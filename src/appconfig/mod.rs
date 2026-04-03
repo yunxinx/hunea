@@ -22,6 +22,7 @@ pub struct TuiConfig {
     pub external_editor: Vec<String>,
     pub show_external_editor_helper: bool,
     pub copy_on_mouse_selection_release: bool,
+    pub swap_enter_and_send: bool,
 }
 
 /// `UserInputStyle` 表示用户输入区与用户消息的展示模式。
@@ -75,6 +76,7 @@ struct FileTuiConfig {
     external_editor: Option<Vec<String>>,
     show_external_editor_helper: Option<bool>,
     copy_on_mouse_selection_release: Option<bool>,
+    swap_enter_and_send: Option<bool>,
 }
 
 impl Config {
@@ -86,6 +88,7 @@ impl Config {
                 external_editor: Vec::new(),
                 show_external_editor_helper: true,
                 copy_on_mouse_selection_release: false,
+                swap_enter_and_send: false,
             },
         }
     }
@@ -299,6 +302,10 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
 
     if let Some(copy_on_release) = file_config.tui.copy_on_mouse_selection_release {
         config.tui.copy_on_mouse_selection_release = copy_on_release;
+    }
+
+    if let Some(swap_enter_and_send) = file_config.tui.swap_enter_and_send {
+        config.tui.swap_enter_and_send = swap_enter_and_send;
     }
 
     Ok(config)

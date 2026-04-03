@@ -87,6 +87,7 @@ fn model_options_from_config(tui_config: &TuiConfig) -> ModelOptions {
         external_editor_hint: external_editor_hint_from_config(&tui_config.external_editor),
         show_external_editor_helper: tui_config.show_external_editor_helper,
         copy_on_mouse_selection_release: tui_config.copy_on_mouse_selection_release,
+        swap_enter_and_send: tui_config.swap_enter_and_send,
     }
 }
 
@@ -115,8 +116,23 @@ mod tests {
             external_editor: Vec::new(),
             show_external_editor_helper: true,
             copy_on_mouse_selection_release: true,
+            swap_enter_and_send: false,
         });
 
         assert!(options.copy_on_mouse_selection_release);
+    }
+
+    #[test]
+    fn model_options_from_config_carries_swap_enter_and_send_flag() {
+        let options = model_options_from_config(&TuiConfig {
+            user_input_style: UserInputStyle::Cx,
+            status_line: Vec::new(),
+            external_editor: Vec::new(),
+            show_external_editor_helper: true,
+            copy_on_mouse_selection_release: false,
+            swap_enter_and_send: true,
+        });
+
+        assert!(options.swap_enter_and_send);
     }
 }

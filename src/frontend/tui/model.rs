@@ -28,6 +28,7 @@ pub struct Model {
     pub(crate) external_editor_hint: String,
     pub(crate) external_editor_helper_enabled: bool,
     pub(crate) copy_on_mouse_selection_release: bool,
+    pub(crate) swap_enter_and_send: bool,
     pub(crate) selection: SelectionState,
     pub(crate) selection_click: SelectionClickState,
     pub(crate) selection_version: usize,
@@ -74,6 +75,7 @@ pub struct ModelOptions {
     pub external_editor_hint: String,
     pub show_external_editor_helper: bool,
     pub copy_on_mouse_selection_release: bool,
+    pub swap_enter_and_send: bool,
 }
 
 impl Default for ModelOptions {
@@ -85,6 +87,7 @@ impl Default for ModelOptions {
             external_editor_hint: String::new(),
             show_external_editor_helper: true,
             copy_on_mouse_selection_release: false,
+            swap_enter_and_send: false,
         }
     }
 }
@@ -123,6 +126,7 @@ impl Model {
             external_editor_hint: options.external_editor_hint,
             external_editor_helper_enabled: options.show_external_editor_helper,
             copy_on_mouse_selection_release: options.copy_on_mouse_selection_release,
+            swap_enter_and_send: options.swap_enter_and_send,
             selection: SelectionState::default(),
             selection_click: SelectionClickState::default(),
             selection_version: 0,

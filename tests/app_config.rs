@@ -119,6 +119,17 @@ fn load_defaults_copy_on_mouse_selection_release_to_false() {
 }
 
 #[test]
+fn load_defaults_swap_enter_and_send_to_false() {
+    let working_dir = temp_test_dir("load-default-swap-enter-working");
+    let user_config_dir = temp_test_dir("load-default-swap-enter-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep swapped enter disabled");
+
+    assert!(!config.tui.swap_enter_and_send);
+}
+
+#[test]
 fn load_accepts_enabling_copy_on_mouse_selection_release() {
     let working_dir = temp_test_dir("load-enable-copy-on-selection-working");
     write_config(
@@ -130,6 +141,20 @@ fn load_accepts_enabling_copy_on_mouse_selection_release() {
         .expect("copy_on_mouse_selection_release should accept true");
 
     assert!(config.tui.copy_on_mouse_selection_release);
+}
+
+#[test]
+fn load_accepts_swap_enter_and_send() {
+    let working_dir = temp_test_dir("load-swap-enter-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nswap_enter_and_send = true\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("swap_enter_and_send should accept true");
+
+    assert!(config.tui.swap_enter_and_send);
 }
 
 #[test]

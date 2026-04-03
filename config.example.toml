@@ -52,3 +52,9 @@ show_external_editor_helper = true
 # 是否在释放按键时自动复制选中的内容。
 # 默认关闭；开启后会更接近一些终端里的“选中即复制”手感。
 copy_on_mouse_selection_release = false
+
+# `swap_enter_and_send` 控制是否交换“换行”和“发送消息”的按键语义。
+# 默认关闭；开启后：
+# - Enter 改为插入换行
+# - Ctrl+J 与 Shift+Enter 改为发送消息
+swap_enter_and_send = false

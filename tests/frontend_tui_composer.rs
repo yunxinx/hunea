@@ -48,6 +48,58 @@ fn enter_preserves_leading_and_trailing_whitespace() {
 }
 
 #[test]
+fn swap_enter_and_send_makes_enter_insert_newline() {
+    let mut model = ready_model_with_swap_enter_and_send(20, 12, true);
+
+    for character in "hello".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    let before_items = model.transcript_plain_items();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(model.composer_text(), "hello\n");
+    assert_eq!(model.transcript_plain_items(), before_items);
+}
+
+#[test]
+fn swap_enter_and_send_makes_ctrl_j_send_message() {
+    let mut model = ready_model_with_swap_enter_and_send(20, 12, true);
+
+    for character in "hello".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    let before_len = model.transcript_plain_items().len();
+    model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('j'),
+        KeyModifiers::CONTROL,
+    )));
+
+    let items = model.transcript_plain_items();
+    assert_eq!(items.len(), before_len + 1);
+    assert_eq!(items.last().map(String::as_str), Some("› hello"));
+    assert_eq!(model.composer_text(), "");
+}
+
+#[test]
+fn swap_enter_and_send_makes_shift_enter_send_message() {
+    let mut model = ready_model_with_swap_enter_and_send(20, 12, true);
+
+    for character in "hello".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    let before_len = model.transcript_plain_items().len();
+    model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::SHIFT,
+    )));
+
+    let items = model.transcript_plain_items();
+    assert_eq!(items.len(), before_len + 1);
+    assert_eq!(items.last().map(String::as_str), Some("› hello"));
+    assert_eq!(model.composer_text(), "");
+}
+
+#[test]
 fn long_english_input_wraps_by_word_boundary() {
     let mut model = ready_model(9, 20);
 
@@ -64,7 +116,21 @@ fn long_english_input_wraps_by_word_boundary() {
 }
 
 fn ready_model(width: u16, height: u16) -> Model {
-    let mut model = Model::new(HeroOptions::default());
+    ready_model_with_swap_enter_and_send(width, height, false)
+}
+
+fn ready_model_with_swap_enter_and_send(
+    width: u16,
+    height: u16,
+    swap_enter_and_send: bool,
+) -> Model {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        lumos::frontend::tui::ModelOptions {
+            swap_enter_and_send,
+            ..lumos::frontend::tui::ModelOptions::default()
+        },
+    );
     model.update(AppEvent::Resized { width, height });
     model.update(AppEvent::StartupReadyTimeout);
     model

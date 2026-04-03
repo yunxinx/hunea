@@ -13,9 +13,9 @@ const LIGHT_BACKGROUND_MAIN: RgbColor = RgbColor {
     blue: 47,
 };
 const DARK_BACKGROUND_SECONDARY: RgbColor = RgbColor {
-    red: 168,
-    green: 168,
-    blue: 168,
+    red: 191,
+    green: 191,
+    blue: 191,
 };
 const LIGHT_BACKGROUND_SECONDARY: RgbColor = RgbColor {
     red: 47,
@@ -23,7 +23,7 @@ const LIGHT_BACKGROUND_SECONDARY: RgbColor = RgbColor {
     blue: 47,
 };
 
-/// TerminalPalette 定义当前终端里最基础的两个颜色语义。
+/// `TerminalPalette` 定义当前终端里最基础的两个颜色语义。
 /// `main` 用于应用名等主体信息，`secondary` 用于边框、前缀和版本号。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalPalette {
@@ -112,7 +112,7 @@ fn secondary_color(context: PaletteContext) -> Color {
     let secondary = if let Some(background) = context.background {
         let complementary = complementary(background);
         if context.has_dark_background {
-            lighten(complementary, 0.10)
+            lighten(complementary, 0.20)
         } else {
             darken(complementary, 0.10)
         }
@@ -231,7 +231,7 @@ mod tests {
         });
 
         assert_eq!(dark_palette.main, Color::Rgb(245, 245, 245));
-        assert_eq!(dark_palette.secondary, Color::Rgb(168, 168, 168));
+        assert_eq!(dark_palette.secondary, Color::Rgb(191, 191, 191));
         assert_eq!(light_palette.main, Color::Rgb(47, 47, 47));
         assert_eq!(light_palette.secondary, Color::Rgb(47, 47, 47));
     }
@@ -246,6 +246,6 @@ mod tests {
     }
 
     fn lightened_channel(channel: u8) -> u8 {
-        (f32::from(channel) + ((255.0 - f32::from(channel)) * 0.10)).round() as u8
+        (f32::from(channel) + ((255.0 - f32::from(channel)) * 0.20)).round() as u8
     }
 }

@@ -2,12 +2,14 @@ use std::io::{self, Write};
 
 use ratatui::{buffer::Buffer, layout::Rect, style::Color, widgets::Widget};
 
-use crate::theme::{TerminalPalette, detect_palette};
+use crate::{
+    envinfo::short_work_dir,
+    frontend::tui::theme::{TerminalPalette, detect_palette},
+};
 
 const DEFAULT_APP_NAME: &str = "Lumos";
 const DEFAULT_VERSION: &str = "v0.0.1";
 const BORDER_WIDTH: u16 = 2;
-const HERO_HEIGHT: u16 = 3;
 const HORIZONTAL_PADDING: u16 = 2;
 
 /// `HeroOptions` 控制启动 hero 的文案和宽度。
@@ -32,22 +34,8 @@ pub fn render_hero_with_palette(options: &HeroOptions, palette: TerminalPalette)
 
 /// `render_hero_buffer_with_palette` 直接返回 Ratatui `Buffer`，方便测试布局与颜色语义。
 pub fn render_hero_buffer_with_palette(options: &HeroOptions, palette: TerminalPalette) -> Buffer {
-    let app_name = options.app_name.as_deref().unwrap_or(DEFAULT_APP_NAME);
-    let version = options.version.as_deref().unwrap_or(DEFAULT_VERSION);
-    let content = hero_content(app_name, version);
-    let content_width = options.width.max(content_width(&content));
-    let total_width = content_width + BORDER_WIDTH + (HORIZONTAL_PADDING * 2);
-    let area = Rect::new(0, 0, total_width, HERO_HEIGHT);
-    let mut buffer = Buffer::empty(area);
-
-    StartupHero {
-        app_name,
-        version,
-        palette,
-    }
-    .render(area, &mut buffer);
-
-    buffer
+    let work_dir = short_work_dir();
+    render_hero_buffer(options, palette, &work_dir)
 }
 
 /// `print_hero` 直接把启动 hero 输出到标准输出。
@@ -62,15 +50,37 @@ pub fn write_hero_to<W: Write>(writer: &mut W, options: &HeroOptions) -> io::Res
     writeln!(writer, "{}", render_hero(options))
 }
 
+fn render_hero_buffer(options: &HeroOptions, palette: TerminalPalette, work_dir: &str) -> Buffer {
+    let app_name = options.app_name.as_deref().unwrap_or(DEFAULT_APP_NAME);
+    let version = options.version.as_deref().unwrap_or(DEFAULT_VERSION);
+    let content_lines = hero_content_lines(app_name, version, work_dir);
+    let content_width = options.width.max(max_content_width(&content_lines));
+    let total_width = content_width + BORDER_WIDTH + (HORIZONTAL_PADDING * 2);
+    let total_height = content_lines.len() as u16 + BORDER_WIDTH;
+    let area = Rect::new(0, 0, total_width, total_height);
+    let mut buffer = Buffer::empty(area);
+
+    StartupHero {
+        app_name,
+        version,
+        work_dir,
+        palette,
+    }
+    .render(area, &mut buffer);
+
+    buffer
+}
+
 struct StartupHero<'a> {
     app_name: &'a str,
     version: &'a str,
+    work_dir: &'a str,
     palette: TerminalPalette,
 }
 
 impl Widget for StartupHero<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.width < BORDER_WIDTH || area.height < HERO_HEIGHT {
+        if area.width < BORDER_WIDTH || area.height < BORDER_WIDTH {
             return;
         }
 
@@ -89,7 +99,7 @@ impl Widget for StartupHero<'_> {
         render_border_row(
             buf,
             area.x,
-            area.y + 2,
+            area.y + area.height.saturating_sub(1),
             area.width,
             BorderGlyphs {
                 left: '╰',
@@ -99,49 +109,88 @@ impl Widget for StartupHero<'_> {
             self.palette.secondary,
         );
 
-        let middle_y = area.y + 1;
-        set_cell(buf, area.x, middle_y, '│', self.palette.secondary);
-        set_cell(
-            buf,
-            area.x + area.width.saturating_sub(1),
-            middle_y,
-            '│',
-            self.palette.secondary,
-        );
+        for row in area.y + 1..area.y + area.height.saturating_sub(1) {
+            set_cell(buf, area.x, row, '│', self.palette.secondary);
+            set_cell(
+                buf,
+                area.x + area.width.saturating_sub(1),
+                row,
+                '│',
+                self.palette.secondary,
+            );
+        }
 
-        let mut cursor_x = area.x + 1 + HORIZONTAL_PADDING;
-        write_styled_text(buf, &mut cursor_x, middle_y, ">_", self.palette.secondary);
-        write_plain_text(buf, &mut cursor_x, middle_y, " ");
-        write_styled_text(
-            buf,
-            &mut cursor_x,
-            middle_y,
-            self.app_name,
-            self.palette.main,
-        );
-        write_plain_text(buf, &mut cursor_x, middle_y, " ");
-        let version = format!("({})", self.version);
-        write_styled_text(
-            buf,
-            &mut cursor_x,
-            middle_y,
-            &version,
-            self.palette.secondary,
-        );
+        for (index, line) in hero_content_lines(self.app_name, self.version, self.work_dir)
+            .into_iter()
+            .enumerate()
+        {
+            let row = area.y + 1 + index as u16;
+            let mut cursor_x = area.x + 1 + HORIZONTAL_PADDING;
 
-        let content_end = area.x + area.width - 1 - HORIZONTAL_PADDING;
-        while cursor_x < content_end {
-            write_plain_text(buf, &mut cursor_x, middle_y, " ");
+            match line {
+                HeroLine::Title { app_name, version } => {
+                    render_title_line(buf, &mut cursor_x, row, app_name, version, self.palette)
+                }
+                HeroLine::Spacer => {}
+                HeroLine::WorkDir(work_dir) => {
+                    write_styled_text(buf, &mut cursor_x, row, work_dir, self.palette.secondary);
+                }
+            }
         }
     }
 }
 
-fn hero_content(app_name: &str, version: &str) -> String {
-    format!(">_ {} ({})", app_name, version)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeroLine<'a> {
+    Title { app_name: &'a str, version: &'a str },
+    Spacer,
+    WorkDir(&'a str),
 }
 
-fn content_width(content: &str) -> u16 {
-    content.chars().count() as u16
+fn hero_content_lines<'a>(
+    app_name: &'a str,
+    version: &'a str,
+    work_dir: &'a str,
+) -> Vec<HeroLine<'a>> {
+    let mut lines = vec![HeroLine::Title { app_name, version }];
+
+    if !work_dir.is_empty() {
+        lines.push(HeroLine::Spacer);
+        lines.push(HeroLine::WorkDir(work_dir));
+    }
+
+    lines
+}
+
+fn max_content_width(lines: &[HeroLine<'_>]) -> u16 {
+    lines
+        .iter()
+        .map(|line| match line {
+            HeroLine::Title { app_name, version } => title_width(app_name, version),
+            HeroLine::Spacer => 0,
+            HeroLine::WorkDir(work_dir) => work_dir.chars().count() as u16,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn render_title_line(
+    buf: &mut Buffer,
+    cursor_x: &mut u16,
+    y: u16,
+    app_name: &str,
+    version: &str,
+    palette: TerminalPalette,
+) {
+    write_styled_text(buf, cursor_x, y, ">_", palette.secondary);
+    write_plain_text(buf, cursor_x, y, " ");
+    write_styled_text(buf, cursor_x, y, app_name, palette.main);
+    write_plain_text(buf, cursor_x, y, " ");
+    write_styled_text(buf, cursor_x, y, &format!("({version})"), palette.secondary);
+}
+
+fn title_width(app_name: &str, version: &str) -> u16 {
+    format!(">_ {app_name} ({version})").chars().count() as u16
 }
 
 struct BorderGlyphs {
@@ -244,5 +293,27 @@ fn foreground_code(color: Color) -> String {
         Color::White => String::from("97"),
         Color::Indexed(index) => format!("38;5;{index}"),
         Color::Rgb(red, green, blue) => format!("38;2;{red};{green};{blue}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HeroOptions, render_hero_buffer};
+    use crate::frontend::tui::theme::TerminalPalette;
+    use ratatui::style::Color;
+
+    #[test]
+    fn render_keeps_title_width_when_work_dir_is_absent() {
+        let buffer = render_hero_buffer(&HeroOptions::default(), sample_palette(), "");
+
+        assert_eq!(buffer.area.width, 23);
+        assert_eq!(buffer.area.height, 3);
+    }
+
+    fn sample_palette() -> TerminalPalette {
+        TerminalPalette {
+            main: Color::Rgb(245, 245, 245),
+            secondary: Color::Rgb(191, 191, 191),
+        }
     }
 }

@@ -1,6 +1,6 @@
 use ratatui::text::Line;
 
-use crate::frontend::tui::{Model, composer, transcript};
+use crate::frontend::tui::{Model, composer, status_line::StatusLineRenderResult, transcript};
 
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutCache, DocumentLayoutKey,
@@ -20,6 +20,7 @@ pub(crate) struct DocumentLayoutInput {
     pub(crate) composer_frame_decoration_plain_line: Option<String>,
     pub(crate) composer_cursor_x: u16,
     pub(crate) composer_cursor_y: usize,
+    pub(crate) status_line: StatusLineRenderResult,
 }
 
 impl Model {
@@ -98,12 +99,14 @@ impl Model {
             transcript_render_version: self.transcript_render_version,
             palette_version: self.palette_version,
             style_mode: self.style_mode,
+            document_width: self.width,
             composer_value: self.composer.value().to_string(),
             composer_width: self.composer.content_width(),
             composer_prompt: self.composer.prompt().to_string(),
             composer_placeholder: self.composer.placeholder().to_string(),
             composer_line: self.composer.line(),
             composer_column: self.composer.column(),
+            status_line_text: self.current_status_line_parts().join("\0"),
         }
     }
 
@@ -123,6 +126,7 @@ impl Model {
             composer_frame_decoration_plain_line: composer_document.frame_decoration_plain_line,
             composer_cursor_x: composer_document.cursor_x,
             composer_cursor_y: composer_document.cursor_y,
+            status_line: self.current_status_line_render_result(),
         }
     }
 
@@ -152,19 +156,25 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
         input.transcript_lines.len()
             + extra_gap
             + input.composer_lines.len()
-            + usize::from(has_composer_padding) * 2,
+            + usize::from(has_composer_padding) * 2
+            + input.status_line.gap_before
+            + usize::from(input.status_line.has_content),
     );
     let mut plain_lines = Vec::with_capacity(
         input.transcript_plain_lines.len()
             + extra_gap
             + input.composer_plain_lines.len()
-            + usize::from(has_composer_padding) * 2,
+            + usize::from(has_composer_padding) * 2
+            + input.status_line.gap_before
+            + usize::from(input.status_line.has_content),
     );
     let mut anchors = Vec::with_capacity(
         input.transcript_anchors.len()
             + extra_gap
             + input.composer_anchors.len()
-            + usize::from(has_composer_padding) * 2,
+            + usize::from(has_composer_padding) * 2
+            + input.status_line.gap_before
+            + usize::from(input.status_line.has_content),
     );
 
     lines.extend(input.transcript_lines);
@@ -212,6 +222,27 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             gap_index: 1,
             ..DocumentLineAnchor::default()
         });
+    }
+
+    if input.status_line.has_content {
+        for gap_index in 0..input.status_line.gap_before {
+            lines.push(Line::raw(""));
+            plain_lines.push(String::new());
+            anchors.push(DocumentLineAnchor {
+                region: DocumentAnchorRegion::ComposerStatusGap,
+                gap_index,
+                ..DocumentLineAnchor::default()
+            });
+        }
+
+        if let Some(line) = input.status_line.line {
+            lines.push(line);
+            plain_lines.push(input.status_line.plain_line);
+            anchors.push(DocumentLineAnchor {
+                region: DocumentAnchorRegion::StatusLine,
+                ..DocumentLineAnchor::default()
+            });
+        }
     }
 
     let composer_slot = if lines.is_empty() {

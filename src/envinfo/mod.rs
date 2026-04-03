@@ -1,3 +1,5 @@
+mod git;
 mod workdir;
 
+pub use git::git_branch;
 pub use workdir::{short_work_dir, shorten_home_prefix};

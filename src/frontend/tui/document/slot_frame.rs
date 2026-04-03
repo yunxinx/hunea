@@ -31,11 +31,11 @@ impl SlotFrame {
         }
     }
 
-    pub(crate) fn has_padding(self) -> bool {
-        self.frame_line_count > self.content_line_count
-    }
-
     pub(crate) fn frame_bottom_line(self) -> usize {
         self.frame_start_line + self.frame_line_count - 1
+    }
+
+    pub(crate) fn content_bottom_line(self) -> usize {
+        self.content_start_line + self.content_line_count - 1
     }
 }

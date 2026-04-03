@@ -14,6 +14,7 @@ pub(crate) use self::cache::{
     DocumentLayoutCache as LayoutCache, DocumentViewportAnchor as ViewportAnchor,
     DocumentViewportCache as ViewportCache, ManualDocumentScrollRestoreTarget as RestoreTarget,
 };
+pub(crate) use self::slot_viewport::offset_viewport_line_indices;
 
 #[cfg(test)]
 mod tests {

@@ -20,19 +20,19 @@ impl Model {
     }
 
     pub(crate) fn bottom_follow_anchor_line(&self, layout: &DocumentLayout) -> usize {
-        let anchor_line = layout.cursor_y;
-        if !layout.composer_slot.has_padding() {
-            if !self.composer.value().is_empty() {
-                return layout.lines.len().saturating_sub(1);
+        if !layout_has_content_below_composer_frame(layout) {
+            if layout.composer_slot.frame_line_count <= self.document_viewport_height() {
+                return layout.composer_slot.frame_bottom_line();
             }
-            return anchor_line;
+            return layout.cursor_y;
         }
 
-        if layout.composer_slot.frame_line_count <= self.document_viewport_height() {
-            return layout.composer_slot.frame_bottom_line();
+        let lines_below_cursor = layout.lines.len().saturating_sub(1 + layout.cursor_y);
+        if lines_below_cursor < self.document_viewport_height() {
+            return layout.lines.len().saturating_sub(1);
         }
 
-        anchor_line
+        layout.cursor_y
     }
 }
 
@@ -52,6 +52,25 @@ pub(crate) fn bottom_follow_viewport_line_indices(
 
     let start = anchor_line.saturating_add(1).saturating_sub(height);
     (start..=anchor_line).collect()
+}
+
+pub(crate) fn offset_viewport_line_indices(
+    layout: &DocumentLayout,
+    offset: usize,
+    height: usize,
+) -> Vec<usize> {
+    if layout.lines.is_empty() {
+        return Vec::new();
+    }
+
+    if height == 0 {
+        return (0..layout.lines.len()).collect();
+    }
+
+    let max_offset = layout.lines.len().saturating_sub(height);
+    let resolved_offset = offset.min(max_offset);
+    let end = (resolved_offset + height).min(layout.lines.len());
+    (resolved_offset..end).collect()
 }
 
 pub(crate) fn compose_bottom_follow_document_viewport(
@@ -90,5 +109,94 @@ pub(crate) fn compose_document_viewport_from_line_indices(
         lines,
         plain_lines,
         resolved_offset: line_indices[0],
+    }
+}
+
+fn layout_has_content_below_composer_frame(layout: &DocumentLayout) -> bool {
+    layout.composer_slot.frame_bottom_line() < layout.lines.len().saturating_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frontend::tui::document::slot_frame::SlotFrame;
+    use crate::frontend::tui::{HeroOptions, Model};
+
+    #[test]
+    fn bottom_follow_keeps_legacy_composer_anchor_without_status_line() {
+        let mut model = Model::new(HeroOptions::default());
+        model.height = 2;
+        model.has_window = true;
+
+        let layout = DocumentLayout {
+            lines: vec![
+                Line::raw("frame-top"),
+                Line::raw("input-line"),
+                Line::raw("frame-bottom"),
+            ],
+            plain_lines: vec![
+                "frame-top".to_string(),
+                "input-line".to_string(),
+                "frame-bottom".to_string(),
+            ],
+            composer_slot: SlotFrame::new(0, true, 1),
+            cursor_x: 2,
+            cursor_y: 1,
+            ..DocumentLayout::default()
+        };
+
+        let viewport = compose_bottom_follow_document_viewport(
+            &layout,
+            model.document_viewport_height(),
+            model.bottom_follow_presentation(&layout),
+        );
+
+        assert_eq!(
+            viewport.plain_lines,
+            vec!["frame-top".to_string(), "input-line".to_string()]
+        );
+        assert_eq!(viewport.resolved_offset, 0);
+    }
+
+    #[test]
+    fn bottom_follow_can_include_status_line_below_composer() {
+        let mut model = Model::new(HeroOptions::default());
+        model.height = 3;
+        model.has_window = true;
+
+        let layout = DocumentLayout {
+            lines: vec![
+                Line::raw("frame-top"),
+                Line::raw("input-line"),
+                Line::raw("frame-bottom"),
+                Line::raw("status-line"),
+            ],
+            plain_lines: vec![
+                "frame-top".to_string(),
+                "input-line".to_string(),
+                "frame-bottom".to_string(),
+                "status-line".to_string(),
+            ],
+            composer_slot: SlotFrame::new(0, true, 1),
+            cursor_x: 2,
+            cursor_y: 1,
+            ..DocumentLayout::default()
+        };
+
+        let viewport = compose_bottom_follow_document_viewport(
+            &layout,
+            model.document_viewport_height(),
+            model.bottom_follow_presentation(&layout),
+        );
+
+        assert_eq!(
+            viewport.plain_lines,
+            vec![
+                "input-line".to_string(),
+                "frame-bottom".to_string(),
+                "status-line".to_string()
+            ]
+        );
+        assert_eq!(viewport.resolved_offset, 1);
     }
 }

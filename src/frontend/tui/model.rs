@@ -1,9 +1,14 @@
 use ratatui::Frame;
 
+use crate::envinfo;
+
 use super::{
     HeroOptions,
     composer::Composer,
-    document::{LayoutCache, RestoreTarget, ViewportAnchor, ViewportCache},
+    document::{
+        LayoutCache, RestoreTarget, ViewportAnchor, ViewportCache, offset_viewport_line_indices,
+    },
+    status_line::{StatusLineItem, StatusLineRenderResult},
     style_mode::StyleMode,
     theme::{TerminalPalette, default_palette},
     transcript::{RenderResult, Transcript},
@@ -14,6 +19,9 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct Model {
     pub(crate) style_mode: StyleMode,
+    pub(crate) status_line_items: Vec<StatusLineItem>,
+    pub(crate) git_branch: String,
+    pub(crate) current_dir: String,
     pub(crate) palette: TerminalPalette,
     pub(crate) palette_version: usize,
     pub(crate) transcript: Transcript,
@@ -35,23 +43,45 @@ pub struct Model {
     quitting: bool,
 }
 
+/// `ModelOptions` 表示创建 TUI 模型时可配置的样式与状态行选项。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModelOptions {
+    pub style_mode: StyleMode,
+    pub status_line_items: Vec<StatusLineItem>,
+}
+
 impl Model {
     /// `new` 创建并初始化 TUI 模型。
     pub fn new(hero_options: HeroOptions) -> Self {
-        Self::new_with_style_mode(hero_options, StyleMode::Cx)
+        Self::new_with_options(hero_options, ModelOptions::default())
     }
 
     /// `new_with_style_mode` 创建并初始化带指定样式模式的 TUI 模型。
     pub fn new_with_style_mode(hero_options: HeroOptions, style_mode: StyleMode) -> Self {
+        Self::new_with_options(
+            hero_options,
+            ModelOptions {
+                style_mode,
+                status_line_items: Vec::new(),
+            },
+        )
+    }
+
+    /// `new_with_options` 创建并初始化带显式选项的 TUI 模型。
+    pub fn new_with_options(hero_options: HeroOptions, options: ModelOptions) -> Self {
         let palette = default_palette();
         let mut transcript = Transcript::new(palette);
         transcript.set_gap(1);
         transcript.append_hero(hero_options);
         let transcript_render = transcript.render();
-        let style_mode = style_mode.normalized();
+        let style_mode = options.style_mode.normalized();
+        let status_line_items = options.status_line_items;
 
         Self {
             style_mode,
+            status_line_items: status_line_items.clone(),
+            git_branch: resolve_initial_git_branch(&status_line_items),
+            current_dir: resolve_initial_current_dir(&status_line_items),
             palette,
             palette_version: 1,
             transcript_render_version: 1,
@@ -156,11 +186,27 @@ impl Model {
 
     pub(crate) fn sync_composer_height(&mut self) {
         let full_height = self.composer.full_height().max(1);
-        let viewport_height = if !self.has_window || self.height == 0 {
+        let mut viewport_height = if !self.has_window || self.height == 0 {
             full_height
         } else {
             full_height.min(self.height.max(1))
         };
+
+        let status_line = self.current_status_line_render_result();
+        if status_line.has_content {
+            if self.follow_bottom && !self.manual_document_scroll {
+                let visible_height = self.bottom_follow_composer_content_line_count(&status_line);
+                viewport_height =
+                    viewport_height.min(u16::try_from(visible_height).unwrap_or(u16::MAX));
+            } else {
+                let visible_height = self.visible_composer_content_line_count_in_viewport();
+                if visible_height > 0 {
+                    viewport_height =
+                        viewport_height.min(u16::try_from(visible_height).unwrap_or(u16::MAX));
+                }
+            }
+        }
+
         self.composer.set_height(viewport_height);
     }
 
@@ -169,6 +215,70 @@ impl Model {
         self.transcript_render_version += 1;
         self.document_layout_cache.valid = false;
         self.document_viewport_cache.valid = false;
+    }
+
+    fn bottom_follow_composer_content_line_count(
+        &self,
+        status_line: &StatusLineRenderResult,
+    ) -> usize {
+        let viewport_height = usize::from(self.height.max(1));
+        let mut tail_rows = status_line.gap_before + 1;
+        if self.composer_uses_rendered_frame_padding() {
+            tail_rows += 1;
+        }
+
+        if tail_rows < viewport_height {
+            viewport_height - tail_rows
+        } else {
+            viewport_height
+        }
+    }
+
+    fn composer_uses_rendered_frame_padding(&self) -> bool {
+        match self.style_mode {
+            StyleMode::Cx => self.palette.surface.is_some(),
+            StyleMode::Cc => true,
+            StyleMode::Ms => false,
+        }
+    }
+
+    fn visible_composer_content_line_count_in_viewport(&mut self) -> usize {
+        let layout = self.build_document_layout();
+        let line_indices = offset_viewport_line_indices(
+            &layout,
+            self.document_viewport_y,
+            self.document_viewport_height(),
+        );
+
+        line_indices
+            .into_iter()
+            .filter(|line_index| {
+                *line_index >= layout.composer_slot.content_start_line
+                    && *line_index <= layout.composer_slot.content_bottom_line()
+            })
+            .count()
+    }
+}
+
+fn resolve_initial_git_branch(items: &[StatusLineItem]) -> String {
+    if items
+        .iter()
+        .any(|item| matches!(item, StatusLineItem::GitBranch))
+    {
+        envinfo::git_branch()
+    } else {
+        String::new()
+    }
+}
+
+fn resolve_initial_current_dir(items: &[StatusLineItem]) -> String {
+    if items
+        .iter()
+        .any(|item| matches!(item, StatusLineItem::CurrentDir))
+    {
+        envinfo::short_work_dir()
+    } else {
+        String::new()
     }
 }
 

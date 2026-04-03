@@ -91,6 +91,7 @@ impl Model {
             let style_mode = self.style_mode;
             self.transcript_mut()
                 .append_message_with_style_mode(Sender::User, content, style_mode);
+            self.refresh_status_line_after_transcript_change();
             self.sync_transcript_render();
             self.composer_mut().clear();
             self.sync_composer_height();

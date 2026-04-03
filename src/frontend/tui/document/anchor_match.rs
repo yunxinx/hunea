@@ -110,9 +110,13 @@ fn score_document_anchor_match(
         DocumentAnchorRegion::TranscriptComposerGap => {
             (candidate.gap_index == target.gap_index).then_some(0)
         }
+        DocumentAnchorRegion::ComposerStatusGap => {
+            (candidate.gap_index == target.gap_index).then_some(0)
+        }
         DocumentAnchorRegion::ComposerPadding => {
             (candidate.gap_index == target.gap_index).then_some(0)
         }
+        DocumentAnchorRegion::StatusLine => Some(0),
         DocumentAnchorRegion::None => Some(0),
     }
 }

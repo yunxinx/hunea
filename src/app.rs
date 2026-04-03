@@ -3,8 +3,8 @@ use std::io::{self, IsTerminal, Write};
 use color_eyre::eyre::{Result, WrapErr};
 
 use crate::{
-    appconfig::{self, UserInputStyle},
-    frontend::tui::{self, HeroOptions, Model, StyleMode},
+    appconfig::{self, TuiConfig, UserInputStyle},
+    frontend::tui::{self, HeroOptions, Model, ModelOptions, StatusLineItem, StyleMode},
 };
 
 /// `run` 负责组装并启动交互式 TUI 应用。
@@ -13,18 +13,18 @@ pub fn run() -> Result<()> {
     let preserve_ansi = stdout.is_terminal();
     let mut handle = stdout.lock();
     let config = appconfig::load().wrap_err("failed to load app config")?;
-    run_with_writer(&mut handle, preserve_ansi, config.tui.user_input_style)
+    run_with_writer(&mut handle, preserve_ansi, &config.tui)
 }
 
 /// `run_with_writer` 允许调用方注入退出 AltScreen 后的 terminal replay 输出目标。
 pub fn run_with_writer<W: Write>(
     writer: &mut W,
     preserve_ansi: bool,
-    user_input_style: UserInputStyle,
+    tui_config: &TuiConfig,
 ) -> Result<()> {
-    let model = tui::run_with_style_mode(
+    let model = tui::run_with_options(
         HeroOptions::default(),
-        style_mode_from_config(user_input_style),
+        model_options_from_config(tui_config),
     )
     .wrap_err("failed to run tui application")?;
     write_terminal_replay_with_context(writer, &model, preserve_ansi)
@@ -76,4 +76,18 @@ fn style_mode_from_config(style: UserInputStyle) -> StyleMode {
         UserInputStyle::Cc => StyleMode::Cc,
         UserInputStyle::Ms => StyleMode::Ms,
     }
+}
+
+fn model_options_from_config(tui_config: &TuiConfig) -> ModelOptions {
+    ModelOptions {
+        style_mode: style_mode_from_config(tui_config.user_input_style),
+        status_line_items: status_line_items_from_config(&tui_config.status_line),
+    }
+}
+
+fn status_line_items_from_config(items: &[String]) -> Vec<StatusLineItem> {
+    items
+        .iter()
+        .filter_map(|item| StatusLineItem::from_config_value(item))
+        .collect()
 }

@@ -16,6 +16,7 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiConfig {
     pub user_input_style: UserInputStyle,
+    pub status_line: Vec<String>,
 }
 
 /// `UserInputStyle` 表示用户输入区与用户消息的展示模式。
@@ -41,6 +42,10 @@ pub enum AppConfigError {
         path: Option<PathBuf>,
         value: String,
     },
+    InvalidStatusLineItem {
+        path: Option<PathBuf>,
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,6 +59,7 @@ struct FileConfig {
 #[serde(deny_unknown_fields)]
 struct FileTuiConfig {
     user_input_style: Option<String>,
+    status_line: Option<Vec<String>>,
 }
 
 impl Config {
@@ -61,6 +67,7 @@ impl Config {
         Self {
             tui: TuiConfig {
                 user_input_style: UserInputStyle::Cx,
+                status_line: Vec::new(),
             },
         }
     }
@@ -101,6 +108,18 @@ impl fmt::Display for AppConfigError {
             Self::InvalidStyleMode { path: None, value } => {
                 write!(f, "unknown tui.user_input_style {:?}", value)
             }
+            Self::InvalidStatusLineItem {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: unknown tui.status_line item {:?}",
+                path.display(),
+                value
+            ),
+            Self::InvalidStatusLineItem { path: None, value } => {
+                write!(f, "unknown tui.status_line item {:?}", value)
+            }
         }
     }
 }
@@ -110,7 +129,7 @@ impl std::error::Error for AppConfigError {
         match self {
             Self::Read { source, .. } => Some(source),
             Self::Decode { source, .. } => Some(source),
-            Self::InvalidStyleMode { .. } => None,
+            Self::InvalidStyleMode { .. } | Self::InvalidStatusLineItem { .. } => None,
         }
     }
 }
@@ -199,11 +218,40 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
             })?;
     }
 
+    if let Some(items) = file_config.tui.status_line {
+        validate_status_line_items(&items).map_err(|error| match error {
+            AppConfigError::InvalidStatusLineItem { value, .. } => {
+                AppConfigError::InvalidStatusLineItem {
+                    path: Some(path.to_path_buf()),
+                    value,
+                }
+            }
+            other => other,
+        })?;
+        config.tui.status_line = items;
+    }
+
     Ok(config)
 }
 
 fn user_config_directory() -> Option<PathBuf> {
     ProjectDirs::from("", "", "lumos").map(|dirs| dirs.config_dir().to_path_buf())
+}
+
+fn validate_status_line_items(items: &[String]) -> Result<(), AppConfigError> {
+    for item in items {
+        match item.as_str() {
+            "git-branch" | "current-dir" => {}
+            other => {
+                return Err(AppConfigError::InvalidStatusLineItem {
+                    path: None,
+                    value: other.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

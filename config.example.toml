@@ -1,0 +1,27 @@
+# lumos 配置示例
+#
+# 实际配置文件请放在以下任一位置：
+# 1. 用户级：平台标准配置目录下的 lumos/config.toml
+#    例如 Linux 常见为 ~/.config/lumos/config.toml
+# 2. 项目级：./.lumos/config.toml
+#
+# 当两者同时存在时，项目级配置会覆盖用户级配置。
+# 修改配置后需要重启 lumos 才会生效。
+
+[tui]
+# 可选值：
+# `user_input_style` 控制“输入中的用户内容”和“发送后的用户消息”的展示风格。
+# - "cx"：当前 framed 样式。composer 与用户消息会在足够高的窗口里显示 surface frame。
+# - "cc"：整行着色的紧凑样式。关闭上下 surface frame，但保留整行用户消息背景。
+# - "ms"：最原始的旧主题。用户消息按内容范围着色，不做整行补齐，也不显示 surface frame。
+user_input_style = "cx"
+
+# `status_line` 控制输入框下方状态行中要显示的信息。
+# 顺序会直接影响从左到右的显示顺序。
+# 当前支持的值：
+# - "git-branch"：当前工作目录所在 Git 仓库的分支名
+# - "current-dir"：当前工作目录的短路径，home 前缀会缩写为 ~
+#
+# 未配置时不显示状态行；如果配置了但当前所有项都拿不到内容，
+# 状态行也会保持隐藏。
+status_line = ["git-branch"]

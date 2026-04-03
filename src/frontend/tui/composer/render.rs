@@ -11,7 +11,10 @@ use super::{
 };
 use crate::frontend::tui::{
     style_mode::StyleMode,
-    theme::{TerminalPalette, muted_text_style, secondary_text_style, surface_text_style},
+    theme::{
+        TerminalPalette, muted_text_style, secondary_text_style, surface_text_style,
+        tertiary_text_style,
+    },
 };
 
 #[cfg(test)]
@@ -348,7 +351,7 @@ fn frame_decoration_line(
             (
                 Some(Line::from(vec![Span::styled(
                     plain.clone(),
-                    secondary_text_style(palette),
+                    tertiary_text_style(palette),
                 )])),
                 Some(plain),
             )
@@ -394,7 +397,7 @@ mod tests {
     use super::{render_document, trim_overflow_boundary_spaces};
     use crate::frontend::tui::composer::Composer;
     use crate::frontend::tui::composer::grapheme::is_space_cluster;
-    use crate::frontend::tui::theme::default_palette;
+    use crate::frontend::tui::theme::{default_palette, tertiary_text_style};
 
     #[test]
     fn trim_overflow_boundary_spaces_drops_trailing_spaces_only_when_needed() {
@@ -455,6 +458,25 @@ mod tests {
         for _ in 0..256 {
             black_box(render_document(&composer, default_palette()));
         }
+    }
+
+    #[test]
+    fn rule_frame_decoration_uses_tertiary_palette_slot() {
+        let mut composer = Composer::new(crate::frontend::tui::StyleMode::Cc);
+        composer.set_width(12);
+        composer.set_height(4);
+
+        let result = render_document(&composer, default_palette());
+        let expected = ratatui::text::Line::from(vec![ratatui::text::Span::styled(
+            "─".repeat(12),
+            tertiary_text_style(default_palette()),
+        )]);
+
+        assert_eq!(
+            result.frame_decoration_line,
+            Some(expected),
+            "rule decoration should use the tertiary style"
+        );
     }
 
     fn assert_render_document_invariants(

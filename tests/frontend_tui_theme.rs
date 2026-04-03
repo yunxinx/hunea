@@ -1,4 +1,6 @@
-use lumos::frontend::tui::theme::{palette_from_background, terminal_default_palette};
+use lumos::frontend::tui::theme::{
+    palette_from_background, terminal_default_palette, tertiary_text_style,
+};
 use ratatui::style::Color;
 
 #[test]
@@ -24,4 +26,18 @@ fn terminal_default_palette_reports_terminal_default_mode() {
     let palette = terminal_default_palette();
 
     assert!(palette.uses_terminal_default_colors());
+}
+
+#[test]
+fn palette_exposes_a_distinct_tertiary_slot() {
+    let palette = palette_from_background(true, Some(Color::Rgb(32, 64, 96)));
+
+    assert_ne!(palette.tertiary, palette.secondary);
+}
+
+#[test]
+fn tertiary_text_style_uses_the_tertiary_palette_slot() {
+    let palette = palette_from_background(true, Some(Color::Rgb(32, 64, 96)));
+
+    assert_eq!(tertiary_text_style(palette).fg, Some(palette.tertiary));
 }

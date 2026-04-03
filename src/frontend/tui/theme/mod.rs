@@ -7,5 +7,5 @@ pub use palette::{
 };
 pub use styles::{
     muted_text_style, panel_block, primary_text_style, secondary_text_style,
-    surface_emphasis_style, surface_text_style,
+    surface_emphasis_style, surface_text_style, tertiary_text_style,
 };

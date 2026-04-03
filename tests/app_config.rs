@@ -15,6 +15,7 @@ fn load_defaults_to_cx_when_no_config_exists() {
         .expect("missing config files should fall back to defaults");
 
     assert_eq!(config.tui.user_input_style, UserInputStyle::Cx);
+    assert!(config.tui.status_line.is_empty());
 }
 
 #[test]
@@ -48,6 +49,70 @@ fn load_accepts_cc_style_mode() {
         .expect("cc should be accepted as a valid style mode");
 
     assert_eq!(config.tui.user_input_style, UserInputStyle::Cc);
+}
+
+#[test]
+fn load_accepts_git_branch_status_line() {
+    let working_dir = temp_test_dir("load-accepts-git-branch-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line = [\"git-branch\"]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("git-branch should be accepted as a valid status line item");
+
+    assert_eq!(config.tui.status_line, vec!["git-branch"]);
+}
+
+#[test]
+fn load_accepts_current_dir_status_line() {
+    let working_dir = temp_test_dir("load-accepts-current-dir-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line = [\"current-dir\"]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("current-dir should be accepted as a valid status line item");
+
+    assert_eq!(config.tui.status_line, vec!["current-dir"]);
+}
+
+#[test]
+fn load_project_config_can_clear_user_status_line() {
+    let working_dir = temp_test_dir("load-clears-status-line-working");
+    let user_config_dir = temp_test_dir("load-clears-status-line-config");
+    write_config(
+        &user_config_dir.join("config.toml"),
+        "[tui]\nstatus_line = [\"git-branch\"]\n",
+    );
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line = []\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("project config should be able to clear user-level status line items");
+
+    assert!(config.tui.status_line.is_empty());
+}
+
+#[test]
+fn load_rejects_unknown_status_line_item() {
+    let working_dir = temp_test_dir("load-rejects-status-line-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line = [\"weird-item\"]\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("unknown status line item should be rejected");
+
+    assert!(
+        error.to_string().contains("unknown tui.status_line item"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

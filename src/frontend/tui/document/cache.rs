@@ -13,12 +13,14 @@ pub(crate) struct DocumentLayoutKey {
     pub(crate) transcript_render_version: usize,
     pub(crate) palette_version: usize,
     pub(crate) style_mode: StyleMode,
+    pub(crate) document_width: u16,
     pub(crate) composer_value: String,
     pub(crate) composer_width: usize,
     pub(crate) composer_prompt: String,
     pub(crate) composer_placeholder: String,
     pub(crate) composer_line: usize,
     pub(crate) composer_column: usize,
+    pub(crate) status_line_text: String,
 }
 
 /// `DocumentLayout` 表示整份统一文档流的稳定布局。
@@ -76,6 +78,8 @@ pub(crate) enum DocumentAnchorRegion {
     Composer,
     ComposerPadding,
     TranscriptComposerGap,
+    ComposerStatusGap,
+    StatusLine,
 }
 
 /// `DocumentLineAnchor` 把 transcript 与 composer 的行级锚点统一到同一坐标系。

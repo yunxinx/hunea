@@ -21,6 +21,11 @@ pub fn secondary_text_style(palette: TerminalPalette) -> Style {
     apply_foreground(Style::new(), palette.secondary)
 }
 
+/// `tertiary_text_style` 返回更弱化的辅助文字样式。
+pub fn tertiary_text_style(palette: TerminalPalette) -> Style {
+    apply_foreground(Style::new(), palette.tertiary)
+}
+
 /// `surface_text_style` 返回带弱化背景的正文样式。
 pub fn surface_text_style(palette: TerminalPalette) -> Style {
     apply_surface(Style::new(), palette)
@@ -67,7 +72,7 @@ mod tests {
 
     use super::{
         muted_text_style, panel_block, primary_text_style, secondary_text_style,
-        surface_emphasis_style, surface_text_style,
+        surface_emphasis_style, surface_text_style, tertiary_text_style,
     };
     use crate::frontend::tui::theme::{default_palette, terminal_default_palette};
 
@@ -78,6 +83,7 @@ mod tests {
         assert_eq!(primary_text_style(palette).fg, Some(palette.main));
         assert_eq!(muted_text_style(palette).fg, Some(palette.muted));
         assert_eq!(secondary_text_style(palette).fg, Some(palette.secondary));
+        assert_eq!(tertiary_text_style(palette).fg, Some(palette.tertiary));
         assert_eq!(surface_text_style(palette).fg, Some(palette.main));
         assert_eq!(surface_text_style(palette).bg, palette.surface);
         assert_eq!(surface_emphasis_style(palette).fg, Some(palette.main));

@@ -8,6 +8,8 @@ const DARK_BACKGROUND_MUTED: Color = Color::Rgb(202, 202, 202);
 const LIGHT_BACKGROUND_MUTED: Color = Color::Rgb(95, 95, 95);
 const DARK_BACKGROUND_SECONDARY: Color = Color::Rgb(166, 166, 166);
 const LIGHT_BACKGROUND_SECONDARY: Color = Color::Rgb(110, 110, 110);
+const DARK_BACKGROUND_TERTIARY: Color = Color::Rgb(154, 154, 154);
+const LIGHT_BACKGROUND_TERTIARY: Color = Color::Rgb(122, 122, 122);
 const DARK_BACKGROUND_SURFACE: Color = Color::Rgb(46, 46, 46);
 const LIGHT_BACKGROUND_SURFACE: Color = Color::Rgb(236, 236, 236);
 
@@ -20,12 +22,13 @@ pub struct PaletteDetection {
 
 /// `TerminalPalette` 定义当前终端下的一组基础语义颜色。
 /// `main` 用于主体信息，`muted` 用于输入正文，`secondary` 用于辅助信息，
-/// `surface` 用于弱化背景块。
+/// `tertiary` 用于更弱的状态信息，`surface` 用于弱化背景块。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalPalette {
     pub main: Color,
     pub muted: Color,
     pub secondary: Color,
+    pub tertiary: Color,
     pub surface: Option<Color>,
     mode: PaletteMode,
 }
@@ -54,6 +57,7 @@ pub fn terminal_default_palette() -> TerminalPalette {
         main: Color::Reset,
         muted: Color::Reset,
         secondary: Color::Reset,
+        tertiary: Color::Reset,
         surface: None,
         mode: PaletteMode::TerminalDefault,
     }
@@ -116,6 +120,11 @@ pub fn palette_from_background(
             DARK_BACKGROUND_SECONDARY
         } else {
             LIGHT_BACKGROUND_SECONDARY
+        },
+        tertiary: if has_dark_background {
+            DARK_BACKGROUND_TERTIARY
+        } else {
+            LIGHT_BACKGROUND_TERTIARY
         },
         surface: Some(surface_color(has_dark_background, background)),
         mode: PaletteMode::Explicit,

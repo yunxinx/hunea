@@ -1015,4 +1015,23 @@ mod tests {
         assert_eq!(lines_to_plain_text(&lines), "中");
         assert_eq!(lines.len(), 1);
     }
+
+    #[test]
+    #[ignore = "performance smoke test"]
+    fn render_markdown_perf_smoke() {
+        use std::hint::black_box;
+
+        let markdown = (0..6)
+            .map(|index| {
+                format!(
+                    "## Section {index}\n\n- summarize the latest transcript cache behavior\n- explain why viewport anchors stay stable across resize\n- keep the markdown renderer width-aware\n\n```rust\nfn section_{index}() -> Result<(), &'static str> {{\n    Ok(())\n}}\n```\n"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for _ in 0..128 {
+            black_box(render_markdown_lines(&markdown, 72, default_palette()));
+        }
+    }
 }

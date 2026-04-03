@@ -237,3 +237,155 @@ fn trim_overflow_boundary_spaces(text: &str, width: usize) -> String {
         .map(|cluster| cluster.text)
         .collect::<String>()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{render_document, trim_overflow_boundary_spaces};
+    use crate::frontend::tui::composer::Composer;
+    use crate::frontend::tui::composer::grapheme::is_space_cluster;
+    use crate::frontend::tui::theme::default_palette;
+
+    #[test]
+    fn trim_overflow_boundary_spaces_drops_trailing_spaces_only_when_needed() {
+        assert_eq!(trim_overflow_boundary_spaces("ab  ", 2), "ab");
+        assert_eq!(trim_overflow_boundary_spaces("ab ", 3), "ab ");
+        assert_eq!(trim_overflow_boundary_spaces("ab", 2), "ab");
+    }
+
+    #[test]
+    fn is_space_cluster_recognizes_whitespace_only_clusters() {
+        assert!(is_space_cluster(" "));
+        assert!(is_space_cluster("\t"));
+        assert!(!is_space_cluster(" x"));
+        assert!(!is_space_cluster(""));
+    }
+
+    #[test]
+    fn render_document_preserves_invariants_across_seed_cases() {
+        let cases = [
+            ("hello world", 12, 0, 5),
+            ("", 8, 0, 0),
+            ("中文和 emoji 👨‍👩‍👧", 6, 0, 4),
+        ];
+
+        for (value, width, cursor_line, cursor_column) in cases {
+            assert_render_document_invariants(value, width, cursor_line, cursor_column);
+        }
+    }
+
+    #[test]
+    fn render_document_preserves_invariants_across_generated_cases() {
+        for (value, width, cursor_line, cursor_column) in generated_composer_cases() {
+            assert_render_document_invariants(&value, width, cursor_line, cursor_column);
+        }
+    }
+
+    #[test]
+    #[ignore = "performance smoke test"]
+    fn render_document_perf_smoke() {
+        use std::hint::black_box;
+
+        let draft = [
+            "draft heading for transcript and composer benchmark",
+            "",
+            "soft wrap should stay stable under repeated rendering soft wrap should stay stable under repeated rendering",
+            "    indented literal line with spaces",
+            "\tindented literal line with tabs",
+            "中文内容需要继续参与真实宽度计算。",
+            "emoji cluster 👨‍👩‍👧 should keep cursor mapping correct",
+            "line eight keeps the input tall enough to exercise viewport math",
+            "line nine keeps the document renderer allocating multiple visual rows",
+            "line ten keeps the cursor near the bottom of the draft",
+            "benchmark final line with emoji 👨‍👩‍👧 and trailing text",
+        ]
+        .join("\n");
+
+        let composer = composer_with_cursor(&draft, 64, 10, 48);
+        for _ in 0..256 {
+            black_box(render_document(&composer, default_palette()));
+        }
+    }
+
+    fn assert_render_document_invariants(
+        value: &str,
+        content_width: usize,
+        cursor_line: usize,
+        cursor_column: usize,
+    ) {
+        let composer = composer_with_cursor(value, content_width, cursor_line, cursor_column);
+        let result = render_document(&composer, default_palette());
+
+        assert!(
+            !result.lines.is_empty(),
+            "rendered lines should not be empty"
+        );
+        assert_eq!(
+            result.lines.len(),
+            result.anchors.len(),
+            "line count {} did not match anchors {}",
+            result.lines.len(),
+            result.anchors.len()
+        );
+        assert_eq!(result.lines.len(), result.plain_lines.len());
+        assert!(
+            result.cursor_y < result.lines.len(),
+            "cursor_y {} was out of range for {} lines",
+            result.cursor_y,
+            result.lines.len()
+        );
+    }
+
+    fn composer_with_cursor(
+        value: &str,
+        content_width: usize,
+        cursor_line: usize,
+        cursor_column: usize,
+    ) -> Composer {
+        let mut composer = Composer::default();
+        composer.set_width((content_width + 2) as u16);
+        composer.set_height(8);
+        composer.set_text_for_test(value);
+
+        let lines = super::super::logical_lines(composer.value());
+        composer.cursor =
+            super::super::absolute_cursor_for_position(&lines, cursor_line, cursor_column);
+        composer.sync_viewport_to_cursor();
+        composer
+    }
+
+    fn generated_composer_cases() -> Vec<(String, usize, usize, usize)> {
+        let segments = ["a", "b", " ", "  ", "\t", "\n", "中", "文", "👨‍👩‍👧", "emoji"];
+        let mut seed = 0xC0DE_u64;
+        let mut cases = Vec::new();
+
+        for _ in 0..48 {
+            let len = next_u32(&mut seed) as usize % 24;
+            let mut value = String::new();
+            for _ in 0..len {
+                let index = next_u32(&mut seed) as usize % segments.len();
+                value.push_str(segments[index]);
+            }
+
+            let width = (next_u32(&mut seed) as usize % 32) + 1;
+            let lines = value.split('\n').collect::<Vec<_>>();
+            let cursor_line = if lines.is_empty() {
+                0
+            } else {
+                next_u32(&mut seed) as usize % lines.len()
+            };
+            let cursor_column = lines
+                .get(cursor_line)
+                .map(|line| next_u32(&mut seed) as usize % (line.chars().count() + 1))
+                .unwrap_or(0);
+
+            cases.push((value, width, cursor_line, cursor_column));
+        }
+
+        cases
+    }
+
+    fn next_u32(seed: &mut u64) -> u32 {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (*seed >> 32) as u32
+    }
+}

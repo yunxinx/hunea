@@ -776,3 +776,119 @@ fn append_column_offset_run(
 fn should_hard_wrap_prompt_line(line: &str) -> bool {
     leading_space_count(line) >= 4
 }
+
+#[cfg(test)]
+mod tests {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    use super::wrap_prompt_visual_lines;
+    use crate::frontend::tui::transcript::wrap::measure_width;
+
+    #[test]
+    fn wrap_prompt_visual_lines_preserves_basic_invariants_across_seed_cases() {
+        let cases = [
+            ("hello world", 10, 2),
+            (" abc def", 5, 0),
+            ("a\tb", 8, 2),
+            ("中文和 emoji 👨‍👩‍👧", 6, 0),
+        ];
+
+        for (value, width, line_prefix_width) in cases {
+            assert_prompt_wrap_invariants(value, width, line_prefix_width);
+        }
+    }
+
+    #[test]
+    fn wrap_prompt_visual_lines_preserves_invariants_across_generated_cases() {
+        for (value, width, line_prefix_width) in generated_prompt_cases() {
+            assert_prompt_wrap_invariants(&value, width, line_prefix_width);
+        }
+    }
+
+    #[test]
+    #[ignore = "performance smoke test"]
+    fn wrap_prompt_visual_lines_perf_smoke() {
+        use std::hint::black_box;
+
+        let prose = "the composer should preserve wrapped words and cursor anchors across resize "
+            .repeat(8);
+        let literal =
+            "\tfunc benchmark() error {\n\t\treturn render\tviewport\tanchors\n\t}".to_string();
+
+        for _ in 0..256 {
+            black_box(wrap_prompt_visual_lines(&prose, 36, 2));
+            black_box(wrap_prompt_visual_lines(&literal, 24, 2));
+        }
+    }
+
+    fn assert_prompt_wrap_invariants(value: &str, width: usize, line_prefix_width: usize) {
+        let lines = wrap_prompt_visual_lines(value, width, line_prefix_width);
+        assert!(!lines.is_empty(), "wrapped lines should not be empty");
+
+        let mut previous_logical_line = None;
+        let mut previous_end_char = 0usize;
+
+        for (index, line) in lines.iter().enumerate() {
+            if measure_width(&line.text) > width.max(1) {
+                assert!(
+                    line.text.graphemes(true).count() <= 1,
+                    "line {index} width {} exceeded content width {width}: {:?}",
+                    measure_width(&line.text),
+                    line.text
+                );
+            }
+            assert!(
+                line.start_char <= line.visible_start_char
+                    && line.visible_start_char <= line.end_char,
+                "line {index} has invalid char range: start={} visible={} end={}",
+                line.start_char,
+                line.visible_start_char,
+                line.end_char
+            );
+
+            if let Some(previous_logical_line) = previous_logical_line {
+                assert!(
+                    line.logical_line >= previous_logical_line,
+                    "line {index} logical line regressed from {previous_logical_line} to {}",
+                    line.logical_line
+                );
+                if line.logical_line == previous_logical_line {
+                    assert!(
+                        line.end_char >= previous_end_char,
+                        "line {index} end char regressed within logical line: prev end={previous_end_char} end={}",
+                        line.end_char
+                    );
+                }
+            }
+
+            previous_logical_line = Some(line.logical_line);
+            previous_end_char = line.end_char;
+        }
+    }
+
+    fn generated_prompt_cases() -> Vec<(String, usize, usize)> {
+        let segments = ["a", "b", " ", "  ", "\t", "\n", "中", "文", "👨‍👩‍👧", "emoji"];
+        let mut seed = 0x5EED_u64;
+        let mut cases = Vec::new();
+
+        for _ in 0..48 {
+            let len = next_u32(&mut seed) as usize % 18;
+            let mut value = String::new();
+            for _ in 0..len {
+                let index = next_u32(&mut seed) as usize % segments.len();
+                value.push_str(segments[index]);
+            }
+
+            let width = (next_u32(&mut seed) as usize % 32) + 1;
+            let line_prefix_width = next_u32(&mut seed) as usize % 8;
+            cases.push((value, width, line_prefix_width));
+        }
+
+        cases
+    }
+
+    fn next_u32(seed: &mut u64) -> u32 {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (*seed >> 32) as u32
+    }
+}

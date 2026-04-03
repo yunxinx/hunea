@@ -51,6 +51,27 @@ fn page_down_uses_custom_visual_lines_for_zwj_sequences() {
 }
 
 #[test]
+fn home_moves_to_the_current_line_start() {
+    let mut composer = test_composer(8, 2, "ab\ncd");
+    composer.handle_key(KeyEvent::from(KeyCode::Left));
+
+    composer.handle_key(KeyEvent::from(KeyCode::Home));
+
+    assert_eq!(composer.cursor_position(), (1, 0));
+}
+
+#[test]
+fn end_moves_to_the_current_line_end() {
+    let mut composer = test_composer(8, 2, "ab\ncde");
+    composer.move_to_begin_for_test();
+    composer.handle_key(KeyEvent::from(KeyCode::Right));
+
+    composer.handle_key(KeyEvent::from(KeyCode::End));
+
+    assert_eq!(composer.cursor_position(), (0, 2));
+}
+
+#[test]
 fn render_wraps_chinese_text_at_the_line_edge() {
     let composer = test_composer(6, 2, "中文中");
 

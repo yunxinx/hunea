@@ -74,3 +74,25 @@ fn visual_lines_for_text_with_options(
 
     lines
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{placeholder_line_count, visual_line_count};
+
+    #[test]
+    fn visual_line_count_returns_one_for_empty_or_non_positive_width() {
+        assert_eq!(visual_line_count("", 10, 2), 1);
+        assert_eq!(visual_line_count("hello", 0, 2), 1);
+    }
+
+    #[test]
+    fn visual_line_count_counts_wrapped_prompt_lines() {
+        assert_eq!(visual_line_count("hello world", 7, 2), 2);
+    }
+
+    #[test]
+    fn placeholder_line_count_counts_wrapped_placeholder_lines() {
+        assert_eq!(placeholder_line_count("hello world", 7, 2), 2);
+        assert_eq!(placeholder_line_count("", 7, 2), 1);
+    }
+}

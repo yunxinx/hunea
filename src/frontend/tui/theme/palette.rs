@@ -68,9 +68,7 @@ impl TerminalPalette {
 
 /// `detect_palette` 用于非交互场景，优先探测真实背景，失败时再回退到环境变量推断。
 pub fn detect_palette() -> TerminalPalette {
-    try_detect_palette()
-        .map(|detection| detection.palette)
-        .unwrap_or_else(|| palette_from_background(detect_dark_background_from_env(), None))
+    detect_palette_from_sources(detect_background, detect_dark_background_from_env)
 }
 
 /// `try_detect_palette` 仅在拿到真实终端背景色时返回显式配色。
@@ -82,6 +80,19 @@ pub fn try_detect_palette() -> Option<PaletteDetection> {
         palette: palette_from_background(has_dark_background, Some(rgb_to_color(background))),
         has_dark_background,
     })
+}
+
+fn detect_palette_from_sources(
+    background_probe: impl FnOnce() -> Option<RgbColor>,
+    dark_background_probe: impl FnOnce() -> bool,
+) -> TerminalPalette {
+    match background_probe() {
+        Some(background) => palette_from_background(
+            is_dark_background(background),
+            Some(rgb_to_color(background)),
+        ),
+        None => palette_from_background(dark_background_probe(), None),
+    }
 }
 
 /// `palette_from_background` 根据终端背景信息生成语义配色。
@@ -210,7 +221,10 @@ fn rgb_to_color(color: RgbColor) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_dark_background_from_env, palette_from_background};
+    use super::{
+        RgbColor, default_palette, detect_dark_background_from_env, detect_palette_from_sources,
+        is_dark_background, palette_from_background,
+    };
     use ratatui::style::Color;
 
     #[test]
@@ -235,5 +249,50 @@ mod tests {
         }
 
         assert!(detect_dark_background_from_env());
+    }
+
+    #[test]
+    fn detect_palette_from_sources_prefers_the_detected_background() {
+        let palette = detect_palette_from_sources(
+            || {
+                Some(RgbColor {
+                    red: 32,
+                    green: 40,
+                    blue: 48,
+                })
+            },
+            || panic!("fallback should not run when background probe succeeds"),
+        );
+
+        assert_eq!(
+            palette,
+            palette_from_background(true, Some(Color::Rgb(32, 40, 48)))
+        );
+    }
+
+    #[test]
+    fn detect_palette_from_sources_falls_back_to_the_dark_probe() {
+        let palette = detect_palette_from_sources(|| None, || false);
+
+        assert_eq!(palette, palette_from_background(false, None));
+    }
+
+    #[test]
+    fn default_palette_uses_the_stable_dark_fallback() {
+        assert_eq!(default_palette(), palette_from_background(true, None));
+    }
+
+    #[test]
+    fn is_dark_background_follows_luma_threshold() {
+        assert!(is_dark_background(RgbColor {
+            red: 17,
+            green: 17,
+            blue: 17,
+        }));
+        assert!(!is_dark_background(RgbColor {
+            red: 240,
+            green: 240,
+            blue: 240,
+        }));
     }
 }

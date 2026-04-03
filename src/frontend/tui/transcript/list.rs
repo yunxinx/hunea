@@ -408,6 +408,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn render_builds_gap_anchor_between_visible_blocks() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.items = vec![
+            TranscriptItem::Message(static_message("one")),
+            TranscriptItem::Message(static_message("two")),
+        ];
+
+        let result = transcript.render();
+
+        assert_eq!(result.line_anchors.len(), 3);
+        assert_eq!(result.line_anchors[1].item_index, 0);
+        assert_eq!(
+            result.line_anchors[1].item_anchor.kind,
+            LineAnchorKind::ItemGap
+        );
+        assert_eq!(result.line_anchors[2].item_index, 1);
+    }
+
+    #[test]
+    #[ignore = "performance smoke test"]
+    fn render_perf_smoke_for_large_cached_transcript() {
+        use std::hint::black_box;
+
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_width(72);
+
+        for index in 0..64 {
+            transcript.items.push(TranscriptItem::Message(static_message(&format!(
+                "item {index:02}\nalpha beta gamma alpha beta gamma\ndelta epsilon zeta delta epsilon zeta"
+            ))));
+        }
+
+        for _ in 0..128 {
+            black_box(transcript.render());
+        }
+    }
+
     fn static_message(content: &str) -> MessageItem {
         MessageItem::new(Sender::Assistant, content)
     }

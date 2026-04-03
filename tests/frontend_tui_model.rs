@@ -63,9 +63,25 @@ fn enter_submits_raw_message_and_clears_the_composer() {
 }
 
 #[test]
-fn ctrl_c_marks_the_model_as_quitting() {
+fn first_ctrl_c_shows_exit_confirmation_instead_of_quitting_immediately() {
     let mut model = Model::new(HeroOptions::default());
 
+    model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+
+    assert!(!model.is_quitting());
+}
+
+#[test]
+fn second_ctrl_c_quits_while_confirmation_is_active() {
+    let mut model = Model::new(HeroOptions::default());
+
+    model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
     model.update(AppEvent::Key(KeyEvent::new(
         KeyCode::Char('c'),
         KeyModifiers::CONTROL,

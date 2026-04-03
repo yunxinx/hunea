@@ -25,3 +25,25 @@ user_input_style = "cx"
 # 未配置时不显示状态行；如果配置了但当前所有项都拿不到内容，
 # 状态行也会保持隐藏。
 status_line = ["git-branch"]
+
+# `external_editor` 控制 Ctrl+G 打开的外部编辑器命令。
+# 使用 TOML 数组原生表达 argv，例如：
+# - ["code", "--wait"]
+# - ["cursor", "--wait"]
+# - ["zed", "--wait"]
+# - ["subl", "-w"]
+# - ["open", "-W", "-n", "-t"]
+# - ["nvim"]
+#
+# 对于 VS Code、Cursor、Zed、Sublime Text 这类 GUI 编辑器，
+# 需要显式带上“等待关闭后再返回”的参数；否则 lumos 会在编辑器刚启动时就回到 TUI。
+# macOS 的 `open` 也需要同时带上 `-W` 与 `-n`。
+#
+# 未配置或显式写成 [] 时，会退回到自动探测模式：
+# 依次尝试 VISUAL、EDITOR，以及平台常见编辑器命令。
+external_editor = ["code", "--wait"]
+
+# `show_external_editor_helper` 控制多行草稿时是否显示
+# “ctrl+g to edit in …” 这条短暂提示。
+# 默认开启；如果已经熟悉 Ctrl+G 工作流，可以关闭以减少干扰。
+show_external_editor_helper = true

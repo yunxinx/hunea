@@ -6,6 +6,8 @@ use std::{
 use directories::ProjectDirs;
 use serde::Deserialize;
 
+use crate::envinfo;
+
 /// `Config` 表示当前 lumos 支持的启动配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -17,6 +19,8 @@ pub struct Config {
 pub struct TuiConfig {
     pub user_input_style: UserInputStyle,
     pub status_line: Vec<String>,
+    pub external_editor: Vec<String>,
+    pub show_external_editor_helper: bool,
 }
 
 /// `UserInputStyle` 表示用户输入区与用户消息的展示模式。
@@ -46,6 +50,13 @@ pub enum AppConfigError {
         path: Option<PathBuf>,
         value: String,
     },
+    InvalidExternalEditorCommand {
+        path: Option<PathBuf>,
+    },
+    ExternalEditorMustWait {
+        path: Option<PathBuf>,
+        command: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60,6 +71,8 @@ struct FileConfig {
 struct FileTuiConfig {
     user_input_style: Option<String>,
     status_line: Option<Vec<String>>,
+    external_editor: Option<Vec<String>>,
+    show_external_editor_helper: Option<bool>,
 }
 
 impl Config {
@@ -68,6 +81,8 @@ impl Config {
             tui: TuiConfig {
                 user_input_style: UserInputStyle::Cx,
                 status_line: Vec::new(),
+                external_editor: Vec::new(),
+                show_external_editor_helper: true,
             },
         }
     }
@@ -120,6 +135,29 @@ impl fmt::Display for AppConfigError {
             Self::InvalidStatusLineItem { path: None, value } => {
                 write!(f, "unknown tui.status_line item {:?}", value)
             }
+            Self::InvalidExternalEditorCommand { path: Some(path) } => write!(
+                f,
+                "validate config file {}: invalid tui.external_editor command",
+                path.display()
+            ),
+            Self::InvalidExternalEditorCommand { path: None } => {
+                write!(f, "invalid tui.external_editor command")
+            }
+            Self::ExternalEditorMustWait {
+                path: Some(path),
+                command,
+            } => write!(
+                f,
+                "validate config file {}: external editor must wait for close: {}",
+                path.display(),
+                command
+            ),
+            Self::ExternalEditorMustWait {
+                path: None,
+                command,
+            } => {
+                write!(f, "external editor must wait for close: {command}")
+            }
         }
     }
 }
@@ -129,7 +167,10 @@ impl std::error::Error for AppConfigError {
         match self {
             Self::Read { source, .. } => Some(source),
             Self::Decode { source, .. } => Some(source),
-            Self::InvalidStyleMode { .. } | Self::InvalidStatusLineItem { .. } => None,
+            Self::InvalidStyleMode { .. }
+            | Self::InvalidStatusLineItem { .. }
+            | Self::InvalidExternalEditorCommand { .. }
+            | Self::ExternalEditorMustWait { .. } => None,
         }
     }
 }
@@ -231,6 +272,28 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
         config.tui.status_line = items;
     }
 
+    if let Some(command) = file_config.tui.external_editor {
+        validate_external_editor(&command).map_err(|error| match error {
+            AppConfigError::InvalidExternalEditorCommand { .. } => {
+                AppConfigError::InvalidExternalEditorCommand {
+                    path: Some(path.to_path_buf()),
+                }
+            }
+            AppConfigError::ExternalEditorMustWait { command, .. } => {
+                AppConfigError::ExternalEditorMustWait {
+                    path: Some(path.to_path_buf()),
+                    command,
+                }
+            }
+            other => other,
+        })?;
+        config.tui.external_editor = command;
+    }
+
+    if let Some(show_helper) = file_config.tui.show_external_editor_helper {
+        config.tui.show_external_editor_helper = show_helper;
+    }
+
     Ok(config)
 }
 
@@ -252,6 +315,26 @@ fn validate_status_line_items(items: &[String]) -> Result<(), AppConfigError> {
     }
 
     Ok(())
+}
+
+fn validate_external_editor(command: &[String]) -> Result<(), AppConfigError> {
+    if command.is_empty() {
+        return Ok(());
+    }
+
+    if command[0].trim().is_empty() {
+        return Err(AppConfigError::InvalidExternalEditorCommand { path: None });
+    }
+
+    envinfo::validate_configured_external_editor(command).map_err(|error| match error {
+        envinfo::ExternalEditorError::ExternalEditorMustWait { command } => {
+            AppConfigError::ExternalEditorMustWait {
+                path: None,
+                command,
+            }
+        }
+        _ => AppConfigError::InvalidExternalEditorCommand { path: None },
+    })
 }
 
 #[cfg(test)]

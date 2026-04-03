@@ -80,6 +80,34 @@ fn load_accepts_current_dir_status_line() {
 }
 
 #[test]
+fn load_accepts_external_editor_command() {
+    let working_dir = temp_test_dir("load-accepts-external-editor-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nexternal_editor = [\"code\", \"--wait\"]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("external editor command should be accepted");
+
+    assert_eq!(config.tui.external_editor, vec!["code", "--wait"]);
+}
+
+#[test]
+fn load_accepts_disabling_external_editor_helper() {
+    let working_dir = temp_test_dir("load-disable-external-editor-helper-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nshow_external_editor_helper = false\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("show_external_editor_helper should accept false");
+
+    assert!(!config.tui.show_external_editor_helper);
+}
+
+#[test]
 fn load_project_config_can_clear_user_status_line() {
     let working_dir = temp_test_dir("load-clears-status-line-working");
     let user_config_dir = temp_test_dir("load-clears-status-line-config");
@@ -96,6 +124,25 @@ fn load_project_config_can_clear_user_status_line() {
         .expect("project config should be able to clear user-level status line items");
 
     assert!(config.tui.status_line.is_empty());
+}
+
+#[test]
+fn load_project_config_can_clear_user_external_editor() {
+    let working_dir = temp_test_dir("load-clears-external-editor-working");
+    let user_config_dir = temp_test_dir("load-clears-external-editor-config");
+    write_config(
+        &user_config_dir.join("config.toml"),
+        "[tui]\nexternal_editor = [\"code\", \"--wait\"]\n",
+    );
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nexternal_editor = []\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("project config should be able to clear user-level external editor");
+
+    assert!(config.tui.external_editor.is_empty());
 }
 
 #[test]
@@ -145,6 +192,42 @@ fn load_rejects_unknown_keys() {
 
     assert!(
         error.to_string().contains("unknown field"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_rejects_external_editor_without_command() {
+    let working_dir = temp_test_dir("load-rejects-empty-external-editor-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nexternal_editor = [\"\"]\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("external editor command should reject empty executable");
+
+    assert!(
+        error.to_string().contains("invalid tui.external_editor"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_rejects_non_blocking_external_editor() {
+    let working_dir = temp_test_dir("load-rejects-non-blocking-external-editor-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nexternal_editor = [\"code\"]\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("GUI editors without wait flags should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("external editor must wait for close"),
         "unexpected error: {error}"
     );
 }

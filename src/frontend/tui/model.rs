@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use ratatui::Frame;
 
 use crate::envinfo;
@@ -8,6 +10,7 @@ use super::{
     document::{
         LayoutCache, RestoreTarget, ViewportAnchor, ViewportCache, offset_viewport_line_indices,
     },
+    external_editor::ExternalEditorLaunch,
     status_line::{StatusLineItem, StatusLineRenderResult},
     style_mode::StyleMode,
     theme::{TerminalPalette, default_palette},
@@ -20,6 +23,9 @@ use super::{
 pub struct Model {
     pub(crate) style_mode: StyleMode,
     pub(crate) status_line_items: Vec<StatusLineItem>,
+    pub(crate) external_editor: Vec<String>,
+    pub(crate) external_editor_hint: String,
+    pub(crate) external_editor_helper_enabled: bool,
     pub(crate) git_branch: String,
     pub(crate) current_dir: String,
     pub(crate) palette: TerminalPalette,
@@ -40,14 +46,36 @@ pub struct Model {
     pub(crate) manual_document_scroll: bool,
     pub(crate) scroll_restore_target: RestoreTarget,
     pub(crate) scroll_restore_anchor: ViewportAnchor,
+    pub(crate) status_notice_text: String,
+    pub(crate) status_notice_token: usize,
+    pub(crate) status_notice_deadline: Option<Instant>,
+    pub(crate) external_editor_helper_visible: bool,
+    pub(crate) external_editor_helper_token: usize,
+    pub(crate) external_editor_helper_deadline: Option<Instant>,
+    pub(crate) exit_confirmation_deadline: Option<Instant>,
     quitting: bool,
 }
 
 /// `ModelOptions` 表示创建 TUI 模型时可配置的样式与状态行选项。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelOptions {
     pub style_mode: StyleMode,
     pub status_line_items: Vec<StatusLineItem>,
+    pub external_editor: Vec<String>,
+    pub external_editor_hint: String,
+    pub show_external_editor_helper: bool,
+}
+
+impl Default for ModelOptions {
+    fn default() -> Self {
+        Self {
+            style_mode: StyleMode::default(),
+            status_line_items: Vec::new(),
+            external_editor: Vec::new(),
+            external_editor_hint: String::new(),
+            show_external_editor_helper: true,
+        }
+    }
 }
 
 impl Model {
@@ -62,7 +90,7 @@ impl Model {
             hero_options,
             ModelOptions {
                 style_mode,
-                status_line_items: Vec::new(),
+                ..ModelOptions::default()
             },
         )
     }
@@ -80,6 +108,9 @@ impl Model {
         Self {
             style_mode,
             status_line_items: status_line_items.clone(),
+            external_editor: options.external_editor,
+            external_editor_hint: options.external_editor_hint,
+            external_editor_helper_enabled: options.show_external_editor_helper,
             git_branch: resolve_initial_git_branch(&status_line_items),
             current_dir: resolve_initial_current_dir(&status_line_items),
             palette,
@@ -100,6 +131,13 @@ impl Model {
             manual_document_scroll: false,
             scroll_restore_target: RestoreTarget::None,
             scroll_restore_anchor: ViewportAnchor::default(),
+            status_notice_text: String::new(),
+            status_notice_token: 0,
+            status_notice_deadline: None,
+            external_editor_helper_visible: false,
+            external_editor_helper_token: 0,
+            external_editor_helper_deadline: None,
+            exit_confirmation_deadline: None,
             quitting: false,
         }
     }
@@ -127,6 +165,18 @@ impl Model {
     /// `is_quitting` 返回是否正在退出。
     pub fn is_quitting(&self) -> bool {
         self.quitting
+    }
+
+    /// `next_timeout_deadline` 返回当前最早需要处理的内部超时。
+    pub fn next_timeout_deadline(&self) -> Option<Instant> {
+        match (
+            self.status_notice_deadline,
+            self.external_editor_helper_deadline,
+        ) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+            (None, None) => None,
+        }
     }
 
     /// `composer_text` 返回输入框当前的内容。
@@ -182,6 +232,30 @@ impl Model {
 
     pub(crate) fn mark_quitting(&mut self) {
         self.quitting = true;
+    }
+
+    pub(crate) fn timeout_event(&self, now: Instant) -> Option<super::AppEvent> {
+        if let Some(deadline) = self.status_notice_deadline
+            && now >= deadline
+        {
+            return Some(super::AppEvent::StatusNoticeTimeout {
+                token: self.status_notice_token,
+            });
+        }
+
+        if let Some(deadline) = self.external_editor_helper_deadline
+            && now >= deadline
+        {
+            return Some(super::AppEvent::ExternalEditorHelperTimeout {
+                token: self.external_editor_helper_token,
+            });
+        }
+
+        None
+    }
+
+    pub(crate) fn maybe_prepare_external_editor_launch(&mut self) -> Option<ExternalEditorLaunch> {
+        self.prepare_external_editor_launch()
     }
 
     pub(crate) fn sync_composer_height(&mut self) {

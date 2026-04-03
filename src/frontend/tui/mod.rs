@@ -1,5 +1,7 @@
 mod composer;
 mod document;
+mod exit_confirmation;
+mod external_editor;
 mod hero;
 mod hero_item;
 mod message_item;
@@ -15,6 +17,7 @@ mod view;
 
 pub mod theme;
 
+pub use external_editor::ExternalEditorLaunch;
 pub use hero::{
     HeroOptions, print_hero, render_hero, render_hero_buffer_with_palette,
     render_hero_lines_with_palette, render_hero_plain_lines_with_palette, render_hero_with_palette,

@@ -1,9 +1,9 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    Model, Sender,
+    ExternalEditorLaunch, Model, Sender,
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},
 };
 
@@ -11,7 +11,7 @@ use super::{
 pub const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// `AppEvent` 描述 TUI 模型可处理的外部事件。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
     Key(KeyEvent),
     Resized {
@@ -28,41 +28,92 @@ pub enum AppEvent {
     ForegroundColorHint {
         is_dark: bool,
     },
+    StatusNoticeTimeout {
+        token: usize,
+    },
+    ExternalEditorHelperTimeout {
+        token: usize,
+    },
+    ExternalEditorFinished {
+        draft_path: PathBuf,
+        original_draft: String,
+        failed: bool,
+    },
     StartupReadyTimeout,
 }
 
 impl Model {
     /// `update` 根据事件推进模型状态。
-    pub fn update(&mut self, event: AppEvent) {
+    pub fn update(&mut self, event: AppEvent) -> Option<ExternalEditorLaunch> {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
-            AppEvent::Resized { width, height } => self.handle_resize(width, height),
-            AppEvent::MouseWheel { delta_lines } => self.scroll_document_by(delta_lines),
+            AppEvent::Resized { width, height } => {
+                self.handle_resize(width, height);
+                None
+            }
+            AppEvent::MouseWheel { delta_lines } => {
+                self.cancel_exit_confirmation();
+                self.scroll_document_by(delta_lines);
+                None
+            }
             AppEvent::DetectedPalette {
                 palette,
                 has_dark_background,
-            } => self.set_palette(palette, has_dark_background),
+            } => {
+                self.set_palette(palette, has_dark_background);
+                None
+            }
             AppEvent::ForegroundColorHint { is_dark } => {
                 if !self.has_palette() {
                     self.set_palette(palette_from_background(!is_dark, None), !is_dark);
                 }
+                None
+            }
+            AppEvent::StatusNoticeTimeout { token } => {
+                self.dismiss_status_notice(token);
+                None
+            }
+            AppEvent::ExternalEditorHelperTimeout { token } => {
+                self.dismiss_external_editor_helper(token);
+                None
+            }
+            AppEvent::ExternalEditorFinished {
+                draft_path,
+                original_draft,
+                failed,
+            } => {
+                self.apply_external_editor_finished(&draft_path, &original_draft, failed);
+                None
             }
             AppEvent::StartupReadyTimeout => {
                 if !self.has_palette() {
                     self.set_palette(terminal_default_palette(), false);
                 }
+                None
             }
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) {
+    fn handle_key(&mut self, key: KeyEvent) -> Option<ExternalEditorLaunch> {
         if !(key.kind.is_press() || key.kind.is_repeat()) {
-            return;
+            return None;
+        }
+
+        if !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
+            self.cancel_exit_confirmation();
         }
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.mark_quitting();
-            return;
+            if self.exit_confirmation_active(std::time::Instant::now()) {
+                self.mark_quitting();
+            } else {
+                self.show_exit_confirmation();
+            }
+            return None;
+        }
+
+        if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return self.maybe_prepare_external_editor_launch();
         }
 
         if key.code == KeyCode::Enter {
@@ -71,16 +122,17 @@ impl Model {
                 let old_line = self.composer.line();
                 let old_column = self.composer.column();
                 self.composer_mut().insert_newline();
+                self.sync_external_editor_helper_after_draft_change(&old_value);
                 self.sync_composer_height();
                 self.sync_document_viewport_after_composer_interaction(
                     &old_value, old_line, old_column,
                 );
-                return;
+                return None;
             }
 
             let content = self.composer_text().to_string();
             if content.trim().is_empty() {
-                return;
+                return None;
             }
 
             let preserved_anchor = if self.manual_document_scroll {
@@ -89,15 +141,19 @@ impl Model {
                 None
             };
             let style_mode = self.style_mode;
-            self.transcript_mut()
-                .append_message_with_style_mode(Sender::User, content, style_mode);
+            self.transcript_mut().append_message_with_style_mode(
+                Sender::User,
+                content.clone(),
+                style_mode,
+            );
             self.refresh_status_line_after_transcript_change();
             self.sync_transcript_render();
             self.composer_mut().clear();
+            self.sync_external_editor_helper_after_draft_change(&content);
             self.sync_composer_height();
             self.follow_bottom = true;
             self.sync_document_viewport_after_transcript_refresh(preserved_anchor);
-            return;
+            return None;
         }
 
         if key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -105,15 +161,16 @@ impl Model {
             let old_line = self.composer.line();
             let old_column = self.composer.column();
             self.composer_mut().insert_newline();
+            self.sync_external_editor_helper_after_draft_change(&old_value);
             self.sync_composer_height();
             self.sync_document_viewport_after_composer_interaction(
                 &old_value, old_line, old_column,
             );
-            return;
+            return None;
         }
 
         if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) && self.manual_document_scroll {
-            return;
+            return None;
         }
 
         if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
@@ -137,25 +194,30 @@ impl Model {
                     &old_value, old_line, old_column,
                 );
             }
-            return;
+            return None;
         }
 
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
         self.composer_mut().handle_key(key);
+        self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
+        None
     }
 
     fn handle_resize(&mut self, width: u16, height: u16) {
+        self.cancel_exit_confirmation();
         let preserved_anchor = if self.manual_document_scroll {
             self.current_document_viewport_anchor()
         } else {
             None
         };
+        let previous_width = self.width;
 
         self.set_window(width, height);
+        self.sync_external_editor_helper_after_resize(previous_width);
         self.sync_document_viewport_after_transcript_refresh(preserved_anchor);
     }
 }

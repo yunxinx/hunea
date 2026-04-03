@@ -75,14 +75,7 @@ impl Composer {
 
     /// `full_height` 返回 composer 完整内容的视觉高度。
     pub fn full_height(&self) -> u16 {
-        if self.value.is_empty() {
-            return 1;
-        }
-
-        let prompt_width = usize::from(prompt_width());
-        let line_count = visual_line_count(&self.value, self.content_width(), prompt_width);
-
-        u16::try_from(line_count.max(1)).unwrap_or(u16::MAX)
+        self.full_height_for_value_at_width(&self.value, self.width)
     }
 
     /// `value` 返回当前输入内容。
@@ -95,6 +88,13 @@ impl Composer {
         self.value.clear();
         self.cursor = 0;
         self.viewport_y = 0;
+    }
+
+    /// `replace_text_and_move_to_end` 用新内容替换当前草稿，并把光标移动到末尾。
+    pub fn replace_text_and_move_to_end(&mut self, value: impl Into<String>) {
+        self.value = value.into();
+        self.cursor = total_chars(&self.value);
+        self.sync_viewport_to_cursor();
     }
 
     /// `insert_newline` 在当前光标位置插入显式换行。
@@ -216,6 +216,18 @@ impl Composer {
     pub(crate) fn bottom_viewport_offset(&self) -> usize {
         self.total_visual_lines()
             .saturating_sub(self.viewport_height().max(1))
+    }
+
+    pub(crate) fn full_height_for_value_at_width(&self, value: &str, width: u16) -> u16 {
+        if value.is_empty() {
+            return 1;
+        }
+
+        let prompt_width = usize::from(prompt_width());
+        let content_width = usize::from(width.saturating_sub(prompt_width as u16)).max(1);
+        let line_count = visual_line_count(value, content_width, prompt_width);
+
+        u16::try_from(line_count.max(1)).unwrap_or(u16::MAX)
     }
 
     #[cfg(test)]

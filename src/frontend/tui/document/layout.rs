@@ -106,7 +106,7 @@ impl Model {
             composer_placeholder: self.composer.placeholder().to_string(),
             composer_line: self.composer.line(),
             composer_column: self.composer.column(),
-            status_line_text: self.current_status_line_parts().join("\0"),
+            status_line_text: self.current_status_line_cache_key(),
         }
     }
 

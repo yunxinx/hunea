@@ -74,10 +74,29 @@ fn status_line_truncates_without_wrapping_in_narrow_viewport() {
 
     assert_eq!(
         render_trimmed_rows(&mut model, 12, 4),
-        vec!["", "› Enter to", "", "  feature/ve"]
+        vec!["", "› Enter to", "", "  feature..."]
     );
 
     env::set_current_dir(original_dir).expect("should restore original directory");
+}
+
+#[test]
+fn status_line_falls_back_to_whole_line_ellipsis_when_only_one_cell_remains() {
+    let mut model = ready_model(
+        10,
+        4,
+        StyleMode::Cx,
+        vec![StatusLineItem::GitBranch, StatusLineItem::CurrentDir],
+    );
+    model.update(AppEvent::DetectedPalette {
+        palette: default_palette(),
+        has_dark_background: true,
+    });
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 10, 4),
+        vec!["", "› Enter to", "", "  main..."]
+    );
 }
 
 #[test]
@@ -139,6 +158,7 @@ fn ready_model(
         ModelOptions {
             style_mode,
             status_line_items,
+            ..ModelOptions::default()
         },
     );
     model.update(AppEvent::Resized { width, height });

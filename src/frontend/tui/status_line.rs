@@ -35,11 +35,24 @@ pub(crate) struct StatusLineRenderResult {
     pub(crate) gap_before: usize,
 }
 
-const STATUS_LINE_INSET_WIDTH: usize = 2;
+pub(crate) const STATUS_LINE_INSET_WIDTH: usize = 2;
 const STATUS_LINE_SEPARATOR: &str = " · ";
+const STATUS_LINE_ELLIPSIS: &str = "...";
 
 impl Model {
+    pub(crate) fn current_status_line_cache_key(&self) -> String {
+        if !self.current_status_notice_text().is_empty() {
+            return format!("notice\0{}", self.current_status_notice_text());
+        }
+
+        self.current_status_line_parts().join("\0")
+    }
+
     pub(crate) fn current_status_line_render_result(&self) -> StatusLineRenderResult {
+        if !self.current_status_notice_text().is_empty() {
+            return self.current_status_notice_render_result();
+        }
+
         let parts = self.current_status_line_parts();
         if parts.is_empty() {
             return StatusLineRenderResult::default();
@@ -68,7 +81,7 @@ impl Model {
     }
 
     pub(crate) fn current_status_line_parts(&self) -> Vec<String> {
-        let mut parts = Vec::with_capacity(self.status_line_items.len());
+        let mut parts = Vec::with_capacity(self.status_line_items.len() + 1);
         for item in &self.status_line_items {
             match item {
                 StatusLineItem::GitBranch if !self.git_branch.is_empty() => {
@@ -79,6 +92,10 @@ impl Model {
                 }
                 _ => {}
             }
+        }
+        let helper = self.current_external_editor_helper_text();
+        if !helper.is_empty() {
+            parts.push(sanitize_status_line_part(&helper));
         }
 
         parts
@@ -116,7 +133,7 @@ pub(crate) fn compose_status_line_text(parts: &[String], width: usize) -> String
         return String::new();
     }
 
-    let first = truncate_display_width(&parts[0], width);
+    let first = truncate_display_width_with_ellipsis(&parts[0], width);
     if first.is_empty() {
         return String::new();
     }
@@ -131,7 +148,19 @@ pub(crate) fn compose_status_line_text(parts: &[String], width: usize) -> String
     for part in parts.iter().skip(1) {
         let part_width = part.width();
         if current_width + separator_width + part_width > width {
-            break;
+            let remaining_width = width.saturating_sub(current_width + separator_width);
+            if remaining_width < STATUS_LINE_ELLIPSIS.width() {
+                return force_ellipsis_at_display_width(&text, width);
+            }
+
+            let truncated_part = truncate_display_width_with_ellipsis(part, remaining_width);
+            if !truncated_part.is_empty() {
+                text.push_str(STATUS_LINE_SEPARATOR);
+                text.push_str(&truncated_part);
+                return text;
+            }
+
+            return force_ellipsis_at_display_width(&text, width);
         }
 
         text.push_str(STATUS_LINE_SEPARATOR);
@@ -154,7 +183,7 @@ fn sanitize_status_line_part(text: &str) -> String {
         .collect()
 }
 
-fn truncate_display_width(text: &str, width: usize) -> String {
+pub(crate) fn truncate_display_width(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
@@ -174,4 +203,41 @@ fn truncate_display_width(text: &str, width: usize) -> String {
     }
 
     rendered
+}
+
+fn truncate_display_width_with_ellipsis(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if text.width() <= width {
+        return text.to_string();
+    }
+
+    let ellipsis_width = STATUS_LINE_ELLIPSIS.width();
+    if width <= ellipsis_width {
+        return truncate_display_width(STATUS_LINE_ELLIPSIS, width);
+    }
+
+    format!(
+        "{}{}",
+        truncate_display_width(text, width - ellipsis_width),
+        STATUS_LINE_ELLIPSIS
+    )
+}
+
+fn force_ellipsis_at_display_width(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let ellipsis_width = STATUS_LINE_ELLIPSIS.width();
+    if width <= ellipsis_width {
+        return truncate_display_width(STATUS_LINE_ELLIPSIS, width);
+    }
+
+    format!(
+        "{}{}",
+        truncate_display_width(text, width - ellipsis_width),
+        STATUS_LINE_ELLIPSIS
+    )
 }

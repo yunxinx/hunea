@@ -4,6 +4,7 @@ use color_eyre::eyre::{Result, WrapErr};
 
 use crate::{
     appconfig::{self, TuiConfig, UserInputStyle},
+    envinfo,
     frontend::tui::{self, HeroOptions, Model, ModelOptions, StatusLineItem, StyleMode},
 };
 
@@ -82,6 +83,9 @@ fn model_options_from_config(tui_config: &TuiConfig) -> ModelOptions {
     ModelOptions {
         style_mode: style_mode_from_config(tui_config.user_input_style),
         status_line_items: status_line_items_from_config(&tui_config.status_line),
+        external_editor: tui_config.external_editor.clone(),
+        external_editor_hint: external_editor_hint_from_config(&tui_config.external_editor),
+        show_external_editor_helper: tui_config.show_external_editor_helper,
     }
 }
 
@@ -90,4 +94,10 @@ fn status_line_items_from_config(items: &[String]) -> Vec<StatusLineItem> {
         .iter()
         .filter_map(|item| StatusLineItem::from_config_value(item))
         .collect()
+}
+
+fn external_editor_hint_from_config(configured: &[String]) -> String {
+    envinfo::resolve_external_editor(configured)
+        .map(|editor| editor.display_name)
+        .unwrap_or_default()
 }

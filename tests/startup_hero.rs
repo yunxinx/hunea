@@ -1,9 +1,11 @@
 use lumos::{
     envinfo::short_work_dir,
-    frontend::tui::theme::TerminalPalette,
-    startup::{HeroOptions, render_hero_buffer_with_palette, write_hero_to},
+    frontend::tui::{
+        HeroOptions, render_hero_buffer_with_palette,
+        theme::{TerminalPalette, palette_from_background},
+        write_hero_to,
+    },
 };
-use ratatui::style::Color;
 
 #[test]
 fn render_uses_default_hero_copy_and_includes_the_current_working_directory() {
@@ -108,14 +110,11 @@ fn write_hero_to_appends_a_trailing_newline() {
 }
 
 fn sample_palette() -> TerminalPalette {
-    TerminalPalette {
-        main: Color::Rgb(245, 245, 245),
-        secondary: Color::Rgb(168, 168, 168),
-    }
+    palette_from_background(true, None)
 }
 
 fn default_title() -> &'static str {
-    ">_ Lumos (v0.0.1)"
+    ">_ Lumos (v0.1.0)"
 }
 
 fn horizontal_border(content_width: u16, left: char, right: char) -> String {

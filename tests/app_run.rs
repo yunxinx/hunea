@@ -1,13 +1,18 @@
 use std::io;
 
-use lumos::app::run_with_writer;
+use lumos::{
+    app::write_exit_transcript_with_context,
+    frontend::tui::{HeroOptions, Model},
+};
 
 #[test]
-fn run_with_writer_adds_context_when_hero_output_fails() {
-    let error = run_with_writer(&mut BrokenWriter).expect_err("run should bubble writer failures");
+fn write_exit_transcript_adds_context_when_output_fails() {
+    let model = Model::new(HeroOptions::default());
+    let error = write_exit_transcript_with_context(&mut BrokenWriter, &model)
+        .expect_err("writer failures should be wrapped with app context");
     let message = format!("{error:?}");
 
-    assert!(message.contains("failed to write startup hero"));
+    assert!(message.contains("failed to write exit transcript"));
 }
 
 struct BrokenWriter;

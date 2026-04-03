@@ -2,39 +2,38 @@ use std::env;
 
 use ratatui::style::Color;
 
-const DARK_BACKGROUND_MAIN: RgbColor = RgbColor {
-    red: 245,
-    green: 245,
-    blue: 245,
-};
-const LIGHT_BACKGROUND_MAIN: RgbColor = RgbColor {
-    red: 47,
-    green: 47,
-    blue: 47,
-};
-const DARK_BACKGROUND_SECONDARY: RgbColor = RgbColor {
-    red: 191,
-    green: 191,
-    blue: 191,
-};
-const LIGHT_BACKGROUND_SECONDARY: RgbColor = RgbColor {
-    red: 47,
-    green: 47,
-    blue: 47,
-};
+const DARK_BACKGROUND_MAIN: Color = Color::Rgb(245, 245, 245);
+const LIGHT_BACKGROUND_MAIN: Color = Color::Rgb(47, 47, 47);
+const DARK_BACKGROUND_MUTED: Color = Color::Rgb(202, 202, 202);
+const LIGHT_BACKGROUND_MUTED: Color = Color::Rgb(95, 95, 95);
+const DARK_BACKGROUND_SECONDARY: Color = Color::Rgb(166, 166, 166);
+const LIGHT_BACKGROUND_SECONDARY: Color = Color::Rgb(110, 110, 110);
+const DARK_BACKGROUND_SURFACE: Color = Color::Rgb(46, 46, 46);
+const LIGHT_BACKGROUND_SURFACE: Color = Color::Rgb(236, 236, 236);
 
-/// `TerminalPalette` 定义当前终端里最基础的两个颜色语义。
-/// `main` 用于应用名等主体信息，`secondary` 用于边框、前缀和版本号。
+/// `PaletteDetection` 描述一次可确认的终端背景探测结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaletteDetection {
+    pub palette: TerminalPalette,
+    pub has_dark_background: bool,
+}
+
+/// `TerminalPalette` 定义当前终端下的一组基础语义颜色。
+/// `main` 用于主体信息，`muted` 用于输入正文，`secondary` 用于辅助信息，
+/// `surface` 用于弱化背景块。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalPalette {
     pub main: Color,
+    pub muted: Color,
     pub secondary: Color,
+    pub surface: Option<Color>,
+    mode: PaletteMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PaletteContext {
-    background: Option<RgbColor>,
-    has_dark_background: bool,
+enum PaletteMode {
+    Explicit,
+    TerminalDefault,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,27 +43,71 @@ struct RgbColor {
     blue: u8,
 }
 
-/// `detect_palette` 根据终端背景明暗生成一组可复用的基础配色。
-/// 颜色统一保留为 RGB 语义，不在这里维护终端颜色档位降级分支。
-pub fn detect_palette() -> TerminalPalette {
-    palette_from_context(detect_palette_context())
+/// `default_palette` 返回不触发终端探测的稳定默认配色。
+pub fn default_palette() -> TerminalPalette {
+    palette_from_background(true, None)
 }
 
-fn palette_from_context(context: PaletteContext) -> TerminalPalette {
+/// `terminal_default_palette` 返回依赖终端默认颜色的保底配色。
+pub fn terminal_default_palette() -> TerminalPalette {
     TerminalPalette {
-        main: main_color(context.has_dark_background),
-        secondary: secondary_color(context),
+        main: Color::Reset,
+        muted: Color::Reset,
+        secondary: Color::Reset,
+        surface: None,
+        mode: PaletteMode::TerminalDefault,
     }
 }
 
-fn detect_palette_context() -> PaletteContext {
-    let background = detect_background();
+impl TerminalPalette {
+    /// `uses_terminal_default_colors` 表示当前配色是否依赖终端默认前景/背景色。
+    pub fn uses_terminal_default_colors(&self) -> bool {
+        matches!(self.mode, PaletteMode::TerminalDefault)
+    }
+}
 
-    PaletteContext {
-        has_dark_background: background
-            .map(is_dark_background)
-            .unwrap_or_else(detect_dark_background_from_env),
-        background,
+/// `detect_palette` 用于非交互场景，优先探测真实背景，失败时再回退到环境变量推断。
+pub fn detect_palette() -> TerminalPalette {
+    try_detect_palette()
+        .map(|detection| detection.palette)
+        .unwrap_or_else(|| palette_from_background(detect_dark_background_from_env(), None))
+}
+
+/// `try_detect_palette` 仅在拿到真实终端背景色时返回显式配色。
+pub fn try_detect_palette() -> Option<PaletteDetection> {
+    let background = detect_background()?;
+    let has_dark_background = is_dark_background(background);
+
+    Some(PaletteDetection {
+        palette: palette_from_background(has_dark_background, Some(rgb_to_color(background))),
+        has_dark_background,
+    })
+}
+
+/// `palette_from_background` 根据终端背景信息生成语义配色。
+/// `background` 为 `None` 时会退回到稳定的 fallback 颜色。
+pub fn palette_from_background(
+    has_dark_background: bool,
+    background: Option<Color>,
+) -> TerminalPalette {
+    TerminalPalette {
+        main: if has_dark_background {
+            DARK_BACKGROUND_MAIN
+        } else {
+            LIGHT_BACKGROUND_MAIN
+        },
+        muted: if has_dark_background {
+            DARK_BACKGROUND_MUTED
+        } else {
+            LIGHT_BACKGROUND_MUTED
+        },
+        secondary: if has_dark_background {
+            DARK_BACKGROUND_SECONDARY
+        } else {
+            LIGHT_BACKGROUND_SECONDARY
+        },
+        surface: Some(surface_color(has_dark_background, background)),
+        mode: PaletteMode::Explicit,
     }
 }
 
@@ -100,75 +143,57 @@ fn detect_dark_background_from_env() -> bool {
     }
 }
 
-fn main_color(has_dark_background: bool) -> Color {
-    if has_dark_background {
-        rgb_to_color(DARK_BACKGROUND_MAIN)
-    } else {
-        rgb_to_color(LIGHT_BACKGROUND_MAIN)
-    }
-}
-
-fn secondary_color(context: PaletteContext) -> Color {
-    let secondary = if let Some(background) = context.background {
-        let complementary = complementary(background);
-        if context.has_dark_background {
-            lighten(complementary, 0.20)
+fn surface_color(has_dark_background: bool, background: Option<Color>) -> Color {
+    let Some(background) = background.and_then(color_to_rgb) else {
+        return if has_dark_background {
+            DARK_BACKGROUND_SURFACE
         } else {
-            darken(complementary, 0.10)
-        }
-    } else if context.has_dark_background {
-        DARK_BACKGROUND_SECONDARY
-    } else {
-        LIGHT_BACKGROUND_SECONDARY
+            LIGHT_BACKGROUND_SURFACE
+        };
     };
 
-    rgb_to_color(secondary)
-}
-
-fn complementary(color: RgbColor) -> RgbColor {
-    RgbColor {
-        red: 255 - color.red,
-        green: 255 - color.green,
-        blue: 255 - color.blue,
+    if has_dark_background {
+        blend_toward(
+            background,
+            RgbColor {
+                red: 255,
+                green: 255,
+                blue: 255,
+            },
+            0.12,
+        )
+    } else {
+        blend_toward(
+            background,
+            RgbColor {
+                red: 0,
+                green: 0,
+                blue: 0,
+            },
+            0.04,
+        )
     }
 }
 
-fn lighten(color: RgbColor, amount: f32) -> RgbColor {
-    blend_toward(
-        color,
-        RgbColor {
-            red: 255,
-            green: 255,
-            blue: 255,
-        },
-        amount,
-    )
+fn color_to_rgb(color: Color) -> Option<RgbColor> {
+    match color {
+        Color::Rgb(red, green, blue) => Some(RgbColor { red, green, blue }),
+        _ => None,
+    }
 }
 
-fn darken(color: RgbColor, amount: f32) -> RgbColor {
-    blend_toward(
-        color,
-        RgbColor {
-            red: 0,
-            green: 0,
-            blue: 0,
-        },
-        amount,
-    )
-}
-
-fn blend_toward(from: RgbColor, to: RgbColor, amount: f32) -> RgbColor {
+fn blend_toward(from: RgbColor, to: RgbColor, amount: f32) -> Color {
     fn blend_channel(from: u8, to: u8, amount: f32) -> u8 {
         let from = from as f32;
         let to = to as f32;
         (from + ((to - from) * amount)).round() as u8
     }
 
-    RgbColor {
-        red: blend_channel(from.red, to.red, amount),
-        green: blend_channel(from.green, to.green, amount),
-        blue: blend_channel(from.blue, to.blue, amount),
-    }
+    Color::Rgb(
+        blend_channel(from.red, to.red, amount),
+        blend_channel(from.green, to.green, amount),
+        blend_channel(from.blue, to.blue, amount),
+    )
 }
 
 fn is_dark_background(color: RgbColor) -> bool {
@@ -185,55 +210,22 @@ fn rgb_to_color(color: RgbColor) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        PaletteContext, RgbColor, complementary, detect_dark_background_from_env,
-        palette_from_context,
-    };
+    use super::{detect_dark_background_from_env, palette_from_background};
     use ratatui::style::Color;
 
     #[test]
-    fn palette_uses_complementary_secondary_when_background_is_available() {
-        let palette = palette_from_context(PaletteContext {
-            background: Some(RgbColor {
-                red: 16,
-                green: 32,
-                blue: 48,
-            }),
-            has_dark_background: true,
-        });
+    fn palette_uses_stable_secondary_color_without_following_background_hue() {
+        let blue_palette = palette_from_background(true, Some(Color::Rgb(16, 36, 63)));
+        let green_palette = palette_from_background(true, Some(Color::Rgb(20, 48, 31)));
 
-        let complementary = complementary(RgbColor {
-            red: 16,
-            green: 32,
-            blue: 48,
-        });
-
-        assert_eq!(palette.main, Color::Rgb(245, 245, 245));
-        assert_eq!(
-            palette.secondary,
-            Color::Rgb(
-                lightened_channel(complementary.red),
-                lightened_channel(complementary.green),
-                lightened_channel(complementary.blue),
-            )
-        );
+        assert_eq!(blue_palette.secondary, green_palette.secondary);
     }
 
     #[test]
-    fn palette_uses_background_sensitive_fallback_without_background_color() {
-        let dark_palette = palette_from_context(PaletteContext {
-            background: None,
-            has_dark_background: true,
-        });
-        let light_palette = palette_from_context(PaletteContext {
-            background: None,
-            has_dark_background: false,
-        });
+    fn palette_surface_follows_the_background_hue_order() {
+        let palette = palette_from_background(true, Some(Color::Rgb(32, 64, 96)));
 
-        assert_eq!(dark_palette.main, Color::Rgb(245, 245, 245));
-        assert_eq!(dark_palette.secondary, Color::Rgb(191, 191, 191));
-        assert_eq!(light_palette.main, Color::Rgb(47, 47, 47));
-        assert_eq!(light_palette.secondary, Color::Rgb(47, 47, 47));
+        assert_eq!(palette.surface, Some(Color::Rgb(59, 87, 115)));
     }
 
     #[test]
@@ -243,9 +235,5 @@ mod tests {
         }
 
         assert!(detect_dark_background_from_env());
-    }
-
-    fn lightened_channel(channel: u8) -> u8 {
-        (f32::from(channel) + ((255.0 - f32::from(channel)) * 0.20)).round() as u8
     }
 }

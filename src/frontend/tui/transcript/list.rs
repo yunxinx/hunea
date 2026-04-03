@@ -112,18 +112,24 @@ impl Transcript {
         self.items.get(index)
     }
 
-    /// `plain_items` 返回适用于退出后打印的文本项。
+    /// `plain_items` 返回适用于纯文本消费的文本项。
     pub(crate) fn plain_items(&self) -> Vec<String> {
-        self.exit_items(false)
-    }
-
-    /// `exit_items` 返回适用于退出后打印的文本项，可选择是否保留 ANSI。
-    pub(crate) fn exit_items(&self, preserve_ansi: bool) -> Vec<String> {
         let width = self.render_width();
 
         self.items
             .iter()
-            .map(|item| item.render_for_exit(width, self.palette, preserve_ansi))
+            .map(|item| item.render_plain_text(width, self.palette))
+            .filter(|item| !item.is_empty())
+            .collect()
+    }
+
+    /// `terminal_replay_items` 返回适用于退出 AltScreen 后回放到终端的文本项。
+    pub(crate) fn terminal_replay_items(&self, preserve_ansi: bool) -> Vec<String> {
+        let width = self.render_width();
+
+        self.items
+            .iter()
+            .map(|item| item.render_for_terminal_replay(width, self.palette, preserve_ansi))
             .filter(|item| !item.is_empty())
             .collect()
     }
@@ -316,10 +322,22 @@ impl TranscriptItem {
         }
     }
 
-    fn render_for_exit(&self, width: u16, palette: TerminalPalette, preserve_ansi: bool) -> String {
+    fn render_for_terminal_replay(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+        preserve_ansi: bool,
+    ) -> String {
         match self {
-            Self::Hero(item) => item.render_for_exit(width, palette, preserve_ansi),
-            Self::Message(item) => item.render_for_exit(width, palette, preserve_ansi),
+            Self::Hero(item) => item.render_for_terminal_replay(width, palette, preserve_ansi),
+            Self::Message(item) => item.render_for_terminal_replay(width, palette, preserve_ansi),
+        }
+    }
+
+    fn render_plain_text(&self, width: u16, palette: TerminalPalette) -> String {
+        match self {
+            Self::Hero(item) => item.render_plain_text(width, palette),
+            Self::Message(item) => item.render_plain_text(width, palette),
         }
     }
 

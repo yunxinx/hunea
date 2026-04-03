@@ -43,8 +43,8 @@ impl HeroItem {
             .unwrap_or_else(|| render_hero_lines_with_palette(&self.options, palette))
     }
 
-    /// `render_for_exit` 返回适合退出后打印的 hero 文本。
-    pub fn render_for_exit(
+    /// `render_for_terminal_replay` 返回适合退出 AltScreen 后回放到终端的 hero 文本。
+    pub fn render_for_terminal_replay(
         &self,
         width: u16,
         palette: TerminalPalette,
@@ -66,6 +66,12 @@ impl HeroItem {
         } else {
             lines_to_plain_text(&lines)
         }
+    }
+
+    /// `render_plain_text` 返回不带 ANSI 的纯文本 hero 内容。
+    pub fn render_plain_text(&self, width: u16, palette: TerminalPalette) -> String {
+        let lines = self.render_lines(width, palette);
+        lines_to_plain_text(&lines)
     }
 
     pub(crate) fn render_cache_key(&self) -> String {

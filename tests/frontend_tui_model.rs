@@ -75,7 +75,7 @@ fn ctrl_c_marks_the_model_as_quitting() {
 }
 
 #[test]
-fn transcript_plain_items_use_the_current_width_for_the_hero() {
+fn terminal_replay_items_use_the_current_width_for_the_hero() {
     let mut model = Model::new(HeroOptions {
         app_name: Some("L".repeat(120)),
         ..HeroOptions::default()
@@ -86,7 +86,7 @@ fn transcript_plain_items_use_the_current_width_for_the_hero() {
         height: 8,
     });
 
-    let items = model.transcript_plain_items();
+    let items = model.terminal_replay_items(false);
     assert_eq!(items.len(), 1);
 
     for line in items[0].split('\n') {

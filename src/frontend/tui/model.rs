@@ -95,14 +95,14 @@ impl Model {
         self.composer.value()
     }
 
-    /// `transcript_plain_items` 返回适用于退出后打印的 transcript 项列表。
+    /// `transcript_plain_items` 返回适用于纯文本消费的 transcript 项列表。
     pub fn transcript_plain_items(&self) -> Vec<String> {
         self.transcript.plain_items()
     }
 
-    /// `transcript_exit_items` 返回退出后打印所需的 transcript 项。
-    pub fn transcript_exit_items(&self, preserve_ansi: bool) -> Vec<String> {
-        self.transcript.exit_items(preserve_ansi)
+    /// `terminal_replay_items` 返回退出 AltScreen 后回放到终端的 transcript 项。
+    pub fn terminal_replay_items(&self, preserve_ansi: bool) -> Vec<String> {
+        self.transcript.terminal_replay_items(preserve_ansi)
     }
 
     pub(crate) fn set_window(&mut self, width: u16, height: u16) {

@@ -3,11 +3,11 @@ use std::io;
 use lumos::app::run_with_writer;
 
 #[test]
-fn run_with_writer_adds_context_when_banner_output_fails() {
+fn run_with_writer_adds_context_when_hero_output_fails() {
     let error = run_with_writer(&mut BrokenWriter).expect_err("run should bubble writer failures");
     let message = format!("{error:?}");
 
-    assert!(message.contains("failed to write startup banner"));
+    assert!(message.contains("failed to write startup hero"));
 }
 
 struct BrokenWriter;

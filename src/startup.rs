@@ -7,41 +7,40 @@ use crate::theme::{TerminalPalette, detect_palette};
 const DEFAULT_APP_NAME: &str = "Lumos";
 const DEFAULT_VERSION: &str = "v0.0.1";
 const BORDER_WIDTH: u16 = 2;
-const BANNER_HEIGHT: u16 = 3;
+const HERO_HEIGHT: u16 = 3;
 const HORIZONTAL_PADDING: u16 = 2;
 
-/// RenderOptions 控制启动 banner 的文案和宽度。
-/// `width` 表示 banner 内容区的最小宽度；为 0 时使用内容自然宽度。
+/// `HeroOptions` 控制启动 hero 的文案和宽度。
+/// `width` 为 0 时使用内容自然宽度。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RenderOptions {
+pub struct HeroOptions {
     pub app_name: Option<String>,
     pub version: Option<String>,
     pub width: u16,
 }
 
-/// Render 使用当前终端主题把 banner 渲染为 ANSI 字符串。
-pub fn render(options: &RenderOptions) -> String {
-    render_with_palette(options, detect_palette())
+/// `render_hero` 使用当前终端主题把启动 hero 渲染为 ANSI 字符串。
+pub fn render_hero(options: &HeroOptions) -> String {
+    render_hero_with_palette(options, detect_palette())
 }
 
-/// RenderWithPalette 在给定语义配色下渲染 banner。
-/// 这个入口让运行时探测和组件渲染保持解耦，后续接到完整 TUI 时也更容易复用。
-pub fn render_with_palette(options: &RenderOptions, palette: TerminalPalette) -> String {
-    let buffer = render_buffer_with_palette(options, palette);
+/// `render_hero_with_palette` 在给定语义配色下渲染启动 hero。
+pub fn render_hero_with_palette(options: &HeroOptions, palette: TerminalPalette) -> String {
+    let buffer = render_hero_buffer_with_palette(options, palette);
     buffer_to_ansi_string(&buffer)
 }
 
-/// RenderBufferWithPalette 直接返回 Ratatui `Buffer`，便于在测试里验证布局与颜色语义。
-pub fn render_buffer_with_palette(options: &RenderOptions, palette: TerminalPalette) -> Buffer {
+/// `render_hero_buffer_with_palette` 直接返回 Ratatui `Buffer`，方便测试布局与颜色语义。
+pub fn render_hero_buffer_with_palette(options: &HeroOptions, palette: TerminalPalette) -> Buffer {
     let app_name = options.app_name.as_deref().unwrap_or(DEFAULT_APP_NAME);
     let version = options.version.as_deref().unwrap_or(DEFAULT_VERSION);
-    let content = banner_content(app_name, version);
+    let content = hero_content(app_name, version);
     let content_width = options.width.max(content_width(&content));
     let total_width = content_width + BORDER_WIDTH + (HORIZONTAL_PADDING * 2);
-    let area = Rect::new(0, 0, total_width, BANNER_HEIGHT);
+    let area = Rect::new(0, 0, total_width, HERO_HEIGHT);
     let mut buffer = Buffer::empty(area);
 
-    StartupBanner {
+    StartupHero {
         app_name,
         version,
         palette,
@@ -51,27 +50,27 @@ pub fn render_buffer_with_palette(options: &RenderOptions, palette: TerminalPale
     buffer
 }
 
-/// Print 直接把 banner 写到标准输出。
-pub fn print(options: &RenderOptions) -> io::Result<()> {
+/// `print_hero` 直接把启动 hero 输出到标准输出。
+pub fn print_hero(options: &HeroOptions) -> io::Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    write_to(&mut handle, options)
+    write_hero_to(&mut handle, options)
 }
 
-/// WriteTo 把 banner 输出到任意 writer，并在结尾补换行，方便命令行入口直接复用。
-pub fn write_to<W: Write>(writer: &mut W, options: &RenderOptions) -> io::Result<()> {
-    writeln!(writer, "{}", render(options))
+/// `write_hero_to` 把启动 hero 输出到任意 writer，并在结尾补换行。
+pub fn write_hero_to<W: Write>(writer: &mut W, options: &HeroOptions) -> io::Result<()> {
+    writeln!(writer, "{}", render_hero(options))
 }
 
-struct StartupBanner<'a> {
+struct StartupHero<'a> {
     app_name: &'a str,
     version: &'a str,
     palette: TerminalPalette,
 }
 
-impl Widget for StartupBanner<'_> {
+impl Widget for StartupHero<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.width < BORDER_WIDTH || area.height < BANNER_HEIGHT {
+        if area.width < BORDER_WIDTH || area.height < HERO_HEIGHT {
             return;
         }
 
@@ -137,7 +136,7 @@ impl Widget for StartupBanner<'_> {
     }
 }
 
-fn banner_content(app_name: &str, version: &str) -> String {
+fn hero_content(app_name: &str, version: &str) -> String {
     format!(">_ {} ({})", app_name, version)
 }
 

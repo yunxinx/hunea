@@ -1,12 +1,12 @@
 use lumos::{
-    banner::{RenderOptions, render_buffer_with_palette, write_to},
+    startup::{HeroOptions, render_hero_buffer_with_palette, write_hero_to},
     theme::TerminalPalette,
 };
 use ratatui::style::Color;
 
 #[test]
-fn render_uses_default_banner_copy_and_rounded_frame() {
-    let buffer = render_buffer_with_palette(&RenderOptions::default(), sample_palette());
+fn render_uses_default_hero_copy_and_rounded_frame() {
+    let buffer = render_hero_buffer_with_palette(&HeroOptions::default(), sample_palette());
 
     assert_eq!(buffer.area.width, 23);
     assert_eq!(buffer.area.height, 3);
@@ -17,9 +17,9 @@ fn render_uses_default_banner_copy_and_rounded_frame() {
 }
 
 #[test]
-fn render_applies_semantic_colors_to_banner_fragments() {
+fn render_applies_semantic_colors_to_hero_fragments() {
     let palette = sample_palette();
-    let buffer = render_buffer_with_palette(&RenderOptions::default(), palette);
+    let buffer = render_hero_buffer_with_palette(&HeroOptions::default(), palette);
 
     assert_eq!(buffer[(0, 1)].fg, palette.secondary);
     assert_eq!(buffer[(3, 1)].fg, palette.secondary);
@@ -33,10 +33,10 @@ fn render_applies_semantic_colors_to_banner_fragments() {
 
 #[test]
 fn render_expands_to_requested_content_width() {
-    let buffer = render_buffer_with_palette(
-        &RenderOptions {
+    let buffer = render_hero_buffer_with_palette(
+        &HeroOptions {
             width: 24,
-            ..RenderOptions::default()
+            ..HeroOptions::default()
         },
         sample_palette(),
     );
@@ -46,12 +46,12 @@ fn render_expands_to_requested_content_width() {
 }
 
 #[test]
-fn write_to_appends_a_trailing_newline() {
+fn write_hero_to_appends_a_trailing_newline() {
     let mut output = Vec::new();
 
-    write_to(&mut output, &RenderOptions::default()).expect("banner should render");
+    write_hero_to(&mut output, &HeroOptions::default()).expect("hero should render");
 
-    let rendered = String::from_utf8(output).expect("banner output should be utf-8");
+    let rendered = String::from_utf8(output).expect("hero output should be utf-8");
     assert!(rendered.ends_with('\n'));
 }
 

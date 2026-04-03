@@ -1,11 +1,16 @@
-use std::{env, io::IsTerminal};
+use std::env;
 
 use ratatui::style::Color;
 
-const DEFAULT_MAIN_TRUECOLOR: RgbColor = RgbColor {
+const DARK_BACKGROUND_MAIN: RgbColor = RgbColor {
     red: 245,
     green: 245,
     blue: 245,
+};
+const LIGHT_BACKGROUND_MAIN: RgbColor = RgbColor {
+    red: 47,
+    green: 47,
+    blue: 47,
 };
 const DARK_BACKGROUND_SECONDARY: RgbColor = RgbColor {
     red: 168,
@@ -27,18 +32,9 @@ pub struct TerminalPalette {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TerminalColorContext {
-    profile: TerminalColorProfile,
+struct PaletteContext {
     background: Option<RgbColor>,
     has_dark_background: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TerminalColorProfile {
-    NoColor,
-    Ansi16,
-    Ansi256,
-    TrueColor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,58 +44,27 @@ struct RgbColor {
     blue: u8,
 }
 
-/// DetectPalette 根据终端颜色能力和背景明暗生成一组可复用的基础配色。
+/// `detect_palette` 根据终端背景明暗生成一组可复用的基础配色。
+/// 颜色统一保留为 RGB 语义，不在这里维护终端颜色档位降级分支。
 pub fn detect_palette() -> TerminalPalette {
-    palette_from_context(detect_terminal_color_context())
+    palette_from_context(detect_palette_context())
 }
 
-fn palette_from_context(context: TerminalColorContext) -> TerminalPalette {
+fn palette_from_context(context: PaletteContext) -> TerminalPalette {
     TerminalPalette {
-        main: main_color(context.profile),
+        main: main_color(context.has_dark_background),
         secondary: secondary_color(context),
     }
 }
 
-fn detect_terminal_color_context() -> TerminalColorContext {
+fn detect_palette_context() -> PaletteContext {
     let background = detect_background();
 
-    TerminalColorContext {
-        profile: detect_color_profile(),
+    PaletteContext {
         has_dark_background: background
             .map(is_dark_background)
             .unwrap_or_else(detect_dark_background_from_env),
         background,
-    }
-}
-
-fn detect_color_profile() -> TerminalColorProfile {
-    if !std::io::stdout().is_terminal() || env::var_os("NO_COLOR").is_some() {
-        return TerminalColorProfile::NoColor;
-    }
-
-    if let Some(force_color) = env::var_os("FORCE_COLOR") {
-        return match force_color.to_string_lossy().trim() {
-            "0" => TerminalColorProfile::NoColor,
-            "3" => TerminalColorProfile::TrueColor,
-            "2" => TerminalColorProfile::Ansi256,
-            _ => TerminalColorProfile::Ansi16,
-        };
-    }
-
-    let color_term = env::var("COLORTERM")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if matches!(color_term.as_str(), "truecolor" | "24bit") {
-        return TerminalColorProfile::TrueColor;
-    }
-
-    let term = env::var("TERM").unwrap_or_default().to_ascii_lowercase();
-    if term.contains("256color") {
-        TerminalColorProfile::Ansi256
-    } else if term.is_empty() || term == "dumb" {
-        TerminalColorProfile::NoColor
-    } else {
-        TerminalColorProfile::Ansi16
     }
 }
 
@@ -135,17 +100,16 @@ fn detect_dark_background_from_env() -> bool {
     }
 }
 
-fn main_color(profile: TerminalColorProfile) -> Color {
-    match profile {
-        TerminalColorProfile::NoColor => Color::Reset,
-        TerminalColorProfile::Ansi16 => Color::Gray,
-        TerminalColorProfile::Ansi256 => Color::Indexed(15),
-        TerminalColorProfile::TrueColor => rgb_to_color(DEFAULT_MAIN_TRUECOLOR),
+fn main_color(has_dark_background: bool) -> Color {
+    if has_dark_background {
+        rgb_to_color(DARK_BACKGROUND_MAIN)
+    } else {
+        rgb_to_color(LIGHT_BACKGROUND_MAIN)
     }
 }
 
-fn secondary_color(context: TerminalColorContext) -> Color {
-    let truecolor = if let Some(background) = context.background {
+fn secondary_color(context: PaletteContext) -> Color {
+    let secondary = if let Some(background) = context.background {
         let complementary = complementary(background);
         if context.has_dark_background {
             lighten(complementary, 0.10)
@@ -158,12 +122,7 @@ fn secondary_color(context: TerminalColorContext) -> Color {
         LIGHT_BACKGROUND_SECONDARY
     };
 
-    match context.profile {
-        TerminalColorProfile::NoColor => Color::Reset,
-        TerminalColorProfile::Ansi16 => Color::Black,
-        TerminalColorProfile::Ansi256 => Color::Indexed(238),
-        TerminalColorProfile::TrueColor => rgb_to_color(truecolor),
-    }
+    rgb_to_color(secondary)
 }
 
 fn complementary(color: RgbColor) -> RgbColor {
@@ -227,15 +186,14 @@ fn rgb_to_color(color: RgbColor) -> Color {
 #[cfg(test)]
 mod tests {
     use super::{
-        RgbColor, TerminalColorContext, TerminalColorProfile, complementary,
-        detect_dark_background_from_env, palette_from_context,
+        PaletteContext, RgbColor, complementary, detect_dark_background_from_env,
+        palette_from_context,
     };
     use ratatui::style::Color;
 
     #[test]
     fn palette_uses_complementary_secondary_when_background_is_available() {
-        let palette = palette_from_context(TerminalColorContext {
-            profile: TerminalColorProfile::TrueColor,
+        let palette = palette_from_context(PaletteContext {
             background: Some(RgbColor {
                 red: 16,
                 green: 32,
@@ -263,18 +221,18 @@ mod tests {
 
     #[test]
     fn palette_uses_background_sensitive_fallback_without_background_color() {
-        let dark_palette = palette_from_context(TerminalColorContext {
-            profile: TerminalColorProfile::TrueColor,
+        let dark_palette = palette_from_context(PaletteContext {
             background: None,
             has_dark_background: true,
         });
-        let light_palette = palette_from_context(TerminalColorContext {
-            profile: TerminalColorProfile::TrueColor,
+        let light_palette = palette_from_context(PaletteContext {
             background: None,
             has_dark_background: false,
         });
 
+        assert_eq!(dark_palette.main, Color::Rgb(245, 245, 245));
         assert_eq!(dark_palette.secondary, Color::Rgb(168, 168, 168));
+        assert_eq!(light_palette.main, Color::Rgb(47, 47, 47));
         assert_eq!(light_palette.secondary, Color::Rgb(47, 47, 47));
     }
 

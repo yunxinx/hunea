@@ -1,4 +1,5 @@
 mod composer;
+mod document;
 mod hero;
 mod hero_item;
 mod message_item;

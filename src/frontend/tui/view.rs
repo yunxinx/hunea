@@ -1,14 +1,9 @@
-use ratatui::{
-    Frame,
-    layout::{Constraint, Layout},
-    text::Text,
-    widgets::Paragraph,
-};
+use ratatui::{Frame, text::Text, widgets::Paragraph};
 
 use super::Model;
 
-/// `render` 负责将模型状态映射为当前帧内容。
-pub fn render(model: &Model, frame: &mut Frame<'_>) {
+/// `render` 负责将统一文档流映射到当前帧内容。
+pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
     if !model.is_ready() {
         return;
     }
@@ -18,31 +13,17 @@ pub fn render(model: &Model, frame: &mut Frame<'_>) {
         return;
     }
 
-    let composer_height = model.composer().visible_height().min(area.height);
-    let gap_height = if area.height > composer_height {
-        model.composer_gap_height()
-    } else {
-        0
-    };
-    let transcript_height = area.height.saturating_sub(composer_height + gap_height);
+    let document = model.build_document_layout();
+    let viewport = model.build_document_viewport(&document);
 
-    let layout = Layout::vertical([
-        Constraint::Length(transcript_height),
-        Constraint::Length(gap_height),
-        Constraint::Length(composer_height),
-    ]);
-    let [transcript_area, _, composer_area] = layout.areas(area);
+    let paragraph = Paragraph::new(Text::from(viewport.lines.clone()));
+    frame.render_widget(paragraph, area);
 
-    if transcript_height > 0 {
-        let transcript = Paragraph::new(Text::from(model.transcript_render().lines.clone()));
-        frame.render_widget(transcript, transcript_area);
+    let cursor_y = document.cursor_y.saturating_sub(viewport.resolved_offset);
+    if cursor_y < viewport.lines.len() {
+        frame.set_cursor_position((
+            area.x + document.cursor_x,
+            area.y + u16::try_from(cursor_y).unwrap_or(u16::MAX),
+        ));
     }
-
-    let composer_result = model.composer().render(*model.palette());
-    let composer = Paragraph::new(Text::from(composer_result.lines));
-    frame.render_widget(composer, composer_area);
-    frame.set_cursor_position((
-        composer_area.x + composer_result.cursor_x,
-        composer_area.y + composer_result.cursor_y,
-    ));
 }

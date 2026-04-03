@@ -25,6 +25,7 @@ const HORIZONTAL_PADDING: u16 = 2;
 pub struct HeroOptions {
     pub app_name: Option<String>,
     pub version: Option<String>,
+    pub work_dir: Option<String>,
     pub width: u16,
 }
 
@@ -41,7 +42,7 @@ pub fn render_hero_with_palette(options: &HeroOptions, palette: TerminalPalette)
 
 /// `render_hero_buffer_with_palette` 直接返回 `Buffer`，便于测试布局和颜色语义。
 pub fn render_hero_buffer_with_palette(options: &HeroOptions, palette: TerminalPalette) -> Buffer {
-    let work_dir = short_work_dir();
+    let work_dir = options.work_dir.clone().unwrap_or_else(short_work_dir);
     render_hero_buffer(options, palette, &work_dir)
 }
 
@@ -170,11 +171,15 @@ struct HeroGlyph {
     foreground: Color,
 }
 
-fn hero_title_plain_text(app_name: &str, version: &str) -> String {
+pub(crate) fn hero_title_plain_text(app_name: &str, version: &str) -> String {
     format!(">_ {app_name} ({version})")
 }
 
-fn resolved_content_width(requested_width: u16, title_text: &str, work_dir: &str) -> u16 {
+pub(crate) fn resolved_content_width(
+    requested_width: u16,
+    title_text: &str,
+    work_dir: &str,
+) -> u16 {
     if requested_width > 0 {
         return requested_width;
     }

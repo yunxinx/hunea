@@ -40,7 +40,8 @@ pub(crate) fn lines_to_ansi_text(lines: &[Line<'_>]) -> String {
     rendered
 }
 
-fn line_to_plain_text(line: &Line<'_>) -> String {
+/// `line_to_plain_text` 把单行带样式文本压平成纯文本。
+pub(crate) fn line_to_plain_text(line: &Line<'_>) -> String {
     line.spans
         .iter()
         .map(|span| span.content.as_ref())

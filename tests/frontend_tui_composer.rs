@@ -14,9 +14,12 @@ fn ctrl_j_inserts_newline_and_renders_expanded_composer() {
 
     assert_eq!(model.composer_text(), "1\n");
 
-    let rows = render_rows(&model, 20, 12);
-    assert_eq!(rows[rows.len() - 2], "┃ 1                 ");
-    assert_eq!(rows[rows.len() - 1], "┃                   ");
+    let rows = render_rows(&mut model, 20, 12);
+    let first_line = rows
+        .iter()
+        .position(|row| row == "┃ 1                 ")
+        .expect("document should contain the first draft line");
+    assert_eq!(rows[first_line + 1], "┃                   ");
 }
 
 #[test]
@@ -52,9 +55,12 @@ fn long_english_input_wraps_by_word_boundary() {
         model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
     }
 
-    let rows = render_rows(&model, 9, 20);
-    assert_eq!(rows[rows.len() - 2], "┃ hello  ");
-    assert_eq!(rows[rows.len() - 1], "  world  ");
+    let rows = render_rows(&mut model, 9, 20);
+    let first_line = rows
+        .iter()
+        .position(|row| row == "┃ hello  ")
+        .expect("document should contain the wrapped first line");
+    assert_eq!(rows[first_line + 1], "  world  ");
 }
 
 fn ready_model(width: u16, height: u16) -> Model {
@@ -64,7 +70,7 @@ fn ready_model(width: u16, height: u16) -> Model {
     model
 }
 
-fn render_rows(model: &Model, width: u16, height: u16) -> Vec<String> {
+fn render_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     terminal

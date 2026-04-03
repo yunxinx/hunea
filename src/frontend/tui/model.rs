@@ -3,26 +3,33 @@ use ratatui::Frame;
 use super::{
     HeroOptions,
     composer::Composer,
+    document::{LayoutCache, RestoreTarget, ViewportAnchor, ViewportCache},
     theme::{TerminalPalette, default_palette},
     transcript::{RenderResult, Transcript},
     view,
 };
 
-const TRANSCRIPT_COMPOSER_GAP: u16 = 1;
-const COMPOSER_MIN_HEIGHT: u16 = 1;
-
 /// `Model` 表示交互式 TUI 应用的状态。
 #[derive(Debug, Clone)]
 pub struct Model {
-    palette: TerminalPalette,
-    transcript: Transcript,
-    transcript_render: RenderResult,
-    composer: Composer,
-    width: u16,
-    height: u16,
-    has_palette: bool,
-    has_window: bool,
-    has_dark_background: bool,
+    pub(crate) palette: TerminalPalette,
+    pub(crate) palette_version: usize,
+    pub(crate) transcript: Transcript,
+    pub(crate) transcript_render: RenderResult,
+    pub(crate) transcript_render_version: usize,
+    pub(crate) composer: Composer,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) document_viewport_y: usize,
+    pub(crate) document_layout_cache: LayoutCache,
+    pub(crate) document_viewport_cache: ViewportCache,
+    pub(crate) has_palette: bool,
+    pub(crate) has_window: bool,
+    pub(crate) has_dark_background: bool,
+    pub(crate) follow_bottom: bool,
+    pub(crate) manual_document_scroll: bool,
+    pub(crate) scroll_restore_target: RestoreTarget,
+    pub(crate) scroll_restore_anchor: ViewportAnchor,
     quitting: bool,
 }
 
@@ -37,20 +44,29 @@ impl Model {
 
         Self {
             palette,
+            palette_version: 1,
+            transcript_render_version: 1,
             transcript,
             transcript_render,
             composer: Composer::default(),
             width: 0,
             height: 0,
+            document_viewport_y: 0,
+            document_layout_cache: LayoutCache::default(),
+            document_viewport_cache: ViewportCache::default(),
             has_palette: false,
             has_window: false,
             has_dark_background: true,
+            follow_bottom: true,
+            manual_document_scroll: false,
+            scroll_restore_target: RestoreTarget::None,
+            scroll_restore_anchor: ViewportAnchor::default(),
             quitting: false,
         }
     }
 
     /// `render` 将当前模型渲染到一帧。
-    pub fn render(&self, frame: &mut Frame<'_>) {
+    pub fn render(&mut self, frame: &mut Frame<'_>) {
         view::render(self, frame);
     }
 
@@ -89,14 +105,6 @@ impl Model {
         self.transcript.exit_items(preserve_ansi)
     }
 
-    pub(crate) fn transcript_render(&self) -> &RenderResult {
-        &self.transcript_render
-    }
-
-    pub(crate) fn composer(&self) -> &Composer {
-        &self.composer
-    }
-
     pub(crate) fn set_window(&mut self, width: u16, height: u16) {
         self.width = width;
         self.height = height;
@@ -104,38 +112,19 @@ impl Model {
         self.transcript.set_width(width.max(1));
         self.composer.set_width(width.max(1));
         self.sync_transcript_render();
-        self.sync_composer_layout();
-    }
-
-    pub(crate) fn composer_viewport_height(&self) -> u16 {
-        let content_height = self.composer.full_height().max(COMPOSER_MIN_HEIGHT);
-        if !self.has_window || self.height == 0 {
-            return content_height;
-        }
-
-        let available_rows = self.height.saturating_sub(self.composer_top_offset());
-        if available_rows == 0 {
-            return COMPOSER_MIN_HEIGHT;
-        }
-
-        content_height.min(available_rows)
-    }
-
-    pub(crate) fn composer_gap_height(&self) -> u16 {
-        if self.transcript_render.line_count > 0 {
-            TRANSCRIPT_COMPOSER_GAP
-        } else {
-            0
-        }
+        self.sync_composer_height();
     }
 
     pub(crate) fn set_palette(&mut self, palette: TerminalPalette, has_dark_background: bool) {
+        if self.palette != palette {
+            self.palette_version += 1;
+        }
         self.palette = palette;
         self.has_dark_background = has_dark_background;
         self.has_palette = true;
         self.transcript.set_palette(palette);
         self.sync_transcript_render();
-        self.sync_composer_layout();
+        self.sync_composer_height();
     }
 
     pub(crate) fn composer_mut(&mut self) -> &mut Composer {
@@ -150,23 +139,21 @@ impl Model {
         self.quitting = true;
     }
 
-    pub(crate) fn sync_composer_layout(&mut self) {
-        let viewport_height = self.composer_viewport_height().max(COMPOSER_MIN_HEIGHT);
+    pub(crate) fn sync_composer_height(&mut self) {
+        let full_height = self.composer.full_height().max(1);
+        let viewport_height = if !self.has_window || self.height == 0 {
+            full_height
+        } else {
+            full_height.min(self.height.max(1))
+        };
         self.composer.set_height(viewport_height);
     }
 
     pub(crate) fn sync_transcript_render(&mut self) {
         self.transcript_render = self.transcript.render();
-    }
-
-    fn composer_top_offset(&self) -> u16 {
-        if self.transcript_render.line_count == 0 {
-            0
-        } else {
-            u16::try_from(self.transcript_render.line_count)
-                .unwrap_or(u16::MAX)
-                .saturating_add(TRANSCRIPT_COMPOSER_GAP)
-        }
+        self.transcript_render_version += 1;
+        self.document_layout_cache.valid = false;
+        self.document_viewport_cache.valid = false;
     }
 }
 
@@ -176,19 +163,28 @@ mod tests {
     use crate::frontend::tui::Sender;
 
     #[test]
-    fn wrapped_transcript_rows_reduce_composer_viewport_height() {
+    fn overflowing_document_bottom_slice_keeps_full_draft_height() {
         let mut model = Model::new(HeroOptions::default());
-        model.transcript_mut().clear();
-        model
-            .transcript_mut()
-            .append_message(Sender::Assistant, "1234567890");
-
-        model.set_window(10, 4);
+        model.set_window(20, 4);
+        model.set_palette(default_palette(), true);
         model.composer_mut().set_text_for_test("1\n2\n3");
-        model.sync_composer_layout();
+        model.sync_composer_height();
+        model.sync_document_viewport_to_bottom();
 
-        assert_eq!(model.transcript_render.line_count, 1);
-        assert_eq!(model.composer().visible_height(), 2);
+        let layout = model.build_document_layout();
+        assert_eq!(layout.composer_line_count, 3);
+
+        let viewport = model.build_document_viewport(&layout);
+        let rendered = viewport.plain_lines;
+        assert_eq!(
+            rendered,
+            vec![
+                String::new(),
+                "┃ 1".to_string(),
+                "┃ 2".to_string(),
+                "┃ 3".to_string(),
+            ]
+        );
     }
 
     #[test]

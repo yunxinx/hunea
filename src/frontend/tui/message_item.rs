@@ -6,7 +6,8 @@ use super::{
     styled_text::{lines_to_ansi_text, lines_to_plain_text},
     theme::{TerminalPalette, surface_emphasis_style, surface_text_style},
     transcript::{
-        DEFAULT_RENDER_WIDTH, render_markdown_lines, wrap_assistant_text, wrap_prompt_text,
+        DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchorKind, render_markdown_lines,
+        wrap_assistant_text, wrap_prompt_text, wrap_prompt_visual_lines,
     },
 };
 
@@ -49,6 +50,37 @@ impl MessageItem {
         } else {
             lines_to_plain_text(&lines)
         }
+    }
+
+    pub(crate) fn render_cache_key(&self) -> String {
+        format!("{}:{}", self.sender as u8, self.content)
+    }
+
+    pub(crate) fn render_line_anchors(
+        &self,
+        width: u16,
+        _palette: TerminalPalette,
+    ) -> Vec<ItemLineAnchor> {
+        if self.sender != Sender::User {
+            return Vec::new();
+        }
+
+        let prefix_width = measure_width(USER_MESSAGE_PREFIX);
+        let content_width = usize::from(width.max(1))
+            .saturating_sub(prefix_width)
+            .max(1);
+        wrap_prompt_visual_lines(&self.content, content_width, prefix_width)
+            .into_iter()
+            .enumerate()
+            .map(|(rendered_line, line)| ItemLineAnchor {
+                kind: LineAnchorKind::LogicalPosition,
+                logical_line: line.logical_line,
+                range_start: line.visible_start_char,
+                range_end: line.end_char,
+                rendered_line,
+                gap_offset: 0,
+            })
+            .collect()
     }
 
     #[cfg(test)]

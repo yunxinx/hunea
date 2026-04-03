@@ -14,10 +14,14 @@ use self::{
         grapheme_target_right, logical_column_for_visual_offset, measure_width,
     },
     layout::{placeholder_line_count, visual_line_count, visual_lines_for_text},
-    render::{RenderResult, render},
+    render::{DocumentRenderResult, render_document},
     viewport::{calculate_cursor_visual_position, sync_viewport_offset_for_cursor},
 };
 use super::theme::TerminalPalette;
+
+pub(crate) use self::render::LineAnchor;
+#[cfg(test)]
+use self::render::{RenderResult, render};
 
 const PROMPT: &str = "┃ ";
 const PLACEHOLDER: &str = "Enter to send Prompts";
@@ -48,16 +52,17 @@ impl Composer {
     /// `set_width` 更新 composer 的总渲染宽度。
     pub fn set_width(&mut self, width: u16) {
         self.width = width.max(1);
-        self.sync_viewport();
+        self.clamp_viewport();
     }
 
     /// `set_height` 更新 composer viewport 的可视高度。
     pub fn set_height(&mut self, height: u16) {
         self.height = height.max(1);
-        self.sync_viewport();
+        self.clamp_viewport();
     }
 
     /// `visible_height` 返回当前 viewport 的可视高度。
+    #[allow(dead_code)]
     pub fn visible_height(&self) -> u16 {
         self.height.max(1)
     }
@@ -89,7 +94,7 @@ impl Composer {
     /// `insert_newline` 在当前光标位置插入显式换行。
     pub fn insert_newline(&mut self) {
         self.insert_char('\n');
-        self.sync_viewport();
+        self.sync_viewport_to_cursor();
     }
 
     /// `handle_key` 处理输入编辑、导航与分页相关按键。
@@ -127,11 +132,16 @@ impl Composer {
             _ => {}
         }
 
-        self.sync_viewport();
+        self.sync_viewport_to_cursor();
     }
 
+    #[cfg(test)]
     pub(crate) fn render(&self, palette: TerminalPalette) -> RenderResult {
         render(self, palette)
+    }
+
+    pub(crate) fn render_document(&self, palette: TerminalPalette) -> DocumentRenderResult {
+        render_document(self, palette)
     }
 
     pub(crate) fn content_width(&self) -> usize {
@@ -150,6 +160,10 @@ impl Composer {
         self.viewport_y
     }
 
+    pub(crate) fn set_viewport_offset(&mut self, offset: usize) {
+        self.viewport_y = self.clamp_viewport_offset(offset);
+    }
+
     pub(crate) fn viewport_height(&self) -> usize {
         usize::from(self.height.max(1))
     }
@@ -158,17 +172,49 @@ impl Composer {
         logical_position(&self.value, self.cursor)
     }
 
+    pub(crate) fn line(&self) -> usize {
+        self.cursor_position().0
+    }
+
+    pub(crate) fn column(&self) -> usize {
+        self.cursor_position().1
+    }
+
+    pub(crate) fn move_to_begin(&mut self) {
+        self.cursor = 0;
+        self.sync_viewport_to_cursor();
+    }
+
+    pub(crate) fn move_to_end(&mut self) {
+        self.cursor = total_chars(&self.value);
+        self.sync_viewport_to_cursor();
+    }
+
+    pub(crate) fn handle_page_key(&mut self, direction: isize) -> bool {
+        if !matches!(direction, -1 | 1) {
+            return false;
+        }
+
+        self.page_move(direction);
+        true
+    }
+
+    pub(crate) fn bottom_viewport_offset(&self) -> usize {
+        self.total_visual_lines()
+            .saturating_sub(self.viewport_height().max(1))
+    }
+
     #[cfg(test)]
     pub(crate) fn set_text_for_test(&mut self, value: impl Into<String>) {
         self.value = value.into();
         self.cursor = total_chars(&self.value);
-        self.sync_viewport();
+        self.sync_viewport_to_cursor();
     }
 
     #[cfg(test)]
     pub(crate) fn move_to_begin_for_test(&mut self) {
         self.cursor = 0;
-        self.sync_viewport();
+        self.sync_viewport_to_cursor();
     }
 
     fn insert_char(&mut self, character: char) {
@@ -319,14 +365,6 @@ impl Composer {
         self.cursor = lines[row].start_char + lines[row].len_chars();
     }
 
-    fn move_to_begin(&mut self) {
-        self.cursor = 0;
-    }
-
-    fn move_to_end(&mut self) {
-        self.cursor = total_chars(&self.value);
-    }
-
     fn page_move(&mut self, direction: isize) {
         let visual_lines = visual_lines_for_text(
             &self.value,
@@ -383,7 +421,7 @@ impl Composer {
         );
     }
 
-    fn sync_viewport(&mut self) {
+    pub(crate) fn sync_viewport_to_cursor(&mut self) {
         if self.value.is_empty() {
             self.viewport_y = 0;
             return;
@@ -402,6 +440,29 @@ impl Composer {
             visual_lines.len(),
             cursor_visual_y,
         );
+    }
+
+    fn clamp_viewport(&mut self) {
+        self.viewport_y = self.clamp_viewport_offset(self.viewport_y);
+    }
+
+    fn clamp_viewport_offset(&self, offset: usize) -> usize {
+        let total_lines = self.total_visual_lines();
+        if total_lines == 0 {
+            return 0;
+        }
+
+        offset.min(total_lines.saturating_sub(self.viewport_height().max(1)))
+    }
+
+    fn total_visual_lines(&self) -> usize {
+        let prompt_width = usize::from(prompt_width());
+        if self.value.is_empty() {
+            return placeholder_line_count(self.placeholder(), self.content_width(), prompt_width)
+                .max(1);
+        }
+
+        visual_line_count(&self.value, self.content_width(), prompt_width).max(1)
     }
 
     fn delete_absolute_range(&mut self, start: usize, end: usize) {

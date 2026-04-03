@@ -6,7 +6,7 @@ use std::{
 use color_eyre::eyre::Result;
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -62,6 +62,15 @@ pub fn run(hero_options: HeroOptions) -> Result<Model> {
         match event::read()? {
             Event::Key(key) => model.update(AppEvent::Key(key)),
             Event::Resize(width, height) => model.update(AppEvent::Resized { width, height }),
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => model.update(AppEvent::MouseWheel {
+                    delta_lines: -Model::document_mouse_wheel_delta(),
+                }),
+                MouseEventKind::ScrollDown => model.update(AppEvent::MouseWheel {
+                    delta_lines: Model::document_mouse_wheel_delta(),
+                }),
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -75,7 +84,7 @@ impl TerminalSession {
     fn enter() -> io::Result<(Terminal<CrosstermBackend<io::Stdout>>, Self)> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, Hide)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         terminal.hide_cursor()?;
@@ -87,6 +96,6 @@ impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, Show, LeaveAlternateScreen);
+        let _ = execute!(stdout, Show, DisableMouseCapture, LeaveAlternateScreen);
     }
 }

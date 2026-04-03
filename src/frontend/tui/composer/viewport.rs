@@ -1,10 +1,11 @@
 use super::{grapheme::measure_width, layout::VisualLine};
 
-pub(crate) fn visible_viewport_lines(
-    lines: &[VisualLine],
+#[cfg(test)]
+pub(crate) fn visible_viewport_lines<T>(
+    lines: &[T],
     offset: usize,
     height: usize,
-) -> (&[VisualLine], usize) {
+) -> (&[T], usize) {
     if lines.is_empty() {
         return (&[], 0);
     }

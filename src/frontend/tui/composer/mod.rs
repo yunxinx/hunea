@@ -13,18 +13,17 @@ use self::{
         grapheme_range_at_or_after_cursor, grapheme_range_before_cursor, grapheme_target_left,
         grapheme_target_right, logical_column_for_visual_offset, measure_width,
     },
-    layout::{placeholder_line_count, visual_line_count, visual_lines_for_text},
+    layout::{visual_line_count, visual_lines_for_text},
     render::{DocumentRenderResult, render_document},
     viewport::{calculate_cursor_visual_position, sync_viewport_offset_for_cursor},
 };
-use super::theme::TerminalPalette;
+use super::{style_mode::StyleMode, theme::TerminalPalette};
 
 pub(crate) use self::render::LineAnchor;
 #[cfg(test)]
 use self::render::{RenderResult, render};
 
-const PROMPT: &str = "┃ ";
-const PLACEHOLDER: &str = "Enter to send Prompts";
+const PLACEHOLDER: &str = "Enter to send Prompt";
 
 /// `Composer` 管理底部输入区的文本、光标和自定义 viewport。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,21 +33,28 @@ pub struct Composer {
     width: u16,
     height: u16,
     viewport_y: usize,
+    style_mode: StyleMode,
 }
 
 impl Default for Composer {
     fn default() -> Self {
+        Self::new(StyleMode::Cx)
+    }
+}
+
+impl Composer {
+    /// `new` 创建指定样式模式的输入框状态。
+    pub fn new(style_mode: StyleMode) -> Self {
         Self {
             value: String::new(),
             cursor: 0,
             width: 1,
             height: 1,
             viewport_y: 0,
+            style_mode: style_mode.normalized(),
         }
     }
-}
 
-impl Composer {
     /// `set_width` 更新 composer 的总渲染宽度。
     pub fn set_width(&mut self, width: u16) {
         self.width = width.max(1);
@@ -69,12 +75,12 @@ impl Composer {
 
     /// `full_height` 返回 composer 完整内容的视觉高度。
     pub fn full_height(&self) -> u16 {
+        if self.value.is_empty() {
+            return 1;
+        }
+
         let prompt_width = usize::from(prompt_width());
-        let line_count = if self.value.is_empty() {
-            placeholder_line_count(self.placeholder(), self.content_width(), prompt_width)
-        } else {
-            visual_line_count(&self.value, self.content_width(), prompt_width)
-        };
+        let line_count = visual_line_count(&self.value, self.content_width(), prompt_width);
 
         u16::try_from(line_count.max(1)).unwrap_or(u16::MAX)
     }
@@ -149,11 +155,19 @@ impl Composer {
     }
 
     pub(crate) fn prompt(&self) -> &str {
-        PROMPT
+        match self.style_mode {
+            StyleMode::Cx => "› ",
+            StyleMode::Cc => "❯ ",
+            StyleMode::Ms => "┃ ",
+        }
     }
 
     pub(crate) fn placeholder(&self) -> &str {
         PLACEHOLDER
+    }
+
+    pub(crate) fn style_mode(&self) -> StyleMode {
+        self.style_mode
     }
 
     pub(crate) fn viewport_offset(&self) -> usize {
@@ -456,12 +470,11 @@ impl Composer {
     }
 
     fn total_visual_lines(&self) -> usize {
-        let prompt_width = usize::from(prompt_width());
         if self.value.is_empty() {
-            return placeholder_line_count(self.placeholder(), self.content_width(), prompt_width)
-                .max(1);
+            return 1;
         }
 
+        let prompt_width = usize::from(prompt_width());
         visual_line_count(&self.value, self.content_width(), prompt_width).max(1)
     }
 
@@ -554,7 +567,7 @@ fn total_chars(value: &str) -> usize {
 }
 
 fn prompt_width() -> u16 {
-    u16::try_from(measure_width(PROMPT)).unwrap_or(u16::MAX)
+    u16::try_from(measure_width("┃ ")).unwrap_or(u16::MAX)
 }
 
 fn is_ctrl_only(modifiers: KeyModifiers) -> bool {

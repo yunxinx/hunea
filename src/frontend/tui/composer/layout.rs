@@ -16,6 +16,7 @@ pub(crate) fn visual_line_count(value: &str, width: usize, line_prefix_width: us
         .max(1)
 }
 
+#[cfg(test)]
 pub(crate) fn placeholder_line_count(value: &str, width: usize, line_prefix_width: usize) -> usize {
     placeholder_visual_lines_for_text(value, width, line_prefix_width)
         .len()

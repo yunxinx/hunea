@@ -1,4 +1,5 @@
 use ratatui::{
+    prelude::Stylize,
     style::Style,
     widgets::{Block, BorderType, Padding},
 };
@@ -23,6 +24,11 @@ pub fn secondary_text_style(palette: TerminalPalette) -> Style {
 /// `surface_text_style` 返回带弱化背景的正文样式。
 pub fn surface_text_style(palette: TerminalPalette) -> Style {
     apply_surface(Style::new(), palette)
+}
+
+/// `surface_emphasis_style` 返回带弱化背景的强调正文样式。
+pub fn surface_emphasis_style(palette: TerminalPalette) -> Style {
+    apply_surface(Style::new().bold(), palette)
 }
 
 /// `panel_block` 返回用于 hero 容器的统一边框样式。
@@ -60,7 +66,8 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
 
     use super::{
-        muted_text_style, panel_block, primary_text_style, secondary_text_style, surface_text_style,
+        muted_text_style, panel_block, primary_text_style, secondary_text_style,
+        surface_emphasis_style, surface_text_style,
     };
     use crate::frontend::tui::theme::{default_palette, terminal_default_palette};
 
@@ -73,6 +80,13 @@ mod tests {
         assert_eq!(secondary_text_style(palette).fg, Some(palette.secondary));
         assert_eq!(surface_text_style(palette).fg, Some(palette.main));
         assert_eq!(surface_text_style(palette).bg, palette.surface);
+        assert_eq!(surface_emphasis_style(palette).fg, Some(palette.main));
+        assert_eq!(surface_emphasis_style(palette).bg, palette.surface);
+        assert!(
+            surface_emphasis_style(palette)
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
     }
 
     #[test]

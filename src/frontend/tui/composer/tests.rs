@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::Composer;
-use crate::frontend::tui::theme::default_palette;
+use crate::frontend::tui::{StyleMode, theme::default_palette};
 
 #[test]
 fn right_moves_over_the_full_combining_cluster() {
@@ -184,7 +184,7 @@ fn render_expands_tabs_using_prompt_aware_stops() {
 }
 
 fn test_composer(width: u16, height: u16, value: &str) -> Composer {
-    let mut composer = Composer::default();
+    let mut composer = Composer::new(StyleMode::Ms);
     composer.set_width(width);
     composer.set_height(height);
     composer.set_text_for_test(value);

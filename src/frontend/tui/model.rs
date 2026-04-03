@@ -4,6 +4,7 @@ use super::{
     HeroOptions,
     composer::Composer,
     document::{LayoutCache, RestoreTarget, ViewportAnchor, ViewportCache},
+    style_mode::StyleMode,
     theme::{TerminalPalette, default_palette},
     transcript::{RenderResult, Transcript},
     view,
@@ -12,6 +13,7 @@ use super::{
 /// `Model` 表示交互式 TUI 应用的状态。
 #[derive(Debug, Clone)]
 pub struct Model {
+    pub(crate) style_mode: StyleMode,
     pub(crate) palette: TerminalPalette,
     pub(crate) palette_version: usize,
     pub(crate) transcript: Transcript,
@@ -36,19 +38,26 @@ pub struct Model {
 impl Model {
     /// `new` 创建并初始化 TUI 模型。
     pub fn new(hero_options: HeroOptions) -> Self {
+        Self::new_with_style_mode(hero_options, StyleMode::Cx)
+    }
+
+    /// `new_with_style_mode` 创建并初始化带指定样式模式的 TUI 模型。
+    pub fn new_with_style_mode(hero_options: HeroOptions, style_mode: StyleMode) -> Self {
         let palette = default_palette();
         let mut transcript = Transcript::new(palette);
         transcript.set_gap(1);
         transcript.append_hero(hero_options);
         let transcript_render = transcript.render();
+        let style_mode = style_mode.normalized();
 
         Self {
+            style_mode,
             palette,
             palette_version: 1,
             transcript_render_version: 1,
             transcript,
             transcript_render,
-            composer: Composer::default(),
+            composer: Composer::new(style_mode),
             width: 0,
             height: 0,
             document_viewport_y: 0,
@@ -116,6 +125,11 @@ impl Model {
     }
 
     pub(crate) fn set_palette(&mut self, palette: TerminalPalette, has_dark_background: bool) {
+        let preserved_anchor = if self.manual_document_scroll {
+            self.current_document_viewport_anchor()
+        } else {
+            None
+        };
         if self.palette != palette {
             self.palette_version += 1;
         }
@@ -125,6 +139,7 @@ impl Model {
         self.transcript.set_palette(palette);
         self.sync_transcript_render();
         self.sync_composer_height();
+        self.sync_document_viewport_after_transcript_refresh(preserved_anchor);
     }
 
     pub(crate) fn composer_mut(&mut self) -> &mut Composer {
@@ -160,11 +175,11 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::tui::Sender;
+    use crate::frontend::tui::{Sender, StyleMode};
 
     #[test]
     fn overflowing_document_bottom_slice_keeps_full_draft_height() {
-        let mut model = Model::new(HeroOptions::default());
+        let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
         model.set_window(20, 4);
         model.set_palette(default_palette(), true);
         model.composer_mut().set_text_for_test("1\n2\n3");

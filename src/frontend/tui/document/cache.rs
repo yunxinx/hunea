@@ -2,6 +2,8 @@ use ratatui::text::Line;
 
 use crate::frontend::tui::{
     composer,
+    document::slot_frame::SlotFrame,
+    style_mode::StyleMode,
     transcript::{self},
 };
 
@@ -10,6 +12,7 @@ use crate::frontend::tui::{
 pub(crate) struct DocumentLayoutKey {
     pub(crate) transcript_render_version: usize,
     pub(crate) palette_version: usize,
+    pub(crate) style_mode: StyleMode,
     pub(crate) composer_value: String,
     pub(crate) composer_width: usize,
     pub(crate) composer_prompt: String,
@@ -24,6 +27,7 @@ pub(crate) struct DocumentLayout {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) plain_lines: Vec<String>,
     pub(crate) anchors: Vec<DocumentLineAnchor>,
+    pub(crate) composer_slot: SlotFrame,
     pub(crate) composer_start_line: usize,
     pub(crate) composer_line_count: usize,
     pub(crate) cursor_x: u16,
@@ -44,6 +48,7 @@ pub(crate) struct DocumentViewportKey {
     pub(crate) layout_key: DocumentLayoutKey,
     pub(crate) offset: usize,
     pub(crate) height: usize,
+    pub(crate) bottom_follow: bool,
 }
 
 /// `DocumentViewport` 表示统一文档在当前 offset 下的可视切片。
@@ -69,6 +74,7 @@ pub(crate) enum DocumentAnchorRegion {
     None,
     Transcript,
     Composer,
+    ComposerPadding,
     TranscriptComposerGap,
 }
 

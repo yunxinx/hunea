@@ -6,6 +6,7 @@ mod message_item;
 mod model;
 mod runner;
 mod sender;
+mod style_mode;
 mod styled_text;
 mod transcript;
 mod update;
@@ -19,6 +20,7 @@ pub use hero::{
     write_hero_to,
 };
 pub use model::Model;
-pub use runner::run;
+pub use runner::{run, run_with_style_mode};
 pub use sender::Sender;
+pub use style_mode::StyleMode;
 pub use update::{AppEvent, STARTUP_PROBE_TIMEOUT};

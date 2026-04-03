@@ -12,11 +12,16 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use super::{AppEvent, HeroOptions, Model, STARTUP_PROBE_TIMEOUT, theme};
+use super::{AppEvent, HeroOptions, Model, STARTUP_PROBE_TIMEOUT, StyleMode, theme};
 
 /// `run` 启动交互式 TUI，并在退出后返回最终模型。
 pub fn run(hero_options: HeroOptions) -> Result<Model> {
-    let mut model = Model::new(hero_options);
+    run_with_style_mode(hero_options, StyleMode::Cx)
+}
+
+/// `run_with_style_mode` 启动带指定样式模式的交互式 TUI。
+pub fn run_with_style_mode(hero_options: HeroOptions, style_mode: StyleMode) -> Result<Model> {
+    let mut model = Model::new_with_style_mode(hero_options, style_mode);
 
     if let Some(detection) = theme::try_detect_palette() {
         model.update(AppEvent::DetectedPalette {

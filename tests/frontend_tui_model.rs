@@ -59,7 +59,7 @@ fn enter_submits_raw_message_and_clears_the_composer() {
 
     let items = model.transcript_plain_items();
     assert_eq!(items.len(), 2);
-    assert_eq!(items[1], ">   hi  ");
+    assert_eq!(items[1], "›   hi  ");
 }
 
 #[test]

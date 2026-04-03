@@ -10,7 +10,7 @@ use super::{
     ViewportRenderResult, cache::CachedRenderBlock, cache::ScreenRenderCache, new_render_result,
 };
 use crate::frontend::tui::{
-    HeroOptions, Sender, hero_item::HeroItem, message_item::MessageItem,
+    HeroOptions, Sender, StyleMode, hero_item::HeroItem, message_item::MessageItem,
     styled_text::line_to_plain_text, theme::TerminalPalette,
 };
 
@@ -87,9 +87,24 @@ impl Transcript {
     }
 
     /// `append_message` 追加一条消息项。
+    #[cfg(test)]
     pub(crate) fn append_message(&mut self, sender: Sender, content: impl Into<String>) {
         self.items
             .push(TranscriptItem::Message(MessageItem::new(sender, content)));
+        self.screen_cache.ensure_item_count(self.items.len());
+    }
+
+    /// `append_message_with_style_mode` 追加一条带样式模式的消息项。
+    pub(crate) fn append_message_with_style_mode(
+        &mut self,
+        sender: Sender,
+        content: impl Into<String>,
+        style_mode: StyleMode,
+    ) {
+        self.items
+            .push(TranscriptItem::Message(MessageItem::new_with_style_mode(
+                sender, content, style_mode,
+            )));
         self.screen_cache.ensure_item_count(self.items.len());
     }
 

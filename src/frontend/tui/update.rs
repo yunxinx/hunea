@@ -88,7 +88,9 @@ impl Model {
             } else {
                 None
             };
-            self.transcript_mut().append_message(Sender::User, content);
+            let style_mode = self.style_mode;
+            self.transcript_mut()
+                .append_message_with_style_mode(Sender::User, content, style_mode);
             self.sync_transcript_render();
             self.composer_mut().clear();
             self.sync_composer_height();

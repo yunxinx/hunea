@@ -1,4 +1,7 @@
-use ratatui::text::{Line, Span};
+use ratatui::{
+    style::Style,
+    text::{Line, Span},
+};
 
 use super::{
     Composer,
@@ -6,7 +9,10 @@ use super::{
     layout::{VisualLine, placeholder_visual_lines_for_text, visual_lines_for_text},
     viewport::calculate_cursor_visual_position,
 };
-use crate::frontend::tui::theme::{TerminalPalette, muted_text_style, secondary_text_style};
+use crate::frontend::tui::{
+    style_mode::StyleMode,
+    theme::{TerminalPalette, muted_text_style, secondary_text_style, surface_text_style},
+};
 
 #[cfg(test)]
 use super::viewport::visible_viewport_lines;
@@ -16,6 +22,14 @@ pub(crate) struct LineAnchor {
     pub(crate) logical_line: usize,
     pub(crate) visible_start_char: usize,
     pub(crate) end_char: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum FrameDecorationMode {
+    #[default]
+    None,
+    Surface,
+    Rule,
 }
 
 #[cfg(test)]
@@ -31,8 +45,33 @@ pub(crate) struct DocumentRenderResult {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) plain_lines: Vec<String>,
     pub(crate) anchors: Vec<LineAnchor>,
+    pub(crate) frame_decoration_line: Option<Line<'static>>,
+    pub(crate) frame_decoration_plain_line: Option<String>,
     pub(crate) cursor_x: u16,
     pub(crate) cursor_y: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StyledVisualRenderOptions<'a> {
+    prompt: &'a str,
+    prompt_width: usize,
+    prompt_style: ratatui::style::Style,
+    text_style: ratatui::style::Style,
+    content_width: usize,
+    frame_fill_width: usize,
+    fill_style: Style,
+    prompt_first_line_only: bool,
+    trim_overflow_spaces: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlainVisualRenderOptions<'a> {
+    prompt: &'a str,
+    prompt_width: usize,
+    content_width: usize,
+    frame_fill_width: usize,
+    prompt_first_line_only: bool,
+    trim_overflow_spaces: bool,
 }
 
 #[cfg(test)]
@@ -61,37 +100,64 @@ pub(crate) fn render_document(
     palette: TerminalPalette,
 ) -> DocumentRenderResult {
     let prompt_width = measure_width(composer.prompt());
-    let prompt_style = secondary_text_style(palette);
-    let text_style = muted_text_style(palette);
-    let placeholder_style = secondary_text_style(palette);
+    let frame_width = usize::from(composer.width.max(1));
+    let frame_mode = frame_decoration_mode(composer.style_mode());
+    let prompt_first_line_only = matches!(composer.style_mode(), StyleMode::Cx | StyleMode::Cc);
+    let mut prompt_style = secondary_text_style(palette);
+    let mut text_style = muted_text_style(palette);
+    let mut placeholder_style = secondary_text_style(palette);
+    let mut fill_style = Style::default();
+    let mut frame_fill_width = 0;
+    let (frame_decoration_line, frame_decoration_plain_line) =
+        frame_decoration_line(frame_mode, palette, frame_width);
+
+    if matches!(frame_mode, FrameDecorationMode::Surface) && palette.surface.is_some() {
+        frame_fill_width = frame_width;
+        fill_style = surface_text_style(palette);
+        prompt_style = apply_optional_background(prompt_style, palette);
+        text_style = apply_optional_background(text_style, palette);
+        placeholder_style = apply_optional_background(placeholder_style, palette);
+    }
 
     if composer.value().is_empty() {
-        let placeholder_lines = placeholder_visual_lines_for_text(
+        let placeholder_line = first_placeholder_visual_line(
             composer.placeholder(),
             composer.content_width(),
             prompt_width,
         );
+        let placeholder_lines = vec![placeholder_line];
         let plain_lines = rendered_plain_lines(
             &placeholder_lines,
-            composer.prompt(),
-            prompt_width,
-            composer.content_width(),
-            true,
+            PlainVisualRenderOptions {
+                prompt: composer.prompt(),
+                prompt_width,
+                content_width: composer.content_width(),
+                frame_fill_width,
+                prompt_first_line_only,
+                trim_overflow_spaces: true,
+            },
         );
         let lines = render_visual_lines(
             &placeholder_lines,
-            composer.prompt(),
-            prompt_width,
-            prompt_style,
-            placeholder_style,
-            composer.content_width(),
-            true,
+            StyledVisualRenderOptions {
+                prompt: composer.prompt(),
+                prompt_width,
+                prompt_style,
+                text_style: placeholder_style,
+                content_width: composer.content_width(),
+                frame_fill_width,
+                fill_style,
+                prompt_first_line_only,
+                trim_overflow_spaces: true,
+            },
         );
 
         return DocumentRenderResult {
             anchors: line_anchors_for_visual_lines(&placeholder_lines),
             lines,
             plain_lines,
+            frame_decoration_line,
+            frame_decoration_plain_line,
             cursor_x: u16::try_from(prompt_width).unwrap_or(u16::MAX),
             cursor_y: 0,
         };
@@ -106,47 +172,74 @@ pub(crate) fn render_document(
         anchors: line_anchors_for_visual_lines(&visual_lines),
         plain_lines: rendered_plain_lines(
             &visual_lines,
-            composer.prompt(),
-            prompt_width,
-            composer.content_width(),
-            false,
+            PlainVisualRenderOptions {
+                prompt: composer.prompt(),
+                prompt_width,
+                content_width: composer.content_width(),
+                frame_fill_width,
+                prompt_first_line_only,
+                trim_overflow_spaces: false,
+            },
         ),
         lines: render_visual_lines(
             &visual_lines,
-            composer.prompt(),
-            prompt_width,
-            prompt_style,
-            text_style,
-            composer.content_width(),
-            false,
+            StyledVisualRenderOptions {
+                prompt: composer.prompt(),
+                prompt_width,
+                prompt_style,
+                text_style,
+                content_width: composer.content_width(),
+                frame_fill_width,
+                fill_style,
+                prompt_first_line_only,
+                trim_overflow_spaces: false,
+            },
         ),
+        frame_decoration_line,
+        frame_decoration_plain_line,
         cursor_x: u16::try_from(cursor_visual_x).unwrap_or(u16::MAX),
         cursor_y,
     }
 }
 
+fn first_placeholder_visual_line(text: &str, width: usize, line_prefix_width: usize) -> VisualLine {
+    placeholder_visual_lines_for_text(text, width, line_prefix_width)
+        .into_iter()
+        .next()
+        .unwrap_or(VisualLine {
+            text: String::new(),
+            logical_line: 0,
+            visible_start_char: 0,
+            end_char: 0,
+            column_offsets: Vec::new(),
+            is_continuation: false,
+        })
+}
+
 fn render_visual_lines(
     lines: &[VisualLine],
-    prompt: &str,
-    prompt_width: usize,
-    prompt_style: ratatui::style::Style,
-    text_style: ratatui::style::Style,
-    content_width: usize,
-    trim_overflow_spaces: bool,
+    options: StyledVisualRenderOptions<'_>,
 ) -> Vec<Line<'static>> {
     lines
         .iter()
-        .map(|line| {
+        .enumerate()
+        .map(|(index, line)| {
             let (line_prefix, line_text) = rendered_line_parts(
                 line,
-                prompt,
-                prompt_width,
-                content_width,
-                trim_overflow_spaces,
+                options.prompt,
+                options.prompt_width,
+                options.content_width,
+                options.prompt_first_line_only,
+                index,
+                options.trim_overflow_spaces,
             );
+            let fill_width = options
+                .frame_fill_width
+                .saturating_sub(options.prompt_width + measure_width(&line_text));
             Line::default().spans([
-                Span::styled(line_prefix, prompt_style),
-                Span::styled(line_text, text_style),
+                Span::styled(line_prefix, options.prompt_style),
+                Span::styled(line_text, options.text_style),
+                Span::styled(" ".repeat(fill_width), options.fill_style),
             ])
         })
         .collect()
@@ -154,22 +247,25 @@ fn render_visual_lines(
 
 fn rendered_plain_lines(
     lines: &[VisualLine],
-    prompt: &str,
-    prompt_width: usize,
-    content_width: usize,
-    trim_overflow_spaces: bool,
+    options: PlainVisualRenderOptions<'_>,
 ) -> Vec<String> {
     lines
         .iter()
-        .map(|line| {
+        .enumerate()
+        .map(|(index, line)| {
             let (line_prefix, line_text) = rendered_line_parts(
                 line,
-                prompt,
-                prompt_width,
-                content_width,
-                trim_overflow_spaces,
+                options.prompt,
+                options.prompt_width,
+                options.content_width,
+                options.prompt_first_line_only,
+                index,
+                options.trim_overflow_spaces,
             );
-            format!("{line_prefix}{line_text}")
+            let fill_width = options
+                .frame_fill_width
+                .saturating_sub(options.prompt_width + measure_width(&line_text));
+            format!("{line_prefix}{line_text}{}", " ".repeat(fill_width))
         })
         .collect()
 }
@@ -196,9 +292,11 @@ fn rendered_line_parts(
     prompt: &str,
     prompt_width: usize,
     content_width: usize,
+    prompt_first_line_only: bool,
+    rendered_index: usize,
     trim_overflow_spaces: bool,
 ) -> (String, String) {
-    let line_prefix = if line.is_continuation {
+    let line_prefix = if line.is_continuation || (prompt_first_line_only && rendered_index > 0) {
         " ".repeat(prompt_width)
     } else {
         prompt.to_string()
@@ -210,6 +308,59 @@ fn rendered_line_parts(
     };
 
     (line_prefix, line_text)
+}
+
+fn frame_decoration_mode(style_mode: StyleMode) -> FrameDecorationMode {
+    match style_mode {
+        StyleMode::Cx => FrameDecorationMode::Surface,
+        StyleMode::Cc => FrameDecorationMode::Rule,
+        StyleMode::Ms => FrameDecorationMode::None,
+    }
+}
+
+fn frame_decoration_line(
+    mode: FrameDecorationMode,
+    palette: TerminalPalette,
+    width: usize,
+) -> (Option<Line<'static>>, Option<String>) {
+    if width == 0 {
+        return (None, None);
+    }
+
+    match mode {
+        FrameDecorationMode::None => (None, None),
+        FrameDecorationMode::Surface => {
+            if palette.surface.is_none() {
+                return (None, None);
+            }
+
+            let plain = " ".repeat(width);
+            (
+                Some(Line::from(vec![Span::styled(
+                    plain.clone(),
+                    surface_text_style(palette),
+                )])),
+                Some(plain),
+            )
+        }
+        FrameDecorationMode::Rule => {
+            let plain = "─".repeat(width);
+            (
+                Some(Line::from(vec![Span::styled(
+                    plain.clone(),
+                    secondary_text_style(palette),
+                )])),
+                Some(plain),
+            )
+        }
+    }
+}
+
+fn apply_optional_background(style: Style, palette: TerminalPalette) -> Style {
+    match palette.surface {
+        Some(surface) => style.bg(surface),
+        None => style,
+    }
 }
 
 fn trim_overflow_boundary_spaces(text: &str, width: usize) -> String {

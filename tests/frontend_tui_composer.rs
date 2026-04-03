@@ -17,9 +17,9 @@ fn ctrl_j_inserts_newline_and_renders_expanded_composer() {
     let rows = render_rows(&mut model, 20, 12);
     let first_line = rows
         .iter()
-        .position(|row| row == "┃ 1                 ")
+        .position(|row| row == "› 1                 ")
         .expect("document should contain the first draft line");
-    assert_eq!(rows[first_line + 1], "┃                   ");
+    assert_eq!(rows[first_line + 1], "                    ");
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn enter_preserves_leading_and_trailing_whitespace() {
 
     let items = model.transcript_plain_items();
     assert_eq!(items.len(), 2);
-    assert_eq!(items[1], ">   hi  ");
+    assert_eq!(items[1], "›   hi  ");
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn long_english_input_wraps_by_word_boundary() {
     let rows = render_rows(&mut model, 9, 20);
     let first_line = rows
         .iter()
-        .position(|row| row == "┃ hello  ")
+        .position(|row| row == "› hello  ")
         .expect("document should contain the wrapped first line");
     assert_eq!(rows[first_line + 1], "  world  ");
 }

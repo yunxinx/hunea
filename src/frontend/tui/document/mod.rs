@@ -1,6 +1,8 @@
 mod anchor_match;
 mod cache;
 mod layout;
+mod slot_frame;
+mod slot_viewport;
 mod sync;
 
 pub(crate) use self::cache::{
@@ -23,7 +25,7 @@ mod tests {
         compose_document_layout, compose_document_viewport, visible_document_lines,
     };
     use super::*;
-    use crate::frontend::tui::{HeroOptions, Model, Sender, theme::default_palette};
+    use crate::frontend::tui::{HeroOptions, Model, Sender, StyleMode, theme::default_palette};
 
     #[test]
     fn build_document_layout_combines_transcript_and_composer_snapshots() {
@@ -224,7 +226,7 @@ mod tests {
     }
 
     fn ready_document_model(width: u16, height: u16) -> Model {
-        let mut model = Model::new(HeroOptions::default());
+        let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
         model.transcript_mut().clear();
         model.sync_transcript_render();
         model.set_window(width, height);

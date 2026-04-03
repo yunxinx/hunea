@@ -23,9 +23,9 @@ fn overflowing_document_bottom_slice_keeps_the_full_draft_visible() {
         rows,
         vec![
             "                    ",
-            "┃ 1                 ",
-            "┃ 2                 ",
-            "┃ 3                 ",
+            "› 1                 ",
+            "  2                 ",
+            "  3                 ",
         ]
     );
 }

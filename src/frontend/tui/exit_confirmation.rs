@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use ratatui::style::Stylize;
+use unicode_width::UnicodeWidthStr;
 
 use super::{Model, document::DocumentViewportAnchor};
 
@@ -87,6 +88,10 @@ impl Model {
                 ),
             ])),
             plain_line,
+            selectable: super::selection::SelectableLineRange::new(
+                super::status_line::STATUS_LINE_INSET_WIDTH,
+                super::status_line::STATUS_LINE_INSET_WIDTH + text.width(),
+            ),
             has_content: true,
             gap_before: super::status_line::status_line_gap_before(self.style_mode),
         }
@@ -126,6 +131,7 @@ impl Model {
             return;
         }
 
+        self.maybe_clear_selection_for_bottom_status_slot_change();
         let preserved_anchor = if self.manual_document_scroll {
             self.current_document_viewport_anchor()
         } else {

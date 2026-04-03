@@ -210,6 +210,9 @@ impl Model {
         old_column: usize,
     ) {
         if self.composer.value() != old_value {
+            if self.selection.active {
+                self.invalidate_selection_for_reflow();
+            }
             if self.manual_document_scroll {
                 self.restore_from_manual_document_scroll();
                 return;

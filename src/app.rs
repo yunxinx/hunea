@@ -86,6 +86,7 @@ fn model_options_from_config(tui_config: &TuiConfig) -> ModelOptions {
         external_editor: tui_config.external_editor.clone(),
         external_editor_hint: external_editor_hint_from_config(&tui_config.external_editor),
         show_external_editor_helper: tui_config.show_external_editor_helper,
+        copy_on_mouse_selection_release: tui_config.copy_on_mouse_selection_release,
     }
 }
 
@@ -100,4 +101,22 @@ fn external_editor_hint_from_config(configured: &[String]) -> String {
     envinfo::resolve_external_editor(configured)
         .map(|editor| editor.display_name)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_options_from_config_carries_mouse_selection_copy_flag() {
+        let options = model_options_from_config(&TuiConfig {
+            user_input_style: UserInputStyle::Cx,
+            status_line: Vec::new(),
+            external_editor: Vec::new(),
+            show_external_editor_helper: true,
+            copy_on_mouse_selection_release: true,
+        });
+
+        assert!(options.copy_on_mouse_selection_release);
+    }
 }

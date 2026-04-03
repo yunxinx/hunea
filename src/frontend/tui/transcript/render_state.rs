@@ -1,5 +1,7 @@
 use ratatui::text::Line;
 
+use crate::frontend::tui::selection::SelectableLineRange;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum LineAnchorKind {
     #[default]
@@ -32,6 +34,7 @@ pub(crate) struct RenderResult {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) plain_lines: Vec<String>,
     pub(crate) line_anchors: Vec<LineAnchor>,
+    pub(crate) selectable_ranges: Vec<SelectableLineRange>,
     pub(crate) line_count: usize,
 }
 
@@ -66,6 +69,7 @@ pub(crate) fn new_render_result(
     lines: Vec<Line<'static>>,
     plain_lines: Vec<String>,
     line_anchors: Vec<LineAnchor>,
+    selectable_ranges: Vec<SelectableLineRange>,
 ) -> RenderResult {
     if lines.is_empty() {
         return RenderResult::default();
@@ -76,6 +80,7 @@ pub(crate) fn new_render_result(
         lines,
         plain_lines,
         line_anchors,
+        selectable_ranges,
         line_count,
     }
 }

@@ -11,6 +11,7 @@ use super::{
         LayoutCache, RestoreTarget, ViewportAnchor, ViewportCache, offset_viewport_line_indices,
     },
     external_editor::ExternalEditorLaunch,
+    selection::{AutoScrollDirection, MousePosition, SelectionClickState, SelectionState},
     status_line::{StatusLineItem, StatusLineRenderResult},
     style_mode::StyleMode,
     theme::{TerminalPalette, default_palette},
@@ -26,6 +27,14 @@ pub struct Model {
     pub(crate) external_editor: Vec<String>,
     pub(crate) external_editor_hint: String,
     pub(crate) external_editor_helper_enabled: bool,
+    pub(crate) copy_on_mouse_selection_release: bool,
+    pub(crate) selection: SelectionState,
+    pub(crate) selection_click: SelectionClickState,
+    pub(crate) selection_version: usize,
+    pub(crate) selection_auto_scroll_direction: AutoScrollDirection,
+    pub(crate) selection_auto_scroll_token: usize,
+    pub(crate) selection_auto_scroll_mouse: MousePosition,
+    pub(crate) selection_auto_scroll_deadline: Option<Instant>,
     pub(crate) git_branch: String,
     pub(crate) current_dir: String,
     pub(crate) palette: TerminalPalette,
@@ -64,6 +73,7 @@ pub struct ModelOptions {
     pub external_editor: Vec<String>,
     pub external_editor_hint: String,
     pub show_external_editor_helper: bool,
+    pub copy_on_mouse_selection_release: bool,
 }
 
 impl Default for ModelOptions {
@@ -74,6 +84,7 @@ impl Default for ModelOptions {
             external_editor: Vec::new(),
             external_editor_hint: String::new(),
             show_external_editor_helper: true,
+            copy_on_mouse_selection_release: false,
         }
     }
 }
@@ -111,6 +122,14 @@ impl Model {
             external_editor: options.external_editor,
             external_editor_hint: options.external_editor_hint,
             external_editor_helper_enabled: options.show_external_editor_helper,
+            copy_on_mouse_selection_release: options.copy_on_mouse_selection_release,
+            selection: SelectionState::default(),
+            selection_click: SelectionClickState::default(),
+            selection_version: 0,
+            selection_auto_scroll_direction: AutoScrollDirection::None,
+            selection_auto_scroll_token: 0,
+            selection_auto_scroll_mouse: MousePosition::default(),
+            selection_auto_scroll_deadline: None,
             git_branch: resolve_initial_git_branch(&status_line_items),
             current_dir: resolve_initial_current_dir(&status_line_items),
             palette,
@@ -172,10 +191,17 @@ impl Model {
         match (
             self.status_notice_deadline,
             self.external_editor_helper_deadline,
+            self.selection_auto_scroll_deadline,
         ) {
-            (Some(left), Some(right)) => Some(left.min(right)),
-            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
-            (None, None) => None,
+            (Some(left), Some(right), Some(third)) => Some(left.min(right).min(third)),
+            (Some(left), Some(right), None) => Some(left.min(right)),
+            (Some(left), None, Some(right)) | (None, Some(left), Some(right)) => {
+                Some(left.min(right))
+            }
+            (Some(deadline), None, None)
+            | (None, Some(deadline), None)
+            | (None, None, Some(deadline)) => Some(deadline),
+            (None, None, None) => None,
         }
     }
 
@@ -210,6 +236,9 @@ impl Model {
         } else {
             None
         };
+        if self.selection.active {
+            self.invalidate_selection_for_reflow();
+        }
         if self.palette != palette {
             self.palette_version += 1;
         }
@@ -251,6 +280,14 @@ impl Model {
             });
         }
 
+        if let Some(deadline) = self.selection_auto_scroll_deadline
+            && now >= deadline
+        {
+            return Some(super::AppEvent::SelectionAutoScrollTick {
+                token: self.selection_auto_scroll_token,
+            });
+        }
+
         None
     }
 
@@ -285,6 +322,9 @@ impl Model {
     }
 
     pub(crate) fn sync_transcript_render(&mut self) {
+        if self.selection.active {
+            self.invalidate_selection_for_reflow();
+        }
         self.transcript_render = self.transcript.render();
         self.transcript_render_version += 1;
         self.document_layout_cache.valid = false;

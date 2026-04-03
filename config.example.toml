@@ -47,3 +47,8 @@ external_editor = ["code", "--wait"]
 # “ctrl+g to edit in …” 这条短暂提示。
 # 默认开启；如果已经熟悉 Ctrl+G 工作流，可以关闭以减少干扰。
 show_external_editor_helper = true
+
+# `copy_on_mouse_selection_release` 控制鼠标左键拖拽选区完成后，
+# 是否在释放按键时自动复制选中的内容。
+# 默认关闭；开启后会更接近一些终端里的“选中即复制”手感。
+copy_on_mouse_selection_release = false

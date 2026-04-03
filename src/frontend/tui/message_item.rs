@@ -3,6 +3,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{
     Sender, StyleMode,
+    selection::SelectableLineRange,
     styled_text::{lines_to_ansi_text, lines_to_plain_text},
     theme::{TerminalPalette, secondary_text_style, surface_emphasis_style, surface_text_style},
     transcript::{
@@ -152,6 +153,55 @@ impl MessageItem {
         }
     }
 
+    pub(crate) fn render_selectable_line_ranges(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+    ) -> Vec<SelectableLineRange> {
+        if self.sender != Sender::User {
+            return Vec::new();
+        }
+
+        let snapshot = user_message_wrap_snapshot(&self.content, width, palette, self.style_mode);
+        let mut ranges =
+            Vec::with_capacity(snapshot.lines.len() + usize::from(snapshot.has_frame) * 2);
+
+        if snapshot.has_frame {
+            ranges.push(SelectableLineRange::default());
+        }
+
+        for (index, line) in snapshot.lines.iter().enumerate() {
+            let line_width = measure_width(&line.text);
+            if line_width == 0 {
+                let anchor_end = if snapshot.layout.frame_width > 0 {
+                    snapshot.layout.frame_width
+                } else {
+                    snapshot.layout.line_prefix_width.max(1)
+                };
+                ranges.push(SelectableLineRange::blank_anchor(0, anchor_end));
+                continue;
+            }
+
+            if index == 0 {
+                ranges.push(SelectableLineRange::new(
+                    0,
+                    snapshot.layout.line_prefix_width + line_width,
+                ));
+            } else {
+                ranges.push(SelectableLineRange::new(
+                    snapshot.layout.line_prefix_width,
+                    snapshot.layout.line_prefix_width + line_width,
+                ));
+            }
+        }
+
+        if snapshot.has_frame {
+            ranges.push(SelectableLineRange::default());
+        }
+
+        ranges
+    }
+
     #[cfg(test)]
     fn render_plain_for_test(&self, width: u16) -> String {
         self.render_plain_text(width, crate::frontend::tui::theme::default_palette())
@@ -258,6 +308,72 @@ fn render_user_plain_text(content: &str, width: u16, style_mode: StyleMode) -> S
                 user_message_inset_width(style_mode),
             );
             format_user_plain_lines(&wrapped, style_mode)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UserMessageWrapSnapshot {
+    lines: Vec<crate::frontend::tui::transcript::PromptVisualLine>,
+    layout: UserMessageRenderLayout,
+    has_frame: bool,
+}
+
+fn user_message_wrap_snapshot(
+    content: &str,
+    width: u16,
+    palette: TerminalPalette,
+    style_mode: StyleMode,
+) -> UserMessageWrapSnapshot {
+    match style_mode.normalized() {
+        StyleMode::Ms => {
+            let layout = UserMessageRenderLayout {
+                frame_width: usize::from(width.max(1)),
+                content_width: user_message_legacy_content_width(width, style_mode),
+                line_prefix_width: user_message_inset_width(style_mode),
+                shows_prefix: true,
+                shows_frame: false,
+            };
+            UserMessageWrapSnapshot {
+                lines: wrap_prompt_visual_lines(
+                    content,
+                    layout.content_width,
+                    layout.line_prefix_width,
+                ),
+                layout,
+                has_frame: false,
+            }
+        }
+        StyleMode::Cc => {
+            let layout = UserMessageRenderLayout {
+                frame_width: usize::from(width.max(1)),
+                content_width: user_message_compact_content_width(width, style_mode),
+                line_prefix_width: user_message_inset_width(style_mode),
+                shows_prefix: true,
+                shows_frame: false,
+            };
+            UserMessageWrapSnapshot {
+                lines: wrap_prompt_visual_lines(
+                    content,
+                    layout.content_width,
+                    layout.line_prefix_width,
+                ),
+                layout,
+                has_frame: false,
+            }
+        }
+        StyleMode::Cx => {
+            let layout = user_message_layout(width, style_mode);
+            let has_frame = layout.shows_frame && has_visible_user_message_frame(palette);
+            UserMessageWrapSnapshot {
+                lines: wrap_prompt_visual_lines(
+                    content,
+                    layout.content_width,
+                    layout.line_prefix_width,
+                ),
+                layout,
+                has_frame,
+            }
         }
     }
 }
@@ -480,7 +596,10 @@ fn user_message_layout(width: u16, style_mode: StyleMode) -> UserMessageRenderLa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::tui::theme::{default_palette, secondary_text_style, surface_text_style};
+    use crate::frontend::tui::{
+        selection::SelectableLineRange,
+        theme::{default_palette, secondary_text_style, surface_text_style},
+    };
 
     #[test]
     fn assistant_plain_output_preserves_the_raw_command_text() {
@@ -611,6 +730,29 @@ mod tests {
             screen,
             item.render_for_terminal_replay(20, default_palette(), false)
         );
+    }
+
+    #[test]
+    fn user_message_selectable_ranges_skip_prompt_only_leading_blank_line() {
+        let item = MessageItem::new(Sender::User, "\nfoo");
+
+        let ranges = item.render_selectable_line_ranges(20, default_palette());
+
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(ranges[0], SelectableLineRange::default());
+        assert_eq!(ranges[1], SelectableLineRange::blank_anchor(0, 20));
+        assert_eq!(ranges[2], SelectableLineRange::new(2, 5));
+        assert_eq!(ranges[3], SelectableLineRange::default());
+    }
+
+    #[test]
+    fn user_message_selectable_ranges_ignore_trailing_fill() {
+        let item = MessageItem::new(Sender::User, "hi");
+
+        let ranges = item.render_selectable_line_ranges(10, default_palette());
+
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[1], SelectableLineRange::new(0, 4));
     }
 
     fn plain_line(line: Line<'static>) -> String {

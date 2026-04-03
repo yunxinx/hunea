@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lumos::frontend::tui::{
-    AppEvent, HeroOptions, Model, ModelOptions, StyleMode, theme::default_palette,
+    AppEffect, AppEvent, HeroOptions, Model, ModelOptions, StyleMode, theme::default_palette,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -36,6 +36,9 @@ fn ctrl_g_returns_external_editor_launch_with_current_draft() {
             KeyModifiers::CONTROL,
         )))
         .expect("ctrl+g should prepare an external editor launch");
+    let AppEffect::LaunchExternalEditor(effect) = effect else {
+        panic!("ctrl+g should return an external editor launch effect");
+    };
 
     assert!(
         effect.command[0].ends_with("/sh") || effect.command[0] == "sh",

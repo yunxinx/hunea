@@ -14,7 +14,9 @@ pub(crate) use self::cache::{
     DocumentLayoutCache as LayoutCache, DocumentViewportAnchor as ViewportAnchor,
     DocumentViewportCache as ViewportCache, ManualDocumentScrollRestoreTarget as RestoreTarget,
 };
-pub(crate) use self::slot_viewport::offset_viewport_line_indices;
+pub(crate) use self::slot_viewport::{
+    bottom_follow_viewport_line_indices, offset_viewport_line_indices,
+};
 
 #[cfg(test)]
 mod tests {
@@ -26,7 +28,10 @@ mod tests {
         compose_document_layout, compose_document_viewport, visible_document_lines,
     };
     use super::*;
-    use crate::frontend::tui::{HeroOptions, Model, Sender, StyleMode, theme::default_palette};
+    use crate::frontend::tui::{
+        HeroOptions, Model, Sender, StatusLineItem, StyleMode,
+        selection::SelectableLineRange as DocumentSelectable, theme::default_palette,
+    };
 
     #[test]
     fn build_document_layout_combines_transcript_and_composer_snapshots() {
@@ -48,6 +53,8 @@ mod tests {
         assert_eq!(layout.composer_line_count, 1);
         assert_eq!(layout.cursor_x, 3);
         assert_eq!(layout.cursor_y, 2);
+        assert_eq!(layout.selectable[1], DocumentSelectable::default());
+        assert!(layout.selectable[2].has_content());
     }
 
     #[test]
@@ -77,6 +84,22 @@ mod tests {
             viewport.plain_lines,
             vec!["history".to_string(), String::new(), "┃ x".to_string()]
         );
+    }
+
+    #[test]
+    fn status_line_selectable_range_skips_leading_inset() {
+        let mut model = ready_document_model(20, 4);
+        model.status_line_items = vec![StatusLineItem::GitBranch];
+        model.git_branch = "main".to_string();
+
+        let layout = model.build_document_layout();
+        let status_line = layout
+            .anchors
+            .iter()
+            .position(|anchor| matches!(anchor.region, DocumentAnchorRegion::StatusLine))
+            .expect("status line should be present");
+
+        assert_eq!(layout.selectable[status_line].start_column, 2);
     }
 
     #[test]

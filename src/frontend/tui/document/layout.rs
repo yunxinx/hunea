@@ -1,6 +1,14 @@
 use ratatui::text::Line;
 
-use crate::frontend::tui::{Model, composer, status_line::StatusLineRenderResult, transcript};
+use crate::frontend::tui::{
+    Model, composer,
+    selection::{
+        SelectableLineRange, apply_selection_to_viewport, normalize_transcript_selectable_range,
+        selectable_range_for_plain_line,
+    },
+    status_line::StatusLineRenderResult,
+    transcript,
+};
 
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutCache, DocumentLayoutKey,
@@ -13,9 +21,11 @@ pub(crate) struct DocumentLayoutInput {
     pub(crate) transcript_lines: Vec<Line<'static>>,
     pub(crate) transcript_plain_lines: Vec<String>,
     pub(crate) transcript_anchors: Vec<DocumentLineAnchor>,
+    pub(crate) transcript_selectable: Vec<SelectableLineRange>,
     pub(crate) composer_lines: Vec<Line<'static>>,
     pub(crate) composer_plain_lines: Vec<String>,
     pub(crate) composer_anchors: Vec<DocumentLineAnchor>,
+    pub(crate) composer_selectable: Vec<SelectableLineRange>,
     pub(crate) composer_frame_decoration_line: Option<Line<'static>>,
     pub(crate) composer_frame_decoration_plain_line: Option<String>,
     pub(crate) composer_cursor_x: u16,
@@ -47,6 +57,7 @@ impl Model {
             offset: self.document_viewport_y,
             height: self.document_viewport_height(),
             bottom_follow: uses_bottom_follow,
+            selection_version: self.selection_version,
         };
         if self.document_viewport_cache.valid && self.document_viewport_cache.key == key {
             return self.document_viewport_cache.viewport.clone();
@@ -64,6 +75,7 @@ impl Model {
                 self.bottom_follow_presentation(layout),
             );
         }
+        apply_selection_to_viewport(&mut viewport, layout, self.selection);
 
         self.document_viewport_cache = DocumentViewportCache {
             key,
@@ -112,6 +124,11 @@ impl Model {
 
     pub(crate) fn current_document_layout_input(&self) -> DocumentLayoutInput {
         let composer_document = self.composer.render_document(self.palette);
+        let transcript_width = if self.width == 0 {
+            crate::frontend::tui::transcript::DEFAULT_RENDER_WIDTH
+        } else {
+            usize::from(self.width)
+        };
 
         DocumentLayoutInput {
             transcript_lines: self.transcript_render.lines.clone(),
@@ -119,9 +136,28 @@ impl Model {
             transcript_anchors: document_anchors_for_transcript(
                 &self.transcript_render.line_anchors,
             ),
+            transcript_selectable: if self.transcript_render.selectable_ranges.len()
+                == self.transcript_render.plain_lines.len()
+            {
+                self.transcript_render.selectable_ranges.clone()
+            } else {
+                self.transcript_render
+                    .plain_lines
+                    .iter()
+                    .zip(self.transcript_render.line_anchors.iter())
+                    .map(|(line, anchor)| {
+                        normalize_transcript_selectable_range(
+                            line,
+                            transcript_width,
+                            !matches!(anchor.item_anchor.kind, transcript::LineAnchorKind::ItemGap),
+                        )
+                    })
+                    .collect()
+            },
             composer_lines: composer_document.lines,
             composer_plain_lines: composer_document.plain_lines,
             composer_anchors: document_anchors_for_composer(&composer_document.anchors),
+            composer_selectable: composer_document.selectable_ranges,
             composer_frame_decoration_line: composer_document.frame_decoration_line,
             composer_frame_decoration_plain_line: composer_document.frame_decoration_plain_line,
             composer_cursor_x: composer_document.cursor_x,
@@ -176,10 +212,22 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             + input.status_line.gap_before
             + usize::from(input.status_line.has_content),
     );
+    let mut selectable = Vec::with_capacity(
+        input.transcript_selectable.len()
+            + extra_gap
+            + input.composer_selectable.len()
+            + usize::from(has_composer_padding) * 2
+            + input.status_line.gap_before
+            + usize::from(input.status_line.has_content),
+    );
 
     lines.extend(input.transcript_lines);
     plain_lines.extend(input.transcript_plain_lines);
     anchors.extend(input.transcript_anchors);
+    selectable.extend(ensure_selectable_ranges(
+        &plain_lines,
+        &input.transcript_selectable,
+    ));
     if !lines.is_empty() {
         lines.push(Line::raw(""));
         plain_lines.push(String::new());
@@ -188,6 +236,7 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             gap_index: 0,
             ..DocumentLineAnchor::default()
         });
+        selectable.push(SelectableLineRange::default());
     }
 
     let composer_slot = SlotFrame::new(
@@ -206,11 +255,16 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             gap_index: 0,
             ..DocumentLineAnchor::default()
         });
+        selectable.push(SelectableLineRange::default());
     }
 
     lines.extend(input.composer_lines);
     plain_lines.extend(input.composer_plain_lines);
     anchors.extend(input.composer_anchors);
+    selectable.extend(ensure_selectable_ranges(
+        &plain_lines[plain_lines.len() - input.composer_selectable.len()..],
+        &input.composer_selectable,
+    ));
     if let (Some(line), Some(plain)) = (
         input.composer_frame_decoration_line,
         input.composer_frame_decoration_plain_line,
@@ -222,6 +276,7 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             gap_index: 1,
             ..DocumentLineAnchor::default()
         });
+        selectable.push(SelectableLineRange::default());
     }
 
     if input.status_line.has_content {
@@ -233,6 +288,7 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
                 gap_index,
                 ..DocumentLineAnchor::default()
             });
+            selectable.push(SelectableLineRange::default());
         }
 
         if let Some(line) = input.status_line.line {
@@ -242,6 +298,7 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
                 region: DocumentAnchorRegion::StatusLine,
                 ..DocumentLineAnchor::default()
             });
+            selectable.push(input.status_line.selectable);
         }
     }
 
@@ -254,6 +311,7 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
         lines.push(Line::raw(""));
         plain_lines.push(String::new());
         anchors.push(DocumentLineAnchor::default());
+        selectable.push(SelectableLineRange::default());
     }
 
     DocumentLayout {
@@ -265,7 +323,24 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
         lines,
         plain_lines,
         anchors,
+        selectable,
     }
+}
+
+fn ensure_selectable_ranges(
+    plain_lines: &[String],
+    ranges: &[SelectableLineRange],
+) -> Vec<SelectableLineRange> {
+    plain_lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            ranges
+                .get(index)
+                .copied()
+                .unwrap_or_else(|| selectable_range_for_plain_line(line))
+        })
+        .collect()
 }
 
 pub(crate) fn compose_document_viewport(

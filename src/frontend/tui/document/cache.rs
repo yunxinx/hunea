@@ -3,6 +3,7 @@ use ratatui::text::Line;
 use crate::frontend::tui::{
     composer,
     document::slot_frame::SlotFrame,
+    selection::SelectableLineRange,
     style_mode::StyleMode,
     transcript::{self},
 };
@@ -29,6 +30,7 @@ pub(crate) struct DocumentLayout {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) plain_lines: Vec<String>,
     pub(crate) anchors: Vec<DocumentLineAnchor>,
+    pub(crate) selectable: Vec<SelectableLineRange>,
     pub(crate) composer_slot: SlotFrame,
     pub(crate) composer_start_line: usize,
     pub(crate) composer_line_count: usize,
@@ -51,6 +53,7 @@ pub(crate) struct DocumentViewportKey {
     pub(crate) offset: usize,
     pub(crate) height: usize,
     pub(crate) bottom_follow: bool,
+    pub(crate) selection_version: usize,
 }
 
 /// `DocumentViewport` 表示统一文档在当前 offset 下的可视切片。

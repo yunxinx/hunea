@@ -1,6 +1,7 @@
 use ratatui::text::Line;
 
 use super::render_state::{ItemLineAnchor, RenderResult};
+use crate::frontend::tui::selection::SelectableLineRange;
 
 /// `CachedRenderBlock` 缓存单个 transcript item 在某个宽度下的屏幕渲染结果。
 #[derive(Debug, Clone, Default)]
@@ -11,6 +12,7 @@ pub(crate) struct CachedRenderBlock {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) plain_lines: Vec<String>,
     pub(crate) anchors: Vec<ItemLineAnchor>,
+    pub(crate) selectable_ranges: Vec<SelectableLineRange>,
     pub(crate) valid: bool,
 }
 

@@ -4,6 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use arboard::Clipboard;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use color_eyre::eyre::Result;
 use crossterm::{
     cursor::{Hide, Show},
@@ -14,8 +16,7 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use super::{
-    AppEvent, ExternalEditorLaunch, HeroOptions, Model, ModelOptions, STARTUP_PROBE_TIMEOUT,
-    StyleMode, theme,
+    AppEffect, AppEvent, HeroOptions, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StyleMode, theme,
 };
 
 /// `run` 启动交互式 TUI，并在退出后返回最终模型。
@@ -109,6 +110,30 @@ pub fn run_with_options(hero_options: HeroOptions, options: ModelOptions) -> Res
                     });
                     apply_effect_if_needed(&mut terminal, &mut model, effect)?;
                 }
+                MouseEventKind::Down(button) => {
+                    let effect = model.update(AppEvent::MouseDown {
+                        button,
+                        column: mouse.column,
+                        row: mouse.row,
+                    });
+                    apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+                }
+                MouseEventKind::Up(button) => {
+                    let effect = model.update(AppEvent::MouseUp {
+                        button,
+                        column: mouse.column,
+                        row: mouse.row,
+                    });
+                    apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+                }
+                MouseEventKind::Drag(button) => {
+                    let effect = model.update(AppEvent::MouseDrag {
+                        button,
+                        column: mouse.column,
+                        row: mouse.row,
+                    });
+                    apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+                }
                 _ => model.cancel_exit_confirmation(),
             },
             _ => {}
@@ -187,19 +212,24 @@ fn next_wait_duration(model: &Model, startup_deadline: Instant, now: Instant) ->
 fn apply_effect_if_needed(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     model: &mut Model,
-    effect: Option<ExternalEditorLaunch>,
+    effect: Option<AppEffect>,
 ) -> Result<()> {
     let Some(effect) = effect else {
         return Ok(());
     };
 
-    run_external_editor_effect(terminal, model, effect)
+    match effect {
+        AppEffect::LaunchExternalEditor(launch) => {
+            run_external_editor_effect(terminal, model, launch)
+        }
+        AppEffect::CopySelection(text) => run_copy_selection_effect(terminal, model, &text),
+    }
 }
 
 fn run_external_editor_effect(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     model: &mut Model,
-    launch: ExternalEditorLaunch,
+    launch: super::ExternalEditorLaunch,
 ) -> Result<()> {
     TerminalSession::suspend(terminal)?;
     let failed = run_external_editor_command(&launch.command).is_err();
@@ -215,6 +245,16 @@ fn run_external_editor_effect(
         original_draft: launch.original_draft,
         failed,
     });
+    Ok(())
+}
+
+fn run_copy_selection_effect(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    model: &mut Model,
+    text: &str,
+) -> Result<()> {
+    let copied = copy_selection_to_system_or_terminal_clipboard(terminal, text);
+    let _ = model.update(AppEvent::SelectionCopyCompleted { success: copied });
     Ok(())
 }
 
@@ -234,4 +274,32 @@ fn run_external_editor_command(command: &[String]) -> io::Result<()> {
             "external editor exited with a failure status",
         ))
     }
+}
+
+fn copy_selection_to_system_or_terminal_clipboard(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    text: &str,
+) -> bool {
+    if copy_selection_to_system_clipboard(text).is_ok() {
+        return true;
+    }
+
+    copy_selection_to_terminal_clipboard(terminal, text).is_ok()
+}
+
+fn copy_selection_to_system_clipboard(text: &str) -> Result<(), arboard::Error> {
+    let mut clipboard = Clipboard::new()?;
+    clipboard.set_text(text.to_string())
+}
+
+fn copy_selection_to_terminal_clipboard(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    text: &str,
+) -> io::Result<()> {
+    use std::io::Write as _;
+
+    let encoded = BASE64_STANDARD.encode(text.as_bytes());
+    let sequence = format!("\u{1b}]52;c;{encoded}\u{7}");
+    terminal.backend_mut().write_all(sequence.as_bytes())?;
+    terminal.backend_mut().flush()
 }

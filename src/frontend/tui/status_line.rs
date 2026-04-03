@@ -5,7 +5,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     envinfo,
     frontend::tui::{
-        Model, StyleMode, theme::tertiary_text_style, transcript::DEFAULT_RENDER_WIDTH,
+        Model, StyleMode, selection::SelectableLineRange, theme::tertiary_text_style,
+        transcript::DEFAULT_RENDER_WIDTH,
     },
 };
 
@@ -31,6 +32,7 @@ impl StatusLineItem {
 pub(crate) struct StatusLineRenderResult {
     pub(crate) line: Option<Line<'static>>,
     pub(crate) plain_line: String,
+    pub(crate) selectable: SelectableLineRange,
     pub(crate) has_content: bool,
     pub(crate) gap_before: usize,
 }
@@ -75,6 +77,7 @@ impl Model {
                 tertiary_text_style(self.palette),
             )])),
             plain_line,
+            selectable: status_line_selectable_range(&text),
             has_content: true,
             gap_before: status_line_gap_before(self.style_mode),
         }
@@ -169,6 +172,13 @@ pub(crate) fn compose_status_line_text(parts: &[String], width: usize) -> String
     }
 
     text
+}
+
+fn status_line_selectable_range(text: &str) -> SelectableLineRange {
+    SelectableLineRange::new(
+        STATUS_LINE_INSET_WIDTH,
+        STATUS_LINE_INSET_WIDTH + text.width(),
+    )
 }
 
 fn sanitize_status_line_part(text: &str) -> String {

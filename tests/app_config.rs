@@ -108,6 +108,31 @@ fn load_accepts_disabling_external_editor_helper() {
 }
 
 #[test]
+fn load_defaults_copy_on_mouse_selection_release_to_false() {
+    let working_dir = temp_test_dir("load-default-copy-on-selection-working");
+    let user_config_dir = temp_test_dir("load-default-copy-on-selection-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep selection copy disabled");
+
+    assert!(!config.tui.copy_on_mouse_selection_release);
+}
+
+#[test]
+fn load_accepts_enabling_copy_on_mouse_selection_release() {
+    let working_dir = temp_test_dir("load-enable-copy-on-selection-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\ncopy_on_mouse_selection_release = true\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("copy_on_mouse_selection_release should accept true");
+
+    assert!(config.tui.copy_on_mouse_selection_release);
+}
+
+#[test]
 fn load_project_config_can_clear_user_status_line() {
     let working_dir = temp_test_dir("load-clears-status-line-working");
     let user_config_dir = temp_test_dir("load-clears-status-line-config");

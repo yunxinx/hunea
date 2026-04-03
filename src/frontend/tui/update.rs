@@ -1,6 +1,6 @@
 use std::{path::PathBuf, time::Duration};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 
 use super::{
     ExternalEditorLaunch, Model, Sender,
@@ -9,6 +9,13 @@ use super::{
 
 /// `STARTUP_PROBE_TIMEOUT` 是启动阶段等待主题探测结果的最长时长。
 pub const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// `AppEffect` 表示 runner 需要在模型外执行的一次副作用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppEffect {
+    LaunchExternalEditor(ExternalEditorLaunch),
+    CopySelection(String),
+}
 
 /// `AppEvent` 描述 TUI 模型可处理的外部事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +27,21 @@ pub enum AppEvent {
     },
     MouseWheel {
         delta_lines: isize,
+    },
+    MouseDown {
+        button: MouseButton,
+        column: u16,
+        row: u16,
+    },
+    MouseUp {
+        button: MouseButton,
+        column: u16,
+        row: u16,
+    },
+    MouseDrag {
+        button: MouseButton,
+        column: u16,
+        row: u16,
     },
     DetectedPalette {
         palette: TerminalPalette,
@@ -39,12 +61,18 @@ pub enum AppEvent {
         original_draft: String,
         failed: bool,
     },
+    SelectionAutoScrollTick {
+        token: usize,
+    },
+    SelectionCopyCompleted {
+        success: bool,
+    },
     StartupReadyTimeout,
 }
 
 impl Model {
     /// `update` 根据事件推进模型状态。
-    pub fn update(&mut self, event: AppEvent) -> Option<ExternalEditorLaunch> {
+    pub fn update(&mut self, event: AppEvent) -> Option<AppEffect> {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
             AppEvent::Resized { width, height } => {
@@ -56,6 +84,21 @@ impl Model {
                 self.scroll_document_by(delta_lines);
                 None
             }
+            AppEvent::MouseDown {
+                button,
+                column,
+                row,
+            } => self.handle_mouse_down(button, column, row),
+            AppEvent::MouseUp {
+                button,
+                column,
+                row,
+            } => self.handle_mouse_up(button, column, row),
+            AppEvent::MouseDrag {
+                button,
+                column,
+                row,
+            } => self.handle_mouse_drag(button, column, row),
             AppEvent::DetectedPalette {
                 palette,
                 has_dark_background,
@@ -85,6 +128,14 @@ impl Model {
                 self.apply_external_editor_finished(&draft_path, &original_draft, failed);
                 None
             }
+            AppEvent::SelectionAutoScrollTick { token } => {
+                self.handle_selection_auto_scroll_tick(token);
+                None
+            }
+            AppEvent::SelectionCopyCompleted { success } => {
+                self.handle_selection_copy_completed(success);
+                None
+            }
             AppEvent::StartupReadyTimeout => {
                 if !self.has_palette() {
                     self.set_palette(terminal_default_palette(), false);
@@ -94,7 +145,7 @@ impl Model {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> Option<ExternalEditorLaunch> {
+    fn handle_key(&mut self, key: KeyEvent) -> Option<AppEffect> {
         if !(key.kind.is_press() || key.kind.is_repeat()) {
             return None;
         }
@@ -113,7 +164,9 @@ impl Model {
         }
 
         if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return self.maybe_prepare_external_editor_launch();
+            return self
+                .maybe_prepare_external_editor_launch()
+                .map(AppEffect::LaunchExternalEditor);
         }
 
         if key.code == KeyCode::Enter {
@@ -216,6 +269,9 @@ impl Model {
         };
         let previous_width = self.width;
 
+        if self.selection.active {
+            self.invalidate_selection_for_reflow();
+        }
         self.set_window(width, height);
         self.sync_external_editor_helper_after_resize(previous_width);
         self.sync_document_viewport_after_transcript_refresh(preserved_anchor);

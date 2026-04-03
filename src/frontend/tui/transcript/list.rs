@@ -10,8 +10,12 @@ use super::{
     ViewportRenderResult, cache::CachedRenderBlock, cache::ScreenRenderCache, new_render_result,
 };
 use crate::frontend::tui::{
-    HeroOptions, Sender, StyleMode, hero_item::HeroItem, message_item::MessageItem,
-    styled_text::line_to_plain_text, theme::TerminalPalette,
+    HeroOptions, Sender, StyleMode,
+    hero_item::HeroItem,
+    message_item::MessageItem,
+    selection::{SelectableLineRange, normalize_transcript_selectable_range},
+    styled_text::line_to_plain_text,
+    theme::TerminalPalette,
 };
 
 /// `TranscriptItem` 表示 transcript 中的一项。
@@ -185,22 +189,25 @@ impl Transcript {
         let mut lines = Vec::with_capacity(total_block_lines(&blocks, self.gap));
         let mut plain_lines = Vec::with_capacity(total_block_lines(&blocks, self.gap));
         let mut line_anchors = Vec::with_capacity(total_block_lines(&blocks, self.gap));
+        let mut selectable_ranges = Vec::with_capacity(total_block_lines(&blocks, self.gap));
 
         for (index, block) in blocks.iter().enumerate() {
             lines.extend(block.lines.iter().cloned());
             plain_lines.extend(block.plain_lines.iter().cloned());
             line_anchors.extend(line_anchors_for_block(block));
+            selectable_ranges.extend(block.selectable_ranges.iter().copied());
 
             if index + 1 < blocks.len() && self.gap > 0 {
                 for gap_offset in 0..self.gap {
                     lines.push(Line::raw(""));
                     plain_lines.push(String::new());
                     line_anchors.push(gap_line_anchor_for_block(block.item_index, gap_offset));
+                    selectable_ranges.push(SelectableLineRange::default());
                 }
             }
         }
 
-        let result = new_render_result(lines, plain_lines, line_anchors);
+        let result = new_render_result(lines, plain_lines, line_anchors, selectable_ranges);
         self.screen_cache
             .store_result(width, self.gap, self.items.len(), result.clone());
         result
@@ -273,6 +280,8 @@ impl Transcript {
         if anchors.len() != lines.len() {
             anchors = fallback_rendered_line_anchors(lines.len());
         }
+        let selectable_ranges =
+            self.items[index].render_selectable_line_ranges(width, self.palette, &plain_lines);
 
         let block = CachedRenderBlock {
             item_index: index,
@@ -281,6 +290,7 @@ impl Transcript {
             lines,
             plain_lines,
             anchors,
+            selectable_ranges,
             valid: true,
         };
         *cached = block.clone();
@@ -292,6 +302,7 @@ impl Transcript {
         let mut lines = base.lines.clone();
         let mut plain_lines = base.plain_lines.clone();
         let mut line_anchors = base.line_anchors.clone();
+        let mut selectable_ranges = base.selectable_ranges.clone();
 
         let mut previous_visible_item_index = None;
         for block in blocks {
@@ -314,18 +325,20 @@ impl Transcript {
                     lines.push(Line::raw(""));
                     plain_lines.push(String::new());
                     line_anchors.push(gap_line_anchor_for_block(gap_item_index, gap_offset));
+                    selectable_ranges.push(SelectableLineRange::default());
                 }
             }
 
             lines.extend(block.lines.iter().cloned());
             plain_lines.extend(block.plain_lines.iter().cloned());
             line_anchors.extend(line_anchors_for_block(block));
+            selectable_ranges.extend(block.selectable_ranges.iter().copied());
             has_rendered_content = true;
             previous_anchor_item_index = Some(block.item_index);
         }
 
         let _ = width;
-        new_render_result(lines, plain_lines, line_anchors)
+        new_render_result(lines, plain_lines, line_anchors, selectable_ranges)
     }
 }
 
@@ -361,6 +374,28 @@ impl TranscriptItem {
             Self::Hero(item) => item.render_line_anchors(width, palette),
             Self::Message(item) => item.render_line_anchors(width, palette),
         }
+    }
+
+    fn render_selectable_line_ranges(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+        plain_lines: &[String],
+    ) -> Vec<SelectableLineRange> {
+        let ranges = match self {
+            Self::Hero(_) => Vec::new(),
+            Self::Message(item) => item.render_selectable_line_ranges(width, palette),
+        };
+        if ranges.len() == plain_lines.len() {
+            return ranges;
+        }
+
+        plain_lines
+            .iter()
+            .map(|line| {
+                normalize_transcript_selectable_range(line, usize::from(width.max(1)), true)
+            })
+            .collect()
     }
 
     fn render_cache_key(&self) -> u64 {

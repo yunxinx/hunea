@@ -171,6 +171,7 @@ impl Model {
             return;
         }
 
+        self.maybe_clear_selection_for_bottom_status_slot_change();
         let preserved_anchor = if self.manual_document_scroll {
             self.current_document_viewport_anchor()
         } else {

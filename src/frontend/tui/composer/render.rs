@@ -10,6 +10,7 @@ use super::{
     viewport::calculate_cursor_visual_position,
 };
 use crate::frontend::tui::{
+    selection::SelectableLineRange,
     style_mode::StyleMode,
     theme::{
         TerminalPalette, muted_text_style, secondary_text_style, surface_text_style,
@@ -48,6 +49,7 @@ pub(crate) struct DocumentRenderResult {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) plain_lines: Vec<String>,
     pub(crate) anchors: Vec<LineAnchor>,
+    pub(crate) selectable_ranges: Vec<SelectableLineRange>,
     pub(crate) frame_decoration_line: Option<Line<'static>>,
     pub(crate) frame_decoration_plain_line: Option<String>,
     pub(crate) cursor_x: u16,
@@ -159,6 +161,14 @@ pub(crate) fn render_document(
             anchors: line_anchors_for_visual_lines(&placeholder_lines),
             lines,
             plain_lines,
+            selectable_ranges: selectable_ranges_for_visual_lines(
+                &placeholder_lines,
+                prompt_width,
+                composer.content_width(),
+                frame_fill_width,
+                prompt_first_line_only,
+                true,
+            ),
             frame_decoration_line,
             frame_decoration_plain_line,
             cursor_x: u16::try_from(prompt_width).unwrap_or(u16::MAX),
@@ -184,6 +194,14 @@ pub(crate) fn render_document(
                 trim_overflow_spaces: false,
             },
         ),
+        selectable_ranges: selectable_ranges_for_visual_lines(
+            &visual_lines,
+            prompt_width,
+            composer.content_width(),
+            frame_fill_width,
+            prompt_first_line_only,
+            false,
+        ),
         lines: render_visual_lines(
             &visual_lines,
             StyledVisualRenderOptions {
@@ -203,6 +221,43 @@ pub(crate) fn render_document(
         cursor_x: u16::try_from(cursor_visual_x).unwrap_or(u16::MAX),
         cursor_y,
     }
+}
+
+fn selectable_ranges_for_visual_lines(
+    lines: &[VisualLine],
+    prompt_width: usize,
+    content_width: usize,
+    frame_fill_width: usize,
+    prompt_first_line_only: bool,
+    trim_overflow_spaces: bool,
+) -> Vec<SelectableLineRange> {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let line_text = if trim_overflow_spaces {
+                trim_overflow_boundary_spaces(&line.text, content_width)
+            } else {
+                line.text.clone()
+            };
+            let line_width = measure_width(&line_text);
+            if line_width == 0 {
+                let anchor_end = if frame_fill_width > 0 {
+                    frame_fill_width
+                } else {
+                    prompt_width.max(1)
+                };
+                return SelectableLineRange::blank_anchor(0, anchor_end);
+            }
+
+            let shows_prompt = !(line.is_continuation || prompt_first_line_only && index > 0);
+            if shows_prompt {
+                SelectableLineRange::new(0, prompt_width + line_width)
+            } else {
+                SelectableLineRange::new(prompt_width, prompt_width + line_width)
+            }
+        })
+        .collect()
 }
 
 fn first_placeholder_visual_line(text: &str, width: usize, line_prefix_width: usize) -> VisualLine {

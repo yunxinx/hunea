@@ -62,14 +62,29 @@ impl Model {
         }
 
         if key.code == KeyCode::Enter {
-            let content = self.composer_text().trim().to_string();
-            if !content.is_empty() {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                self.composer_mut().insert_newline();
+                self.sync_composer_layout();
+                return;
+            }
+
+            let content = self.composer_text().to_string();
+            if !content.trim().is_empty() {
                 self.transcript_mut().append_message(Sender::User, content);
+                self.sync_transcript_line_count();
                 self.composer_mut().clear();
             }
+            self.sync_composer_layout();
+            return;
+        }
+
+        if key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.composer_mut().insert_newline();
+            self.sync_composer_layout();
             return;
         }
 
         self.composer_mut().handle_key(key);
+        self.sync_composer_layout();
     }
 }

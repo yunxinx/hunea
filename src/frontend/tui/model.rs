@@ -8,6 +8,9 @@ use super::{
     view,
 };
 
+const TRANSCRIPT_COMPOSER_GAP: u16 = 1;
+const COMPOSER_MIN_HEIGHT: u16 = 1;
+
 /// `Model` 表示交互式 TUI 应用的状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Model {
@@ -16,6 +19,7 @@ pub struct Model {
     composer: Composer,
     width: u16,
     height: u16,
+    transcript_line_count: u16,
     has_palette: bool,
     has_window: bool,
     has_dark_background: bool,
@@ -36,6 +40,7 @@ impl Model {
             composer: Composer::default(),
             width: 0,
             height: 0,
+            transcript_line_count: 0,
             has_palette: false,
             has_window: false,
             has_dark_background: true,
@@ -92,6 +97,30 @@ impl Model {
         self.has_window = true;
         self.transcript.set_width(width.max(1));
         self.composer.set_width(width.max(1));
+        self.sync_transcript_line_count();
+        self.sync_composer_layout();
+    }
+
+    pub(crate) fn composer_viewport_height(&self) -> u16 {
+        let content_height = self.composer.full_height().max(COMPOSER_MIN_HEIGHT);
+        if !self.has_window || self.height == 0 {
+            return content_height;
+        }
+
+        let available_rows = self.height.saturating_sub(self.composer_top_offset());
+        if available_rows == 0 {
+            return COMPOSER_MIN_HEIGHT;
+        }
+
+        content_height.min(available_rows)
+    }
+
+    pub(crate) fn composer_gap_height(&self) -> u16 {
+        if self.transcript_line_count > 0 {
+            TRANSCRIPT_COMPOSER_GAP
+        } else {
+            0
+        }
     }
 
     pub(crate) fn set_palette(&mut self, palette: TerminalPalette, has_dark_background: bool) {
@@ -99,6 +128,8 @@ impl Model {
         self.has_dark_background = has_dark_background;
         self.has_palette = true;
         self.transcript.set_palette(palette);
+        self.sync_transcript_line_count();
+        self.sync_composer_layout();
     }
 
     pub(crate) fn composer_mut(&mut self) -> &mut Composer {
@@ -111,5 +142,24 @@ impl Model {
 
     pub(crate) fn mark_quitting(&mut self) {
         self.quitting = true;
+    }
+
+    pub(crate) fn sync_composer_layout(&mut self) {
+        let viewport_height = self.composer_viewport_height().max(COMPOSER_MIN_HEIGHT);
+        self.composer.set_height(viewport_height);
+    }
+
+    pub(crate) fn sync_transcript_line_count(&mut self) {
+        let rendered_lines = self.transcript.render_lines().len();
+        self.transcript_line_count = u16::try_from(rendered_lines).unwrap_or(u16::MAX);
+    }
+
+    fn composer_top_offset(&self) -> u16 {
+        if self.transcript_line_count == 0 {
+            0
+        } else {
+            self.transcript_line_count
+                .saturating_add(TRANSCRIPT_COMPOSER_GAP)
+        }
     }
 }

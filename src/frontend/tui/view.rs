@@ -7,8 +7,6 @@ use ratatui::{
 
 use super::Model;
 
-const TRANSCRIPT_COMPOSER_GAP: u16 = 1;
-
 /// `render` 负责将模型状态映射为当前帧内容。
 pub fn render(model: &Model, frame: &mut Frame<'_>) {
     if !model.is_ready() {
@@ -20,9 +18,9 @@ pub fn render(model: &Model, frame: &mut Frame<'_>) {
         return;
     }
 
-    let composer_height = 1.min(area.height);
-    let gap_height = if area.height > 1 {
-        TRANSCRIPT_COMPOSER_GAP
+    let composer_height = model.composer().visible_height().min(area.height);
+    let gap_height = if area.height > composer_height {
+        model.composer_gap_height()
     } else {
         0
     };
@@ -40,10 +38,11 @@ pub fn render(model: &Model, frame: &mut Frame<'_>) {
         frame.render_widget(transcript, transcript_area);
     }
 
-    let composer = Paragraph::new(model.composer().render_line(*model.palette()));
+    let composer_result = model.composer().render(*model.palette());
+    let composer = Paragraph::new(Text::from(composer_result.lines));
     frame.render_widget(composer, composer_area);
     frame.set_cursor_position((
-        composer_area.x + model.composer().cursor_offset(),
-        composer_area.y,
+        composer_area.x + composer_result.cursor_x,
+        composer_area.y + composer_result.cursor_y,
     ));
 }

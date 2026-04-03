@@ -4,7 +4,7 @@ use super::{
     HeroOptions,
     composer::Composer,
     theme::{TerminalPalette, default_palette},
-    transcript::Transcript,
+    transcript::{RenderResult, Transcript},
     view,
 };
 
@@ -12,14 +12,14 @@ const TRANSCRIPT_COMPOSER_GAP: u16 = 1;
 const COMPOSER_MIN_HEIGHT: u16 = 1;
 
 /// `Model` 表示交互式 TUI 应用的状态。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Model {
     palette: TerminalPalette,
     transcript: Transcript,
+    transcript_render: RenderResult,
     composer: Composer,
     width: u16,
     height: u16,
-    transcript_line_count: u16,
     has_palette: bool,
     has_window: bool,
     has_dark_background: bool,
@@ -33,14 +33,15 @@ impl Model {
         let mut transcript = Transcript::new(palette);
         transcript.set_gap(1);
         transcript.append_hero(hero_options);
+        let transcript_render = transcript.render();
 
         Self {
             palette,
             transcript,
+            transcript_render,
             composer: Composer::default(),
             width: 0,
             height: 0,
-            transcript_line_count: 0,
             has_palette: false,
             has_window: false,
             has_dark_background: true,
@@ -83,8 +84,8 @@ impl Model {
         self.transcript.plain_items()
     }
 
-    pub(crate) fn transcript(&self) -> &Transcript {
-        &self.transcript
+    pub(crate) fn transcript_render(&self) -> &RenderResult {
+        &self.transcript_render
     }
 
     pub(crate) fn composer(&self) -> &Composer {
@@ -97,7 +98,7 @@ impl Model {
         self.has_window = true;
         self.transcript.set_width(width.max(1));
         self.composer.set_width(width.max(1));
-        self.sync_transcript_line_count();
+        self.sync_transcript_render();
         self.sync_composer_layout();
     }
 
@@ -116,7 +117,7 @@ impl Model {
     }
 
     pub(crate) fn composer_gap_height(&self) -> u16 {
-        if self.transcript_line_count > 0 {
+        if self.transcript_render.line_count > 0 {
             TRANSCRIPT_COMPOSER_GAP
         } else {
             0
@@ -128,7 +129,7 @@ impl Model {
         self.has_dark_background = has_dark_background;
         self.has_palette = true;
         self.transcript.set_palette(palette);
-        self.sync_transcript_line_count();
+        self.sync_transcript_render();
         self.sync_composer_layout();
     }
 
@@ -149,17 +150,50 @@ impl Model {
         self.composer.set_height(viewport_height);
     }
 
-    pub(crate) fn sync_transcript_line_count(&mut self) {
-        let rendered_lines = self.transcript.render_lines().len();
-        self.transcript_line_count = u16::try_from(rendered_lines).unwrap_or(u16::MAX);
+    pub(crate) fn sync_transcript_render(&mut self) {
+        self.transcript_render = self.transcript.render();
     }
 
     fn composer_top_offset(&self) -> u16 {
-        if self.transcript_line_count == 0 {
+        if self.transcript_render.line_count == 0 {
             0
         } else {
-            self.transcript_line_count
+            u16::try_from(self.transcript_render.line_count)
+                .unwrap_or(u16::MAX)
                 .saturating_add(TRANSCRIPT_COMPOSER_GAP)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frontend::tui::Sender;
+
+    #[test]
+    fn wrapped_transcript_rows_reduce_composer_viewport_height() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, "1234567890");
+
+        model.set_window(10, 4);
+        model.composer_mut().set_text_for_test("1\n2\n3");
+        model.sync_composer_layout();
+
+        assert_eq!(model.transcript_render.line_count, 2);
+        assert_eq!(model.composer().visible_height(), 1);
+    }
+
+    #[test]
+    fn transcript_plain_items_preserve_assistant_raw_content() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, "go test ./...");
+
+        assert_eq!(model.transcript_plain_items(), vec!["go test ./..."]);
     }
 }

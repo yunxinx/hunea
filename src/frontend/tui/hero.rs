@@ -8,7 +8,10 @@ use ratatui::{
 
 use crate::{
     envinfo::short_work_dir,
-    frontend::tui::theme::{TerminalPalette, detect_palette},
+    frontend::tui::{
+        theme::{TerminalPalette, detect_palette},
+        transcript::wrap_prompt_text,
+    },
 };
 
 const DEFAULT_APP_NAME: &str = "Lumos";
@@ -73,10 +76,22 @@ pub fn write_hero_to<W: Write>(writer: &mut W, options: &HeroOptions) -> io::Res
 fn render_hero_buffer(options: &HeroOptions, palette: TerminalPalette, work_dir: &str) -> Buffer {
     let app_name = options.app_name.as_deref().unwrap_or(DEFAULT_APP_NAME);
     let version = options.version.as_deref().unwrap_or(DEFAULT_VERSION);
-    let content_lines = hero_content_lines(app_name, version, work_dir);
-    let content_width = options.width.max(max_content_width(&content_lines));
+    let title_text = hero_title_plain_text(app_name, version);
+    let content_width = resolved_content_width(options.width, &title_text, work_dir);
+    let title_lines = wrap_prompt_text(&title_text, content_width as usize, 0);
+    let work_dir_lines = if work_dir.is_empty() {
+        Vec::new()
+    } else {
+        wrap_prompt_text(work_dir, content_width as usize, 0)
+    };
     let total_width = content_width + BORDER_WIDTH + (HORIZONTAL_PADDING * 2);
-    let total_height = content_lines.len() as u16 + BORDER_WIDTH;
+    let content_height = title_lines.len() as u16
+        + if work_dir_lines.is_empty() {
+            0
+        } else {
+            1 + work_dir_lines.len() as u16
+        };
+    let total_height = content_height + BORDER_WIDTH;
     let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, total_width, total_height));
 
     render_border_row(
@@ -116,21 +131,33 @@ fn render_hero_buffer(options: &HeroOptions, palette: TerminalPalette, work_dir:
         );
     }
 
-    for (index, line) in hero_content_lines(app_name, version, work_dir)
-        .into_iter()
-        .enumerate()
-    {
-        let row = 1 + index as u16;
-        let mut cursor_x = 1 + HORIZONTAL_PADDING;
+    let mut row = 1;
+    let title_glyphs = hero_title_glyphs(app_name, version, palette);
+    let mut title_offset = 0;
+    for line in &title_lines {
+        let glyph_count = line.chars().count();
+        render_glyph_line(
+            &mut buffer,
+            row,
+            &title_glyphs[title_offset..title_offset + glyph_count],
+        );
+        title_offset += glyph_count;
+        row += 1;
+    }
 
-        match line {
-            HeroLine::Title { app_name, version } => {
-                render_title_line(&mut buffer, &mut cursor_x, row, app_name, version, palette)
-            }
-            HeroLine::Spacer => {}
-            HeroLine::WorkDir(work_dir) => {
-                write_styled_text(&mut buffer, &mut cursor_x, row, work_dir, palette.secondary);
-            }
+    if !work_dir_lines.is_empty() {
+        row += 1;
+        let work_dir_glyphs = monochrome_glyphs(work_dir, palette.secondary);
+        let mut work_dir_offset = 0;
+        for line in &work_dir_lines {
+            let glyph_count = line.chars().count();
+            render_glyph_line(
+                &mut buffer,
+                row,
+                &work_dir_glyphs[work_dir_offset..work_dir_offset + glyph_count],
+            );
+            work_dir_offset += glyph_count;
+            row += 1;
         }
     }
 
@@ -138,62 +165,54 @@ fn render_hero_buffer(options: &HeroOptions, palette: TerminalPalette, work_dir:
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HeroLine<'a> {
-    Title { app_name: &'a str, version: &'a str },
-    Spacer,
-    WorkDir(&'a str),
+struct HeroGlyph {
+    character: char,
+    foreground: Color,
 }
 
-fn hero_content_lines<'a>(
-    app_name: &'a str,
-    version: &'a str,
-    work_dir: &'a str,
-) -> Vec<HeroLine<'a>> {
-    let mut lines = vec![HeroLine::Title { app_name, version }];
+fn hero_title_plain_text(app_name: &str, version: &str) -> String {
+    format!(">_ {app_name} ({version})")
+}
 
-    if !work_dir.is_empty() {
-        lines.push(HeroLine::Spacer);
-        lines.push(HeroLine::WorkDir(work_dir));
+fn resolved_content_width(requested_width: u16, title_text: &str, work_dir: &str) -> u16 {
+    if requested_width > 0 {
+        return requested_width;
     }
 
-    lines
+    title_text.chars().count().max(work_dir.chars().count()) as u16
 }
 
-fn max_content_width(lines: &[HeroLine<'_>]) -> u16 {
-    lines
-        .iter()
-        .map(|line| match line {
-            HeroLine::Title { app_name, version } => title_width(app_name, version),
-            HeroLine::Spacer => 0,
-            HeroLine::WorkDir(work_dir) => work_dir.chars().count() as u16,
-        })
-        .max()
-        .unwrap_or(0)
-}
-
-fn render_title_line(
-    buffer: &mut Buffer,
-    cursor_x: &mut u16,
-    y: u16,
-    app_name: &str,
-    version: &str,
-    palette: TerminalPalette,
-) {
-    write_styled_text(buffer, cursor_x, y, ">_", palette.secondary);
-    write_plain_text(buffer, cursor_x, y, " ");
-    write_styled_text(buffer, cursor_x, y, app_name, palette.main);
-    write_plain_text(buffer, cursor_x, y, " ");
-    write_styled_text(
-        buffer,
-        cursor_x,
-        y,
+fn hero_title_glyphs(app_name: &str, version: &str, palette: TerminalPalette) -> Vec<HeroGlyph> {
+    let mut glyphs = monochrome_glyphs(">_", palette.secondary);
+    glyphs.extend(reset_glyphs(" "));
+    glyphs.extend(monochrome_glyphs(app_name, palette.main));
+    glyphs.extend(reset_glyphs(" "));
+    glyphs.extend(monochrome_glyphs(
         &format!("({version})"),
         palette.secondary,
-    );
+    ));
+    glyphs
 }
 
-fn title_width(app_name: &str, version: &str) -> u16 {
-    format!(">_ {app_name} ({version})").chars().count() as u16
+fn monochrome_glyphs(text: &str, color: Color) -> Vec<HeroGlyph> {
+    text.chars()
+        .map(|character| HeroGlyph {
+            character,
+            foreground: color,
+        })
+        .collect()
+}
+
+fn reset_glyphs(text: &str) -> Vec<HeroGlyph> {
+    monochrome_glyphs(text, Color::Reset)
+}
+
+fn render_glyph_line(buffer: &mut Buffer, y: u16, glyphs: &[HeroGlyph]) {
+    let mut cursor_x = 1 + HORIZONTAL_PADDING;
+    for glyph in glyphs {
+        set_cell(buffer, cursor_x, y, glyph.character, glyph.foreground, None);
+        cursor_x += 1;
+    }
 }
 
 struct BorderGlyphs {
@@ -215,20 +234,6 @@ fn render_border_row(
         set_cell(buffer, column, y, glyphs.horizontal, color, None);
     }
     set_cell(buffer, x + width - 1, y, glyphs.right, color, None);
-}
-
-fn write_styled_text(buffer: &mut Buffer, cursor_x: &mut u16, y: u16, text: &str, color: Color) {
-    for character in text.chars() {
-        set_cell(buffer, *cursor_x, y, character, color, None);
-        *cursor_x += 1;
-    }
-}
-
-fn write_plain_text(buffer: &mut Buffer, cursor_x: &mut u16, y: u16, text: &str) {
-    for character in text.chars() {
-        set_cell(buffer, *cursor_x, y, character, Color::Reset, None);
-        *cursor_x += 1;
-    }
 }
 
 fn set_cell(

@@ -2,11 +2,16 @@ use ratatui::{
     style::Style,
     text::{Line, Span},
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use super::{
     Sender,
     theme::{TerminalPalette, surface_emphasis_style, surface_text_style},
+    transcript::{DEFAULT_RENDER_WIDTH, wrap_assistant_text, wrap_prompt_text},
 };
+
+const USER_MESSAGE_PREFIX: &str = "> ";
 
 /// `MessageItem` 表示 transcript 中的一条对话消息。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,30 +47,12 @@ impl MessageItem {
 }
 
 fn render_user_message(content: &str, width: u16, palette: TerminalPalette) -> Vec<Line<'static>> {
-    let prefix = "> ";
-    let continuation_prefix = " ".repeat(prefix.chars().count());
-    let content_width = width.max(1) as usize - prefix.chars().count().min(width.max(1) as usize);
-    let content_width = content_width.max(1);
-    let wrapped = wrap_text(content, content_width);
-    let prefix_style = surface_text_style(palette);
-    let content_style = surface_emphasis_style(palette);
-
-    wrapped
-        .into_iter()
-        .enumerate()
-        .map(|(index, line)| {
-            let line_prefix = if index == 0 {
-                prefix
-            } else {
-                continuation_prefix.as_str()
-            };
-
-            Line::default().spans([
-                Span::styled(line_prefix.to_string(), prefix_style),
-                Span::styled(line, content_style),
-            ])
-        })
-        .collect()
+    let prefix_width = measure_width(USER_MESSAGE_PREFIX);
+    let content_width = usize::from(width.max(1))
+        .saturating_sub(prefix_width)
+        .max(1);
+    let wrapped = wrap_prompt_text(content, content_width, prefix_width);
+    format_user_styled_lines(&wrapped, palette)
 }
 
 fn render_assistant_message(
@@ -73,31 +60,72 @@ fn render_assistant_message(
     width: u16,
     _palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
-    let padded_width = width.saturating_sub(2).max(1) as usize;
+    let width = if width == 0 {
+        DEFAULT_RENDER_WIDTH
+    } else {
+        usize::from(width)
+    };
+    let (left_padding, right_padding) = assistant_message_padding(content, width);
+    let content_width = width.saturating_sub(left_padding + right_padding).max(1);
 
-    wrap_text(content, padded_width)
+    wrap_assistant_text(content, content_width, left_padding)
         .into_iter()
         .map(|line| {
             Line::default().spans([
-                Span::styled("  ".to_string(), Style::new()),
+                Span::styled(" ".repeat(left_padding), Style::new()),
                 Span::styled(line, Style::new()),
+                Span::styled(" ".repeat(right_padding), Style::new()),
             ])
         })
         .collect()
 }
 
 fn render_user_plain(content: &str, width: u16) -> String {
-    let prefix = "> ";
-    let continuation_prefix = " ".repeat(prefix.chars().count());
-    let content_width = width.max(1) as usize - prefix.chars().count().min(width.max(1) as usize);
-    let content_width = content_width.max(1);
+    let _ = width;
+    let raw_lines = content
+        .split('\n')
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    format_user_plain_lines(&raw_lines)
+}
 
-    wrap_text(content, content_width)
-        .into_iter()
+fn render_assistant_plain(content: &str, width: u16) -> String {
+    let _ = width;
+    content.to_string()
+}
+
+fn format_user_styled_lines(lines: &[String], palette: TerminalPalette) -> Vec<Line<'static>> {
+    let prefix_style = surface_text_style(palette);
+    let content_style = surface_emphasis_style(palette);
+    let continuation_prefix = " ".repeat(measure_width(USER_MESSAGE_PREFIX));
+
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let prefix = if index == 0 {
+                USER_MESSAGE_PREFIX.to_string()
+            } else {
+                continuation_prefix.clone()
+            };
+
+            Line::default().spans([
+                Span::styled(prefix, prefix_style),
+                Span::styled(line.clone(), content_style),
+            ])
+        })
+        .collect()
+}
+
+fn format_user_plain_lines(lines: &[String]) -> String {
+    let continuation_prefix = " ".repeat(measure_width(USER_MESSAGE_PREFIX));
+
+    lines
+        .iter()
         .enumerate()
         .map(|(index, line)| {
             if index == 0 {
-                format!("{prefix}{line}")
+                format!("{USER_MESSAGE_PREFIX}{line}")
             } else {
                 format!("{continuation_prefix}{line}")
             }
@@ -106,48 +134,77 @@ fn render_user_plain(content: &str, width: u16) -> String {
         .join("\n")
 }
 
-fn render_assistant_plain(content: &str, width: u16) -> String {
-    let padded_width = width.saturating_sub(2).max(1) as usize;
-    wrap_text(content, padded_width)
-        .into_iter()
-        .map(|line| format!("  {line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+fn assistant_message_padding(content: &str, width: usize) -> (usize, usize) {
+    if width <= 1 {
+        return (0, 0);
+    }
+
+    let mut min_content_width = widest_non_tab_cluster_width(content).max(1);
+    if min_content_width > width {
+        min_content_width = width;
+    }
+
+    let total_padding = width.saturating_sub(min_content_width).min(4);
+    let left = 2.min(total_padding.div_ceil(2));
+    let right = 2.min(total_padding.saturating_sub(left));
+
+    (left, right)
 }
 
-fn wrap_text(content: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
+fn widest_non_tab_cluster_width(content: &str) -> usize {
+    UnicodeSegmentation::graphemes(content, true)
+        .filter(|cluster| *cluster != "\t")
+        .map(measure_width)
+        .max()
+        .unwrap_or(0)
+}
 
-    for raw_line in content.split('\n') {
-        if raw_line.is_empty() {
-            lines.push(String::new());
-            continue;
-        }
+fn measure_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
 
-        let mut current = String::new();
-        let mut current_width = 0usize;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frontend::tui::theme::default_palette;
 
-        for character in raw_line.chars() {
-            if current_width == width {
-                lines.push(std::mem::take(&mut current));
-                current_width = 0;
-            }
+    #[test]
+    fn assistant_plain_output_preserves_the_raw_command_text() {
+        let item = MessageItem::new(Sender::Assistant, "go test ./...");
 
-            current.push(character);
-            current_width += 1;
-        }
-
-        if current.is_empty() {
-            lines.push(String::new());
-        } else {
-            lines.push(current);
-        }
+        assert_eq!(item.render_plain(6), "go test ./...");
     }
 
-    if lines.is_empty() {
-        lines.push(String::new());
+    #[test]
+    fn user_render_wraps_prose_at_word_boundaries() {
+        let item = MessageItem::new(Sender::User, "hello world");
+
+        let lines = item
+            .render_lines(8, default_palette())
+            .into_iter()
+            .map(plain_line)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines, vec!["> hello", "  world"]);
     }
 
-    lines
+    #[test]
+    fn assistant_render_wraps_leading_make_explanation_as_prose() {
+        let item = MessageItem::new(Sender::Assistant, "make the handler return early");
+
+        let lines = item
+            .render_lines(20, default_palette())
+            .into_iter()
+            .map(plain_line)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines, vec!["  make the handler  ", "  return early  "]);
+    }
+
+    fn plain_line(line: Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
 }

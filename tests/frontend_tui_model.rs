@@ -74,6 +74,26 @@ fn ctrl_c_marks_the_model_as_quitting() {
     assert!(model.is_quitting());
 }
 
+#[test]
+fn transcript_plain_items_use_the_current_width_for_the_hero() {
+    let mut model = Model::new(HeroOptions {
+        app_name: Some("L".repeat(120)),
+        ..HeroOptions::default()
+    });
+
+    model.update(AppEvent::Resized {
+        width: 20,
+        height: 8,
+    });
+
+    let items = model.transcript_plain_items();
+    assert_eq!(items.len(), 1);
+
+    for line in items[0].split('\n') {
+        assert!(line.chars().count() <= 20, "line exceeded width: {line}");
+    }
+}
+
 fn buffer_text(buffer: &Buffer) -> String {
     let mut rendered = String::new();
 

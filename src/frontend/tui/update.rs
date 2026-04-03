@@ -71,7 +71,7 @@ impl Model {
             let content = self.composer_text().to_string();
             if !content.trim().is_empty() {
                 self.transcript_mut().append_message(Sender::User, content);
-                self.sync_transcript_line_count();
+                self.sync_transcript_render();
                 self.composer_mut().clear();
             }
             self.sync_composer_layout();

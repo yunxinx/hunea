@@ -7,6 +7,7 @@ use super::{
         render_hero_plain_lines_with_palette,
     },
     theme::TerminalPalette,
+    transcript::DEFAULT_RENDER_WIDTH,
 };
 
 /// `HeroItem` 表示 transcript 的开场项。
@@ -30,6 +31,12 @@ impl HeroItem {
 
     /// `render_plain` 返回用于退出后打印的纯文本内容。
     pub fn render_plain(&self, width: u16, palette: TerminalPalette) -> String {
+        let width = if width == 0 {
+            u16::try_from(DEFAULT_RENDER_WIDTH).unwrap_or(u16::MAX)
+        } else {
+            width
+        };
+
         adjusted_options(&self.options, width, palette)
             .map(|options| render_hero_plain_lines_with_palette(&options, palette))
             .unwrap_or_else(|| render_hero_plain_lines_with_palette(&self.options, palette))

@@ -34,7 +34,7 @@ pub fn render(model: &Model, frame: &mut Frame<'_>) {
     let [transcript_area, _, composer_area] = layout.areas(area);
 
     if transcript_height > 0 {
-        let transcript = Paragraph::new(Text::from(model.transcript().render_lines()));
+        let transcript = Paragraph::new(Text::from(model.transcript_render().lines.clone()));
         frame.render_widget(transcript, transcript_area);
     }
 

@@ -4,7 +4,7 @@ use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 #[test]
 fn ctrl_j_inserts_newline_and_renders_expanded_composer() {
-    let mut model = ready_model(20, 8);
+    let mut model = ready_model(20, 12);
 
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('1'))));
     model.update(AppEvent::Key(KeyEvent::new(
@@ -14,9 +14,9 @@ fn ctrl_j_inserts_newline_and_renders_expanded_composer() {
 
     assert_eq!(model.composer_text(), "1\n");
 
-    let rows = render_rows(&model, 20, 8);
-    assert_eq!(rows[6], "┃ 1                 ");
-    assert_eq!(rows[7], "┃                   ");
+    let rows = render_rows(&model, 20, 12);
+    assert_eq!(rows[rows.len() - 2], "┃ 1                 ");
+    assert_eq!(rows[rows.len() - 1], "┃                   ");
 }
 
 #[test]
@@ -46,15 +46,15 @@ fn enter_preserves_leading_and_trailing_whitespace() {
 
 #[test]
 fn long_english_input_wraps_by_word_boundary() {
-    let mut model = ready_model(9, 8);
+    let mut model = ready_model(9, 20);
 
     for character in "hello world".chars() {
         model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
     }
 
-    let rows = render_rows(&model, 9, 8);
-    assert_eq!(rows[6], "┃ hello  ");
-    assert_eq!(rows[7], "  world  ");
+    let rows = render_rows(&model, 9, 20);
+    assert_eq!(rows[rows.len() - 2], "┃ hello  ");
+    assert_eq!(rows[rows.len() - 1], "  world  ");
 }
 
 fn ready_model(width: u16, height: u16) -> Model {

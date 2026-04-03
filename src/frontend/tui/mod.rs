@@ -5,6 +5,7 @@ mod message_item;
 mod model;
 mod runner;
 mod sender;
+mod styled_text;
 mod transcript;
 mod update;
 mod view;

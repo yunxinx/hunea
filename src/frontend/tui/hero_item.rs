@@ -2,10 +2,8 @@ use ratatui::text::Line;
 
 use super::{
     HeroOptions,
-    hero::{
-        render_hero_buffer_with_palette, render_hero_lines_with_palette,
-        render_hero_plain_lines_with_palette,
-    },
+    hero::{render_hero_buffer_with_palette, render_hero_lines_with_palette},
+    styled_text::{lines_to_ansi_text, lines_to_plain_text},
     theme::TerminalPalette,
     transcript::DEFAULT_RENDER_WIDTH,
 };
@@ -29,18 +27,28 @@ impl HeroItem {
             .unwrap_or_else(|| render_hero_lines_with_palette(&self.options, palette))
     }
 
-    /// `render_plain` 返回用于退出后打印的纯文本内容。
-    pub fn render_plain(&self, width: u16, palette: TerminalPalette) -> String {
+    /// `render_for_exit` 返回适合退出后打印的 hero 文本。
+    pub fn render_for_exit(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+        preserve_ansi: bool,
+    ) -> String {
         let width = if width == 0 {
             u16::try_from(DEFAULT_RENDER_WIDTH).unwrap_or(u16::MAX)
         } else {
             width
         };
 
-        adjusted_options(&self.options, width, palette)
-            .map(|options| render_hero_plain_lines_with_palette(&options, palette))
-            .unwrap_or_else(|| render_hero_plain_lines_with_palette(&self.options, palette))
-            .join("\n")
+        let lines = adjusted_options(&self.options, width, palette)
+            .map(|options| render_hero_lines_with_palette(&options, palette))
+            .unwrap_or_else(|| render_hero_lines_with_palette(&self.options, palette));
+
+        if preserve_ansi {
+            lines_to_ansi_text(&lines)
+        } else {
+            lines_to_plain_text(&lines)
+        }
     }
 }
 

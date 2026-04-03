@@ -84,6 +84,11 @@ impl Model {
         self.transcript.plain_items()
     }
 
+    /// `transcript_exit_items` 返回退出后打印所需的 transcript 项。
+    pub fn transcript_exit_items(&self, preserve_ansi: bool) -> Vec<String> {
+        self.transcript.exit_items(preserve_ansi)
+    }
+
     pub(crate) fn transcript_render(&self) -> &RenderResult {
         &self.transcript_render
     }
@@ -182,18 +187,18 @@ mod tests {
         model.composer_mut().set_text_for_test("1\n2\n3");
         model.sync_composer_layout();
 
-        assert_eq!(model.transcript_render.line_count, 2);
-        assert_eq!(model.composer().visible_height(), 1);
+        assert_eq!(model.transcript_render.line_count, 1);
+        assert_eq!(model.composer().visible_height(), 2);
     }
 
     #[test]
-    fn transcript_plain_items_preserve_assistant_raw_content() {
+    fn transcript_plain_items_use_assistant_markdown_render_path() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
         model
             .transcript_mut()
-            .append_message(Sender::Assistant, "go test ./...");
+            .append_message(Sender::Assistant, "# Overview of the API");
 
-        assert_eq!(model.transcript_plain_items(), vec!["go test ./..."]);
+        assert_eq!(model.transcript_plain_items(), vec!["Overview of the API"]);
     }
 }

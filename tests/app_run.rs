@@ -8,7 +8,7 @@ use lumos::{
 #[test]
 fn write_exit_transcript_adds_context_when_output_fails() {
     let model = Model::new(HeroOptions::default());
-    let error = write_exit_transcript_with_context(&mut BrokenWriter, &model)
+    let error = write_exit_transcript_with_context(&mut BrokenWriter, &model, false)
         .expect_err("writer failures should be wrapped with app context");
     let message = format!("{error:?}");
 

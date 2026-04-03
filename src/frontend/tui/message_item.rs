@@ -1,14 +1,13 @@
-use ratatui::{
-    style::Style,
-    text::{Line, Span},
-};
-use unicode_segmentation::UnicodeSegmentation;
+use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::{
     Sender,
+    styled_text::{lines_to_ansi_text, lines_to_plain_text},
     theme::{TerminalPalette, surface_emphasis_style, surface_text_style},
-    transcript::{DEFAULT_RENDER_WIDTH, wrap_assistant_text, wrap_prompt_text},
+    transcript::{
+        DEFAULT_RENDER_WIDTH, render_markdown_lines, wrap_assistant_text, wrap_prompt_text,
+    },
 };
 
 const USER_MESSAGE_PREFIX: &str = "> ";
@@ -37,12 +36,25 @@ impl MessageItem {
         }
     }
 
-    /// `render_plain` 返回用于退出后打印的纯文本内容。
-    pub fn render_plain(&self, width: u16) -> String {
-        match self.sender {
-            Sender::User => render_user_plain(&self.content, width),
-            Sender::Assistant => render_assistant_plain(&self.content, width),
+    /// `render_for_exit` 返回适合退出后打印的消息文本。
+    pub fn render_for_exit(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+        preserve_ansi: bool,
+    ) -> String {
+        let lines = self.render_lines(width, palette);
+        if preserve_ansi {
+            lines_to_ansi_text(&lines)
+        } else {
+            lines_to_plain_text(&lines)
         }
+    }
+
+    #[cfg(test)]
+    fn render_plain_for_test(&self, width: u16) -> String {
+        let lines = self.render_lines(width, crate::frontend::tui::theme::default_palette());
+        lines_to_plain_text(&lines)
     }
 }
 
@@ -58,40 +70,22 @@ fn render_user_message(content: &str, width: u16, palette: TerminalPalette) -> V
 fn render_assistant_message(
     content: &str,
     width: u16,
-    _palette: TerminalPalette,
+    palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
     let width = if width == 0 {
         DEFAULT_RENDER_WIDTH
     } else {
         usize::from(width)
     };
-    let (left_padding, right_padding) = assistant_message_padding(content, width);
-    let content_width = width.saturating_sub(left_padding + right_padding).max(1);
+    let rendered = render_markdown_lines(content, width, palette);
+    if rendered.is_empty() {
+        return wrap_assistant_text(content, width, 0)
+            .into_iter()
+            .map(Line::raw)
+            .collect();
+    }
 
-    wrap_assistant_text(content, content_width, left_padding)
-        .into_iter()
-        .map(|line| {
-            Line::default().spans([
-                Span::styled(" ".repeat(left_padding), Style::new()),
-                Span::styled(line, Style::new()),
-                Span::styled(" ".repeat(right_padding), Style::new()),
-            ])
-        })
-        .collect()
-}
-
-fn render_user_plain(content: &str, width: u16) -> String {
-    let _ = width;
-    let raw_lines = content
-        .split('\n')
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    format_user_plain_lines(&raw_lines)
-}
-
-fn render_assistant_plain(content: &str, width: u16) -> String {
-    let _ = width;
-    content.to_string()
+    rendered
 }
 
 fn format_user_styled_lines(lines: &[String], palette: TerminalPalette) -> Vec<Line<'static>> {
@@ -117,48 +111,6 @@ fn format_user_styled_lines(lines: &[String], palette: TerminalPalette) -> Vec<L
         .collect()
 }
 
-fn format_user_plain_lines(lines: &[String]) -> String {
-    let continuation_prefix = " ".repeat(measure_width(USER_MESSAGE_PREFIX));
-
-    lines
-        .iter()
-        .enumerate()
-        .map(|(index, line)| {
-            if index == 0 {
-                format!("{USER_MESSAGE_PREFIX}{line}")
-            } else {
-                format!("{continuation_prefix}{line}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn assistant_message_padding(content: &str, width: usize) -> (usize, usize) {
-    if width <= 1 {
-        return (0, 0);
-    }
-
-    let mut min_content_width = widest_non_tab_cluster_width(content).max(1);
-    if min_content_width > width {
-        min_content_width = width;
-    }
-
-    let total_padding = width.saturating_sub(min_content_width).min(4);
-    let left = 2.min(total_padding.div_ceil(2));
-    let right = 2.min(total_padding.saturating_sub(left));
-
-    (left, right)
-}
-
-fn widest_non_tab_cluster_width(content: &str) -> usize {
-    UnicodeSegmentation::graphemes(content, true)
-        .filter(|cluster| *cluster != "\t")
-        .map(measure_width)
-        .max()
-        .unwrap_or(0)
-}
-
 fn measure_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
@@ -172,7 +124,10 @@ mod tests {
     fn assistant_plain_output_preserves_the_raw_command_text() {
         let item = MessageItem::new(Sender::Assistant, "go test ./...");
 
-        assert_eq!(item.render_plain(6), "go test ./...");
+        assert_eq!(
+            item.render_for_exit(6, default_palette(), false),
+            "go\ntest\n./..."
+        );
     }
 
     #[test]
@@ -198,7 +153,47 @@ mod tests {
             .map(plain_line)
             .collect::<Vec<_>>();
 
-        assert_eq!(lines, vec!["  make the handler  ", "  return early  "]);
+        assert_eq!(lines, vec!["make the handler", "return early"]);
+    }
+
+    #[test]
+    fn assistant_render_uses_markdown_heading_rendering() {
+        let item = MessageItem::new(Sender::Assistant, "# Overview of the API");
+
+        let lines = item
+            .render_lines(20, default_palette())
+            .into_iter()
+            .map(plain_line)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines, vec!["Overview of the API"]);
+    }
+
+    #[test]
+    fn assistant_render_uses_markdown_emphasis_rendering() {
+        let item = MessageItem::new(Sender::Assistant, "__init__");
+
+        let lines = item
+            .render_lines(20, default_palette())
+            .into_iter()
+            .map(plain_line)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines, vec!["init"]);
+    }
+
+    #[test]
+    fn assistant_exit_render_matches_screen_markdown_text() {
+        let item = MessageItem::new(Sender::Assistant, "## Summary\n\n__init__");
+
+        let screen = item
+            .render_lines(20, default_palette())
+            .into_iter()
+            .map(plain_line)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(screen, item.render_plain_for_test(20));
     }
 
     fn plain_line(line: Line<'static>) -> String {

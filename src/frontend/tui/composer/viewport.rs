@@ -1,4 +1,4 @@
-use super::{grapheme::cluster_width_before_char, layout::VisualLine};
+use super::{grapheme::measure_width, layout::VisualLine};
 
 pub(crate) fn visible_viewport_lines(
     lines: &[VisualLine],
@@ -42,22 +42,34 @@ pub(crate) fn calculate_cursor_visual_position(
         .skip(first_line)
     {
         if logical_column == line.end_char && line_index < last_line {
-            return (line_index + 1, prompt_width);
+            let next_line = &lines[line_index + 1];
+            if next_line.visible_start_char <= logical_column
+                && logical_column <= next_line.end_char
+            {
+                continue;
+            }
+            if next_line.visible_start_char == logical_column {
+                return (line_index + 1, prompt_width);
+            }
         }
 
         if logical_column > line.end_char {
             continue;
         }
 
+        if logical_column <= line.visible_start_char {
+            return (line_index, prompt_width);
+        }
+
         return (
             line_index,
-            prompt_width + cluster_width_before_char(&line.text, logical_column - line.start_char),
+            prompt_width + visual_offset_for_logical_column(line, logical_column),
         );
     }
 
     (
         last_line,
-        prompt_width + cluster_width_before_char(&last_visual_line.text, last_visual_line.end_char),
+        prompt_width + measure_width(&last_visual_line.text),
     )
 }
 
@@ -109,4 +121,24 @@ fn logical_line_bounds(lines: &[VisualLine], logical_line: usize) -> Option<(usi
         (Some(first), Some(last)) => Some((first, last)),
         _ => None,
     }
+}
+
+fn visual_offset_for_logical_column(line: &VisualLine, logical_column: usize) -> usize {
+    if logical_column <= line.visible_start_char {
+        return 0;
+    }
+    if logical_column >= line.end_char {
+        return line
+            .column_offsets
+            .last()
+            .copied()
+            .unwrap_or_else(|| measure_width(&line.text));
+    }
+
+    let index = logical_column.saturating_sub(line.visible_start_char);
+    if index < line.column_offsets.len() {
+        return line.column_offsets[index];
+    }
+
+    measure_width(&line.text)
 }

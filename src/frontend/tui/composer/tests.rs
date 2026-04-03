@@ -61,11 +61,121 @@ fn render_wraps_chinese_text_at_the_line_edge() {
     assert_eq!(render.cursor_x, 4);
 }
 
+#[test]
+fn render_shows_editable_boundary_space_on_continuation_line() {
+    let composer = test_composer(7, 2, "hello ");
+
+    let render = composer.render(default_palette());
+
+    assert_eq!(plain_lines(&render), vec!["┃ hello", "   "]);
+    assert_eq!(render.cursor_y, 1);
+    assert_eq!(render.cursor_x, 3);
+}
+
+#[test]
+fn render_maps_hidden_boundary_space_to_continuation_start() {
+    let composer = test_composer(7, 2, "hello world");
+
+    let render = composer_with_cursor(composer, 6).render(default_palette());
+
+    assert_eq!(plain_lines(&render), vec!["┃ hello", "  world"]);
+    assert_eq!(render.cursor_y, 1);
+    assert_eq!(render.cursor_x, 2);
+}
+
+#[test]
+fn render_reflows_boundary_word_with_trailing_space() {
+    let composer = test_composer(22, 2, &(String::from("aaaaaaaaaaaaaaaaaa b ")));
+
+    let render = composer.render(default_palette());
+
+    assert_eq!(plain_lines(&render), vec!["┃ aaaaaaaaaaaaaaaaaa", "  b "]);
+    assert_eq!(render.cursor_y, 1);
+    assert_eq!(render.cursor_x, 4);
+}
+
+#[test]
+fn render_keeps_later_text_on_wrapped_boundary_line() {
+    let composer = test_composer(22, 2, &(String::from("aaaaaaaaaaaaaaaaaa b   c")));
+
+    let render = composer.render(default_palette());
+
+    assert_eq!(
+        plain_lines(&render),
+        vec!["┃ aaaaaaaaaaaaaaaaaa", "  b   c"]
+    );
+    assert_eq!(render.cursor_y, 1);
+    assert_eq!(render.cursor_x, 7);
+}
+
+#[test]
+fn render_preserves_long_leading_spaces_on_wrapped_continuation_line() {
+    let composer = test_composer(7, 2, "abc d    e");
+
+    let render = composer.render(default_palette());
+
+    assert_eq!(plain_lines(&render), vec!["┃ abc d", "      e"]);
+    assert_eq!(render.cursor_y, 1);
+    assert_eq!(render.cursor_x, 7);
+}
+
+#[test]
+fn render_keeps_short_indented_cursor_on_first_visual_line() {
+    let composer = composer_with_cursor(test_composer(7, 2, " abc def"), 4);
+
+    let render = composer.render(default_palette());
+
+    assert_eq!(plain_lines(&render), vec!["┃  abc", "  def"]);
+    assert_eq!(render.cursor_y, 0);
+    assert_eq!(render.cursor_x, 6);
+}
+
+#[test]
+fn render_keeps_short_indented_hard_wrapped_cursor_at_line_end() {
+    let composer = test_composer(4, 3, " abcde");
+
+    let render = composer.render(default_palette());
+
+    assert_eq!(plain_lines(&render), vec!["┃  a", "  bc", "  de"]);
+    assert_eq!(render.cursor_y, 2);
+    assert_eq!(render.cursor_x, 4);
+}
+
+#[test]
+fn render_wraps_short_indented_wide_glyph_without_overwide_line() {
+    let composer = test_composer(4, 2, " 中");
+
+    let render = composer.render(default_palette());
+
+    assert_eq!(plain_lines(&render), vec!["┃  ", "  中"]);
+    assert_eq!(render.cursor_y, 1);
+    assert_eq!(render.cursor_x, 4);
+}
+
+#[test]
+fn render_expands_tabs_using_prompt_aware_stops() {
+    let composer = test_composer(10, 1, "a\tb");
+
+    let render = composer.render(default_palette());
+
+    assert_eq!(plain_lines(&render), vec!["┃ a     b"]);
+    assert_eq!(render.cursor_y, 0);
+}
+
 fn test_composer(width: u16, height: u16, value: &str) -> Composer {
     let mut composer = Composer::default();
     composer.set_width(width);
     composer.set_height(height);
     composer.set_text_for_test(value);
+    composer
+}
+
+fn composer_with_cursor(mut composer: Composer, cursor: usize) -> Composer {
+    let current = composer.value().chars().count();
+    for _ in 0..current.saturating_sub(cursor) {
+        composer.handle_key(KeyEvent::from(KeyCode::Left));
+    }
+
     composer
 }
 

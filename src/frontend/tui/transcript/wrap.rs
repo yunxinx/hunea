@@ -3,9 +3,11 @@ use std::collections::VecDeque;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use super::prompt_wrap::wrap_prompt_visual_lines;
+
 pub(crate) const DEFAULT_RENDER_WIDTH: usize = 80;
 
-const DISPLAY_TAB_WIDTH: usize = 8;
+pub(super) const DISPLAY_TAB_WIDTH: usize = 8;
 const ASSISTANT_LITERAL_COMMANDS: &[&str] = &[
     "go", "git", "make", "npm", "pnpm", "yarn", "uv", "python", "python3", "pip", "cargo",
     "docker", "kubectl", "curl", "wget", "bash", "sh",
@@ -18,7 +20,6 @@ const ASSISTANT_PROSE_LEAD_WORDS: &[&str] = &[
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WrapMode {
-    Prompt,
     Assistant,
 }
 
@@ -35,7 +36,10 @@ pub(crate) fn wrap_prompt_text(
     width: usize,
     line_prefix_width: usize,
 ) -> Vec<String> {
-    wrap_text(value.as_ref(), width, line_prefix_width, WrapMode::Prompt)
+    wrap_prompt_visual_lines(value.as_ref(), width, line_prefix_width)
+        .into_iter()
+        .map(|line| line.text)
+        .collect()
 }
 
 /// `wrap_assistant_text` 按 assistant transcript 的展示需求换行。
@@ -129,7 +133,7 @@ fn should_hard_wrap_line(line: &str, mode: WrapMode) -> bool {
     mode == WrapMode::Assistant && looks_like_assistant_literal_line(line)
 }
 
-fn split_short_indent(line: &str) -> (String, &str) {
+pub(super) fn split_short_indent(line: &str) -> (String, &str) {
     let prefix_len = line
         .chars()
         .take_while(|character| *character == ' ')
@@ -450,7 +454,7 @@ fn hard_wrap_line(line: &str, width: usize, line_prefix_width: usize) -> Vec<Str
     lines
 }
 
-fn split_text_to_width(text: &str, width: usize) -> (String, String) {
+pub(super) fn split_text_to_width(text: &str, width: usize) -> (String, String) {
     if text.is_empty() || width == 0 {
         return (String::new(), text.to_string());
     }
@@ -477,7 +481,7 @@ fn split_text_to_width(text: &str, width: usize) -> (String, String) {
     (fitted, text[byte_offset..].to_string())
 }
 
-fn leading_space_count(line: &str) -> usize {
+pub(super) fn leading_space_count(line: &str) -> usize {
     line.chars()
         .take_while(|character| *character == ' ')
         .count()
@@ -615,7 +619,7 @@ fn normalize_command_token(token: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn render_cluster_for_display(cluster: &str, absolute_column: usize) -> (String, usize) {
+pub(super) fn render_cluster_for_display(cluster: &str, absolute_column: usize) -> (String, usize) {
     if cluster != "\t" {
         return (cluster.to_string(), measure_width(cluster));
     }
@@ -639,11 +643,11 @@ fn detect_fence_marker(line: &str) -> Option<&'static str> {
     None
 }
 
-fn is_space_cluster(cluster: &str) -> bool {
+pub(super) fn is_space_cluster(cluster: &str) -> bool {
     !cluster.is_empty() && cluster.chars().all(char::is_whitespace)
 }
 
-fn measure_width(text: &str) -> usize {
+pub(super) fn measure_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
@@ -668,10 +672,10 @@ mod tests {
     }
 
     #[test]
-    fn wrap_prompt_text_treats_double_spaces_as_prose() {
+    fn wrap_prompt_text_preserves_wrapped_double_spaces() {
         assert_eq!(
             wrap_prompt_text("Hello.  Another sentence", 10, 0),
-            vec!["Hello.", "Another", "sentence"]
+            vec!["Hello.", "  Another", "sentence"]
         );
     }
 
@@ -681,6 +685,19 @@ mod tests {
             wrap_prompt_text(" - nested list item that wraps", 10, 0),
             vec![" - nested", "list item", "that wraps"]
         );
+    }
+
+    #[test]
+    fn wrap_prompt_text_reflows_boundary_word_when_trailing_space_overflows() {
+        assert_eq!(
+            wrap_prompt_text("aaaaaaaaaaaaaaaaaa b ", 20, 0),
+            vec!["aaaaaaaaaaaaaaaaaa", "b "]
+        );
+    }
+
+    #[test]
+    fn wrap_prompt_text_preserves_long_leading_spaces_on_wrapped_line() {
+        assert_eq!(wrap_prompt_text("abc d    e", 5, 0), vec!["abc d", "    e"]);
     }
 
     #[test]

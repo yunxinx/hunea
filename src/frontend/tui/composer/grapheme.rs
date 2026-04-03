@@ -87,51 +87,58 @@ pub(crate) fn grapheme_target_right(line: &str, cursor_chars: usize) -> Option<u
     Some(total_chars)
 }
 
-pub(crate) fn cluster_width_before_char(text: &str, char_offset: usize) -> usize {
-    if char_offset == 0 {
-        return 0;
-    }
-
-    let mut width = 0;
-    for cluster in grapheme_clusters(text) {
-        if char_offset < cluster.end_char {
-            return width;
-        }
-
-        width += cluster.width;
-        if char_offset == cluster.end_char {
-            return width;
-        }
-    }
-
-    width
-}
-
 pub(crate) fn logical_column_for_visual_offset(
     line: &VisualLine,
     visual_offset: usize,
-    _content_width: usize,
+    content_width: usize,
 ) -> usize {
-    if visual_offset == 0 || line.text.is_empty() {
-        return line.start_char;
+    if visual_offset == 0 {
+        return line.visible_start_char;
+    }
+
+    if content_width == 0 || line.text.is_empty() {
+        return line.visible_start_char;
+    }
+
+    if !line.column_offsets.is_empty() {
+        for (index, offset) in line.column_offsets.iter().enumerate() {
+            if *offset == visual_offset {
+                return line.visible_start_char + index;
+            }
+            if *offset >= visual_offset {
+                if index == 0 {
+                    return line.visible_start_char;
+                }
+
+                let mut boundary_index = index - 1;
+                while boundary_index > 0
+                    && line.column_offsets[boundary_index - 1]
+                        == line.column_offsets[boundary_index]
+                {
+                    boundary_index -= 1;
+                }
+                return line.visible_start_char + boundary_index;
+            }
+        }
+
+        return line.end_char;
     }
 
     let mut consumed_width = 0;
     let mut consumed_chars = 0;
-
     for cluster in grapheme_clusters(&line.text) {
         if consumed_width + cluster.width > visual_offset {
-            return line.start_char + consumed_chars;
+            return line.visible_start_char + consumed_chars;
         }
 
         consumed_width += cluster.width;
         consumed_chars += cluster.end_char - cluster.start_char;
         if consumed_width >= visual_offset {
-            return line.start_char + consumed_chars;
+            return line.visible_start_char + consumed_chars;
         }
     }
 
-    line.start_char + consumed_chars
+    line.visible_start_char + consumed_chars
 }
 
 pub(crate) fn is_space_cluster(cluster: &str) -> bool {

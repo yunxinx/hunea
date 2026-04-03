@@ -144,6 +144,23 @@ mod tests {
     }
 
     #[test]
+    fn user_render_preserves_wrapped_continuation_spaces() {
+        let item = MessageItem::new(Sender::User, "aaaaaaaaaaaaaaaaaa b   c");
+
+        assert_eq!(
+            item.render_plain_for_test(22),
+            "> aaaaaaaaaaaaaaaaaa\n  b   c"
+        );
+    }
+
+    #[test]
+    fn user_render_preserves_long_wrapped_leading_spaces() {
+        let item = MessageItem::new(Sender::User, "abc d    e");
+
+        assert_eq!(item.render_plain_for_test(7), "> abc d\n      e");
+    }
+
+    #[test]
     fn assistant_render_wraps_leading_make_explanation_as_prose() {
         let item = MessageItem::new(Sender::Assistant, "make the handler return early");
 

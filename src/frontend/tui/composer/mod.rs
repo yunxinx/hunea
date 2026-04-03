@@ -64,10 +64,11 @@ impl Composer {
 
     /// `full_height` 返回 composer 完整内容的视觉高度。
     pub fn full_height(&self) -> u16 {
+        let prompt_width = usize::from(prompt_width());
         let line_count = if self.value.is_empty() {
-            placeholder_line_count(self.placeholder(), self.content_width())
+            placeholder_line_count(self.placeholder(), self.content_width(), prompt_width)
         } else {
-            visual_line_count(&self.value, self.content_width())
+            visual_line_count(&self.value, self.content_width(), prompt_width)
         };
 
         u16::try_from(line_count.max(1)).unwrap_or(u16::MAX)
@@ -274,7 +275,11 @@ impl Composer {
         }
 
         let lines = logical_lines(&self.value);
-        let visual_lines = visual_lines_for_text(&self.value, self.content_width());
+        let visual_lines = visual_lines_for_text(
+            &self.value,
+            self.content_width(),
+            usize::from(prompt_width()),
+        );
         let (row, column) = logical_position(&self.value, self.cursor);
         let (current_visual_line, current_visual_column) =
             calculate_cursor_visual_position(&visual_lines, row, column, 0);
@@ -323,7 +328,11 @@ impl Composer {
     }
 
     fn page_move(&mut self, direction: isize) {
-        let visual_lines = visual_lines_for_text(&self.value, self.content_width());
+        let visual_lines = visual_lines_for_text(
+            &self.value,
+            self.content_width(),
+            usize::from(prompt_width()),
+        );
         if visual_lines.is_empty() {
             self.viewport_y = 0;
             return;
@@ -380,7 +389,11 @@ impl Composer {
             return;
         }
 
-        let visual_lines = visual_lines_for_text(&self.value, self.content_width());
+        let visual_lines = visual_lines_for_text(
+            &self.value,
+            self.content_width(),
+            usize::from(prompt_width()),
+        );
         let (row, column) = logical_position(&self.value, self.cursor);
         let (cursor_visual_y, _) = calculate_cursor_visual_position(&visual_lines, row, column, 0);
         self.viewport_y = sync_viewport_offset_for_cursor(

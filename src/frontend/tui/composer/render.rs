@@ -21,8 +21,11 @@ pub(crate) fn render(composer: &Composer, palette: TerminalPalette) -> RenderRes
     let text_style = muted_text_style(palette);
 
     if composer.value().is_empty() {
-        let placeholder_lines =
-            placeholder_visual_lines_for_text(composer.placeholder(), composer.content_width());
+        let placeholder_lines = placeholder_visual_lines_for_text(
+            composer.placeholder(),
+            composer.content_width(),
+            prompt_width,
+        );
         let visible_lines =
             visible_viewport_lines(&placeholder_lines, 0, composer.viewport_height()).0;
 
@@ -41,7 +44,8 @@ pub(crate) fn render(composer: &Composer, palette: TerminalPalette) -> RenderRes
         };
     }
 
-    let visual_lines = visual_lines_for_text(composer.value(), composer.content_width());
+    let visual_lines =
+        visual_lines_for_text(composer.value(), composer.content_width(), prompt_width);
     let (row, column) = composer.cursor_position();
     let (full_cursor_y, cursor_visual_x) =
         calculate_cursor_visual_position(&visual_lines, row, column, prompt_width);

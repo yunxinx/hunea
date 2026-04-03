@@ -131,6 +131,9 @@ impl Transcript {
     /// `render` 渲染整个 transcript，并返回带锚点的稳定结果。
     pub(crate) fn render(&mut self) -> RenderResult {
         let width = self.render_width();
+        if self.can_reuse_cached_render_result(width) {
+            return self.screen_cache.result.clone();
+        }
         let (blocks, first_changed_index) = self.render_screen_blocks(width);
         if first_changed_index.is_none()
             && self
@@ -190,6 +193,27 @@ impl Transcript {
 
     fn render_width(&self) -> u16 {
         self.width.max(1)
+    }
+
+    /// `can_reuse_cached_render_result` 判断是否可以直接复用整份 RenderResult。
+    /// 只有 item 级缓存键、宽度与数量都保持一致时，才允许跳过 block 重建。
+    fn can_reuse_cached_render_result(&self, width: u16) -> bool {
+        if !self
+            .screen_cache
+            .can_reuse_result(width, self.gap, self.items.len())
+        {
+            return false;
+        }
+
+        for (index, item) in self.items.iter().enumerate() {
+            let cached = &self.screen_cache.items[index];
+            if !cached.valid || cached.width != width || cached.cache_key != item.render_cache_key()
+            {
+                return false;
+            }
+        }
+
+        true
     }
 
     fn render_screen_blocks(&mut self, width: u16) -> (Vec<CachedRenderBlock>, Option<usize>) {
@@ -444,6 +468,55 @@ mod tests {
         for _ in 0..128 {
             black_box(transcript.render());
         }
+    }
+
+    #[test]
+    fn cached_render_result_can_be_reused_when_item_cache_keys_are_stable() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.items = vec![TranscriptItem::Message(static_message("cached"))];
+
+        let _ = transcript.render();
+
+        assert!(transcript.can_reuse_cached_render_result(transcript.render_width()));
+    }
+
+    #[test]
+    fn cached_render_result_becomes_stale_after_item_content_changes() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.items = vec![TranscriptItem::Message(static_message("one"))];
+
+        let _ = transcript.render();
+        transcript.items[0] = TranscriptItem::Message(static_message("two"));
+
+        assert!(!transcript.can_reuse_cached_render_result(transcript.render_width()));
+    }
+
+    #[test]
+    fn render_refreshes_after_item_content_changes() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.items = vec![TranscriptItem::Message(static_message("one"))];
+
+        let first = transcript.render();
+        assert_eq!(first.plain_lines, vec!["one"]);
+
+        transcript.items[0] = TranscriptItem::Message(static_message("two"));
+
+        let second = transcript.render();
+        assert_eq!(second.plain_lines, vec!["two"]);
+    }
+
+    #[test]
+    fn render_viewport_refreshes_after_item_content_changes() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.items = vec![TranscriptItem::Message(static_message("one\ntwo"))];
+
+        let first = transcript.render_viewport(1, 1);
+        assert_eq!(first.plain_lines, vec!["two"]);
+
+        transcript.items[0] = TranscriptItem::Message(static_message("alpha\nbeta"));
+
+        let second = transcript.render_viewport(1, 1);
+        assert_eq!(second.plain_lines, vec!["beta"]);
     }
 
     fn static_message(content: &str) -> MessageItem {

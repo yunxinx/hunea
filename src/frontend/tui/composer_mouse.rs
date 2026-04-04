@@ -112,7 +112,7 @@ impl Model {
         let Some(line) = line_indices.get(usize::from(row)).copied() else {
             return false;
         };
-        if line != click.selection_point.line {
+        if line != click.selection_point.line() {
             return false;
         }
 
@@ -125,7 +125,11 @@ impl Model {
             return false;
         }
 
-        line_data.selectable.has_content() && usize::from(column) >= line_data.selectable.end_column
+        line_data.selectable.has_content()
+            && line_data
+                .selectable
+                .content_columns()
+                .is_some_and(|(_, end_column)| usize::from(column) >= end_column)
     }
 
     pub(crate) fn is_composer_edge_clamped_motion(
@@ -144,7 +148,7 @@ impl Model {
         let Some(line) = line_indices.get(usize::from(row)).copied() else {
             return false;
         };
-        if line != click.selection_point.line {
+        if line != click.selection_point.line() {
             return false;
         }
 
@@ -159,8 +163,7 @@ fn selection_point_for_drag_selectable_line(
     line: usize,
     selectable: SelectableLineRange,
 ) -> Option<SelectionPoint> {
-    selectable.has_anchor().then_some(SelectionPoint {
-        line,
-        column: selectable.clamp(column),
-    })
+    selectable
+        .has_anchor()
+        .then_some(SelectionPoint::new(line, selectable.clamp(column)))
 }

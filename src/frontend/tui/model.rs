@@ -9,8 +9,7 @@ use super::{
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
     document::{
-        LayoutCache, RestoreTarget, TranscriptCache, ViewportAnchor, ViewportCache,
-        offset_viewport_line_indices,
+        LayoutCache, RestoreState, TranscriptCache, ViewportCache, offset_viewport_line_indices,
     },
     external_editor::ExternalEditorLaunch,
     selection::{AutoScrollDirection, MousePosition, SelectionClickState, SelectionState},
@@ -24,54 +23,53 @@ use super::{
 /// `Model` 表示交互式 TUI 应用的状态。
 #[derive(Debug, Clone)]
 pub struct Model {
-    pub(crate) style_mode: StyleMode,
-    pub(crate) status_line_items: Vec<StatusLineItem>,
-    pub(crate) external_editor: Vec<String>,
-    pub(crate) external_editor_hint: String,
-    pub(crate) external_editor_helper_enabled: bool,
-    pub(crate) command_panel_selected: usize,
-    pub(crate) command_panel_scroll: usize,
-    pub(crate) copy_on_mouse_selection_release: bool,
-    pub(crate) swap_enter_and_send: bool,
-    pub(crate) ctrl_c_clears_input: bool,
-    pub(crate) selection: SelectionState,
-    pub(crate) selection_click: SelectionClickState,
-    pub(crate) pending_composer_cursor_click: PendingComposerCursorClick,
-    pub(crate) selection_version: usize,
-    pub(crate) selection_auto_scroll_direction: AutoScrollDirection,
-    pub(crate) selection_auto_scroll_token: usize,
-    pub(crate) selection_auto_scroll_mouse: MousePosition,
-    pub(crate) selection_auto_scroll_deadline: Option<Instant>,
-    pub(crate) git_branch: String,
-    pub(crate) current_dir: String,
-    pub(crate) palette: TerminalPalette,
-    pub(crate) palette_version: usize,
-    pub(crate) transcript: Transcript,
-    pub(crate) transcript_render: RenderResult,
-    pub(crate) transcript_render_version: usize,
-    pub(crate) composer: Composer,
-    pub(crate) width: u16,
-    pub(crate) height: u16,
-    pub(crate) document_viewport_y: usize,
-    pub(crate) document_transcript_cache: TranscriptCache,
-    pub(crate) document_layout_cache: LayoutCache,
-    pub(crate) document_viewport_cache: ViewportCache,
-    pub(crate) has_palette: bool,
-    pub(crate) has_window: bool,
-    pub(crate) has_dark_background: bool,
-    pub(crate) follow_bottom: bool,
-    pub(crate) manual_document_scroll: bool,
-    pub(crate) scroll_restore_target: RestoreTarget,
-    pub(crate) scroll_restore_anchor: ViewportAnchor,
-    pub(crate) status_notice_text: String,
-    pub(crate) status_notice_token: usize,
-    pub(crate) status_notice_deadline: Option<Instant>,
-    pub(crate) history_scroll_indicator_token: usize,
-    pub(crate) history_scroll_indicator_deadline: Option<Instant>,
-    pub(crate) external_editor_helper_visible: bool,
-    pub(crate) external_editor_helper_token: usize,
-    pub(crate) external_editor_helper_deadline: Option<Instant>,
-    pub(crate) exit_confirmation_deadline: Option<Instant>,
+    pub(super) style_mode: StyleMode,
+    pub(super) status_line_items: Vec<StatusLineItem>,
+    pub(super) external_editor: Vec<String>,
+    pub(super) external_editor_hint: String,
+    pub(super) external_editor_helper_enabled: bool,
+    pub(super) command_panel_selected: usize,
+    pub(super) command_panel_scroll: usize,
+    pub(super) copy_on_mouse_selection_release: bool,
+    pub(super) swap_enter_and_send: bool,
+    pub(super) ctrl_c_clears_input: bool,
+    pub(super) selection: SelectionState,
+    pub(super) selection_click: SelectionClickState,
+    pub(super) pending_composer_cursor_click: PendingComposerCursorClick,
+    pub(super) selection_version: usize,
+    pub(super) selection_auto_scroll_direction: AutoScrollDirection,
+    pub(super) selection_auto_scroll_token: usize,
+    pub(super) selection_auto_scroll_mouse: MousePosition,
+    pub(super) selection_auto_scroll_deadline: Option<Instant>,
+    pub(super) git_branch: String,
+    pub(super) current_dir: String,
+    pub(super) palette: TerminalPalette,
+    pub(super) palette_version: usize,
+    pub(super) transcript: Transcript,
+    pub(super) transcript_render: RenderResult,
+    pub(super) transcript_render_version: usize,
+    pub(super) composer: Composer,
+    pub(super) width: u16,
+    pub(super) height: u16,
+    pub(super) document_viewport_y: usize,
+    pub(super) document_transcript_cache: TranscriptCache,
+    pub(super) document_layout_cache: LayoutCache,
+    pub(super) document_viewport_cache: ViewportCache,
+    pub(super) has_palette: bool,
+    pub(super) has_window: bool,
+    pub(super) has_dark_background: bool,
+    pub(super) follow_bottom: bool,
+    pub(super) manual_document_scroll: bool,
+    pub(super) manual_scroll_restore: RestoreState,
+    pub(super) status_notice_text: String,
+    pub(super) status_notice_token: usize,
+    pub(super) status_notice_deadline: Option<Instant>,
+    pub(super) history_scroll_indicator_token: usize,
+    pub(super) history_scroll_indicator_deadline: Option<Instant>,
+    pub(super) external_editor_helper_visible: bool,
+    pub(super) external_editor_helper_token: usize,
+    pub(super) external_editor_helper_deadline: Option<Instant>,
+    pub(super) exit_confirmation_deadline: Option<Instant>,
     quitting: bool,
 }
 
@@ -168,8 +166,7 @@ impl Model {
             has_dark_background: true,
             follow_bottom: true,
             manual_document_scroll: false,
-            scroll_restore_target: RestoreTarget::None,
-            scroll_restore_anchor: ViewportAnchor::default(),
+            manual_scroll_restore: RestoreState::default(),
             status_notice_text: String::new(),
             status_notice_token: 0,
             status_notice_deadline: None,
@@ -253,7 +250,7 @@ impl Model {
         } else {
             None
         };
-        if self.selection.active {
+        if self.selection.is_active() {
             self.invalidate_selection_for_reflow();
         }
         if self.palette != palette {
@@ -349,12 +346,12 @@ impl Model {
     }
 
     pub(crate) fn sync_transcript_render(&mut self) {
-        if self.selection.active {
+        if self.selection.is_active() {
             self.invalidate_selection_for_reflow();
         }
         self.transcript_render = self.transcript.render();
         self.transcript_render_version += 1;
-        self.document_viewport_cache.valid = false;
+        self.invalidate_document_viewport_cache();
     }
 
     fn bottom_follow_composer_content_line_count(

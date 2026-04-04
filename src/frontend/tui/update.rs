@@ -343,7 +343,7 @@ impl Model {
         let previous_width = self.width;
         let had_pending_click = self.pending_composer_cursor_click.active;
 
-        if self.selection.active {
+        if self.selection.is_active() {
             self.invalidate_selection_for_reflow();
         }
         self.set_window(width, height);

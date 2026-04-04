@@ -202,8 +202,6 @@ impl Model {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::text::Line;
-
     use crate::frontend::tui::{
         HeroOptions, Model, Sender,
         document::{DocumentLayout, DocumentViewport},
@@ -220,24 +218,7 @@ mod tests {
         model.document_viewport_y = 0;
         model.show_history_scroll_indicator();
 
-        let layout = DocumentLayout {
-            transcript_line_count: 5,
-            lines: vec![
-                Line::raw("a"),
-                Line::raw("b"),
-                Line::raw("c"),
-                Line::raw("d"),
-                Line::raw("e"),
-            ],
-            plain_lines: vec![
-                "a".to_string(),
-                "b".to_string(),
-                "c".to_string(),
-                "d".to_string(),
-                "e".to_string(),
-            ],
-            ..DocumentLayout::default()
-        };
+        let layout = DocumentLayout::with_test_plain_lines(5, &["a", "b", "c", "d", "e"]);
 
         assert_eq!(model.history_scroll_percentage(&layout), Some(0));
     }
@@ -276,29 +257,8 @@ mod tests {
         model.document_viewport_y = 2;
         model.show_history_scroll_indicator();
 
-        let layout = DocumentLayout {
-            transcript_line_count: 5,
-            lines: vec![
-                Line::raw("a"),
-                Line::raw("b"),
-                Line::raw("c"),
-                Line::raw("d"),
-                Line::raw("e"),
-            ],
-            plain_lines: vec![
-                "a".to_string(),
-                "b".to_string(),
-                "c".to_string(),
-                "d".to_string(),
-                "e".to_string(),
-            ],
-            ..DocumentLayout::default()
-        };
-        let viewport = DocumentViewport {
-            lines: vec![Line::raw("c")],
-            plain_lines: vec!["c".to_string()],
-            resolved_offset: 2,
-        };
+        let layout = DocumentLayout::with_test_plain_lines(5, &["a", "b", "c", "d", "e"]);
+        let viewport = DocumentViewport::with_test_plain_lines(&["c"], 2);
         let bounds = model
             .current_history_scroll_indicator_bounds(&layout, &viewport)
             .expect("indicator bounds should exist");

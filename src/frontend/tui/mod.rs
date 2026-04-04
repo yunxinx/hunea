@@ -1,3 +1,6 @@
+#[doc(hidden)]
+pub mod benchmark;
+
 mod command_panel;
 mod composer;
 mod composer_mouse;

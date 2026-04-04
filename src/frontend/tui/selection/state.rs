@@ -9,27 +9,104 @@ pub(crate) const SELECTION_AUTO_SCROLL_INTERVAL: Duration = Duration::from_milli
 /// `SelectionPoint` 用统一文档坐标记录选区端点。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SelectionPoint {
-    pub(crate) line: usize,
-    pub(crate) column: usize,
+    line: usize,
+    column: usize,
+}
+
+impl SelectionPoint {
+    pub(crate) const fn new(line: usize, column: usize) -> Self {
+        Self { line, column }
+    }
+
+    pub(crate) const fn line(self) -> usize {
+        self.line
+    }
+
+    pub(crate) const fn column(self) -> usize {
+        self.column
+    }
 }
 
 /// `MousePosition` 记录最近一次拖拽时的鼠标位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct MousePosition {
-    pub(crate) column: u16,
-    pub(crate) row: u16,
+    column: u16,
+    row: u16,
+}
+
+impl MousePosition {
+    pub(crate) const fn new(column: u16, row: u16) -> Self {
+        Self { column, row }
+    }
+
+    pub(crate) const fn column(self) -> u16 {
+        self.column
+    }
+
+    pub(crate) const fn row(self) -> u16 {
+        self.row
+    }
 }
 
 /// `SelectionState` 保存当前屏幕选区状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SelectionState {
-    pub(crate) active: bool,
-    pub(crate) dragging: bool,
-    pub(crate) anchor: SelectionPoint,
-    pub(crate) focus: SelectionPoint,
+    active: bool,
+    dragging: bool,
+    anchor: SelectionPoint,
+    focus: SelectionPoint,
 }
 
 impl SelectionState {
+    pub(crate) const fn is_active(self) -> bool {
+        self.active
+    }
+
+    pub(crate) const fn is_dragging(self) -> bool {
+        self.dragging
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn anchor(self) -> SelectionPoint {
+        self.anchor
+    }
+
+    pub(crate) const fn focus(self) -> SelectionPoint {
+        self.focus
+    }
+
+    pub(crate) fn begin(&mut self, point: SelectionPoint) {
+        self.active = true;
+        self.dragging = true;
+        self.anchor = point;
+        self.focus = point;
+    }
+
+    pub(crate) fn update_focus(&mut self, point: SelectionPoint) {
+        self.focus = point;
+    }
+
+    pub(crate) fn finish(&mut self, point: SelectionPoint) {
+        self.focus = point;
+        self.dragging = false;
+        self.active = true;
+    }
+
+    pub(crate) fn stop_drag(&mut self) {
+        self.dragging = false;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(crate) fn select_range(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
+        self.active = true;
+        self.dragging = false;
+        self.anchor = anchor;
+        self.focus = focus;
+    }
+
     pub(crate) fn ordered_points(self) -> Option<(SelectionPoint, SelectionPoint)> {
         if !self.active {
             return None;
@@ -51,9 +128,34 @@ impl SelectionState {
 /// `SelectionClickState` 服务双击/三击扩选。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SelectionClickState {
-    pub(crate) point: SelectionPoint,
-    pub(crate) count: u8,
-    pub(crate) at: Option<Instant>,
+    point: SelectionPoint,
+    count: u8,
+    at: Option<Instant>,
+}
+
+impl SelectionClickState {
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(crate) fn register(&mut self, point: SelectionPoint, at: Instant) -> u8 {
+        let mut next_count = 1;
+        if let Some(previous_at) = self.at
+            && at.duration_since(previous_at) <= SELECTION_MULTI_CLICK_WINDOW
+            && self.point.line == point.line
+            && self.point.column.abs_diff(point.column) <= 1
+        {
+            next_count = self.count.saturating_add(1);
+            if next_count > 3 {
+                next_count = 1;
+            }
+        }
+
+        self.point = point;
+        self.count = next_count;
+        self.at = Some(at);
+        next_count
+    }
 }
 
 /// `AutoScrollDirection` 表示拖拽选区时的自动滚动方向。
@@ -86,6 +188,44 @@ pub(crate) fn selection_auto_scroll_direction_for_mouse_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_state_transition_helpers_keep_drag_lifecycle_consistent() {
+        let anchor = SelectionPoint::new(2, 3);
+        let focus = SelectionPoint::new(4, 6);
+        let mut selection = SelectionState::default();
+
+        selection.begin(anchor);
+        assert!(selection.is_active());
+        assert!(selection.is_dragging());
+        assert_eq!(selection.anchor(), anchor);
+        assert_eq!(selection.focus(), anchor);
+
+        selection.update_focus(focus);
+        selection.finish(focus);
+        assert!(selection.is_active());
+        assert!(!selection.is_dragging());
+        assert_eq!(selection.focus(), focus);
+        assert_eq!(selection.ordered_points(), Some((anchor, focus)));
+
+        selection.clear();
+        assert_eq!(selection, SelectionState::default());
+    }
+
+    #[test]
+    fn selection_click_state_register_cycles_after_triple_click() {
+        let point = SelectionPoint::new(3, 5);
+        let start = Instant::now();
+        let mut click = SelectionClickState::default();
+
+        assert_eq!(click.register(point, start), 1);
+        assert_eq!(click.register(point, start + Duration::from_millis(100)), 2);
+        assert_eq!(click.register(point, start + Duration::from_millis(200)), 3);
+        assert_eq!(click.register(point, start + Duration::from_millis(300)), 1);
+
+        click.clear();
+        assert_eq!(click, SelectionClickState::default());
+    }
 
     #[test]
     fn ordered_points_normalizes_reverse_drag() {

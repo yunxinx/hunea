@@ -3,11 +3,12 @@ use std::cmp::Ordering;
 use crate::frontend::tui::{Model, transcript::LineAnchorKind};
 
 use super::{
-    DocumentLayout, DocumentViewportAnchor, ManualDocumentScrollRestoreTarget,
+    DocumentLayout, DocumentViewportAnchor,
     anchor_match::{
         canonical_rendered_transcript_anchor_text, find_document_offset_for_viewport_anchor,
         transcript_content_line_count_for_item,
     },
+    manual_scroll::crossed_manual_document_scroll_restore_target,
 };
 
 const DOCUMENT_MOUSE_WHEEL_DELTA: isize = 3;
@@ -211,7 +212,7 @@ impl Model {
         old_column: usize,
     ) {
         if self.composer.value() != old_value {
-            if self.selection.active {
+            if self.selection.is_active() {
                 self.invalidate_selection_for_reflow();
             }
             if self.manual_document_scroll {
@@ -274,81 +275,6 @@ impl Model {
         self.sync_document_viewport_for_composer_cursor();
     }
 
-    pub(crate) fn clear_manual_document_scroll_restore_target(&mut self) {
-        self.scroll_restore_target = ManualDocumentScrollRestoreTarget::None;
-        self.scroll_restore_anchor = DocumentViewportAnchor::default();
-    }
-
-    pub(crate) fn start_manual_document_scroll_if_needed(&mut self) {
-        if self.manual_document_scroll {
-            return;
-        }
-
-        if self.follow_bottom {
-            self.scroll_restore_target = ManualDocumentScrollRestoreTarget::BottomFollow;
-            return;
-        }
-
-        if let Some(anchor) = self.current_document_viewport_anchor() {
-            self.scroll_restore_target = ManualDocumentScrollRestoreTarget::ComposerCursor;
-            self.scroll_restore_anchor = anchor;
-            return;
-        }
-
-        self.scroll_restore_target = ManualDocumentScrollRestoreTarget::ComposerCursor;
-    }
-
-    pub(crate) fn manual_document_scroll_restore_offsets(
-        &self,
-        layout: &DocumentLayout,
-    ) -> (usize, usize, bool) {
-        match self.scroll_restore_target {
-            ManualDocumentScrollRestoreTarget::BottomFollow => {
-                let (document_offset, composer_offset) =
-                    self.bottom_follow_viewport_offsets(layout);
-                (document_offset, composer_offset, true)
-            }
-            _ => {
-                if let Some(offset) =
-                    find_document_offset_for_viewport_anchor(layout, &self.scroll_restore_anchor)
-                {
-                    let document_offset =
-                        self.clamp_document_viewport_offset(offset, layout.line_count());
-                    if self.document_offset_keeps_cursor_visible(layout, document_offset) {
-                        let composer_offset =
-                            self.current_composer_viewport_offset(layout, document_offset);
-                        return (document_offset, composer_offset, false);
-                    }
-                }
-
-                let (document_offset, composer_offset) =
-                    self.composer_cursor_restore_viewport_offsets(layout);
-                (document_offset, composer_offset, false)
-            }
-        }
-    }
-
-    pub(crate) fn complete_manual_document_scroll_if_restored(&mut self) {
-        if !self.manual_document_scroll
-            || self.scroll_restore_target == ManualDocumentScrollRestoreTarget::None
-        {
-            return;
-        }
-
-        let layout = self.build_document_layout();
-        let (restore_offset, restore_composer_offset, restore_follow_bottom) =
-            self.manual_document_scroll_restore_offsets(&layout);
-        if self.document_viewport_y != restore_offset
-            || self.composer.viewport_offset() != restore_composer_offset
-        {
-            return;
-        }
-
-        self.follow_bottom = restore_follow_bottom;
-        self.manual_document_scroll = false;
-        self.clear_manual_document_scroll_restore_target();
-    }
-
     pub(crate) fn composer_at_bottom_follow_anchor(&self) -> bool {
         if self.composer.value().is_empty() {
             return true;
@@ -361,32 +287,6 @@ impl Model {
 
         self.composer.line() == lines.len().saturating_sub(1)
             && self.composer.column() == last_line.chars().count()
-    }
-
-    fn restore_from_manual_document_scroll(&mut self) {
-        let layout = self.build_document_layout();
-        let (document_offset, composer_offset, follow_bottom) =
-            self.manual_document_scroll_edit_restore_offsets(&layout);
-        self.document_viewport_y = document_offset;
-        self.composer.set_viewport_offset(composer_offset);
-        self.follow_bottom = follow_bottom;
-        self.manual_document_scroll = false;
-        self.clear_manual_document_scroll_restore_target();
-    }
-
-    fn clamp_document_viewport_offset_signed(
-        &self,
-        offset: usize,
-        delta: isize,
-        total_lines: usize,
-    ) -> usize {
-        let next = if delta.is_negative() {
-            offset.saturating_sub(delta.unsigned_abs())
-        } else {
-            offset.saturating_add(delta as usize)
-        };
-
-        self.clamp_document_viewport_offset(next, total_lines)
     }
 
     pub(crate) fn bottom_follow_viewport_offsets(&self, layout: &DocumentLayout) -> (usize, usize) {
@@ -407,64 +307,5 @@ impl Model {
             self.document_bottom_offset(layout.line_count()),
             self.composer.bottom_viewport_offset(),
         )
-    }
-
-    fn composer_cursor_restore_viewport_offsets(&self, layout: &DocumentLayout) -> (usize, usize) {
-        let viewport_height = self.document_viewport_height();
-        if viewport_height == 0 {
-            return (0, 0);
-        }
-
-        let document_offset = self.clamp_document_viewport_offset(
-            layout.cursor_y.saturating_sub(viewport_height - 1),
-            layout.line_count(),
-        );
-        let composer_offset = self.current_composer_viewport_offset(layout, document_offset);
-        (document_offset, composer_offset)
-    }
-
-    fn document_offset_keeps_cursor_visible(
-        &self,
-        layout: &DocumentLayout,
-        document_offset: usize,
-    ) -> bool {
-        let viewport_height = self.document_viewport_height();
-        if viewport_height == 0 {
-            return true;
-        }
-
-        let document_offset =
-            self.clamp_document_viewport_offset(document_offset, layout.line_count());
-        layout.cursor_y >= document_offset && layout.cursor_y < document_offset + viewport_height
-    }
-
-    fn manual_document_scroll_edit_restore_offsets(
-        &self,
-        layout: &DocumentLayout,
-    ) -> (usize, usize, bool) {
-        match self.scroll_restore_target {
-            ManualDocumentScrollRestoreTarget::BottomFollow => {
-                let (document_offset, composer_offset) =
-                    self.bottom_follow_viewport_offsets(layout);
-                (document_offset, composer_offset, true)
-            }
-            _ => {
-                let (document_offset, composer_offset) =
-                    self.composer_cursor_restore_viewport_offsets(layout);
-                (document_offset, composer_offset, false)
-            }
-        }
-    }
-}
-
-fn crossed_manual_document_scroll_restore_target(
-    current_offset: usize,
-    next_offset: usize,
-    restore_offset: usize,
-) -> bool {
-    match current_offset.cmp(&restore_offset) {
-        Ordering::Less => next_offset >= restore_offset,
-        Ordering::Greater => next_offset <= restore_offset,
-        Ordering::Equal => false,
     }
 }

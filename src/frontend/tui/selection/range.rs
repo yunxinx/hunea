@@ -6,10 +6,10 @@ use super::SelectionState;
 /// `SelectableLineRange` 描述一条渲染行里真正可落点、可复制的正文列范围。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SelectableLineRange {
-    pub(crate) start_column: usize,
-    pub(crate) end_column: usize,
-    pub(crate) anchor_start_column: usize,
-    pub(crate) anchor_end_column: usize,
+    start_column: usize,
+    end_column: usize,
+    anchor_start_column: usize,
+    anchor_end_column: usize,
 }
 
 impl SelectableLineRange {
@@ -44,6 +44,17 @@ impl SelectableLineRange {
 
     pub(crate) fn has_anchor(self) -> bool {
         self.anchor_end_column > self.anchor_start_column
+    }
+
+    pub(crate) fn content_columns(self) -> Option<(usize, usize)> {
+        self.has_content()
+            .then_some((self.start_column, self.end_column))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn anchor_columns(self) -> Option<(usize, usize)> {
+        self.has_anchor()
+            .then_some((self.anchor_start_column, self.anchor_end_column))
     }
 
     pub(crate) fn contains(self, column: usize) -> bool {
@@ -96,18 +107,29 @@ pub(crate) fn selection_columns_for_line(
     selectable: SelectableLineRange,
 ) -> Option<(usize, usize)> {
     let (start, end) = selection.ordered_points()?;
-    if line < start.line || line > end.line || !selectable.has_content() {
+    if line < start.line() || line > end.line() || !selectable.has_content() {
         return None;
     }
 
-    let (start_column, end_column) = if start.line == end.line {
-        (selectable.clamp(start.column), selectable.clamp(end.column))
-    } else if line == start.line {
-        (selectable.clamp(start.column), selectable.end_column)
-    } else if line == end.line {
-        (selectable.start_column, selectable.clamp(end.column))
+    let (start_column, end_column) = if start.line() == end.line() {
+        (
+            selectable.clamp(start.column()),
+            selectable.clamp(end.column()),
+        )
+    } else if line == start.line() {
+        let (_, end_column) = selectable
+            .content_columns()
+            .expect("content columns checked above");
+        (selectable.clamp(start.column()), end_column)
+    } else if line == end.line() {
+        let (start_column, _) = selectable
+            .content_columns()
+            .expect("content columns checked above");
+        (start_column, selectable.clamp(end.column()))
     } else {
-        (selectable.start_column, selectable.end_column)
+        selectable
+            .content_columns()
+            .expect("content columns checked above")
     };
 
     (start_column < end_column).then_some((start_column, end_column))
@@ -121,15 +143,18 @@ pub(crate) fn selection_ends_before_line_content(
     let Some((start, end)) = selection.ordered_points() else {
         return false;
     };
-    if start.line >= end.line || line != end.line {
+    if start.line() >= end.line() || line != end.line() {
         return false;
     }
 
     if !selectable.has_content() {
-        return end.column == 0;
+        return end.column() == 0;
     }
 
-    end.column <= selectable.start_column
+    let (start_column, _) = selectable
+        .content_columns()
+        .expect("content columns checked above");
+    end.column() <= start_column
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +282,17 @@ mod tests {
     use crate::frontend::tui::selection::{SelectionPoint, SelectionState};
 
     #[test]
+    fn selectable_range_reports_semantic_content_and_anchor_bounds() {
+        let content = SelectableLineRange::new(2, 6);
+        assert_eq!(content.content_columns(), Some((2, 6)));
+        assert_eq!(content.anchor_columns(), Some((2, 6)));
+
+        let blank = SelectableLineRange::blank_anchor(0, 8);
+        assert_eq!(blank.content_columns(), None);
+        assert_eq!(blank.anchor_columns(), Some((0, 8)));
+    }
+
+    #[test]
     fn blank_anchor_can_accept_mouse_hit_without_copying_fill() {
         let range = SelectableLineRange::blank_anchor(0, 8);
 
@@ -268,12 +304,8 @@ mod tests {
 
     #[test]
     fn selection_columns_respect_single_line_range() {
-        let selection = SelectionState {
-            active: true,
-            dragging: false,
-            anchor: SelectionPoint { line: 1, column: 2 },
-            focus: SelectionPoint { line: 1, column: 5 },
-        };
+        let mut selection = SelectionState::default();
+        selection.select_range(SelectionPoint::new(1, 2), SelectionPoint::new(1, 5));
 
         assert_eq!(
             selection_columns_for_line(selection, 1, SelectableLineRange::new(0, 10)),

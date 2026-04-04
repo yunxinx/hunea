@@ -7,12 +7,12 @@ use super::{SelectionState, selection_columns_for_line, selection_ends_before_li
 
 pub(crate) fn selection_text(layout: &DocumentLayout, selection: SelectionState) -> Option<String> {
     let (start, end) = selection.ordered_points()?;
-    if start.line >= layout.line_count() || end.line >= layout.line_count() {
+    if start.line() >= layout.line_count() || end.line() >= layout.line_count() {
         return None;
     }
 
-    let mut lines = Vec::with_capacity(end.line.saturating_sub(start.line) + 1);
-    for line in start.line..=end.line {
+    let mut lines = Vec::with_capacity(end.line().saturating_sub(start.line()) + 1);
+    for line in start.line()..=end.line() {
         if let Some(line_data) = layout.line_at(line)
             && let Some((start_column, end_column)) =
                 selection_columns_for_line(selection, line, line_data.selectable)
@@ -95,12 +95,11 @@ mod tests {
     #[test]
     fn out_of_range_selection_is_ignored() {
         let layout = DocumentLayout::default();
-        let selection = SelectionState {
-            active: true,
-            dragging: false,
-            anchor: super::super::SelectionPoint { line: 1, column: 0 },
-            focus: super::super::SelectionPoint { line: 2, column: 1 },
-        };
+        let mut selection = SelectionState::default();
+        selection.select_range(
+            super::super::SelectionPoint::new(1, 0),
+            super::super::SelectionPoint::new(2, 1),
+        );
 
         assert_eq!(selection_text(&layout, selection), None);
     }

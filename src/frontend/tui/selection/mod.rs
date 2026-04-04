@@ -1,303 +1,36 @@
 mod copy;
+mod mouse;
 mod range;
 mod render;
 mod state;
-
+mod viewport;
 use std::time::Instant;
 
-use crossterm::event::MouseButton;
 use unicode_width::UnicodeWidthStr;
 
-use crate::frontend::tui::{
-    AppEffect, Model,
-    composer_mouse::PendingComposerCursorClick,
-    document::{
-        DocumentAnchorRegion, DocumentLayout, DocumentViewport,
-        bottom_follow_viewport_line_indices, offset_viewport_line_indices,
-    },
-};
+use crate::frontend::tui::{AppEffect, Model, document::DocumentLayout};
 
-pub(crate) use self::copy::selection_text;
-pub(crate) use self::range::{
+pub(super) use self::copy::selection_text;
+pub(super) use self::range::{
     SelectableLineRange, normalize_transcript_selectable_range, selectable_range_for_plain_line,
     selection_columns_for_line, selection_ends_before_line_content, word_selection_columns,
 };
-pub(crate) use self::render::apply_selection_to_line;
-pub(crate) use self::state::{
-    AutoScrollDirection, MousePosition, SELECTION_AUTO_SCROLL_INTERVAL,
-    SELECTION_MULTI_CLICK_WINDOW, SelectionClickState, SelectionPoint, SelectionState,
-    selection_auto_scroll_direction_for_mouse_row,
+pub(super) use self::render::apply_selection_to_line;
+pub(super) use self::state::{
+    AutoScrollDirection, MousePosition, SELECTION_AUTO_SCROLL_INTERVAL, SelectionClickState,
+    SelectionPoint, SelectionState, selection_auto_scroll_direction_for_mouse_row,
 };
+pub(super) use self::viewport::apply_selection_to_viewport;
 
 const SELECTION_COPIED_NOTICE_TEXT: &str = "Selection copied";
 const SELECTION_COPY_FAILED_NOTICE_TEXT: &str = "Copy selection failed";
 
 impl Model {
-    pub(crate) fn handle_mouse_down(
-        &mut self,
-        button: MouseButton,
-        column: u16,
-        row: u16,
-    ) -> Option<AppEffect> {
-        if let Some(effect) = self.handle_history_scroll_indicator_mouse_down(button, column, row) {
-            return effect;
-        }
-
-        self.clear_history_scroll_indicator();
-        self.cancel_exit_confirmation();
-
-        match button {
-            MouseButton::Middle => {
-                self.clear_pending_composer_cursor_click();
-                self.reset_selection_click();
-                self.request_copy_selection()
-            }
-            MouseButton::Left => {
-                self.stop_selection_auto_scroll();
-                let layout = self.build_document_layout();
-                if let Some(click) = self.composer_cursor_click_for_mouse(column, row) {
-                    if !click.hit_content && click.line_has_content {
-                        self.reset_selection_click();
-                        self.clear_selection_range();
-                        self.pending_composer_cursor_click = click;
-                        return None;
-                    }
-
-                    match self.register_selection_click(click.selection_point, Instant::now()) {
-                        2 => {
-                            self.clear_pending_composer_cursor_click();
-                            if self.select_word_at_point(click.selection_point, &layout) {
-                                return None;
-                            }
-                        }
-                        3 => {
-                            self.clear_pending_composer_cursor_click();
-                            self.select_line_at_point(click.selection_point.line, &layout);
-                            return None;
-                        }
-                        _ => {}
-                    }
-
-                    self.clear_selection_range();
-                    self.pending_composer_cursor_click = click;
-                    return None;
-                }
-
-                self.clear_pending_composer_cursor_click();
-                if let Some(point) =
-                    self.selection_point_for_mouse_with_layout(column, row, &layout)
-                {
-                    match self.register_selection_click(point, Instant::now()) {
-                        2 if self.select_word_at_point(point, &layout) => return None,
-                        3 => {
-                            self.select_line_at_point(point.line, &layout);
-                            return None;
-                        }
-                        _ => {
-                            self.start_selection(point);
-                            return None;
-                        }
-                    }
-                }
-
-                self.clear_selection();
-                None
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn handle_mouse_up(
-        &mut self,
-        button: MouseButton,
-        column: u16,
-        row: u16,
-    ) -> Option<AppEffect> {
-        self.clear_history_scroll_indicator();
-        self.cancel_exit_confirmation();
-
-        if button == MouseButton::Left && self.pending_composer_cursor_click.active {
-            let click = self.pending_composer_cursor_click;
-            self.clear_pending_composer_cursor_click();
-
-            if let Some(release_click) = self.composer_cursor_click_for_mouse(column, row)
-                && self.same_composer_cursor_target(click, release_click)
-                && !self.is_composer_end_gutter_drag(click, column, row)
-            {
-                self.clear_selection_range();
-                self.handle_composer_cursor_click(release_click);
-                return None;
-            }
-
-            if let Some(point) = self.selection_point_for_drag_mouse(column, row)
-                && point != click.selection_point
-            {
-                self.start_selection(click.selection_point);
-                self.finish_selection(point);
-                self.reset_selection_click();
-                if self.copy_on_mouse_selection_release && self.selection.ordered_points().is_some()
-                {
-                    return self.request_copy_selection();
-                }
-                return None;
-            }
-
-            if column != click.column || row != click.row {
-                self.reset_selection_click();
-                self.clear_selection_range();
-                return None;
-            }
-
-            self.clear_selection_range();
-            self.handle_composer_cursor_click(click);
-            return None;
-        }
-
-        if button != MouseButton::Left || !self.selection.active {
-            return None;
-        }
-
-        let was_dragging = self.selection.dragging;
-        self.stop_selection_auto_scroll();
-        if was_dragging {
-            if let Some(point) = self.selection_point_for_drag_mouse(column, row) {
-                self.finish_selection(point);
-            } else {
-                self.selection.dragging = false;
-            }
-        }
-
-        let completed_drag_selection = was_dragging && self.selection.ordered_points().is_some();
-        if completed_drag_selection {
-            self.reset_selection_click();
-        }
-        if self.copy_on_mouse_selection_release && completed_drag_selection {
-            return self.request_copy_selection();
-        }
-
-        None
-    }
-
-    pub(crate) fn handle_mouse_drag(
-        &mut self,
-        button: MouseButton,
-        column: u16,
-        row: u16,
-    ) -> Option<AppEffect> {
-        self.cancel_exit_confirmation();
-        if button != MouseButton::Left {
-            return None;
-        }
-
-        if self.pending_composer_cursor_click.active {
-            let click = self.pending_composer_cursor_click;
-            if let Some(motion_click) = self.composer_cursor_click_for_mouse(column, row)
-                && self.same_composer_cursor_target(click, motion_click)
-            {
-                if self.is_composer_end_gutter_drag(click, column, row) {
-                    self.start_selection(click.selection_point);
-                    self.clear_pending_composer_cursor_click();
-                    if let Some(point) = self.selection_point_for_drag_mouse(column, row) {
-                        self.update_selection_focus(point);
-                    }
-                    self.update_selection_auto_scroll(MousePosition { column, row });
-                    return None;
-                }
-
-                if self.is_composer_edge_clamped_motion(click, row) {
-                    if click.edge_motions == 0 {
-                        self.pending_composer_cursor_click = PendingComposerCursorClick {
-                            edge_motions: 1,
-                            ..click
-                        };
-                        return None;
-                    }
-
-                    self.start_selection(click.selection_point);
-                    self.clear_pending_composer_cursor_click();
-                    self.update_selection_auto_scroll(MousePosition { column, row });
-                    return None;
-                }
-
-                return None;
-            }
-
-            let point = self.selection_point_for_drag_mouse(column, row);
-            let left_viewport = usize::from(row) >= self.document_viewport_height();
-            if point.is_none() || point == Some(click.selection_point) {
-                if left_viewport || self.is_composer_edge_clamped_motion(click, row) {
-                    self.start_selection(click.selection_point);
-                    self.clear_pending_composer_cursor_click();
-                    self.update_selection_auto_scroll(MousePosition { column, row });
-                    return None;
-                }
-
-                return None;
-            }
-
-            self.start_selection(click.selection_point);
-            self.clear_pending_composer_cursor_click();
-            self.update_selection_focus(point.expect("point checked to exist"));
-            self.update_selection_auto_scroll(MousePosition { column, row });
-            return None;
-        }
-
-        if !self.selection.dragging {
-            return None;
-        }
-
-        if let Some(point) = self.selection_point_for_drag_mouse(column, row) {
-            self.update_selection_focus(point);
-        }
-        self.update_selection_auto_scroll(MousePosition { column, row });
-        None
-    }
-
-    pub(crate) fn handle_selection_auto_scroll_tick(&mut self, token: usize) {
-        if !self.selection.dragging
-            || self.selection_auto_scroll_direction == AutoScrollDirection::None
-            || token != self.selection_auto_scroll_token
-        {
-            return;
-        }
-
-        let previous_viewport_y = self.document_viewport_y;
-        match self.selection_auto_scroll_direction {
-            AutoScrollDirection::Down => self.scroll_document_by(1),
-            AutoScrollDirection::Up => self.scroll_document_by(-1),
-            AutoScrollDirection::None => {}
-        }
-
-        if self.document_viewport_y == previous_viewport_y {
-            self.stop_selection_auto_scroll();
-            return;
-        }
-
-        if let Some(point) = self.selection_point_for_drag_mouse(
-            self.selection_auto_scroll_mouse.column,
-            self.selection_auto_scroll_mouse.row,
-        ) {
-            self.update_selection_focus(point);
-        }
-        self.arm_selection_auto_scroll();
-    }
-
     pub(crate) fn handle_selection_copy_completed(&mut self, success: bool) {
         if success {
             self.show_transient_status_notice(SELECTION_COPIED_NOTICE_TEXT);
         } else {
             self.show_transient_status_notice(SELECTION_COPY_FAILED_NOTICE_TEXT);
-        }
-    }
-
-    pub(crate) fn maybe_clear_selection_for_bottom_status_slot_change(&mut self) {
-        if !self.selection.active {
-            return;
-        }
-
-        let layout = self.build_document_layout();
-        if selection_intersects_status_line(&layout, self.selection) {
-            self.clear_selection();
         }
     }
 
@@ -307,12 +40,8 @@ impl Model {
     }
 
     pub(crate) fn start_selection(&mut self, point: SelectionPoint) {
-        let next = SelectionState {
-            active: true,
-            dragging: true,
-            anchor: point,
-            focus: point,
-        };
+        let mut next = SelectionState::default();
+        next.begin(point);
         if self.selection == next {
             return;
         }
@@ -322,24 +51,23 @@ impl Model {
     }
 
     pub(crate) fn update_selection_focus(&mut self, point: SelectionPoint) {
-        if !self.selection.active || self.selection.focus == point {
+        if !self.selection.is_active() || self.selection.focus() == point {
             return;
         }
 
-        self.selection.focus = point;
+        self.selection.update_focus(point);
         self.mark_selection_changed();
     }
 
     pub(crate) fn finish_selection(&mut self, point: SelectionPoint) {
-        if !self.selection.active {
+        if !self.selection.is_active() {
             return;
         }
-        if self.selection.focus == point && !self.selection.dragging {
+        if self.selection.focus() == point && !self.selection.is_dragging() {
             return;
         }
 
-        self.selection.focus = point;
-        self.selection.dragging = false;
+        self.selection.finish(point);
         self.mark_selection_changed();
     }
 
@@ -355,7 +83,7 @@ impl Model {
             return;
         }
 
-        self.selection = SelectionState::default();
+        self.selection.clear();
         self.mark_selection_changed();
     }
 
@@ -364,33 +92,16 @@ impl Model {
             return;
         }
 
-        self.selection = SelectionState::default();
+        self.selection.clear();
         self.mark_selection_changed();
     }
 
     pub(crate) fn reset_selection_click(&mut self) {
-        self.selection_click = SelectionClickState::default();
+        self.selection_click.clear();
     }
 
     pub(crate) fn register_selection_click(&mut self, point: SelectionPoint, at: Instant) -> u8 {
-        let mut next_count = 1;
-        if let Some(previous_at) = self.selection_click.at
-            && at.duration_since(previous_at) <= SELECTION_MULTI_CLICK_WINDOW
-            && self.selection_click.point.line == point.line
-            && self.selection_click.point.column.abs_diff(point.column) <= 1
-        {
-            next_count = self.selection_click.count.saturating_add(1);
-            if next_count > 3 {
-                next_count = 1;
-            }
-        }
-
-        self.selection_click = SelectionClickState {
-            point,
-            count: next_count,
-            at: Some(at),
-        };
-        next_count
+        self.selection_click.register(point, at)
     }
 
     pub(crate) fn select_word_at_point(
@@ -398,25 +109,17 @@ impl Model {
         point: SelectionPoint,
         layout: &DocumentLayout,
     ) -> bool {
-        let Some(line) = layout.line_text_at(point.line) else {
+        let Some(line) = layout.line_text_at(point.line()) else {
             return false;
         };
-        let Some((start_column, end_column)) = word_selection_columns(&line, point.column) else {
+        let Some((start_column, end_column)) = word_selection_columns(&line, point.column()) else {
             return false;
         };
 
-        self.selection = SelectionState {
-            active: true,
-            dragging: false,
-            anchor: SelectionPoint {
-                line: point.line,
-                column: start_column,
-            },
-            focus: SelectionPoint {
-                line: point.line,
-                column: end_column,
-            },
-        };
+        self.selection.select_range(
+            SelectionPoint::new(point.line(), start_column),
+            SelectionPoint::new(point.line(), end_column),
+        );
         self.mark_selection_changed();
         true
     }
@@ -426,98 +129,36 @@ impl Model {
             .line_at(line)
             .map(|line_data| line_data.selectable)
             .unwrap_or_default();
-        let start_column = if selectable.has_content() {
-            selectable.start_column
-        } else {
-            0
-        };
+        let start_column = selectable
+            .content_columns()
+            .map(|(start_column, _)| start_column)
+            .unwrap_or_default();
         let focus = if line + 1 < layout.line_count() {
-            SelectionPoint {
-                line: line + 1,
-                column: 0,
-            }
+            SelectionPoint::new(line + 1, 0)
         } else {
-            SelectionPoint {
+            SelectionPoint::new(
                 line,
-                column: if selectable.has_content() {
-                    selectable.end_column
-                } else {
-                    layout
-                        .line_text_at(line)
-                        .map(|text| text.width())
-                        .unwrap_or_default()
-                },
-            }
+                selectable
+                    .content_columns()
+                    .map(|(_, end_column)| end_column)
+                    .unwrap_or_else(|| {
+                        layout
+                            .line_text_at(line)
+                            .map(|text| text.width())
+                            .unwrap_or_default()
+                    }),
+            )
         };
 
-        self.selection = SelectionState {
-            active: true,
-            dragging: false,
-            anchor: SelectionPoint {
-                line,
-                column: start_column,
-            },
-            focus,
-        };
+        self.selection
+            .select_range(SelectionPoint::new(line, start_column), focus);
         self.mark_selection_changed();
-    }
-
-    pub(crate) fn selection_point_for_mouse_with_layout(
-        &self,
-        column: u16,
-        row: u16,
-        layout: &DocumentLayout,
-    ) -> Option<SelectionPoint> {
-        let line = *self
-            .document_viewport_line_indices(layout)
-            .get(usize::from(row))?;
-        let selectable = layout
-            .line_at(line)
-            .map(|line_data| line_data.selectable)
-            .unwrap_or_default();
-        selection_point_for_selectable_line(usize::from(column), line, selectable)
-    }
-
-    pub(crate) fn selection_point_for_drag_mouse(
-        &mut self,
-        column: u16,
-        row: u16,
-    ) -> Option<SelectionPoint> {
-        let layout = self.build_document_layout();
-        let line_indices = self.document_viewport_line_indices(&layout);
-        if line_indices.is_empty() {
-            return None;
-        }
-
-        let clamped_row = usize::from(row).min(line_indices.len().saturating_sub(1));
-        let line = *line_indices.get(clamped_row)?;
-        let selectable = layout
-            .line_at(line)
-            .map(|line_data| line_data.selectable)
-            .unwrap_or_default();
-        selection_point_for_drag_on_selectable_line(usize::from(column), line, selectable)
-    }
-
-    pub(crate) fn document_viewport_line_indices(&self, layout: &DocumentLayout) -> Vec<usize> {
-        if self.follow_bottom && !self.manual_document_scroll {
-            return bottom_follow_viewport_line_indices(
-                layout,
-                self.document_viewport_height(),
-                self.bottom_follow_presentation(layout),
-            );
-        }
-
-        offset_viewport_line_indices(
-            layout,
-            self.document_viewport_y,
-            self.document_viewport_height(),
-        )
     }
 
     pub(crate) fn update_selection_auto_scroll(&mut self, mouse: MousePosition) {
         self.selection_auto_scroll_mouse = mouse;
         let next_direction = selection_auto_scroll_direction_for_mouse_row(
-            mouse.row,
+            mouse.row(),
             self.document_viewport_height(),
         );
         if next_direction == AutoScrollDirection::None {
@@ -553,84 +194,10 @@ impl Model {
 
     fn mark_selection_changed(&mut self) {
         self.selection_version += 1;
-        self.document_viewport_cache.valid = false;
+        self.invalidate_document_viewport_cache();
     }
 
     fn arm_selection_auto_scroll(&mut self) {
         self.selection_auto_scroll_deadline = Some(Instant::now() + SELECTION_AUTO_SCROLL_INTERVAL);
-    }
-}
-
-fn selection_intersects_status_line(layout: &DocumentLayout, selection: SelectionState) -> bool {
-    let Some((start, end)) = selection.ordered_points() else {
-        return false;
-    };
-
-    for line in start.line..=end.line {
-        if layout
-            .line_anchor_at(line)
-            .is_some_and(|anchor| anchor.region == DocumentAnchorRegion::StatusLine)
-        {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn selection_point_for_selectable_line(
-    column: usize,
-    line: usize,
-    selectable: SelectableLineRange,
-) -> Option<SelectionPoint> {
-    if !selectable.contains(column) {
-        return None;
-    }
-
-    Some(SelectionPoint {
-        line,
-        column: if selectable.has_content() { column } else { 0 },
-    })
-}
-
-fn selection_point_for_drag_on_selectable_line(
-    column: usize,
-    line: usize,
-    selectable: SelectableLineRange,
-) -> Option<SelectionPoint> {
-    selectable.has_anchor().then_some(SelectionPoint {
-        line,
-        column: selectable.clamp(column),
-    })
-}
-
-pub(crate) fn apply_selection_to_viewport(
-    viewport: &mut DocumentViewport,
-    layout: &DocumentLayout,
-    selection: SelectionState,
-) {
-    let Some((start, end)) = selection.ordered_points() else {
-        return;
-    };
-
-    for (index, line) in viewport.lines.iter_mut().enumerate() {
-        let absolute_line = viewport.resolved_offset + index;
-        if absolute_line < start.line || absolute_line > end.line {
-            continue;
-        }
-
-        let Some(selectable) = layout
-            .line_at(absolute_line)
-            .map(|line_data| line_data.selectable)
-        else {
-            continue;
-        };
-        let Some((start_column, end_column)) =
-            selection_columns_for_line(selection, absolute_line, selectable)
-        else {
-            continue;
-        };
-
-        *line = apply_selection_to_line(line, start_column, end_column);
     }
 }

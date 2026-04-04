@@ -40,6 +40,16 @@ pub(crate) struct DocumentLayoutInput {
 }
 
 impl Model {
+    pub(crate) fn invalidate_document_viewport_cache(&mut self) {
+        self.document_viewport_cache.valid = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invalidate_document_caches_for_test(&mut self) {
+        self.document_layout_cache.valid = false;
+        self.document_viewport_cache.valid = false;
+    }
+
     pub(crate) fn build_document_layout(&mut self) -> DocumentLayout {
         let key = self.current_document_layout_key();
         if self.document_layout_cache.valid && self.document_layout_cache.key == key {

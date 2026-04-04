@@ -1,10 +1,7 @@
 use std::fmt::Write as _;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    style::Stylize,
-    text::{Line, Span},
-};
+use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::{
@@ -57,14 +54,6 @@ const COMMAND_PANEL_ITEMS: [CommandPanelItem; 1] = [CommandPanelItem {
 impl Model {
     pub(crate) fn command_panel_active(&self) -> bool {
         command_panel_query(self.composer_text()).is_some()
-    }
-
-    pub(crate) fn current_command_panel_layout_key_state(&self) -> String {
-        let Some(state) = self.current_command_panel_state() else {
-            return String::new();
-        };
-
-        format!("{}|{}|{}", state.query, state.selected, state.scroll)
     }
 
     pub(crate) fn sync_command_panel_navigation(&mut self) {
@@ -243,10 +232,10 @@ impl Model {
             for row in 0..visible_rows {
                 if row == 0 {
                     let plain_line = pad_display_width_right("  No commands", width);
-                    lines.push(Line::from(vec![Span::styled(
+                    lines.push(Line::styled(
                         plain_line.clone(),
                         tertiary_text_style(self.palette),
-                    )]));
+                    ));
                     plain_lines.push(plain_line.clone());
                     selectable.push(command_panel_selectable_range(&plain_line, width));
                     continue;

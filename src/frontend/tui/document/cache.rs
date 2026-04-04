@@ -60,14 +60,13 @@ pub(crate) struct DocumentLayoutKey {
     pub(super) style_mode: StyleMode,
     pub(super) document_width: u16,
     pub(super) viewport_height: usize,
-    pub(super) composer_value: String,
+    pub(super) composer_content_revision: usize,
+    pub(super) composer_cursor_revision: usize,
     pub(super) composer_width: usize,
-    pub(super) composer_prompt: String,
-    pub(super) composer_placeholder: String,
-    pub(super) composer_line: usize,
-    pub(super) composer_column: usize,
-    pub(super) command_panel_state: String,
-    pub(super) status_line_text: String,
+    pub(super) command_panel_selected: usize,
+    pub(super) command_panel_scroll: usize,
+    pub(super) status_line_config: u8,
+    pub(super) status_line_revision: usize,
 }
 
 /// `DocumentLayout` 表示整份统一文档流的稳定布局。
@@ -75,7 +74,6 @@ pub(crate) struct DocumentLayoutKey {
 pub(crate) struct DocumentLayout {
     pub(super) transcript: DocumentTranscriptSnapshot,
     pub(crate) transcript_line_count: usize,
-    pub(super) transcript_segments: Vec<DocumentTranscriptSegment>,
     pub(super) transcript_items: HashMap<usize, DocumentTranscriptItemLines>,
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) plain_lines: Vec<String>,
@@ -113,15 +111,6 @@ pub(crate) struct DocumentLayoutLine {
     pub(crate) plain_line: String,
     pub(crate) anchor: DocumentLineAnchor,
     pub(crate) selectable: SelectableLineRange,
-}
-
-/// `DocumentTranscriptSegment` 描述 transcript 在 unified document 里的一个可索引连续片段。
-#[derive(Debug, Clone, Default)]
-pub(crate) struct DocumentTranscriptSegment {
-    pub(super) start_line: usize,
-    pub(super) line_count: usize,
-    pub(super) lines: Vec<Line<'static>>,
-    pub(super) plain_lines: Vec<String>,
 }
 
 /// `DocumentTranscriptItemLines` 描述单个 transcript item 在 unified document 顶部前缀里的内容行范围。

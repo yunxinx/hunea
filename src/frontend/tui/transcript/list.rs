@@ -1,8 +1,3 @@
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-};
-
 use ratatui::text::Line;
 
 use super::{
@@ -404,12 +399,10 @@ impl TranscriptItem {
     }
 
     fn render_cache_key(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
         match self {
-            Self::Hero(item) => item.render_cache_key().hash(&mut hasher),
-            Self::Message(item) => item.render_cache_key().hash(&mut hasher),
+            Self::Hero(item) => item.render_cache_key(),
+            Self::Message(item) => item.render_cache_key(),
         }
-        hasher.finish()
     }
 }
 
@@ -460,7 +453,7 @@ mod tests {
     use ratatui::text::Span;
 
     use super::*;
-    use crate::frontend::tui::theme::default_palette;
+    use crate::frontend::tui::{StyleMode, theme::default_palette};
 
     #[test]
     fn render_returns_content_lines_and_line_count() {
@@ -577,6 +570,28 @@ mod tests {
         transcript.items[0] = TranscriptItem::Message(static_message("two"));
 
         assert!(!transcript.can_reuse_cached_render_result(transcript.render_width()));
+    }
+
+    #[test]
+    fn precomputed_render_cache_key_changes_with_message_content_and_style() {
+        let assistant_one = TranscriptItem::Message(MessageItem::new(Sender::Assistant, "one"));
+        let assistant_two = TranscriptItem::Message(MessageItem::new(Sender::Assistant, "two"));
+        let user_cx = TranscriptItem::Message(MessageItem::new_with_style_mode(
+            Sender::User,
+            "same",
+            StyleMode::Cx,
+        ));
+        let user_cc = TranscriptItem::Message(MessageItem::new_with_style_mode(
+            Sender::User,
+            "same",
+            StyleMode::Cc,
+        ));
+
+        assert_ne!(
+            assistant_one.render_cache_key(),
+            assistant_two.render_cache_key()
+        );
+        assert_ne!(user_cx.render_cache_key(), user_cc.render_cache_key());
     }
 
     #[test]

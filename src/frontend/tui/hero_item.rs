@@ -1,3 +1,8 @@
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
+
 use ratatui::text::Line;
 
 use super::{
@@ -74,14 +79,8 @@ impl HeroItem {
         lines_to_plain_text(&lines)
     }
 
-    pub(crate) fn render_cache_key(&self) -> String {
-        format!(
-            "{}|{}|{}|{}",
-            self.options.app_name.as_deref().unwrap_or(""),
-            self.options.version.as_deref().unwrap_or(""),
-            self.options.work_dir.as_deref().unwrap_or(""),
-            self.options.width
-        )
+    pub(crate) fn render_cache_key(&self) -> u64 {
+        hero_item_render_cache_key(&self.options)
     }
 
     pub(crate) fn render_line_anchors(
@@ -161,6 +160,15 @@ impl HeroItem {
         ));
         anchors
     }
+}
+
+fn hero_item_render_cache_key(options: &HeroOptions) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    options.app_name.as_deref().unwrap_or("").hash(&mut hasher);
+    options.version.as_deref().unwrap_or("").hash(&mut hasher);
+    options.work_dir.as_deref().unwrap_or("").hash(&mut hasher);
+    options.width.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn hero_wrapped_text_anchors(text: &str, width: usize, logical_line: usize) -> Vec<ItemLineAnchor> {

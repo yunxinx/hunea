@@ -8,7 +8,7 @@ use crate::frontend::tui::transcript::{Transcript, TranscriptItem};
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutKey, DocumentLineAnchor,
     DocumentTranscriptSnapshot, layout::transcript_composer_gap_line_count,
-    line_access::new_document_transcript_index,
+    line_access::new_document_transcript_item_index,
 };
 
 /// `DocumentTranscriptAppend` 表示 transcript 尾部新增到 unified document 的稳定片段。
@@ -40,10 +40,12 @@ pub(crate) fn sliced_transcript_append(
     }
 
     let mut items = HashMap::new();
+    let mut previous_item_index = None;
     for anchor in &render.line_anchors[start_line..] {
-        if items.contains_key(&anchor.item_index) {
+        if previous_item_index == Some(anchor.item_index) {
             continue;
         }
+        previous_item_index = Some(anchor.item_index);
         if let Some(item) = transcript.item(anchor.item_index).cloned() {
             items.insert(anchor.item_index, item);
         }
@@ -116,7 +118,7 @@ pub(crate) fn extend_document_layout_from_transcript_append(
         anchors.splice(gap_insert_at..gap_insert_at, gap_anchors);
         selectable.splice(gap_insert_at..gap_insert_at, gap_selectable);
     }
-    let (transcript_segments, transcript_items) = new_document_transcript_index(&transcript);
+    let transcript_items = new_document_transcript_item_index(&transcript);
 
     let mut composer_slot = base.composer_slot;
     composer_slot.frame_start_line += line_delta;
@@ -125,7 +127,6 @@ pub(crate) fn extend_document_layout_from_transcript_append(
     DocumentLayout {
         transcript,
         transcript_line_count: base.transcript_line_count + appended_line_count,
-        transcript_segments,
         transcript_items,
         lines,
         plain_lines,

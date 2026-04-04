@@ -37,6 +37,8 @@ pub struct Composer {
     width: u16,
     height: u16,
     viewport_y: usize,
+    content_revision: usize,
+    cursor_revision: usize,
     style_mode: StyleMode,
 }
 
@@ -55,6 +57,8 @@ impl Composer {
             width: 1,
             height: 1,
             viewport_y: 0,
+            content_revision: 1,
+            cursor_revision: 1,
             style_mode: style_mode.normalized(),
         }
     }
@@ -89,15 +93,26 @@ impl Composer {
 
     /// `clear` 清空输入内容并复位光标与 viewport。
     pub fn clear(&mut self) {
+        if self.value.is_empty() {
+            self.set_cursor(0);
+            self.viewport_y = 0;
+            return;
+        }
+
         self.value.clear();
-        self.cursor = 0;
+        self.set_cursor(0);
         self.viewport_y = 0;
+        self.bump_content_revision();
     }
 
     /// `replace_text_and_move_to_end` 用新内容替换当前草稿，并把光标移动到末尾。
     pub fn replace_text_and_move_to_end(&mut self, value: impl Into<String>) {
-        self.value = value.into();
-        self.cursor = total_chars(&self.value);
+        let value = value.into();
+        if self.value != value {
+            self.value = value;
+            self.bump_content_revision();
+        }
+        self.set_cursor(total_chars(&self.value));
         self.sync_viewport_to_cursor();
     }
 
@@ -115,7 +130,8 @@ impl Composer {
 
         let byte_index = char_to_byte_index(&self.value, self.cursor);
         self.value.insert_str(byte_index, text);
-        self.cursor += total_chars(text);
+        self.set_cursor(self.cursor + total_chars(text));
+        self.bump_content_revision();
         self.sync_viewport_to_cursor();
     }
 
@@ -186,6 +202,14 @@ impl Composer {
         self.style_mode
     }
 
+    pub(crate) fn content_revision(&self) -> usize {
+        self.content_revision
+    }
+
+    pub(crate) fn cursor_revision(&self) -> usize {
+        self.cursor_revision
+    }
+
     pub(crate) fn viewport_offset(&self) -> usize {
         self.viewport_y
     }
@@ -211,12 +235,12 @@ impl Composer {
     }
 
     pub(crate) fn move_to_begin(&mut self) {
-        self.cursor = 0;
+        self.set_cursor(0);
         self.sync_viewport_to_cursor();
     }
 
     pub(crate) fn move_to_end(&mut self) {
-        self.cursor = total_chars(&self.value);
+        self.set_cursor(total_chars(&self.value));
         self.sync_viewport_to_cursor();
     }
 
@@ -248,21 +272,26 @@ impl Composer {
 
     #[cfg(test)]
     pub(crate) fn set_text_for_test(&mut self, value: impl Into<String>) {
-        self.value = value.into();
-        self.cursor = total_chars(&self.value);
+        let value = value.into();
+        if self.value != value {
+            self.value = value;
+            self.bump_content_revision();
+        }
+        self.set_cursor(total_chars(&self.value));
         self.sync_viewport_to_cursor();
     }
 
     #[cfg(test)]
     pub(crate) fn move_to_begin_for_test(&mut self) {
-        self.cursor = 0;
+        self.set_cursor(0);
         self.sync_viewport_to_cursor();
     }
 
     fn insert_char(&mut self, character: char) {
         let byte_index = char_to_byte_index(&self.value, self.cursor);
         self.value.insert(byte_index, character);
-        self.cursor += 1;
+        self.set_cursor(self.cursor + 1);
+        self.bump_content_revision();
     }
 
     fn backspace(&mut self) {
@@ -323,13 +352,13 @@ impl Composer {
         }
 
         if column == 0 {
-            self.cursor -= 1;
+            self.set_cursor(self.cursor - 1);
             return;
         }
 
         let line = lines[row];
         if let Some(target) = grapheme_target_left(line.text, column) {
-            self.cursor = line.start_char + target;
+            self.set_cursor(line.start_char + target);
         }
     }
 
@@ -347,13 +376,13 @@ impl Composer {
         let line = lines[row];
         if column >= line.len_chars() {
             if row + 1 < lines.len() {
-                self.cursor += 1;
+                self.set_cursor(self.cursor + 1);
             }
             return;
         }
 
         if let Some(target) = grapheme_target_right(line.text, column) {
-            self.cursor = line.start_char + target;
+            self.set_cursor(line.start_char + target);
         }
     }
 
@@ -384,7 +413,11 @@ impl Composer {
             current_visual_column,
             self.content_width(),
         );
-        self.cursor = absolute_cursor_for_position(&lines, target_line.logical_line, target_column);
+        self.set_cursor(absolute_cursor_for_position(
+            &lines,
+            target_line.logical_line,
+            target_column,
+        ));
     }
 
     fn move_line_start(&mut self) {
@@ -394,7 +427,7 @@ impl Composer {
             return;
         }
 
-        self.cursor = lines[row].start_char;
+        self.set_cursor(lines[row].start_char);
     }
 
     fn move_line_end(&mut self) {
@@ -404,7 +437,7 @@ impl Composer {
             return;
         }
 
-        self.cursor = lines[row].start_char + lines[row].len_chars();
+        self.set_cursor(lines[row].start_char + lines[row].len_chars());
     }
 
     fn page_move(&mut self, direction: isize) {
@@ -454,7 +487,11 @@ impl Composer {
             current_visual_column,
             self.content_width(),
         );
-        self.cursor = absolute_cursor_for_position(&lines, target_line.logical_line, target_column);
+        self.set_cursor(absolute_cursor_for_position(
+            &lines,
+            target_line.logical_line,
+            target_column,
+        ));
         self.viewport_y = sync_viewport_offset_for_cursor(
             current_offset,
             self.viewport_height(),
@@ -514,7 +551,21 @@ impl Composer {
         let byte_start = char_to_byte_index(&self.value, start);
         let byte_end = char_to_byte_index(&self.value, end);
         self.value.drain(byte_start..byte_end);
-        self.cursor = start.min(total_chars(&self.value));
+        self.set_cursor(start.min(total_chars(&self.value)));
+        self.bump_content_revision();
+    }
+
+    fn bump_content_revision(&mut self) {
+        self.content_revision = self.content_revision.saturating_add(1);
+    }
+
+    fn set_cursor(&mut self, cursor: usize) {
+        if self.cursor == cursor {
+            return;
+        }
+
+        self.cursor = cursor;
+        self.cursor_revision = self.cursor_revision.saturating_add(1);
     }
 }
 

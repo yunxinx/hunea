@@ -1,5 +1,4 @@
 use ratatui::{
-    prelude::Stylize,
     style::Style,
     widgets::{Block, BorderType, Padding},
 };

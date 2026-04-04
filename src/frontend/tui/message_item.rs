@@ -1,3 +1,8 @@
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
+
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -42,10 +47,12 @@ impl MessageItem {
         content: impl Into<String>,
         style_mode: StyleMode,
     ) -> Self {
+        let style_mode = style_mode.normalized();
+        let content = content.into();
         Self {
             sender,
-            content: content.into(),
-            style_mode: style_mode.normalized(),
+            content,
+            style_mode,
         }
     }
 
@@ -84,18 +91,8 @@ impl MessageItem {
         }
     }
 
-    pub(crate) fn render_cache_key(&self) -> String {
-        let style_key = if self.sender == Sender::User {
-            match self.style_mode.normalized() {
-                StyleMode::Cx => "cx",
-                StyleMode::Cc => "cc",
-                StyleMode::Ms => "ms",
-            }
-        } else {
-            ""
-        };
-
-        format!("{}:{style_key}:{}", self.sender as u8, self.content)
+    pub(crate) fn render_cache_key(&self) -> u64 {
+        message_item_render_cache_key(self.sender, &self.content, self.style_mode)
     }
 
     pub(crate) fn render_line_anchors(
@@ -206,6 +203,16 @@ impl MessageItem {
     fn render_plain_for_test(&self, width: u16) -> String {
         self.render_plain_text(width, crate::frontend::tui::theme::default_palette())
     }
+}
+
+fn message_item_render_cache_key(sender: Sender, content: &str, style_mode: StyleMode) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (sender as u8).hash(&mut hasher);
+    if sender == Sender::User {
+        style_mode.hash(&mut hasher);
+    }
+    content.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn render_user_message_lines(

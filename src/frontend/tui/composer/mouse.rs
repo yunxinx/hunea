@@ -70,6 +70,10 @@ pub(crate) fn move_cursor_to_logical_position(
     logical_column: usize,
 ) {
     let lines = logical_lines(composer.value());
-    composer.cursor = absolute_cursor_for_position(&lines, logical_line, logical_column);
+    composer.set_cursor(absolute_cursor_for_position(
+        &lines,
+        logical_line,
+        logical_column,
+    ));
     composer.sync_viewport_to_cursor();
 }

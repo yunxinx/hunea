@@ -1,11 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::MouseButton;
-use ratatui::{
-    Frame,
-    layout::Rect,
-    text::{Line, Span},
-};
+use ratatui::{Frame, layout::Rect, text::Line};
 use unicode_width::UnicodeWidthStr;
 
 use super::{
@@ -132,7 +128,7 @@ impl Model {
             style = style.bg(surface);
         }
 
-        Some((Line::from(vec![Span::styled(visible_text, style)]), bounds))
+        Some((Line::styled(visible_text, style), bounds))
     }
 
     fn current_history_scroll_indicator_bounds(

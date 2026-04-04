@@ -11,9 +11,8 @@ mod sync;
 pub(super) use self::cache::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutCache, DocumentLayoutKey,
     DocumentLayoutLine, DocumentLineAnchor, DocumentTranscriptCache, DocumentTranscriptItemLines,
-    DocumentTranscriptKey, DocumentTranscriptSegment, DocumentTranscriptSnapshot, DocumentViewport,
-    DocumentViewportAnchor, DocumentViewportCache, DocumentViewportKey,
-    ManualDocumentScrollRestoreTarget,
+    DocumentTranscriptKey, DocumentTranscriptSnapshot, DocumentViewport, DocumentViewportAnchor,
+    DocumentViewportCache, DocumentViewportKey, ManualDocumentScrollRestoreTarget,
 };
 pub(super) use self::cache::{
     DocumentLayoutCache as LayoutCache, DocumentTranscriptCache as TranscriptCache,

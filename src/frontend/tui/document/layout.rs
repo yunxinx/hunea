@@ -19,7 +19,7 @@ use super::{
         can_extend_cached_document_layout, extend_document_layout_from_transcript_append,
         sliced_transcript_append,
     },
-    line_access::new_document_transcript_index,
+    line_access::new_document_transcript_item_index,
     slot_frame::SlotFrame,
     slot_viewport::compose_bottom_follow_document_viewport,
 };
@@ -191,14 +191,13 @@ impl Model {
             style_mode: self.style_mode,
             document_width: self.width,
             viewport_height: self.document_viewport_height(),
-            composer_value: self.composer.value().to_string(),
+            composer_content_revision: self.composer.content_revision(),
+            composer_cursor_revision: self.composer.cursor_revision(),
             composer_width: self.composer.content_width(),
-            composer_prompt: self.composer.prompt().to_string(),
-            composer_placeholder: self.composer.placeholder().to_string(),
-            composer_line: self.composer.line(),
-            composer_column: self.composer.column(),
-            command_panel_state: self.current_command_panel_layout_key_state(),
-            status_line_text: self.current_status_line_cache_key(),
+            command_panel_selected: self.command_panel_selected,
+            command_panel_scroll: self.command_panel_scroll,
+            status_line_config: self.status_line_config_bits(),
+            status_line_revision: self.status_line_revision(),
         }
     }
 
@@ -242,7 +241,7 @@ impl Model {
 
 pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLayout {
     let transcript_line_count = input.transcript.lines.len();
-    let (transcript_segments, transcript_items) = new_document_transcript_index(&input.transcript);
+    let transcript_items = new_document_transcript_item_index(&input.transcript);
     let extra_gap = if transcript_line_count == 0 {
         0
     } else {
@@ -411,7 +410,6 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
     DocumentLayout {
         transcript: input.transcript,
         transcript_line_count,
-        transcript_segments,
         transcript_items,
         composer_slot,
         composer_start_line: composer_slot.content_start_line,
@@ -510,10 +508,12 @@ impl Model {
         }
 
         let mut items = std::collections::HashMap::new();
+        let mut previous_item_index = None;
         for anchor in &self.transcript_render.line_anchors {
-            if items.contains_key(&anchor.item_index) {
+            if previous_item_index == Some(anchor.item_index) {
                 continue;
             }
+            previous_item_index = Some(anchor.item_index);
             if let Some(item) = self.transcript.item(anchor.item_index).cloned() {
                 items.insert(anchor.item_index, item);
             }

@@ -181,6 +181,7 @@ impl Model {
         };
 
         self.external_editor_helper_visible = visible;
+        self.bump_status_line_revision();
         if !visible {
             self.external_editor_helper_deadline = None;
         }

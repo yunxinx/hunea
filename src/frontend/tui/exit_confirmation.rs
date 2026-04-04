@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 
-use ratatui::style::Stylize;
 use unicode_width::UnicodeWidthStr;
 
 use super::{Model, document::DocumentViewportAnchor};
@@ -79,14 +78,12 @@ impl Model {
             text
         );
         super::status_line::StatusLineRenderResult {
-            line: Some(ratatui::text::Line::from(vec![
-                ratatui::text::Span::styled(
-                    plain_line.clone(),
-                    super::theme::tertiary_text_style(self.palette)
-                        .bold()
-                        .italic(),
-                ),
-            ])),
+            line: Some(ratatui::text::Line::styled(
+                plain_line.clone(),
+                super::theme::tertiary_text_style(self.palette)
+                    .bold()
+                    .italic(),
+            )),
             plain_line,
             selectable: super::selection::SelectableLineRange::new(
                 super::status_line::STATUS_LINE_INSET_WIDTH,
@@ -140,6 +137,7 @@ impl Model {
         };
 
         self.status_notice_text = text;
+        self.bump_status_line_revision();
         self.sync_after_bottom_status_slot_change(preserved_anchor);
     }
 }

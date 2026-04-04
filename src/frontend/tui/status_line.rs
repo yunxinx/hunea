@@ -1,4 +1,4 @@
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -42,12 +42,15 @@ const STATUS_LINE_SEPARATOR: &str = " · ";
 const STATUS_LINE_ELLIPSIS: &str = "...";
 
 impl Model {
-    pub(crate) fn current_status_line_cache_key(&self) -> String {
-        if !self.current_status_notice_text().is_empty() {
-            return format!("notice\0{}", self.current_status_notice_text());
+    pub(crate) fn status_line_config_bits(&self) -> u8 {
+        let mut bits = 0u8;
+        if self.uses_status_line_item(StatusLineItem::GitBranch) {
+            bits |= 1 << 0;
         }
-
-        self.current_status_line_parts().join("\0")
+        if self.uses_status_line_item(StatusLineItem::CurrentDir) {
+            bits |= 1 << 1;
+        }
+        bits
     }
 
     pub(crate) fn current_status_line_render_result(&self) -> StatusLineRenderResult {
@@ -75,10 +78,10 @@ impl Model {
 
         let plain_line = format!("{}{}", " ".repeat(STATUS_LINE_INSET_WIDTH), text);
         StatusLineRenderResult {
-            line: Some(Line::from(vec![Span::styled(
+            line: Some(Line::styled(
                 plain_line.clone(),
                 tertiary_text_style(self.palette),
-            )])),
+            )),
             plain_line,
             selectable: status_line_selectable_range(&text),
             has_content: true,
@@ -123,6 +126,7 @@ impl Model {
         }
 
         self.git_branch = next_branch;
+        self.bump_status_line_revision();
     }
 }
 

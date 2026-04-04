@@ -70,6 +70,7 @@ pub struct Model {
     pub(super) external_editor_helper_token: usize,
     pub(super) external_editor_helper_deadline: Option<Instant>,
     pub(super) exit_confirmation_deadline: Option<Instant>,
+    pub(super) status_line_revision: usize,
     quitting: bool,
 }
 
@@ -176,6 +177,7 @@ impl Model {
             external_editor_helper_token: 0,
             external_editor_helper_deadline: None,
             exit_confirmation_deadline: None,
+            status_line_revision: 1,
             quitting: false,
         }
     }
@@ -352,6 +354,14 @@ impl Model {
         self.transcript_render = self.transcript.render();
         self.transcript_render_version += 1;
         self.invalidate_document_viewport_cache();
+    }
+
+    pub(crate) fn status_line_revision(&self) -> usize {
+        self.status_line_revision
+    }
+
+    pub(crate) fn bump_status_line_revision(&mut self) {
+        self.status_line_revision = self.status_line_revision.saturating_add(1);
     }
 
     fn bottom_follow_composer_content_line_count(

@@ -7,7 +7,7 @@ use crate::frontend::tui::{
 
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutLine, DocumentLineAnchor,
-    DocumentTranscriptItemLines, DocumentTranscriptSegment, DocumentTranscriptSnapshot,
+    DocumentTranscriptItemLines, DocumentTranscriptSnapshot,
 };
 
 impl DocumentLayout {
@@ -193,49 +193,7 @@ impl DocumentLayout {
             return Vec::new();
         }
 
-        if self.transcript_segments.is_empty() {
-            return self.transcript.plain_lines[start..end.min(self.transcript_line_count)]
-                .to_vec();
-        }
-
-        let end = end.min(self.transcript_line_count);
-        let mut lines = Vec::with_capacity(end - start);
-        let mut current = start;
-
-        let mut segment_index = self
-            .transcript_segments
-            .partition_point(|segment| segment.start_line + segment.line_count <= start);
-        while segment_index < self.transcript_segments.len() && current < end {
-            let segment = &self.transcript_segments[segment_index];
-            if current < segment.start_line {
-                let fallback_end = end.min(segment.start_line);
-                lines.extend_from_slice(&self.transcript.plain_lines[current..fallback_end]);
-                current = fallback_end;
-                if current >= end {
-                    break;
-                }
-            }
-
-            let local_start = current.saturating_sub(segment.start_line);
-            let local_end = segment
-                .line_count
-                .min(end.saturating_sub(segment.start_line));
-            if local_start < local_end && local_end <= segment.plain_lines.len() {
-                lines.extend_from_slice(&segment.plain_lines[local_start..local_end]);
-                current = segment.start_line + local_end;
-            } else {
-                let fallback_end = end.min(segment.start_line + segment.line_count);
-                lines.extend_from_slice(&self.transcript.plain_lines[current..fallback_end]);
-                current = fallback_end;
-            }
-            segment_index += 1;
-        }
-
-        if current < end {
-            lines.extend_from_slice(&self.transcript.plain_lines[current..end]);
-        }
-
-        lines
+        self.transcript.plain_lines[start..end.min(self.transcript_line_count)].to_vec()
     }
 
     fn transcript_lines_for_range(
@@ -247,64 +205,19 @@ impl DocumentLayout {
             return Vec::new();
         }
 
-        if self.transcript_segments.is_empty() {
-            return self.transcript.lines[start..end.min(self.transcript_line_count)].to_vec();
-        }
-
-        let end = end.min(self.transcript_line_count);
-        let mut lines = Vec::with_capacity(end - start);
-        let mut current = start;
-
-        let mut segment_index = self
-            .transcript_segments
-            .partition_point(|segment| segment.start_line + segment.line_count <= start);
-        while segment_index < self.transcript_segments.len() && current < end {
-            let segment = &self.transcript_segments[segment_index];
-            if current < segment.start_line {
-                let fallback_end = end.min(segment.start_line);
-                lines.extend_from_slice(&self.transcript.lines[current..fallback_end]);
-                current = fallback_end;
-                if current >= end {
-                    break;
-                }
-            }
-
-            let local_start = current.saturating_sub(segment.start_line);
-            let local_end = segment
-                .line_count
-                .min(end.saturating_sub(segment.start_line));
-            if local_start < local_end && local_end <= segment.lines.len() {
-                lines.extend_from_slice(&segment.lines[local_start..local_end]);
-                current = segment.start_line + local_end;
-            } else {
-                let fallback_end = end.min(segment.start_line + segment.line_count);
-                lines.extend_from_slice(&self.transcript.lines[current..fallback_end]);
-                current = fallback_end;
-            }
-            segment_index += 1;
-        }
-
-        if current < end {
-            lines.extend_from_slice(&self.transcript.lines[current..end]);
-        }
-
-        lines
+        self.transcript.lines[start..end.min(self.transcript_line_count)].to_vec()
     }
 }
 
-/// `new_document_transcript_index` 为 transcript snapshot 构建 segment 和 item 行索引。
-pub(crate) fn new_document_transcript_index(
+/// `new_document_transcript_item_index` 为 transcript snapshot 构建 item 行索引。
+pub(crate) fn new_document_transcript_item_index(
     snapshot: &DocumentTranscriptSnapshot,
-) -> (
-    Vec<DocumentTranscriptSegment>,
-    HashMap<usize, DocumentTranscriptItemLines>,
-) {
+) -> HashMap<usize, DocumentTranscriptItemLines> {
     if snapshot.lines.is_empty() || snapshot.anchors.is_empty() {
-        return (Vec::new(), HashMap::new());
+        return HashMap::new();
     }
 
-    let mut segments = Vec::new();
-    let mut items = HashMap::new();
+    let mut items = HashMap::with_capacity(snapshot.items.len().max(1));
     let mut start = 0;
     let mut current_item_index = snapshot.anchors[0].transcript.item_index;
     let mut content_line_count = usize::from(!matches!(
@@ -316,12 +229,6 @@ pub(crate) fn new_document_transcript_index(
         let anchor = snapshot.anchors[index];
         if anchor.transcript.item_index != current_item_index {
             let line_count = index - start;
-            segments.push(DocumentTranscriptSegment {
-                start_line: start,
-                line_count,
-                lines: snapshot.lines[start..index].to_vec(),
-                plain_lines: snapshot.plain_lines[start..index].to_vec(),
-            });
             items.insert(
                 current_item_index,
                 DocumentTranscriptItemLines {
@@ -340,12 +247,6 @@ pub(crate) fn new_document_transcript_index(
     }
 
     let line_count = snapshot.lines.len() - start;
-    segments.push(DocumentTranscriptSegment {
-        start_line: start,
-        line_count,
-        lines: snapshot.lines[start..].to_vec(),
-        plain_lines: snapshot.plain_lines[start..].to_vec(),
-    });
     items.insert(
         current_item_index,
         DocumentTranscriptItemLines {
@@ -355,5 +256,5 @@ pub(crate) fn new_document_transcript_index(
         },
     );
 
-    (segments, items)
+    items
 }

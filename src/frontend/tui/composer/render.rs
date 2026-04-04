@@ -394,20 +394,14 @@ fn frame_decoration_line(
 
             let plain = " ".repeat(width);
             (
-                Some(Line::from(vec![Span::styled(
-                    plain.clone(),
-                    surface_text_style(palette),
-                )])),
+                Some(Line::styled(plain.clone(), surface_text_style(palette))),
                 Some(plain),
             )
         }
         FrameDecorationMode::Rule => {
             let plain = "─".repeat(width);
             (
-                Some(Line::from(vec![Span::styled(
-                    plain.clone(),
-                    tertiary_text_style(palette),
-                )])),
+                Some(Line::styled(plain.clone(), tertiary_text_style(palette))),
                 Some(plain),
             )
         }
@@ -522,10 +516,8 @@ mod tests {
         composer.set_height(4);
 
         let result = render_document(&composer, default_palette());
-        let expected = ratatui::text::Line::from(vec![ratatui::text::Span::styled(
-            "─".repeat(12),
-            tertiary_text_style(default_palette()),
-        )]);
+        let expected =
+            ratatui::text::Line::styled("─".repeat(12), tertiary_text_style(default_palette()));
 
         assert_eq!(
             result.frame_decoration_line,
@@ -575,8 +567,11 @@ mod tests {
         composer.set_text_for_test(value);
 
         let lines = super::super::logical_lines(composer.value());
-        composer.cursor =
-            super::super::absolute_cursor_for_position(&lines, cursor_line, cursor_column);
+        composer.set_cursor(super::super::absolute_cursor_for_position(
+            &lines,
+            cursor_line,
+            cursor_column,
+        ));
         composer.sync_viewport_to_cursor();
         composer
     }

@@ -39,6 +39,11 @@ impl Model {
         column: u16,
         row: u16,
     ) -> Option<AppEffect> {
+        if let Some(effect) = self.handle_history_scroll_indicator_mouse_down(button, column, row) {
+            return effect;
+        }
+
+        self.clear_history_scroll_indicator();
         self.cancel_exit_confirmation();
 
         match button {
@@ -108,6 +113,7 @@ impl Model {
         column: u16,
         row: u16,
     ) -> Option<AppEffect> {
+        self.clear_history_scroll_indicator();
         self.cancel_exit_confirmation();
 
         if button == MouseButton::Left && self.pending_composer_cursor_click.active {

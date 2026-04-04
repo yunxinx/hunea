@@ -255,6 +255,23 @@ fn load_rejects_unknown_style_mode() {
 }
 
 #[test]
+fn load_rejects_legacy_command_panel_mode_key() {
+    let working_dir = temp_test_dir("load-rejects-legacy-command-panel-mode-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\ncommand_panel_mode = \"inline\"\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("legacy command_panel_mode should be rejected explicitly");
+
+    assert!(
+        error.to_string().contains("command_panel_mode"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn load_rejects_unknown_keys() {
     let working_dir = temp_test_dir("load-rejects-keys-working");
     write_config(

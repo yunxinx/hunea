@@ -54,6 +54,9 @@ impl Model {
         if !self.current_status_notice_text().is_empty() {
             return self.current_status_notice_render_result();
         }
+        if self.command_panel_active() {
+            return StatusLineRenderResult::default();
+        }
 
         let parts = self.current_status_line_parts();
         if parts.is_empty() {
@@ -215,7 +218,7 @@ pub(crate) fn truncate_display_width(text: &str, width: usize) -> String {
     rendered
 }
 
-fn truncate_display_width_with_ellipsis(text: &str, width: usize) -> String {
+pub(crate) fn truncate_display_width_with_ellipsis(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }

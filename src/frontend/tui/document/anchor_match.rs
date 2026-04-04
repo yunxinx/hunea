@@ -120,6 +120,9 @@ fn score_document_anchor_match(
                 target.composer.visible_start_char,
             ))
         }
+        DocumentAnchorRegion::CommandPanel => {
+            (candidate.gap_index == target.gap_index).then_some(0)
+        }
         DocumentAnchorRegion::Transcript => {
             if candidate.transcript.item_index != target.transcript.item_index {
                 return None;

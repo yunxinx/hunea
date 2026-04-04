@@ -54,6 +54,9 @@ pub enum AppEvent {
     StatusNoticeTimeout {
         token: usize,
     },
+    HistoryScrollIndicatorTimeout {
+        token: usize,
+    },
     ExternalEditorHelperTimeout {
         token: usize,
     },
@@ -98,6 +101,7 @@ impl Model {
                     if had_pending_click {
                         self.reset_selection_click();
                     }
+                    self.show_history_scroll_indicator();
                 }
                 None
             }
@@ -131,6 +135,10 @@ impl Model {
             }
             AppEvent::StatusNoticeTimeout { token } => {
                 self.dismiss_status_notice(token);
+                None
+            }
+            AppEvent::HistoryScrollIndicatorTimeout { token } => {
+                self.dismiss_history_scroll_indicator(token);
                 None
             }
             AppEvent::ExternalEditorHelperTimeout { token } => {
@@ -167,6 +175,7 @@ impl Model {
             return None;
         }
 
+        self.clear_history_scroll_indicator();
         if !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
             self.cancel_exit_confirmation();
         }
@@ -188,6 +197,10 @@ impl Model {
             return self
                 .maybe_prepare_external_editor_launch()
                 .map(AppEffect::LaunchExternalEditor);
+        }
+
+        if self.handle_command_panel_key(key) {
+            return None;
         }
 
         if key.code == KeyCode::Enter {
@@ -243,6 +256,7 @@ impl Model {
         let old_line = self.composer.line();
         let old_column = self.composer.column();
         self.composer_mut().handle_key(key);
+        self.sync_command_panel_navigation();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -254,6 +268,7 @@ impl Model {
         let old_line = self.composer.line();
         let old_column = self.composer.column();
         self.composer_mut().insert_newline();
+        self.sync_command_panel_navigation();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -271,6 +286,7 @@ impl Model {
         let old_column = self.composer.column();
         self.composer_mut()
             .insert_text(&normalize_pasted_text(text));
+        self.sync_command_panel_navigation();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -282,6 +298,7 @@ impl Model {
         let old_line = self.composer.line();
         let old_column = self.composer.column();
         self.composer_mut().clear();
+        self.sync_command_panel_navigation();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -308,6 +325,7 @@ impl Model {
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
         self.composer_mut().clear();
+        self.sync_command_panel_navigation();
         self.sync_external_editor_helper_after_draft_change(&content);
         self.sync_composer_height();
         self.follow_bottom = true;
@@ -334,6 +352,7 @@ impl Model {
             self.reset_selection_click();
         }
         self.sync_external_editor_helper_after_resize(previous_width);
+        self.sync_command_panel_navigation();
         self.sync_document_viewport_after_transcript_refresh(preserved_anchor);
     }
 }

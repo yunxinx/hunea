@@ -18,6 +18,7 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
 
     let paragraph = Paragraph::new(Text::from(viewport.lines.clone()));
     frame.render_widget(paragraph, area);
+    model.render_history_scroll_indicator(frame, area, &document, &viewport);
 
     let cursor_y = document.cursor_y.saturating_sub(viewport.resolved_offset);
     if cursor_y < viewport.lines.len() {

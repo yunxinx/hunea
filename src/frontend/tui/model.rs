@@ -29,6 +29,8 @@ pub struct Model {
     pub(crate) external_editor: Vec<String>,
     pub(crate) external_editor_hint: String,
     pub(crate) external_editor_helper_enabled: bool,
+    pub(crate) command_panel_selected: usize,
+    pub(crate) command_panel_scroll: usize,
     pub(crate) copy_on_mouse_selection_release: bool,
     pub(crate) swap_enter_and_send: bool,
     pub(crate) ctrl_c_clears_input: bool,
@@ -64,6 +66,8 @@ pub struct Model {
     pub(crate) status_notice_text: String,
     pub(crate) status_notice_token: usize,
     pub(crate) status_notice_deadline: Option<Instant>,
+    pub(crate) history_scroll_indicator_token: usize,
+    pub(crate) history_scroll_indicator_deadline: Option<Instant>,
     pub(crate) external_editor_helper_visible: bool,
     pub(crate) external_editor_helper_token: usize,
     pub(crate) external_editor_helper_deadline: Option<Instant>,
@@ -132,6 +136,8 @@ impl Model {
             external_editor: options.external_editor,
             external_editor_hint: options.external_editor_hint,
             external_editor_helper_enabled: options.show_external_editor_helper,
+            command_panel_selected: 0,
+            command_panel_scroll: 0,
             copy_on_mouse_selection_release: options.copy_on_mouse_selection_release,
             swap_enter_and_send: options.swap_enter_and_send,
             ctrl_c_clears_input: options.ctrl_c_clears_input,
@@ -167,6 +173,8 @@ impl Model {
             status_notice_text: String::new(),
             status_notice_token: 0,
             status_notice_deadline: None,
+            history_scroll_indicator_token: 0,
+            history_scroll_indicator_deadline: None,
             external_editor_helper_visible: false,
             external_editor_helper_token: 0,
             external_editor_helper_deadline: None,
@@ -202,21 +210,15 @@ impl Model {
 
     /// `next_timeout_deadline` 返回当前最早需要处理的内部超时。
     pub fn next_timeout_deadline(&self) -> Option<Instant> {
-        match (
+        [
             self.status_notice_deadline,
             self.external_editor_helper_deadline,
+            self.history_scroll_indicator_deadline,
             self.selection_auto_scroll_deadline,
-        ) {
-            (Some(left), Some(right), Some(third)) => Some(left.min(right).min(third)),
-            (Some(left), Some(right), None) => Some(left.min(right)),
-            (Some(left), None, Some(right)) | (None, Some(left), Some(right)) => {
-                Some(left.min(right))
-            }
-            (Some(deadline), None, None)
-            | (None, Some(deadline), None)
-            | (None, None, Some(deadline)) => Some(deadline),
-            (None, None, None) => None,
-        }
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// `composer_text` 返回输入框当前的内容。
@@ -241,6 +243,7 @@ impl Model {
         self.transcript.set_width(width.max(1));
         self.composer.set_width(width.max(1));
         self.sync_transcript_render();
+        self.sync_command_panel_navigation();
         self.sync_composer_height();
     }
 
@@ -286,6 +289,14 @@ impl Model {
             });
         }
 
+        if let Some(deadline) = self.history_scroll_indicator_deadline
+            && now >= deadline
+        {
+            return Some(super::AppEvent::HistoryScrollIndicatorTimeout {
+                token: self.history_scroll_indicator_token,
+            });
+        }
+
         if let Some(deadline) = self.external_editor_helper_deadline
             && now >= deadline
         {
@@ -318,9 +329,11 @@ impl Model {
         };
 
         let status_line = self.current_status_line_render_result();
-        if status_line.has_content {
+        let command_panel = self.current_inline_command_panel_render_result();
+        if status_line.has_content || command_panel.has_content {
             if self.follow_bottom && !self.manual_document_scroll {
-                let visible_height = self.bottom_follow_composer_content_line_count(&status_line);
+                let visible_height =
+                    self.bottom_follow_composer_content_line_count(&status_line, &command_panel);
                 viewport_height =
                     viewport_height.min(u16::try_from(visible_height).unwrap_or(u16::MAX));
             } else {
@@ -347,9 +360,13 @@ impl Model {
     fn bottom_follow_composer_content_line_count(
         &self,
         status_line: &StatusLineRenderResult,
+        command_panel: &super::command_panel::CommandPanelRenderResult,
     ) -> usize {
         let viewport_height = usize::from(self.height.max(1));
-        let mut tail_rows = status_line.gap_before + 1;
+        let mut tail_rows = command_panel.lines.len();
+        if status_line.has_content {
+            tail_rows += status_line.gap_before + 1;
+        }
         if self.composer_uses_rendered_frame_padding() {
             tail_rows += 1;
         }
@@ -361,7 +378,7 @@ impl Model {
         }
     }
 
-    fn composer_uses_rendered_frame_padding(&self) -> bool {
+    pub(crate) fn composer_uses_rendered_frame_padding(&self) -> bool {
         match self.style_mode {
             StyleMode::Cx => self.palette.surface.is_some(),
             StyleMode::Cc => true,

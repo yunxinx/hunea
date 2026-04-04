@@ -1,3 +1,4 @@
+mod command_panel;
 mod composer;
 mod composer_mouse;
 mod document;
@@ -5,6 +6,7 @@ mod exit_confirmation;
 mod external_editor;
 mod hero;
 mod hero_item;
+mod history_scroll_indicator;
 mod message_item;
 mod model;
 mod runner;

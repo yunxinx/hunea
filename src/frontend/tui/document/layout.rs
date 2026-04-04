@@ -1,7 +1,9 @@
 use ratatui::text::Line;
 
 use crate::frontend::tui::{
-    Model, composer,
+    Model,
+    command_panel::CommandPanelRenderResult,
+    composer,
     selection::{
         SelectableLineRange, apply_selection_to_viewport, selectable_range_for_plain_line,
     },
@@ -33,6 +35,7 @@ pub(crate) struct DocumentLayoutInput {
     pub(crate) composer_frame_decoration_plain_line: Option<String>,
     pub(crate) composer_cursor_x: u16,
     pub(crate) composer_cursor_y: usize,
+    pub(crate) command_panel: CommandPanelRenderResult,
     pub(crate) status_line: StatusLineRenderResult,
 }
 
@@ -177,12 +180,14 @@ impl Model {
             palette_version: self.palette_version,
             style_mode: self.style_mode,
             document_width: self.width,
+            viewport_height: self.document_viewport_height(),
             composer_value: self.composer.value().to_string(),
             composer_width: self.composer.content_width(),
             composer_prompt: self.composer.prompt().to_string(),
             composer_placeholder: self.composer.placeholder().to_string(),
             composer_line: self.composer.line(),
             composer_column: self.composer.column(),
+            command_panel_state: self.current_command_panel_layout_key_state(),
             status_line_text: self.current_status_line_cache_key(),
         }
     }
@@ -201,6 +206,7 @@ impl Model {
             composer_frame_decoration_plain_line: composer_document.frame_decoration_plain_line,
             composer_cursor_x: composer_document.cursor_x,
             composer_cursor_y: composer_document.cursor_y,
+            command_panel: self.current_inline_command_panel_render_result(),
             status_line: self.current_status_line_render_result(),
         }
     }
@@ -238,6 +244,7 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             + extra_gap
             + input.composer_lines.len()
             + usize::from(has_composer_padding) * 2
+            + input.command_panel.lines.len()
             + input.status_line.gap_before
             + usize::from(input.status_line.has_content),
     );
@@ -246,6 +253,7 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             + extra_gap
             + input.composer_plain_lines.len()
             + usize::from(has_composer_padding) * 2
+            + input.command_panel.plain_lines.len()
             + input.status_line.gap_before
             + usize::from(input.status_line.has_content),
     );
@@ -254,6 +262,7 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             + extra_gap
             + input.composer_anchors.len()
             + usize::from(has_composer_padding) * 2
+            + input.command_panel.lines.len()
             + input.status_line.gap_before
             + usize::from(input.status_line.has_content),
     );
@@ -262,6 +271,7 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             + extra_gap
             + input.composer_selectable.len()
             + usize::from(has_composer_padding) * 2
+            + input.command_panel.selectable.len()
             + input.status_line.gap_before
             + usize::from(input.status_line.has_content),
     );
@@ -324,6 +334,33 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             ..DocumentLineAnchor::default()
         });
         selectable.push(SelectableLineRange::default());
+    }
+
+    if input.command_panel.has_content {
+        for index in 0..input.command_panel.lines.len() {
+            lines.push(input.command_panel.lines[index].clone());
+            plain_lines.push(
+                input
+                    .command_panel
+                    .plain_lines
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            anchors.push(DocumentLineAnchor {
+                region: DocumentAnchorRegion::CommandPanel,
+                gap_index: index,
+                ..DocumentLineAnchor::default()
+            });
+            selectable.push(
+                input
+                    .command_panel
+                    .selectable
+                    .get(index)
+                    .copied()
+                    .unwrap_or_default(),
+            );
+        }
     }
 
     if input.status_line.has_content {

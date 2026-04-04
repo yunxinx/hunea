@@ -59,12 +59,14 @@ pub(crate) struct DocumentLayoutKey {
     pub(crate) palette_version: usize,
     pub(crate) style_mode: StyleMode,
     pub(crate) document_width: u16,
+    pub(crate) viewport_height: usize,
     pub(crate) composer_value: String,
     pub(crate) composer_width: usize,
     pub(crate) composer_prompt: String,
     pub(crate) composer_placeholder: String,
     pub(crate) composer_line: usize,
     pub(crate) composer_column: usize,
+    pub(crate) command_panel_state: String,
     pub(crate) status_line_text: String,
 }
 
@@ -154,6 +156,7 @@ pub(crate) enum DocumentAnchorRegion {
     None,
     Transcript,
     Composer,
+    CommandPanel,
     ComposerPadding,
     TranscriptComposerGap,
     ComposerStatusGap,

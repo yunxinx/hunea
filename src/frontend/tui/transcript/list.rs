@@ -8,6 +8,7 @@ use ratatui::text::Line;
 use super::{
     DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchor, LineAnchorKind, RenderResult,
     ViewportRenderResult, cache::CachedRenderBlock, cache::ScreenRenderCache, new_render_result,
+    new_render_result_with_append_start,
 };
 use crate::frontend::tui::{
     HeroOptions, Sender, StyleMode,
@@ -313,6 +314,7 @@ impl Transcript {
         }
         let mut previous_anchor_item_index = previous_visible_item_index;
         let mut has_rendered_content = !lines.is_empty();
+        let append_start_line = isize::try_from(lines.len()).unwrap_or(isize::MAX);
 
         for block in blocks {
             if block.item_index < self.screen_cache.item_count {
@@ -338,7 +340,13 @@ impl Transcript {
         }
 
         let _ = width;
-        new_render_result(lines, plain_lines, line_anchors, selectable_ranges)
+        new_render_result_with_append_start(
+            lines,
+            plain_lines,
+            line_anchors,
+            selectable_ranges,
+            append_start_line,
+        )
     }
 }
 
@@ -498,6 +506,21 @@ mod tests {
             result.line_anchors[1].item_anchor.kind,
             LineAnchorKind::ItemGap
         );
+    }
+
+    #[test]
+    fn render_append_path_marks_append_start_line() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.items = vec![TranscriptItem::Message(static_message("first"))];
+        let _ = transcript.render();
+
+        transcript
+            .items
+            .push(TranscriptItem::Message(static_message("second")));
+        let result = transcript.render();
+
+        assert_eq!(result.append_start_line, 1);
+        assert_eq!(result.plain_lines, vec!["first", "", "second"]);
     }
 
     #[test]

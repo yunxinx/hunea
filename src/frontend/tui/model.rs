@@ -338,7 +338,6 @@ impl Model {
         }
         self.transcript_render = self.transcript.render();
         self.transcript_render_version += 1;
-        self.document_layout_cache.valid = false;
         self.document_viewport_cache.valid = false;
     }
 

@@ -13,7 +13,12 @@ use crate::frontend::tui::{
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutCache, DocumentLayoutKey,
     DocumentLineAnchor, DocumentViewport, DocumentViewportCache, DocumentViewportKey,
-    slot_frame::SlotFrame, slot_viewport::compose_bottom_follow_document_viewport,
+    append::{
+        can_extend_cached_document_layout, extend_document_layout_from_transcript_append,
+        sliced_transcript_append,
+    },
+    slot_frame::SlotFrame,
+    slot_viewport::compose_bottom_follow_document_viewport,
 };
 
 #[derive(Debug, Clone)]
@@ -40,14 +45,52 @@ impl Model {
             return self.document_layout_cache.layout.clone();
         }
 
+        if let Some(layout) = self.build_document_layout_from_transcript_append(&key) {
+            self.document_layout_cache = DocumentLayoutCache {
+                key,
+                layout: layout.clone(),
+                transcript_line_count: self.transcript_render.line_count,
+                valid: true,
+            };
+            return layout;
+        }
+
         let layout = compose_document_layout(self.current_document_layout_input());
 
         self.document_layout_cache = DocumentLayoutCache {
             key,
             layout: layout.clone(),
+            transcript_line_count: self.transcript_render.line_count,
             valid: true,
         };
         layout
+    }
+
+    pub(crate) fn build_document_layout_from_transcript_append(
+        &self,
+        key: &DocumentLayoutKey,
+    ) -> Option<DocumentLayout> {
+        if !self.document_layout_cache.valid {
+            return None;
+        }
+        if !can_extend_cached_document_layout(&self.document_layout_cache.key, key) {
+            return None;
+        }
+
+        let start_line = usize::try_from(self.transcript_render.append_start_line).ok()?;
+        if self.document_layout_cache.transcript_line_count != start_line {
+            return None;
+        }
+
+        let appended = sliced_transcript_append(&self.transcript_render, start_line)?;
+        if appended.lines.is_empty() {
+            return None;
+        }
+
+        Some(extend_document_layout_from_transcript_append(
+            &self.document_layout_cache.layout,
+            appended,
+        ))
     }
 
     pub(crate) fn build_document_viewport(&mut self, layout: &DocumentLayout) -> DocumentViewport {
@@ -186,7 +229,11 @@ impl Model {
 }
 
 pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLayout {
-    let extra_gap = usize::from(!input.transcript_lines.is_empty());
+    let extra_gap = if input.transcript_lines.is_empty() {
+        0
+    } else {
+        transcript_composer_gap_line_count()
+    };
     let has_composer_padding = input.composer_frame_decoration_line.is_some();
     let mut lines = Vec::with_capacity(
         input.transcript_lines.len()
@@ -229,14 +276,16 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
         &input.transcript_selectable,
     ));
     if !lines.is_empty() {
-        lines.push(Line::raw(""));
-        plain_lines.push(String::new());
-        anchors.push(DocumentLineAnchor {
-            region: DocumentAnchorRegion::TranscriptComposerGap,
-            gap_index: 0,
-            ..DocumentLineAnchor::default()
-        });
-        selectable.push(SelectableLineRange::default());
+        for gap_index in 0..transcript_composer_gap_line_count() {
+            lines.push(Line::raw(""));
+            plain_lines.push(String::new());
+            anchors.push(DocumentLineAnchor {
+                region: DocumentAnchorRegion::TranscriptComposerGap,
+                gap_index,
+                ..DocumentLineAnchor::default()
+            });
+            selectable.push(SelectableLineRange::default());
+        }
     }
 
     let composer_slot = SlotFrame::new(
@@ -325,6 +374,10 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
         anchors,
         selectable,
     }
+}
+
+pub(crate) fn transcript_composer_gap_line_count() -> usize {
+    1
 }
 
 fn ensure_selectable_ranges(

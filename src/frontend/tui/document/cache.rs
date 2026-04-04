@@ -43,6 +43,7 @@ pub(crate) struct DocumentLayout {
 pub(crate) struct DocumentLayoutCache {
     pub(crate) key: DocumentLayoutKey,
     pub(crate) layout: DocumentLayout,
+    pub(crate) transcript_line_count: usize,
     pub(crate) valid: bool,
 }
 

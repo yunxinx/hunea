@@ -29,13 +29,16 @@ pub(crate) struct LineAnchor {
 }
 
 /// `RenderResult` 表示 transcript 在当前宽度下的稳定渲染结果。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct RenderResult {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) plain_lines: Vec<String>,
     pub(crate) line_anchors: Vec<LineAnchor>,
     pub(crate) selectable_ranges: Vec<SelectableLineRange>,
     pub(crate) line_count: usize,
+    /// `append_start_line` 标记这次结果是否由尾部追加快路径扩展而来。
+    /// `-1` 表示这次是完整重组；非负值表示旧结果的行数。
+    pub(crate) append_start_line: isize,
 }
 
 /// `ViewportRenderResult` 表示 transcript 在给定 viewport 下的可视切片。
@@ -65,11 +68,34 @@ impl RenderResult {
     }
 }
 
+impl Default for RenderResult {
+    fn default() -> Self {
+        Self {
+            lines: Vec::new(),
+            plain_lines: Vec::new(),
+            line_anchors: Vec::new(),
+            selectable_ranges: Vec::new(),
+            line_count: 0,
+            append_start_line: -1,
+        }
+    }
+}
+
 pub(crate) fn new_render_result(
     lines: Vec<Line<'static>>,
     plain_lines: Vec<String>,
     line_anchors: Vec<LineAnchor>,
     selectable_ranges: Vec<SelectableLineRange>,
+) -> RenderResult {
+    new_render_result_with_append_start(lines, plain_lines, line_anchors, selectable_ranges, -1)
+}
+
+pub(crate) fn new_render_result_with_append_start(
+    lines: Vec<Line<'static>>,
+    plain_lines: Vec<String>,
+    line_anchors: Vec<LineAnchor>,
+    selectable_ranges: Vec<SelectableLineRange>,
+    append_start_line: isize,
 ) -> RenderResult {
     if lines.is_empty() {
         return RenderResult::default();
@@ -82,6 +108,7 @@ pub(crate) fn new_render_result(
         line_anchors,
         selectable_ranges,
         line_count,
+        append_start_line,
     }
 }
 

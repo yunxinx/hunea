@@ -1,4 +1,5 @@
 mod anchor_match;
+mod append;
 mod cache;
 mod layout;
 mod slot_frame;
@@ -216,6 +217,88 @@ mod tests {
         assert_eq!(model.document_viewport_y, original_document_offset);
         assert_eq!(model.composer.viewport_offset(), original_composer_offset);
         assert_eq!(model.scroll_restore_target, RestoreTarget::BottomFollow);
+    }
+
+    #[test]
+    fn build_document_layout_matches_full_compose_after_transcript_append() {
+        let mut model = ready_document_model(24, 6);
+        model.composer_mut().set_text_for_test("draft");
+        model.sync_composer_height();
+
+        let _ = model.build_document_layout();
+
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, "history");
+        model.sync_transcript_render();
+
+        let key = model.current_document_layout_key();
+        let layout = model
+            .build_document_layout_from_transcript_append(&key)
+            .expect("single append should extend the cached document layout");
+        let expected = compose_document_layout(model.current_document_layout_input());
+
+        assert_eq!(layout.plain_lines, expected.plain_lines);
+        assert_eq!(layout.anchors, expected.anchors);
+        assert_eq!(layout.selectable, expected.selectable);
+        assert_eq!(layout.composer_slot, expected.composer_slot);
+        assert_eq!(layout.cursor_y, expected.cursor_y);
+    }
+
+    #[test]
+    fn build_document_layout_matches_full_compose_after_appending_to_non_empty_transcript() {
+        let mut model = ready_document_model(24, 6);
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, "history");
+        model.sync_transcript_render();
+        model.composer_mut().set_text_for_test("draft");
+        model.sync_composer_height();
+
+        let _ = model.build_document_layout();
+
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, "next");
+        model.sync_transcript_render();
+
+        let key = model.current_document_layout_key();
+        let layout = model
+            .build_document_layout_from_transcript_append(&key)
+            .expect("tail append should extend before the composer gap");
+        let expected = compose_document_layout(model.current_document_layout_input());
+
+        assert_eq!(layout.plain_lines, expected.plain_lines);
+        assert_eq!(layout.anchors, expected.anchors);
+        assert_eq!(layout.selectable, expected.selectable);
+        assert_eq!(layout.composer_slot, expected.composer_slot);
+        assert_eq!(layout.cursor_y, expected.cursor_y);
+    }
+
+    #[test]
+    fn build_document_layout_append_path_rejects_multiple_pending_transcript_appends() {
+        let mut model = ready_document_model(24, 6);
+        model.composer_mut().set_text_for_test("draft");
+        model.sync_composer_height();
+
+        let _ = model.build_document_layout();
+
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, "one");
+        model.sync_transcript_render();
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, "two");
+        model.sync_transcript_render();
+
+        let key = model.current_document_layout_key();
+        assert!(
+            model
+                .build_document_layout_from_transcript_append(&key)
+                .is_none(),
+            "multiple pending transcript appends should fall back to full compose"
+        );
     }
 
     #[test]

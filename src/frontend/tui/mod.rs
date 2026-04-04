@@ -1,4 +1,5 @@
 mod composer;
+mod composer_mouse;
 mod document;
 mod exit_confirmation;
 mod external_editor;

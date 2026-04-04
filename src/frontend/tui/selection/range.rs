@@ -50,6 +50,10 @@ impl SelectableLineRange {
         self.has_anchor() && self.anchor_start_column <= column && column < self.anchor_end_column
     }
 
+    pub(crate) fn contains_content(self, column: usize) -> bool {
+        self.has_content() && self.start_column <= column && column < self.end_column
+    }
+
     pub(crate) fn clamp(self, column: usize) -> usize {
         if !self.has_content() {
             return 0;

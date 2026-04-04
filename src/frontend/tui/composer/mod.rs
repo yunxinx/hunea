@@ -1,5 +1,6 @@
 mod grapheme;
 mod layout;
+mod mouse;
 mod render;
 mod viewport;
 
@@ -19,6 +20,9 @@ use self::{
 };
 use super::{style_mode::StyleMode, theme::TerminalPalette};
 
+pub(crate) use self::mouse::{
+    cursor_position_for_line_anchor_click, move_cursor_to_logical_position,
+};
 pub(crate) use self::render::LineAnchor;
 #[cfg(test)]
 use self::render::{RenderResult, render};

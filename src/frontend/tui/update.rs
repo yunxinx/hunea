@@ -81,7 +81,22 @@ impl Model {
             }
             AppEvent::MouseWheel { delta_lines } => {
                 self.cancel_exit_confirmation();
+                let before_document_viewport_y = self.document_viewport_y;
+                let before_composer_viewport_y = self.composer.viewport_offset();
+                let before_follow_bottom = self.follow_bottom;
+                let before_manual_document_scroll = self.manual_document_scroll;
+                let had_pending_click = self.pending_composer_cursor_click.active;
                 self.scroll_document_by(delta_lines);
+                if self.document_viewport_y != before_document_viewport_y
+                    || self.composer.viewport_offset() != before_composer_viewport_y
+                    || self.follow_bottom != before_follow_bottom
+                    || self.manual_document_scroll != before_manual_document_scroll
+                {
+                    self.clear_pending_composer_cursor_click();
+                    if had_pending_click {
+                        self.reset_selection_click();
+                    }
+                }
                 None
             }
             AppEvent::MouseDown {
@@ -289,11 +304,16 @@ impl Model {
             None
         };
         let previous_width = self.width;
+        let had_pending_click = self.pending_composer_cursor_click.active;
 
         if self.selection.active {
             self.invalidate_selection_for_reflow();
         }
         self.set_window(width, height);
+        if had_pending_click {
+            self.clear_pending_composer_cursor_click();
+            self.reset_selection_click();
+        }
         self.sync_external_editor_helper_after_resize(previous_width);
         self.sync_document_viewport_after_transcript_refresh(preserved_anchor);
     }

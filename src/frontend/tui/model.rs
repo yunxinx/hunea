@@ -7,6 +7,7 @@ use crate::envinfo;
 use super::{
     HeroOptions,
     composer::Composer,
+    composer_mouse::PendingComposerCursorClick,
     document::{
         LayoutCache, RestoreTarget, ViewportAnchor, ViewportCache, offset_viewport_line_indices,
     },
@@ -32,6 +33,7 @@ pub struct Model {
     pub(crate) ctrl_c_clears_input: bool,
     pub(crate) selection: SelectionState,
     pub(crate) selection_click: SelectionClickState,
+    pub(crate) pending_composer_cursor_click: PendingComposerCursorClick,
     pub(crate) selection_version: usize,
     pub(crate) selection_auto_scroll_direction: AutoScrollDirection,
     pub(crate) selection_auto_scroll_token: usize,
@@ -133,6 +135,7 @@ impl Model {
             ctrl_c_clears_input: options.ctrl_c_clears_input,
             selection: SelectionState::default(),
             selection_click: SelectionClickState::default(),
+            pending_composer_cursor_click: PendingComposerCursorClick::default(),
             selection_version: 0,
             selection_auto_scroll_direction: AutoScrollDirection::None,
             selection_auto_scroll_token: 0,

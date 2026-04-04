@@ -75,6 +75,27 @@ pub struct FrameRenderSummary {
     pub height: u16,
 }
 
+/// `DocumentStressSummary` 收敛超大 transcript 下 document pipeline 的冷路径测量结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentStressSummary {
+    pub item_count: usize,
+    pub width: u16,
+    pub height: u16,
+    pub transcript_line_count: usize,
+    pub document_line_count: usize,
+    pub viewport_line_count: usize,
+    pub frame_non_empty_cells: usize,
+    pub transcript_render_time: std::time::Duration,
+    pub document_layout_time: std::time::Duration,
+    pub document_viewport_time: std::time::Duration,
+    pub frame_render_time: std::time::Duration,
+    pub rss_before_kib: Option<usize>,
+    pub rss_after_transcript_kib: Option<usize>,
+    pub rss_after_layout_kib: Option<usize>,
+    pub rss_after_viewport_kib: Option<usize>,
+    pub rss_after_frame_kib: Option<usize>,
+}
+
 /// `TranscriptBench` 封装 transcript 渲染 benchmark 所需的状态。
 #[derive(Debug, Clone)]
 pub struct TranscriptBench {
@@ -199,6 +220,89 @@ pub fn render_composer_document_with_input(
     }
 }
 
+/// `measure_document_pipeline_stress` 测量大规模 transcript 下的 document 冷路径。
+pub fn measure_document_pipeline_stress(
+    item_count: usize,
+    width: u16,
+    height: u16,
+) -> DocumentStressSummary {
+    let mut model = new_stress_document_model(item_count, width, height);
+    let mut terminal = Terminal::new(TestBackend::new(width, height))
+        .expect("stress benchmark backend should initialize");
+
+    let rss_before_kib = process_rss_kib();
+
+    let transcript_render_started_at = std::time::Instant::now();
+    model.sync_transcript_render();
+    let transcript_render_time = transcript_render_started_at.elapsed();
+    let rss_after_transcript_kib = process_rss_kib();
+
+    let document_layout_started_at = std::time::Instant::now();
+    let layout = model.build_document_layout();
+    let document_layout_time = document_layout_started_at.elapsed();
+    let rss_after_layout_kib = process_rss_kib();
+
+    let document_viewport_started_at = std::time::Instant::now();
+    let viewport = model.build_document_viewport(&layout);
+    let document_viewport_time = document_viewport_started_at.elapsed();
+    let rss_after_viewport_kib = process_rss_kib();
+
+    let frame_render_started_at = std::time::Instant::now();
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("stress benchmark frame render should succeed");
+    let frame_render_time = frame_render_started_at.elapsed();
+    let rss_after_frame_kib = process_rss_kib();
+
+    let buffer = terminal.backend().buffer();
+    let frame_non_empty_cells = (0..buffer.area.height)
+        .flat_map(|row| (0..buffer.area.width).map(move |column| (column, row)))
+        .filter(|&(column, row)| buffer[(column, row)].symbol() != " ")
+        .count();
+
+    DocumentStressSummary {
+        item_count,
+        width,
+        height,
+        transcript_line_count: model.transcript_render.line_count,
+        document_line_count: layout.line_count(),
+        viewport_line_count: viewport.lines.len(),
+        frame_non_empty_cells,
+        transcript_render_time,
+        document_layout_time,
+        document_viewport_time,
+        frame_render_time,
+        rss_before_kib,
+        rss_after_transcript_kib,
+        rss_after_layout_kib,
+        rss_after_viewport_kib,
+        rss_after_frame_kib,
+    }
+}
+
+/// `format_document_stress_summary` 输出便于人工比较的 stress 摘要。
+pub fn format_document_stress_summary(summary: &DocumentStressSummary) -> String {
+    format!(
+        "items={items} size={width}x{height} transcript_lines={transcript_lines} document_lines={document_lines} viewport_lines={viewport_lines} frame_cells={frame_cells} timings_ms={{render:{render:.3}, layout:{layout:.3}, viewport:{viewport:.3}, frame:{frame:.3}}} rss_kib={{before:{rss_before:?}, after_render:{rss_render:?}, after_layout:{rss_layout:?}, after_viewport:{rss_viewport:?}, after_frame:{rss_frame:?}}}",
+        items = summary.item_count,
+        width = summary.width,
+        height = summary.height,
+        transcript_lines = summary.transcript_line_count,
+        document_lines = summary.document_line_count,
+        viewport_lines = summary.viewport_line_count,
+        frame_cells = summary.frame_non_empty_cells,
+        render = summary.transcript_render_time.as_secs_f64() * 1000.0,
+        layout = summary.document_layout_time.as_secs_f64() * 1000.0,
+        viewport = summary.document_viewport_time.as_secs_f64() * 1000.0,
+        frame = summary.frame_render_time.as_secs_f64() * 1000.0,
+        rss_before = summary.rss_before_kib,
+        rss_render = summary.rss_after_transcript_kib,
+        rss_layout = summary.rss_after_layout_kib,
+        rss_viewport = summary.rss_after_viewport_kib,
+        rss_frame = summary.rss_after_frame_kib,
+    )
+}
+
 impl TranscriptBench {
     /// `new` 创建一个与 Go transcript benchmark 场景对齐的 transcript bench。
     pub fn new(item_count: usize, width: u16, palette: TerminalPalette) -> Self {
@@ -232,42 +336,7 @@ impl TranscriptBench {
 impl DocumentBench {
     /// `new` 创建一个与 Go unified document benchmark 场景对齐的 document bench。
     pub fn new(item_count: usize, width: u16, height: u16) -> Self {
-        let mut model = Model::new_with_options(
-            HeroOptions {
-                app_name: Some("lumos".to_string()),
-                version: Some("dev".to_string()),
-                work_dir: Some("/tmp/lumos".to_string()),
-                width: 0,
-            },
-            ModelOptions {
-                style_mode: StyleMode::Cx,
-                ..ModelOptions::default()
-            },
-        );
-        model.transcript_mut().clear();
-
-        for index in 0..item_count {
-            if index % 3 == 0 {
-                model.transcript_mut().append_message_with_style_mode(
-                    Sender::User,
-                    benchmark_user_message(index),
-                    StyleMode::Cx,
-                );
-            } else {
-                model.transcript_mut().append_message_with_style_mode(
-                    Sender::Assistant,
-                    benchmark_assistant_markdown(index),
-                    StyleMode::Cx,
-                );
-            }
-        }
-
-        model.set_window(width, height);
-        model.set_palette(default_palette(), true);
-        model
-            .composer_mut()
-            .replace_text_and_move_to_end(benchmark_composer_draft_for_document());
-        model.sync_composer_height();
+        let mut model = new_stress_document_model(item_count, width, height);
         model.sync_transcript_render();
 
         let layout = model.build_document_layout();
@@ -369,6 +438,45 @@ impl ModelRenderBench {
     }
 }
 
+fn new_stress_document_model(item_count: usize, width: u16, height: u16) -> Model {
+    let mut model = Model::new_with_options(
+        HeroOptions {
+            app_name: Some("lumos".to_string()),
+            version: Some("dev".to_string()),
+            work_dir: Some("/tmp/lumos".to_string()),
+            width: 0,
+        },
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+
+    for index in 0..item_count {
+        append_transcript_benchmark_item(model.transcript_mut(), index);
+    }
+
+    model.set_window(width, height);
+    model.set_palette(default_palette(), true);
+    model
+        .composer_mut()
+        .replace_text_and_move_to_end(benchmark_composer_draft_for_document());
+    model.sync_composer_height();
+    model
+}
+
+fn process_rss_kib() -> Option<usize> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status.lines().find_map(|line| {
+        let value = line.strip_prefix("VmRSS:")?;
+        value
+            .split_whitespace()
+            .next()
+            .and_then(|number| number.parse::<usize>().ok())
+    })
+}
+
 fn append_transcript_benchmark_item(transcript: &mut Transcript, index: usize) {
     if index.is_multiple_of(3) {
         transcript.append_message_with_style_mode(
@@ -467,4 +575,38 @@ fn benchmark_composer_draft_for_document() -> String {
         "cursor placement should stay near the bottom of the document".to_string(),
     ]
     .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_pipeline_stress_summary_reports_consistent_counts_for_small_fixture() {
+        let summary = measure_document_pipeline_stress(24, 80, 18);
+
+        assert_eq!(summary.item_count, 24);
+        assert_eq!(summary.width, 80);
+        assert_eq!(summary.height, 18);
+        assert!(summary.transcript_line_count > 0);
+        assert!(summary.document_line_count >= summary.transcript_line_count);
+        assert!(summary.viewport_line_count > 0);
+        assert!(summary.frame_non_empty_cells > 0);
+        assert!(format_document_stress_summary(&summary).contains("items=24"));
+    }
+
+    #[test]
+    #[ignore = "stress profile for large transcript scales"]
+    fn document_pipeline_stress_profiles_up_to_one_million_items() {
+        for item_count in [10_000_usize, 100_000_usize, 1_000_000_usize] {
+            let summary = measure_document_pipeline_stress(item_count, 80, 24);
+            eprintln!("{}", format_document_stress_summary(&summary));
+
+            assert_eq!(summary.item_count, item_count);
+            assert!(summary.transcript_line_count > 0);
+            assert!(summary.document_line_count >= summary.transcript_line_count);
+            assert!(summary.viewport_line_count > 0);
+            assert!(summary.frame_non_empty_cells > 0);
+        }
+    }
 }

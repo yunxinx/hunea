@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use ratatui::text::Line;
 
 use super::{
@@ -150,10 +152,10 @@ impl Transcript {
     }
 
     /// `render` 渲染整个 transcript，并返回带锚点的稳定结果。
-    pub(crate) fn render(&mut self) -> RenderResult {
+    pub(crate) fn render(&mut self) -> Rc<RenderResult> {
         let width = self.render_width();
         if self.can_reuse_cached_render_result(width) {
-            return self.screen_cache.result.clone();
+            return Rc::clone(&self.screen_cache.result);
         }
         let (blocks, first_changed_index) = self.render_screen_blocks(width);
         if first_changed_index.is_none()
@@ -161,7 +163,7 @@ impl Transcript {
                 .screen_cache
                 .can_reuse_result(width, self.gap, self.items.len())
         {
-            return self.screen_cache.result.clone();
+            return Rc::clone(&self.screen_cache.result);
         }
         if let Some(first_changed_index) = first_changed_index
             && self
@@ -169,16 +171,16 @@ impl Transcript {
                 .can_extend_result(width, self.gap, self.items.len())
             && first_changed_index >= self.screen_cache.item_count
         {
-            let result = self.extend_render_result(width, &blocks);
+            let result = Rc::new(self.extend_render_result(width, &blocks));
             self.screen_cache
-                .store_result(width, self.gap, self.items.len(), result.clone());
+                .store_result(width, self.gap, self.items.len(), Rc::clone(&result));
             return result;
         }
 
         if blocks.is_empty() {
-            let result = RenderResult::default();
+            let result = Rc::new(RenderResult::default());
             self.screen_cache
-                .store_result(width, self.gap, self.items.len(), result.clone());
+                .store_result(width, self.gap, self.items.len(), Rc::clone(&result));
             return result;
         }
 
@@ -203,9 +205,14 @@ impl Transcript {
             }
         }
 
-        let result = new_render_result(lines, plain_lines, line_anchors, selectable_ranges);
+        let result = Rc::new(new_render_result(
+            lines,
+            plain_lines,
+            line_anchors,
+            selectable_ranges,
+        ));
         self.screen_cache
-            .store_result(width, self.gap, self.items.len(), result.clone());
+            .store_result(width, self.gap, self.items.len(), Rc::clone(&result));
         result
     }
 
@@ -453,7 +460,14 @@ mod tests {
     use ratatui::text::Span;
 
     use super::*;
-    use crate::frontend::tui::{StyleMode, theme::default_palette};
+    use crate::frontend::tui::{
+        StyleMode,
+        message_item::{
+            message_item_render_cache_key_call_count,
+            reset_message_item_render_cache_key_call_count,
+        },
+        theme::default_palette,
+    };
 
     #[test]
     fn render_returns_content_lines_and_line_count() {
@@ -570,6 +584,34 @@ mod tests {
         transcript.items[0] = TranscriptItem::Message(static_message("two"));
 
         assert!(!transcript.can_reuse_cached_render_result(transcript.render_width()));
+    }
+
+    #[test]
+    fn render_cache_hit_reuses_underlying_result_storage() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.items = vec![TranscriptItem::Message(static_message("cached"))];
+
+        let first = transcript.render();
+        let second = transcript.render();
+
+        assert_eq!(first.lines.as_ptr(), second.lines.as_ptr());
+        assert_eq!(first.plain_lines.as_ptr(), second.plain_lines.as_ptr());
+        assert_eq!(first.line_anchors.as_ptr(), second.line_anchors.as_ptr());
+    }
+
+    #[test]
+    fn render_cache_hit_does_not_rehash_message_content() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.items = vec![TranscriptItem::Message(static_message("cached"))];
+        reset_message_item_render_cache_key_call_count();
+
+        let _ = transcript.render();
+        let after_first_render = message_item_render_cache_key_call_count();
+        let _ = transcript.render();
+        let after_second_render = message_item_render_cache_key_call_count();
+
+        assert_eq!(after_first_render, 0);
+        assert_eq!(after_second_render, 0);
     }
 
     #[test]

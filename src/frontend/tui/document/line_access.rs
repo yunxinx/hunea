@@ -13,7 +13,39 @@ use super::{
 impl DocumentLayout {
     /// `line_count` 返回 unified document 的总行数。
     pub(crate) fn line_count(&self) -> usize {
-        self.lines.len()
+        self.transcript_line_count + self.tail_lines.len()
+    }
+
+    /// `plain_text_len` 返回 unified document 纯文本的总字符数（含换行分隔）。
+    pub(crate) fn plain_text_len(&self) -> usize {
+        self.plain_text_len_for_range(0, self.line_count())
+    }
+
+    /// `plain_text_len_for_range` 返回指定连续范围内纯文本的总字符数（含换行分隔）。
+    pub(crate) fn plain_text_len_for_range(&self, mut start: usize, count: usize) -> usize {
+        if count == 0 || self.line_count() == 0 || start >= self.line_count() {
+            return 0;
+        }
+
+        let end = (start + count).min(self.line_count());
+        let mut total = 0;
+        let mut used_transcript = false;
+        if start < self.transcript_line_count {
+            let transcript_end = end.min(self.transcript_line_count);
+            total += plain_lines_len(&self.transcript.plain_lines[start..transcript_end]);
+            used_transcript = transcript_end > start;
+            start = transcript_end;
+        }
+        if start < end {
+            let tail_start = start - self.transcript_line_count;
+            let tail_end = end - self.transcript_line_count;
+            if used_transcript {
+                total += 1;
+            }
+            total += plain_lines_len(&self.tail_plain_lines[tail_start..tail_end]);
+        }
+
+        total
     }
 
     /// `line_at` 返回指定视觉行的统一只读视图。
@@ -26,10 +58,26 @@ impl DocumentLayout {
         }
 
         Some(DocumentLayoutLine {
-            line: self.lines.get(index).cloned().unwrap_or_default(),
-            plain_line: self.plain_lines.get(index).cloned().unwrap_or_default(),
-            anchor: self.anchors.get(index).copied().unwrap_or_default(),
-            selectable: self.selectable.get(index).copied().unwrap_or_default(),
+            line: self
+                .tail_lines
+                .get(index - self.transcript_line_count)
+                .cloned()
+                .unwrap_or_default(),
+            plain_line: self
+                .tail_plain_lines
+                .get(index - self.transcript_line_count)
+                .cloned()
+                .unwrap_or_default(),
+            anchor: self
+                .tail_anchors
+                .get(index - self.transcript_line_count)
+                .copied()
+                .unwrap_or_default(),
+            selectable: self
+                .tail_selectable
+                .get(index - self.transcript_line_count)
+                .copied()
+                .unwrap_or_default(),
         })
     }
 
@@ -47,9 +95,12 @@ impl DocumentLayout {
             return self.transcript.anchors.get(index).copied();
         }
 
-        self.anchors.get(index).copied()
+        self.tail_anchors
+            .get(index - self.transcript_line_count)
+            .copied()
     }
 
+    #[cfg(test)]
     /// `all_plain_lines` 返回 unified document 的完整纯文本行视图。
     pub(crate) fn all_plain_lines(&self) -> Vec<String> {
         self.line_texts_for_range(0, self.line_count())
@@ -63,6 +114,7 @@ impl DocumentLayout {
             .collect()
     }
 
+    #[cfg(test)]
     /// `line_texts_for_range` 返回给定连续范围内的纯文本行。
     pub(crate) fn line_texts_for_range(&self, mut start: usize, count: usize) -> Vec<String> {
         if count == 0 || self.line_count() == 0 || start >= self.line_count() {
@@ -77,7 +129,9 @@ impl DocumentLayout {
             start = transcript_end;
         }
         if start < end {
-            lines.extend_from_slice(&self.plain_lines[start..end]);
+            let tail_start = start - self.transcript_line_count;
+            let tail_end = end - self.transcript_line_count;
+            lines.extend_from_slice(&self.tail_plain_lines[tail_start..tail_end]);
         }
 
         lines
@@ -101,7 +155,9 @@ impl DocumentLayout {
             start = transcript_end;
         }
         if start < end {
-            lines.extend_from_slice(&self.lines[start..end]);
+            let tail_start = start - self.transcript_line_count;
+            let tail_end = end - self.transcript_line_count;
+            lines.extend_from_slice(&self.tail_lines[tail_start..tail_end]);
         }
 
         lines
@@ -207,6 +263,14 @@ impl DocumentLayout {
 
         self.transcript.lines[start..end.min(self.transcript_line_count)].to_vec()
     }
+}
+
+fn plain_lines_len(lines: &[String]) -> usize {
+    if lines.is_empty() {
+        return 0;
+    }
+
+    lines.iter().map(String::len).sum::<usize>() + lines.len().saturating_sub(1)
 }
 
 /// `new_document_transcript_item_index` 为 transcript snapshot 构建 item 行索引。

@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::text::Line;
 use std::hint::black_box;
+use std::rc::Rc;
 
 use super::layout::{compose_document_layout, compose_document_viewport, visible_document_lines};
 use super::*;
@@ -95,8 +96,8 @@ fn status_line_selectable_range_skips_leading_inset() {
 #[test]
 fn visible_document_lines_tracks_cursor_visibility() {
     let layout = DocumentLayout {
-        lines: vec![Line::raw("a"), Line::raw("b"), Line::raw("c")],
-        plain_lines: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        tail_lines: vec![Line::raw("a"), Line::raw("b"), Line::raw("c")],
+        tail_plain_lines: vec!["a".to_string(), "b".to_string(), "c".to_string()],
         cursor_x: 4,
         cursor_y: 1,
         ..DocumentLayout::default()
@@ -275,9 +276,60 @@ fn build_document_layout_matches_full_compose_after_transcript_append() {
 
     assert_eq!(layout.all_plain_lines(), expected.all_plain_lines());
     assert_eq!(layout.all_line_anchors(), expected.all_line_anchors());
-    assert_eq!(layout.selectable, expected.selectable);
+    assert_eq!(layout.tail_selectable, expected.tail_selectable);
     assert_eq!(layout.composer_slot, expected.composer_slot);
     assert_eq!(layout.cursor_y, expected.cursor_y);
+}
+
+#[test]
+fn build_document_layout_cache_hit_reuses_cached_allocation() {
+    let mut model = ready_document_model(24, 6);
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "history");
+    model.sync_transcript_render();
+    model.composer_mut().set_text_for_test("draft");
+    model.sync_composer_height();
+
+    let first = model.build_document_layout();
+    let second = model.build_document_layout();
+
+    assert!(Rc::ptr_eq(&first, &second));
+}
+
+#[test]
+fn build_document_viewport_cache_hit_reuses_cached_allocation() {
+    let mut model = ready_document_model(24, 6);
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "history");
+    model.sync_transcript_render();
+    model.composer_mut().set_text_for_test("draft");
+    model.sync_composer_height();
+
+    let layout = model.build_document_layout();
+    let first = model.build_document_viewport(&layout);
+    let second = model.build_document_viewport(&layout);
+
+    assert!(Rc::ptr_eq(&first, &second));
+}
+
+#[test]
+fn build_document_viewport_tracks_plain_text_len_without_recomputing_from_lines() {
+    let mut model = ready_document_model(24, 6);
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "history");
+    model.sync_transcript_render();
+    model.composer_mut().set_text_for_test("draft");
+    model.sync_composer_height();
+
+    let layout = model.build_document_layout();
+    let viewport = model.build_document_viewport(&layout);
+    let expected = viewport.plain_lines.iter().map(String::len).sum::<usize>()
+        + viewport.plain_lines.len().saturating_sub(1);
+
+    assert_eq!(viewport.plain_text_len, expected);
 }
 
 #[test]
@@ -305,7 +357,7 @@ fn build_document_layout_matches_full_compose_after_appending_to_non_empty_trans
 
     assert_eq!(layout.all_plain_lines(), expected.all_plain_lines());
     assert_eq!(layout.all_line_anchors(), expected.all_line_anchors());
-    assert_eq!(layout.selectable, expected.selectable);
+    assert_eq!(layout.tail_selectable, expected.tail_selectable);
     assert_eq!(layout.composer_slot, expected.composer_slot);
     assert_eq!(layout.cursor_y, expected.cursor_y);
 }

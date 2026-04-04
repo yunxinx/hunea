@@ -72,33 +72,22 @@ pub(crate) fn sliced_transcript_append(
 pub(crate) fn extend_document_layout_from_transcript_append(
     base: &DocumentLayout,
     appended: DocumentTranscriptAppend,
-    transcript: DocumentTranscriptSnapshot,
+    transcript: Rc<DocumentTranscriptSnapshot>,
 ) -> DocumentLayout {
     if appended.lines.is_empty() {
         return base.clone();
     }
 
-    let insert_at = appended
-        .previous_transcript_line_count
-        .min(base.lines.len());
     let appended_line_count = appended.lines.len();
     let line_delta = appended_line_count
         + usize::from(appended.previous_transcript_line_count == 0)
             * transcript_composer_gap_line_count();
-    let mut lines = base.lines.clone();
-    lines.splice(insert_at..insert_at, appended.lines);
-    let mut plain_lines = base.plain_lines.clone();
-    plain_lines.splice(insert_at..insert_at, appended.plain_lines);
-    let mut anchors = base.anchors.clone();
-    anchors.splice(insert_at..insert_at, appended.anchors);
-    let mut selectable = base.selectable.clone();
-    selectable.splice(
-        insert_at..insert_at,
-        std::iter::repeat_n(SelectableLineRange::default(), appended_line_count),
-    );
+    let mut tail_lines = base.tail_lines.clone();
+    let mut tail_plain_lines = base.tail_plain_lines.clone();
+    let mut tail_anchors = base.tail_anchors.clone();
+    let mut tail_selectable = base.tail_selectable.clone();
 
     if appended.previous_transcript_line_count == 0 {
-        let gap_insert_at = insert_at + appended_line_count;
         let mut gap_lines = Vec::with_capacity(transcript_composer_gap_line_count());
         let mut gap_plain_lines = Vec::with_capacity(transcript_composer_gap_line_count());
         let mut gap_anchors = Vec::with_capacity(transcript_composer_gap_line_count());
@@ -113,12 +102,12 @@ pub(crate) fn extend_document_layout_from_transcript_append(
             });
             gap_selectable.push(SelectableLineRange::default());
         }
-        lines.splice(gap_insert_at..gap_insert_at, gap_lines);
-        plain_lines.splice(gap_insert_at..gap_insert_at, gap_plain_lines);
-        anchors.splice(gap_insert_at..gap_insert_at, gap_anchors);
-        selectable.splice(gap_insert_at..gap_insert_at, gap_selectable);
+        tail_lines.splice(0..0, gap_lines);
+        tail_plain_lines.splice(0..0, gap_plain_lines);
+        tail_anchors.splice(0..0, gap_anchors);
+        tail_selectable.splice(0..0, gap_selectable);
     }
-    let transcript_items = new_document_transcript_item_index(&transcript);
+    let transcript_items = new_document_transcript_item_index(transcript.as_ref());
 
     let mut composer_slot = base.composer_slot;
     composer_slot.frame_start_line += line_delta;
@@ -128,10 +117,10 @@ pub(crate) fn extend_document_layout_from_transcript_append(
         transcript,
         transcript_line_count: base.transcript_line_count + appended_line_count,
         transcript_items,
-        lines,
-        plain_lines,
-        anchors,
-        selectable,
+        tail_lines,
+        tail_plain_lines,
+        tail_anchors,
+        tail_selectable,
         composer_slot,
         composer_start_line: base.composer_start_line + line_delta,
         composer_line_count: base.composer_line_count,

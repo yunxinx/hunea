@@ -29,6 +29,7 @@ const HERO_LOGICAL_LINE_BOTTOM_BORDER: usize = 4;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeroItem {
     options: HeroOptions,
+    render_cache_key: u64,
 }
 
 impl HeroItem {
@@ -38,7 +39,12 @@ impl HeroItem {
             options.work_dir = Some(short_work_dir());
         }
 
-        Self { options }
+        let render_cache_key = hero_item_render_cache_key(&options);
+
+        Self {
+            options,
+            render_cache_key,
+        }
     }
 
     /// `render_lines` 将 hero 渲染为带样式的文本行。
@@ -80,7 +86,7 @@ impl HeroItem {
     }
 
     pub(crate) fn render_cache_key(&self) -> u64 {
-        hero_item_render_cache_key(&self.options)
+        self.render_cache_key
     }
 
     pub(crate) fn render_line_anchors(

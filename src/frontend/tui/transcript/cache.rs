@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use ratatui::text::Line;
 
 use super::render_state::{ItemLineAnchor, RenderResult};
@@ -20,7 +22,7 @@ pub(crate) struct CachedRenderBlock {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ScreenRenderCache {
     pub(crate) items: Vec<CachedRenderBlock>,
-    pub(crate) result: RenderResult,
+    pub(crate) result: Rc<RenderResult>,
     pub(crate) width: u16,
     pub(crate) gap: usize,
     pub(crate) item_count: usize,
@@ -40,7 +42,7 @@ impl ScreenRenderCache {
     }
 
     pub(crate) fn invalidate_result(&mut self) {
-        self.result = RenderResult::default();
+        self.result = Rc::new(RenderResult::default());
         self.valid = false;
     }
 
@@ -72,7 +74,7 @@ impl ScreenRenderCache {
         width: u16,
         gap: usize,
         item_count: usize,
-        result: RenderResult,
+        result: Rc<RenderResult>,
     ) {
         self.result = result;
         self.width = width;

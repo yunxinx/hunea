@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::time::Instant;
 
 use ratatui::Frame;
@@ -46,7 +47,7 @@ pub struct Model {
     pub(super) palette: TerminalPalette,
     pub(super) palette_version: usize,
     pub(super) transcript: Transcript,
-    pub(super) transcript_render: RenderResult,
+    pub(super) transcript_render: Rc<RenderResult>,
     pub(super) transcript_render_version: usize,
     pub(super) composer: Composer,
     pub(super) width: u16,
@@ -451,7 +452,7 @@ mod tests {
         assert_eq!(layout.composer_line_count, 3);
 
         let viewport = model.build_document_viewport(&layout);
-        let rendered = viewport.plain_lines;
+        let rendered = viewport.plain_lines.clone();
         assert_eq!(
             rendered,
             vec![

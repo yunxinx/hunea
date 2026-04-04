@@ -3,6 +3,9 @@ use std::{
     hash::{Hash, Hasher},
 };
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -32,6 +35,12 @@ pub struct MessageItem {
     sender: Sender,
     content: String,
     style_mode: StyleMode,
+    render_cache_key: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static MESSAGE_ITEM_RENDER_CACHE_KEY_CALL_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 impl MessageItem {
@@ -49,10 +58,12 @@ impl MessageItem {
     ) -> Self {
         let style_mode = style_mode.normalized();
         let content = content.into();
+        let render_cache_key = message_item_render_cache_key(sender, &content, style_mode);
         Self {
             sender,
             content,
             style_mode,
+            render_cache_key,
         }
     }
 
@@ -92,7 +103,7 @@ impl MessageItem {
     }
 
     pub(crate) fn render_cache_key(&self) -> u64 {
-        message_item_render_cache_key(self.sender, &self.content, self.style_mode)
+        self.render_cache_key
     }
 
     pub(crate) fn render_line_anchors(
@@ -205,7 +216,20 @@ impl MessageItem {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn reset_message_item_render_cache_key_call_count() {
+    MESSAGE_ITEM_RENDER_CACHE_KEY_CALL_COUNT.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn message_item_render_cache_key_call_count() -> usize {
+    MESSAGE_ITEM_RENDER_CACHE_KEY_CALL_COUNT.get()
+}
+
 fn message_item_render_cache_key(sender: Sender, content: &str, style_mode: StyleMode) -> u64 {
+    #[cfg(test)]
+    MESSAGE_ITEM_RENDER_CACHE_KEY_CALL_COUNT.with(|count| count.set(count.get() + 1));
+
     let mut hasher = DefaultHasher::new();
     (sender as u8).hash(&mut hasher);
     if sender == Sender::User {

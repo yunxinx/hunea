@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use ratatui::text::Line;
 
 use crate::frontend::tui::{
@@ -26,7 +28,7 @@ use super::{
 
 #[derive(Debug, Clone)]
 pub(crate) struct DocumentLayoutInput {
-    pub(crate) transcript: DocumentTranscriptSnapshot,
+    pub(crate) transcript: Rc<DocumentTranscriptSnapshot>,
     pub(crate) composer_lines: Vec<Line<'static>>,
     pub(crate) composer_plain_lines: Vec<String>,
     pub(crate) composer_anchors: Vec<DocumentLineAnchor>,
@@ -50,10 +52,10 @@ impl Model {
         self.document_viewport_cache.valid = false;
     }
 
-    pub(crate) fn build_document_layout(&mut self) -> DocumentLayout {
+    pub(crate) fn build_document_layout(&mut self) -> Rc<DocumentLayout> {
         let key = self.current_document_layout_key();
         if self.document_layout_cache.valid && self.document_layout_cache.key == key {
-            return self.document_layout_cache.layout.clone();
+            return Rc::clone(&self.document_layout_cache.layout);
         }
 
         if let Some((layout, transcript_snapshot)) =
@@ -64,31 +66,34 @@ impl Model {
                     transcript_render_version: self.transcript_render_version,
                     document_width: self.width,
                 },
-                snapshot: transcript_snapshot,
+                snapshot: Rc::clone(&transcript_snapshot),
                 valid: true,
             };
+            let layout = Rc::new(layout);
             self.document_layout_cache = DocumentLayoutCache {
                 key,
-                layout: layout.clone(),
+                layout: Rc::clone(&layout),
                 transcript_line_count: self.transcript_render.line_count,
                 valid: true,
             };
             return layout;
         }
 
-        let layout = compose_document_layout(self.current_document_layout_input());
+        let layout = Rc::new(compose_document_layout(
+            self.current_document_layout_input(),
+        ));
         self.document_transcript_cache = DocumentTranscriptCache {
             key: DocumentTranscriptKey {
                 transcript_render_version: self.transcript_render_version,
                 document_width: self.width,
             },
-            snapshot: layout.transcript.clone(),
+            snapshot: Rc::clone(&layout.transcript),
             valid: true,
         };
 
         self.document_layout_cache = DocumentLayoutCache {
             key,
-            layout: layout.clone(),
+            layout: Rc::clone(&layout),
             transcript_line_count: self.transcript_render.line_count,
             valid: true,
         };
@@ -98,7 +103,7 @@ impl Model {
     pub(crate) fn build_document_layout_from_transcript_append(
         &mut self,
         key: &DocumentLayoutKey,
-    ) -> Option<(DocumentLayout, DocumentTranscriptSnapshot)> {
+    ) -> Option<(DocumentLayout, Rc<DocumentTranscriptSnapshot>)> {
         if !self.document_layout_cache.valid {
             return None;
         }
@@ -122,13 +127,16 @@ impl Model {
             extend_document_layout_from_transcript_append(
                 &self.document_layout_cache.layout,
                 appended,
-                transcript_snapshot.clone(),
+                Rc::clone(&transcript_snapshot),
             ),
             transcript_snapshot,
         ))
     }
 
-    pub(crate) fn build_document_viewport(&mut self, layout: &DocumentLayout) -> DocumentViewport {
+    pub(crate) fn build_document_viewport(
+        &mut self,
+        layout: &DocumentLayout,
+    ) -> Rc<DocumentViewport> {
         let uses_bottom_follow = self.follow_bottom && !self.manual_document_scroll;
         let key = DocumentViewportKey {
             layout_key: self.current_document_layout_key(),
@@ -138,7 +146,7 @@ impl Model {
             selection_version: self.selection_version,
         };
         if self.document_viewport_cache.valid && self.document_viewport_cache.key == key {
-            return self.document_viewport_cache.viewport.clone();
+            return Rc::clone(&self.document_viewport_cache.viewport);
         }
 
         let mut viewport = compose_document_viewport(
@@ -155,9 +163,10 @@ impl Model {
         }
         apply_selection_to_viewport(&mut viewport, layout, self.selection);
 
+        let viewport = Rc::new(viewport);
         self.document_viewport_cache = DocumentViewportCache {
             key,
-            viewport: viewport.clone(),
+            viewport: Rc::clone(&viewport),
             valid: true,
         };
         viewport
@@ -248,36 +257,32 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
         transcript_composer_gap_line_count()
     };
     let has_composer_padding = input.composer_frame_decoration_line.is_some();
-    let mut lines = Vec::with_capacity(
-        transcript_line_count
-            + extra_gap
+    let mut tail_lines = Vec::with_capacity(
+        extra_gap
             + input.composer_lines.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
             + input.status_line.gap_before
             + usize::from(input.status_line.has_content),
     );
-    let mut plain_lines = Vec::with_capacity(
-        transcript_line_count
-            + extra_gap
+    let mut tail_plain_lines = Vec::with_capacity(
+        extra_gap
             + input.composer_plain_lines.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.plain_lines.len()
             + input.status_line.gap_before
             + usize::from(input.status_line.has_content),
     );
-    let mut anchors = Vec::with_capacity(
-        transcript_line_count
-            + extra_gap
+    let mut tail_anchors = Vec::with_capacity(
+        extra_gap
             + input.composer_anchors.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
             + input.status_line.gap_before
             + usize::from(input.status_line.has_content),
     );
-    let mut selectable = Vec::with_capacity(
-        transcript_line_count
-            + extra_gap
+    let mut tail_selectable = Vec::with_capacity(
+        extra_gap
             + input.composer_selectable.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.selectable.len()
@@ -285,28 +290,21 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             + usize::from(input.status_line.has_content),
     );
 
-    lines.extend(input.transcript.lines.iter().cloned());
-    plain_lines.extend(input.transcript.plain_lines.iter().cloned());
-    anchors.extend(input.transcript.anchors.iter().copied());
-    selectable.extend(std::iter::repeat_n(
-        SelectableLineRange::default(),
-        transcript_line_count,
-    ));
     if transcript_line_count > 0 {
         for gap_index in 0..transcript_composer_gap_line_count() {
-            lines.push(Line::raw(""));
-            plain_lines.push(String::new());
-            anchors.push(DocumentLineAnchor {
+            tail_lines.push(Line::raw(""));
+            tail_plain_lines.push(String::new());
+            tail_anchors.push(DocumentLineAnchor {
                 region: DocumentAnchorRegion::TranscriptComposerGap,
                 gap_index,
                 ..DocumentLineAnchor::default()
             });
-            selectable.push(SelectableLineRange::default());
+            tail_selectable.push(SelectableLineRange::default());
         }
     }
 
     let composer_slot = SlotFrame::new(
-        lines.len(),
+        transcript_line_count + tail_lines.len(),
         has_composer_padding,
         input.composer_plain_lines.len(),
     );
@@ -314,41 +312,41 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
         input.composer_frame_decoration_line.clone(),
         input.composer_frame_decoration_plain_line.clone(),
     ) {
-        lines.push(line);
-        plain_lines.push(plain);
-        anchors.push(DocumentLineAnchor {
+        tail_lines.push(line);
+        tail_plain_lines.push(plain);
+        tail_anchors.push(DocumentLineAnchor {
             region: DocumentAnchorRegion::ComposerPadding,
             gap_index: 0,
             ..DocumentLineAnchor::default()
         });
-        selectable.push(SelectableLineRange::default());
+        tail_selectable.push(SelectableLineRange::default());
     }
 
-    lines.extend(input.composer_lines);
-    plain_lines.extend(input.composer_plain_lines);
-    anchors.extend(input.composer_anchors);
-    selectable.extend(ensure_selectable_ranges(
-        &plain_lines[plain_lines.len() - input.composer_selectable.len()..],
+    tail_lines.extend(input.composer_lines);
+    tail_plain_lines.extend(input.composer_plain_lines);
+    tail_anchors.extend(input.composer_anchors);
+    tail_selectable.extend(ensure_selectable_ranges(
+        &tail_plain_lines[tail_plain_lines.len() - input.composer_selectable.len()..],
         &input.composer_selectable,
     ));
     if let (Some(line), Some(plain)) = (
         input.composer_frame_decoration_line,
         input.composer_frame_decoration_plain_line,
     ) {
-        lines.push(line);
-        plain_lines.push(plain);
-        anchors.push(DocumentLineAnchor {
+        tail_lines.push(line);
+        tail_plain_lines.push(plain);
+        tail_anchors.push(DocumentLineAnchor {
             region: DocumentAnchorRegion::ComposerPadding,
             gap_index: 1,
             ..DocumentLineAnchor::default()
         });
-        selectable.push(SelectableLineRange::default());
+        tail_selectable.push(SelectableLineRange::default());
     }
 
     if input.command_panel.has_content {
         for index in 0..input.command_panel.lines.len() {
-            lines.push(input.command_panel.lines[index].clone());
-            plain_lines.push(
+            tail_lines.push(input.command_panel.lines[index].clone());
+            tail_plain_lines.push(
                 input
                     .command_panel
                     .plain_lines
@@ -356,12 +354,12 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
                     .cloned()
                     .unwrap_or_default(),
             );
-            anchors.push(DocumentLineAnchor {
+            tail_anchors.push(DocumentLineAnchor {
                 region: DocumentAnchorRegion::CommandPanel,
                 gap_index: index,
                 ..DocumentLineAnchor::default()
             });
-            selectable.push(
+            tail_selectable.push(
                 input
                     .command_panel
                     .selectable
@@ -374,52 +372,52 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
 
     if input.status_line.has_content {
         for gap_index in 0..input.status_line.gap_before {
-            lines.push(Line::raw(""));
-            plain_lines.push(String::new());
-            anchors.push(DocumentLineAnchor {
+            tail_lines.push(Line::raw(""));
+            tail_plain_lines.push(String::new());
+            tail_anchors.push(DocumentLineAnchor {
                 region: DocumentAnchorRegion::ComposerStatusGap,
                 gap_index,
                 ..DocumentLineAnchor::default()
             });
-            selectable.push(SelectableLineRange::default());
+            tail_selectable.push(SelectableLineRange::default());
         }
 
         if let Some(line) = input.status_line.line {
-            lines.push(line);
-            plain_lines.push(input.status_line.plain_line);
-            anchors.push(DocumentLineAnchor {
+            tail_lines.push(line);
+            tail_plain_lines.push(input.status_line.plain_line);
+            tail_anchors.push(DocumentLineAnchor {
                 region: DocumentAnchorRegion::StatusLine,
                 ..DocumentLineAnchor::default()
             });
-            selectable.push(input.status_line.selectable);
+            tail_selectable.push(input.status_line.selectable);
         }
     }
 
-    let composer_slot = if lines.is_empty() {
+    let composer_slot = if transcript_line_count == 0 && tail_lines.is_empty() {
         SlotFrame::new(0, false, 1)
     } else {
         composer_slot
     };
-    if lines.is_empty() {
-        lines.push(Line::raw(""));
-        plain_lines.push(String::new());
-        anchors.push(DocumentLineAnchor::default());
-        selectable.push(SelectableLineRange::default());
+    if transcript_line_count == 0 && tail_lines.is_empty() {
+        tail_lines.push(Line::raw(""));
+        tail_plain_lines.push(String::new());
+        tail_anchors.push(DocumentLineAnchor::default());
+        tail_selectable.push(SelectableLineRange::default());
     }
 
     DocumentLayout {
         transcript: input.transcript,
         transcript_line_count,
         transcript_items,
+        tail_lines,
+        tail_plain_lines,
+        tail_anchors,
+        tail_selectable,
         composer_slot,
         composer_start_line: composer_slot.content_start_line,
         composer_line_count: composer_slot.content_line_count,
         cursor_x: input.composer_cursor_x,
         cursor_y: composer_slot.content_start_line + input.composer_cursor_y,
-        lines,
-        plain_lines,
-        anchors,
-        selectable,
     }
 }
 
@@ -448,15 +446,40 @@ pub(crate) fn compose_document_viewport(
     offset: usize,
     height: usize,
 ) -> DocumentViewport {
-    let (lines, plain_lines, resolved_offset) = visible_document_lines(layout, offset, height);
+    if layout.line_count() == 0 {
+        return DocumentViewport {
+            lines: vec![Line::raw("")],
+            plain_text_len: 0,
+            #[cfg(test)]
+            plain_lines: vec![String::new()],
+            resolved_offset: 0,
+        };
+    }
+
+    if height == 0 || height >= layout.line_count() {
+        return DocumentViewport {
+            lines: layout.lines_for_range(0, layout.line_count()),
+            plain_text_len: layout.plain_text_len(),
+            #[cfg(test)]
+            plain_lines: layout.all_plain_lines(),
+            resolved_offset: 0,
+        };
+    }
+
+    let max_offset = layout.line_count().saturating_sub(height);
+    let resolved_offset = offset.min(max_offset);
+    let visible_line_count = height.min(layout.line_count() - resolved_offset);
 
     DocumentViewport {
-        lines,
-        plain_lines,
+        lines: layout.lines_for_range(resolved_offset, visible_line_count),
+        plain_text_len: layout.plain_text_len_for_range(resolved_offset, visible_line_count),
+        #[cfg(test)]
+        plain_lines: layout.line_texts_for_range(resolved_offset, visible_line_count),
         resolved_offset,
     }
 }
 
+#[cfg(test)]
 pub(crate) fn visible_document_lines(
     layout: &DocumentLayout,
     offset: usize,
@@ -498,13 +521,15 @@ fn document_anchors_for_transcript(
 }
 
 impl Model {
-    pub(crate) fn current_document_transcript_snapshot(&mut self) -> DocumentTranscriptSnapshot {
+    pub(crate) fn current_document_transcript_snapshot(
+        &mut self,
+    ) -> Rc<DocumentTranscriptSnapshot> {
         let key = DocumentTranscriptKey {
             transcript_render_version: self.transcript_render_version,
             document_width: self.width,
         };
         if self.document_transcript_cache.valid && self.document_transcript_cache.key == key {
-            return self.document_transcript_cache.snapshot.clone();
+            return Rc::clone(&self.document_transcript_cache.snapshot);
         }
 
         let mut items = std::collections::HashMap::new();
@@ -519,7 +544,7 @@ impl Model {
             }
         }
 
-        let snapshot = DocumentTranscriptSnapshot {
+        let snapshot = Rc::new(DocumentTranscriptSnapshot {
             lines: self.transcript_render.lines.clone(),
             plain_lines: self.transcript_render.plain_lines.clone(),
             anchors: document_anchors_for_transcript(&self.transcript_render.line_anchors),
@@ -533,10 +558,10 @@ impl Model {
             selectable_cache: std::rc::Rc::new(std::cell::RefCell::new(
                 std::collections::HashMap::new(),
             )),
-        };
+        });
         self.document_transcript_cache = DocumentTranscriptCache {
             key,
-            snapshot: snapshot.clone(),
+            snapshot: Rc::clone(&snapshot),
             valid: true,
         };
         snapshot
@@ -545,7 +570,7 @@ impl Model {
     pub(crate) fn document_transcript_snapshot_after_append(
         &mut self,
         appended: &super::append::DocumentTranscriptAppend,
-    ) -> DocumentTranscriptSnapshot {
+    ) -> Rc<DocumentTranscriptSnapshot> {
         let previous_key = DocumentTranscriptKey {
             transcript_render_version: self.document_layout_cache.key.transcript_render_version,
             document_width: self.width,
@@ -553,9 +578,11 @@ impl Model {
         if self.document_transcript_cache.valid
             && self.document_transcript_cache.key == previous_key
         {
-            return super::append::extend_document_transcript_snapshot_from_append(
-                &self.document_transcript_cache.snapshot,
-                appended,
+            return Rc::new(
+                super::append::extend_document_transcript_snapshot_from_append(
+                    &self.document_transcript_cache.snapshot,
+                    appended,
+                ),
             );
         }
 

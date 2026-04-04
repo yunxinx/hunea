@@ -49,13 +49,12 @@ fn command_panel_rows_are_inserted_into_document_before_status_notice() {
     model.show_transient_status_notice("Selection copied");
 
     let layout = model.build_document_layout();
-    let panel_line = layout
-        .plain_lines
+    let plain_lines = layout.all_plain_lines();
+    let panel_line = plain_lines
         .iter()
         .position(|line| line.contains("/exit"))
         .expect("command panel row should exist");
-    let notice_line = layout
-        .plain_lines
+    let notice_line = plain_lines
         .iter()
         .position(|line| line.contains("Selection copied"))
         .expect("status notice should exist");

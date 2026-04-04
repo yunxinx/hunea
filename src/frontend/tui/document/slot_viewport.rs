@@ -91,6 +91,8 @@ pub(crate) fn compose_document_viewport_from_line_indices(
     if line_indices.is_empty() {
         return DocumentViewport {
             lines: vec![Line::raw("")],
+            plain_text_len: 0,
+            #[cfg(test)]
             plain_lines: vec![String::new()],
             resolved_offset: 0,
         };
@@ -99,21 +101,32 @@ pub(crate) fn compose_document_viewport_from_line_indices(
     if let Some((start, count)) = contiguous_line_range(line_indices) {
         return DocumentViewport {
             lines: layout.lines_for_range(start, count),
+            plain_text_len: layout.plain_text_len_for_range(start, count),
+            #[cfg(test)]
             plain_lines: layout.line_texts_for_range(start, count),
             resolved_offset: start,
         };
     }
 
     let mut lines = Vec::with_capacity(line_indices.len());
+    let mut plain_text_len = 0;
+    #[cfg(test)]
     let mut plain_lines = Vec::with_capacity(line_indices.len());
     for &index in line_indices {
         if let Some(line) = layout.line_at(index) {
+            if !lines.is_empty() {
+                plain_text_len += 1;
+            }
+            plain_text_len += line.plain_line.len();
             lines.push(line.line);
+            #[cfg(test)]
             plain_lines.push(line.plain_line);
         }
     }
     DocumentViewport {
         lines,
+        plain_text_len,
+        #[cfg(test)]
         plain_lines,
         resolved_offset: line_indices[0],
     }
@@ -147,12 +160,12 @@ mod tests {
         model.has_window = true;
 
         let layout = DocumentLayout {
-            lines: vec![
+            tail_lines: vec![
                 Line::raw("frame-top"),
                 Line::raw("input-line"),
                 Line::raw("frame-bottom"),
             ],
-            plain_lines: vec![
+            tail_plain_lines: vec![
                 "frame-top".to_string(),
                 "input-line".to_string(),
                 "frame-bottom".to_string(),
@@ -183,13 +196,13 @@ mod tests {
         model.has_window = true;
 
         let layout = DocumentLayout {
-            lines: vec![
+            tail_lines: vec![
                 Line::raw("frame-top"),
                 Line::raw("input-line"),
                 Line::raw("frame-bottom"),
                 Line::raw("status-line"),
             ],
-            plain_lines: vec![
+            tail_plain_lines: vec![
                 "frame-top".to_string(),
                 "input-line".to_string(),
                 "frame-bottom".to_string(),

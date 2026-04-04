@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use ratatui::{Terminal, backend::TestBackend};
 
@@ -85,7 +86,7 @@ pub struct TranscriptBench {
 #[derive(Debug, Clone)]
 pub struct DocumentBench {
     model: Model,
-    layout: super::document::DocumentLayout,
+    layout: Rc<super::document::DocumentLayout>,
     next_index: usize,
 }
 
@@ -407,7 +408,7 @@ fn summarize_transcript_render(
 fn summarize_document_layout(layout: &super::document::DocumentLayout) -> DocumentLayoutSummary {
     DocumentLayoutSummary {
         line_count: layout.line_count(),
-        plain_text_len: plain_lines_len(&layout.plain_lines),
+        plain_text_len: layout.plain_text_len(),
         transcript_line_count: layout.transcript_line_count,
         composer_line_count: layout.composer_line_count,
         cursor_x: layout.cursor_x,
@@ -420,7 +421,7 @@ fn summarize_document_viewport(
 ) -> DocumentViewportSummary {
     DocumentViewportSummary {
         line_count: viewport.lines.len(),
-        plain_text_len: plain_lines_len(&viewport.plain_lines),
+        plain_text_len: viewport.plain_text_len,
         resolved_offset: viewport.resolved_offset,
     }
 }

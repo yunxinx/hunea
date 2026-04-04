@@ -48,7 +48,7 @@ impl Default for DocumentTranscriptSnapshot {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DocumentTranscriptCache {
     pub(super) key: DocumentTranscriptKey,
-    pub(super) snapshot: DocumentTranscriptSnapshot,
+    pub(super) snapshot: Rc<DocumentTranscriptSnapshot>,
     pub(super) valid: bool,
 }
 
@@ -72,13 +72,13 @@ pub(crate) struct DocumentLayoutKey {
 /// `DocumentLayout` 表示整份统一文档流的稳定布局。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DocumentLayout {
-    pub(super) transcript: DocumentTranscriptSnapshot,
+    pub(super) transcript: Rc<DocumentTranscriptSnapshot>,
     pub(crate) transcript_line_count: usize,
     pub(super) transcript_items: HashMap<usize, DocumentTranscriptItemLines>,
-    pub(crate) lines: Vec<Line<'static>>,
-    pub(crate) plain_lines: Vec<String>,
-    pub(super) anchors: Vec<DocumentLineAnchor>,
-    pub(super) selectable: Vec<SelectableLineRange>,
+    pub(crate) tail_lines: Vec<Line<'static>>,
+    pub(crate) tail_plain_lines: Vec<String>,
+    pub(super) tail_anchors: Vec<DocumentLineAnchor>,
+    pub(super) tail_selectable: Vec<SelectableLineRange>,
     pub(crate) composer_slot: SlotFrame,
     pub(super) composer_start_line: usize,
     pub(crate) composer_line_count: usize,
@@ -92,13 +92,33 @@ impl DocumentLayout {
         transcript_line_count: usize,
         plain_lines: &[&str],
     ) -> Self {
+        let transcript_line_count = transcript_line_count.min(plain_lines.len());
+        let transcript_plain_lines = &plain_lines[..transcript_line_count];
+        let tail_plain_lines = &plain_lines[transcript_line_count..];
         Self {
             transcript_line_count,
-            lines: plain_lines
+            transcript: Rc::new(DocumentTranscriptSnapshot {
+                lines: transcript_plain_lines
+                    .iter()
+                    .map(|line| Line::raw((*line).to_string()))
+                    .collect(),
+                plain_lines: transcript_plain_lines
+                    .iter()
+                    .map(|line| (*line).to_string())
+                    .collect(),
+                anchors: vec![DocumentLineAnchor::default(); transcript_plain_lines.len()],
+                ..DocumentTranscriptSnapshot::default()
+            }),
+            tail_lines: tail_plain_lines
                 .iter()
                 .map(|line| Line::raw((*line).to_string()))
                 .collect(),
-            plain_lines: plain_lines.iter().map(|line| (*line).to_string()).collect(),
+            tail_plain_lines: tail_plain_lines
+                .iter()
+                .map(|line| (*line).to_string())
+                .collect(),
+            tail_anchors: vec![DocumentLineAnchor::default(); tail_plain_lines.len()],
+            tail_selectable: vec![SelectableLineRange::default(); tail_plain_lines.len()],
             ..Self::default()
         }
     }
@@ -125,7 +145,7 @@ pub(crate) struct DocumentTranscriptItemLines {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DocumentLayoutCache {
     pub(super) key: DocumentLayoutKey,
-    pub(super) layout: DocumentLayout,
+    pub(super) layout: Rc<DocumentLayout>,
     pub(super) transcript_line_count: usize,
     pub(super) valid: bool,
 }
@@ -144,7 +164,8 @@ pub(crate) struct DocumentViewportKey {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DocumentViewport {
     pub(crate) lines: Vec<Line<'static>>,
-    #[allow(dead_code)]
+    pub(crate) plain_text_len: usize,
+    #[cfg(test)]
     pub(crate) plain_lines: Vec<String>,
     pub(crate) resolved_offset: usize,
 }
@@ -157,6 +178,8 @@ impl DocumentViewport {
                 .iter()
                 .map(|line| Line::raw((*line).to_string()))
                 .collect(),
+            plain_text_len: plain_lines.iter().map(|line| line.len()).sum::<usize>()
+                + plain_lines.len().saturating_sub(1),
             plain_lines: plain_lines.iter().map(|line| (*line).to_string()).collect(),
             resolved_offset,
         }
@@ -167,7 +190,7 @@ impl DocumentViewport {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DocumentViewportCache {
     pub(super) key: DocumentViewportKey,
-    pub(super) viewport: DocumentViewport,
+    pub(super) viewport: Rc<DocumentViewport>,
     pub(super) valid: bool,
 }
 

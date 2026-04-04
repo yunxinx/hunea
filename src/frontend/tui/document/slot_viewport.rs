@@ -27,9 +27,9 @@ impl Model {
             return layout.cursor_y;
         }
 
-        let lines_below_cursor = layout.lines.len().saturating_sub(1 + layout.cursor_y);
+        let lines_below_cursor = layout.line_count().saturating_sub(1 + layout.cursor_y);
         if lines_below_cursor < self.document_viewport_height() {
-            return layout.lines.len().saturating_sub(1);
+            return layout.line_count().saturating_sub(1);
         }
 
         layout.cursor_y
@@ -41,11 +41,11 @@ pub(crate) fn bottom_follow_viewport_line_indices(
     height: usize,
     presentation: BottomFollowPresentation,
 ) -> Vec<usize> {
-    if layout.lines.is_empty() {
+    if layout.line_count() == 0 {
         return Vec::new();
     }
 
-    let anchor_line = presentation.anchor_line.min(layout.lines.len() - 1);
+    let anchor_line = presentation.anchor_line.min(layout.line_count() - 1);
     if height == 0 {
         return (0..=anchor_line).collect();
     }
@@ -59,17 +59,17 @@ pub(crate) fn offset_viewport_line_indices(
     offset: usize,
     height: usize,
 ) -> Vec<usize> {
-    if layout.lines.is_empty() {
+    if layout.line_count() == 0 {
         return Vec::new();
     }
 
     if height == 0 {
-        return (0..layout.lines.len()).collect();
+        return (0..layout.line_count()).collect();
     }
 
-    let max_offset = layout.lines.len().saturating_sub(height);
+    let max_offset = layout.line_count().saturating_sub(height);
     let resolved_offset = offset.min(max_offset);
-    let end = (resolved_offset + height).min(layout.lines.len());
+    let end = (resolved_offset + height).min(layout.line_count());
     (resolved_offset..end).collect()
 }
 
@@ -96,15 +96,22 @@ pub(crate) fn compose_document_viewport_from_line_indices(
         };
     }
 
+    if let Some((start, count)) = contiguous_line_range(line_indices) {
+        return DocumentViewport {
+            lines: layout.lines_for_range(start, count),
+            plain_lines: layout.line_texts_for_range(start, count),
+            resolved_offset: start,
+        };
+    }
+
     let mut lines = Vec::with_capacity(line_indices.len());
     let mut plain_lines = Vec::with_capacity(line_indices.len());
     for &index in line_indices {
-        if let Some(line) = layout.lines.get(index) {
-            lines.push(line.clone());
-            plain_lines.push(layout.plain_lines.get(index).cloned().unwrap_or_default());
+        if let Some(line) = layout.line_at(index) {
+            lines.push(line.line);
+            plain_lines.push(line.plain_line);
         }
     }
-
     DocumentViewport {
         lines,
         plain_lines,
@@ -113,7 +120,18 @@ pub(crate) fn compose_document_viewport_from_line_indices(
 }
 
 fn layout_has_content_below_composer_frame(layout: &DocumentLayout) -> bool {
-    layout.composer_slot.frame_bottom_line() < layout.lines.len().saturating_sub(1)
+    layout.composer_slot.frame_bottom_line() < layout.line_count().saturating_sub(1)
+}
+
+fn contiguous_line_range(line_indices: &[usize]) -> Option<(usize, usize)> {
+    let start = *line_indices.first()?;
+    for (offset, index) in line_indices.iter().copied().enumerate().skip(1) {
+        if index != start + offset {
+            return None;
+        }
+    }
+
+    Some((start, line_indices.len()))
 }
 
 #[cfg(test)]

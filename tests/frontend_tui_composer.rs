@@ -115,6 +115,26 @@ fn long_english_input_wraps_by_word_boundary() {
     assert_eq!(rows[first_line + 1], "  world  ");
 }
 
+#[test]
+fn paste_event_inserts_multiline_text_without_sending_message() {
+    let mut model = ready_model(20, 12);
+    let before_items = model.transcript_plain_items();
+
+    model.update(AppEvent::Paste("alpha\nbeta\ngamma".to_string()));
+
+    assert_eq!(model.composer_text(), "alpha\nbeta\ngamma");
+    assert_eq!(model.transcript_plain_items(), before_items);
+}
+
+#[test]
+fn paste_event_normalizes_crlf_into_composer_newlines() {
+    let mut model = ready_model(20, 12);
+
+    model.update(AppEvent::Paste("alpha\r\nbeta\r\ngamma".to_string()));
+
+    assert_eq!(model.composer_text(), "alpha\nbeta\ngamma");
+}
+
 fn ready_model(width: u16, height: u16) -> Model {
     ready_model_with_swap_enter_and_send(width, height, false)
 }

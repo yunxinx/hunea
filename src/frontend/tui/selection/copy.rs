@@ -7,33 +7,31 @@ use super::{SelectionState, selection_columns_for_line, selection_ends_before_li
 
 pub(crate) fn selection_text(layout: &DocumentLayout, selection: SelectionState) -> Option<String> {
     let (start, end) = selection.ordered_points()?;
-    if start.line >= layout.plain_lines.len() || end.line >= layout.plain_lines.len() {
+    if start.line >= layout.line_count() || end.line >= layout.line_count() {
         return None;
     }
 
     let mut lines = Vec::with_capacity(end.line.saturating_sub(start.line) + 1);
     for line in start.line..=end.line {
-        if let Some(selectable) = layout.selectable.get(line).copied()
+        if let Some(line_data) = layout.line_at(line)
             && let Some((start_column, end_column)) =
-                selection_columns_for_line(selection, line, selectable)
+                selection_columns_for_line(selection, line, line_data.selectable)
         {
             lines.push(selection_text_for_line(
-                layout
-                    .plain_lines
-                    .get(line)
-                    .map(String::as_str)
-                    .unwrap_or(""),
+                &line_data.plain_line,
                 start_column,
                 end_column,
             ));
             continue;
         }
 
-        let preserves_blank = layout
-            .anchors
-            .get(line)
-            .is_some_and(line_preserves_blank_selection);
-        let selectable = layout.selectable.get(line).copied().unwrap_or_default();
+        let line_data = layout.line_at(line);
+        let preserves_blank = line_data
+            .as_ref()
+            .is_some_and(|line_data| line_preserves_blank_selection(&line_data.anchor));
+        let selectable = line_data
+            .map(|line_data| line_data.selectable)
+            .unwrap_or_default();
         if preserves_blank || selection_ends_before_line_content(selection, line, selectable) {
             lines.push(String::new());
         }

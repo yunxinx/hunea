@@ -392,10 +392,10 @@ impl Model {
         point: SelectionPoint,
         layout: &DocumentLayout,
     ) -> bool {
-        let Some(line) = layout.plain_lines.get(point.line) else {
+        let Some(line) = layout.line_text_at(point.line) else {
             return false;
         };
-        let Some((start_column, end_column)) = word_selection_columns(line, point.column) else {
+        let Some((start_column, end_column)) = word_selection_columns(&line, point.column) else {
             return false;
         };
 
@@ -416,13 +416,16 @@ impl Model {
     }
 
     pub(crate) fn select_line_at_point(&mut self, line: usize, layout: &DocumentLayout) {
-        let selectable = layout.selectable.get(line).copied().unwrap_or_default();
+        let selectable = layout
+            .line_at(line)
+            .map(|line_data| line_data.selectable)
+            .unwrap_or_default();
         let start_column = if selectable.has_content() {
             selectable.start_column
         } else {
             0
         };
-        let focus = if line + 1 < layout.plain_lines.len() {
+        let focus = if line + 1 < layout.line_count() {
             SelectionPoint {
                 line: line + 1,
                 column: 0,
@@ -434,8 +437,7 @@ impl Model {
                     selectable.end_column
                 } else {
                     layout
-                        .plain_lines
-                        .get(line)
+                        .line_text_at(line)
                         .map(|text| text.width())
                         .unwrap_or_default()
                 },
@@ -463,7 +465,10 @@ impl Model {
         let line = *self
             .document_viewport_line_indices(layout)
             .get(usize::from(row))?;
-        let selectable = layout.selectable.get(line).copied().unwrap_or_default();
+        let selectable = layout
+            .line_at(line)
+            .map(|line_data| line_data.selectable)
+            .unwrap_or_default();
         selection_point_for_selectable_line(usize::from(column), line, selectable)
     }
 
@@ -480,7 +485,10 @@ impl Model {
 
         let clamped_row = usize::from(row).min(line_indices.len().saturating_sub(1));
         let line = *line_indices.get(clamped_row)?;
-        let selectable = layout.selectable.get(line).copied().unwrap_or_default();
+        let selectable = layout
+            .line_at(line)
+            .map(|line_data| line_data.selectable)
+            .unwrap_or_default();
         selection_point_for_drag_on_selectable_line(usize::from(column), line, selectable)
     }
 
@@ -554,8 +562,7 @@ fn selection_intersects_status_line(layout: &DocumentLayout, selection: Selectio
 
     for line in start.line..=end.line {
         if layout
-            .anchors
-            .get(line)
+            .line_anchor_at(line)
             .is_some_and(|anchor| anchor.region == DocumentAnchorRegion::StatusLine)
         {
             return true;
@@ -606,7 +613,10 @@ pub(crate) fn apply_selection_to_viewport(
             continue;
         }
 
-        let Some(selectable) = layout.selectable.get(absolute_line).copied() else {
+        let Some(selectable) = layout
+            .line_at(absolute_line)
+            .map(|line_data| line_data.selectable)
+        else {
             continue;
         };
         let Some((start_column, end_column)) =

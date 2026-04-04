@@ -107,6 +107,18 @@ impl Composer {
         self.sync_viewport_to_cursor();
     }
 
+    /// `insert_text` 在当前光标位置插入一段文本。
+    pub fn insert_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        let byte_index = char_to_byte_index(&self.value, self.cursor);
+        self.value.insert_str(byte_index, text);
+        self.cursor += total_chars(text);
+        self.sync_viewport_to_cursor();
+    }
+
     /// `handle_key` 处理输入编辑、导航与分页相关按键。
     pub fn handle_key(&mut self, key: KeyEvent) {
         match key.code {

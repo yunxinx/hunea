@@ -48,17 +48,17 @@ impl Model {
         let layout = self.build_document_layout();
         let line_indices = self.document_viewport_line_indices(&layout);
         let line = *line_indices.get(usize::from(row))?;
-        let anchor = layout.anchors.get(line).copied()?;
-        if anchor.region != DocumentAnchorRegion::Composer {
+        let line_data = layout.line_at(line)?;
+        if line_data.anchor.region != DocumentAnchorRegion::Composer {
             return None;
         }
 
-        let selectable = layout.selectable.get(line).copied().unwrap_or_default();
+        let selectable = line_data.selectable;
         let selection_point =
             selection_point_for_drag_selectable_line(usize::from(column), line, selectable)?;
         let (logical_line, logical_column) = composer::cursor_position_for_line_anchor_click(
             &self.composer,
-            anchor.composer,
+            line_data.anchor.composer,
             usize::from(column),
         )?;
 
@@ -116,17 +116,16 @@ impl Model {
             return false;
         }
 
-        let Some(anchor) = layout.anchors.get(line).copied() else {
+        let Some(line_data) = layout.line_at(line) else {
             return false;
         };
-        if anchor.region != DocumentAnchorRegion::Composer
-            || click.logical_column != anchor.composer.end_char
+        if line_data.anchor.region != DocumentAnchorRegion::Composer
+            || click.logical_column != line_data.anchor.composer.end_char
         {
             return false;
         }
 
-        let selectable = layout.selectable.get(line).copied().unwrap_or_default();
-        selectable.has_content() && usize::from(column) >= selectable.end_column
+        line_data.selectable.has_content() && usize::from(column) >= line_data.selectable.end_column
     }
 
     pub(crate) fn is_composer_edge_clamped_motion(
@@ -150,9 +149,8 @@ impl Model {
         }
 
         layout
-            .anchors
-            .get(line)
-            .is_some_and(|anchor| anchor.region == DocumentAnchorRegion::Composer)
+            .line_at(line)
+            .is_some_and(|line_data| line_data.anchor.region == DocumentAnchorRegion::Composer)
     }
 }
 

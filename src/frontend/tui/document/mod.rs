@@ -2,18 +2,22 @@ mod anchor_match;
 mod append;
 mod cache;
 mod layout;
+mod line_access;
 mod slot_frame;
 mod slot_viewport;
 mod sync;
 
 pub(crate) use self::cache::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutCache, DocumentLayoutKey,
-    DocumentLineAnchor, DocumentViewport, DocumentViewportAnchor, DocumentViewportCache,
-    DocumentViewportKey, ManualDocumentScrollRestoreTarget,
+    DocumentLayoutLine, DocumentLineAnchor, DocumentTranscriptCache, DocumentTranscriptItemLines,
+    DocumentTranscriptKey, DocumentTranscriptSegment, DocumentTranscriptSnapshot, DocumentViewport,
+    DocumentViewportAnchor, DocumentViewportCache, DocumentViewportKey,
+    ManualDocumentScrollRestoreTarget,
 };
 pub(crate) use self::cache::{
-    DocumentLayoutCache as LayoutCache, DocumentViewportAnchor as ViewportAnchor,
-    DocumentViewportCache as ViewportCache, ManualDocumentScrollRestoreTarget as RestoreTarget,
+    DocumentLayoutCache as LayoutCache, DocumentTranscriptCache as TranscriptCache,
+    DocumentViewportAnchor as ViewportAnchor, DocumentViewportCache as ViewportCache,
+    ManualDocumentScrollRestoreTarget as RestoreTarget,
 };
 pub(crate) use self::slot_viewport::{
     bottom_follow_viewport_line_indices, offset_viewport_line_indices,
@@ -47,15 +51,22 @@ mod tests {
         let layout = model.build_document_layout();
 
         assert_eq!(
-            layout.plain_lines,
+            layout.all_plain_lines(),
             vec!["history".to_string(), String::new(), "┃ x".to_string(),]
         );
         assert_eq!(layout.composer_start_line, 2);
         assert_eq!(layout.composer_line_count, 1);
         assert_eq!(layout.cursor_x, 3);
         assert_eq!(layout.cursor_y, 2);
-        assert_eq!(layout.selectable[1], DocumentSelectable::default());
-        assert!(layout.selectable[2].has_content());
+        assert_eq!(
+            layout.line_at(1).map(|line| line.selectable),
+            Some(DocumentSelectable::default())
+        );
+        assert!(
+            layout
+                .line_at(2)
+                .is_some_and(|line| line.selectable.has_content())
+        );
     }
 
     #[test]
@@ -73,7 +84,7 @@ mod tests {
         let viewport = compose_document_viewport(&layout, 0, 4);
 
         assert_eq!(
-            layout.plain_lines,
+            layout.all_plain_lines(),
             vec!["history".to_string(), String::new(), "┃ x".to_string()]
         );
         assert_eq!(layout.composer_start_line, 2);
@@ -94,13 +105,20 @@ mod tests {
         model.git_branch = "main".to_string();
 
         let layout = model.build_document_layout();
-        let status_line = layout
-            .anchors
-            .iter()
-            .position(|anchor| matches!(anchor.region, DocumentAnchorRegion::StatusLine))
+        let status_line = (0..layout.line_count())
+            .find(|index| {
+                layout
+                    .line_anchor_at(*index)
+                    .is_some_and(|anchor| matches!(anchor.region, DocumentAnchorRegion::StatusLine))
+            })
             .expect("status line should be present");
 
-        assert_eq!(layout.selectable[status_line].start_column, 2);
+        assert_eq!(
+            layout
+                .line_at(status_line)
+                .map(|line| line.selectable.start_column),
+            Some(2)
+        );
     }
 
     #[test]
@@ -113,8 +131,7 @@ mod tests {
             ..DocumentLayout::default()
         };
 
-        let (visible_lines, _, visible_offset) =
-            visible_document_lines(&layout.lines, &layout.plain_lines, 0, 2);
+        let (visible_lines, _, visible_offset) = visible_document_lines(&layout, 0, 2);
         assert_eq!(visible_lines.len(), 2);
         assert_eq!(visible_offset, 0);
         assert!(cursor_visible_in_document_viewport(
@@ -123,8 +140,7 @@ mod tests {
             visible_lines.len()
         ));
 
-        let (hidden_lines, _, hidden_offset) =
-            visible_document_lines(&layout.lines, &layout.plain_lines, 2, 1);
+        let (hidden_lines, _, hidden_offset) = visible_document_lines(&layout, 2, 1);
         assert_eq!(hidden_lines.len(), 1);
         assert_eq!(hidden_offset, 2);
         assert!(!cursor_visible_in_document_viewport(
@@ -233,13 +249,13 @@ mod tests {
         model.sync_transcript_render();
 
         let key = model.current_document_layout_key();
-        let layout = model
+        let (layout, _) = model
             .build_document_layout_from_transcript_append(&key)
             .expect("single append should extend the cached document layout");
         let expected = compose_document_layout(model.current_document_layout_input());
 
-        assert_eq!(layout.plain_lines, expected.plain_lines);
-        assert_eq!(layout.anchors, expected.anchors);
+        assert_eq!(layout.all_plain_lines(), expected.all_plain_lines());
+        assert_eq!(layout.all_line_anchors(), expected.all_line_anchors());
         assert_eq!(layout.selectable, expected.selectable);
         assert_eq!(layout.composer_slot, expected.composer_slot);
         assert_eq!(layout.cursor_y, expected.cursor_y);
@@ -263,13 +279,13 @@ mod tests {
         model.sync_transcript_render();
 
         let key = model.current_document_layout_key();
-        let layout = model
+        let (layout, _) = model
             .build_document_layout_from_transcript_append(&key)
             .expect("tail append should extend before the composer gap");
         let expected = compose_document_layout(model.current_document_layout_input());
 
-        assert_eq!(layout.plain_lines, expected.plain_lines);
-        assert_eq!(layout.anchors, expected.anchors);
+        assert_eq!(layout.all_plain_lines(), expected.all_plain_lines());
+        assert_eq!(layout.all_line_anchors(), expected.all_line_anchors());
         assert_eq!(layout.selectable, expected.selectable);
         assert_eq!(layout.composer_slot, expected.composer_slot);
         assert_eq!(layout.cursor_y, expected.cursor_y);
@@ -330,6 +346,71 @@ mod tests {
             model.document_layout_cache.valid = false;
             model.document_viewport_cache.valid = false;
         }
+    }
+
+    #[test]
+    fn transcript_render_defers_transcript_selectable_ranges_to_document_access() {
+        let mut model = ready_document_model(24, 6);
+        model
+            .transcript_mut()
+            .append_message(Sender::User, "alpha beta gamma");
+
+        model.sync_transcript_render();
+
+        assert!(
+            model.transcript_render.selectable_ranges.is_empty(),
+            "transcript render should leave transcript selectable ranges empty for lazy document access"
+        );
+    }
+
+    #[test]
+    fn document_line_access_computes_transcript_selectable_ranges_lazily() {
+        let mut model = ready_document_model(24, 6);
+        model
+            .transcript_mut()
+            .append_message(Sender::User, "alpha beta gamma");
+        model.sync_transcript_render();
+
+        let layout = model.build_document_layout();
+        assert_eq!(
+            layout
+                .transcript
+                .selectable_cache
+                .borrow()
+                .get(&0)
+                .cloned()
+                .unwrap_or_default()
+                .len(),
+            0
+        );
+
+        let selectable_line_index = (0..layout.transcript_line_count)
+            .find(|index| {
+                layout
+                    .line_at(*index)
+                    .is_some_and(|line| line.selectable.has_content())
+            })
+            .expect("transcript lines should include selectable content");
+        let line = layout
+            .line_at(selectable_line_index)
+            .expect("selectable transcript line should exist");
+        assert!(
+            line.selectable.has_content(),
+            "line_at should compute a selectable range, got {:?}, cache={:?}",
+            line,
+            layout.transcript.selectable_cache.borrow()
+        );
+        assert_eq!(
+            layout
+                .transcript
+                .selectable_cache
+                .borrow()
+                .get(&0)
+                .cloned()
+                .unwrap_or_default()
+                .len(),
+            3
+        );
     }
 
     fn ready_document_model(width: u16, height: u16) -> Model {

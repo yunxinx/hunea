@@ -1,4 +1,4 @@
-use crate::frontend::tui::transcript::LineAnchorKind;
+use crate::frontend::tui::transcript::{LineAnchor, LineAnchorKind};
 
 use super::{DocumentAnchorRegion, DocumentLayout, DocumentLineAnchor, DocumentViewportAnchor};
 
@@ -31,23 +31,62 @@ pub(crate) fn transcript_content_line_count_for_item(
     item_index: usize,
 ) -> usize {
     layout
-        .anchors
-        .iter()
-        .filter(|anchor| {
-            matches!(anchor.region, DocumentAnchorRegion::Transcript)
-                && anchor.transcript.item_index == item_index
-                && !matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap)
-        })
-        .count()
+        .transcript_item_lines(item_index)
+        .map(|item| item.content_line_count)
+        .unwrap_or(0)
 }
 
 fn find_document_anchor_offset(
     layout: &DocumentLayout,
     anchor: DocumentLineAnchor,
 ) -> Option<usize> {
+    if matches!(anchor.region, DocumentAnchorRegion::Transcript) {
+        return find_transcript_document_anchor_offset(layout, anchor.transcript);
+    }
+
     let mut best = None;
-    for (index, candidate) in layout.anchors.iter().copied().enumerate() {
+    for index in 0..layout.line_count() {
+        let Some(candidate) = layout.line_anchor_at(index) else {
+            continue;
+        };
         let Some(score) = score_document_anchor_match(candidate, anchor) else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .map(|(_, best_score)| score < *best_score)
+            .unwrap_or(true)
+        {
+            best = Some((index, score));
+        }
+    }
+
+    best.map(|(index, _)| index)
+}
+
+fn find_transcript_document_anchor_offset(
+    layout: &DocumentLayout,
+    target: LineAnchor,
+) -> Option<usize> {
+    let item_lines = layout.transcript_item_lines(target.item_index)?;
+    let start = item_lines.content_start_line;
+    let end = if matches!(target.item_anchor.kind, LineAnchorKind::ItemGap) {
+        start + item_lines.total_line_count
+    } else {
+        start + item_lines.content_line_count
+    };
+
+    let mut best = None;
+    let target_anchor = DocumentLineAnchor {
+        region: DocumentAnchorRegion::Transcript,
+        transcript: target,
+        ..DocumentLineAnchor::default()
+    };
+    for index in start..end {
+        let Some(candidate) = layout.line_anchor_at(index) else {
+            continue;
+        };
+        let Some(score) = score_document_anchor_match(candidate, target_anchor) else {
             continue;
         };
         if best
@@ -174,14 +213,22 @@ fn find_document_offset_for_rendered_transcript_anchor(
         _ => {
             let mut best = item_offsets[0];
             let mut best_score = score_rendered_transcript_relative_position(
-                layout.anchors[best].transcript.item_anchor.rendered_line,
+                layout
+                    .line_anchor_at(best)?
+                    .transcript
+                    .item_anchor
+                    .rendered_line,
                 item_offsets.len(),
                 target_rendered_line,
                 anchor.transcript_item_line_count,
             );
             for offset in item_offsets.into_iter().skip(1) {
                 let score = score_rendered_transcript_relative_position(
-                    layout.anchors[offset].transcript.item_anchor.rendered_line,
+                    layout
+                        .line_anchor_at(offset)?
+                        .transcript
+                        .item_anchor
+                        .rendered_line,
                     transcript_content_line_count_for_item(layout, item_index),
                     target_rendered_line,
                     anchor.transcript_item_line_count,
@@ -200,16 +247,11 @@ fn transcript_content_line_offsets_for_item(
     layout: &DocumentLayout,
     item_index: usize,
 ) -> Vec<usize> {
-    layout
-        .anchors
-        .iter()
-        .enumerate()
-        .filter_map(|(index, anchor)| {
-            (matches!(anchor.region, DocumentAnchorRegion::Transcript)
-                && anchor.transcript.item_index == item_index
-                && !matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap))
-            .then_some(index)
-        })
+    let Some(item_lines) = layout.transcript_item_lines(item_index) else {
+        return Vec::new();
+    };
+
+    (item_lines.content_start_line..item_lines.content_start_line + item_lines.content_line_count)
         .collect()
 }
 
@@ -225,13 +267,17 @@ fn find_rendered_transcript_text_match(
         let mut best = None;
         for &offset in item_offsets {
             let candidate_text =
-                canonical_rendered_transcript_anchor_text(&layout.plain_lines[offset]);
+                canonical_rendered_transcript_anchor_text(&layout.line_text_at(offset)?);
             if candidate_text != target_text {
                 continue;
             }
 
             let score = score_rendered_transcript_relative_position(
-                layout.anchors[offset].transcript.item_anchor.rendered_line,
+                layout
+                    .line_anchor_at(offset)?
+                    .transcript
+                    .item_anchor
+                    .rendered_line,
                 item_offsets.len(),
                 target_rendered_line,
                 target_item_line_count,
@@ -290,12 +336,12 @@ fn find_rendered_transcript_split_sequence_match(
         let offset = item_offsets[start];
         let mut prefix = String::new();
         for next in start..item_offsets.len() {
-            let piece = &layout.plain_lines[item_offsets[next]];
+            let piece = layout.line_text_at(item_offsets[next])?;
             if piece.is_empty() {
                 break;
             }
 
-            prefix.push_str(piece);
+            prefix.push_str(&piece);
             if !target_text.starts_with(&prefix) {
                 break;
             }
@@ -304,7 +350,11 @@ fn find_rendered_transcript_split_sequence_match(
             }
 
             let score = score_rendered_transcript_relative_position(
-                layout.anchors[offset].transcript.item_anchor.rendered_line,
+                layout
+                    .line_anchor_at(offset)?
+                    .transcript
+                    .item_anchor
+                    .rendered_line,
                 item_offsets.len(),
                 target_rendered_line,
                 target_item_line_count,
@@ -336,15 +386,19 @@ fn find_rendered_transcript_merged_line_match(
 
     let mut best = None;
     for &offset in item_offsets {
-        let candidate_text = &layout.plain_lines[offset];
+        let candidate_text = layout.line_text_at(offset)?;
         if candidate_text.is_empty()
-            || !contains_rendered_transcript_merged_text(candidate_text, target_text)
+            || !contains_rendered_transcript_merged_text(&candidate_text, target_text)
         {
             continue;
         }
 
         let score = score_rendered_transcript_relative_position(
-            layout.anchors[offset].transcript.item_anchor.rendered_line,
+            layout
+                .line_anchor_at(offset)?
+                .transcript
+                .item_anchor
+                .rendered_line,
             item_offsets.len(),
             target_rendered_line,
             target_item_line_count,
@@ -441,7 +495,7 @@ fn find_rendered_transcript_boundary_spanning_match(
         let candidate_offset = item_offsets[start];
         let mut pieces = Vec::new();
         for next in start..item_offsets.len() {
-            let piece = &layout.plain_lines[item_offsets[next]];
+            let piece = layout.line_text_at(item_offsets[next])?;
             if piece.is_empty() {
                 break;
             }
@@ -452,7 +506,8 @@ fn find_rendered_transcript_boundary_spanning_match(
             }
 
             let score = score_rendered_transcript_relative_position(
-                layout.anchors[candidate_offset]
+                layout
+                    .line_anchor_at(candidate_offset)?
                     .transcript
                     .item_anchor
                     .rendered_line,

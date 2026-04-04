@@ -9,7 +9,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use color_eyre::eyre::Result;
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseEventKind},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -93,6 +96,10 @@ pub fn run_with_options(hero_options: HeroOptions, options: ModelOptions) -> Res
                 let effect = model.update(AppEvent::Key(key));
                 apply_effect_if_needed(&mut terminal, &mut model, effect)?;
             }
+            Event::Paste(text) => {
+                let effect = model.update(AppEvent::Paste(text));
+                apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+            }
             Event::Resize(width, height) => {
                 let effect = model.update(AppEvent::Resized { width, height });
                 apply_effect_if_needed(&mut terminal, &mut model, effect)?;
@@ -149,7 +156,13 @@ impl TerminalSession {
     fn enter() -> io::Result<(Terminal<CrosstermBackend<io::Stdout>>, Self)> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste,
+            Hide
+        )?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         terminal.hide_cursor()?;
@@ -162,6 +175,7 @@ impl TerminalSession {
         execute!(
             terminal.backend_mut(),
             Show,
+            DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen
         )?;
@@ -174,6 +188,7 @@ impl TerminalSession {
             terminal.backend_mut(),
             EnterAlternateScreen,
             EnableMouseCapture,
+            EnableBracketedPaste,
             Hide
         )?;
         terminal.hide_cursor()?;
@@ -186,7 +201,13 @@ impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, Show, DisableMouseCapture, LeaveAlternateScreen);
+        let _ = execute!(
+            stdout,
+            Show,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
     }
 }
 

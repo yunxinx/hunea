@@ -19,14 +19,15 @@ impl Model {
 
     pub(crate) fn current_document_viewport_anchor(&mut self) -> Option<DocumentViewportAnchor> {
         let layout = self.build_document_layout();
-        if layout.anchors.is_empty() {
+        if layout.line_count() == 0 {
             return None;
         }
 
         let offset =
-            self.clamp_document_viewport_offset(self.document_viewport_y, layout.lines.len());
-        let line_anchor = layout.anchors.get(offset).copied()?;
-        let mut line_text = layout.plain_lines.get(offset).cloned().unwrap_or_default();
+            self.clamp_document_viewport_offset(self.document_viewport_y, layout.line_count());
+        let line = layout.line_at(offset)?;
+        let line_anchor = line.anchor;
+        let mut line_text = line.plain_line;
         if matches!(line_anchor.region, super::DocumentAnchorRegion::Transcript)
             && matches!(
                 line_anchor.transcript.item_anchor.kind,
@@ -61,7 +62,7 @@ impl Model {
         }
 
         let layout = self.build_document_layout();
-        if layout.lines.is_empty() {
+        if layout.line_count() == 0 {
             self.document_viewport_y = 0;
             self.composer.set_viewport_offset(0);
             self.follow_bottom = true;
@@ -71,9 +72,9 @@ impl Model {
         }
 
         let current_offset =
-            self.clamp_document_viewport_offset(self.document_viewport_y, layout.lines.len());
+            self.clamp_document_viewport_offset(self.document_viewport_y, layout.line_count());
         let next_offset =
-            self.clamp_document_viewport_offset_signed(current_offset, lines, layout.lines.len());
+            self.clamp_document_viewport_offset_signed(current_offset, lines, layout.line_count());
         if next_offset == current_offset {
             return;
         }
@@ -119,7 +120,7 @@ impl Model {
         }
 
         let mut current_offset =
-            self.clamp_document_viewport_offset(self.document_viewport_y, layout.lines.len());
+            self.clamp_document_viewport_offset(self.document_viewport_y, layout.line_count());
         let viewport_height = self.document_viewport_height();
         if viewport_height == 0 {
             self.document_viewport_y = 0;
@@ -136,7 +137,7 @@ impl Model {
         }
 
         self.document_viewport_y =
-            self.clamp_document_viewport_offset(current_offset, layout.lines.len());
+            self.clamp_document_viewport_offset(current_offset, layout.line_count());
         self.composer.set_viewport_offset(
             self.current_composer_viewport_offset(&layout, self.document_viewport_y),
         );
@@ -146,14 +147,14 @@ impl Model {
 
     pub(crate) fn sync_document_viewport_preserving_position(&mut self) {
         let layout = self.build_document_layout();
-        if layout.lines.is_empty() {
+        if layout.line_count() == 0 {
             self.document_viewport_y = 0;
             self.composer.set_viewport_offset(0);
             return;
         }
 
         self.document_viewport_y =
-            self.clamp_document_viewport_offset(self.document_viewport_y, layout.lines.len());
+            self.clamp_document_viewport_offset(self.document_viewport_y, layout.line_count());
         self.composer.set_viewport_offset(
             self.current_composer_viewport_offset(&layout, self.document_viewport_y),
         );
@@ -164,7 +165,7 @@ impl Model {
         anchor: &DocumentViewportAnchor,
     ) {
         let layout = self.build_document_layout();
-        if layout.lines.is_empty() {
+        if layout.line_count() == 0 {
             self.document_viewport_y = 0;
             self.composer.set_viewport_offset(0);
             return;
@@ -175,7 +176,7 @@ impl Model {
             return;
         };
 
-        self.document_viewport_y = self.clamp_document_viewport_offset(offset, layout.lines.len());
+        self.document_viewport_y = self.clamp_document_viewport_offset(offset, layout.line_count());
         self.composer.set_viewport_offset(
             self.current_composer_viewport_offset(&layout, self.document_viewport_y),
         );
@@ -197,7 +198,7 @@ impl Model {
 
         self.document_viewport_y = self.clamp_document_viewport_offset(
             layout.composer_start_line + self.composer.viewport_offset(),
-            layout.lines.len(),
+            layout.line_count(),
         );
         self.manual_document_scroll = false;
         self.clear_manual_document_scroll_restore_target();
@@ -312,7 +313,7 @@ impl Model {
                     find_document_offset_for_viewport_anchor(layout, &self.scroll_restore_anchor)
                 {
                     let document_offset =
-                        self.clamp_document_viewport_offset(offset, layout.lines.len());
+                        self.clamp_document_viewport_offset(offset, layout.line_count());
                     if self.document_offset_keeps_cursor_visible(layout, document_offset) {
                         let composer_offset =
                             self.current_composer_viewport_offset(layout, document_offset);
@@ -397,13 +398,13 @@ impl Model {
 
             let document_offset = self.clamp_document_viewport_offset(
                 layout.cursor_y.saturating_sub(viewport_height - 1),
-                layout.lines.len(),
+                layout.line_count(),
             );
             return (document_offset, 0);
         }
 
         (
-            self.document_bottom_offset(layout.lines.len()),
+            self.document_bottom_offset(layout.line_count()),
             self.composer.bottom_viewport_offset(),
         )
     }
@@ -416,7 +417,7 @@ impl Model {
 
         let document_offset = self.clamp_document_viewport_offset(
             layout.cursor_y.saturating_sub(viewport_height - 1),
-            layout.lines.len(),
+            layout.line_count(),
         );
         let composer_offset = self.current_composer_viewport_offset(layout, document_offset);
         (document_offset, composer_offset)
@@ -433,7 +434,7 @@ impl Model {
         }
 
         let document_offset =
-            self.clamp_document_viewport_offset(document_offset, layout.lines.len());
+            self.clamp_document_viewport_offset(document_offset, layout.line_count());
         layout.cursor_y >= document_offset && layout.cursor_y < document_offset + viewport_height
     }
 

@@ -281,9 +281,6 @@ impl Transcript {
         if anchors.len() != lines.len() {
             anchors = fallback_rendered_line_anchors(lines.len());
         }
-        let selectable_ranges =
-            self.items[index].render_selectable_line_ranges(width, self.palette, &plain_lines);
-
         let block = CachedRenderBlock {
             item_index: index,
             cache_key,
@@ -291,7 +288,7 @@ impl Transcript {
             lines,
             plain_lines,
             anchors,
-            selectable_ranges,
+            selectable_ranges: Vec::new(),
             valid: true,
         };
         *cached = block.clone();
@@ -384,7 +381,7 @@ impl TranscriptItem {
         }
     }
 
-    fn render_selectable_line_ranges(
+    pub(crate) fn render_selectable_line_ranges(
         &self,
         width: u16,
         palette: TerminalPalette,

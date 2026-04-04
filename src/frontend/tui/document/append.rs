@@ -1,10 +1,14 @@
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
 use ratatui::text::Line;
 
 use crate::frontend::tui::selection::SelectableLineRange;
+use crate::frontend::tui::transcript::{Transcript, TranscriptItem};
 
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutKey, DocumentLineAnchor,
-    layout::transcript_composer_gap_line_count,
+    DocumentTranscriptSnapshot, layout::transcript_composer_gap_line_count,
+    line_access::new_document_transcript_index,
 };
 
 /// `DocumentTranscriptAppend` 表示 transcript 尾部新增到 unified document 的稳定片段。
@@ -14,13 +18,14 @@ pub(crate) struct DocumentTranscriptAppend {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) plain_lines: Vec<String>,
     pub(crate) anchors: Vec<DocumentLineAnchor>,
-    pub(crate) selectable: Vec<SelectableLineRange>,
+    pub(crate) items: HashMap<usize, TranscriptItem>,
 }
 
 /// `sliced_transcript_append` 从完整 transcript 渲染结果中切出这次追加的尾部片段。
 pub(crate) fn sliced_transcript_append(
     render: &crate::frontend::tui::transcript::RenderResult,
     start_line: usize,
+    transcript: &Transcript,
 ) -> Option<DocumentTranscriptAppend> {
     if start_line > render.lines.len() {
         return None;
@@ -32,6 +37,16 @@ pub(crate) fn sliced_transcript_append(
             previous_transcript_line_count: start_line,
             ..DocumentTranscriptAppend::default()
         });
+    }
+
+    let mut items = HashMap::new();
+    for anchor in &render.line_anchors[start_line..] {
+        if items.contains_key(&anchor.item_index) {
+            continue;
+        }
+        if let Some(item) = transcript.item(anchor.item_index).cloned() {
+            items.insert(anchor.item_index, item);
+        }
     }
 
     Some(DocumentTranscriptAppend {
@@ -47,7 +62,7 @@ pub(crate) fn sliced_transcript_append(
                 ..DocumentLineAnchor::default()
             })
             .collect(),
-        selectable: render.selectable_ranges[start_line..].to_vec(),
+        items,
     })
 }
 
@@ -55,6 +70,7 @@ pub(crate) fn sliced_transcript_append(
 pub(crate) fn extend_document_layout_from_transcript_append(
     base: &DocumentLayout,
     appended: DocumentTranscriptAppend,
+    transcript: DocumentTranscriptSnapshot,
 ) -> DocumentLayout {
     if appended.lines.is_empty() {
         return base.clone();
@@ -63,51 +79,54 @@ pub(crate) fn extend_document_layout_from_transcript_append(
     let insert_at = appended
         .previous_transcript_line_count
         .min(base.lines.len());
-    let mut insert_lines = appended.lines;
-    let mut insert_plain_lines = appended.plain_lines;
-    let mut insert_anchors = appended.anchors;
-    let mut insert_selectable = appended.selectable;
+    let appended_line_count = appended.lines.len();
+    let line_delta = appended_line_count
+        + usize::from(appended.previous_transcript_line_count == 0)
+            * transcript_composer_gap_line_count();
+    let mut lines = base.lines.clone();
+    lines.splice(insert_at..insert_at, appended.lines);
+    let mut plain_lines = base.plain_lines.clone();
+    plain_lines.splice(insert_at..insert_at, appended.plain_lines);
+    let mut anchors = base.anchors.clone();
+    anchors.splice(insert_at..insert_at, appended.anchors);
+    let mut selectable = base.selectable.clone();
+    selectable.splice(
+        insert_at..insert_at,
+        std::iter::repeat_n(SelectableLineRange::default(), appended_line_count),
+    );
 
     if appended.previous_transcript_line_count == 0 {
+        let gap_insert_at = insert_at + appended_line_count;
+        let mut gap_lines = Vec::with_capacity(transcript_composer_gap_line_count());
+        let mut gap_plain_lines = Vec::with_capacity(transcript_composer_gap_line_count());
+        let mut gap_anchors = Vec::with_capacity(transcript_composer_gap_line_count());
+        let mut gap_selectable = Vec::with_capacity(transcript_composer_gap_line_count());
         for gap_index in 0..transcript_composer_gap_line_count() {
-            insert_lines.push(Line::raw(""));
-            insert_plain_lines.push(String::new());
-            insert_anchors.push(DocumentLineAnchor {
+            gap_lines.push(Line::raw(""));
+            gap_plain_lines.push(String::new());
+            gap_anchors.push(DocumentLineAnchor {
                 region: DocumentAnchorRegion::TranscriptComposerGap,
                 gap_index,
                 ..DocumentLineAnchor::default()
             });
-            insert_selectable.push(SelectableLineRange::default());
+            gap_selectable.push(SelectableLineRange::default());
         }
+        lines.splice(gap_insert_at..gap_insert_at, gap_lines);
+        plain_lines.splice(gap_insert_at..gap_insert_at, gap_plain_lines);
+        anchors.splice(gap_insert_at..gap_insert_at, gap_anchors);
+        selectable.splice(gap_insert_at..gap_insert_at, gap_selectable);
     }
-
-    let line_delta = insert_lines.len();
-
-    let mut lines = Vec::with_capacity(base.lines.len() + line_delta);
-    lines.extend_from_slice(&base.lines[..insert_at]);
-    lines.extend(insert_lines);
-    lines.extend_from_slice(&base.lines[insert_at..]);
-
-    let mut plain_lines = Vec::with_capacity(base.plain_lines.len() + line_delta);
-    plain_lines.extend_from_slice(&base.plain_lines[..insert_at]);
-    plain_lines.extend(insert_plain_lines);
-    plain_lines.extend_from_slice(&base.plain_lines[insert_at..]);
-
-    let mut anchors = Vec::with_capacity(base.anchors.len() + line_delta);
-    anchors.extend_from_slice(&base.anchors[..insert_at]);
-    anchors.extend(insert_anchors);
-    anchors.extend_from_slice(&base.anchors[insert_at..]);
-
-    let mut selectable = Vec::with_capacity(base.selectable.len() + line_delta);
-    selectable.extend_from_slice(&base.selectable[..insert_at]);
-    selectable.extend(insert_selectable);
-    selectable.extend_from_slice(&base.selectable[insert_at..]);
+    let (transcript_segments, transcript_items) = new_document_transcript_index(&transcript);
 
     let mut composer_slot = base.composer_slot;
     composer_slot.frame_start_line += line_delta;
     composer_slot.content_start_line += line_delta;
 
     DocumentLayout {
+        transcript,
+        transcript_line_count: base.transcript_line_count + appended_line_count,
+        transcript_segments,
+        transcript_items,
         lines,
         plain_lines,
         anchors,
@@ -117,6 +136,41 @@ pub(crate) fn extend_document_layout_from_transcript_append(
         composer_line_count: base.composer_line_count,
         cursor_x: base.cursor_x,
         cursor_y: base.cursor_y + line_delta,
+    }
+}
+
+/// `extend_document_transcript_snapshot_from_append` 把新追加的 transcript 尾部并入旧快照。
+pub(crate) fn extend_document_transcript_snapshot_from_append(
+    base: &DocumentTranscriptSnapshot,
+    appended: &DocumentTranscriptAppend,
+) -> DocumentTranscriptSnapshot {
+    if appended.lines.is_empty() {
+        return base.clone();
+    }
+
+    let insert_at = appended
+        .previous_transcript_line_count
+        .min(base.lines.len());
+    let mut lines = base.lines.clone();
+    lines.splice(insert_at..insert_at, appended.lines.iter().cloned());
+
+    let mut plain_lines = base.plain_lines.clone();
+    plain_lines.splice(insert_at..insert_at, appended.plain_lines.iter().cloned());
+
+    let mut anchors = base.anchors.clone();
+    anchors.splice(insert_at..insert_at, appended.anchors.iter().copied());
+
+    let mut items = base.items.clone();
+    items.extend(appended.items.clone());
+
+    DocumentTranscriptSnapshot {
+        lines,
+        plain_lines,
+        anchors,
+        width: base.width,
+        palette: base.palette,
+        items,
+        selectable_cache: Rc::new(RefCell::new(base.selectable_cache.borrow().clone())),
     }
 }
 

@@ -3,8 +3,7 @@ use ratatui::text::Line;
 use crate::frontend::tui::{
     Model, composer,
     selection::{
-        SelectableLineRange, apply_selection_to_viewport, normalize_transcript_selectable_range,
-        selectable_range_for_plain_line,
+        SelectableLineRange, apply_selection_to_viewport, selectable_range_for_plain_line,
     },
     status_line::StatusLineRenderResult,
     transcript,
@@ -12,21 +11,20 @@ use crate::frontend::tui::{
 
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutCache, DocumentLayoutKey,
-    DocumentLineAnchor, DocumentViewport, DocumentViewportCache, DocumentViewportKey,
+    DocumentLineAnchor, DocumentTranscriptCache, DocumentTranscriptKey, DocumentTranscriptSnapshot,
+    DocumentViewport, DocumentViewportCache, DocumentViewportKey,
     append::{
         can_extend_cached_document_layout, extend_document_layout_from_transcript_append,
         sliced_transcript_append,
     },
+    line_access::new_document_transcript_index,
     slot_frame::SlotFrame,
     slot_viewport::compose_bottom_follow_document_viewport,
 };
 
 #[derive(Debug, Clone)]
 pub(crate) struct DocumentLayoutInput {
-    pub(crate) transcript_lines: Vec<Line<'static>>,
-    pub(crate) transcript_plain_lines: Vec<String>,
-    pub(crate) transcript_anchors: Vec<DocumentLineAnchor>,
-    pub(crate) transcript_selectable: Vec<SelectableLineRange>,
+    pub(crate) transcript: DocumentTranscriptSnapshot,
     pub(crate) composer_lines: Vec<Line<'static>>,
     pub(crate) composer_plain_lines: Vec<String>,
     pub(crate) composer_anchors: Vec<DocumentLineAnchor>,
@@ -45,7 +43,17 @@ impl Model {
             return self.document_layout_cache.layout.clone();
         }
 
-        if let Some(layout) = self.build_document_layout_from_transcript_append(&key) {
+        if let Some((layout, transcript_snapshot)) =
+            self.build_document_layout_from_transcript_append(&key)
+        {
+            self.document_transcript_cache = DocumentTranscriptCache {
+                key: DocumentTranscriptKey {
+                    transcript_render_version: self.transcript_render_version,
+                    document_width: self.width,
+                },
+                snapshot: transcript_snapshot,
+                valid: true,
+            };
             self.document_layout_cache = DocumentLayoutCache {
                 key,
                 layout: layout.clone(),
@@ -56,6 +64,14 @@ impl Model {
         }
 
         let layout = compose_document_layout(self.current_document_layout_input());
+        self.document_transcript_cache = DocumentTranscriptCache {
+            key: DocumentTranscriptKey {
+                transcript_render_version: self.transcript_render_version,
+                document_width: self.width,
+            },
+            snapshot: layout.transcript.clone(),
+            valid: true,
+        };
 
         self.document_layout_cache = DocumentLayoutCache {
             key,
@@ -67,9 +83,9 @@ impl Model {
     }
 
     pub(crate) fn build_document_layout_from_transcript_append(
-        &self,
+        &mut self,
         key: &DocumentLayoutKey,
-    ) -> Option<DocumentLayout> {
+    ) -> Option<(DocumentLayout, DocumentTranscriptSnapshot)> {
         if !self.document_layout_cache.valid {
             return None;
         }
@@ -82,14 +98,20 @@ impl Model {
             return None;
         }
 
-        let appended = sliced_transcript_append(&self.transcript_render, start_line)?;
+        let appended =
+            sliced_transcript_append(&self.transcript_render, start_line, &self.transcript)?;
         if appended.lines.is_empty() {
             return None;
         }
 
-        Some(extend_document_layout_from_transcript_append(
-            &self.document_layout_cache.layout,
-            appended,
+        let transcript_snapshot = self.document_transcript_snapshot_after_append(&appended);
+        Some((
+            extend_document_layout_from_transcript_append(
+                &self.document_layout_cache.layout,
+                appended,
+                transcript_snapshot.clone(),
+            ),
+            transcript_snapshot,
         ))
     }
 
@@ -165,38 +187,12 @@ impl Model {
         }
     }
 
-    pub(crate) fn current_document_layout_input(&self) -> DocumentLayoutInput {
+    pub(crate) fn current_document_layout_input(&mut self) -> DocumentLayoutInput {
         let composer_document = self.composer.render_document(self.palette);
-        let transcript_width = if self.width == 0 {
-            crate::frontend::tui::transcript::DEFAULT_RENDER_WIDTH
-        } else {
-            usize::from(self.width)
-        };
+        let transcript = self.current_document_transcript_snapshot();
 
         DocumentLayoutInput {
-            transcript_lines: self.transcript_render.lines.clone(),
-            transcript_plain_lines: self.transcript_render.plain_lines.clone(),
-            transcript_anchors: document_anchors_for_transcript(
-                &self.transcript_render.line_anchors,
-            ),
-            transcript_selectable: if self.transcript_render.selectable_ranges.len()
-                == self.transcript_render.plain_lines.len()
-            {
-                self.transcript_render.selectable_ranges.clone()
-            } else {
-                self.transcript_render
-                    .plain_lines
-                    .iter()
-                    .zip(self.transcript_render.line_anchors.iter())
-                    .map(|(line, anchor)| {
-                        normalize_transcript_selectable_range(
-                            line,
-                            transcript_width,
-                            !matches!(anchor.item_anchor.kind, transcript::LineAnchorKind::ItemGap),
-                        )
-                    })
-                    .collect()
-            },
+            transcript,
             composer_lines: composer_document.lines,
             composer_plain_lines: composer_document.plain_lines,
             composer_anchors: document_anchors_for_composer(&composer_document.anchors),
@@ -229,14 +225,16 @@ impl Model {
 }
 
 pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLayout {
-    let extra_gap = if input.transcript_lines.is_empty() {
+    let transcript_line_count = input.transcript.lines.len();
+    let (transcript_segments, transcript_items) = new_document_transcript_index(&input.transcript);
+    let extra_gap = if transcript_line_count == 0 {
         0
     } else {
         transcript_composer_gap_line_count()
     };
     let has_composer_padding = input.composer_frame_decoration_line.is_some();
     let mut lines = Vec::with_capacity(
-        input.transcript_lines.len()
+        transcript_line_count
             + extra_gap
             + input.composer_lines.len()
             + usize::from(has_composer_padding) * 2
@@ -244,7 +242,7 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             + usize::from(input.status_line.has_content),
     );
     let mut plain_lines = Vec::with_capacity(
-        input.transcript_plain_lines.len()
+        transcript_line_count
             + extra_gap
             + input.composer_plain_lines.len()
             + usize::from(has_composer_padding) * 2
@@ -252,7 +250,7 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             + usize::from(input.status_line.has_content),
     );
     let mut anchors = Vec::with_capacity(
-        input.transcript_anchors.len()
+        transcript_line_count
             + extra_gap
             + input.composer_anchors.len()
             + usize::from(has_composer_padding) * 2
@@ -260,7 +258,7 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             + usize::from(input.status_line.has_content),
     );
     let mut selectable = Vec::with_capacity(
-        input.transcript_selectable.len()
+        transcript_line_count
             + extra_gap
             + input.composer_selectable.len()
             + usize::from(has_composer_padding) * 2
@@ -268,14 +266,14 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
             + usize::from(input.status_line.has_content),
     );
 
-    lines.extend(input.transcript_lines);
-    plain_lines.extend(input.transcript_plain_lines);
-    anchors.extend(input.transcript_anchors);
-    selectable.extend(ensure_selectable_ranges(
-        &plain_lines,
-        &input.transcript_selectable,
+    lines.extend(input.transcript.lines.iter().cloned());
+    plain_lines.extend(input.transcript.plain_lines.iter().cloned());
+    anchors.extend(input.transcript.anchors.iter().copied());
+    selectable.extend(std::iter::repeat_n(
+        SelectableLineRange::default(),
+        transcript_line_count,
     ));
-    if !lines.is_empty() {
+    if transcript_line_count > 0 {
         for gap_index in 0..transcript_composer_gap_line_count() {
             lines.push(Line::raw(""));
             plain_lines.push(String::new());
@@ -364,6 +362,10 @@ pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLay
     }
 
     DocumentLayout {
+        transcript: input.transcript,
+        transcript_line_count,
+        transcript_segments,
+        transcript_items,
         composer_slot,
         composer_start_line: composer_slot.content_start_line,
         composer_line_count: composer_slot.content_line_count,
@@ -401,8 +403,7 @@ pub(crate) fn compose_document_viewport(
     offset: usize,
     height: usize,
 ) -> DocumentViewport {
-    let (lines, plain_lines, resolved_offset) =
-        visible_document_lines(&layout.lines, &layout.plain_lines, offset, height);
+    let (lines, plain_lines, resolved_offset) = visible_document_lines(layout, offset, height);
 
     DocumentViewport {
         lines,
@@ -412,25 +413,27 @@ pub(crate) fn compose_document_viewport(
 }
 
 pub(crate) fn visible_document_lines(
-    lines: &[Line<'static>],
-    plain_lines: &[String],
+    layout: &DocumentLayout,
     offset: usize,
     height: usize,
 ) -> (Vec<Line<'static>>, Vec<String>, usize) {
-    if lines.is_empty() {
+    if layout.line_count() == 0 {
         return (vec![Line::raw("")], vec![String::new()], 0);
     }
 
-    if height == 0 || height >= lines.len() {
-        return (lines.to_vec(), plain_lines.to_vec(), 0);
+    if height == 0 || height >= layout.line_count() {
+        return (
+            layout.lines_for_range(0, layout.line_count()),
+            layout.all_plain_lines(),
+            0,
+        );
     }
 
-    let max_offset = lines.len().saturating_sub(height);
+    let max_offset = layout.line_count().saturating_sub(height);
     let resolved_offset = offset.min(max_offset);
-    let end = resolved_offset + height;
     (
-        lines[resolved_offset..end].to_vec(),
-        plain_lines[resolved_offset..end].to_vec(),
+        layout.lines_for_range(resolved_offset, height),
+        layout.line_texts_for_range(resolved_offset, height),
         resolved_offset,
     )
 }
@@ -447,6 +450,70 @@ fn document_anchors_for_transcript(
             ..DocumentLineAnchor::default()
         })
         .collect()
+}
+
+impl Model {
+    pub(crate) fn current_document_transcript_snapshot(&mut self) -> DocumentTranscriptSnapshot {
+        let key = DocumentTranscriptKey {
+            transcript_render_version: self.transcript_render_version,
+            document_width: self.width,
+        };
+        if self.document_transcript_cache.valid && self.document_transcript_cache.key == key {
+            return self.document_transcript_cache.snapshot.clone();
+        }
+
+        let mut items = std::collections::HashMap::new();
+        for anchor in &self.transcript_render.line_anchors {
+            if items.contains_key(&anchor.item_index) {
+                continue;
+            }
+            if let Some(item) = self.transcript.item(anchor.item_index).cloned() {
+                items.insert(anchor.item_index, item);
+            }
+        }
+
+        let snapshot = DocumentTranscriptSnapshot {
+            lines: self.transcript_render.lines.clone(),
+            plain_lines: self.transcript_render.plain_lines.clone(),
+            anchors: document_anchors_for_transcript(&self.transcript_render.line_anchors),
+            width: if self.width == 0 {
+                crate::frontend::tui::transcript::DEFAULT_RENDER_WIDTH as u16
+            } else {
+                self.width
+            },
+            palette: self.palette,
+            items,
+            selectable_cache: std::rc::Rc::new(std::cell::RefCell::new(
+                std::collections::HashMap::new(),
+            )),
+        };
+        self.document_transcript_cache = DocumentTranscriptCache {
+            key,
+            snapshot: snapshot.clone(),
+            valid: true,
+        };
+        snapshot
+    }
+
+    pub(crate) fn document_transcript_snapshot_after_append(
+        &mut self,
+        appended: &super::append::DocumentTranscriptAppend,
+    ) -> DocumentTranscriptSnapshot {
+        let previous_key = DocumentTranscriptKey {
+            transcript_render_version: self.document_layout_cache.key.transcript_render_version,
+            document_width: self.width,
+        };
+        if self.document_transcript_cache.valid
+            && self.document_transcript_cache.key == previous_key
+        {
+            return super::append::extend_document_transcript_snapshot_from_append(
+                &self.document_transcript_cache.snapshot,
+                appended,
+            );
+        }
+
+        self.current_document_transcript_snapshot()
+    }
 }
 
 fn document_anchors_for_composer(line_anchors: &[composer::LineAnchor]) -> Vec<DocumentLineAnchor> {

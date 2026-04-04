@@ -21,6 +21,7 @@ pub enum AppEffect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
     Key(KeyEvent),
+    Paste(String),
     Resized {
         width: u16,
         height: u16,
@@ -75,6 +76,7 @@ impl Model {
     pub fn update(&mut self, event: AppEvent) -> Option<AppEffect> {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
+            AppEvent::Paste(text) => self.handle_paste(&text),
             AppEvent::Resized { width, height } => {
                 self.handle_resize(width, height);
                 None
@@ -258,6 +260,23 @@ impl Model {
         None
     }
 
+    fn handle_paste(&mut self, text: &str) -> Option<AppEffect> {
+        if text.is_empty() {
+            return None;
+        }
+
+        self.cancel_exit_confirmation();
+        let old_value = self.composer_text().to_string();
+        let old_line = self.composer.line();
+        let old_column = self.composer.column();
+        self.composer_mut()
+            .insert_text(&normalize_pasted_text(text));
+        self.sync_external_editor_helper_after_draft_change(&old_value);
+        self.sync_composer_height();
+        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
+        None
+    }
+
     fn handle_composer_clear_input(&mut self) -> Option<AppEffect> {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
@@ -317,4 +336,23 @@ impl Model {
         self.sync_external_editor_helper_after_resize(previous_width);
         self.sync_document_viewport_after_transcript_refresh(preserved_anchor);
     }
+}
+
+fn normalize_pasted_text(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(character) = chars.next() {
+        if character == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            normalized.push('\n');
+            continue;
+        }
+
+        normalized.push(character);
+    }
+
+    normalized
 }

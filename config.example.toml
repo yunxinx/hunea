@@ -58,3 +58,8 @@ copy_on_mouse_selection_release = false
 # - Enter 改为插入换行
 # - Ctrl+J 与 Shift+Enter 改为发送消息
 swap_enter_and_send = false
+
+# `ctrl_c_clears_input` 控制在输入框已有草稿时，
+# 单击 Ctrl+C 是否直接清空草稿。
+# 默认开启；关闭后，Ctrl+C 会恢复为退出确认语义。
+ctrl_c_clears_input = true

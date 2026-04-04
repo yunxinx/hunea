@@ -130,6 +130,17 @@ fn load_defaults_swap_enter_and_send_to_false() {
 }
 
 #[test]
+fn load_defaults_ctrl_c_clears_input_to_true() {
+    let working_dir = temp_test_dir("load-default-ctrl-c-clears-input-working");
+    let user_config_dir = temp_test_dir("load-default-ctrl-c-clears-input-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep ctrl+c draft clear enabled");
+
+    assert!(config.tui.ctrl_c_clears_input);
+}
+
+#[test]
 fn load_accepts_enabling_copy_on_mouse_selection_release() {
     let working_dir = temp_test_dir("load-enable-copy-on-selection-working");
     write_config(
@@ -155,6 +166,20 @@ fn load_accepts_swap_enter_and_send() {
         .expect("swap_enter_and_send should accept true");
 
     assert!(config.tui.swap_enter_and_send);
+}
+
+#[test]
+fn load_accepts_disabling_ctrl_c_clears_input() {
+    let working_dir = temp_test_dir("load-disable-ctrl-c-clears-input-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nctrl_c_clears_input = false\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("ctrl_c_clears_input should accept false");
+
+    assert!(!config.tui.ctrl_c_clears_input);
 }
 
 #[test]

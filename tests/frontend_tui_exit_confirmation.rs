@@ -64,15 +64,69 @@ fn status_notice_timeout_restores_previous_status_line_content() {
     env::set_current_dir(original_dir).expect("should restore original directory");
 }
 
+#[test]
+fn ctrl_c_clears_existing_draft_before_showing_exit_confirmation() {
+    let mut model = ready_model();
+
+    for character in "hello".chars() {
+        let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+
+    let _ = model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+    assert_eq!(model.composer_text(), "");
+    assert!(!model.is_quitting());
+
+    let _ = model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(!model.is_quitting());
+
+    let _ = model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(model.is_quitting());
+}
+
+#[test]
+fn ctrl_c_keeps_exit_confirmation_behavior_when_clear_feature_is_disabled() {
+    let mut model = ready_model_with_options(ModelOptions {
+        ctrl_c_clears_input: false,
+        ..ModelOptions::default()
+    });
+
+    for character in "hello".chars() {
+        let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+
+    let _ = model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+    assert_eq!(model.composer_text(), "hello");
+    assert!(!model.is_quitting());
+
+    let _ = model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(model.is_quitting());
+}
+
 fn ready_model() -> Model {
-    let mut model = Model::new_with_options(
-        HeroOptions::default(),
-        ModelOptions {
-            style_mode: StyleMode::Cx,
-            status_line_items: vec![StatusLineItem::GitBranch],
-            ..ModelOptions::default()
-        },
-    );
+    ready_model_with_options(ModelOptions {
+        style_mode: StyleMode::Cx,
+        status_line_items: vec![StatusLineItem::GitBranch],
+        ..ModelOptions::default()
+    })
+}
+
+fn ready_model_with_options(options: ModelOptions) -> Model {
+    let mut model = Model::new_with_options(HeroOptions::default(), options);
     let _ = model.update(AppEvent::Resized {
         width: 40,
         height: 4,

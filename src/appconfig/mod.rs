@@ -23,6 +23,7 @@ pub struct TuiConfig {
     pub show_external_editor_helper: bool,
     pub copy_on_mouse_selection_release: bool,
     pub swap_enter_and_send: bool,
+    pub ctrl_c_clears_input: bool,
 }
 
 /// `UserInputStyle` 表示用户输入区与用户消息的展示模式。
@@ -77,6 +78,7 @@ struct FileTuiConfig {
     show_external_editor_helper: Option<bool>,
     copy_on_mouse_selection_release: Option<bool>,
     swap_enter_and_send: Option<bool>,
+    ctrl_c_clears_input: Option<bool>,
 }
 
 impl Config {
@@ -89,6 +91,7 @@ impl Config {
                 show_external_editor_helper: true,
                 copy_on_mouse_selection_release: false,
                 swap_enter_and_send: false,
+                ctrl_c_clears_input: true,
             },
         }
     }
@@ -306,6 +309,10 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
 
     if let Some(swap_enter_and_send) = file_config.tui.swap_enter_and_send {
         config.tui.swap_enter_and_send = swap_enter_and_send;
+    }
+
+    if let Some(ctrl_c_clears_input) = file_config.tui.ctrl_c_clears_input {
+        config.tui.ctrl_c_clears_input = ctrl_c_clears_input;
     }
 
     Ok(config)

@@ -155,6 +155,10 @@ impl Model {
         }
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.ctrl_c_clears_input && !self.composer_text().is_empty() {
+                self.cancel_exit_confirmation();
+                return self.handle_composer_clear_input();
+            }
             if self.exit_confirmation_active(std::time::Instant::now()) {
                 self.mark_quitting();
             } else {
@@ -233,6 +237,17 @@ impl Model {
         let old_line = self.composer.line();
         let old_column = self.composer.column();
         self.composer_mut().insert_newline();
+        self.sync_external_editor_helper_after_draft_change(&old_value);
+        self.sync_composer_height();
+        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
+        None
+    }
+
+    fn handle_composer_clear_input(&mut self) -> Option<AppEffect> {
+        let old_value = self.composer_text().to_string();
+        let old_line = self.composer.line();
+        let old_column = self.composer.column();
+        self.composer_mut().clear();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);

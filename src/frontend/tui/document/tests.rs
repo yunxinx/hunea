@@ -130,13 +130,36 @@ fn transcript_line_text_falls_back_to_item_render_when_snapshot_plain_lines_are_
     let layout = model.build_document_layout();
     let mut degraded = (*layout).clone();
     degraded.transcript = Rc::new(DocumentTranscriptSnapshot {
-        plain_lines: vec![String::new(); degraded.transcript_line_count],
+        plain_lines: Rc::new(vec![String::new(); degraded.transcript_line_count]),
         ..layout.transcript.as_ref().clone()
     });
 
     assert_eq!(
         degraded.line_at(0).map(|line| line.plain_line),
         Some("alpha".to_string())
+    );
+}
+
+#[test]
+fn current_document_transcript_snapshot_reuses_render_storage() {
+    let mut model = ready_document_model(20, 4);
+    model.transcript_mut().clear();
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "alpha\nbeta\ngamma");
+    model.sync_transcript_render();
+
+    let snapshot = model.current_document_transcript_snapshot();
+
+    assert_eq!(
+        snapshot.lines.as_ptr(),
+        model.transcript_render.lines.as_ptr(),
+        "document transcript snapshot should share transcript render lines instead of cloning them"
+    );
+    assert_eq!(
+        snapshot.plain_lines.as_ptr(),
+        model.transcript_render.plain_lines.as_ptr(),
+        "document transcript snapshot should share transcript render plain lines instead of cloning them"
     );
 }
 
@@ -416,10 +439,7 @@ fn build_document_layout_matches_full_compose_after_transcript_append() {
         .append_message(Sender::Assistant, "history");
     model.sync_transcript_render();
 
-    let key = model.current_document_layout_key();
-    let (layout, _) = model
-        .build_document_layout_from_transcript_append(&key)
-        .expect("single append should extend the cached document layout");
+    let layout = model.build_document_layout();
     let expected = compose_document_layout(model.current_document_layout_input());
 
     assert_eq!(layout.all_plain_lines(), expected.all_plain_lines());
@@ -497,10 +517,7 @@ fn build_document_layout_matches_full_compose_after_appending_to_non_empty_trans
         .append_message(Sender::Assistant, "next");
     model.sync_transcript_render();
 
-    let key = model.current_document_layout_key();
-    let (layout, _) = model
-        .build_document_layout_from_transcript_append(&key)
-        .expect("tail append should extend before the composer gap");
+    let layout = model.build_document_layout();
     let expected = compose_document_layout(model.current_document_layout_input());
 
     assert_eq!(layout.all_plain_lines(), expected.all_plain_lines());
@@ -511,7 +528,8 @@ fn build_document_layout_matches_full_compose_after_appending_to_non_empty_trans
 }
 
 #[test]
-fn build_document_layout_append_path_rejects_multiple_pending_transcript_appends() {
+fn build_document_layout_after_multiple_pending_transcript_appends_matches_compose_document_layout()
+{
     let mut model = ready_document_model(24, 6);
     model.composer_mut().set_text_for_test("draft");
     model.sync_composer_height();
@@ -527,13 +545,14 @@ fn build_document_layout_append_path_rejects_multiple_pending_transcript_appends
         .append_message(Sender::Assistant, "two");
     model.sync_transcript_render();
 
-    let key = model.current_document_layout_key();
-    assert!(
-        model
-            .build_document_layout_from_transcript_append(&key)
-            .is_none(),
-        "multiple pending transcript appends should fall back to full compose"
-    );
+    let layout = model.build_document_layout();
+    let expected = compose_document_layout(model.current_document_layout_input());
+
+    assert_eq!(layout.all_plain_lines(), expected.all_plain_lines());
+    assert_eq!(layout.all_line_anchors(), expected.all_line_anchors());
+    assert_eq!(layout.tail.selectable, expected.tail.selectable);
+    assert_eq!(layout.composer_slot, expected.composer_slot);
+    assert_eq!(layout.cursor_y, expected.cursor_y);
 }
 
 #[test]

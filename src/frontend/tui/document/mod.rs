@@ -1,5 +1,4 @@
 mod anchor_match;
-mod append;
 mod cache;
 mod layout;
 mod line_access;
@@ -25,9 +24,7 @@ pub(crate) use self::slot_viewport::{
     bottom_follow_viewport_line_indices, offset_viewport_line_indices,
 };
 pub(super) use self::tail::DocumentTailLayoutCache as TailLayoutCache;
-pub(super) use self::tail::{
-    DocumentTailLayout, offset_slot_frame, tail_layout_with_transcript_gap,
-};
+pub(super) use self::tail::{DocumentTailLayout, offset_slot_frame};
 pub(super) use self::viewport_state::ViewportState;
 #[cfg(test)]
 pub(super) use self::viewport_state::{

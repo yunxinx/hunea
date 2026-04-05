@@ -10,7 +10,7 @@ use crate::frontend::tui::{
 
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutLine, DocumentLineAnchor,
-    DocumentTranscriptItemLines, DocumentTranscriptSnapshot,
+    DocumentTranscriptItemLines,
 };
 
 /// `DocumentSelectionLine` 表示 selection / copy 路径消费的一条语义行。
@@ -111,9 +111,9 @@ impl DocumentLayout {
         if target.region == DocumentAnchorRegion::Transcript {
             return self
                 .transcript
-                .anchors
+                .line_anchors
                 .iter()
-                .position(|anchor| *anchor == target);
+                .position(|anchor| *anchor == target.transcript);
         }
 
         self.tail
@@ -220,8 +220,8 @@ impl DocumentLayout {
 
         (start..end.min(self.transcript_line_count))
             .filter_map(|index| {
-                let anchor = self.transcript.anchors.get(index).copied()?;
-                self.transcript_line_text_at(index, anchor)
+                let anchor = self.transcript.line_anchors.get(index).copied()?;
+                self.transcript_line_text_at(index, document_anchor_for_transcript(anchor))
             })
             .collect()
     }
@@ -265,7 +265,7 @@ impl DocumentLayout {
 
     fn transcript_line_at(&self, index: usize) -> Option<DocumentLayoutLine> {
         let line = self.transcript.lines.get(index).cloned()?;
-        let anchor = self.transcript.anchors.get(index).copied()?;
+        let anchor = document_anchor_for_transcript(*self.transcript.line_anchors.get(index)?);
         let plain_line = self.transcript_line_text_at(index, anchor)?;
         let selectable = self.transcript_selectable_at(anchor, &plain_line);
 
@@ -278,7 +278,7 @@ impl DocumentLayout {
     }
 
     fn transcript_selection_line_at(&self, index: usize) -> Option<DocumentSelectionLine> {
-        let anchor = self.transcript.anchors.get(index).copied()?;
+        let anchor = document_anchor_for_transcript(*self.transcript.line_anchors.get(index)?);
         let text = self.transcript_line_text_at(index, anchor)?;
         let selectable = self.transcript_selectable_at(anchor, &text);
 
@@ -343,7 +343,7 @@ impl DocumentLayout {
         }
 
         let plain_lines = self.transcript_item_text_lines(item_index)?;
-        let item = self.transcript.items.get(&item_index)?;
+        let item = self.transcript.items.get(item_index)?.as_ref();
         let ranges = item.render_selectable_line_ranges(
             self.transcript.width.max(1),
             self.transcript.palette,
@@ -367,7 +367,7 @@ impl DocumentLayout {
             return Some(lines);
         }
 
-        let item = self.transcript.items.get(&item_index)?;
+        let item = self.transcript.items.get(item_index)?.as_ref();
         let lines = item.render_plain_lines(self.transcript.width.max(1), self.transcript.palette);
         self.transcript
             .item_text_lines_cache
@@ -399,23 +399,22 @@ fn plain_lines_len(lines: &[String]) -> usize {
 
 /// `new_document_transcript_item_index` 为 transcript snapshot 构建 item 行索引。
 pub(crate) fn new_document_transcript_item_index(
-    snapshot: &DocumentTranscriptSnapshot,
+    line_anchors: &[crate::frontend::tui::transcript::LineAnchor],
 ) -> HashMap<usize, DocumentTranscriptItemLines> {
-    if snapshot.lines.is_empty() || snapshot.anchors.is_empty() {
+    if line_anchors.is_empty() {
         return HashMap::new();
     }
 
-    let mut items = HashMap::with_capacity(snapshot.items.len().max(1));
+    let mut items = HashMap::new();
     let mut start = 0;
-    let mut current_item_index = snapshot.anchors[0].transcript.item_index;
+    let mut current_item_index = line_anchors[0].item_index;
     let mut content_line_count = usize::from(!matches!(
-        snapshot.anchors[0].transcript.item_anchor.kind,
+        line_anchors[0].item_anchor.kind,
         LineAnchorKind::ItemGap
     ));
 
-    for index in 1..snapshot.anchors.len() {
-        let anchor = snapshot.anchors[index];
-        if anchor.transcript.item_index != current_item_index {
+    for (index, anchor) in line_anchors.iter().copied().enumerate().skip(1) {
+        if anchor.item_index != current_item_index {
             let line_count = index - start;
             items.insert(
                 current_item_index,
@@ -426,15 +425,15 @@ pub(crate) fn new_document_transcript_item_index(
                 },
             );
             start = index;
-            current_item_index = anchor.transcript.item_index;
+            current_item_index = anchor.item_index;
             content_line_count = 0;
         }
-        if !matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap) {
+        if !matches!(anchor.item_anchor.kind, LineAnchorKind::ItemGap) {
             content_line_count += 1;
         }
     }
 
-    let line_count = snapshot.lines.len() - start;
+    let line_count = line_anchors.len() - start;
     items.insert(
         current_item_index,
         DocumentTranscriptItemLines {
@@ -445,4 +444,14 @@ pub(crate) fn new_document_transcript_item_index(
     );
 
     items
+}
+
+fn document_anchor_for_transcript(
+    transcript: crate::frontend::tui::transcript::LineAnchor,
+) -> DocumentLineAnchor {
+    DocumentLineAnchor {
+        region: DocumentAnchorRegion::Transcript,
+        transcript,
+        ..DocumentLineAnchor::default()
+    }
 }

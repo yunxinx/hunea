@@ -289,34 +289,6 @@ pub(crate) fn ensure_selectable_ranges(
         .collect()
 }
 
-pub(crate) fn tail_layout_with_transcript_gap(base: &DocumentTailLayout) -> DocumentTailLayout {
-    let mut lines = Vec::with_capacity(base.lines.len() + transcript_composer_gap_line_count());
-    let mut text_lines =
-        Vec::with_capacity(base.text_lines.len() + transcript_composer_gap_line_count());
-    let mut anchors = Vec::with_capacity(base.anchors.len() + transcript_composer_gap_line_count());
-    let mut selectable =
-        Vec::with_capacity(base.selectable.len() + transcript_composer_gap_line_count());
-    append_transcript_gap(&mut lines, &mut text_lines, &mut anchors, &mut selectable);
-    lines.extend(base.lines.iter().cloned());
-    text_lines.extend(base.text_lines.iter().cloned());
-    anchors.extend(base.anchors.iter().copied());
-    selectable.extend(base.selectable.iter().copied());
-
-    let mut composer_slot = base.composer_slot;
-    composer_slot.frame_start_line += transcript_composer_gap_line_count();
-    composer_slot.content_start_line += transcript_composer_gap_line_count();
-
-    DocumentTailLayout {
-        lines,
-        text_lines,
-        anchors,
-        selectable,
-        composer_slot,
-        cursor_x: base.cursor_x,
-        cursor_y: base.cursor_y + transcript_composer_gap_line_count(),
-    }
-}
-
 pub(crate) fn offset_slot_frame(slot: SlotFrame, offset: usize) -> SlotFrame {
     SlotFrame {
         frame_start_line: slot.frame_start_line + offset,

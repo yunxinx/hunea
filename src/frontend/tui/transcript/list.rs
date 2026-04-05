@@ -26,7 +26,7 @@ pub(crate) enum TranscriptItem {
 /// `Transcript` 管理 document-flow 顺序、宽度与逐项渲染缓存。
 #[derive(Debug, Clone)]
 pub(crate) struct Transcript {
-    items: Vec<TranscriptItem>,
+    items: Rc<Vec<Rc<TranscriptItem>>>,
     gap: usize,
     width: u16,
     palette: TerminalPalette,
@@ -48,7 +48,7 @@ impl Transcript {
     /// `new` 创建一个空 transcript。
     pub(crate) fn new(palette: TerminalPalette) -> Self {
         Self {
-            items: Vec::new(),
+            items: Rc::new(Vec::new()),
             gap: 1,
             width: DEFAULT_RENDER_WIDTH as u16,
             palette,
@@ -83,16 +83,16 @@ impl Transcript {
 
     /// `append_hero` 追加一条 hero 项。
     pub(crate) fn append_hero(&mut self, options: HeroOptions) {
-        self.items
-            .push(TranscriptItem::Hero(HeroItem::new(options)));
+        Rc::make_mut(&mut self.items).push(Rc::new(TranscriptItem::Hero(HeroItem::new(options))));
         self.screen_cache.ensure_item_count(self.items.len());
     }
 
     /// `append_message` 追加一条消息项。
     #[cfg(test)]
     pub(crate) fn append_message(&mut self, sender: Sender, content: impl Into<String>) {
-        self.items
-            .push(TranscriptItem::Message(MessageItem::new(sender, content)));
+        Rc::make_mut(&mut self.items).push(Rc::new(TranscriptItem::Message(MessageItem::new(
+            sender, content,
+        ))));
         self.screen_cache.ensure_item_count(self.items.len());
     }
 
@@ -103,10 +103,9 @@ impl Transcript {
         content: impl Into<String>,
         style_mode: StyleMode,
     ) {
-        self.items
-            .push(TranscriptItem::Message(MessageItem::new_with_style_mode(
-                sender, content, style_mode,
-            )));
+        Rc::make_mut(&mut self.items).push(Rc::new(TranscriptItem::Message(
+            MessageItem::new_with_style_mode(sender, content, style_mode),
+        )));
         self.screen_cache.ensure_item_count(self.items.len());
     }
 
@@ -119,14 +118,18 @@ impl Transcript {
     /// `clear` 清空 transcript。
     #[allow(dead_code)]
     pub(crate) fn clear(&mut self) {
-        self.items.clear();
+        Rc::make_mut(&mut self.items).clear();
         self.screen_cache.reset();
     }
 
     /// `item` 返回指定索引的 transcript 项。
     #[allow(dead_code)]
     pub(crate) fn item(&self, index: usize) -> Option<&TranscriptItem> {
-        self.items.get(index)
+        self.items.get(index).map(Rc::as_ref)
+    }
+
+    pub(crate) fn items_snapshot(&self) -> Rc<Vec<Rc<TranscriptItem>>> {
+        Rc::clone(&self.items)
     }
 
     /// `plain_items` 返回适用于纯文本消费的文本项。
@@ -299,10 +302,10 @@ impl Transcript {
 
     fn extend_render_result(&self, width: u16, blocks: &[CachedRenderBlock]) -> RenderResult {
         let base = self.screen_cache.result.clone();
-        let mut lines = base.lines.clone();
-        let mut plain_lines = base.plain_lines.clone();
-        let mut line_anchors = base.line_anchors.clone();
-        let mut selectable_ranges = base.selectable_ranges.clone();
+        let mut lines = base.lines.as_ref().clone();
+        let mut plain_lines = base.plain_lines.as_ref().clone();
+        let mut line_anchors = base.line_anchors.as_ref().clone();
+        let mut selectable_ranges = base.selectable_ranges.as_ref().clone();
 
         let mut previous_visible_item_index = None;
         for block in blocks {
@@ -479,10 +482,16 @@ mod tests {
     #[test]
     fn render_returns_content_lines_and_line_count() {
         let mut transcript = Transcript::new(default_palette());
-        transcript.items = vec![
-            TranscriptItem::Message(MessageItem::new(Sender::Assistant, "one\ntwo")),
-            TranscriptItem::Message(MessageItem::new(Sender::Assistant, "three")),
-        ];
+        transcript.items = Rc::new(vec![
+            Rc::new(TranscriptItem::Message(MessageItem::new(
+                Sender::Assistant,
+                "one\ntwo",
+            ))),
+            Rc::new(TranscriptItem::Message(MessageItem::new(
+                Sender::Assistant,
+                "three",
+            ))),
+        ]);
 
         let result = transcript.render();
         let rendered = result
@@ -503,12 +512,13 @@ mod tests {
     #[test]
     fn render_append_path_keeps_gap_anchor_on_previous_item() {
         let mut transcript = Transcript::new(default_palette());
-        transcript.items = vec![TranscriptItem::Message(static_message("first"))];
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
+            "first",
+        )))]);
         let _ = transcript.render();
 
-        transcript
-            .items
-            .push(TranscriptItem::Message(static_message("second")));
+        Rc::make_mut(&mut transcript.items)
+            .push(Rc::new(TranscriptItem::Message(static_message("second"))));
         let result = transcript.render();
 
         assert_eq!(result.line_anchors.len(), 3);
@@ -522,25 +532,26 @@ mod tests {
     #[test]
     fn render_append_path_marks_append_start_line() {
         let mut transcript = Transcript::new(default_palette());
-        transcript.items = vec![TranscriptItem::Message(static_message("first"))];
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
+            "first",
+        )))]);
         let _ = transcript.render();
 
-        transcript
-            .items
-            .push(TranscriptItem::Message(static_message("second")));
+        Rc::make_mut(&mut transcript.items)
+            .push(Rc::new(TranscriptItem::Message(static_message("second"))));
         let result = transcript.render();
 
         assert_eq!(result.append_start_line, 1);
-        assert_eq!(result.plain_lines, vec!["first", "", "second"]);
+        assert_eq!(result.plain_lines.as_ref(), &vec!["first", "", "second"]);
     }
 
     #[test]
     fn render_builds_gap_anchor_between_visible_blocks() {
         let mut transcript = Transcript::new(default_palette());
-        transcript.items = vec![
-            TranscriptItem::Message(static_message("one")),
-            TranscriptItem::Message(static_message("two")),
-        ];
+        transcript.items = Rc::new(vec![
+            Rc::new(TranscriptItem::Message(static_message("one"))),
+            Rc::new(TranscriptItem::Message(static_message("two"))),
+        ]);
 
         let result = transcript.render();
 
@@ -562,9 +573,11 @@ mod tests {
         transcript.set_width(72);
 
         for index in 0..64 {
-            transcript.items.push(TranscriptItem::Message(static_message(&format!(
+            Rc::make_mut(&mut transcript.items).push(Rc::new(TranscriptItem::Message(
+                static_message(&format!(
                 "item {index:02}\nalpha beta gamma alpha beta gamma\ndelta epsilon zeta delta epsilon zeta"
-            ))));
+            )),
+            )));
         }
 
         for _ in 0..128 {
@@ -575,7 +588,9 @@ mod tests {
     #[test]
     fn cached_render_result_can_be_reused_when_item_cache_keys_are_stable() {
         let mut transcript = Transcript::new(default_palette());
-        transcript.items = vec![TranscriptItem::Message(static_message("cached"))];
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
+            "cached",
+        )))]);
 
         let _ = transcript.render();
 
@@ -585,10 +600,13 @@ mod tests {
     #[test]
     fn cached_render_result_becomes_stale_after_item_content_changes() {
         let mut transcript = Transcript::new(default_palette());
-        transcript.items = vec![TranscriptItem::Message(static_message("one"))];
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
+            "one",
+        )))]);
 
         let _ = transcript.render();
-        transcript.items[0] = TranscriptItem::Message(static_message("two"));
+        Rc::make_mut(&mut transcript.items)[0] =
+            Rc::new(TranscriptItem::Message(static_message("two")));
 
         assert!(!transcript.can_reuse_cached_render_result(transcript.render_width()));
     }
@@ -596,7 +614,9 @@ mod tests {
     #[test]
     fn render_cache_hit_reuses_underlying_result_storage() {
         let mut transcript = Transcript::new(default_palette());
-        transcript.items = vec![TranscriptItem::Message(static_message("cached"))];
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
+            "cached",
+        )))]);
 
         let first = transcript.render();
         let second = transcript.render();
@@ -609,7 +629,9 @@ mod tests {
     #[test]
     fn render_cache_hit_does_not_rehash_message_content() {
         let mut transcript = Transcript::new(default_palette());
-        transcript.items = vec![TranscriptItem::Message(static_message("cached"))];
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
+            "cached",
+        )))]);
         reset_message_item_render_cache_key_call_count();
 
         let _ = transcript.render();
@@ -646,26 +668,32 @@ mod tests {
     #[test]
     fn render_refreshes_after_item_content_changes() {
         let mut transcript = Transcript::new(default_palette());
-        transcript.items = vec![TranscriptItem::Message(static_message("one"))];
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
+            "one",
+        )))]);
 
         let first = transcript.render();
-        assert_eq!(first.plain_lines, vec!["one"]);
+        assert_eq!(first.plain_lines.as_ref(), &vec!["one"]);
 
-        transcript.items[0] = TranscriptItem::Message(static_message("two"));
+        Rc::make_mut(&mut transcript.items)[0] =
+            Rc::new(TranscriptItem::Message(static_message("two")));
 
         let second = transcript.render();
-        assert_eq!(second.plain_lines, vec!["two"]);
+        assert_eq!(second.plain_lines.as_ref(), &vec!["two"]);
     }
 
     #[test]
     fn render_viewport_refreshes_after_item_content_changes() {
         let mut transcript = Transcript::new(default_palette());
-        transcript.items = vec![TranscriptItem::Message(static_message("one\ntwo"))];
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
+            "one\ntwo",
+        )))]);
 
         let first = transcript.render_viewport(1, 1);
         assert_eq!(first.plain_lines, vec!["two"]);
 
-        transcript.items[0] = TranscriptItem::Message(static_message("alpha\nbeta"));
+        Rc::make_mut(&mut transcript.items)[0] =
+            Rc::new(TranscriptItem::Message(static_message("alpha\nbeta")));
 
         let second = transcript.render_viewport(1, 1);
         assert_eq!(second.plain_lines, vec!["beta"]);

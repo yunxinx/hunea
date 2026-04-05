@@ -2,18 +2,12 @@ use std::rc::Rc;
 
 use ratatui::text::Line;
 
-use crate::frontend::tui::{Model, selection::apply_selection_to_viewport, transcript};
+use crate::frontend::tui::{Model, selection::apply_selection_to_viewport};
 
 use super::{
-    DocumentAnchorRegion, DocumentLayout, DocumentLayoutCache, DocumentLayoutKey,
-    DocumentLineAnchor, DocumentTranscriptCache, DocumentTranscriptKey, DocumentTranscriptSnapshot,
-    DocumentViewport, DocumentViewportCache, DocumentViewportKey,
-    append::{
-        can_extend_cached_document_layout, extend_document_layout_from_transcript_append,
-        sliced_transcript_append,
-    },
-    line_access::new_document_transcript_item_index,
-    offset_slot_frame,
+    DocumentLayout, DocumentLayoutCache, DocumentLayoutKey, DocumentTranscriptCache,
+    DocumentTranscriptKey, DocumentTranscriptSnapshot, DocumentViewport, DocumentViewportCache,
+    DocumentViewportKey, line_access::new_document_transcript_item_index, offset_slot_frame,
     slot_viewport::compose_bottom_follow_document_viewport,
 };
 
@@ -42,27 +36,6 @@ impl Model {
             return Rc::clone(&self.document_layout_cache.layout);
         }
 
-        if let Some((layout, transcript_snapshot)) =
-            self.build_document_layout_from_transcript_append(&key)
-        {
-            self.document_transcript_cache = DocumentTranscriptCache {
-                key: DocumentTranscriptKey {
-                    transcript_render_version: self.transcript_render_version,
-                    document_width: self.width,
-                },
-                snapshot: Rc::clone(&transcript_snapshot),
-                valid: true,
-            };
-            let layout = Rc::new(layout);
-            self.document_layout_cache = DocumentLayoutCache {
-                key,
-                layout: Rc::clone(&layout),
-                transcript_line_count: self.transcript_render.line_count,
-                valid: true,
-            };
-            return layout;
-        }
-
         let layout = Rc::new(compose_document_layout(
             self.current_document_layout_input(),
         ));
@@ -77,43 +50,9 @@ impl Model {
         self.document_layout_cache = DocumentLayoutCache {
             key,
             layout: Rc::clone(&layout),
-            transcript_line_count: self.transcript_render.line_count,
             valid: true,
         };
         layout
-    }
-
-    pub(crate) fn build_document_layout_from_transcript_append(
-        &mut self,
-        key: &DocumentLayoutKey,
-    ) -> Option<(DocumentLayout, Rc<DocumentTranscriptSnapshot>)> {
-        if !self.document_layout_cache.valid {
-            return None;
-        }
-        if !can_extend_cached_document_layout(&self.document_layout_cache.key, key) {
-            return None;
-        }
-
-        let start_line = usize::try_from(self.transcript_render.append_start_line).ok()?;
-        if self.document_layout_cache.transcript_line_count != start_line {
-            return None;
-        }
-
-        let appended =
-            sliced_transcript_append(&self.transcript_render, start_line, &self.transcript)?;
-        if appended.lines.is_empty() {
-            return None;
-        }
-
-        let transcript_snapshot = self.document_transcript_snapshot_after_append(&appended);
-        Some((
-            extend_document_layout_from_transcript_append(
-                &self.document_layout_cache.layout,
-                appended,
-                Rc::clone(&transcript_snapshot),
-            ),
-            transcript_snapshot,
-        ))
     }
 
     pub(crate) fn build_document_viewport(
@@ -222,13 +161,13 @@ impl Model {
 
 pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLayout {
     let transcript_line_count = input.transcript.lines.len();
-    let transcript_items = new_document_transcript_item_index(&input.transcript);
+    let transcript = Rc::clone(&input.transcript);
     let composer_slot = offset_slot_frame(input.tail.composer_slot, transcript_line_count);
 
     DocumentLayout {
-        transcript: input.transcript,
+        transcript_items: Rc::clone(&transcript.item_index),
+        transcript,
         transcript_line_count,
-        transcript_items,
         tail: Rc::clone(&input.tail),
         composer_slot,
         composer_start_line: composer_slot.content_start_line,
@@ -315,29 +254,20 @@ impl Model {
             return Rc::clone(&self.document_transcript_cache.snapshot);
         }
 
-        let mut items = std::collections::HashMap::new();
-        let mut previous_item_index = None;
-        for anchor in &self.transcript_render.line_anchors {
-            if previous_item_index == Some(anchor.item_index) {
-                continue;
-            }
-            previous_item_index = Some(anchor.item_index);
-            if let Some(item) = self.transcript.item(anchor.item_index).cloned() {
-                items.insert(anchor.item_index, item);
-            }
-        }
-
         let snapshot = Rc::new(DocumentTranscriptSnapshot {
-            lines: self.transcript_render.lines.clone(),
-            plain_lines: self.transcript_render.plain_lines.clone(),
-            anchors: document_anchors_for_transcript(&self.transcript_render.line_anchors),
+            lines: Rc::clone(&self.transcript_render.lines),
+            plain_lines: Rc::clone(&self.transcript_render.plain_lines),
+            line_anchors: Rc::clone(&self.transcript_render.line_anchors),
             width: if self.width == 0 {
                 crate::frontend::tui::transcript::DEFAULT_RENDER_WIDTH as u16
             } else {
                 self.width
             },
             palette: self.palette,
-            items,
+            items: self.transcript.items_snapshot(),
+            item_index: Rc::new(new_document_transcript_item_index(
+                self.transcript_render.line_anchors.as_slice(),
+            )),
             item_text_lines_cache: Rc::new(std::cell::RefCell::new(
                 std::collections::HashMap::new(),
             )),
@@ -350,40 +280,4 @@ impl Model {
         };
         snapshot
     }
-
-    pub(crate) fn document_transcript_snapshot_after_append(
-        &mut self,
-        appended: &super::append::DocumentTranscriptAppend,
-    ) -> Rc<DocumentTranscriptSnapshot> {
-        let previous_key = DocumentTranscriptKey {
-            transcript_render_version: self.document_layout_cache.key.transcript_render_version,
-            document_width: self.width,
-        };
-        if self.document_transcript_cache.valid
-            && self.document_transcript_cache.key == previous_key
-        {
-            return Rc::new(
-                super::append::extend_document_transcript_snapshot_from_append(
-                    &self.document_transcript_cache.snapshot,
-                    appended,
-                ),
-            );
-        }
-
-        self.current_document_transcript_snapshot()
-    }
-}
-
-fn document_anchors_for_transcript(
-    line_anchors: &[transcript::LineAnchor],
-) -> Vec<DocumentLineAnchor> {
-    line_anchors
-        .iter()
-        .copied()
-        .map(|transcript| DocumentLineAnchor {
-            region: DocumentAnchorRegion::Transcript,
-            transcript,
-            ..DocumentLineAnchor::default()
-        })
-        .collect()
 }

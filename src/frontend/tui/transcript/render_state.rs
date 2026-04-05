@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use ratatui::text::Line;
 
 use crate::frontend::tui::selection::SelectableLineRange;
@@ -31,10 +33,10 @@ pub(crate) struct LineAnchor {
 /// `RenderResult` 表示 transcript 在当前宽度下的稳定渲染结果。
 #[derive(Debug, Clone)]
 pub(crate) struct RenderResult {
-    pub(crate) lines: Vec<Line<'static>>,
-    pub(crate) plain_lines: Vec<String>,
-    pub(crate) line_anchors: Vec<LineAnchor>,
-    pub(crate) selectable_ranges: Vec<SelectableLineRange>,
+    pub(crate) lines: Rc<Vec<Line<'static>>>,
+    pub(crate) plain_lines: Rc<Vec<String>>,
+    pub(crate) line_anchors: Rc<Vec<LineAnchor>>,
+    pub(crate) selectable_ranges: Rc<Vec<SelectableLineRange>>,
     pub(crate) line_count: usize,
     /// `append_start_line` 标记这次结果是否由尾部追加快路径扩展而来。
     /// `-1` 表示这次是完整重组；非负值表示旧结果的行数。
@@ -71,10 +73,10 @@ impl RenderResult {
 impl Default for RenderResult {
     fn default() -> Self {
         Self {
-            lines: Vec::new(),
-            plain_lines: Vec::new(),
-            line_anchors: Vec::new(),
-            selectable_ranges: Vec::new(),
+            lines: Rc::new(Vec::new()),
+            plain_lines: Rc::new(Vec::new()),
+            line_anchors: Rc::new(Vec::new()),
+            selectable_ranges: Rc::new(Vec::new()),
             line_count: 0,
             append_start_line: -1,
         }
@@ -103,10 +105,10 @@ pub(crate) fn new_render_result_with_append_start(
 
     let line_count = lines.len();
     RenderResult {
-        lines,
-        plain_lines,
-        line_anchors,
-        selectable_ranges,
+        lines: Rc::new(lines),
+        plain_lines: Rc::new(plain_lines),
+        line_anchors: Rc::new(line_anchors),
+        selectable_ranges: Rc::new(selectable_ranges),
         line_count,
         append_start_line,
     }

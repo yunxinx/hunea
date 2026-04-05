@@ -357,24 +357,46 @@ impl DocumentBench {
         summary
     }
 
-    /// `build_offset_viewport` 使用手动滚动 offset 构造 viewport 并返回稳定摘要。
-    pub fn build_offset_viewport(&mut self) -> DocumentViewportSummary {
-        self.model.follow_bottom = false;
-        self.model.manual_document_scroll = true;
-        self.model.document_viewport_cache = Default::default();
-        self.model.document_viewport_y = self.model.clamp_document_viewport_offset(
+    /// `prepare_offset_viewport_state` 把模型切到固定的手动滚动 viewport 状态。
+    pub fn prepare_offset_viewport_state(&mut self) {
+        let document_offset = self.model.clamp_document_viewport_offset(
             self.layout.line_count().saturating_sub(12),
             self.layout.line_count(),
         );
+        let composer_offset = self
+            .model
+            .current_composer_viewport_offset(&self.layout, document_offset);
+        self.model.apply_document_viewport_position(
+            &self.layout,
+            document_offset,
+            composer_offset,
+            false,
+            true,
+        );
+    }
+
+    /// `build_offset_viewport` 使用手动滚动 offset 构造 viewport 并返回稳定摘要。
+    pub fn build_offset_viewport(&mut self) -> DocumentViewportSummary {
+        self.model.document_viewport_cache = Default::default();
 
         summarize_document_viewport(&self.model.build_document_viewport(&self.layout))
     }
 
+    /// `prepare_bottom_follow_viewport_state` 把模型切到底部跟随状态。
+    pub fn prepare_bottom_follow_viewport_state(&mut self) {
+        let (document_offset, composer_offset) =
+            self.model.bottom_follow_viewport_offsets(&self.layout);
+        self.model.apply_document_viewport_position(
+            &self.layout,
+            document_offset,
+            composer_offset,
+            true,
+            false,
+        );
+    }
+
     /// `build_bottom_follow_viewport` 使用 bottom-follow 语义构造 viewport 并返回稳定摘要。
     pub fn build_bottom_follow_viewport(&mut self) -> DocumentViewportSummary {
-        self.model.follow_bottom = true;
-        self.model.manual_document_scroll = false;
-        self.model.document_viewport_y = 0;
         self.model.document_viewport_cache = Default::default();
 
         summarize_document_viewport(&self.model.build_document_viewport(&self.layout))

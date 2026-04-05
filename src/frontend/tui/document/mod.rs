@@ -7,6 +7,7 @@ mod manual_scroll;
 mod slot_frame;
 mod slot_viewport;
 mod sync;
+mod viewport_state;
 
 pub(super) use self::cache::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutCache, DocumentLayoutKey,
@@ -21,6 +22,11 @@ pub(super) use self::cache::{
 pub(super) use self::manual_scroll::ManualScrollRestoreState as RestoreState;
 pub(crate) use self::slot_viewport::{
     bottom_follow_viewport_line_indices, offset_viewport_line_indices,
+};
+pub(super) use self::viewport_state::ViewportState;
+#[cfg(test)]
+pub(super) use self::viewport_state::{
+    TranscriptSemanticPosition, ViewAnchor, document_viewport_anchor_at_line,
 };
 
 #[cfg(test)]

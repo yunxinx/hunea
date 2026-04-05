@@ -2,22 +2,19 @@ use std::cmp::Ordering;
 
 use crate::frontend::tui::Model;
 
-use super::{
-    DocumentLayout, DocumentViewportAnchor, ManualDocumentScrollRestoreTarget,
-    anchor_match::find_document_offset_for_viewport_anchor,
-};
+use super::{DocumentLayout, ManualDocumentScrollRestoreTarget, ViewportState};
 
 /// `ManualScrollRestoreState` 收口手动滚动返回目标及其锚点。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ManualScrollRestoreState {
     target: ManualDocumentScrollRestoreTarget,
-    anchor: DocumentViewportAnchor,
+    viewport_state: ViewportState,
 }
 
 impl ManualScrollRestoreState {
     pub(crate) fn clear(&mut self) {
         self.target = ManualDocumentScrollRestoreTarget::None;
-        self.anchor = DocumentViewportAnchor::default();
+        self.viewport_state = ViewportState::default();
     }
 
     pub(crate) fn is_pending(&self) -> bool {
@@ -26,20 +23,20 @@ impl ManualScrollRestoreState {
 
     pub(crate) fn track_bottom_follow(&mut self) {
         self.target = ManualDocumentScrollRestoreTarget::BottomFollow;
-        self.anchor = DocumentViewportAnchor::default();
+        self.viewport_state = ViewportState::default();
     }
 
-    pub(crate) fn track_composer_cursor(&mut self, anchor: Option<DocumentViewportAnchor>) {
+    pub(crate) fn track_composer_cursor(&mut self, viewport_state: Option<ViewportState>) {
         self.target = ManualDocumentScrollRestoreTarget::ComposerCursor;
-        self.anchor = anchor.unwrap_or_default();
+        self.viewport_state = viewport_state.unwrap_or_default();
     }
 
     pub(crate) const fn target(&self) -> ManualDocumentScrollRestoreTarget {
         self.target
     }
 
-    pub(crate) fn anchor(&self) -> &DocumentViewportAnchor {
-        &self.anchor
+    pub(crate) fn viewport_state(&self) -> &ViewportState {
+        &self.viewport_state
     }
 }
 
@@ -58,8 +55,9 @@ impl Model {
             return;
         }
 
-        let anchor = self.current_document_viewport_anchor();
-        self.manual_scroll_restore.track_composer_cursor(anchor);
+        let viewport_state = self.current_document_viewport_state();
+        self.manual_scroll_restore
+            .track_composer_cursor(Some(viewport_state));
     }
 
     pub(crate) fn manual_document_scroll_restore_offsets(
@@ -87,18 +85,26 @@ impl Model {
             return;
         }
 
-        self.follow_bottom = offsets.follow_bottom;
-        self.manual_document_scroll = false;
+        self.apply_document_viewport_position(
+            &layout,
+            offsets.document_offset,
+            offsets.composer_offset,
+            offsets.follow_bottom,
+            false,
+        );
         self.clear_manual_document_scroll_restore_target();
     }
 
     pub(super) fn restore_from_manual_document_scroll(&mut self) {
         let layout = self.build_document_layout();
         let offsets = self.edit_restore_offsets(&layout);
-        self.document_viewport_y = offsets.document_offset;
-        self.composer.set_viewport_offset(offsets.composer_offset);
-        self.follow_bottom = offsets.follow_bottom;
-        self.manual_document_scroll = false;
+        self.apply_document_viewport_position(
+            &layout,
+            offsets.document_offset,
+            offsets.composer_offset,
+            offsets.follow_bottom,
+            false,
+        );
         self.clear_manual_document_scroll_restore_target();
     }
 
@@ -154,21 +160,18 @@ impl Model {
                 ManualScrollRestoreOffsets::new(document_offset, composer_offset, true)
             }
             _ => {
-                if let Some(offset) = find_document_offset_for_viewport_anchor(
-                    layout,
-                    self.manual_scroll_restore.anchor(),
-                ) {
-                    let document_offset =
-                        self.clamp_document_viewport_offset(offset, layout.line_count());
-                    if self.document_offset_keeps_cursor_visible(layout, document_offset) {
-                        let composer_offset =
-                            self.current_composer_viewport_offset(layout, document_offset);
-                        return ManualScrollRestoreOffsets::new(
-                            document_offset,
-                            composer_offset,
-                            false,
-                        );
-                    }
+                let document_offset = self
+                    .manual_scroll_restore
+                    .viewport_state()
+                    .resolve_offset(layout, self.document_viewport_height());
+                if self.document_offset_keeps_cursor_visible(layout, document_offset) {
+                    let composer_offset =
+                        self.current_composer_viewport_offset(layout, document_offset);
+                    return ManualScrollRestoreOffsets::new(
+                        document_offset,
+                        composer_offset,
+                        false,
+                    );
                 }
 
                 let (document_offset, composer_offset) =

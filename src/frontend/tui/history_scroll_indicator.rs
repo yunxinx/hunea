@@ -209,12 +209,9 @@ mod tests {
         model.width = 20;
         model.height = 5;
         model.has_window = true;
-        model.follow_bottom = false;
-        model.manual_document_scroll = true;
-        model.document_viewport_y = 0;
-        model.show_history_scroll_indicator();
-
         let layout = DocumentLayout::with_test_plain_lines(5, &["a", "b", "c", "d", "e"]);
+        model.apply_document_viewport_position(&layout, 0, 0, false, true);
+        model.show_history_scroll_indicator();
 
         assert_eq!(model.history_scroll_percentage(&layout), Some(0));
     }
@@ -248,12 +245,9 @@ mod tests {
         model.width = 20;
         model.height = 1;
         model.has_window = true;
-        model.follow_bottom = false;
-        model.manual_document_scroll = true;
-        model.document_viewport_y = 2;
-        model.show_history_scroll_indicator();
-
         let layout = DocumentLayout::with_test_plain_lines(5, &["a", "b", "c", "d", "e"]);
+        model.apply_document_viewport_position(&layout, 2, 0, false, true);
+        model.show_history_scroll_indicator();
         let viewport = DocumentViewport::with_test_plain_lines(&["c"], 2);
         let bounds = model
             .current_history_scroll_indicator_bounds(&layout, &viewport)

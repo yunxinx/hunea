@@ -1,6 +1,9 @@
 use crate::frontend::tui::transcript::{LineAnchor, LineAnchorKind};
 
-use super::{DocumentAnchorRegion, DocumentLayout, DocumentLineAnchor, DocumentViewportAnchor};
+use super::{
+    DocumentAnchorRegion, DocumentLayout, DocumentLineAnchor, DocumentViewportAnchor,
+    viewport_state::{TranscriptSemanticPosition, transcript_semantic_position},
+};
 
 pub(crate) fn canonical_rendered_transcript_anchor_text(text: &str) -> String {
     if text.trim().is_empty() {
@@ -195,6 +198,7 @@ fn find_document_offset_for_rendered_transcript_anchor(
         &anchor.line_text,
         target_rendered_line,
         anchor.transcript_item_line_count,
+        anchor.transcript_semantic_position,
         true,
     );
     let fuzzy = find_rendered_transcript_text_match(
@@ -203,6 +207,7 @@ fn find_document_offset_for_rendered_transcript_anchor(
         &anchor.line_text,
         target_rendered_line,
         anchor.transcript_item_line_count,
+        anchor.transcript_semantic_position,
         false,
     );
     match (exact, fuzzy) {
@@ -224,6 +229,7 @@ fn find_document_offset_for_rendered_transcript_anchor(
                 item_offsets.len(),
                 target_rendered_line,
                 anchor.transcript_item_line_count,
+                anchor.transcript_semantic_position,
             );
             for offset in item_offsets.into_iter().skip(1) {
                 let score = score_rendered_transcript_relative_position(
@@ -235,6 +241,7 @@ fn find_document_offset_for_rendered_transcript_anchor(
                     transcript_content_line_count_for_item(layout, item_index),
                     target_rendered_line,
                     anchor.transcript_item_line_count,
+                    anchor.transcript_semantic_position,
                 );
                 if score < best_score {
                     best = offset;
@@ -264,6 +271,7 @@ fn find_rendered_transcript_text_match(
     target_text: &str,
     target_rendered_line: usize,
     target_item_line_count: usize,
+    target_semantic_position: TranscriptSemanticPosition,
     exact: bool,
 ) -> Option<(usize, usize)> {
     if exact {
@@ -284,6 +292,7 @@ fn find_rendered_transcript_text_match(
                 item_offsets.len(),
                 target_rendered_line,
                 target_item_line_count,
+                target_semantic_position,
             );
             if best
                 .as_ref()
@@ -302,6 +311,7 @@ fn find_rendered_transcript_text_match(
         target_text,
         target_rendered_line,
         target_item_line_count,
+        target_semantic_position,
     )
     .or_else(|| {
         find_rendered_transcript_merged_line_match(
@@ -310,6 +320,7 @@ fn find_rendered_transcript_text_match(
             target_text,
             target_rendered_line,
             target_item_line_count,
+            target_semantic_position,
         )
     })
     .or_else(|| {
@@ -319,6 +330,7 @@ fn find_rendered_transcript_text_match(
             target_text,
             target_rendered_line,
             target_item_line_count,
+            target_semantic_position,
         )
     })
 }
@@ -329,6 +341,7 @@ fn find_rendered_transcript_split_sequence_match(
     target_text: &str,
     target_rendered_line: usize,
     target_item_line_count: usize,
+    target_semantic_position: TranscriptSemanticPosition,
 ) -> Option<(usize, usize)> {
     if target_text.is_empty() {
         return None;
@@ -361,6 +374,7 @@ fn find_rendered_transcript_split_sequence_match(
                 item_offsets.len(),
                 target_rendered_line,
                 target_item_line_count,
+                target_semantic_position,
             );
             if best
                 .as_ref()
@@ -382,6 +396,7 @@ fn find_rendered_transcript_merged_line_match(
     target_text: &str,
     target_rendered_line: usize,
     target_item_line_count: usize,
+    target_semantic_position: TranscriptSemanticPosition,
 ) -> Option<(usize, usize)> {
     if target_text.is_empty() {
         return None;
@@ -405,6 +420,7 @@ fn find_rendered_transcript_merged_line_match(
             item_offsets.len(),
             target_rendered_line,
             target_item_line_count,
+            target_semantic_position,
         );
         if best
             .as_ref()
@@ -487,6 +503,7 @@ fn find_rendered_transcript_boundary_spanning_match(
     target_text: &str,
     target_rendered_line: usize,
     target_item_line_count: usize,
+    target_semantic_position: TranscriptSemanticPosition,
 ) -> Option<(usize, usize)> {
     if target_text.is_empty() {
         return None;
@@ -517,6 +534,7 @@ fn find_rendered_transcript_boundary_spanning_match(
                 item_offsets.len(),
                 target_rendered_line,
                 target_item_line_count,
+                target_semantic_position,
             );
             if best
                 .as_ref()
@@ -603,12 +621,46 @@ fn score_rendered_transcript_relative_position(
     candidate_item_line_count: usize,
     target_rendered_line: usize,
     target_item_line_count: usize,
+    target_semantic_position: TranscriptSemanticPosition,
 ) -> usize {
+    let semantic_distance = score_transcript_semantic_position(
+        transcript_semantic_position(
+            LineAnchorKind::RenderedLine,
+            candidate_rendered_line,
+            candidate_item_line_count,
+        ),
+        target_semantic_position,
+    );
     if candidate_item_line_count <= 1 || target_item_line_count <= 1 {
-        return candidate_rendered_line.abs_diff(target_rendered_line);
+        return semantic_distance
+            .saturating_mul(4)
+            .saturating_add(candidate_rendered_line.abs_diff(target_rendered_line));
     }
 
     let left = candidate_rendered_line * (target_item_line_count - 1);
     let right = target_rendered_line * (candidate_item_line_count - 1);
-    left.abs_diff(right)
+    let relative_distance = left.abs_diff(right);
+    let max_line_count = candidate_item_line_count.max(target_item_line_count).max(1);
+    semantic_distance
+        .saturating_mul(max_line_count.saturating_mul(max_line_count))
+        .saturating_add(relative_distance)
+}
+
+fn score_transcript_semantic_position(
+    candidate: TranscriptSemanticPosition,
+    target: TranscriptSemanticPosition,
+) -> usize {
+    match (candidate, target) {
+        (_, TranscriptSemanticPosition::Unknown) => 0,
+        (left, right) if left == right => 0,
+        (TranscriptSemanticPosition::WholeItem, TranscriptSemanticPosition::Start)
+        | (TranscriptSemanticPosition::WholeItem, TranscriptSemanticPosition::End)
+        | (TranscriptSemanticPosition::Start, TranscriptSemanticPosition::WholeItem)
+        | (TranscriptSemanticPosition::End, TranscriptSemanticPosition::WholeItem) => 1,
+        (TranscriptSemanticPosition::Middle, TranscriptSemanticPosition::Start)
+        | (TranscriptSemanticPosition::Middle, TranscriptSemanticPosition::End)
+        | (TranscriptSemanticPosition::Start, TranscriptSemanticPosition::Middle)
+        | (TranscriptSemanticPosition::End, TranscriptSemanticPosition::Middle) => 1,
+        _ => 2,
+    }
 }

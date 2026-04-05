@@ -1,14 +1,10 @@
 use std::cmp::Ordering;
 
-use crate::frontend::tui::{Model, transcript::LineAnchorKind};
+use crate::frontend::tui::Model;
 
 use super::{
-    DocumentLayout, DocumentViewportAnchor,
-    anchor_match::{
-        canonical_rendered_transcript_anchor_text, find_document_offset_for_viewport_anchor,
-        transcript_content_line_count_for_item,
-    },
-    manual_scroll::crossed_manual_document_scroll_restore_target,
+    DocumentLayout, ViewportState, bottom_follow_viewport_line_indices,
+    manual_scroll::crossed_manual_document_scroll_restore_target, offset_viewport_line_indices,
 };
 
 const DOCUMENT_MOUSE_WHEEL_DELTA: isize = 3;
@@ -18,43 +14,14 @@ impl Model {
         DOCUMENT_MOUSE_WHEEL_DELTA
     }
 
-    pub(crate) fn current_document_viewport_anchor(&mut self) -> Option<DocumentViewportAnchor> {
+    pub(crate) fn current_document_viewport_state(&mut self) -> ViewportState {
         let layout = self.build_document_layout();
-        if layout.line_count() == 0 {
-            return None;
-        }
-
-        let offset =
-            self.clamp_document_viewport_offset(self.document_viewport_y, layout.line_count());
-        let line = layout.line_at(offset)?;
-        let line_anchor = line.anchor;
-        let mut line_text = line.plain_line;
-        if matches!(line_anchor.region, super::DocumentAnchorRegion::Transcript)
-            && matches!(
-                line_anchor.transcript.item_anchor.kind,
-                LineAnchorKind::RenderedLine
-            )
-        {
-            line_text = canonical_rendered_transcript_anchor_text(&line_text);
-        }
-
-        let transcript_item_line_count =
-            if matches!(line_anchor.region, super::DocumentAnchorRegion::Transcript)
-                && matches!(
-                    line_anchor.transcript.item_anchor.kind,
-                    LineAnchorKind::RenderedLine
-                )
-            {
-                transcript_content_line_count_for_item(&layout, line_anchor.transcript.item_index)
-            } else {
-                0
-            };
-
-        Some(DocumentViewportAnchor {
-            line_anchor,
-            line_text,
-            transcript_item_line_count,
-        })
+        self.capture_viewport_state_with_layout(
+            &layout,
+            self.document_viewport_y,
+            self.follow_bottom,
+            self.manual_document_scroll,
+        )
     }
 
     pub(crate) fn scroll_document_by(&mut self, lines: isize) {
@@ -64,10 +31,7 @@ impl Model {
 
         let layout = self.build_document_layout();
         if layout.line_count() == 0 {
-            self.document_viewport_y = 0;
-            self.composer.set_viewport_offset(0);
-            self.follow_bottom = true;
-            self.manual_document_scroll = false;
+            self.apply_document_viewport_position(&layout, 0, 0, true, false);
             self.clear_manual_document_scroll_restore_target();
             return;
         }
@@ -89,27 +53,31 @@ impl Model {
             next_offset,
             restore_offset,
         ) {
-            self.document_viewport_y = restore_offset;
-            self.composer.set_viewport_offset(restore_composer_offset);
-            self.follow_bottom = restore_follow_bottom;
-            self.manual_document_scroll = false;
+            self.apply_document_viewport_position(
+                &layout,
+                restore_offset,
+                restore_composer_offset,
+                restore_follow_bottom,
+                false,
+            );
             self.clear_manual_document_scroll_restore_target();
             return;
         }
 
-        self.document_viewport_y = next_offset;
-        self.composer
-            .set_viewport_offset(self.current_composer_viewport_offset(&layout, next_offset));
-        self.follow_bottom = false;
-        self.manual_document_scroll = true;
+        let composer_offset = self.current_composer_viewport_offset(&layout, next_offset);
+        self.apply_document_viewport_position(&layout, next_offset, composer_offset, false, true);
     }
 
     pub(crate) fn sync_document_viewport_to_bottom(&mut self) {
         let layout = self.build_document_layout();
         let (document_offset, composer_offset) = self.bottom_follow_viewport_offsets(&layout);
-        self.document_viewport_y = document_offset;
-        self.composer.set_viewport_offset(composer_offset);
-        self.manual_document_scroll = false;
+        self.apply_document_viewport_position(
+            &layout,
+            document_offset,
+            composer_offset,
+            true,
+            false,
+        );
         self.clear_manual_document_scroll_restore_target();
     }
 
@@ -124,8 +92,7 @@ impl Model {
             self.clamp_document_viewport_offset(self.document_viewport_y, layout.line_count());
         let viewport_height = self.document_viewport_height();
         if viewport_height == 0 {
-            self.document_viewport_y = 0;
-            self.composer.set_viewport_offset(0);
+            self.apply_document_viewport_position(&layout, 0, 0, false, false);
             return;
         }
 
@@ -137,49 +104,77 @@ impl Model {
             _ => {}
         }
 
-        self.document_viewport_y =
+        let document_offset =
             self.clamp_document_viewport_offset(current_offset, layout.line_count());
-        self.composer.set_viewport_offset(
-            self.current_composer_viewport_offset(&layout, self.document_viewport_y),
+        let composer_offset = self.current_composer_viewport_offset(&layout, document_offset);
+        self.apply_document_viewport_position(
+            &layout,
+            document_offset,
+            composer_offset,
+            false,
+            false,
         );
-        self.manual_document_scroll = false;
         self.clear_manual_document_scroll_restore_target();
     }
 
     pub(crate) fn sync_document_viewport_preserving_position(&mut self) {
         let layout = self.build_document_layout();
         if layout.line_count() == 0 {
-            self.document_viewport_y = 0;
-            self.composer.set_viewport_offset(0);
+            self.apply_document_viewport_position(
+                &layout,
+                0,
+                0,
+                false,
+                self.manual_document_scroll,
+            );
             return;
         }
 
-        self.document_viewport_y =
+        let document_offset =
             self.clamp_document_viewport_offset(self.document_viewport_y, layout.line_count());
-        self.composer.set_viewport_offset(
-            self.current_composer_viewport_offset(&layout, self.document_viewport_y),
+        let composer_offset = self.current_composer_viewport_offset(&layout, document_offset);
+        self.apply_document_viewport_position(
+            &layout,
+            document_offset,
+            composer_offset,
+            self.follow_bottom,
+            self.manual_document_scroll,
         );
     }
 
-    pub(crate) fn sync_document_viewport_for_viewport_anchor(
-        &mut self,
-        anchor: &DocumentViewportAnchor,
-    ) {
+    pub(crate) fn sync_document_viewport_for_viewport_state(&mut self, state: &ViewportState) {
         let layout = self.build_document_layout();
         if layout.line_count() == 0 {
-            self.document_viewport_y = 0;
-            self.composer.set_viewport_offset(0);
+            self.apply_document_viewport_position(
+                &layout,
+                0,
+                0,
+                state.follow_bottom(),
+                state.manual_scroll(),
+            );
             return;
         }
 
-        let Some(offset) = find_document_offset_for_viewport_anchor(&layout, anchor) else {
-            self.sync_document_viewport_preserving_position();
+        if state.follow_bottom() && !state.manual_scroll() {
+            let (document_offset, composer_offset) = self.bottom_follow_viewport_offsets(&layout);
+            self.apply_document_viewport_position(
+                &layout,
+                document_offset,
+                composer_offset,
+                true,
+                false,
+            );
             return;
-        };
+        }
 
-        self.document_viewport_y = self.clamp_document_viewport_offset(offset, layout.line_count());
-        self.composer.set_viewport_offset(
-            self.current_composer_viewport_offset(&layout, self.document_viewport_y),
+        let document_offset = state.resolve_offset(&layout, self.document_viewport_height());
+        let composer_offset = self.current_composer_viewport_offset(&layout, document_offset);
+        self.apply_document_viewport_position(
+            &layout,
+            document_offset,
+            composer_offset,
+            state.follow_bottom(),
+            state.manual_scroll(),
         );
     }
 
@@ -197,11 +192,17 @@ impl Model {
             return;
         }
 
-        self.document_viewport_y = self.clamp_document_viewport_offset(
+        let document_offset = self.clamp_document_viewport_offset(
             layout.composer_start_line + self.composer.viewport_offset(),
             layout.line_count(),
         );
-        self.manual_document_scroll = false;
+        self.apply_document_viewport_position(
+            &layout,
+            document_offset,
+            self.composer.viewport_offset(),
+            false,
+            false,
+        );
         self.clear_manual_document_scroll_restore_target();
     }
 
@@ -255,7 +256,7 @@ impl Model {
 
     pub(crate) fn sync_document_viewport_after_transcript_refresh(
         &mut self,
-        preserved_anchor: Option<DocumentViewportAnchor>,
+        preserved_viewport_state: Option<ViewportState>,
     ) {
         if self.follow_bottom {
             self.sync_document_viewport_to_bottom();
@@ -263,8 +264,8 @@ impl Model {
         }
 
         if self.manual_document_scroll {
-            if let Some(anchor) = preserved_anchor.as_ref() {
-                self.sync_document_viewport_for_viewport_anchor(anchor);
+            if let Some(state) = preserved_viewport_state.as_ref() {
+                self.sync_document_viewport_for_viewport_state(state);
             } else {
                 self.sync_document_viewport_preserving_position();
             }
@@ -307,5 +308,71 @@ impl Model {
             self.document_bottom_offset(layout.line_count()),
             self.composer.bottom_viewport_offset(),
         )
+    }
+
+    pub(crate) fn capture_viewport_state_with_layout(
+        &self,
+        layout: &DocumentLayout,
+        document_offset: usize,
+        follow_bottom: bool,
+        manual_scroll: bool,
+    ) -> ViewportState {
+        let resolved_offset =
+            self.clamp_document_viewport_offset(document_offset, layout.line_count());
+        let line_indices = self.document_viewport_line_indices_for_mode(
+            layout,
+            resolved_offset,
+            follow_bottom,
+            manual_scroll,
+        );
+        ViewportState::capture(
+            layout,
+            &line_indices,
+            resolved_offset,
+            follow_bottom,
+            manual_scroll,
+            self.document_viewport_height(),
+            self.width,
+        )
+    }
+
+    pub(crate) fn apply_document_viewport_position(
+        &mut self,
+        layout: &DocumentLayout,
+        document_offset: usize,
+        composer_offset: usize,
+        follow_bottom: bool,
+        manual_scroll: bool,
+    ) {
+        let document_offset =
+            self.clamp_document_viewport_offset(document_offset, layout.line_count());
+        self.document_viewport_y = document_offset;
+        self.composer.set_viewport_offset(composer_offset);
+        self.follow_bottom = follow_bottom;
+        self.manual_document_scroll = manual_scroll;
+        self.document_viewport_state = self.capture_viewport_state_with_layout(
+            layout,
+            document_offset,
+            follow_bottom,
+            manual_scroll,
+        );
+    }
+
+    pub(crate) fn document_viewport_line_indices_for_mode(
+        &self,
+        layout: &DocumentLayout,
+        document_offset: usize,
+        follow_bottom: bool,
+        manual_scroll: bool,
+    ) -> Vec<usize> {
+        if follow_bottom && !manual_scroll {
+            return bottom_follow_viewport_line_indices(
+                layout,
+                self.document_viewport_height(),
+                self.bottom_follow_presentation(layout),
+            );
+        }
+
+        offset_viewport_line_indices(layout, document_offset, self.document_viewport_height())
     }
 }

@@ -174,8 +174,8 @@ impl Model {
 
         self.maybe_clear_selection_for_bottom_status_slot_change();
         self.maybe_clear_pending_composer_cursor_click_for_bottom_status_slot_change();
-        let preserved_anchor = if self.manual_document_scroll {
-            self.current_document_viewport_anchor()
+        let preserved_viewport_state = if self.manual_document_scroll {
+            Some(self.current_document_viewport_state())
         } else {
             None
         };
@@ -185,7 +185,7 @@ impl Model {
         if !visible {
             self.external_editor_helper_deadline = None;
         }
-        self.sync_after_bottom_status_slot_change(preserved_anchor);
+        self.sync_after_bottom_status_slot_change(preserved_viewport_state);
     }
 }
 

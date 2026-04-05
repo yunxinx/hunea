@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use unicode_width::UnicodeWidthStr;
 
-use super::{Model, document::DocumentViewportAnchor};
+use super::{Model, document::ViewportState};
 
 pub(crate) const EXIT_CONFIRMATION_PROMPT: &str = "Press again to exit";
 pub(crate) const EXIT_CONFIRMATION_WINDOW: Duration = Duration::from_secs(1);
@@ -96,7 +96,7 @@ impl Model {
 
     pub(crate) fn sync_after_bottom_status_slot_change(
         &mut self,
-        preserved_anchor: Option<DocumentViewportAnchor>,
+        preserved_viewport_state: Option<ViewportState>,
     ) {
         self.sync_composer_height();
         if self.follow_bottom {
@@ -105,8 +105,8 @@ impl Model {
         }
 
         if self.manual_document_scroll {
-            if let Some(anchor) = preserved_anchor.as_ref() {
-                self.sync_document_viewport_for_viewport_anchor(anchor);
+            if let Some(state) = preserved_viewport_state.as_ref() {
+                self.sync_document_viewport_for_viewport_state(state);
             } else {
                 self.sync_document_viewport_preserving_position();
             }
@@ -130,14 +130,14 @@ impl Model {
 
         self.maybe_clear_selection_for_bottom_status_slot_change();
         self.maybe_clear_pending_composer_cursor_click_for_bottom_status_slot_change();
-        let preserved_anchor = if self.manual_document_scroll {
-            self.current_document_viewport_anchor()
+        let preserved_viewport_state = if self.manual_document_scroll {
+            Some(self.current_document_viewport_state())
         } else {
             None
         };
 
         self.status_notice_text = text;
         self.bump_status_line_revision();
-        self.sync_after_bottom_status_slot_change(preserved_anchor);
+        self.sync_after_bottom_status_slot_change(preserved_viewport_state);
     }
 }

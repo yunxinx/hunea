@@ -137,10 +137,11 @@ impl Model {
         &mut self,
         layout: &DocumentLayout,
     ) -> Rc<DocumentViewport> {
-        let uses_bottom_follow = self.follow_bottom && !self.manual_document_scroll;
+        let uses_bottom_follow = self.document_viewport_state.follow_bottom()
+            && !self.document_viewport_state.manual_scroll();
         let key = DocumentViewportKey {
             layout_key: self.current_document_layout_key(),
-            offset: self.document_viewport_y,
+            offset: self.document_viewport_state.resolved_offset(),
             height: self.document_viewport_height(),
             bottom_follow: uses_bottom_follow,
             selection_version: self.selection_version,
@@ -151,7 +152,7 @@ impl Model {
 
         let mut viewport = compose_document_viewport(
             layout,
-            self.document_viewport_y,
+            self.document_viewport_state.resolved_offset(),
             self.document_viewport_height(),
         );
         if uses_bottom_follow {

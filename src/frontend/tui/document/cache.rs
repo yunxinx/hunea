@@ -222,6 +222,7 @@ pub(crate) struct DocumentViewportAnchor {
     pub(super) line_anchor: DocumentLineAnchor,
     pub(super) line_text: String,
     pub(super) transcript_item_line_count: usize,
+    pub(super) transcript_semantic_position: super::viewport_state::TranscriptSemanticPosition,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -1,9 +1,6 @@
 use crate::frontend::tui::{
     Model,
-    document::{
-        DocumentAnchorRegion, DocumentLayout, DocumentViewport,
-        bottom_follow_viewport_line_indices, offset_viewport_line_indices,
-    },
+    document::{DocumentAnchorRegion, DocumentLayout, DocumentViewport},
 };
 
 use super::{
@@ -49,18 +46,11 @@ impl Model {
     }
 
     pub(crate) fn document_viewport_line_indices(&self, layout: &DocumentLayout) -> Vec<usize> {
-        if self.follow_bottom && !self.manual_document_scroll {
-            return bottom_follow_viewport_line_indices(
-                layout,
-                self.document_viewport_height(),
-                self.bottom_follow_presentation(layout),
-            );
-        }
-
-        offset_viewport_line_indices(
+        self.document_viewport_line_indices_for_mode(
             layout,
-            self.document_viewport_y,
-            self.document_viewport_height(),
+            self.document_viewport_state.resolved_offset(),
+            self.document_viewport_state.follow_bottom(),
+            self.document_viewport_state.manual_scroll(),
         )
     }
 

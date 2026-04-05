@@ -311,8 +311,8 @@ impl Model {
             return None;
         }
 
-        let preserved_anchor = if self.manual_document_scroll {
-            self.current_document_viewport_anchor()
+        let preserved_viewport_state = if self.manual_document_scroll {
+            Some(self.current_document_viewport_state())
         } else {
             None
         };
@@ -329,14 +329,14 @@ impl Model {
         self.sync_external_editor_helper_after_draft_change(&content);
         self.sync_composer_height();
         self.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_anchor);
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         None
     }
 
     fn handle_resize(&mut self, width: u16, height: u16) {
         self.cancel_exit_confirmation();
-        let preserved_anchor = if self.manual_document_scroll {
-            self.current_document_viewport_anchor()
+        let preserved_viewport_state = if self.manual_document_scroll {
+            Some(self.current_document_viewport_state())
         } else {
             None
         };
@@ -353,7 +353,7 @@ impl Model {
         }
         self.sync_external_editor_helper_after_resize(previous_width);
         self.sync_command_panel_navigation();
-        self.sync_document_viewport_after_transcript_refresh(preserved_anchor);
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
     }
 }
 

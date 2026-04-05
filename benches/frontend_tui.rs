@@ -105,6 +105,7 @@ fn document_benches(c: &mut Criterion) {
             &item_count,
             |b, &item_count| {
                 let mut bench = benchmark::DocumentBench::new(item_count, 80, 18);
+                bench.prepare_offset_viewport_state();
                 b.iter(|| black_box(bench.build_offset_viewport()));
             },
         );
@@ -113,6 +114,7 @@ fn document_benches(c: &mut Criterion) {
             &item_count,
             |b, &item_count| {
                 let mut bench = benchmark::DocumentBench::new(item_count, 80, 18);
+                bench.prepare_bottom_follow_viewport_state();
                 b.iter(|| black_box(bench.build_bottom_follow_viewport()));
             },
         );

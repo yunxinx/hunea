@@ -10,7 +10,8 @@ use super::{
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
     document::{
-        LayoutCache, RestoreState, TranscriptCache, ViewportCache, offset_viewport_line_indices,
+        LayoutCache, RestoreState, TranscriptCache, ViewportCache, ViewportState,
+        offset_viewport_line_indices,
     },
     external_editor::ExternalEditorLaunch,
     selection::{AutoScrollDirection, MousePosition, SelectionClickState, SelectionState},
@@ -53,6 +54,7 @@ pub struct Model {
     pub(super) width: u16,
     pub(super) height: u16,
     pub(super) document_viewport_y: usize,
+    pub(super) document_viewport_state: ViewportState,
     pub(super) document_transcript_cache: TranscriptCache,
     pub(super) document_layout_cache: LayoutCache,
     pub(super) document_viewport_cache: ViewportCache,
@@ -160,6 +162,7 @@ impl Model {
             width: 0,
             height: 0,
             document_viewport_y: 0,
+            document_viewport_state: ViewportState::default(),
             document_transcript_cache: TranscriptCache::default(),
             document_layout_cache: LayoutCache::default(),
             document_viewport_cache: ViewportCache::default(),
@@ -248,8 +251,8 @@ impl Model {
     }
 
     pub(crate) fn set_palette(&mut self, palette: TerminalPalette, has_dark_background: bool) {
-        let preserved_anchor = if self.manual_document_scroll {
-            self.current_document_viewport_anchor()
+        let preserved_viewport_state = if self.manual_document_scroll {
+            Some(self.current_document_viewport_state())
         } else {
             None
         };
@@ -265,7 +268,7 @@ impl Model {
         self.transcript.set_palette(palette);
         self.sync_transcript_render();
         self.sync_composer_height();
-        self.sync_document_viewport_after_transcript_refresh(preserved_anchor);
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
     }
 
     pub(crate) fn composer_mut(&mut self) -> &mut Composer {

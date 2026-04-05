@@ -124,15 +124,11 @@ fn visible_document_lines_tracks_cursor_visibility() {
 
 #[test]
 fn manual_scroll_restore_state_tracks_target_specific_anchor() {
-    let anchor = DocumentViewportAnchor {
-        line_text: "anchor".to_string(),
-        transcript_item_line_count: 3,
-        ..DocumentViewportAnchor::default()
-    };
+    let viewport_state = ViewportState::bottom_follow(3, 4, 20);
     let mut restore = RestoreState::default();
 
     assert_eq!(restore.target(), ManualDocumentScrollRestoreTarget::None);
-    assert_eq!(restore.anchor(), &DocumentViewportAnchor::default());
+    assert_eq!(restore.viewport_state(), &ViewportState::default());
     assert!(!restore.is_pending());
 
     restore.track_bottom_follow();
@@ -140,26 +136,26 @@ fn manual_scroll_restore_state_tracks_target_specific_anchor() {
         restore.target(),
         ManualDocumentScrollRestoreTarget::BottomFollow
     );
-    assert_eq!(restore.anchor(), &DocumentViewportAnchor::default());
+    assert_eq!(restore.viewport_state(), &ViewportState::default());
     assert!(restore.is_pending());
 
-    restore.track_composer_cursor(Some(anchor.clone()));
+    restore.track_composer_cursor(Some(viewport_state.clone()));
     assert_eq!(
         restore.target(),
         ManualDocumentScrollRestoreTarget::ComposerCursor
     );
-    assert_eq!(restore.anchor(), &anchor);
+    assert_eq!(restore.viewport_state(), &viewport_state);
 
     restore.track_composer_cursor(None);
     assert_eq!(
         restore.target(),
         ManualDocumentScrollRestoreTarget::ComposerCursor
     );
-    assert_eq!(restore.anchor(), &DocumentViewportAnchor::default());
+    assert_eq!(restore.viewport_state(), &ViewportState::default());
 
     restore.clear();
     assert_eq!(restore.target(), ManualDocumentScrollRestoreTarget::None);
-    assert_eq!(restore.anchor(), &DocumentViewportAnchor::default());
+    assert_eq!(restore.viewport_state(), &ViewportState::default());
     assert!(!restore.is_pending());
 }
 
@@ -168,13 +164,13 @@ fn scroll_document_by_restores_composer_viewport_when_crossing_restore_target() 
     let mut model = ready_document_model(20, 4);
     model.composer_mut().set_text_for_test("1\n2\n3\n4\n5\n6");
     model.sync_composer_height();
-    model.document_viewport_y = 0;
-    model.composer.set_viewport_offset(0);
-    model.follow_bottom = false;
-    model.manual_document_scroll = true;
+    model.sync_document_viewport_for_composer_cursor();
+    let restore_viewport_state = model.current_document_viewport_state();
+    let layout = model.build_document_layout();
+    model.apply_document_viewport_position(&layout, 0, 0, false, true);
     model
         .manual_scroll_restore
-        .track_composer_cursor(Some(DocumentViewportAnchor::default()));
+        .track_composer_cursor(Some(restore_viewport_state));
 
     model.scroll_document_by(Model::document_mouse_wheel_delta());
 
@@ -227,15 +223,11 @@ fn transcript_refresh_keeps_manual_scrollback_before_restore_target() {
     }
     model.sync_transcript_render();
 
-    model.follow_bottom = false;
-    model.manual_document_scroll = true;
-    model.document_viewport_y = 0;
-    model.composer.set_viewport_offset(0);
+    let layout = model.build_document_layout();
+    model.apply_document_viewport_position(&layout, 0, 0, false, true);
     model.manual_scroll_restore.track_bottom_follow();
 
-    let anchor = model
-        .current_document_viewport_anchor()
-        .expect("manual scrollback should have a viewport anchor");
+    let preserved_viewport_state = model.current_document_viewport_state();
     let original_document_offset = model.document_viewport_y;
     let original_composer_offset = model.composer.viewport_offset();
 
@@ -243,7 +235,7 @@ fn transcript_refresh_keeps_manual_scrollback_before_restore_target() {
         .transcript_mut()
         .append_message(Sender::Assistant, "new history line");
     model.sync_transcript_render();
-    model.sync_document_viewport_after_transcript_refresh(Some(anchor));
+    model.sync_document_viewport_after_transcript_refresh(Some(preserved_viewport_state));
 
     assert!(!model.follow_bottom);
     assert!(model.manual_document_scroll);
@@ -252,6 +244,112 @@ fn transcript_refresh_keeps_manual_scrollback_before_restore_target() {
     assert_eq!(
         model.manual_scroll_restore.target(),
         ManualDocumentScrollRestoreTarget::BottomFollow
+    );
+}
+
+#[test]
+fn transcript_viewport_anchor_classifies_rendered_lines_by_semantic_position() {
+    let mut model = ready_document_model(18, 3);
+    model.transcript_mut().append_message(
+        Sender::Assistant,
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa",
+    );
+    model.sync_transcript_render();
+
+    let layout = model.build_document_layout();
+    let item_lines = layout
+        .transcript_item_lines(0)
+        .expect("wrapped assistant item should produce transcript lines");
+    assert!(
+        item_lines.content_line_count > 1,
+        "test fixture should wrap into multiple rendered lines"
+    );
+
+    let anchor = document_viewport_anchor_at_line(
+        &layout,
+        item_lines.content_start_line + item_lines.content_line_count - 1,
+    )
+    .expect("last transcript line should produce a viewport anchor");
+
+    assert_eq!(
+        anchor.transcript_semantic_position,
+        TranscriptSemanticPosition::End
+    );
+}
+
+#[test]
+fn viewport_state_preserves_semantic_anchor_offset_across_transcript_append() {
+    let mut model = ready_document_model(20, 2);
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "history");
+    model.sync_transcript_render();
+    model.composer_mut().set_text_for_test("draft");
+    model.sync_composer_height();
+
+    let layout = model.build_document_layout();
+    let state = ViewportState::capture(
+        &layout,
+        &[1, 2],
+        1,
+        false,
+        true,
+        model.document_viewport_height(),
+        model.width,
+    );
+
+    assert_eq!(state.anchor_viewport_offset(), 1);
+    assert!(matches!(
+        state.anchor(),
+        ViewAnchor::Line(anchor)
+            if anchor.line_anchor.region == DocumentAnchorRegion::Composer
+    ));
+
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "new history");
+    model.sync_transcript_render();
+    let updated_layout = model.build_document_layout();
+
+    assert_eq!(
+        state.resolve_offset(&updated_layout, model.document_viewport_height()),
+        3,
+        "appending transcript content above the anchor should keep the same semantic line on the same viewport row"
+    );
+}
+
+#[test]
+fn viewport_state_restores_rendered_transcript_anchor_by_semantic_position_after_resize() {
+    let mut model = ready_document_model(18, 3);
+    model.transcript_mut().append_message(
+        Sender::Assistant,
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa",
+    );
+    model.sync_transcript_render();
+
+    let layout = model.build_document_layout();
+    let item_lines = layout
+        .transcript_item_lines(0)
+        .expect("wrapped assistant item should produce transcript lines");
+    let document_offset = item_lines.content_start_line + item_lines.content_line_count - 1;
+    let state = model.capture_viewport_state_with_layout(&layout, document_offset, false, true);
+
+    assert!(matches!(
+        state.anchor(),
+        ViewAnchor::Line(anchor)
+            if anchor.transcript_semantic_position == TranscriptSemanticPosition::End
+    ));
+
+    model.set_window(12, 3);
+    let resized_layout = model.build_document_layout();
+    let resolved_offset = state.resolve_offset(&resized_layout, model.document_viewport_height());
+    let restored_anchor = document_viewport_anchor_at_line(&resized_layout, resolved_offset)
+        .expect("resolved viewport offset should still point at a transcript anchor");
+
+    assert_eq!(restored_anchor.line_anchor.transcript.item_index, 0);
+    assert_eq!(
+        restored_anchor.transcript_semantic_position,
+        TranscriptSemanticPosition::End
     );
 }
 

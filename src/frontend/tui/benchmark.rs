@@ -10,7 +10,8 @@ use super::{
     styled_text::lines_to_plain_text,
     theme::{TerminalPalette, default_palette},
     transcript::{
-        RenderResult, Transcript, TranscriptItem, render_markdown_lines, wrap_prompt_visual_lines,
+        CachedLineAnchors, RenderResult, Transcript, TranscriptItem, render_markdown_lines,
+        wrap_prompt_visual_lines,
     },
 };
 
@@ -91,6 +92,8 @@ pub struct DocumentMemorySummary {
     pub raw_text_bytes: usize,
     pub estimated_item_bytes: usize,
     pub estimated_render_ui_bytes: usize,
+    /// 这里统计的是 plain-line 相关常驻元数据。
+    /// 在当前实现下，它主要对应每行长度表，而不是整份字符串副本。
     pub estimated_plain_line_bytes: usize,
     pub estimated_anchor_bytes: usize,
     pub estimated_index_bytes: usize,
@@ -709,15 +712,11 @@ fn estimate_document_memory_summary(
                 .sum::<usize>();
         }
 
-        estimated_plain_line_bytes += size_of_val(summary.block.plain_lines.as_slice());
-        estimated_plain_line_bytes += summary
-            .block
-            .plain_lines
-            .iter()
-            .map(String::capacity)
-            .sum::<usize>();
-
-        estimated_anchor_bytes += size_of_val(summary.block.anchors.as_slice());
+        estimated_plain_line_bytes += size_of_val(summary.block.plain_line_byte_lens.as_slice());
+        estimated_anchor_bytes += match &summary.block.anchors {
+            CachedLineAnchors::Explicit(anchors) => size_of_val(anchors.as_slice()),
+            CachedLineAnchors::GeneratedRenderedLines => 0,
+        };
     }
 
     let estimated_index_bytes = size_of::<RenderResult>()

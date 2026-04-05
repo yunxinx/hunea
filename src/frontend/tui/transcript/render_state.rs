@@ -6,6 +6,9 @@ use crate::frontend::tui::selection::SelectableLineRange;
 
 use super::cache::CachedRenderBlock;
 
+#[cfg(test)]
+use super::cache::CachedLineAnchors;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum LineAnchorKind {
     #[default]
@@ -177,10 +180,10 @@ impl RenderResult {
         let block_index = relative - summary.gap_before;
         Some(RenderedTranscriptLine {
             line: summary.block.lines.get(block_index)?.clone(),
-            plain_line: summary.block.plain_lines.get(block_index)?.clone(),
+            plain_line: summary.block.plain_line_at(block_index)?,
             anchor: LineAnchor {
                 item_index: summary.item_index,
-                item_anchor: *summary.block.anchors.get(block_index)?,
+                item_anchor: summary.block.anchor_at(block_index)?,
             },
         })
     }
@@ -271,16 +274,15 @@ impl RenderResult {
                 slice
                     .lines
                     .extend(summary.block.lines[block_start..block_end].iter().cloned());
-                slice.plain_char_len += summary.block.plain_lines[block_start..block_end]
-                    .iter()
-                    .map(String::len)
+                slice.plain_char_len += (block_start..block_end)
+                    .filter_map(|index| summary.block.plain_line_len(index))
                     .sum::<usize>();
                 #[cfg(test)]
-                slice.plain_lines.extend(
-                    summary.block.plain_lines[block_start..block_end]
-                        .iter()
-                        .cloned(),
-                );
+                for index in block_start..block_end {
+                    if let Some(plain_line) = summary.block.plain_line_at(index) {
+                        slice.plain_lines.push(plain_line);
+                    }
+                }
             }
 
             remaining -= taken;
@@ -336,16 +338,7 @@ impl RenderResult {
         summary: &RenderItemSummary,
         anchor: ItemLineAnchor,
     ) -> Option<usize> {
-        let block_index = anchor.rendered_line;
-        if summary.block.anchors.get(block_index).copied() == Some(anchor) {
-            return Some(block_index);
-        }
-
-        summary
-            .block
-            .anchors
-            .iter()
-            .position(|candidate| *candidate == anchor)
+        summary.block.anchor_index(anchor)
     }
 }
 
@@ -437,8 +430,8 @@ mod tests {
             cache_key: 0,
             width: 80,
             lines: Rc::new(vec![Line::raw(text.to_string()); anchors.len()]),
-            plain_lines: Rc::new(vec![text.to_string(); anchors.len()]),
-            anchors: Rc::new(anchors),
+            plain_line_byte_lens: Rc::new(vec![text.len(); anchors.len()]),
+            anchors: CachedLineAnchors::Explicit(Rc::new(anchors)),
             plain_text_char_len,
         })
     }

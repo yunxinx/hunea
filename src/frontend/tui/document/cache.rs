@@ -4,7 +4,8 @@ use ratatui::text::Line;
 
 #[cfg(test)]
 use crate::frontend::tui::transcript::{
-    CachedRenderBlock, ItemLineAnchor, LineAnchorKind, RenderItemSummary, new_render_result,
+    CachedLineAnchors, CachedRenderBlock, ItemLineAnchor, LineAnchorKind, RenderItemSummary,
+    new_render_result,
 };
 use crate::frontend::tui::{
     composer,
@@ -107,12 +108,14 @@ impl DocumentLayout {
                                 cache_key: 0,
                                 width: 1,
                                 lines: Rc::new(vec![Line::raw((*line).to_string())]),
-                                plain_lines: Rc::new(vec![(*line).to_string()]),
-                                anchors: Rc::new(vec![ItemLineAnchor {
-                                    kind: LineAnchorKind::RenderedLine,
-                                    rendered_line: 0,
-                                    ..ItemLineAnchor::default()
-                                }]),
+                                plain_line_byte_lens: Rc::new(vec![line.len()]),
+                                anchors: CachedLineAnchors::Explicit(Rc::new(vec![
+                                    ItemLineAnchor {
+                                        kind: LineAnchorKind::RenderedLine,
+                                        rendered_line: 0,
+                                        ..ItemLineAnchor::default()
+                                    },
+                                ])),
                                 plain_text_char_len: line.len(),
                             });
                             RenderItemSummary {

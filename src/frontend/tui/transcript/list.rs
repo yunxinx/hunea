@@ -3,16 +3,20 @@ use std::rc::Rc;
 use ratatui::text::Line;
 
 use super::{
-    DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchorKind, RenderResult, ViewportRenderResult,
-    cache::CachedRenderBlock, cache::ScreenRenderCache, new_render_result_with_append_start,
+    DEFAULT_RENDER_WIDTH, ItemLineAnchor, RenderResult, ViewportRenderResult,
+    cache::{CachedLineAnchors, CachedRenderBlock, ScreenRenderCache},
+    new_render_result_with_append_start,
     render_state::RenderItemSummary,
 };
+
+#[cfg(test)]
+use super::LineAnchorKind;
 use crate::frontend::tui::{
     HeroOptions, Sender, StyleMode,
     hero_item::HeroItem,
     message_item::MessageItem,
     selection::{SelectableLineRange, normalize_transcript_selectable_range},
-    styled_text::line_to_plain_text,
+    styled_text::{line_plain_text_len, line_to_plain_text},
     theme::TerminalPalette,
 };
 
@@ -274,18 +278,21 @@ impl Transcript {
         }
 
         let lines = self.items[index].render_lines(width, self.palette);
-        let plain_lines = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
-        let mut anchors = self.items[index].render_line_anchors(width, self.palette);
-        if anchors.len() != lines.len() {
-            anchors = fallback_rendered_line_anchors(lines.len());
-        }
+        let anchors = self.items[index].render_line_anchors(width, self.palette);
+        let plain_line_byte_lens = lines.iter().map(line_plain_text_len).collect::<Vec<_>>();
+        let plain_text_char_len = plain_line_byte_lens.iter().sum();
+        let uses_explicit_anchors = anchors.len() == lines.len();
         let block = Rc::new(CachedRenderBlock {
             cache_key,
             width,
-            plain_text_char_len: plain_lines.iter().map(String::len).sum(),
+            plain_text_char_len,
             lines: Rc::new(lines),
-            plain_lines: Rc::new(plain_lines),
-            anchors: Rc::new(anchors),
+            plain_line_byte_lens: Rc::new(plain_line_byte_lens),
+            anchors: if uses_explicit_anchors {
+                CachedLineAnchors::Explicit(Rc::new(anchors))
+            } else {
+                CachedLineAnchors::GeneratedRenderedLines
+            },
         });
         self.screen_cache.items.insert(index, Rc::clone(&block));
         block
@@ -387,16 +394,6 @@ impl TranscriptItem {
             Self::Message(item) => item.source_text_byte_len(),
         }
     }
-}
-
-fn fallback_rendered_line_anchors(line_count: usize) -> Vec<ItemLineAnchor> {
-    (0..line_count)
-        .map(|rendered_line| ItemLineAnchor {
-            kind: LineAnchorKind::RenderedLine,
-            rendered_line,
-            ..ItemLineAnchor::default()
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -581,6 +578,52 @@ mod tests {
             0,
             "append should not grow dense render cache slots before any render happens"
         );
+    }
+
+    #[test]
+    fn assistant_render_blocks_use_generated_anchors_without_eager_plain_text_cache() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_width(12);
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
+            "alpha beta gamma delta epsilon",
+        )))]);
+
+        let render = transcript.render();
+        let block = render
+            .items
+            .first()
+            .expect("assistant item should produce a render block")
+            .block
+            .as_ref();
+
+        assert!(
+            !block.stores_plain_lines(),
+            "assistant blocks should not keep a second plain-text copy for every rendered line"
+        );
+        assert!(
+            block.uses_generated_rendered_line_anchors(),
+            "assistant blocks should synthesize rendered-line anchors instead of storing a fallback anchor vec"
+        );
+    }
+
+    #[test]
+    fn generated_anchor_blocks_still_round_trip_plain_text_and_anchor_lookup() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_width(12);
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(static_message(
+            "alpha beta gamma delta epsilon",
+        )))]);
+
+        let render = transcript.render();
+        let rendered = render
+            .line_at(1)
+            .expect("wrapped assistant message should expose multiple rendered lines");
+
+        assert!(
+            !rendered.plain_line.is_empty(),
+            "plain text should still be recoverable when the block only stores structured render data"
+        );
+        assert_eq!(render.line_index_for_anchor(rendered.anchor), Some(1));
     }
 
     #[test]

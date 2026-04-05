@@ -5,6 +5,7 @@ mod prompt_wrap;
 mod render_state;
 mod wrap;
 
+pub(crate) use cache::CachedLineAnchors;
 #[cfg(test)]
 pub(crate) use cache::CachedRenderBlock;
 pub(crate) use list::{Transcript, TranscriptItem};

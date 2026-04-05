@@ -48,6 +48,11 @@ pub(crate) fn line_to_plain_text(line: &Line<'_>) -> String {
         .collect::<String>()
 }
 
+/// `line_plain_text_len` 返回单行纯文本的 UTF-8 字节长度。
+pub(crate) fn line_plain_text_len(line: &Line<'_>) -> usize {
+    line.spans.iter().map(|span| span.content.len()).sum()
+}
+
 fn push_style_escape(rendered: &mut String, style: Style) {
     let mut codes = Vec::new();
 

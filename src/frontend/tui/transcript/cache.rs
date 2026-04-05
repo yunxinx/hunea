@@ -2,7 +2,22 @@ use std::{collections::HashMap, rc::Rc};
 
 use ratatui::text::Line;
 
+use crate::frontend::tui::styled_text::line_to_plain_text;
+
 use super::render_state::{ItemLineAnchor, RenderResult};
+
+/// `CachedLineAnchors` 描述 block 的锚点存储策略。
+#[derive(Debug, Clone)]
+pub(crate) enum CachedLineAnchors {
+    Explicit(Rc<Vec<ItemLineAnchor>>),
+    GeneratedRenderedLines,
+}
+
+impl Default for CachedLineAnchors {
+    fn default() -> Self {
+        Self::Explicit(Rc::new(Vec::new()))
+    }
+}
 
 /// `CachedRenderBlock` 缓存单个 transcript item 在某个宽度下的屏幕渲染结果。
 #[derive(Debug, Clone, Default)]
@@ -10,9 +25,59 @@ pub(crate) struct CachedRenderBlock {
     pub(crate) cache_key: u64,
     pub(crate) width: u16,
     pub(crate) lines: Rc<Vec<Line<'static>>>,
-    pub(crate) plain_lines: Rc<Vec<String>>,
-    pub(crate) anchors: Rc<Vec<ItemLineAnchor>>,
+    pub(crate) plain_line_byte_lens: Rc<Vec<usize>>,
+    pub(crate) anchors: CachedLineAnchors,
     pub(crate) plain_text_char_len: usize,
+}
+
+impl CachedRenderBlock {
+    pub(crate) fn plain_line_at(&self, index: usize) -> Option<String> {
+        self.lines.get(index).map(line_to_plain_text)
+    }
+
+    pub(crate) fn plain_line_len(&self, index: usize) -> Option<usize> {
+        self.plain_line_byte_lens.get(index).copied()
+    }
+
+    pub(crate) fn anchor_at(&self, index: usize) -> Option<ItemLineAnchor> {
+        match &self.anchors {
+            CachedLineAnchors::Explicit(anchors) => anchors.get(index).copied(),
+            CachedLineAnchors::GeneratedRenderedLines => {
+                self.lines.get(index).map(|_| ItemLineAnchor {
+                    kind: super::render_state::LineAnchorKind::RenderedLine,
+                    rendered_line: index,
+                    ..ItemLineAnchor::default()
+                })
+            }
+        }
+    }
+
+    pub(crate) fn anchor_index(&self, target: ItemLineAnchor) -> Option<usize> {
+        match &self.anchors {
+            CachedLineAnchors::Explicit(anchors) => {
+                let block_index = target.rendered_line;
+                if anchors.get(block_index).copied() == Some(target) {
+                    return Some(block_index);
+                }
+
+                anchors.iter().position(|candidate| *candidate == target)
+            }
+            CachedLineAnchors::GeneratedRenderedLines => (target.kind
+                == super::render_state::LineAnchorKind::RenderedLine)
+                .then_some(target.rendered_line)
+                .filter(|&index| index < self.lines.len()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stores_plain_lines(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    pub(crate) fn uses_generated_rendered_line_anchors(&self) -> bool {
+        matches!(self.anchors, CachedLineAnchors::GeneratedRenderedLines)
+    }
 }
 
 /// `ScreenRenderCache` 管理 transcript 的 item 级缓存与整体结果缓存。

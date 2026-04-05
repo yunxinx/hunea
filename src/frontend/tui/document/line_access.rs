@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::frontend::tui::{
     selection::{
         ResolvedSelectionPoint, SelectableLineRange, SelectionPoint,
@@ -43,7 +41,10 @@ impl DocumentLayout {
         let mut used_transcript = false;
         if start < self.transcript_line_count {
             let transcript_end = end.min(self.transcript_line_count);
-            total += plain_lines_len(&self.transcript.plain_lines[start..transcript_end]);
+            total += self
+                .transcript
+                .render
+                .plain_text_len_for_range(start, transcript_end - start);
             used_transcript = transcript_end > start;
             start = transcript_end;
         }
@@ -111,9 +112,8 @@ impl DocumentLayout {
         if target.region == DocumentAnchorRegion::Transcript {
             return self
                 .transcript
-                .line_anchors
-                .iter()
-                .position(|anchor| *anchor == target.transcript);
+                .render
+                .line_index_for_anchor(target.transcript);
         }
 
         self.tail
@@ -218,12 +218,9 @@ impl DocumentLayout {
             return Vec::new();
         }
 
-        (start..end.min(self.transcript_line_count))
-            .filter_map(|index| {
-                let anchor = self.transcript.line_anchors.get(index).copied()?;
-                self.transcript_line_text_at(index, document_anchor_for_transcript(anchor))
-            })
-            .collect()
+        self.transcript
+            .render
+            .plain_lines_for_range(start, end.min(self.transcript_line_count) - start)
     }
 
     /// `lines_for_range` 返回给定连续范围内的带样式行。
@@ -257,20 +254,25 @@ impl DocumentLayout {
         &self,
         item_index: usize,
     ) -> Option<DocumentTranscriptItemLines> {
-        self.transcript_items
-            .get(&item_index)
-            .copied()
+        self.transcript
+            .render
+            .item_lines(item_index)
+            .map(|item| DocumentTranscriptItemLines {
+                content_start_line: item.content_start_line,
+                content_line_count: item.content_line_count,
+                total_line_count: item.total_line_count,
+            })
             .filter(|item| item.content_line_count > 0)
     }
 
     fn transcript_line_at(&self, index: usize) -> Option<DocumentLayoutLine> {
-        let line = self.transcript.lines.get(index).cloned()?;
-        let anchor = document_anchor_for_transcript(*self.transcript.line_anchors.get(index)?);
-        let plain_line = self.transcript_line_text_at(index, anchor)?;
+        let rendered = self.transcript.render.line_at(index)?;
+        let anchor = document_anchor_for_transcript(rendered.anchor);
+        let plain_line = rendered.plain_line;
         let selectable = self.transcript_selectable_at(anchor, &plain_line);
 
         Some(DocumentLayoutLine {
-            line,
+            line: rendered.line,
             plain_line,
             anchor,
             selectable,
@@ -278,8 +280,9 @@ impl DocumentLayout {
     }
 
     fn transcript_selection_line_at(&self, index: usize) -> Option<DocumentSelectionLine> {
-        let anchor = document_anchor_for_transcript(*self.transcript.line_anchors.get(index)?);
-        let text = self.transcript_line_text_at(index, anchor)?;
+        let rendered = self.transcript.render.line_at(index)?;
+        let anchor = document_anchor_for_transcript(rendered.anchor);
+        let text = rendered.plain_line;
         let selectable = self.transcript_selectable_at(anchor, &text);
 
         Some(DocumentSelectionLine {
@@ -312,20 +315,6 @@ impl DocumentLayout {
             usize::from(self.transcript.width.max(1)),
             true,
         )
-    }
-
-    fn transcript_line_text_at(&self, index: usize, anchor: DocumentLineAnchor) -> Option<String> {
-        if matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap) {
-            return Some(String::new());
-        }
-
-        if let Some(lines) = self.transcript_item_text_lines(anchor.transcript.item_index)
-            && anchor.transcript.item_anchor.rendered_line < lines.len()
-        {
-            return Some(lines[anchor.transcript.item_anchor.rendered_line].clone());
-        }
-
-        self.transcript.plain_lines.get(index).cloned()
     }
 
     fn transcript_selectable_ranges_for_item(
@@ -385,7 +374,9 @@ impl DocumentLayout {
             return Vec::new();
         }
 
-        self.transcript.lines[start..end.min(self.transcript_line_count)].to_vec()
+        self.transcript
+            .render
+            .lines_for_range(start, end.min(self.transcript_line_count) - start)
     }
 }
 
@@ -395,55 +386,6 @@ fn plain_lines_len(lines: &[String]) -> usize {
     }
 
     lines.iter().map(String::len).sum::<usize>() + lines.len().saturating_sub(1)
-}
-
-/// `new_document_transcript_item_index` 为 transcript snapshot 构建 item 行索引。
-pub(crate) fn new_document_transcript_item_index(
-    line_anchors: &[crate::frontend::tui::transcript::LineAnchor],
-) -> HashMap<usize, DocumentTranscriptItemLines> {
-    if line_anchors.is_empty() {
-        return HashMap::new();
-    }
-
-    let mut items = HashMap::new();
-    let mut start = 0;
-    let mut current_item_index = line_anchors[0].item_index;
-    let mut content_line_count = usize::from(!matches!(
-        line_anchors[0].item_anchor.kind,
-        LineAnchorKind::ItemGap
-    ));
-
-    for (index, anchor) in line_anchors.iter().copied().enumerate().skip(1) {
-        if anchor.item_index != current_item_index {
-            let line_count = index - start;
-            items.insert(
-                current_item_index,
-                DocumentTranscriptItemLines {
-                    content_start_line: start,
-                    content_line_count,
-                    total_line_count: line_count,
-                },
-            );
-            start = index;
-            current_item_index = anchor.item_index;
-            content_line_count = 0;
-        }
-        if !matches!(anchor.item_anchor.kind, LineAnchorKind::ItemGap) {
-            content_line_count += 1;
-        }
-    }
-
-    let line_count = line_anchors.len() - start;
-    items.insert(
-        current_item_index,
-        DocumentTranscriptItemLines {
-            content_start_line: start,
-            content_line_count,
-            total_line_count: line_count,
-        },
-    );
-
-    items
 }
 
 fn document_anchor_for_transcript(

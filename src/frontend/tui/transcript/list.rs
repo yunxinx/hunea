@@ -3,9 +3,9 @@ use std::rc::Rc;
 use ratatui::text::Line;
 
 use super::{
-    DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchor, LineAnchorKind, RenderResult,
-    ViewportRenderResult, cache::CachedRenderBlock, cache::ScreenRenderCache, new_render_result,
-    new_render_result_with_append_start,
+    DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchorKind, RenderResult, ViewportRenderResult,
+    cache::CachedRenderBlock, cache::ScreenRenderCache, new_render_result_with_append_start,
+    render_state::RenderItemSummary,
 };
 use crate::frontend::tui::{
     HeroOptions, Sender, StyleMode,
@@ -30,6 +30,7 @@ pub(crate) struct Transcript {
     gap: usize,
     width: u16,
     palette: TerminalPalette,
+    items_version: usize,
     screen_cache: ScreenRenderCache,
 }
 
@@ -52,6 +53,7 @@ impl Transcript {
             gap: 1,
             width: DEFAULT_RENDER_WIDTH as u16,
             palette,
+            items_version: 1,
             screen_cache: ScreenRenderCache::default(),
         }
     }
@@ -63,12 +65,18 @@ impl Transcript {
         }
 
         self.gap = gap;
-        self.screen_cache.invalidate_result();
+        self.screen_cache.mark_dirty_from(0);
     }
 
     /// `set_width` 设置 transcript 的可用宽度。
     pub(crate) fn set_width(&mut self, width: u16) {
-        self.width = width.max(1);
+        let width = width.max(1);
+        if self.width == width {
+            return;
+        }
+
+        self.width = width;
+        self.screen_cache.invalidate_all();
     }
 
     /// `set_palette` 刷新 transcript 使用的配色。
@@ -83,17 +91,13 @@ impl Transcript {
 
     /// `append_hero` 追加一条 hero 项。
     pub(crate) fn append_hero(&mut self, options: HeroOptions) {
-        Rc::make_mut(&mut self.items).push(Rc::new(TranscriptItem::Hero(HeroItem::new(options))));
-        self.screen_cache.ensure_item_count(self.items.len());
+        self.push_item(TranscriptItem::Hero(HeroItem::new(options)));
     }
 
     /// `append_message` 追加一条消息项。
     #[cfg(test)]
     pub(crate) fn append_message(&mut self, sender: Sender, content: impl Into<String>) {
-        Rc::make_mut(&mut self.items).push(Rc::new(TranscriptItem::Message(MessageItem::new(
-            sender, content,
-        ))));
-        self.screen_cache.ensure_item_count(self.items.len());
+        self.push_item(TranscriptItem::Message(MessageItem::new(sender, content)));
     }
 
     /// `append_message_with_style_mode` 追加一条带样式模式的消息项。
@@ -103,10 +107,9 @@ impl Transcript {
         content: impl Into<String>,
         style_mode: StyleMode,
     ) {
-        Rc::make_mut(&mut self.items).push(Rc::new(TranscriptItem::Message(
-            MessageItem::new_with_style_mode(sender, content, style_mode),
+        self.push_item(TranscriptItem::Message(MessageItem::new_with_style_mode(
+            sender, content, style_mode,
         )));
-        self.screen_cache.ensure_item_count(self.items.len());
     }
 
     /// `len` 返回 transcript 项数量。
@@ -119,6 +122,7 @@ impl Transcript {
     #[allow(dead_code)]
     pub(crate) fn clear(&mut self) {
         Rc::make_mut(&mut self.items).clear();
+        self.items_version = self.items_version.saturating_add(1);
         self.screen_cache.reset();
     }
 
@@ -157,65 +161,43 @@ impl Transcript {
     /// `render` 渲染整个 transcript，并返回带锚点的稳定结果。
     pub(crate) fn render(&mut self) -> Rc<RenderResult> {
         let width = self.render_width();
-        if self.can_reuse_cached_render_result(width) {
-            return Rc::clone(&self.screen_cache.result);
-        }
-        let (blocks, first_changed_index) = self.render_screen_blocks(width);
-        if first_changed_index.is_none()
-            && self
-                .screen_cache
-                .can_reuse_result(width, self.gap, self.items.len())
+        if self
+            .screen_cache
+            .can_reuse_result(width, self.gap, self.items.len(), self.items_version)
         {
             return Rc::clone(&self.screen_cache.result);
         }
-        if let Some(first_changed_index) = first_changed_index
-            && self
-                .screen_cache
-                .can_extend_result(width, self.gap, self.items.len())
-            && first_changed_index >= self.screen_cache.item_count
-        {
-            let result = Rc::new(self.extend_render_result(width, &blocks));
-            self.screen_cache
-                .store_result(width, self.gap, self.items.len(), Rc::clone(&result));
-            return result;
-        }
-
-        if blocks.is_empty() {
+        if self.items.is_empty() {
             let result = Rc::new(RenderResult::default());
-            self.screen_cache
-                .store_result(width, self.gap, self.items.len(), Rc::clone(&result));
+            self.screen_cache.store_result(
+                width,
+                self.gap,
+                self.items.len(),
+                self.items_version,
+                Rc::clone(&result),
+            );
             return result;
         }
 
-        let mut lines = Vec::with_capacity(total_block_lines(&blocks, self.gap));
-        let mut plain_lines = Vec::with_capacity(total_block_lines(&blocks, self.gap));
-        let mut line_anchors = Vec::with_capacity(total_block_lines(&blocks, self.gap));
-        let mut selectable_ranges = Vec::with_capacity(total_block_lines(&blocks, self.gap));
-
-        for (index, block) in blocks.iter().enumerate() {
-            lines.extend(block.lines.iter().cloned());
-            plain_lines.extend(block.plain_lines.iter().cloned());
-            line_anchors.extend(line_anchors_for_block(block));
-            selectable_ranges.extend(block.selectable_ranges.iter().copied());
-
-            if index + 1 < blocks.len() && self.gap > 0 {
-                for gap_offset in 0..self.gap {
-                    lines.push(Line::raw(""));
-                    plain_lines.push(String::new());
-                    line_anchors.push(gap_line_anchor_for_block(block.item_index, gap_offset));
-                    selectable_ranges.push(SelectableLineRange::default());
-                }
-            }
-        }
-
-        let result = Rc::new(new_render_result(
-            lines,
-            plain_lines,
-            line_anchors,
-            selectable_ranges,
-        ));
-        self.screen_cache
-            .store_result(width, self.gap, self.items.len(), Rc::clone(&result));
+        let dirty_from = self.screen_cache.dirty_from.min(self.items.len());
+        let append_start_line = if self.screen_cache.width == width
+            && self.screen_cache.gap == self.gap
+            && dirty_from >= self.screen_cache.item_count
+            && self.items.len() >= self.screen_cache.item_count
+            && self.screen_cache.item_count > 0
+        {
+            isize::try_from(self.screen_cache.result.line_count).unwrap_or(isize::MAX)
+        } else {
+            -1
+        };
+        let result = Rc::new(self.build_render_result(width, dirty_from, append_start_line));
+        self.screen_cache.store_result(
+            width,
+            self.gap,
+            self.items.len(),
+            self.items_version,
+            Rc::clone(&result),
+        );
         result
     }
 
@@ -229,55 +211,66 @@ impl Transcript {
         self.width.max(1)
     }
 
-    /// `can_reuse_cached_render_result` 判断是否可以直接复用整份 RenderResult。
-    /// 只有 item 级缓存键、宽度与数量都保持一致时，才允许跳过 block 重建。
+    #[cfg(test)]
     fn can_reuse_cached_render_result(&self, width: u16) -> bool {
-        if !self
-            .screen_cache
-            .can_reuse_result(width, self.gap, self.items.len())
-        {
-            return false;
-        }
-
-        for (index, item) in self.items.iter().enumerate() {
-            let cached = &self.screen_cache.items[index];
-            if !cached.valid || cached.width != width || cached.cache_key != item.render_cache_key()
-            {
-                return false;
-            }
-        }
-
-        true
+        self.screen_cache
+            .can_reuse_result(width, self.gap, self.items.len(), self.items_version)
     }
 
-    fn render_screen_blocks(&mut self, width: u16) -> (Vec<CachedRenderBlock>, Option<usize>) {
-        if self.items.is_empty() {
-            return (Vec::new(), None);
+    fn build_render_result(
+        &mut self,
+        width: u16,
+        dirty_from: usize,
+        append_start_line: isize,
+    ) -> RenderResult {
+        let previous = Rc::clone(&self.screen_cache.result);
+        let mut items = Vec::with_capacity(self.items.len());
+        let mut total_lines = 0;
+        let mut previous_visible_item_index = None;
+
+        if dirty_from > 0 {
+            for summary in previous.items.iter() {
+                if summary.item_index >= dirty_from {
+                    break;
+                }
+                total_lines = summary.start_line + summary.total_line_count;
+                previous_visible_item_index = Some(summary.item_index);
+                items.push(summary.clone());
+            }
         }
 
-        self.screen_cache.ensure_item_count(self.items.len());
-
-        let mut blocks = Vec::with_capacity(self.items.len());
-        let mut first_changed_index = None;
-
-        for index in 0..self.items.len() {
-            let (block, changed) = self.render_screen_block(index, width);
-            if changed && first_changed_index.is_none() {
-                first_changed_index = Some(index);
+        for index in dirty_from..self.items.len() {
+            let block = self.render_screen_block(index, width);
+            if block.lines.is_empty() {
+                continue;
             }
-            if !block.lines.is_empty() {
-                blocks.push(block);
-            }
+
+            let gap_before = usize::from(previous_visible_item_index.is_some()) * self.gap;
+            let summary = RenderItemSummary {
+                item_index: index,
+                start_line: total_lines,
+                gap_before,
+                content_line_count: block.lines.len(),
+                total_line_count: gap_before + block.lines.len(),
+                content_char_len: block.plain_text_char_len,
+                gap_owner_item_index: previous_visible_item_index,
+                block,
+            };
+            total_lines += summary.total_line_count;
+            previous_visible_item_index = Some(index);
+            items.push(summary);
         }
 
-        (blocks, first_changed_index)
+        new_render_result_with_append_start(items, append_start_line)
     }
 
-    fn render_screen_block(&mut self, index: usize, width: u16) -> (CachedRenderBlock, bool) {
+    fn render_screen_block(&mut self, index: usize, width: u16) -> Rc<CachedRenderBlock> {
         let cache_key = self.items[index].render_cache_key();
-        let cached = &mut self.screen_cache.items[index];
-        if cached.valid && cached.width == width && cached.cache_key == cache_key {
-            return (cached.clone(), false);
+        if let Some(cached) = self.screen_cache.items.get(&index)
+            && cached.width == width
+            && cached.cache_key == cache_key
+        {
+            return Rc::clone(cached);
         }
 
         let lines = self.items[index].render_lines(width, self.palette);
@@ -286,69 +279,35 @@ impl Transcript {
         if anchors.len() != lines.len() {
             anchors = fallback_rendered_line_anchors(lines.len());
         }
-        let block = CachedRenderBlock {
-            item_index: index,
+        let block = Rc::new(CachedRenderBlock {
             cache_key,
             width,
-            lines,
-            plain_lines,
-            anchors,
-            selectable_ranges: Vec::new(),
-            valid: true,
-        };
-        *cached = block.clone();
-        (block, true)
+            plain_text_char_len: plain_lines.iter().map(String::len).sum(),
+            lines: Rc::new(lines),
+            plain_lines: Rc::new(plain_lines),
+            anchors: Rc::new(anchors),
+        });
+        self.screen_cache.items.insert(index, Rc::clone(&block));
+        block
     }
 
-    fn extend_render_result(&self, width: u16, blocks: &[CachedRenderBlock]) -> RenderResult {
-        let base = self.screen_cache.result.clone();
-        let mut lines = base.lines.as_ref().clone();
-        let mut plain_lines = base.plain_lines.as_ref().clone();
-        let mut line_anchors = base.line_anchors.as_ref().clone();
-        let mut selectable_ranges = base.selectable_ranges.as_ref().clone();
+    fn push_item(&mut self, item: TranscriptItem) {
+        let len_before_append = self.items.len();
+        Rc::make_mut(&mut self.items).push(Rc::new(item));
+        self.items_version = self.items_version.saturating_add(1);
+        self.screen_cache.mark_dirty_from(len_before_append);
+    }
 
-        let mut previous_visible_item_index = None;
-        for block in blocks {
-            if block.item_index >= self.screen_cache.item_count {
-                break;
-            }
-            previous_visible_item_index = Some(block.item_index);
-        }
-        let mut previous_anchor_item_index = previous_visible_item_index;
-        let mut has_rendered_content = !lines.is_empty();
-        let append_start_line = isize::try_from(lines.len()).unwrap_or(isize::MAX);
+    #[cfg(test)]
+    fn replace_item_for_test(&mut self, index: usize, item: TranscriptItem) {
+        Rc::make_mut(&mut self.items)[index] = Rc::new(item);
+        self.items_version = self.items_version.saturating_add(1);
+        self.screen_cache.clear_item(index);
+    }
 
-        for block in blocks {
-            if block.item_index < self.screen_cache.item_count {
-                continue;
-            }
-
-            if has_rendered_content && self.gap > 0 {
-                let gap_item_index = previous_anchor_item_index.unwrap_or(block.item_index);
-                for gap_offset in 0..self.gap {
-                    lines.push(Line::raw(""));
-                    plain_lines.push(String::new());
-                    line_anchors.push(gap_line_anchor_for_block(gap_item_index, gap_offset));
-                    selectable_ranges.push(SelectableLineRange::default());
-                }
-            }
-
-            lines.extend(block.lines.iter().cloned());
-            plain_lines.extend(block.plain_lines.iter().cloned());
-            line_anchors.extend(line_anchors_for_block(block));
-            selectable_ranges.extend(block.selectable_ranges.iter().copied());
-            has_rendered_content = true;
-            previous_anchor_item_index = Some(block.item_index);
-        }
-
-        let _ = width;
-        new_render_result_with_append_start(
-            lines,
-            plain_lines,
-            line_anchors,
-            selectable_ranges,
-            append_start_line,
-        )
+    #[cfg(test)]
+    pub(crate) fn dirty_from_for_test(&self) -> usize {
+        self.screen_cache.dirty_from
     }
 }
 
@@ -433,38 +392,6 @@ fn fallback_rendered_line_anchors(line_count: usize) -> Vec<ItemLineAnchor> {
         .collect()
 }
 
-fn line_anchors_for_block(block: &CachedRenderBlock) -> Vec<LineAnchor> {
-    block
-        .anchors
-        .iter()
-        .copied()
-        .map(|item_anchor| LineAnchor {
-            item_index: block.item_index,
-            item_anchor,
-        })
-        .collect()
-}
-
-fn gap_line_anchor_for_block(item_index: usize, gap_offset: usize) -> LineAnchor {
-    LineAnchor {
-        item_index,
-        item_anchor: ItemLineAnchor {
-            kind: LineAnchorKind::ItemGap,
-            gap_offset,
-            ..ItemLineAnchor::default()
-        },
-    }
-}
-
-fn total_block_lines(blocks: &[CachedRenderBlock], gap: usize) -> usize {
-    let total = blocks.iter().map(|block| block.lines.len()).sum::<usize>();
-    if blocks.len() <= 1 || gap == 0 {
-        return total;
-    }
-
-    total + (blocks.len() - 1) * gap
-}
-
 #[cfg(test)]
 mod tests {
     use ratatui::text::Span;
@@ -495,7 +422,7 @@ mod tests {
 
         let result = transcript.render();
         let rendered = result
-            .lines
+            .lines_for_range(0, result.line_count)
             .iter()
             .map(|line| {
                 line.spans
@@ -517,16 +444,13 @@ mod tests {
         )))]);
         let _ = transcript.render();
 
-        Rc::make_mut(&mut transcript.items)
-            .push(Rc::new(TranscriptItem::Message(static_message("second"))));
+        transcript.append_message(Sender::Assistant, "second");
         let result = transcript.render();
+        let line_anchors = result.all_line_anchors();
 
-        assert_eq!(result.line_anchors.len(), 3);
-        assert_eq!(result.line_anchors[1].item_index, 0);
-        assert_eq!(
-            result.line_anchors[1].item_anchor.kind,
-            LineAnchorKind::ItemGap
-        );
+        assert_eq!(line_anchors.len(), 3);
+        assert_eq!(line_anchors[1].item_index, 0);
+        assert_eq!(line_anchors[1].item_anchor.kind, LineAnchorKind::ItemGap);
     }
 
     #[test]
@@ -537,12 +461,11 @@ mod tests {
         )))]);
         let _ = transcript.render();
 
-        Rc::make_mut(&mut transcript.items)
-            .push(Rc::new(TranscriptItem::Message(static_message("second"))));
+        transcript.append_message(Sender::Assistant, "second");
         let result = transcript.render();
 
         assert_eq!(result.append_start_line, 1);
-        assert_eq!(result.plain_lines.as_ref(), &vec!["first", "", "second"]);
+        assert_eq!(result.all_plain_lines(), vec!["first", "", "second"]);
     }
 
     #[test]
@@ -554,14 +477,12 @@ mod tests {
         ]);
 
         let result = transcript.render();
+        let line_anchors = result.all_line_anchors();
 
-        assert_eq!(result.line_anchors.len(), 3);
-        assert_eq!(result.line_anchors[1].item_index, 0);
-        assert_eq!(
-            result.line_anchors[1].item_anchor.kind,
-            LineAnchorKind::ItemGap
-        );
-        assert_eq!(result.line_anchors[2].item_index, 1);
+        assert_eq!(line_anchors.len(), 3);
+        assert_eq!(line_anchors[1].item_index, 0);
+        assert_eq!(line_anchors[1].item_anchor.kind, LineAnchorKind::ItemGap);
+        assert_eq!(line_anchors[2].item_index, 1);
     }
 
     #[test]
@@ -605,8 +526,7 @@ mod tests {
         )))]);
 
         let _ = transcript.render();
-        Rc::make_mut(&mut transcript.items)[0] =
-            Rc::new(TranscriptItem::Message(static_message("two")));
+        transcript.replace_item_for_test(0, TranscriptItem::Message(static_message("two")));
 
         assert!(!transcript.can_reuse_cached_render_result(transcript.render_width()));
     }
@@ -621,9 +541,7 @@ mod tests {
         let first = transcript.render();
         let second = transcript.render();
 
-        assert_eq!(first.lines.as_ptr(), second.lines.as_ptr());
-        assert_eq!(first.plain_lines.as_ptr(), second.plain_lines.as_ptr());
-        assert_eq!(first.line_anchors.as_ptr(), second.line_anchors.as_ptr());
+        assert_eq!(first.items.as_ptr(), second.items.as_ptr());
     }
 
     #[test]
@@ -641,6 +559,21 @@ mod tests {
 
         assert_eq!(after_first_render, 0);
         assert_eq!(after_second_render, 0);
+    }
+
+    #[test]
+    fn append_does_not_preallocate_dense_render_cache_slots() {
+        let mut transcript = Transcript::new(default_palette());
+
+        for index in 0..64 {
+            transcript.append_message(Sender::Assistant, format!("item {index}"));
+        }
+
+        assert_eq!(
+            transcript.screen_cache.items.len(),
+            0,
+            "append should not grow dense render cache slots before any render happens"
+        );
     }
 
     #[test]
@@ -673,13 +606,12 @@ mod tests {
         )))]);
 
         let first = transcript.render();
-        assert_eq!(first.plain_lines.as_ref(), &vec!["one"]);
+        assert_eq!(first.all_plain_lines(), vec!["one"]);
 
-        Rc::make_mut(&mut transcript.items)[0] =
-            Rc::new(TranscriptItem::Message(static_message("two")));
+        transcript.replace_item_for_test(0, TranscriptItem::Message(static_message("two")));
 
         let second = transcript.render();
-        assert_eq!(second.plain_lines.as_ref(), &vec!["two"]);
+        assert_eq!(second.all_plain_lines(), vec!["two"]);
     }
 
     #[test]
@@ -692,8 +624,7 @@ mod tests {
         let first = transcript.render_viewport(1, 1);
         assert_eq!(first.plain_lines, vec!["two"]);
 
-        Rc::make_mut(&mut transcript.items)[0] =
-            Rc::new(TranscriptItem::Message(static_message("alpha\nbeta")));
+        transcript.replace_item_for_test(0, TranscriptItem::Message(static_message("alpha\nbeta")));
 
         let second = transcript.render_viewport(1, 1);
         assert_eq!(second.plain_lines, vec!["beta"]);

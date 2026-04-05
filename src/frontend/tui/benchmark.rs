@@ -528,8 +528,8 @@ fn summarize_transcript_render(
 ) -> TranscriptRenderSummary {
     TranscriptRenderSummary {
         line_count: render.line_count,
-        plain_text_len: plain_lines_len(&render.plain_lines),
-        anchor_count: render.line_anchors.len(),
+        plain_text_len: render.plain_text_len(),
+        anchor_count: render.anchor_count(),
         selectable_count: render.selectable_ranges.len(),
         append_start_line: render.append_start_line,
     }
@@ -610,11 +610,31 @@ mod tests {
         assert_eq!(summary.item_count, 24);
         assert_eq!(summary.width, 80);
         assert_eq!(summary.height, 18);
-        assert!(summary.transcript_line_count > 0);
+        assert!(
+            summary.transcript_line_count > summary.item_count,
+            "benchmark transcript should materialize substantially more than one visual line per item"
+        );
         assert!(summary.document_line_count >= summary.transcript_line_count);
         assert!(summary.viewport_line_count > 0);
         assert!(summary.frame_non_empty_cells > 0);
         assert!(format_document_stress_summary(&summary).contains("items=24"));
+    }
+
+    #[test]
+    fn transcript_benchmark_render_summary_scales_with_item_count() {
+        let mut bench = TranscriptBench::new(24, 80, default_palette());
+        assert_eq!(bench.transcript.len(), 24);
+
+        let render = bench.transcript.render();
+        let summary = summarize_transcript_render(&render);
+
+        assert!(
+            summary.line_count > 24,
+            "benchmark transcript should render substantially more than one visual line per item, got {summary:?}, dirty_from={}, item_summaries={}, plain_lines={:?}",
+            bench.transcript.dirty_from_for_test(),
+            render.items.len(),
+            render.all_plain_lines()
+        );
     }
 
     #[test]

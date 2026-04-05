@@ -3,7 +3,9 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use ratatui::text::Line;
 
 #[cfg(test)]
-use crate::frontend::tui::transcript::{ItemLineAnchor, LineAnchor, LineAnchorKind};
+use crate::frontend::tui::transcript::{
+    CachedRenderBlock, ItemLineAnchor, LineAnchorKind, RenderItemSummary, new_render_result,
+};
 use crate::frontend::tui::{
     composer,
     selection::SelectableLineRange,
@@ -24,13 +26,10 @@ pub(crate) struct DocumentTranscriptKey {
 /// `DocumentTranscriptSnapshot` 缓存 unified document 真正需要的 transcript 行级数据。
 #[derive(Debug, Clone)]
 pub(crate) struct DocumentTranscriptSnapshot {
-    pub(super) lines: Rc<Vec<Line<'static>>>,
-    pub(super) plain_lines: Rc<Vec<String>>,
-    pub(super) line_anchors: Rc<Vec<transcript::LineAnchor>>,
+    pub(super) render: Rc<transcript::RenderResult>,
     pub(super) width: u16,
     pub(super) palette: TerminalPalette,
     pub(super) items: Rc<Vec<Rc<TranscriptItem>>>,
-    pub(super) item_index: Rc<HashMap<usize, DocumentTranscriptItemLines>>,
     pub(super) item_text_lines_cache: Rc<RefCell<HashMap<usize, Vec<String>>>>,
     pub(super) selectable_cache: Rc<RefCell<HashMap<usize, Vec<SelectableLineRange>>>>,
 }
@@ -38,13 +37,10 @@ pub(crate) struct DocumentTranscriptSnapshot {
 impl Default for DocumentTranscriptSnapshot {
     fn default() -> Self {
         Self {
-            lines: Rc::new(Vec::new()),
-            plain_lines: Rc::new(Vec::new()),
-            line_anchors: Rc::new(Vec::new()),
+            render: Rc::new(transcript::RenderResult::default()),
             width: 0,
             palette: crate::frontend::tui::theme::default_palette(),
             items: Rc::new(Vec::new()),
-            item_index: Rc::new(HashMap::new()),
             item_text_lines_cache: Rc::new(RefCell::new(HashMap::new())),
             selectable_cache: Rc::new(RefCell::new(HashMap::new())),
         }
@@ -66,7 +62,8 @@ pub(crate) struct DocumentLayoutKey {
     pub(super) palette_version: usize,
     pub(super) style_mode: StyleMode,
     pub(super) document_width: u16,
-    pub(super) viewport_height: usize,
+    pub(super) document_viewport_height: usize,
+    pub(super) composer_viewport_height: usize,
     pub(super) composer_content_revision: usize,
     pub(super) composer_cursor_revision: usize,
     pub(super) composer_width: usize,
@@ -81,7 +78,6 @@ pub(crate) struct DocumentLayoutKey {
 pub(crate) struct DocumentLayout {
     pub(super) transcript: Rc<DocumentTranscriptSnapshot>,
     pub(crate) transcript_line_count: usize,
-    pub(super) transcript_items: Rc<HashMap<usize, DocumentTranscriptItemLines>>,
     pub(crate) tail: Rc<DocumentTailLayout>,
     pub(crate) composer_slot: SlotFrame,
     pub(super) composer_start_line: usize,
@@ -102,66 +98,38 @@ impl DocumentLayout {
         Self {
             transcript_line_count,
             transcript: Rc::new(DocumentTranscriptSnapshot {
-                lines: Rc::new(
-                    transcript_plain_lines
-                        .iter()
-                        .map(|line| Line::raw((*line).to_string()))
-                        .collect(),
-                ),
-                plain_lines: Rc::new(
-                    transcript_plain_lines
-                        .iter()
-                        .map(|line| (*line).to_string())
-                        .collect(),
-                ),
-                line_anchors: Rc::new(
+                render: Rc::new(new_render_result(
                     transcript_plain_lines
                         .iter()
                         .enumerate()
-                        .map(|(index, _)| LineAnchor {
-                            item_index: index,
-                            item_anchor: ItemLineAnchor {
-                                kind: LineAnchorKind::RenderedLine,
-                                rendered_line: 0,
-                                ..ItemLineAnchor::default()
-                            },
-                        })
-                        .collect(),
-                ),
-                item_index: Rc::new(
-                    transcript_plain_lines
-                        .iter()
-                        .enumerate()
-                        .map(|(index, _)| {
-                            (
-                                index,
-                                DocumentTranscriptItemLines {
-                                    content_start_line: index,
-                                    content_line_count: 1,
-                                    total_line_count: 1,
-                                },
-                            )
-                        })
-                        .collect(),
-                ),
-                ..DocumentTranscriptSnapshot::default()
-            }),
-            transcript_items: Rc::new(
-                transcript_plain_lines
-                    .iter()
-                    .enumerate()
-                    .map(|(index, _)| {
-                        (
-                            index,
-                            DocumentTranscriptItemLines {
-                                content_start_line: index,
+                        .map(|(index, line)| {
+                            let block = Rc::new(CachedRenderBlock {
+                                cache_key: 0,
+                                width: 1,
+                                lines: Rc::new(vec![Line::raw((*line).to_string())]),
+                                plain_lines: Rc::new(vec![(*line).to_string()]),
+                                anchors: Rc::new(vec![ItemLineAnchor {
+                                    kind: LineAnchorKind::RenderedLine,
+                                    rendered_line: 0,
+                                    ..ItemLineAnchor::default()
+                                }]),
+                                plain_text_char_len: line.len(),
+                            });
+                            RenderItemSummary {
+                                item_index: index,
+                                start_line: index,
+                                gap_before: 0,
                                 content_line_count: 1,
                                 total_line_count: 1,
-                            },
-                        )
-                    })
-                    .collect(),
-            ),
+                                content_char_len: line.len(),
+                                gap_owner_item_index: index.checked_sub(1),
+                                block,
+                            }
+                        })
+                        .collect(),
+                )),
+                ..DocumentTranscriptSnapshot::default()
+            }),
             tail: Rc::new(DocumentTailLayout {
                 lines: tail_plain_lines
                     .iter()
@@ -202,6 +170,7 @@ pub(crate) struct DocumentLayoutLine {
 pub(crate) struct DocumentTranscriptItemLines {
     pub(super) content_start_line: usize,
     pub(super) content_line_count: usize,
+    /// 包含当前 item 内容以及归属于它的 trailing separator。
     pub(super) total_line_count: usize,
 }
 

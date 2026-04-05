@@ -7,8 +7,7 @@ use crate::frontend::tui::{Model, selection::apply_selection_to_viewport};
 use super::{
     DocumentLayout, DocumentLayoutCache, DocumentLayoutKey, DocumentTranscriptCache,
     DocumentTranscriptKey, DocumentTranscriptSnapshot, DocumentViewport, DocumentViewportCache,
-    DocumentViewportKey, line_access::new_document_transcript_item_index, offset_slot_frame,
-    slot_viewport::compose_bottom_follow_document_viewport,
+    DocumentViewportKey, offset_slot_frame, slot_viewport::compose_bottom_follow_document_viewport,
 };
 
 /// `DocumentLayoutInput` 表示统一文档布局真正依赖的 transcript 与 tail 快照。
@@ -122,7 +121,8 @@ impl Model {
             palette_version: self.palette_version,
             style_mode: self.style_mode,
             document_width: self.width,
-            viewport_height: self.document_viewport_height(),
+            document_viewport_height: self.document_viewport_height(),
+            composer_viewport_height: self.composer.viewport_height(),
             composer_content_revision: self.composer.content_revision(),
             composer_cursor_revision: self.composer.cursor_revision(),
             composer_width: self.composer.content_width(),
@@ -160,12 +160,11 @@ impl Model {
 }
 
 pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLayout {
-    let transcript_line_count = input.transcript.lines.len();
+    let transcript_line_count = input.transcript.render.line_count;
     let transcript = Rc::clone(&input.transcript);
     let composer_slot = offset_slot_frame(input.tail.composer_slot, transcript_line_count);
 
     DocumentLayout {
-        transcript_items: Rc::clone(&transcript.item_index),
         transcript,
         transcript_line_count,
         tail: Rc::clone(&input.tail),
@@ -205,12 +204,13 @@ pub(crate) fn compose_document_viewport(
     let max_offset = layout.line_count().saturating_sub(height);
     let resolved_offset = offset.min(max_offset);
     let visible_line_count = height.min(layout.line_count() - resolved_offset);
+    let range = document_range_snapshot(layout, resolved_offset, visible_line_count);
 
     DocumentViewport {
-        lines: layout.lines_for_range(resolved_offset, visible_line_count),
-        plain_text_len: layout.plain_text_len_for_range(resolved_offset, visible_line_count),
+        lines: range.lines,
+        plain_text_len: range.plain_text_len,
         #[cfg(test)]
-        plain_lines: layout.line_texts_for_range(resolved_offset, visible_line_count),
+        plain_lines: range.plain_lines,
         resolved_offset,
     }
 }
@@ -235,11 +235,72 @@ pub(crate) fn visible_document_lines(
 
     let max_offset = layout.line_count().saturating_sub(height);
     let resolved_offset = offset.min(max_offset);
-    (
-        layout.lines_for_range(resolved_offset, height),
-        layout.line_texts_for_range(resolved_offset, height),
-        resolved_offset,
-    )
+    let range = document_range_snapshot(layout, resolved_offset, height);
+    (range.lines, range.plain_lines, resolved_offset)
+}
+
+#[derive(Debug, Clone, Default)]
+struct DocumentRangeSnapshot {
+    lines: Vec<Line<'static>>,
+    plain_text_len: usize,
+    #[cfg(test)]
+    plain_lines: Vec<String>,
+}
+
+fn document_range_snapshot(
+    layout: &DocumentLayout,
+    mut start: usize,
+    count: usize,
+) -> DocumentRangeSnapshot {
+    if count == 0 || layout.line_count() == 0 || start >= layout.line_count() {
+        return DocumentRangeSnapshot::default();
+    }
+
+    let end = (start + count).min(layout.line_count());
+    let mut lines = Vec::with_capacity(end - start);
+    let mut plain_char_len = 0;
+    let mut line_count = 0;
+    #[cfg(test)]
+    let mut plain_lines = Vec::with_capacity(end - start);
+
+    if start < layout.transcript_line_count {
+        let transcript_end = end.min(layout.transcript_line_count);
+        let transcript_slice = layout
+            .transcript
+            .render
+            .range_slice(start, transcript_end - start);
+        plain_char_len += transcript_slice.plain_char_len;
+        line_count += transcript_slice.line_count;
+        lines.extend(transcript_slice.lines);
+        #[cfg(test)]
+        plain_lines.extend(transcript_slice.plain_lines);
+        start = transcript_end;
+    }
+
+    if start < end {
+        let tail_start = start - layout.transcript_line_count;
+        let tail_end = end - layout.transcript_line_count;
+        let tail_line_count = tail_end - tail_start;
+        lines.extend_from_slice(&layout.tail.lines[tail_start..tail_end]);
+        plain_char_len += layout.tail.text_lines[tail_start..tail_end]
+            .iter()
+            .map(String::len)
+            .sum::<usize>();
+        line_count += tail_line_count;
+        #[cfg(test)]
+        plain_lines.extend_from_slice(&layout.tail.text_lines[tail_start..tail_end]);
+    }
+
+    DocumentRangeSnapshot {
+        lines,
+        plain_text_len: if line_count == 0 {
+            0
+        } else {
+            plain_char_len + line_count.saturating_sub(1)
+        },
+        #[cfg(test)]
+        plain_lines,
+    }
 }
 
 impl Model {
@@ -255,9 +316,7 @@ impl Model {
         }
 
         let snapshot = Rc::new(DocumentTranscriptSnapshot {
-            lines: Rc::clone(&self.transcript_render.lines),
-            plain_lines: Rc::clone(&self.transcript_render.plain_lines),
-            line_anchors: Rc::clone(&self.transcript_render.line_anchors),
+            render: Rc::clone(&self.transcript_render),
             width: if self.width == 0 {
                 crate::frontend::tui::transcript::DEFAULT_RENDER_WIDTH as u16
             } else {
@@ -265,9 +324,6 @@ impl Model {
             },
             palette: self.palette,
             items: self.transcript.items_snapshot(),
-            item_index: Rc::new(new_document_transcript_item_index(
-                self.transcript_render.line_anchors.as_slice(),
-            )),
             item_text_lines_cache: Rc::new(std::cell::RefCell::new(
                 std::collections::HashMap::new(),
             )),

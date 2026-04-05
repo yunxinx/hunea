@@ -242,12 +242,17 @@ impl Model {
     }
 
     pub(crate) fn set_window(&mut self, width: u16, height: u16) {
+        let width = width.max(1);
+        let width_changed = !self.has_window || self.width != width;
+
         self.width = width;
         self.height = height;
         self.has_window = true;
-        self.transcript.set_width(width.max(1));
-        self.composer.set_width(width.max(1));
-        self.sync_transcript_render();
+        self.transcript.set_width(width);
+        self.composer.set_width(width);
+        if width_changed {
+            self.sync_transcript_render();
+        }
         self.sync_command_panel_navigation();
         self.sync_composer_height();
     }
@@ -258,19 +263,24 @@ impl Model {
         } else {
             None
         };
-        if self.selection.is_active() {
+        let palette_changed = self.palette != palette;
+        if palette_changed && self.selection.is_active() {
             self.invalidate_selection_for_reflow();
         }
-        if self.palette != palette {
+        if palette_changed {
             self.palette_version += 1;
         }
         self.palette = palette;
         self.has_dark_background = has_dark_background;
         self.has_palette = true;
         self.transcript.set_palette(palette);
-        self.sync_transcript_render();
+        if palette_changed {
+            self.sync_transcript_render();
+        }
         self.sync_composer_height();
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        if palette_changed {
+            self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        }
     }
 
     pub(crate) fn composer_mut(&mut self) -> &mut Composer {
@@ -438,6 +448,8 @@ fn resolve_initial_current_dir(items: &[StatusLineItem]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use super::*;
     use crate::frontend::tui::{Sender, StyleMode};
 
@@ -475,5 +487,62 @@ mod tests {
             .append_message(Sender::Assistant, "# Overview of the API");
 
         assert_eq!(model.transcript_plain_items(), vec!["Overview of the API"]);
+    }
+
+    #[test]
+    fn height_only_resize_keeps_transcript_render_stable() {
+        let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
+        model.transcript_mut().clear();
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, "alpha\nbeta\ngamma\ndelta");
+        model.set_window(20, 4);
+        model.set_palette(default_palette(), true);
+        model.composer_mut().set_text_for_test("1\n2\n3\n4\n5\n6");
+        model.sync_composer_height();
+
+        let before_render_version = model.transcript_render_version;
+        let before_render = Rc::clone(&model.transcript_render);
+        let before_composer_height = model.composer.visible_height();
+
+        model.set_window(20, 8);
+
+        assert_eq!(
+            model.transcript_render_version, before_render_version,
+            "height-only resize should not trigger a transcript rerender"
+        );
+        assert!(
+            Rc::ptr_eq(&before_render, &model.transcript_render),
+            "height-only resize should keep reusing the current transcript render result"
+        );
+        assert!(
+            model.composer.visible_height() > before_composer_height,
+            "height-only resize should still update the tail/composer layout"
+        );
+    }
+
+    #[test]
+    fn setting_the_same_palette_keeps_transcript_render_stable() {
+        let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
+        model.transcript_mut().clear();
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, "alpha\nbeta");
+        model.set_window(20, 4);
+        model.set_palette(default_palette(), true);
+
+        let before_render_version = model.transcript_render_version;
+        let before_render = Rc::clone(&model.transcript_render);
+
+        model.set_palette(default_palette(), true);
+
+        assert_eq!(
+            model.transcript_render_version, before_render_version,
+            "setting the same palette should not trigger a transcript rerender"
+        );
+        assert!(
+            Rc::ptr_eq(&before_render, &model.transcript_render),
+            "setting the same palette should keep the existing transcript render result"
+        );
     }
 }

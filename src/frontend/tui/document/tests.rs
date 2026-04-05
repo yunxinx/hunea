@@ -8,6 +8,7 @@ use super::*;
 use crate::frontend::tui::{
     HeroOptions, Model, Sender, StatusLineItem, StyleMode,
     selection::SelectableLineRange as DocumentSelectable, theme::default_palette,
+    transcript::LineAnchorKind,
 };
 
 #[test]
@@ -67,6 +68,78 @@ fn document_tail_layout_cache_reuses_tail_when_transcript_append_keeps_tail_inpu
 }
 
 #[test]
+fn document_layout_cache_invalidates_on_height_only_resize_when_command_panel_rows_change() {
+    let mut model = ready_document_model(20, 4);
+    model.composer_mut().set_text_for_test("/");
+    model.sync_command_panel_navigation();
+    model.sync_composer_height();
+
+    let first = model.build_document_layout();
+    let first_command_panel_rows = first
+        .all_line_anchors()
+        .into_iter()
+        .filter(|anchor| anchor.region == DocumentAnchorRegion::CommandPanel)
+        .count();
+
+    model.set_window(20, 10);
+
+    let second = model.build_document_layout();
+    let second_command_panel_rows = second
+        .all_line_anchors()
+        .into_iter()
+        .filter(|anchor| anchor.region == DocumentAnchorRegion::CommandPanel)
+        .count();
+
+    assert!(
+        !Rc::ptr_eq(&first, &second),
+        "height-only resize should invalidate the layout cache when command panel rows depend on viewport height"
+    );
+    assert_eq!(first_command_panel_rows, 3);
+    assert_eq!(second_command_panel_rows, 7);
+    assert_eq!(
+        second_command_panel_rows,
+        model.command_panel_list_visible_rows(),
+        "layout should rebuild command panel rows for the new viewport height"
+    );
+}
+
+#[test]
+fn document_tail_layout_cache_invalidates_on_height_only_resize_when_command_panel_rows_change() {
+    let mut model = ready_document_model(20, 4);
+    model.composer_mut().set_text_for_test("/");
+    model.sync_command_panel_navigation();
+    model.sync_composer_height();
+
+    let first = model.build_document_tail_layout();
+    let first_command_panel_rows = first
+        .anchors
+        .iter()
+        .filter(|anchor| anchor.region == DocumentAnchorRegion::CommandPanel)
+        .count();
+
+    model.set_window(20, 10);
+
+    let second = model.build_document_tail_layout();
+    let second_command_panel_rows = second
+        .anchors
+        .iter()
+        .filter(|anchor| anchor.region == DocumentAnchorRegion::CommandPanel)
+        .count();
+
+    assert!(
+        !Rc::ptr_eq(&first, &second),
+        "height-only resize should invalidate the tail cache when command panel rows depend on viewport height"
+    );
+    assert_eq!(first_command_panel_rows, 3);
+    assert_eq!(second_command_panel_rows, 7);
+    assert_eq!(
+        second_command_panel_rows,
+        model.command_panel_list_visible_rows(),
+        "tail should rebuild command panel rows for the new viewport height"
+    );
+}
+
+#[test]
 fn composed_document_layout_and_viewport_match_the_model_snapshot_behavior() {
     let mut model = ready_document_model(20, 4);
     model
@@ -119,28 +192,6 @@ fn status_line_selectable_range_skips_leading_inset() {
 }
 
 #[test]
-fn transcript_line_text_falls_back_to_item_render_when_snapshot_plain_lines_are_missing() {
-    let mut model = ready_document_model(20, 4);
-    model.transcript_mut().clear();
-    model
-        .transcript_mut()
-        .append_message(Sender::Assistant, "alpha");
-    model.sync_transcript_render();
-
-    let layout = model.build_document_layout();
-    let mut degraded = (*layout).clone();
-    degraded.transcript = Rc::new(DocumentTranscriptSnapshot {
-        plain_lines: Rc::new(vec![String::new(); degraded.transcript_line_count]),
-        ..layout.transcript.as_ref().clone()
-    });
-
-    assert_eq!(
-        degraded.line_at(0).map(|line| line.plain_line),
-        Some("alpha".to_string())
-    );
-}
-
-#[test]
 fn current_document_transcript_snapshot_reuses_render_storage() {
     let mut model = ready_document_model(20, 4);
     model.transcript_mut().clear();
@@ -151,15 +202,33 @@ fn current_document_transcript_snapshot_reuses_render_storage() {
 
     let snapshot = model.current_document_transcript_snapshot();
 
-    assert_eq!(
-        snapshot.lines.as_ptr(),
-        model.transcript_render.lines.as_ptr(),
-        "document transcript snapshot should share transcript render lines instead of cloning them"
+    assert!(
+        Rc::ptr_eq(&snapshot.render, &model.transcript_render),
+        "document transcript snapshot should share the transcript render result instead of cloning it"
     );
+}
+
+#[test]
+fn transcript_line_access_uses_structured_render_result() {
+    let mut model = ready_document_model(20, 4);
+    model.transcript_mut().clear();
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "alpha\nbeta");
+    model.sync_transcript_render();
+
+    let layout = model.build_document_layout();
+    let first_line = layout
+        .line_at(0)
+        .expect("transcript line should resolve from the structured render result");
+
+    assert_eq!(first_line.plain_line, "alpha");
+    assert_eq!(first_line.anchor.transcript.item_index, 0);
     assert_eq!(
-        snapshot.plain_lines.as_ptr(),
-        model.transcript_render.plain_lines.as_ptr(),
-        "document transcript snapshot should share transcript render plain lines instead of cloning them"
+        layout.transcript.render.all_line_anchors()[1]
+            .item_anchor
+            .rendered_line,
+        1
     );
 }
 
@@ -424,6 +493,66 @@ fn viewport_state_restores_rendered_transcript_anchor_by_semantic_position_after
         restored_anchor.transcript_semantic_position,
         TranscriptSemanticPosition::End
     );
+}
+
+#[test]
+fn viewport_state_restores_transcript_separator_anchor_after_resize() {
+    let mut model = ready_document_model(18, 1);
+    model.transcript_mut().append_message(
+        Sender::Assistant,
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa",
+    );
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "omega");
+    model.sync_transcript_render();
+
+    let layout = model.build_document_layout();
+    let separator_offset = (0..layout.line_count())
+        .find(|&index| {
+            layout.line_anchor_at(index).is_some_and(|anchor| {
+                matches!(anchor.region, DocumentAnchorRegion::Transcript)
+                    && anchor.transcript.item_index == 0
+                    && matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap)
+            })
+        })
+        .expect("separator line should exist between transcript items");
+    let state = model.capture_viewport_state_with_layout(&layout, separator_offset, false, true);
+
+    assert!(matches!(
+        state.anchor(),
+        ViewAnchor::Line(anchor)
+            if matches!(anchor.line_anchor.region, DocumentAnchorRegion::Transcript)
+                && anchor.line_anchor.transcript.item_index == 0
+                && matches!(anchor.line_anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap)
+    ));
+
+    model.set_window(12, 1);
+    let resized_layout = model.build_document_layout();
+    let expected_separator_offset = (0..resized_layout.line_count())
+        .find(|&index| {
+            resized_layout.line_anchor_at(index).is_some_and(|anchor| {
+                matches!(anchor.region, DocumentAnchorRegion::Transcript)
+                    && anchor.transcript.item_index == 0
+                    && matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap)
+            })
+        })
+        .expect("separator line should survive resize");
+    assert_ne!(
+        separator_offset, expected_separator_offset,
+        "test fixture should move the separator after resize"
+    );
+
+    let resolved_offset = state.resolve_offset(&resized_layout, model.document_viewport_height());
+    let restored_anchor = document_viewport_anchor_at_line(&resized_layout, resolved_offset)
+        .expect("resolved viewport offset should still point at a transcript line");
+
+    assert_eq!(resolved_offset, expected_separator_offset);
+    assert_eq!(restored_anchor.line_anchor.transcript.item_index, 0);
+    assert!(matches!(
+        restored_anchor.line_anchor.transcript.item_anchor.kind,
+        LineAnchorKind::ItemGap
+    ));
 }
 
 #[test]

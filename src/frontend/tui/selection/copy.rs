@@ -6,33 +6,35 @@ use crate::frontend::tui::document::{DocumentAnchorRegion, DocumentLayout};
 use super::{SelectionState, selection_columns_for_line, selection_ends_before_line_content};
 
 pub(crate) fn selection_text(layout: &DocumentLayout, selection: SelectionState) -> Option<String> {
-    let (start, end) = selection.ordered_points()?;
+    let (start, end) = selection.ordered_points(layout)?;
     if start.line() >= layout.line_count() || end.line() >= layout.line_count() {
         return None;
     }
 
     let mut lines = Vec::with_capacity(end.line().saturating_sub(start.line()) + 1);
     for line in start.line()..=end.line() {
-        if let Some(line_data) = layout.line_at(line)
+        if let Some(line_data) = layout.selection_line_at(line)
             && let Some((start_column, end_column)) =
-                selection_columns_for_line(selection, line, line_data.selectable)
+                selection_columns_for_line(selection, layout, line, line_data.selectable)
         {
             lines.push(selection_text_for_line(
-                &line_data.plain_line,
+                &line_data.text,
                 start_column,
                 end_column,
             ));
             continue;
         }
 
-        let line_data = layout.line_at(line);
+        let line_data = layout.selection_line_at(line);
         let preserves_blank = line_data
             .as_ref()
             .is_some_and(|line_data| line_preserves_blank_selection(&line_data.anchor));
         let selectable = line_data
             .map(|line_data| line_data.selectable)
             .unwrap_or_default();
-        if preserves_blank || selection_ends_before_line_content(selection, line, selectable) {
+        if preserves_blank
+            || selection_ends_before_line_content(selection, layout, line, selectable)
+        {
             lines.push(String::new());
         }
     }
@@ -97,8 +99,14 @@ mod tests {
         let layout = DocumentLayout::default();
         let mut selection = SelectionState::default();
         selection.select_range(
-            super::super::SelectionPoint::new(1, 0),
-            super::super::SelectionPoint::new(2, 1),
+            super::super::SelectionPoint::new(
+                crate::frontend::tui::document::DocumentLineAnchor::default(),
+                0,
+            ),
+            super::super::SelectionPoint::new(
+                crate::frontend::tui::document::DocumentLineAnchor::default(),
+                1,
+            ),
         );
 
         assert_eq!(selection_text(&layout, selection), None);

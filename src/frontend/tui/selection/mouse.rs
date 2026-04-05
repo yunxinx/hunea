@@ -46,7 +46,7 @@ impl Model {
                         }
                         3 => {
                             self.clear_pending_composer_cursor_click();
-                            self.select_line_at_point(click.selection_point.line(), &layout);
+                            self.select_line_at_point(click.selection_point, &layout);
                             return None;
                         }
                         _ => {}
@@ -64,7 +64,7 @@ impl Model {
                     match self.register_selection_click(point, Instant::now()) {
                         2 if self.select_word_at_point(point, &layout) => return None,
                         3 => {
-                            self.select_line_at_point(point.line(), &layout);
+                            self.select_line_at_point(point, &layout);
                             return None;
                         }
                         _ => {
@@ -109,7 +109,9 @@ impl Model {
                 self.start_selection(click.selection_point);
                 self.finish_selection(point);
                 self.reset_selection_click();
-                if self.copy_on_mouse_selection_release && self.selection.ordered_points().is_some()
+                let layout = self.build_document_layout();
+                if self.copy_on_mouse_selection_release
+                    && self.selection.ordered_points(&layout).is_some()
                 {
                     return self.request_copy_selection();
                 }
@@ -141,7 +143,9 @@ impl Model {
             }
         }
 
-        let completed_drag_selection = was_dragging && self.selection.ordered_points().is_some();
+        let layout = self.build_document_layout();
+        let completed_drag_selection =
+            was_dragging && self.selection.ordered_points(&layout).is_some();
         if completed_drag_selection {
             self.reset_selection_click();
         }

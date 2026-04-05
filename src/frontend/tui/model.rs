@@ -10,7 +10,7 @@ use super::{
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
     document::{
-        LayoutCache, RestoreState, TranscriptCache, ViewportCache, ViewportState,
+        LayoutCache, RestoreState, TailLayoutCache, TranscriptCache, ViewportCache, ViewportState,
         offset_viewport_line_indices,
     },
     external_editor::ExternalEditorLaunch,
@@ -56,6 +56,7 @@ pub struct Model {
     pub(super) document_viewport_y: usize,
     pub(super) document_viewport_state: ViewportState,
     pub(super) document_transcript_cache: TranscriptCache,
+    pub(super) document_tail_layout_cache: TailLayoutCache,
     pub(super) document_layout_cache: LayoutCache,
     pub(super) document_viewport_cache: ViewportCache,
     pub(super) has_palette: bool,
@@ -164,6 +165,7 @@ impl Model {
             document_viewport_y: 0,
             document_viewport_state: ViewportState::default(),
             document_transcript_cache: TranscriptCache::default(),
+            document_tail_layout_cache: TailLayoutCache::default(),
             document_layout_cache: LayoutCache::default(),
             document_viewport_cache: ViewportCache::default(),
             has_palette: false,
@@ -352,9 +354,6 @@ impl Model {
     }
 
     pub(crate) fn sync_transcript_render(&mut self) {
-        if self.selection.is_active() {
-            self.invalidate_selection_for_reflow();
-        }
         self.transcript_render = self.transcript.render();
         self.transcript_render_version += 1;
         self.invalidate_document_viewport_cache();

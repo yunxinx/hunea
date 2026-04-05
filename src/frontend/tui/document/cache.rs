@@ -2,14 +2,17 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use ratatui::text::Line;
 
+#[cfg(test)]
+use crate::frontend::tui::transcript::{ItemLineAnchor, LineAnchor, LineAnchorKind};
 use crate::frontend::tui::{
     composer,
-    document::slot_frame::SlotFrame,
     selection::SelectableLineRange,
     style_mode::StyleMode,
     theme::TerminalPalette,
     transcript::{self, TranscriptItem},
 };
+
+use super::{slot_frame::SlotFrame, tail::DocumentTailLayout};
 
 /// `DocumentTranscriptKey` 描述 transcript->document 中间快照的命中条件。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -27,6 +30,7 @@ pub(crate) struct DocumentTranscriptSnapshot {
     pub(super) width: u16,
     pub(super) palette: TerminalPalette,
     pub(super) items: HashMap<usize, TranscriptItem>,
+    pub(super) item_text_lines_cache: Rc<RefCell<HashMap<usize, Vec<String>>>>,
     pub(super) selectable_cache: Rc<RefCell<HashMap<usize, Vec<SelectableLineRange>>>>,
 }
 
@@ -39,6 +43,7 @@ impl Default for DocumentTranscriptSnapshot {
             width: 0,
             palette: crate::frontend::tui::theme::default_palette(),
             items: HashMap::new(),
+            item_text_lines_cache: Rc::new(RefCell::new(HashMap::new())),
             selectable_cache: Rc::new(RefCell::new(HashMap::new())),
         }
     }
@@ -75,10 +80,7 @@ pub(crate) struct DocumentLayout {
     pub(super) transcript: Rc<DocumentTranscriptSnapshot>,
     pub(crate) transcript_line_count: usize,
     pub(super) transcript_items: HashMap<usize, DocumentTranscriptItemLines>,
-    pub(crate) tail_lines: Vec<Line<'static>>,
-    pub(crate) tail_plain_lines: Vec<String>,
-    pub(super) tail_anchors: Vec<DocumentLineAnchor>,
-    pub(super) tail_selectable: Vec<SelectableLineRange>,
+    pub(crate) tail: Rc<DocumentTailLayout>,
     pub(crate) composer_slot: SlotFrame,
     pub(super) composer_start_line: usize,
     pub(crate) composer_line_count: usize,
@@ -106,19 +108,45 @@ impl DocumentLayout {
                     .iter()
                     .map(|line| (*line).to_string())
                     .collect(),
-                anchors: vec![DocumentLineAnchor::default(); transcript_plain_lines.len()],
+                anchors: transcript_plain_lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| DocumentLineAnchor {
+                        region: DocumentAnchorRegion::Transcript,
+                        transcript: LineAnchor {
+                            item_index: index,
+                            item_anchor: ItemLineAnchor {
+                                kind: LineAnchorKind::RenderedLine,
+                                rendered_line: 0,
+                                ..ItemLineAnchor::default()
+                            },
+                        },
+                        ..DocumentLineAnchor::default()
+                    })
+                    .collect(),
                 ..DocumentTranscriptSnapshot::default()
             }),
-            tail_lines: tail_plain_lines
-                .iter()
-                .map(|line| Line::raw((*line).to_string()))
-                .collect(),
-            tail_plain_lines: tail_plain_lines
-                .iter()
-                .map(|line| (*line).to_string())
-                .collect(),
-            tail_anchors: vec![DocumentLineAnchor::default(); tail_plain_lines.len()],
-            tail_selectable: vec![SelectableLineRange::default(); tail_plain_lines.len()],
+            tail: Rc::new(DocumentTailLayout {
+                lines: tail_plain_lines
+                    .iter()
+                    .map(|line| Line::raw((*line).to_string()))
+                    .collect(),
+                text_lines: tail_plain_lines
+                    .iter()
+                    .map(|line| (*line).to_string())
+                    .collect(),
+                anchors: tail_plain_lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| DocumentLineAnchor {
+                        region: DocumentAnchorRegion::Composer,
+                        gap_index: index,
+                        ..DocumentLineAnchor::default()
+                    })
+                    .collect(),
+                selectable: vec![SelectableLineRange::default(); tail_plain_lines.len()],
+                ..DocumentTailLayout::default()
+            }),
             ..Self::default()
         }
     }

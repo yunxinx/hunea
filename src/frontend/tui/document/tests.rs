@@ -42,6 +42,31 @@ fn build_document_layout_combines_transcript_and_composer_snapshots() {
 }
 
 #[test]
+fn document_tail_layout_cache_reuses_tail_when_transcript_append_keeps_tail_inputs_stable() {
+    let mut model = ready_document_model(20, 4);
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "history");
+    model.sync_transcript_render();
+    model.composer_mut().set_text_for_test("draft");
+    model.sync_composer_height();
+
+    let first = model.build_document_tail_layout();
+
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "new history");
+    model.sync_transcript_render();
+
+    let second = model.build_document_tail_layout();
+
+    assert!(
+        Rc::ptr_eq(&first, &second),
+        "tail layout should stay cached when transcript append does not change tail inputs"
+    );
+}
+
+#[test]
 fn composed_document_layout_and_viewport_match_the_model_snapshot_behavior() {
     let mut model = ready_document_model(20, 4);
     model
@@ -94,10 +119,35 @@ fn status_line_selectable_range_skips_leading_inset() {
 }
 
 #[test]
+fn transcript_line_text_falls_back_to_item_render_when_snapshot_plain_lines_are_missing() {
+    let mut model = ready_document_model(20, 4);
+    model.transcript_mut().clear();
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "alpha");
+    model.sync_transcript_render();
+
+    let layout = model.build_document_layout();
+    let mut degraded = (*layout).clone();
+    degraded.transcript = Rc::new(DocumentTranscriptSnapshot {
+        plain_lines: vec![String::new(); degraded.transcript_line_count],
+        ..layout.transcript.as_ref().clone()
+    });
+
+    assert_eq!(
+        degraded.line_at(0).map(|line| line.plain_line),
+        Some("alpha".to_string())
+    );
+}
+
+#[test]
 fn visible_document_lines_tracks_cursor_visibility() {
     let layout = DocumentLayout {
-        tail_lines: vec![Line::raw("a"), Line::raw("b"), Line::raw("c")],
-        tail_plain_lines: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        tail: Rc::new(DocumentTailLayout {
+            lines: vec![Line::raw("a"), Line::raw("b"), Line::raw("c")],
+            text_lines: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            ..DocumentTailLayout::default()
+        }),
         cursor_x: 4,
         cursor_y: 1,
         ..DocumentLayout::default()
@@ -374,7 +424,7 @@ fn build_document_layout_matches_full_compose_after_transcript_append() {
 
     assert_eq!(layout.all_plain_lines(), expected.all_plain_lines());
     assert_eq!(layout.all_line_anchors(), expected.all_line_anchors());
-    assert_eq!(layout.tail_selectable, expected.tail_selectable);
+    assert_eq!(layout.tail.selectable, expected.tail.selectable);
     assert_eq!(layout.composer_slot, expected.composer_slot);
     assert_eq!(layout.cursor_y, expected.cursor_y);
 }
@@ -455,7 +505,7 @@ fn build_document_layout_matches_full_compose_after_appending_to_non_empty_trans
 
     assert_eq!(layout.all_plain_lines(), expected.all_plain_lines());
     assert_eq!(layout.all_line_anchors(), expected.all_line_anchors());
-    assert_eq!(layout.tail_selectable, expected.tail_selectable);
+    assert_eq!(layout.tail.selectable, expected.tail.selectable);
     assert_eq!(layout.composer_slot, expected.composer_slot);
     assert_eq!(layout.cursor_y, expected.cursor_y);
 }

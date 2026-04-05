@@ -1,6 +1,8 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::frontend::tui::document::DocumentLayout;
+
 use super::SelectionState;
 
 /// `SelectableLineRange` 描述一条渲染行里真正可落点、可复制的正文列范围。
@@ -103,10 +105,11 @@ pub(crate) fn normalize_transcript_selectable_range(
 
 pub(crate) fn selection_columns_for_line(
     selection: SelectionState,
+    layout: &DocumentLayout,
     line: usize,
     selectable: SelectableLineRange,
 ) -> Option<(usize, usize)> {
-    let (start, end) = selection.ordered_points()?;
+    let (start, end) = selection.ordered_points(layout)?;
     if line < start.line() || line > end.line() || !selectable.has_content() {
         return None;
     }
@@ -137,10 +140,11 @@ pub(crate) fn selection_columns_for_line(
 
 pub(crate) fn selection_ends_before_line_content(
     selection: SelectionState,
+    layout: &DocumentLayout,
     line: usize,
     selectable: SelectableLineRange,
 ) -> bool {
-    let Some((start, end)) = selection.ordered_points() else {
+    let Some((start, end)) = selection.ordered_points(layout) else {
         return false;
     };
     if start.line() >= end.line() || line != end.line() {
@@ -279,7 +283,13 @@ fn column_for_byte_offset(cells: &[VisibleTextCell], byte_offset: usize) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frontend::tui::document::DocumentLayout;
     use crate::frontend::tui::selection::{SelectionPoint, SelectionState};
+
+    fn selection_test_layout(line_count: usize) -> DocumentLayout {
+        let lines = vec![""; line_count];
+        DocumentLayout::with_test_plain_lines(0, &lines)
+    }
 
     #[test]
     fn selectable_range_reports_semantic_content_and_anchor_bounds() {
@@ -304,11 +314,15 @@ mod tests {
 
     #[test]
     fn selection_columns_respect_single_line_range() {
+        let layout = selection_test_layout(2);
         let mut selection = SelectionState::default();
-        selection.select_range(SelectionPoint::new(1, 2), SelectionPoint::new(1, 5));
+        selection.select_range(
+            SelectionPoint::new(layout.line_anchor_at(1).expect("line anchor"), 2),
+            SelectionPoint::new(layout.line_anchor_at(1).expect("line anchor"), 5),
+        );
 
         assert_eq!(
-            selection_columns_for_line(selection, 1, SelectableLineRange::new(0, 10)),
+            selection_columns_for_line(selection, &layout, 1, SelectableLineRange::new(0, 10)),
             Some((2, 5))
         );
     }

@@ -2,13 +2,13 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use ratatui::text::Line;
 
-use crate::frontend::tui::selection::SelectableLineRange;
 use crate::frontend::tui::transcript::{Transcript, TranscriptItem};
 
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutKey, DocumentLineAnchor,
-    DocumentTranscriptSnapshot, layout::transcript_composer_gap_line_count,
-    line_access::new_document_transcript_item_index,
+    DocumentTranscriptSnapshot,
+    layout::{DocumentLayoutInput, compose_document_layout},
+    tail_layout_with_transcript_gap,
 };
 
 /// `DocumentTranscriptAppend` 表示 transcript 尾部新增到 unified document 的稳定片段。
@@ -78,55 +78,13 @@ pub(crate) fn extend_document_layout_from_transcript_append(
         return base.clone();
     }
 
-    let appended_line_count = appended.lines.len();
-    let line_delta = appended_line_count
-        + usize::from(appended.previous_transcript_line_count == 0)
-            * transcript_composer_gap_line_count();
-    let mut tail_lines = base.tail_lines.clone();
-    let mut tail_plain_lines = base.tail_plain_lines.clone();
-    let mut tail_anchors = base.tail_anchors.clone();
-    let mut tail_selectable = base.tail_selectable.clone();
+    let tail = if appended.previous_transcript_line_count == 0 {
+        Rc::new(tail_layout_with_transcript_gap(base.tail.as_ref()))
+    } else {
+        Rc::clone(&base.tail)
+    };
 
-    if appended.previous_transcript_line_count == 0 {
-        let mut gap_lines = Vec::with_capacity(transcript_composer_gap_line_count());
-        let mut gap_plain_lines = Vec::with_capacity(transcript_composer_gap_line_count());
-        let mut gap_anchors = Vec::with_capacity(transcript_composer_gap_line_count());
-        let mut gap_selectable = Vec::with_capacity(transcript_composer_gap_line_count());
-        for gap_index in 0..transcript_composer_gap_line_count() {
-            gap_lines.push(Line::raw(""));
-            gap_plain_lines.push(String::new());
-            gap_anchors.push(DocumentLineAnchor {
-                region: DocumentAnchorRegion::TranscriptComposerGap,
-                gap_index,
-                ..DocumentLineAnchor::default()
-            });
-            gap_selectable.push(SelectableLineRange::default());
-        }
-        tail_lines.splice(0..0, gap_lines);
-        tail_plain_lines.splice(0..0, gap_plain_lines);
-        tail_anchors.splice(0..0, gap_anchors);
-        tail_selectable.splice(0..0, gap_selectable);
-    }
-    let transcript_items = new_document_transcript_item_index(transcript.as_ref());
-
-    let mut composer_slot = base.composer_slot;
-    composer_slot.frame_start_line += line_delta;
-    composer_slot.content_start_line += line_delta;
-
-    DocumentLayout {
-        transcript,
-        transcript_line_count: base.transcript_line_count + appended_line_count,
-        transcript_items,
-        tail_lines,
-        tail_plain_lines,
-        tail_anchors,
-        tail_selectable,
-        composer_slot,
-        composer_start_line: base.composer_start_line + line_delta,
-        composer_line_count: base.composer_line_count,
-        cursor_x: base.cursor_x,
-        cursor_y: base.cursor_y + line_delta,
-    }
+    compose_document_layout(DocumentLayoutInput { transcript, tail })
 }
 
 /// `extend_document_transcript_snapshot_from_append` 把新追加的 transcript 尾部并入旧快照。
@@ -160,6 +118,7 @@ pub(crate) fn extend_document_transcript_snapshot_from_append(
         width: base.width,
         palette: base.palette,
         items,
+        item_text_lines_cache: Rc::new(RefCell::new(base.item_text_lines_cache.borrow().clone())),
         selectable_cache: Rc::new(RefCell::new(base.selectable_cache.borrow().clone())),
     }
 }

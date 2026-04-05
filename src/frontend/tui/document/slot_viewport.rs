@@ -150,7 +150,7 @@ fn contiguous_line_range(line_indices: &[usize]) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::tui::document::slot_frame::SlotFrame;
+    use crate::frontend::tui::document::{DocumentTailLayout, slot_frame::SlotFrame};
     use crate::frontend::tui::{HeroOptions, Model};
 
     #[test]
@@ -160,16 +160,19 @@ mod tests {
         model.has_window = true;
 
         let layout = DocumentLayout {
-            tail_lines: vec![
-                Line::raw("frame-top"),
-                Line::raw("input-line"),
-                Line::raw("frame-bottom"),
-            ],
-            tail_plain_lines: vec![
-                "frame-top".to_string(),
-                "input-line".to_string(),
-                "frame-bottom".to_string(),
-            ],
+            tail: std::rc::Rc::new(DocumentTailLayout {
+                lines: vec![
+                    Line::raw("frame-top"),
+                    Line::raw("input-line"),
+                    Line::raw("frame-bottom"),
+                ],
+                text_lines: vec![
+                    "frame-top".to_string(),
+                    "input-line".to_string(),
+                    "frame-bottom".to_string(),
+                ],
+                ..DocumentTailLayout::default()
+            }),
             composer_slot: SlotFrame::new(0, true, 1),
             cursor_x: 2,
             cursor_y: 1,
@@ -196,18 +199,21 @@ mod tests {
         model.has_window = true;
 
         let layout = DocumentLayout {
-            tail_lines: vec![
-                Line::raw("frame-top"),
-                Line::raw("input-line"),
-                Line::raw("frame-bottom"),
-                Line::raw("status-line"),
-            ],
-            tail_plain_lines: vec![
-                "frame-top".to_string(),
-                "input-line".to_string(),
-                "frame-bottom".to_string(),
-                "status-line".to_string(),
-            ],
+            tail: std::rc::Rc::new(DocumentTailLayout {
+                lines: vec![
+                    Line::raw("frame-top"),
+                    Line::raw("input-line"),
+                    Line::raw("frame-bottom"),
+                    Line::raw("status-line"),
+                ],
+                text_lines: vec![
+                    "frame-top".to_string(),
+                    "input-line".to_string(),
+                    "frame-bottom".to_string(),
+                    "status-line".to_string(),
+                ],
+                ..DocumentTailLayout::default()
+            }),
             composer_slot: SlotFrame::new(0, true, 1),
             cursor_x: 2,
             cursor_y: 1,

@@ -1,12 +1,20 @@
 use crate::frontend::tui::{
     Model,
-    document::{DocumentAnchorRegion, DocumentLayout, DocumentViewport},
+    document::{DocumentAnchorRegion, DocumentLayout, DocumentLineAnchor, DocumentViewport},
 };
 
 use super::{
     SelectableLineRange, SelectionPoint, SelectionState, apply_selection_to_line,
     selection_columns_for_line,
 };
+
+/// `VisibleSelectableRange` 表示当前 viewport 中一段可见的选区高亮投影。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VisibleSelectableRange {
+    pub(crate) viewport_row: usize,
+    pub(crate) start_column: usize,
+    pub(crate) end_column: usize,
+}
 
 impl Model {
     pub(crate) fn selection_point_for_mouse_with_layout(
@@ -18,11 +26,12 @@ impl Model {
         let line = *self
             .document_viewport_line_indices(layout)
             .get(usize::from(row))?;
-        let selectable = layout
-            .line_at(line)
-            .map(|line_data| line_data.selectable)
-            .unwrap_or_default();
-        selection_point_for_selectable_line(usize::from(column), line, selectable)
+        let selection_line = layout.selection_line_at(line)?;
+        selection_point_for_selectable_line(
+            usize::from(column),
+            selection_line.anchor,
+            selection_line.selectable,
+        )
     }
 
     pub(crate) fn selection_point_for_drag_mouse(
@@ -38,11 +47,12 @@ impl Model {
 
         let clamped_row = usize::from(row).min(line_indices.len().saturating_sub(1));
         let line = *line_indices.get(clamped_row)?;
-        let selectable = layout
-            .line_at(line)
-            .map(|line_data| line_data.selectable)
-            .unwrap_or_default();
-        selection_point_for_drag_on_selectable_line(usize::from(column), line, selectable)
+        let selection_line = layout.selection_line_at(line)?;
+        selection_point_for_drag_on_selectable_line(
+            usize::from(column),
+            selection_line.anchor,
+            selection_line.selectable,
+        )
     }
 
     pub(crate) fn document_viewport_line_indices(&self, layout: &DocumentLayout) -> Vec<usize> {
@@ -67,7 +77,7 @@ impl Model {
 }
 
 fn selection_intersects_status_line(layout: &DocumentLayout, selection: SelectionState) -> bool {
-    let Some((start, end)) = selection.ordered_points() else {
+    let Some((start, end)) = selection.ordered_points(layout) else {
         return false;
     };
 
@@ -85,7 +95,7 @@ fn selection_intersects_status_line(layout: &DocumentLayout, selection: Selectio
 
 fn selection_point_for_selectable_line(
     column: usize,
-    line: usize,
+    anchor: DocumentLineAnchor,
     selectable: SelectableLineRange,
 ) -> Option<SelectionPoint> {
     if !selectable.contains(column) {
@@ -93,19 +103,53 @@ fn selection_point_for_selectable_line(
     }
 
     Some(SelectionPoint::new(
-        line,
+        anchor,
         if selectable.has_content() { column } else { 0 },
     ))
 }
 
 fn selection_point_for_drag_on_selectable_line(
     column: usize,
-    line: usize,
+    anchor: DocumentLineAnchor,
     selectable: SelectableLineRange,
 ) -> Option<SelectionPoint> {
     selectable
         .has_anchor()
-        .then_some(SelectionPoint::new(line, selectable.clamp(column)))
+        .then_some(SelectionPoint::new(anchor, selectable.clamp(column)))
+}
+
+pub(crate) fn visible_selection_ranges(
+    viewport: &DocumentViewport,
+    layout: &DocumentLayout,
+    selection: SelectionState,
+) -> Vec<VisibleSelectableRange> {
+    let Some((start, end)) = selection.ordered_points(layout) else {
+        return Vec::new();
+    };
+
+    let mut visible = Vec::new();
+    for viewport_row in 0..viewport.lines.len() {
+        let absolute_line = viewport.resolved_offset + viewport_row;
+        if absolute_line < start.line() || absolute_line > end.line() {
+            continue;
+        }
+
+        let Some(selection_line) = layout.selection_line_at(absolute_line) else {
+            continue;
+        };
+        let Some((start_column, end_column)) =
+            selection_columns_for_line(selection, layout, absolute_line, selection_line.selectable)
+        else {
+            continue;
+        };
+        visible.push(VisibleSelectableRange {
+            viewport_row,
+            start_column,
+            end_column,
+        });
+    }
+
+    visible
 }
 
 pub(crate) fn apply_selection_to_viewport(
@@ -113,28 +157,9 @@ pub(crate) fn apply_selection_to_viewport(
     layout: &DocumentLayout,
     selection: SelectionState,
 ) {
-    let Some((start, end)) = selection.ordered_points() else {
-        return;
-    };
-
-    for (index, line) in viewport.lines.iter_mut().enumerate() {
-        let absolute_line = viewport.resolved_offset + index;
-        if absolute_line < start.line() || absolute_line > end.line() {
-            continue;
+    for visible in visible_selection_ranges(viewport, layout, selection) {
+        if let Some(line) = viewport.lines.get_mut(visible.viewport_row) {
+            *line = apply_selection_to_line(line, visible.start_column, visible.end_column);
         }
-
-        let Some(selectable) = layout
-            .line_at(absolute_line)
-            .map(|line_data| line_data.selectable)
-        else {
-            continue;
-        };
-        let Some((start_column, end_column)) =
-            selection_columns_for_line(selection, absolute_line, selectable)
-        else {
-            continue;
-        };
-
-        *line = apply_selection_to_line(line, start_column, end_column);
     }
 }

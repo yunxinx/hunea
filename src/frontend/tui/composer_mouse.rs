@@ -54,8 +54,11 @@ impl Model {
         }
 
         let selectable = line_data.selectable;
-        let selection_point =
-            selection_point_for_drag_selectable_line(usize::from(column), line, selectable)?;
+        let selection_point = selection_point_for_drag_selectable_line(
+            usize::from(column),
+            line_data.anchor,
+            selectable,
+        )?;
         let (logical_line, logical_column) = composer::cursor_position_for_line_anchor_click(
             &self.composer,
             line_data.anchor.composer,
@@ -112,14 +115,11 @@ impl Model {
         let Some(line) = line_indices.get(usize::from(row)).copied() else {
             return false;
         };
-        if line != click.selection_point.line() {
-            return false;
-        }
-
         let Some(line_data) = layout.line_at(line) else {
             return false;
         };
         if line_data.anchor.region != DocumentAnchorRegion::Composer
+            || line_data.anchor != click.selection_point.anchor()
             || click.logical_column != line_data.anchor.composer.end_char
         {
             return false;
@@ -148,22 +148,19 @@ impl Model {
         let Some(line) = line_indices.get(usize::from(row)).copied() else {
             return false;
         };
-        if line != click.selection_point.line() {
-            return false;
-        }
-
-        layout
-            .line_at(line)
-            .is_some_and(|line_data| line_data.anchor.region == DocumentAnchorRegion::Composer)
+        layout.line_at(line).is_some_and(|line_data| {
+            line_data.anchor.region == DocumentAnchorRegion::Composer
+                && line_data.anchor == click.selection_point.anchor()
+        })
     }
 }
 
 fn selection_point_for_drag_selectable_line(
     column: usize,
-    line: usize,
+    anchor: crate::frontend::tui::document::DocumentLineAnchor,
     selectable: SelectableLineRange,
 ) -> Option<SelectionPoint> {
     selectable
         .has_anchor()
-        .then_some(SelectionPoint::new(line, selectable.clamp(column)))
+        .then_some(SelectionPoint::new(anchor, selectable.clamp(column)))
 }

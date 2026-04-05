@@ -376,6 +376,13 @@ impl TranscriptItem {
         }
     }
 
+    pub(crate) fn render_plain_lines(&self, width: u16, palette: TerminalPalette) -> Vec<String> {
+        self.render_lines(width, palette)
+            .iter()
+            .map(line_to_plain_text)
+            .collect()
+    }
+
     fn render_line_anchors(&self, width: u16, palette: TerminalPalette) -> Vec<ItemLineAnchor> {
         match self {
             Self::Hero(item) => item.render_line_anchors(width, palette),

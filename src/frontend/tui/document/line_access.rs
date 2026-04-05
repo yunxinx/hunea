@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use crate::frontend::tui::{
-    selection::{SelectableLineRange, normalize_transcript_selectable_range},
+    selection::{
+        ResolvedSelectionPoint, SelectableLineRange, SelectionPoint,
+        normalize_transcript_selectable_range,
+    },
     transcript::LineAnchorKind,
 };
 
@@ -10,10 +13,18 @@ use super::{
     DocumentTranscriptItemLines, DocumentTranscriptSnapshot,
 };
 
+/// `DocumentSelectionLine` 表示 selection / copy 路径消费的一条语义行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DocumentSelectionLine {
+    pub(crate) text: String,
+    pub(crate) anchor: DocumentLineAnchor,
+    pub(crate) selectable: SelectableLineRange,
+}
+
 impl DocumentLayout {
     /// `line_count` 返回 unified document 的总行数。
     pub(crate) fn line_count(&self) -> usize {
-        self.transcript_line_count + self.tail_lines.len()
+        self.transcript_line_count + self.tail.lines.len()
     }
 
     /// `plain_text_len` 返回 unified document 纯文本的总字符数（含换行分隔）。
@@ -42,7 +53,7 @@ impl DocumentLayout {
             if used_transcript {
                 total += 1;
             }
-            total += plain_lines_len(&self.tail_plain_lines[tail_start..tail_end]);
+            total += plain_lines_len(&self.tail.text_lines[tail_start..tail_end]);
         }
 
         total
@@ -59,22 +70,26 @@ impl DocumentLayout {
 
         Some(DocumentLayoutLine {
             line: self
-                .tail_lines
+                .tail
+                .lines
                 .get(index - self.transcript_line_count)
                 .cloned()
                 .unwrap_or_default(),
             plain_line: self
-                .tail_plain_lines
+                .tail
+                .text_lines
                 .get(index - self.transcript_line_count)
                 .cloned()
                 .unwrap_or_default(),
             anchor: self
-                .tail_anchors
+                .tail
+                .anchors
                 .get(index - self.transcript_line_count)
                 .copied()
                 .unwrap_or_default(),
             selectable: self
-                .tail_selectable
+                .tail
+                .selectable
                 .get(index - self.transcript_line_count)
                 .copied()
                 .unwrap_or_default(),
@@ -88,16 +103,76 @@ impl DocumentLayout {
 
     /// `line_anchor_at` 返回指定视觉行的锚点。
     pub(crate) fn line_anchor_at(&self, index: usize) -> Option<DocumentLineAnchor> {
+        self.selection_line_at(index).map(|line| line.anchor)
+    }
+
+    /// `line_index_for_anchor` 把语义锚点解析回当前布局中的视觉行。
+    pub(crate) fn line_index_for_anchor(&self, target: DocumentLineAnchor) -> Option<usize> {
+        if target.region == DocumentAnchorRegion::Transcript {
+            return self
+                .transcript
+                .anchors
+                .iter()
+                .position(|anchor| *anchor == target);
+        }
+
+        self.tail
+            .anchors
+            .iter()
+            .position(|anchor| *anchor == target)
+            .map(|index| self.transcript_line_count + index)
+    }
+
+    /// `resolve_selection_point` 把语义选区端点投影回当前布局。
+    pub(crate) fn resolve_selection_point(
+        &self,
+        point: SelectionPoint,
+    ) -> Option<ResolvedSelectionPoint> {
+        Some(ResolvedSelectionPoint::new(
+            self.line_index_for_anchor(point.anchor())?,
+            point.column(),
+        ))
+    }
+
+    /// `selection_line_at` 返回 selection / copy 路径需要的文本与锚点信息。
+    pub(crate) fn selection_line_at(&self, index: usize) -> Option<DocumentSelectionLine> {
         if index >= self.line_count() {
             return None;
         }
         if index < self.transcript_line_count {
-            return self.transcript.anchors.get(index).copied();
+            return self.transcript_selection_line_at(index);
         }
 
-        self.tail_anchors
-            .get(index - self.transcript_line_count)
-            .copied()
+        let tail_index = index - self.transcript_line_count;
+        Some(DocumentSelectionLine {
+            text: self
+                .tail
+                .text_lines
+                .get(tail_index)
+                .cloned()
+                .unwrap_or_default(),
+            anchor: self
+                .tail
+                .anchors
+                .get(tail_index)
+                .copied()
+                .unwrap_or_default(),
+            selectable: self
+                .tail
+                .selectable
+                .get(tail_index)
+                .copied()
+                .unwrap_or_default(),
+        })
+    }
+
+    /// `selection_line_for_anchor` 按语义锚点返回 selection 行。
+    pub(crate) fn selection_line_for_anchor(
+        &self,
+        anchor: DocumentLineAnchor,
+    ) -> Option<DocumentSelectionLine> {
+        let index = self.line_index_for_anchor(anchor)?;
+        self.selection_line_at(index)
     }
 
     #[cfg(test)]
@@ -131,10 +206,24 @@ impl DocumentLayout {
         if start < end {
             let tail_start = start - self.transcript_line_count;
             let tail_end = end - self.transcript_line_count;
-            lines.extend_from_slice(&self.tail_plain_lines[tail_start..tail_end]);
+            lines.extend_from_slice(&self.tail.text_lines[tail_start..tail_end]);
         }
 
         lines
+    }
+
+    #[cfg(test)]
+    fn transcript_line_texts_for_range(&self, start: usize, end: usize) -> Vec<String> {
+        if start >= end || start >= self.transcript_line_count {
+            return Vec::new();
+        }
+
+        (start..end.min(self.transcript_line_count))
+            .filter_map(|index| {
+                let anchor = self.transcript.anchors.get(index).copied()?;
+                self.transcript_line_text_at(index, anchor)
+            })
+            .collect()
     }
 
     /// `lines_for_range` 返回给定连续范围内的带样式行。
@@ -157,7 +246,7 @@ impl DocumentLayout {
         if start < end {
             let tail_start = start - self.transcript_line_count;
             let tail_end = end - self.transcript_line_count;
-            lines.extend_from_slice(&self.tail_lines[tail_start..tail_end]);
+            lines.extend_from_slice(&self.tail.lines[tail_start..tail_end]);
         }
 
         lines
@@ -176,9 +265,9 @@ impl DocumentLayout {
 
     fn transcript_line_at(&self, index: usize) -> Option<DocumentLayoutLine> {
         let line = self.transcript.lines.get(index).cloned()?;
-        let plain_line = self.transcript.plain_lines.get(index).cloned()?;
         let anchor = self.transcript.anchors.get(index).copied()?;
-        let selectable = self.transcript_selectable_at(index, &plain_line, anchor);
+        let plain_line = self.transcript_line_text_at(index, anchor)?;
+        let selectable = self.transcript_selectable_at(anchor, &plain_line);
 
         Some(DocumentLayoutLine {
             line,
@@ -188,11 +277,22 @@ impl DocumentLayout {
         })
     }
 
+    fn transcript_selection_line_at(&self, index: usize) -> Option<DocumentSelectionLine> {
+        let anchor = self.transcript.anchors.get(index).copied()?;
+        let text = self.transcript_line_text_at(index, anchor)?;
+        let selectable = self.transcript_selectable_at(anchor, &text);
+
+        Some(DocumentSelectionLine {
+            text,
+            anchor,
+            selectable,
+        })
+    }
+
     fn transcript_selectable_at(
         &self,
-        _index: usize,
-        plain_line: &str,
         anchor: DocumentLineAnchor,
+        plain_line: &str,
     ) -> SelectableLineRange {
         if anchor.region != DocumentAnchorRegion::Transcript
             || matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap)
@@ -214,6 +314,20 @@ impl DocumentLayout {
         )
     }
 
+    fn transcript_line_text_at(&self, index: usize, anchor: DocumentLineAnchor) -> Option<String> {
+        if matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap) {
+            return Some(String::new());
+        }
+
+        if let Some(lines) = self.transcript_item_text_lines(anchor.transcript.item_index)
+            && anchor.transcript.item_anchor.rendered_line < lines.len()
+        {
+            return Some(lines[anchor.transcript.item_anchor.rendered_line].clone());
+        }
+
+        self.transcript.plain_lines.get(index).cloned()
+    }
+
     fn transcript_selectable_ranges_for_item(
         &self,
         item_index: usize,
@@ -228,9 +342,7 @@ impl DocumentLayout {
             return Some(ranges);
         }
 
-        let item_lines = self.transcript_item_lines(item_index)?;
-        let end = item_lines.content_start_line + item_lines.content_line_count;
-        let plain_lines = self.transcript_line_texts_for_range(item_lines.content_start_line, end);
+        let plain_lines = self.transcript_item_text_lines(item_index)?;
         let item = self.transcript.items.get(&item_index)?;
         let ranges = item.render_selectable_line_ranges(
             self.transcript.width.max(1),
@@ -244,12 +356,24 @@ impl DocumentLayout {
         Some(ranges)
     }
 
-    fn transcript_line_texts_for_range(&self, start: usize, end: usize) -> Vec<String> {
-        if start >= end || start >= self.transcript_line_count {
-            return Vec::new();
+    fn transcript_item_text_lines(&self, item_index: usize) -> Option<Vec<String>> {
+        if let Some(lines) = self
+            .transcript
+            .item_text_lines_cache
+            .borrow()
+            .get(&item_index)
+            .cloned()
+        {
+            return Some(lines);
         }
 
-        self.transcript.plain_lines[start..end.min(self.transcript_line_count)].to_vec()
+        let item = self.transcript.items.get(&item_index)?;
+        let lines = item.render_plain_lines(self.transcript.width.max(1), self.transcript.palette);
+        self.transcript
+            .item_text_lines_cache
+            .borrow_mut()
+            .insert(item_index, lines.clone());
+        Some(lines)
     }
 
     fn transcript_lines_for_range(

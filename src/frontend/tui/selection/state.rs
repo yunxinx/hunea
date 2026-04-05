@@ -1,19 +1,42 @@
 use std::time::{Duration, Instant};
 
+use crate::frontend::tui::document::{DocumentLayout, DocumentLineAnchor};
+
 /// `SELECTION_MULTI_CLICK_WINDOW` 表示双击/三击识别窗口。
 pub(crate) const SELECTION_MULTI_CLICK_WINDOW: Duration = Duration::from_millis(500);
 
 /// `SELECTION_AUTO_SCROLL_INTERVAL` 表示拖拽选区贴边后的自动滚动节奏。
 pub(crate) const SELECTION_AUTO_SCROLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// `SelectionPoint` 用统一文档坐标记录选区端点。
+/// `SelectionPoint` 用语义锚点记录选区端点。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SelectionPoint {
-    line: usize,
+    anchor: DocumentLineAnchor,
     column: usize,
 }
 
 impl SelectionPoint {
+    pub(crate) const fn new(anchor: DocumentLineAnchor, column: usize) -> Self {
+        Self { anchor, column }
+    }
+
+    pub(crate) const fn anchor(self) -> DocumentLineAnchor {
+        self.anchor
+    }
+
+    pub(crate) const fn column(self) -> usize {
+        self.column
+    }
+}
+
+/// `ResolvedSelectionPoint` 表示当前布局中的可见选区端点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolvedSelectionPoint {
+    line: usize,
+    column: usize,
+}
+
+impl ResolvedSelectionPoint {
     pub(crate) const fn new(line: usize, column: usize) -> Self {
         Self { line, column }
     }
@@ -48,13 +71,50 @@ impl MousePosition {
     }
 }
 
+/// `DocumentSelectionRange` 保存 anchor-bound 的语义选区范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct DocumentSelectionRange {
+    anchor: SelectionPoint,
+    focus: SelectionPoint,
+}
+
+impl DocumentSelectionRange {
+    pub(crate) const fn anchor(self) -> SelectionPoint {
+        self.anchor
+    }
+
+    pub(crate) const fn focus(self) -> SelectionPoint {
+        self.focus
+    }
+
+    pub(crate) fn set(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
+        self.anchor = anchor;
+        self.focus = focus;
+    }
+
+    pub(crate) fn ordered_points(
+        self,
+        layout: &DocumentLayout,
+    ) -> Option<(ResolvedSelectionPoint, ResolvedSelectionPoint)> {
+        let mut start = layout.resolve_selection_point(self.anchor)?;
+        let mut end = layout.resolve_selection_point(self.focus)?;
+        if end.line < start.line || (end.line == start.line && end.column < start.column) {
+            std::mem::swap(&mut start, &mut end);
+        }
+        if start == end {
+            return None;
+        }
+
+        Some((start, end))
+    }
+}
+
 /// `SelectionState` 保存当前屏幕选区状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SelectionState {
     active: bool,
     dragging: bool,
-    anchor: SelectionPoint,
-    focus: SelectionPoint,
+    range: DocumentSelectionRange,
 }
 
 impl SelectionState {
@@ -68,26 +128,25 @@ impl SelectionState {
 
     #[cfg(test)]
     pub(crate) const fn anchor(self) -> SelectionPoint {
-        self.anchor
+        self.range.anchor()
     }
 
     pub(crate) const fn focus(self) -> SelectionPoint {
-        self.focus
+        self.range.focus()
     }
 
     pub(crate) fn begin(&mut self, point: SelectionPoint) {
         self.active = true;
         self.dragging = true;
-        self.anchor = point;
-        self.focus = point;
+        self.range.set(point, point);
     }
 
     pub(crate) fn update_focus(&mut self, point: SelectionPoint) {
-        self.focus = point;
+        self.range.set(self.range.anchor(), point);
     }
 
     pub(crate) fn finish(&mut self, point: SelectionPoint) {
-        self.focus = point;
+        self.range.set(self.range.anchor(), point);
         self.dragging = false;
         self.active = true;
     }
@@ -103,25 +162,18 @@ impl SelectionState {
     pub(crate) fn select_range(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
         self.active = true;
         self.dragging = false;
-        self.anchor = anchor;
-        self.focus = focus;
+        self.range.set(anchor, focus);
     }
 
-    pub(crate) fn ordered_points(self) -> Option<(SelectionPoint, SelectionPoint)> {
+    pub(crate) fn ordered_points(
+        self,
+        layout: &DocumentLayout,
+    ) -> Option<(ResolvedSelectionPoint, ResolvedSelectionPoint)> {
         if !self.active {
             return None;
         }
 
-        let mut start = self.anchor;
-        let mut end = self.focus;
-        if end.line < start.line || (end.line == start.line && end.column < start.column) {
-            std::mem::swap(&mut start, &mut end);
-        }
-        if start == end {
-            return None;
-        }
-
-        Some((start, end))
+        self.range.ordered_points(layout)
     }
 }
 
@@ -142,7 +194,7 @@ impl SelectionClickState {
         let mut next_count = 1;
         if let Some(previous_at) = self.at
             && at.duration_since(previous_at) <= SELECTION_MULTI_CLICK_WINDOW
-            && self.point.line == point.line
+            && self.point.anchor == point.anchor
             && self.point.column.abs_diff(point.column) <= 1
         {
             next_count = self.count.saturating_add(1);
@@ -188,11 +240,36 @@ pub(crate) fn selection_auto_scroll_direction_for_mouse_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frontend::tui::document::{DocumentAnchorRegion, DocumentLayout};
+
+    fn test_anchor(line: usize) -> DocumentLineAnchor {
+        DocumentLineAnchor {
+            region: DocumentAnchorRegion::Composer,
+            gap_index: line,
+            ..DocumentLineAnchor::default()
+        }
+    }
+
+    fn selection_test_layout(line_count: usize) -> DocumentLayout {
+        let lines = vec![""; line_count];
+        let mut layout = DocumentLayout::with_test_plain_lines(0, &lines);
+        layout.tail = std::rc::Rc::new(crate::frontend::tui::document::DocumentTailLayout {
+            anchors: (0..line_count).map(test_anchor).collect(),
+            lines: lines
+                .iter()
+                .map(|line| ratatui::text::Line::raw((*line).to_string()))
+                .collect(),
+            text_lines: lines.iter().map(|line| (*line).to_string()).collect(),
+            ..layout.tail.as_ref().clone()
+        });
+        layout
+    }
 
     #[test]
     fn selection_state_transition_helpers_keep_drag_lifecycle_consistent() {
-        let anchor = SelectionPoint::new(2, 3);
-        let focus = SelectionPoint::new(4, 6);
+        let layout = selection_test_layout(5);
+        let anchor = SelectionPoint::new(test_anchor(2), 3);
+        let focus = SelectionPoint::new(test_anchor(4), 6);
         let mut selection = SelectionState::default();
 
         selection.begin(anchor);
@@ -206,7 +283,13 @@ mod tests {
         assert!(selection.is_active());
         assert!(!selection.is_dragging());
         assert_eq!(selection.focus(), focus);
-        assert_eq!(selection.ordered_points(), Some((anchor, focus)));
+        assert_eq!(
+            selection.ordered_points(&layout),
+            Some((
+                ResolvedSelectionPoint::new(2, 3),
+                ResolvedSelectionPoint::new(4, 6)
+            ))
+        );
 
         selection.clear();
         assert_eq!(selection, SelectionState::default());
@@ -214,7 +297,7 @@ mod tests {
 
     #[test]
     fn selection_click_state_register_cycles_after_triple_click() {
-        let point = SelectionPoint::new(3, 5);
+        let point = SelectionPoint::new(test_anchor(3), 5);
         let start = Instant::now();
         let mut click = SelectionClickState::default();
 
@@ -229,18 +312,18 @@ mod tests {
 
     #[test]
     fn ordered_points_normalizes_reverse_drag() {
-        let selection = SelectionState {
-            active: true,
-            dragging: false,
-            anchor: SelectionPoint { line: 4, column: 7 },
-            focus: SelectionPoint { line: 2, column: 3 },
-        };
+        let layout = selection_test_layout(5);
+        let mut selection = SelectionState::default();
+        selection.select_range(
+            SelectionPoint::new(test_anchor(4), 7),
+            SelectionPoint::new(test_anchor(2), 3),
+        );
 
         let (start, end) = selection
-            .ordered_points()
+            .ordered_points(&layout)
             .expect("active multi-cell selection should normalize");
-        assert_eq!(start, SelectionPoint { line: 2, column: 3 });
-        assert_eq!(end, SelectionPoint { line: 4, column: 7 });
+        assert_eq!(start, ResolvedSelectionPoint::new(2, 3));
+        assert_eq!(end, ResolvedSelectionPoint::new(4, 7));
     }
 
     #[test]

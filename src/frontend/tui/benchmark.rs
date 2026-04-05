@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::mem::{size_of, size_of_val};
 use std::rc::Rc;
 
 use ratatui::{Terminal, backend::TestBackend};
@@ -8,7 +9,9 @@ use super::{
     composer::Composer,
     styled_text::lines_to_plain_text,
     theme::{TerminalPalette, default_palette},
-    transcript::{Transcript, render_markdown_lines, wrap_prompt_visual_lines},
+    transcript::{
+        RenderResult, Transcript, TranscriptItem, render_markdown_lines, wrap_prompt_visual_lines,
+    },
 };
 
 /// `TextRenderSummary` 收敛一类文本渲染 benchmark 的稳定输出特征。
@@ -75,9 +78,29 @@ pub struct FrameRenderSummary {
     pub height: u16,
 }
 
-/// `DocumentStressSummary` 收敛超大 transcript 下 document pipeline 的冷路径测量结果。
+/// `DocumentStressScenario` 标记当前 stress summary 对应的测量场景。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentStressScenario {
+    ColdResume,
+    WidthChange { from_width: u16, to_width: u16 },
+}
+
+/// `DocumentMemorySummary` 粗略估算 benchmark fixture 常驻结构的体积拆分。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DocumentMemorySummary {
+    pub raw_text_bytes: usize,
+    pub estimated_item_bytes: usize,
+    pub estimated_render_ui_bytes: usize,
+    pub estimated_plain_line_bytes: usize,
+    pub estimated_anchor_bytes: usize,
+    pub estimated_index_bytes: usize,
+    pub estimated_total_bytes: usize,
+}
+
+/// `DocumentStressSummary` 收敛超大 transcript 下 document pipeline 的测量结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentStressSummary {
+    pub scenario: DocumentStressScenario,
     pub item_count: usize,
     pub width: u16,
     pub height: u16,
@@ -94,6 +117,7 @@ pub struct DocumentStressSummary {
     pub rss_after_layout_kib: Option<usize>,
     pub rss_after_viewport_kib: Option<usize>,
     pub rss_after_frame_kib: Option<usize>,
+    pub memory: DocumentMemorySummary,
 }
 
 /// `TranscriptBench` 封装 transcript 渲染 benchmark 所需的状态。
@@ -226,7 +250,43 @@ pub fn measure_document_pipeline_stress(
     width: u16,
     height: u16,
 ) -> DocumentStressSummary {
-    let mut model = new_stress_document_model(item_count, width, height);
+    let model = new_cold_stress_document_model(item_count, width, height);
+    measure_document_pipeline_stress_with_model(
+        model,
+        DocumentStressScenario::ColdResume,
+        width.max(1),
+        height,
+    )
+}
+
+/// `measure_width_change_document_pipeline_stress` 测量宽度变化后的 rerender 冷路径。
+pub fn measure_width_change_document_pipeline_stress(
+    item_count: usize,
+    from_width: u16,
+    to_width: u16,
+    height: u16,
+) -> DocumentStressSummary {
+    let mut model = new_warm_stress_document_model(item_count, from_width, height);
+    apply_stress_window_resize_without_render(&mut model, to_width, height);
+
+    measure_document_pipeline_stress_with_model(
+        model,
+        DocumentStressScenario::WidthChange {
+            from_width: from_width.max(1),
+            to_width: to_width.max(1),
+        },
+        to_width.max(1),
+        height,
+    )
+}
+
+fn measure_document_pipeline_stress_with_model(
+    mut model: Model,
+    scenario: DocumentStressScenario,
+    width: u16,
+    height: u16,
+) -> DocumentStressSummary {
+    let items = model.transcript.items_snapshot();
     let mut terminal = Terminal::new(TestBackend::new(width, height))
         .expect("stress benchmark backend should initialize");
 
@@ -236,6 +296,10 @@ pub fn measure_document_pipeline_stress(
     model.sync_transcript_render();
     let transcript_render_time = transcript_render_started_at.elapsed();
     let rss_after_transcript_kib = process_rss_kib();
+    let memory = estimate_document_memory_summary(items.as_slice(), &model.transcript_render);
+
+    model.sync_command_panel_navigation();
+    model.sync_composer_height();
 
     let document_layout_started_at = std::time::Instant::now();
     let layout = model.build_document_layout();
@@ -261,7 +325,8 @@ pub fn measure_document_pipeline_stress(
         .count();
 
     DocumentStressSummary {
-        item_count,
+        scenario,
+        item_count: items.len(),
         width,
         height,
         transcript_line_count: model.transcript_render.line_count,
@@ -277,13 +342,15 @@ pub fn measure_document_pipeline_stress(
         rss_after_layout_kib,
         rss_after_viewport_kib,
         rss_after_frame_kib,
+        memory,
     }
 }
 
 /// `format_document_stress_summary` 输出便于人工比较的 stress 摘要。
 pub fn format_document_stress_summary(summary: &DocumentStressSummary) -> String {
     format!(
-        "items={items} size={width}x{height} transcript_lines={transcript_lines} document_lines={document_lines} viewport_lines={viewport_lines} frame_cells={frame_cells} timings_ms={{render:{render:.3}, layout:{layout:.3}, viewport:{viewport:.3}, frame:{frame:.3}}} rss_kib={{before:{rss_before:?}, after_render:{rss_render:?}, after_layout:{rss_layout:?}, after_viewport:{rss_viewport:?}, after_frame:{rss_frame:?}}}",
+        "scenario={scenario} items={items} size={width}x{height} transcript_lines={transcript_lines} document_lines={document_lines} viewport_lines={viewport_lines} frame_cells={frame_cells} timings_ms={{render:{render:.3}, layout:{layout:.3}, viewport:{viewport:.3}, frame:{frame:.3}}} rss_kib={{before:{rss_before:?}, after_render:{rss_render:?}, after_layout:{rss_layout:?}, after_viewport:{rss_viewport:?}, after_frame:{rss_frame:?}}} memory_bytes={{raw_text:{raw_text}, items:{item_bytes}, render_ui:{render_ui}, plain_lines:{plain_lines}, anchors:{anchors}, indexes:{indexes}, estimated_total:{estimated_total}}}",
+        scenario = format_document_stress_scenario(summary.scenario),
         items = summary.item_count,
         width = summary.width,
         height = summary.height,
@@ -300,6 +367,13 @@ pub fn format_document_stress_summary(summary: &DocumentStressSummary) -> String
         rss_layout = summary.rss_after_layout_kib,
         rss_viewport = summary.rss_after_viewport_kib,
         rss_frame = summary.rss_after_frame_kib,
+        raw_text = summary.memory.raw_text_bytes,
+        item_bytes = summary.memory.estimated_item_bytes,
+        render_ui = summary.memory.estimated_render_ui_bytes,
+        plain_lines = summary.memory.estimated_plain_line_bytes,
+        anchors = summary.memory.estimated_anchor_bytes,
+        indexes = summary.memory.estimated_index_bytes,
+        estimated_total = summary.memory.estimated_total_bytes,
     )
 }
 
@@ -461,6 +535,10 @@ impl ModelRenderBench {
 }
 
 fn new_stress_document_model(item_count: usize, width: u16, height: u16) -> Model {
+    new_warm_stress_document_model(item_count, width, height)
+}
+
+fn new_warm_stress_document_model(item_count: usize, width: u16, height: u16) -> Model {
     let mut model = Model::new_with_options(
         HeroOptions {
             app_name: Some("lumos".to_string()),
@@ -486,6 +564,46 @@ fn new_stress_document_model(item_count: usize, width: u16, height: u16) -> Mode
         .replace_text_and_move_to_end(benchmark_composer_draft_for_document());
     model.sync_composer_height();
     model
+}
+
+fn new_cold_stress_document_model(item_count: usize, width: u16, height: u16) -> Model {
+    let mut model = Model::new_with_options(
+        HeroOptions {
+            app_name: Some("lumos".to_string()),
+            version: Some("dev".to_string()),
+            work_dir: Some("/tmp/lumos".to_string()),
+            width: 0,
+        },
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.set_window(width, height);
+    model.set_palette(default_palette(), true);
+
+    for index in 0..item_count {
+        append_transcript_benchmark_item(model.transcript_mut(), index);
+    }
+
+    model
+        .composer_mut()
+        .replace_text_and_move_to_end(benchmark_composer_draft_for_document());
+    model.sync_composer_height();
+    model
+}
+
+fn apply_stress_window_resize_without_render(model: &mut Model, width: u16, height: u16) {
+    let width = width.max(1);
+    model.width = width;
+    model.height = height;
+    model.has_window = true;
+    model.transcript.set_width(width);
+    model.composer.set_width(width);
+    model.document_transcript_cache = Default::default();
+    model.document_layout_cache = Default::default();
+    model.document_viewport_cache = Default::default();
 }
 
 fn process_rss_kib() -> Option<usize> {
@@ -556,6 +674,72 @@ fn summarize_document_viewport(
     }
 }
 
+fn format_document_stress_scenario(scenario: DocumentStressScenario) -> String {
+    match scenario {
+        DocumentStressScenario::ColdResume => "cold_resume".to_string(),
+        DocumentStressScenario::WidthChange {
+            from_width,
+            to_width,
+        } => format!("width_change({from_width}->{to_width})"),
+    }
+}
+
+fn estimate_document_memory_summary(
+    items: &[Rc<TranscriptItem>],
+    render: &RenderResult,
+) -> DocumentMemorySummary {
+    let raw_text_bytes = items.iter().map(|item| item.source_text_byte_len()).sum();
+    let estimated_item_bytes = size_of::<Vec<Rc<TranscriptItem>>>()
+        + size_of_val(items)
+        + items.len() * size_of::<TranscriptItem>()
+        + raw_text_bytes;
+    let mut estimated_render_ui_bytes = 0;
+    let mut estimated_plain_line_bytes = 0;
+    let mut estimated_anchor_bytes = 0;
+
+    for summary in render.items.iter() {
+        estimated_render_ui_bytes += size_of_val(summary.block.as_ref());
+        estimated_render_ui_bytes += size_of_val(summary.block.lines.as_slice());
+        for line in summary.block.lines.iter() {
+            estimated_render_ui_bytes += size_of_val(line.spans.as_slice());
+            estimated_render_ui_bytes += line
+                .spans
+                .iter()
+                .map(|span| span.content.len())
+                .sum::<usize>();
+        }
+
+        estimated_plain_line_bytes += size_of_val(summary.block.plain_lines.as_slice());
+        estimated_plain_line_bytes += summary
+            .block
+            .plain_lines
+            .iter()
+            .map(String::capacity)
+            .sum::<usize>();
+
+        estimated_anchor_bytes += size_of_val(summary.block.anchors.as_slice());
+    }
+
+    let estimated_index_bytes = size_of::<RenderResult>()
+        + size_of_val(render.items.as_slice())
+        + size_of_val(render.item_positions.as_slice())
+        + size_of_val(render.selectable_ranges.as_slice());
+
+    DocumentMemorySummary {
+        raw_text_bytes,
+        estimated_item_bytes,
+        estimated_render_ui_bytes,
+        estimated_plain_line_bytes,
+        estimated_anchor_bytes,
+        estimated_index_bytes,
+        estimated_total_bytes: estimated_item_bytes
+            + estimated_render_ui_bytes
+            + estimated_plain_line_bytes
+            + estimated_anchor_bytes
+            + estimated_index_bytes,
+    }
+}
+
 fn plain_lines_len(lines: &[String]) -> usize {
     if lines.is_empty() {
         return 0;
@@ -604,9 +788,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cold_resume_stress_fixture_keeps_transcript_render_cold_before_measurement() {
+        let model = new_cold_stress_document_model(24, 80, 18);
+
+        assert_eq!(model.width, 80);
+        assert_eq!(model.height, 18);
+        assert!(model.has_window);
+        assert!(model.has_palette);
+        assert_eq!(
+            model.transcript_render.line_count, 0,
+            "cold-resume fixture should leave transcript render cold until the measured render step"
+        );
+    }
+
+    #[test]
     fn document_pipeline_stress_summary_reports_consistent_counts_for_small_fixture() {
         let summary = measure_document_pipeline_stress(24, 80, 18);
 
+        assert_eq!(summary.scenario, DocumentStressScenario::ColdResume);
         assert_eq!(summary.item_count, 24);
         assert_eq!(summary.width, 80);
         assert_eq!(summary.height, 18);
@@ -617,7 +816,44 @@ mod tests {
         assert!(summary.document_line_count >= summary.transcript_line_count);
         assert!(summary.viewport_line_count > 0);
         assert!(summary.frame_non_empty_cells > 0);
-        assert!(format_document_stress_summary(&summary).contains("items=24"));
+        assert!(summary.memory.raw_text_bytes > 0);
+        assert!(summary.memory.estimated_item_bytes >= summary.memory.raw_text_bytes);
+        assert!(summary.memory.estimated_render_ui_bytes > 0);
+        assert!(summary.memory.estimated_plain_line_bytes > 0);
+        assert!(summary.memory.estimated_anchor_bytes > 0);
+        assert!(summary.memory.estimated_index_bytes > 0);
+        let formatted = format_document_stress_summary(&summary);
+        assert!(formatted.contains("scenario=cold_resume"));
+        assert!(formatted.contains("items=24"));
+        assert!(formatted.contains("memory_bytes={"));
+    }
+
+    #[test]
+    fn width_change_document_pipeline_stress_reports_resize_direction_and_memory_breakdown() {
+        let summary = measure_width_change_document_pipeline_stress(24, 80, 56, 18);
+
+        assert_eq!(
+            summary.scenario,
+            DocumentStressScenario::WidthChange {
+                from_width: 80,
+                to_width: 56,
+            }
+        );
+        assert_eq!(summary.item_count, 24);
+        assert_eq!(summary.width, 56);
+        assert_eq!(summary.height, 18);
+        assert!(
+            summary.transcript_line_count > summary.item_count,
+            "resize rerender should still materialize multiple visual lines per item"
+        );
+        assert!(summary.document_line_count >= summary.transcript_line_count);
+        assert!(summary.viewport_line_count > 0);
+        assert!(summary.frame_non_empty_cells > 0);
+        assert!(summary.memory.raw_text_bytes > 0);
+        assert!(summary.memory.estimated_total_bytes >= summary.memory.raw_text_bytes);
+        let formatted = format_document_stress_summary(&summary);
+        assert!(formatted.contains("scenario=width_change(80->56)"));
+        assert!(formatted.contains("memory_bytes={"));
     }
 
     #[test]
@@ -649,6 +885,33 @@ mod tests {
             assert!(summary.document_line_count >= summary.transcript_line_count);
             assert!(summary.viewport_line_count > 0);
             assert!(summary.frame_non_empty_cells > 0);
+        }
+    }
+
+    #[test]
+    #[ignore = "stress profile for width-change rerender scales"]
+    fn document_pipeline_width_change_profiles_up_to_one_million_items() {
+        for item_count in [10_000_usize, 100_000_usize, 1_000_000_usize] {
+            for &(from_width, to_width) in &[(80_u16, 120_u16), (120_u16, 80_u16), (80_u16, 56_u16)]
+            {
+                let summary = measure_width_change_document_pipeline_stress(
+                    item_count, from_width, to_width, 24,
+                );
+                eprintln!("{}", format_document_stress_summary(&summary));
+
+                assert_eq!(summary.item_count, item_count);
+                assert_eq!(
+                    summary.scenario,
+                    DocumentStressScenario::WidthChange {
+                        from_width,
+                        to_width,
+                    }
+                );
+                assert!(summary.transcript_line_count > 0);
+                assert!(summary.document_line_count >= summary.transcript_line_count);
+                assert!(summary.viewport_line_count > 0);
+                assert!(summary.frame_non_empty_cells > 0);
+            }
         }
     }
 }

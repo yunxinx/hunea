@@ -89,6 +89,12 @@ impl HeroItem {
         self.render_cache_key
     }
 
+    pub(crate) fn source_text_byte_len(&self) -> usize {
+        self.options.app_name.as_deref().unwrap_or("").len()
+            + self.options.version.as_deref().unwrap_or("").len()
+            + self.options.work_dir.as_deref().unwrap_or("").len()
+    }
+
     pub(crate) fn render_line_anchors(
         &self,
         width: u16,

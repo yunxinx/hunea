@@ -106,6 +106,10 @@ impl MessageItem {
         self.render_cache_key
     }
 
+    pub(crate) fn source_text_byte_len(&self) -> usize {
+        self.content.len()
+    }
+
     pub(crate) fn render_line_anchors(
         &self,
         width: u16,

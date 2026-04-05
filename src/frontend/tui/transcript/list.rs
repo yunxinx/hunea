@@ -380,6 +380,13 @@ impl TranscriptItem {
             Self::Message(item) => item.render_cache_key(),
         }
     }
+
+    pub(crate) fn source_text_byte_len(&self) -> usize {
+        match self {
+            Self::Hero(item) => item.source_text_byte_len(),
+            Self::Message(item) => item.source_text_byte_len(),
+        }
+    }
 }
 
 fn fallback_rendered_line_anchors(line_count: usize) -> Vec<ItemLineAnchor> {

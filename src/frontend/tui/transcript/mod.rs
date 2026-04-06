@@ -1,4 +1,5 @@
 mod cache;
+mod item_index;
 mod list;
 mod markdown;
 mod prompt_wrap;
@@ -8,6 +9,10 @@ mod wrap;
 pub(crate) use cache::CachedLineAnchors;
 #[cfg(test)]
 pub(crate) use cache::CachedRenderBlock;
+pub(crate) use item_index::{
+    TranscriptItemMetrics, TranscriptItemMetricsCache, TranscriptItemMetricsIndex,
+    TranscriptItemPosition,
+};
 pub(crate) use list::{Transcript, TranscriptItem};
 pub(crate) use markdown::render_markdown_lines;
 pub(crate) use prompt_wrap::{PromptVisualLine, wrap_prompt_visual_lines};

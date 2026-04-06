@@ -12,7 +12,7 @@ use crate::frontend::tui::{
     selection::SelectableLineRange,
     style_mode::StyleMode,
     theme::TerminalPalette,
-    transcript::{self, TranscriptItem},
+    transcript::{self, TranscriptItem, TranscriptItemMetricsIndex},
 };
 
 use super::{slot_frame::SlotFrame, tail::DocumentTailLayout};
@@ -28,6 +28,7 @@ pub(crate) struct DocumentTranscriptKey {
 #[derive(Debug, Clone)]
 pub(crate) struct DocumentTranscriptSnapshot {
     pub(super) render: Rc<transcript::RenderResult>,
+    pub(super) index: TranscriptItemMetricsIndex,
     pub(super) width: u16,
     pub(super) palette: TerminalPalette,
     pub(super) items: Rc<Vec<Rc<TranscriptItem>>>,
@@ -39,6 +40,7 @@ impl Default for DocumentTranscriptSnapshot {
     fn default() -> Self {
         Self {
             render: Rc::new(transcript::RenderResult::default()),
+            index: TranscriptItemMetricsIndex::default(),
             width: 0,
             palette: crate::frontend::tui::theme::default_palette(),
             items: Rc::new(Vec::new()),
@@ -126,7 +128,6 @@ impl DocumentLayout {
                                 gap_before: 0,
                                 content_line_count: 1,
                                 total_line_count: 1,
-                                content_char_len: line.len(),
                                 gap_owner_item_index: index.checked_sub(1),
                                 block,
                             }

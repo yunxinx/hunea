@@ -255,7 +255,7 @@ impl DocumentLayout {
         item_index: usize,
     ) -> Option<DocumentTranscriptItemLines> {
         self.transcript
-            .render
+            .index
             .item_lines(item_index)
             .map(|item| DocumentTranscriptItemLines {
                 content_start_line: item.content_start_line,

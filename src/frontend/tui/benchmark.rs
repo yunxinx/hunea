@@ -784,7 +784,10 @@ fn estimate_document_memory_summary(
 
     let estimated_index_bytes = size_of::<RenderResult>()
         + size_of_val(render.items.as_slice())
-        + size_of_val(render.item_positions.as_slice())
+        + size_of_val(render.index.metrics.as_slice())
+        + size_of_val(render.index.visible_items.as_slice())
+        + size_of_val(render.index.visible_positions.as_slice())
+        + size_of_val(render.index.content_prefix_sums.as_slice())
         + size_of_val(render.selectable_ranges.as_slice());
 
     DocumentMemorySummary {

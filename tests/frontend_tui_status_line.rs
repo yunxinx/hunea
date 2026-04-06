@@ -82,6 +82,13 @@ fn status_line_truncates_without_wrapping_in_narrow_viewport() {
 
 #[test]
 fn status_line_falls_back_to_whole_line_ellipsis_when_only_one_cell_remains() {
+    let _guard = lock_test_environment();
+    let original_dir = env::current_dir().expect("current directory should be available");
+
+    let repo_dir = temp_test_dir("status-line-ellipsis");
+    write_git_head(&repo_dir, "ref: refs/heads/main\n");
+    env::set_current_dir(&repo_dir).expect("should switch into repo directory");
+
     let mut model = ready_model(
         10,
         4,
@@ -97,6 +104,8 @@ fn status_line_falls_back_to_whole_line_ellipsis_when_only_one_cell_remains() {
         render_trimmed_rows(&mut model, 10, 4),
         vec!["", "› Enter to", "", "  main..."]
     );
+
+    env::set_current_dir(original_dir).expect("should restore original directory");
 }
 
 #[test]

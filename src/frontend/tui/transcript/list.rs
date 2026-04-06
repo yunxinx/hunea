@@ -3,7 +3,9 @@ use std::rc::Rc;
 use ratatui::text::Line;
 
 use super::{
-    DEFAULT_RENDER_WIDTH, ItemLineAnchor, RenderResult, ViewportRenderResult,
+    DEFAULT_RENDER_WIDTH, ItemLineAnchor, RenderResult, TranscriptItemMetrics,
+    TranscriptItemMetricsCache, TranscriptItemMetricsIndex, TranscriptItemPosition,
+    ViewportRenderResult,
     cache::{CachedLineAnchors, CachedRenderBlock, ScreenRenderCache},
     new_render_result_with_append_start,
     render_state::RenderItemSummary,
@@ -35,6 +37,7 @@ pub(crate) struct Transcript {
     width: u16,
     palette: TerminalPalette,
     items_version: usize,
+    metrics_cache: TranscriptItemMetricsCache,
     screen_cache: ScreenRenderCache,
 }
 
@@ -58,6 +61,7 @@ impl Transcript {
             width: DEFAULT_RENDER_WIDTH as u16,
             palette,
             items_version: 1,
+            metrics_cache: TranscriptItemMetricsCache::default(),
             screen_cache: ScreenRenderCache::default(),
         }
     }
@@ -69,6 +73,7 @@ impl Transcript {
         }
 
         self.gap = gap;
+        self.metrics_cache.mark_positions_dirty_from(0);
         self.screen_cache.mark_dirty_from(0);
     }
 
@@ -80,6 +85,7 @@ impl Transcript {
         }
 
         self.width = width;
+        self.metrics_cache.invalidate_width();
         self.screen_cache.invalidate_all();
     }
 
@@ -90,6 +96,9 @@ impl Transcript {
         }
 
         self.palette = palette;
+        // 用户消息在 surface 开关变化时会增减额外 padding/frame 行，旧 metrics
+        // 里的 line_count 和 offset 不能继续复用。
+        self.metrics_cache.reset();
         self.screen_cache.invalidate_all();
     }
 
@@ -127,6 +136,7 @@ impl Transcript {
     pub(crate) fn clear(&mut self) {
         Rc::make_mut(&mut self.items).clear();
         self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.reset();
         self.screen_cache.reset();
     }
 
@@ -138,6 +148,119 @@ impl Transcript {
 
     pub(crate) fn items_snapshot(&self) -> Rc<Vec<Rc<TranscriptItem>>> {
         Rc::clone(&self.items)
+    }
+
+    /// `item_metrics_index` 返回 transcript 当前宽度下的轻量 item metrics 索引。
+    pub(crate) fn item_metrics_index(&mut self) -> TranscriptItemMetricsIndex {
+        let width = self.render_width();
+        if self
+            .metrics_cache
+            .can_reuse(width, self.gap, self.items.len())
+        {
+            return self.metrics_cache.index.clone();
+        }
+
+        let item_count = self.items.len();
+        let metrics_dirty_from = self.metrics_cache.metrics_dirty_from.min(item_count);
+        let updated_metrics = (metrics_dirty_from..item_count)
+            .map(|index| {
+                let cache_key = self.items[index].render_cache_key();
+                let block = self.render_screen_block(index, width);
+                (
+                    index,
+                    TranscriptItemMetrics {
+                        item_index: index,
+                        width,
+                        cache_key,
+                        content_line_count: block.line_count(),
+                        content_char_len: block.plain_text_char_len,
+                        is_valid: true,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        {
+            let metrics = Rc::make_mut(&mut self.metrics_cache.index.metrics);
+            resize_metrics(metrics, item_count);
+            for (index, metrics_entry) in updated_metrics {
+                metrics[index] = metrics_entry;
+            }
+        }
+        {
+            let prefix_sums = Rc::make_mut(&mut self.metrics_cache.index.content_prefix_sums);
+            resize_content_prefix_sums(prefix_sums, item_count);
+            for index in metrics_dirty_from..item_count {
+                prefix_sums[index + 1] = prefix_sums[index]
+                    .saturating_add(self.metrics_cache.index.metrics[index].content_char_len);
+            }
+        }
+
+        let positions_dirty_from = self.metrics_cache.positions_dirty_from.min(item_count);
+        {
+            let visible_positions = Rc::make_mut(&mut self.metrics_cache.index.visible_positions);
+            resize_visible_positions(visible_positions, item_count);
+            if positions_dirty_from < item_count {
+                visible_positions[positions_dirty_from..].fill(usize::MAX);
+            }
+        }
+        {
+            let visible_items = Rc::make_mut(&mut self.metrics_cache.index.visible_items);
+            let keep_visible_count =
+                visible_items.partition_point(|item| item.item_index < positions_dirty_from);
+            visible_items.truncate(keep_visible_count);
+
+            let mut total_lines = visible_items
+                .last()
+                .map(|item| item.start_line + item.total_line_count)
+                .unwrap_or(0);
+            let mut previous_visible_item_index = visible_items.last().map(|item| item.item_index);
+
+            let visible_positions = Rc::make_mut(&mut self.metrics_cache.index.visible_positions);
+            for (index, visible_position) in visible_positions
+                .iter_mut()
+                .enumerate()
+                .take(item_count)
+                .skip(positions_dirty_from)
+            {
+                *visible_position = usize::MAX;
+                let metrics = self.metrics_cache.index.metrics[index];
+                if metrics.content_line_count == 0 {
+                    continue;
+                }
+
+                let gap_before = usize::from(previous_visible_item_index.is_some()) * self.gap;
+                let position = TranscriptItemPosition {
+                    item_index: index,
+                    start_line: total_lines,
+                    gap_before,
+                    content_line_count: metrics.content_line_count,
+                    total_line_count: gap_before + metrics.content_line_count,
+                    content_char_len: metrics.content_char_len,
+                    gap_owner_item_index: previous_visible_item_index,
+                };
+                *visible_position = visible_items.len();
+                total_lines += position.total_line_count;
+                previous_visible_item_index = Some(index);
+                visible_items.push(position);
+            }
+        }
+
+        self.metrics_cache.index.line_count = self
+            .metrics_cache
+            .index
+            .visible_items
+            .last()
+            .map(|item| item.start_line + item.total_line_count)
+            .unwrap_or(0);
+        self.metrics_cache.index.content_char_len = *self
+            .metrics_cache
+            .index
+            .content_prefix_sums
+            .last()
+            .unwrap_or(&0);
+        self.metrics_cache.store_valid(width, self.gap, item_count);
+
+        self.metrics_cache.index.clone()
     }
 
     /// `plain_items` 返回适用于纯文本消费的文本项。
@@ -172,7 +295,12 @@ impl Transcript {
             return Rc::clone(&self.screen_cache.result);
         }
         if self.items.is_empty() {
+            let index = self.item_metrics_index();
             let result = Rc::new(RenderResult::default());
+            let result = Rc::new(RenderResult {
+                index,
+                ..(*result).clone()
+            });
             self.screen_cache.store_result(
                 width,
                 self.gap,
@@ -194,7 +322,8 @@ impl Transcript {
         } else {
             -1
         };
-        let result = Rc::new(self.build_render_result(width, dirty_from, append_start_line));
+        let index = self.item_metrics_index();
+        let result = Rc::new(self.build_render_result(width, dirty_from, append_start_line, index));
         self.screen_cache.store_result(
             width,
             self.gap,
@@ -226,46 +355,38 @@ impl Transcript {
         width: u16,
         dirty_from: usize,
         append_start_line: isize,
+        index: TranscriptItemMetricsIndex,
     ) -> RenderResult {
         let previous = Rc::clone(&self.screen_cache.result);
         let mut items = Vec::with_capacity(self.items.len());
-        let mut total_lines = 0;
-        let mut previous_visible_item_index = None;
 
         if dirty_from > 0 {
             for summary in previous.items.iter() {
                 if summary.item_index >= dirty_from {
                     break;
                 }
-                total_lines = summary.start_line + summary.total_line_count;
-                previous_visible_item_index = Some(summary.item_index);
                 items.push(summary.clone());
             }
         }
 
-        for index in dirty_from..self.items.len() {
-            let block = self.render_screen_block(index, width);
-            if block.line_count() == 0 {
-                continue;
-            }
-
-            let gap_before = usize::from(previous_visible_item_index.is_some()) * self.gap;
+        let start_position = index
+            .visible_items
+            .partition_point(|item| item.item_index < dirty_from);
+        for position in index.visible_items.iter().skip(start_position) {
+            let block = self.render_screen_block(position.item_index, width);
             let summary = RenderItemSummary {
-                item_index: index,
-                start_line: total_lines,
-                gap_before,
-                content_line_count: block.line_count(),
-                total_line_count: gap_before + block.line_count(),
-                content_char_len: block.plain_text_char_len,
-                gap_owner_item_index: previous_visible_item_index,
+                item_index: position.item_index,
+                start_line: position.start_line,
+                gap_before: position.gap_before,
+                content_line_count: position.content_line_count,
+                total_line_count: position.total_line_count,
+                gap_owner_item_index: position.gap_owner_item_index,
                 block,
             };
-            total_lines += summary.total_line_count;
-            previous_visible_item_index = Some(index);
             items.push(summary);
         }
 
-        new_render_result_with_append_start(items, append_start_line)
+        new_render_result_with_append_start(items, index, append_start_line)
     }
 
     fn render_screen_block(&mut self, index: usize, width: u16) -> Rc<CachedRenderBlock> {
@@ -325,6 +446,8 @@ impl Transcript {
         let len_before_append = self.items.len();
         Rc::make_mut(&mut self.items).push(Rc::new(item));
         self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache
+            .mark_metrics_dirty_from(len_before_append);
         self.screen_cache.mark_dirty_from(len_before_append);
     }
 
@@ -332,6 +455,7 @@ impl Transcript {
     fn replace_item_for_test(&mut self, index: usize, item: TranscriptItem) {
         Rc::make_mut(&mut self.items)[index] = Rc::new(item);
         self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.mark_metrics_dirty_from(index);
         self.screen_cache.clear_item(index);
     }
 
@@ -339,6 +463,31 @@ impl Transcript {
     pub(crate) fn dirty_from_for_test(&self) -> usize {
         self.screen_cache.dirty_from
     }
+
+    #[cfg(test)]
+    pub(crate) fn item_metrics_dirty_from_for_test(&self) -> usize {
+        self.metrics_cache.metrics_dirty_from
+    }
+
+    #[cfg(test)]
+    pub(crate) fn item_positions_dirty_from_for_test(&self) -> usize {
+        self.metrics_cache.positions_dirty_from
+    }
+}
+
+fn resize_metrics(metrics: &mut Vec<TranscriptItemMetrics>, item_count: usize) {
+    metrics.resize(item_count, TranscriptItemMetrics::default());
+}
+
+fn resize_visible_positions(visible_positions: &mut Vec<usize>, item_count: usize) {
+    visible_positions.resize(item_count, usize::MAX);
+}
+
+fn resize_content_prefix_sums(prefix_sums: &mut Vec<usize>, item_count: usize) {
+    if prefix_sums.is_empty() {
+        prefix_sums.push(0);
+    }
+    prefix_sums.resize(item_count.saturating_add(1), 0);
 }
 
 impl TranscriptItem {
@@ -432,7 +581,7 @@ mod tests {
             reset_user_message_projection_plain_line_len_call_count,
             user_message_projection_plain_line_len_call_count,
         },
-        theme::default_palette,
+        theme::{default_palette, terminal_default_palette},
     };
 
     #[test]
@@ -463,6 +612,82 @@ mod tests {
 
         assert_eq!(rendered, vec!["one", "two", "", "three"]);
         assert_eq!(result.line_count, 4);
+    }
+
+    #[test]
+    fn item_metrics_index_maps_offsets_and_item_ranges_without_full_render_result() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.items = Rc::new(vec![
+            Rc::new(TranscriptItem::Message(MessageItem::new(
+                Sender::Assistant,
+                "one\ntwo",
+            ))),
+            Rc::new(TranscriptItem::Message(MessageItem::new(
+                Sender::Assistant,
+                "three",
+            ))),
+        ]);
+
+        let index = transcript.item_metrics_index();
+
+        assert_eq!(index.line_count, 4);
+        assert_eq!(
+            index.item_lines(0),
+            Some(super::super::render_state::RenderItemLines {
+                content_start_line: 0,
+                content_line_count: 2,
+                total_line_count: 3,
+            })
+        );
+        assert_eq!(
+            index.item_lines(1),
+            Some(super::super::render_state::RenderItemLines {
+                content_start_line: 3,
+                content_line_count: 1,
+                total_line_count: 1,
+            })
+        );
+        assert_eq!(index.item_index_for_line(0), Some(0));
+        assert_eq!(index.item_index_for_line(2), Some(0));
+        assert_eq!(index.item_index_for_line(3), Some(1));
+    }
+
+    #[test]
+    fn item_metrics_index_tracks_invalidation_boundaries() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.items = Rc::new(vec![
+            Rc::new(TranscriptItem::Message(MessageItem::new(
+                Sender::Assistant,
+                "first",
+            ))),
+            Rc::new(TranscriptItem::Message(MessageItem::new(
+                Sender::Assistant,
+                "second",
+            ))),
+        ]);
+
+        let _ = transcript.item_metrics_index();
+        assert_eq!(transcript.item_metrics_dirty_from_for_test(), 2);
+        assert_eq!(transcript.item_positions_dirty_from_for_test(), 2);
+
+        transcript.append_message(Sender::Assistant, "third");
+        assert_eq!(transcript.item_metrics_dirty_from_for_test(), 2);
+        assert_eq!(transcript.item_positions_dirty_from_for_test(), 2);
+
+        let _ = transcript.item_metrics_index();
+        transcript.replace_item_for_test(1, TranscriptItem::Message(static_message("updated")));
+        assert_eq!(transcript.item_metrics_dirty_from_for_test(), 1);
+        assert_eq!(transcript.item_positions_dirty_from_for_test(), 1);
+
+        let _ = transcript.item_metrics_index();
+        transcript.set_gap(2);
+        assert_eq!(transcript.item_metrics_dirty_from_for_test(), 3);
+        assert_eq!(transcript.item_positions_dirty_from_for_test(), 0);
+
+        let _ = transcript.item_metrics_index();
+        transcript.set_width(48);
+        assert_eq!(transcript.item_metrics_dirty_from_for_test(), 0);
+        assert_eq!(transcript.item_positions_dirty_from_for_test(), 0);
     }
 
     #[test]
@@ -792,6 +1017,40 @@ mod tests {
 
         let second = transcript.render_viewport(1, 1);
         assert_eq!(second.plain_lines, vec!["beta"]);
+    }
+
+    #[test]
+    fn palette_change_invalidates_item_metrics_when_render_shape_changes() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_width(20);
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+            Sender::User,
+            "hello",
+        )))]);
+
+        let initial_index = transcript.item_metrics_index();
+        assert_eq!(initial_index.line_count, 3);
+        assert_eq!(
+            initial_index
+                .item_lines(0)
+                .map(|lines| lines.content_line_count),
+            Some(3)
+        );
+
+        transcript.set_palette(terminal_default_palette());
+
+        let updated_index = transcript.item_metrics_index();
+        assert_eq!(updated_index.line_count, 1);
+        assert_eq!(
+            updated_index
+                .item_lines(0)
+                .map(|lines| lines.content_line_count),
+            Some(1)
+        );
+
+        let render = transcript.render();
+        assert_eq!(render.line_count, 1);
+        assert_eq!(render.all_plain_lines(), vec!["› hello             "]);
     }
 
     fn static_message(content: &str) -> MessageItem {

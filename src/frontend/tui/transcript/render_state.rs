@@ -4,7 +4,7 @@ use ratatui::text::Line;
 
 use crate::frontend::tui::selection::SelectableLineRange;
 
-use super::cache::CachedRenderBlock;
+use super::{TranscriptItemMetricsIndex, cache::CachedRenderBlock};
 
 #[cfg(test)]
 use super::cache::CachedLineAnchors;
@@ -38,6 +38,7 @@ pub(crate) struct LineAnchor {
 /// `RenderResult` 表示 transcript 在当前宽度下的稳定渲染结果。
 #[derive(Debug, Clone)]
 pub(crate) struct RenderResult {
+    pub(crate) index: TranscriptItemMetricsIndex,
     pub(crate) items: Rc<Vec<RenderItemSummary>>,
     pub(crate) item_positions: Rc<Vec<usize>>,
     pub(crate) selectable_ranges: Rc<Vec<SelectableLineRange>>,
@@ -56,7 +57,6 @@ pub(crate) struct RenderItemSummary {
     pub(crate) gap_before: usize,
     pub(crate) content_line_count: usize,
     pub(crate) total_line_count: usize,
-    pub(crate) content_char_len: usize,
     pub(crate) gap_owner_item_index: Option<usize>,
     pub(crate) block: Rc<CachedRenderBlock>,
 }
@@ -155,6 +155,11 @@ impl RenderResult {
         self.range_slice(start, count).plain_lines
     }
 
+    #[cfg(test)]
+    pub(crate) fn item_lines(&self, item_index: usize) -> Option<RenderItemLines> {
+        self.index.item_lines(item_index)
+    }
+
     pub(crate) fn line_at(&self, index: usize) -> Option<RenderedTranscriptLine> {
         if index >= self.line_count {
             return None;
@@ -185,16 +190,6 @@ impl RenderResult {
                 item_index: summary.item_index,
                 item_anchor: summary.block.anchor_at(block_index)?,
             },
-        })
-    }
-
-    pub(crate) fn item_lines(&self, item_index: usize) -> Option<RenderItemLines> {
-        let position = self.summary_position_for_item(item_index)?;
-        let summary = self.items.get(position)?;
-        Some(RenderItemLines {
-            content_start_line: summary.start_line + summary.gap_before,
-            content_line_count: summary.content_line_count,
-            total_line_count: summary.content_line_count + self.trailing_gap_line_count(position),
         })
     }
 
@@ -345,6 +340,7 @@ impl RenderResult {
 impl Default for RenderResult {
     fn default() -> Self {
         Self {
+            index: TranscriptItemMetricsIndex::default(),
             items: Rc::new(Vec::new()),
             item_positions: Rc::new(Vec::new()),
             selectable_ranges: Rc::new(Vec::new()),
@@ -357,39 +353,52 @@ impl Default for RenderResult {
 
 #[cfg(test)]
 pub(crate) fn new_render_result(items: Vec<RenderItemSummary>) -> RenderResult {
-    new_render_result_with_append_start(items, -1)
+    new_render_result_with_append_start(items, TranscriptItemMetricsIndex::default(), -1)
 }
 
 pub(crate) fn new_render_result_with_append_start(
     items: Vec<RenderItemSummary>,
+    mut index: TranscriptItemMetricsIndex,
     append_start_line: isize,
 ) -> RenderResult {
     if items.is_empty() {
-        return RenderResult::default();
+        return RenderResult {
+            index,
+            ..RenderResult::default()
+        };
     }
 
-    let item_position_len = items
-        .last()
-        .map(|item| item.item_index.saturating_add(1))
-        .unwrap_or(0);
-    let mut item_positions = vec![usize::MAX; item_position_len];
-    let mut line_count = 0;
-    let mut content_char_len = 0;
-    for (index, item) in items.iter().enumerate() {
-        item_positions[item.item_index] = index;
-        line_count += item.total_line_count;
-        content_char_len += item.content_char_len;
+    if index.visible_positions.is_empty() {
+        index = synthesize_metrics_index_from_render_items(&items);
     }
-    if line_count == 0 {
-        return RenderResult::default();
+
+    let item_positions = if index.visible_positions.is_empty() {
+        let item_position_len = items
+            .last()
+            .map(|item| item.item_index.saturating_add(1))
+            .unwrap_or(0);
+        let mut item_positions = vec![usize::MAX; item_position_len];
+        for (summary_position, item) in items.iter().enumerate() {
+            item_positions[item.item_index] = summary_position;
+        }
+        Rc::new(item_positions)
+    } else {
+        Rc::clone(&index.visible_positions)
+    };
+    if index.line_count == 0 {
+        return RenderResult {
+            index,
+            ..RenderResult::default()
+        };
     }
 
     RenderResult {
+        line_count: index.line_count,
+        content_char_len: index.content_char_len,
+        index,
         items: Rc::new(items),
-        item_positions: Rc::new(item_positions),
+        item_positions,
         selectable_ranges: Rc::new(Vec::new()),
-        line_count,
-        content_char_len,
         append_start_line,
     }
 }
@@ -411,6 +420,69 @@ pub(crate) fn visible_rendered_lines(
     let resolved_offset = offset.min(max_offset);
 
     (render.range_slice(resolved_offset, height), resolved_offset)
+}
+
+fn synthesize_metrics_index_from_render_items(
+    items: &[RenderItemSummary],
+) -> TranscriptItemMetricsIndex {
+    if items.is_empty() {
+        return TranscriptItemMetricsIndex::default();
+    }
+
+    let item_count = items
+        .last()
+        .map(|item| item.item_index.saturating_add(1))
+        .unwrap_or(0);
+    let mut metrics = vec![super::TranscriptItemMetrics::default(); item_count];
+    let mut visible_positions = vec![usize::MAX; item_count];
+    let mut visible_items = Vec::with_capacity(items.len());
+    let mut content_prefix_sums = vec![0_usize; item_count.saturating_add(1)];
+    let mut summaries = items.iter().peekable();
+
+    for item_index in 0..item_count {
+        if summaries
+            .peek()
+            .is_some_and(|summary| summary.item_index == item_index)
+        {
+            let summary = summaries.next().expect("peeked summary should exist");
+            metrics[item_index] = super::TranscriptItemMetrics {
+                item_index,
+                content_line_count: summary.content_line_count,
+                content_char_len: summary.block.plain_text_char_len,
+                is_valid: true,
+                ..super::TranscriptItemMetrics::default()
+            };
+            visible_positions[item_index] = visible_items.len();
+            visible_items.push(super::TranscriptItemPosition {
+                item_index,
+                start_line: summary.start_line,
+                gap_before: summary.gap_before,
+                content_line_count: summary.content_line_count,
+                total_line_count: summary.total_line_count,
+                content_char_len: summary.block.plain_text_char_len,
+                gap_owner_item_index: summary.gap_owner_item_index,
+            });
+        }
+
+        content_prefix_sums[item_index + 1] =
+            content_prefix_sums[item_index].saturating_add(metrics[item_index].content_char_len);
+    }
+
+    TranscriptItemMetricsIndex {
+        metrics: Rc::new(metrics),
+        visible_items: Rc::new(visible_items),
+        visible_positions: Rc::new(visible_positions),
+        content_prefix_sums: Rc::new(content_prefix_sums),
+        line_count: items
+            .last()
+            .map(|item| item.start_line + item.total_line_count)
+            .unwrap_or(0),
+        content_char_len: items
+            .iter()
+            .map(|item| item.block.plain_text_char_len)
+            .sum(),
+        ..TranscriptItemMetricsIndex::default()
+    }
 }
 
 #[cfg(test)]
@@ -447,7 +519,6 @@ mod tests {
                 gap_before: 0,
                 content_line_count: 1,
                 total_line_count: 1,
-                content_char_len: 5,
                 gap_owner_item_index: None,
                 block: render_block(
                     "first",
@@ -465,7 +536,6 @@ mod tests {
                 gap_before: 2,
                 content_line_count: 1,
                 total_line_count: 3,
-                content_char_len: 6,
                 gap_owner_item_index: Some(0),
                 block: render_block(
                     "second",
@@ -506,7 +576,6 @@ mod tests {
                 gap_before: 0,
                 content_line_count: 1,
                 total_line_count: 1,
-                content_char_len: 5,
                 gap_owner_item_index: None,
                 block: render_block(
                     "first",
@@ -524,7 +593,6 @@ mod tests {
                 gap_before: 1,
                 content_line_count: 1,
                 total_line_count: 2,
-                content_char_len: 6,
                 gap_owner_item_index: Some(0),
                 block: render_block(
                     "second",
@@ -542,7 +610,6 @@ mod tests {
                 gap_before: 1,
                 content_line_count: 1,
                 total_line_count: 2,
-                content_char_len: 5,
                 gap_owner_item_index: Some(1),
                 block: render_block(
                     "third",

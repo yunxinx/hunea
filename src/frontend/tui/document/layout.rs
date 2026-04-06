@@ -317,6 +317,7 @@ impl Model {
 
         let snapshot = Rc::new(DocumentTranscriptSnapshot {
             render: Rc::clone(&self.transcript_render),
+            index: self.transcript.item_metrics_index(),
             width: if self.width == 0 {
                 crate::frontend::tui::transcript::DEFAULT_RENDER_WIDTH as u16
             } else {

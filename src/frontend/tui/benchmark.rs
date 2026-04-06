@@ -123,6 +123,19 @@ pub struct DocumentStressSummary {
     pub memory: DocumentMemorySummary,
 }
 
+/// `PhaseABaselineSummary` 汇总 item-level virtualization Phase A 需要冻结的基线。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhaseABaselineSummary {
+    pub item_count: usize,
+    pub width: u16,
+    pub height: u16,
+    pub cold_resume: DocumentStressSummary,
+    pub width_change: DocumentStressSummary,
+    pub manual_scroll_viewport: DocumentViewportSummary,
+    pub bottom_follow_viewport: DocumentViewportSummary,
+    pub frame: FrameRenderSummary,
+}
+
 /// `TranscriptBench` 封装 transcript 渲染 benchmark 所需的状态。
 #[derive(Debug, Clone)]
 pub struct TranscriptBench {
@@ -377,6 +390,65 @@ pub fn format_document_stress_summary(summary: &DocumentStressSummary) -> String
         anchors = summary.memory.estimated_anchor_bytes,
         indexes = summary.memory.estimated_index_bytes,
         estimated_total = summary.memory.estimated_total_bytes,
+    )
+}
+
+/// `measure_phase_a_baseline` 汇总 Phase A 需要冻结的性能与行为基线。
+pub fn measure_phase_a_baseline(
+    item_count: usize,
+    width: u16,
+    height: u16,
+) -> PhaseABaselineSummary {
+    let width = width.max(1);
+    let height = height.max(1);
+    let width_change_target = width.saturating_sub(24).max(1);
+    let cold_resume = measure_document_pipeline_stress(item_count, width, height);
+    let width_change = measure_width_change_document_pipeline_stress(
+        item_count,
+        width,
+        width_change_target,
+        height,
+    );
+
+    let mut document_bench = DocumentBench::new(item_count, width, height);
+    document_bench.prepare_offset_viewport_state();
+    let manual_scroll_viewport = document_bench.build_offset_viewport();
+    document_bench.prepare_bottom_follow_viewport_state();
+    let bottom_follow_viewport = document_bench.build_bottom_follow_viewport();
+
+    let mut frame_bench = ModelRenderBench::new(item_count, width, height);
+    let frame = frame_bench.render_frame();
+
+    PhaseABaselineSummary {
+        item_count,
+        width,
+        height,
+        cold_resume,
+        width_change,
+        manual_scroll_viewport,
+        bottom_follow_viewport,
+        frame,
+    }
+}
+
+/// `format_phase_a_baseline_summary` 输出便于写入工作记录的 Phase A 摘要。
+pub fn format_phase_a_baseline_summary(summary: &PhaseABaselineSummary) -> String {
+    format!(
+        "phase_a items={items} size={width}x{height} cold_resume=[{cold_resume}] width_change=[{width_change}] manual_scroll={{lines:{manual_lines}, plain_text_len:{manual_plain_text_len}, resolved_offset:{manual_offset}}} bottom_follow={{lines:{bottom_lines}, plain_text_len:{bottom_plain_text_len}, resolved_offset:{bottom_offset}}} frame={{cells:{frame_cells}, size:{frame_width}x{frame_height}}}",
+        items = summary.item_count,
+        width = summary.width,
+        height = summary.height,
+        cold_resume = format_document_stress_summary(&summary.cold_resume),
+        width_change = format_document_stress_summary(&summary.width_change),
+        manual_lines = summary.manual_scroll_viewport.line_count,
+        manual_plain_text_len = summary.manual_scroll_viewport.plain_text_len,
+        manual_offset = summary.manual_scroll_viewport.resolved_offset,
+        bottom_lines = summary.bottom_follow_viewport.line_count,
+        bottom_plain_text_len = summary.bottom_follow_viewport.plain_text_len,
+        bottom_offset = summary.bottom_follow_viewport.resolved_offset,
+        frame_cells = summary.frame.non_empty_cells,
+        frame_width = summary.frame.width,
+        frame_height = summary.frame.height,
     )
 }
 
@@ -844,6 +916,43 @@ mod tests {
         let formatted = format_document_stress_summary(&summary);
         assert!(formatted.contains("scenario=width_change(80->56)"));
         assert!(formatted.contains("memory_bytes={"));
+    }
+
+    #[test]
+    fn phase_a_baseline_summary_reports_core_sections() {
+        let summary = measure_phase_a_baseline(24, 80, 18);
+        eprintln!("{}", format_phase_a_baseline_summary(&summary));
+
+        assert_eq!(summary.item_count, 24);
+        assert_eq!(summary.width, 80);
+        assert_eq!(summary.height, 18);
+        assert_eq!(
+            summary.cold_resume.scenario,
+            DocumentStressScenario::ColdResume
+        );
+        assert_eq!(
+            summary.width_change.scenario,
+            DocumentStressScenario::WidthChange {
+                from_width: 80,
+                to_width: 56,
+            }
+        );
+        assert!(
+            summary.manual_scroll_viewport.resolved_offset > 0,
+            "manual scroll viewport should keep a non-zero offset for the baseline fixture"
+        );
+        assert!(summary.bottom_follow_viewport.line_count > 0);
+        assert_eq!(summary.frame.width, 80);
+        assert_eq!(summary.frame.height, 18);
+        assert!(summary.frame.non_empty_cells > 0);
+
+        let formatted = format_phase_a_baseline_summary(&summary);
+        assert!(formatted.contains("phase_a"));
+        assert!(formatted.contains("cold_resume"));
+        assert!(formatted.contains("width_change(80->56)"));
+        assert!(formatted.contains("manual_scroll"));
+        assert!(formatted.contains("bottom_follow"));
+        assert!(formatted.contains("frame={"));
     }
 
     #[test]

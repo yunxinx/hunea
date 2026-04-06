@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{collections::HashMap, rc::Rc};
 
 use ratatui::text::Line;
 
@@ -148,6 +148,13 @@ impl Transcript {
 
     pub(crate) fn items_snapshot(&self) -> Rc<Vec<Rc<TranscriptItem>>> {
         Rc::clone(&self.items)
+    }
+
+    /// `cached_screen_blocks_snapshot` 返回当前宽度下已预热的 item block 引用表。
+    pub(crate) fn cached_screen_blocks_snapshot(
+        &self,
+    ) -> Rc<std::cell::RefCell<HashMap<usize, Rc<CachedRenderBlock>>>> {
+        Rc::clone(&self.screen_cache.items)
     }
 
     /// `item_metrics_index` 返回 transcript 当前宽度下的轻量 item metrics 索引。
@@ -337,7 +344,44 @@ impl Transcript {
     /// `render_viewport` 返回 transcript 的可视切片。
     #[allow(dead_code)]
     pub(crate) fn render_viewport(&mut self, offset: usize, height: usize) -> ViewportRenderResult {
-        self.render().viewport(offset, height)
+        let index = self.item_metrics_index();
+        if index.line_count == 0 {
+            return ViewportRenderResult::default();
+        }
+
+        let resolved_offset = if height == 0 || height >= index.line_count {
+            0
+        } else {
+            offset.min(index.line_count.saturating_sub(height))
+        };
+        let visible_line_count = if height == 0 || height >= index.line_count {
+            index.line_count
+        } else {
+            height
+        };
+        let slice = self.materialize_viewport_slice(&index, resolved_offset, visible_line_count);
+
+        ViewportRenderResult {
+            lines: slice.lines,
+            plain_lines: {
+                #[cfg(test)]
+                {
+                    slice.plain_lines
+                }
+                #[cfg(not(test))]
+                {
+                    Vec::new()
+                }
+            },
+            line_count: slice.line_count,
+            total_line_count: index.line_count,
+            resolved_offset,
+        }
+    }
+
+    /// `retained_block_memory_summary` 返回 warmed item block cache 当前仍被 transcript 保留的体积拆分。
+    pub(crate) fn retained_block_memory_summary(&self) -> super::RetainedBlockMemorySummary {
+        self.screen_cache.retained_block_memory_summary()
     }
 
     fn render_width(&self) -> u16 {
@@ -391,55 +435,90 @@ impl Transcript {
 
     fn render_screen_block(&mut self, index: usize, width: u16) -> Rc<CachedRenderBlock> {
         let cache_key = self.items[index].render_cache_key();
-        if let Some(cached) = self.screen_cache.items.get(&index)
+        if let Some(cached) = self.screen_cache.items.borrow().get(&index)
             && cached.width == width
             && cached.cache_key == cache_key
         {
             return Rc::clone(cached);
         }
 
-        if let TranscriptItem::Message(item) = self.items[index].as_ref()
-            && let Some(projection) = item.render_projection(width, self.palette)
-        {
-            let plain_line_byte_lens = projection.plain_line_lens();
-            let plain_text_char_len = plain_line_byte_lens.iter().sum();
-            let anchors = projection.line_anchors();
-            let line_count = projection.line_count();
-            let block = Rc::new(CachedRenderBlock {
-                cache_key,
-                width,
-                lines: Rc::new(Vec::new()),
-                projected_user: Some(Rc::new(projection)),
-                line_count,
-                plain_text_char_len,
-                plain_line_byte_lens: Rc::new(plain_line_byte_lens),
-                anchors: CachedLineAnchors::Explicit(Rc::new(anchors)),
-            });
-            self.screen_cache.items.insert(index, Rc::clone(&block));
-            return block;
+        let block = Rc::new(materialize_transcript_item_render_block(
+            self.items[index].as_ref(),
+            width,
+            self.palette,
+        ));
+        self.screen_cache
+            .items
+            .borrow_mut()
+            .insert(index, Rc::clone(&block));
+        block
+    }
+
+    fn materialize_viewport_slice(
+        &mut self,
+        index: &TranscriptItemMetricsIndex,
+        start: usize,
+        count: usize,
+    ) -> super::render_state::RenderRangeSlice {
+        if count == 0 || index.line_count == 0 || start >= index.line_count {
+            return super::render_state::RenderRangeSlice::default();
         }
 
-        let lines = self.items[index].render_lines(width, self.palette);
-        let anchors = self.items[index].render_line_anchors(width, self.palette);
-        let plain_line_byte_lens = lines.iter().map(line_plain_text_len).collect::<Vec<_>>();
-        let plain_text_char_len = plain_line_byte_lens.iter().sum();
-        let uses_explicit_anchors = anchors.len() == lines.len();
-        let block = Rc::new(CachedRenderBlock {
-            cache_key,
-            width,
-            plain_text_char_len,
-            line_count: lines.len(),
-            lines: Rc::new(lines),
-            projected_user: None,
-            plain_line_byte_lens: Rc::new(plain_line_byte_lens),
-            anchors: if uses_explicit_anchors {
-                CachedLineAnchors::Explicit(Rc::new(anchors))
-            } else {
-                CachedLineAnchors::GeneratedRenderedLines
-            },
-        });
-        self.screen_cache.items.insert(index, Rc::clone(&block));
-        block
+        let mut remaining = count.min(index.line_count - start);
+        let mut slice = super::render_state::RenderRangeSlice {
+            lines: Vec::with_capacity(remaining),
+            line_count: remaining,
+            plain_char_len: 0,
+            #[cfg(test)]
+            plain_lines: Vec::with_capacity(remaining),
+        };
+        let mut position_index = match index
+            .position_for_line(start)
+            .and_then(|position| index.summary_position_for_item(position.item_index))
+        {
+            Some(position_index) => position_index,
+            None => return super::render_state::RenderRangeSlice::default(),
+        };
+        let mut line_offset = start.saturating_sub(index.visible_items[position_index].start_line);
+        let width = self.render_width();
+
+        while remaining > 0 {
+            let Some(position) = index.visible_items.get(position_index).copied() else {
+                break;
+            };
+            let taken = remaining.min(position.total_line_count.saturating_sub(line_offset));
+            let gap_start = line_offset.min(position.gap_before);
+            let gap_end = (line_offset + taken).min(position.gap_before);
+            for _ in gap_start..gap_end {
+                slice.lines.push(Line::raw(""));
+                #[cfg(test)]
+                slice.plain_lines.push(String::new());
+            }
+
+            let block_start = line_offset.saturating_sub(position.gap_before);
+            let block_end = (line_offset + taken)
+                .saturating_sub(position.gap_before)
+                .min(position.content_line_count);
+            if block_start < block_end {
+                let block = self.render_screen_block(position.item_index, width);
+                block.extend_lines(&mut slice.lines, block_start, block_end);
+                slice.plain_char_len += (block_start..block_end)
+                    .filter_map(|block_index| block.plain_line_len(block_index))
+                    .sum::<usize>();
+                #[cfg(test)]
+                for block_index in block_start..block_end {
+                    if let Some(plain_line) = block.plain_line_at(block_index) {
+                        slice.plain_lines.push(plain_line);
+                    }
+                }
+            }
+
+            remaining -= taken;
+            position_index += 1;
+            line_offset = 0;
+        }
+
+        slice
     }
 
     fn push_item(&mut self, item: TranscriptItem) {
@@ -472,6 +551,56 @@ impl Transcript {
     #[cfg(test)]
     pub(crate) fn item_positions_dirty_from_for_test(&self) -> usize {
         self.metrics_cache.positions_dirty_from
+    }
+}
+
+/// `materialize_transcript_item_render_block` 为单个 transcript item 构造稳定的屏幕块。
+pub(crate) fn materialize_transcript_item_render_block(
+    item: &TranscriptItem,
+    width: u16,
+    palette: TerminalPalette,
+) -> CachedRenderBlock {
+    let cache_key = item.render_cache_key();
+
+    if let TranscriptItem::Message(message) = item
+        && let Some(projection) = message.render_projection(width, palette)
+    {
+        let plain_line_byte_lens = projection.plain_line_lens();
+        let plain_text_char_len = plain_line_byte_lens.iter().sum();
+        let anchors = projection.line_anchors();
+        let line_count = projection.line_count();
+        return CachedRenderBlock {
+            cache_key,
+            width,
+            palette,
+            lines: Rc::new(Vec::new()),
+            projected_user: Some(Rc::new(projection)),
+            line_count,
+            plain_text_char_len,
+            plain_line_byte_lens: Rc::new(plain_line_byte_lens),
+            anchors: CachedLineAnchors::Explicit(Rc::new(anchors)),
+        };
+    }
+
+    let lines = item.render_lines(width, palette);
+    let anchors = item.render_line_anchors(width, palette);
+    let plain_line_byte_lens = lines.iter().map(line_plain_text_len).collect::<Vec<_>>();
+    let plain_text_char_len = plain_line_byte_lens.iter().sum();
+    let uses_explicit_anchors = anchors.len() == lines.len();
+    CachedRenderBlock {
+        cache_key,
+        width,
+        palette,
+        plain_text_char_len,
+        line_count: lines.len(),
+        lines: Rc::new(lines),
+        projected_user: None,
+        plain_line_byte_lens: Rc::new(plain_line_byte_lens),
+        anchors: if uses_explicit_anchors {
+            CachedLineAnchors::Explicit(Rc::new(anchors))
+        } else {
+            CachedLineAnchors::GeneratedRenderedLines
+        },
     }
 }
 
@@ -553,7 +682,7 @@ impl TranscriptItem {
             .collect()
     }
 
-    fn render_cache_key(&self) -> u64 {
+    pub(crate) fn render_cache_key(&self) -> u64 {
         match self {
             Self::Hero(item) => item.render_cache_key(),
             Self::Message(item) => item.render_cache_key(),
@@ -824,7 +953,7 @@ mod tests {
         }
 
         assert_eq!(
-            transcript.screen_cache.items.len(),
+            transcript.screen_cache.items.borrow().len(),
             0,
             "append should not grow dense render cache slots before any render happens"
         );
@@ -1017,6 +1146,59 @@ mod tests {
 
         let second = transcript.render_viewport(1, 1);
         assert_eq!(second.plain_lines, vec!["beta"]);
+    }
+
+    #[test]
+    fn render_viewport_materializes_only_visible_items_once_metrics_are_warm() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_gap(0);
+        transcript.set_width(32);
+
+        for index in 0..10 {
+            transcript.append_message(Sender::Assistant, format!("item {index}"));
+        }
+
+        let _ = transcript.item_metrics_index();
+        transcript.screen_cache.items.borrow_mut().clear();
+        transcript.screen_cache.result = Rc::new(RenderResult::default());
+        transcript.screen_cache.valid = false;
+
+        let viewport = transcript.render_viewport(3, 2);
+
+        assert_eq!(
+            viewport.plain_lines,
+            vec!["item 3".to_string(), "item 4".to_string()]
+        );
+        assert_eq!(
+            transcript.screen_cache.items.borrow().len(),
+            2,
+            "viewport materialization should only populate caches for visible items"
+        );
+        assert!(transcript.screen_cache.items.borrow().contains_key(&3));
+        assert!(transcript.screen_cache.items.borrow().contains_key(&4));
+    }
+
+    #[test]
+    fn cloned_transcript_does_not_reuse_screen_blocks_from_a_different_palette() {
+        let mut original = Transcript::new(default_palette());
+        original.set_width(20);
+        original.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+            Sender::User,
+            "hello",
+        )))]);
+
+        let mut cloned = original.clone();
+        cloned.set_palette(terminal_default_palette());
+
+        let original_render = original.render();
+        assert_eq!(original_render.line_count, 3);
+
+        let cloned_render = cloned.render();
+        assert_eq!(cloned_render.line_count, 1);
+        assert_eq!(
+            cloned_render.all_plain_lines(),
+            vec!["› hello             "]
+        );
     }
 
     #[test]

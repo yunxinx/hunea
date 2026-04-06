@@ -40,6 +40,7 @@ pub(crate) struct LineAnchor {
 pub(crate) struct RenderResult {
     pub(crate) index: TranscriptItemMetricsIndex,
     pub(crate) items: Rc<Vec<RenderItemSummary>>,
+    #[allow(dead_code)]
     pub(crate) item_positions: Rc<Vec<usize>>,
     pub(crate) selectable_ranges: Rc<Vec<SelectableLineRange>>,
     pub(crate) line_count: usize,
@@ -70,8 +71,10 @@ pub(crate) struct RenderItemLines {
 }
 
 /// `RenderedTranscriptLine` 表示按需物化出的一条 transcript 行。
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct RenderedTranscriptLine {
+    #[allow(dead_code)]
     pub(crate) line: Line<'static>,
     pub(crate) plain_line: String,
     pub(crate) anchor: LineAnchor,
@@ -100,6 +103,7 @@ pub(crate) struct RenderRangeSlice {
 
 impl RenderResult {
     /// `viewport` 返回给定偏移和高度下的可视行切片。
+    #[allow(dead_code)]
     pub(crate) fn viewport(&self, offset: usize, height: usize) -> ViewportRenderResult {
         let (slice, resolved_offset) = visible_rendered_lines(self, offset, height);
 
@@ -129,6 +133,7 @@ impl RenderResult {
         self.content_char_len + self.line_count.saturating_sub(1)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn plain_text_len_for_range(&self, start: usize, count: usize) -> usize {
         if count == 0 || self.line_count == 0 || start >= self.line_count {
             return 0;
@@ -146,6 +151,7 @@ impl RenderResult {
         slice.plain_char_len + slice.line_count.saturating_sub(1)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn lines_for_range(&self, start: usize, count: usize) -> Vec<Line<'static>> {
         self.range_slice(start, count).lines
     }
@@ -160,6 +166,7 @@ impl RenderResult {
         self.index.item_lines(item_index)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn line_at(&self, index: usize) -> Option<RenderedTranscriptLine> {
         if index >= self.line_count {
             return None;
@@ -193,6 +200,7 @@ impl RenderResult {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn line_index_for_anchor(&self, target: LineAnchor) -> Option<usize> {
         if matches!(target.item_anchor.kind, LineAnchorKind::ItemGap) {
             let position = self.summary_position_for_item(target.item_index)?;
@@ -288,11 +296,13 @@ impl RenderResult {
         slice
     }
 
+    #[allow(dead_code)]
     fn summary_for_line(&self, index: usize) -> Option<&RenderItemSummary> {
         let position = self.summary_position_for_line(index)?;
         self.items.get(position)
     }
 
+    #[allow(dead_code)]
     fn item_summary(&self, item_index: usize) -> Option<&RenderItemSummary> {
         let position = self.summary_position_for_item(item_index)?;
         self.items.get(position)
@@ -312,11 +322,13 @@ impl RenderResult {
             .ok()
     }
 
+    #[allow(dead_code)]
     fn summary_position_for_item(&self, item_index: usize) -> Option<usize> {
         let position = *self.item_positions.get(item_index)?;
         (position != usize::MAX).then_some(position)
     }
 
+    #[allow(dead_code)]
     fn trailing_gap_line_count(&self, position: usize) -> usize {
         let Some(summary) = self.items.get(position) else {
             return 0;
@@ -328,6 +340,7 @@ impl RenderResult {
             .unwrap_or(0)
     }
 
+    #[allow(dead_code)]
     fn block_index_for_anchor(
         &self,
         summary: &RenderItemSummary,
@@ -354,6 +367,18 @@ impl Default for RenderResult {
 #[cfg(test)]
 pub(crate) fn new_render_result(items: Vec<RenderItemSummary>) -> RenderResult {
     new_render_result_with_append_start(items, TranscriptItemMetricsIndex::default(), -1)
+}
+
+pub(crate) fn index_only_render_result(index: TranscriptItemMetricsIndex) -> RenderResult {
+    RenderResult {
+        line_count: index.line_count,
+        content_char_len: index.content_char_len,
+        item_positions: Rc::clone(&index.visible_positions),
+        index,
+        items: Rc::new(Vec::new()),
+        selectable_ranges: Rc::new(Vec::new()),
+        append_start_line: -1,
+    }
 }
 
 pub(crate) fn new_render_result_with_append_start(
@@ -403,6 +428,7 @@ pub(crate) fn new_render_result_with_append_start(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn visible_rendered_lines(
     render: &RenderResult,
     offset: usize,
@@ -501,6 +527,7 @@ mod tests {
         Rc::new(CachedRenderBlock {
             cache_key: 0,
             width: 80,
+            palette: crate::frontend::tui::theme::default_palette(),
             lines: Rc::new(vec![Line::raw(text.to_string()); anchors.len()]),
             projected_user: None,
             line_count: anchors.len(),

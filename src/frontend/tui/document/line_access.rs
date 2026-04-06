@@ -1,14 +1,21 @@
+use std::rc::Rc;
+
+use ratatui::text::Line;
+
 use crate::frontend::tui::{
     selection::{
         ResolvedSelectionPoint, SelectableLineRange, SelectionPoint,
         normalize_transcript_selectable_range,
     },
-    transcript::LineAnchorKind,
+    transcript::{
+        CachedRenderBlock, ItemLineAnchor, LineAnchor, LineAnchorKind,
+        materialize_transcript_item_render_block,
+    },
 };
 
 use super::{
     DocumentAnchorRegion, DocumentLayout, DocumentLayoutLine, DocumentLineAnchor,
-    DocumentTranscriptItemLines,
+    DocumentTranscriptItemLines, DocumentTranscriptSnapshot,
 };
 
 /// `DocumentSelectionLine` 表示 selection / copy 路径消费的一条语义行。
@@ -17,6 +24,306 @@ pub(crate) struct DocumentSelectionLine {
     pub(crate) text: String,
     pub(crate) anchor: DocumentLineAnchor,
     pub(crate) selectable: SelectableLineRange,
+}
+
+/// `DocumentTranscriptViewportSnapshot` 描述 transcript 当前局部窗口真正需要的行级数据。
+#[derive(Debug, Clone, Default)]
+pub(super) struct DocumentTranscriptViewportSnapshot {
+    pub(super) lines: Vec<Line<'static>>,
+    pub(super) plain_text_len: usize,
+    pub(super) resolved_offset: usize,
+    #[allow(dead_code)]
+    pub(super) item_range: Option<(usize, usize)>,
+    #[cfg(test)]
+    pub(super) plain_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DocumentTranscriptViewportLine {
+    line: Line<'static>,
+    plain_line_len: usize,
+    item_index: usize,
+    #[cfg(test)]
+    plain_line: String,
+}
+
+impl DocumentTranscriptSnapshot {
+    pub(crate) fn line_count(&self) -> usize {
+        self.index.line_count
+    }
+
+    pub(crate) fn plain_text_len_for_range(&self, start: usize, count: usize) -> usize {
+        if start == 0 && count >= self.line_count() {
+            return if self.line_count() == 0 {
+                0
+            } else {
+                self.index.content_char_len + self.line_count().saturating_sub(1)
+            };
+        }
+
+        self.range_snapshot(start, count, false).plain_text_len
+    }
+
+    #[cfg(test)]
+    pub(crate) fn plain_lines_for_range(&self, start: usize, count: usize) -> Vec<String> {
+        self.range_snapshot(start, count, true).plain_lines
+    }
+
+    pub(crate) fn lines_for_range(&self, start: usize, count: usize) -> Vec<Line<'static>> {
+        self.range_snapshot(start, count, false).lines
+    }
+
+    pub(super) fn viewport_snapshot(
+        &self,
+        offset: usize,
+        height: usize,
+    ) -> DocumentTranscriptViewportSnapshot {
+        if self.line_count() == 0 {
+            return DocumentTranscriptViewportSnapshot::default();
+        }
+
+        let resolved_offset = if height == 0 || height >= self.line_count() {
+            0
+        } else {
+            offset.min(self.line_count().saturating_sub(height))
+        };
+        let visible_line_count = if height == 0 || height >= self.line_count() {
+            self.line_count()
+        } else {
+            height
+        };
+
+        let mut snapshot = self.range_snapshot(resolved_offset, visible_line_count, cfg!(test));
+        snapshot.resolved_offset = resolved_offset;
+        snapshot
+    }
+
+    pub(crate) fn line_at(&self, index: usize) -> Option<DocumentLayoutLine> {
+        self.materialize_line(index, true)
+    }
+
+    fn materialize_line(
+        &self,
+        index: usize,
+        include_selectable: bool,
+    ) -> Option<DocumentLayoutLine> {
+        let position = self.index.position_for_line(index)?;
+        let relative = index.saturating_sub(position.start_line);
+        if relative < position.gap_before {
+            return Some(DocumentLayoutLine {
+                line: Line::raw(""),
+                plain_line: String::new(),
+                anchor: document_anchor_for_transcript(LineAnchor {
+                    item_index: position.gap_owner_item_index.unwrap_or(position.item_index),
+                    item_anchor: ItemLineAnchor {
+                        kind: LineAnchorKind::ItemGap,
+                        gap_offset: relative,
+                        ..ItemLineAnchor::default()
+                    },
+                }),
+                selectable: SelectableLineRange::default(),
+            });
+        }
+
+        let block = self.render_block(position.item_index)?;
+        let block_index = relative - position.gap_before;
+        let anchor = document_anchor_for_transcript(LineAnchor {
+            item_index: position.item_index,
+            item_anchor: block.anchor_at(block_index)?,
+        });
+        let plain_line = block.plain_line_at(block_index)?;
+        let selectable = if include_selectable {
+            self.selectable_at(anchor, &plain_line)
+        } else {
+            SelectableLineRange::default()
+        };
+
+        Some(DocumentLayoutLine {
+            line: block.line_at(block_index)?,
+            plain_line,
+            anchor,
+            selectable,
+        })
+    }
+
+    fn viewport_line(
+        &self,
+        index: usize,
+        include_test_plain_lines: bool,
+    ) -> Option<DocumentTranscriptViewportLine> {
+        #[cfg(not(test))]
+        let _ = include_test_plain_lines;
+
+        let position = self.index.position_for_line(index)?;
+        let relative = index.saturating_sub(position.start_line);
+        if relative < position.gap_before {
+            return Some(DocumentTranscriptViewportLine {
+                line: Line::raw(""),
+                plain_line_len: 0,
+                item_index: position.gap_owner_item_index.unwrap_or(position.item_index),
+                #[cfg(test)]
+                plain_line: String::new(),
+            });
+        }
+
+        let block = self.render_block(position.item_index)?;
+        let block_index = relative - position.gap_before;
+        Some(DocumentTranscriptViewportLine {
+            line: block.line_at(block_index)?,
+            plain_line_len: block.plain_line_len(block_index)?,
+            item_index: position.item_index,
+            #[cfg(test)]
+            plain_line: if include_test_plain_lines {
+                block.plain_line_at(block_index)?
+            } else {
+                String::new()
+            },
+        })
+    }
+
+    pub(crate) fn line_index_for_anchor(&self, target: LineAnchor) -> Option<usize> {
+        let item_lines = self.index.item_lines(target.item_index)?;
+        if matches!(target.item_anchor.kind, LineAnchorKind::ItemGap) {
+            let gap_line_count = self.index.trailing_gap_line_count(target.item_index);
+            if target.item_anchor.gap_offset >= gap_line_count {
+                return None;
+            }
+            return Some(
+                item_lines.content_start_line
+                    + item_lines.content_line_count
+                    + target.item_anchor.gap_offset,
+            );
+        }
+
+        let block = self.render_block(target.item_index)?;
+        let block_index = block.anchor_index(target.item_anchor)?;
+        Some(item_lines.content_start_line + block_index)
+    }
+
+    fn range_snapshot(
+        &self,
+        start: usize,
+        count: usize,
+        include_test_plain_lines: bool,
+    ) -> DocumentTranscriptViewportSnapshot {
+        if count == 0 || self.line_count() == 0 || start >= self.line_count() {
+            return DocumentTranscriptViewportSnapshot::default();
+        }
+
+        let end = (start + count).min(self.line_count());
+        let mut lines = Vec::with_capacity(end - start);
+        let mut plain_text_len = 0;
+        let mut item_range = None;
+        #[cfg(test)]
+        let mut plain_lines = Vec::with_capacity(end - start);
+
+        for index in start..end {
+            let Some(line) = self.viewport_line(index, include_test_plain_lines) else {
+                continue;
+            };
+            if !lines.is_empty() {
+                plain_text_len += 1;
+            }
+            plain_text_len += line.plain_line_len;
+            item_range = Some(match item_range {
+                Some((start_item, _)) => (start_item, line.item_index),
+                None => (line.item_index, line.item_index),
+            });
+            #[cfg(test)]
+            if include_test_plain_lines {
+                plain_lines.push(line.plain_line.clone());
+            }
+            lines.push(line.line);
+        }
+
+        DocumentTranscriptViewportSnapshot {
+            lines,
+            plain_text_len,
+            resolved_offset: start,
+            item_range,
+            #[cfg(test)]
+            plain_lines,
+        }
+    }
+
+    fn render_block(&self, item_index: usize) -> Option<Rc<CachedRenderBlock>> {
+        if let Some(block) = self.item_block_cache.borrow().get(&item_index).cloned() {
+            return Some(block);
+        }
+
+        let item = self.items.get(item_index)?.as_ref();
+        let warmed_block = self
+            .warmed_item_block_cache
+            .borrow()
+            .get(&item_index)
+            .cloned();
+        if let Some(block) = warmed_block
+            && block.width == self.width.max(1)
+            && block.palette == self.palette
+            && block.cache_key == item.render_cache_key()
+        {
+            return Some(block);
+        }
+
+        let block = Rc::new(materialize_transcript_item_render_block(
+            item,
+            self.width.max(1),
+            self.palette,
+        ));
+        self.item_block_cache
+            .borrow_mut()
+            .insert(item_index, Rc::clone(&block));
+        Some(block)
+    }
+
+    fn selectable_at(&self, anchor: DocumentLineAnchor, plain_line: &str) -> SelectableLineRange {
+        if anchor.region != DocumentAnchorRegion::Transcript
+            || matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap)
+        {
+            return SelectableLineRange::default();
+        }
+
+        if let Some(item_ranges) = self.selectable_ranges_for_item(anchor.transcript.item_index)
+            && anchor.transcript.item_anchor.rendered_line < item_ranges.len()
+        {
+            return item_ranges[anchor.transcript.item_anchor.rendered_line];
+        }
+
+        normalize_transcript_selectable_range(plain_line, usize::from(self.width.max(1)), true)
+    }
+
+    fn selectable_ranges_for_item(&self, item_index: usize) -> Option<Vec<SelectableLineRange>> {
+        if let Some(ranges) = self.selectable_cache.borrow().get(&item_index).cloned() {
+            return Some(ranges);
+        }
+
+        let plain_lines = self.item_text_lines(item_index)?;
+        let item = self.items.get(item_index)?.as_ref();
+        let ranges =
+            item.render_selectable_line_ranges(self.width.max(1), self.palette, &plain_lines);
+        self.selectable_cache
+            .borrow_mut()
+            .insert(item_index, ranges.clone());
+        Some(ranges)
+    }
+
+    fn item_text_lines(&self, item_index: usize) -> Option<Vec<String>> {
+        if let Some(lines) = self
+            .item_text_lines_cache
+            .borrow()
+            .get(&item_index)
+            .cloned()
+        {
+            return Some(lines);
+        }
+
+        let item = self.items.get(item_index)?.as_ref();
+        let lines = item.render_plain_lines(self.width.max(1), self.palette);
+        self.item_text_lines_cache
+            .borrow_mut()
+            .insert(item_index, lines.clone());
+        Some(lines)
+    }
 }
 
 impl DocumentLayout {
@@ -43,7 +350,6 @@ impl DocumentLayout {
             let transcript_end = end.min(self.transcript_line_count);
             total += self
                 .transcript
-                .render
                 .plain_text_len_for_range(start, transcript_end - start);
             used_transcript = transcript_end > start;
             start = transcript_end;
@@ -66,7 +372,7 @@ impl DocumentLayout {
             return None;
         }
         if index < self.transcript_line_count {
-            return self.transcript_line_at(index);
+            return self.transcript.line_at(index);
         }
 
         Some(DocumentLayoutLine {
@@ -110,10 +416,7 @@ impl DocumentLayout {
     /// `line_index_for_anchor` 把语义锚点解析回当前布局中的视觉行。
     pub(crate) fn line_index_for_anchor(&self, target: DocumentLineAnchor) -> Option<usize> {
         if target.region == DocumentAnchorRegion::Transcript {
-            return self
-                .transcript
-                .render
-                .line_index_for_anchor(target.transcript);
+            return self.transcript.line_index_for_anchor(target.transcript);
         }
 
         self.tail
@@ -136,33 +439,11 @@ impl DocumentLayout {
 
     /// `selection_line_at` 返回 selection / copy 路径需要的文本与锚点信息。
     pub(crate) fn selection_line_at(&self, index: usize) -> Option<DocumentSelectionLine> {
-        if index >= self.line_count() {
-            return None;
-        }
-        if index < self.transcript_line_count {
-            return self.transcript_selection_line_at(index);
-        }
-
-        let tail_index = index - self.transcript_line_count;
+        let line = self.line_at(index)?;
         Some(DocumentSelectionLine {
-            text: self
-                .tail
-                .text_lines
-                .get(tail_index)
-                .cloned()
-                .unwrap_or_default(),
-            anchor: self
-                .tail
-                .anchors
-                .get(tail_index)
-                .copied()
-                .unwrap_or_default(),
-            selectable: self
-                .tail
-                .selectable
-                .get(tail_index)
-                .copied()
-                .unwrap_or_default(),
+            text: line.plain_line,
+            anchor: line.anchor,
+            selectable: line.selectable,
         })
     }
 
@@ -200,7 +481,10 @@ impl DocumentLayout {
         let mut lines = Vec::with_capacity(end - start);
         if start < self.transcript_line_count {
             let transcript_end = end.min(self.transcript_line_count);
-            lines.extend(self.transcript_line_texts_for_range(start, transcript_end));
+            lines.extend(
+                self.transcript
+                    .plain_lines_for_range(start, transcript_end - start),
+            );
             start = transcript_end;
         }
         if start < end {
@@ -212,23 +496,8 @@ impl DocumentLayout {
         lines
     }
 
-    #[cfg(test)]
-    fn transcript_line_texts_for_range(&self, start: usize, end: usize) -> Vec<String> {
-        if start >= end || start >= self.transcript_line_count {
-            return Vec::new();
-        }
-
-        self.transcript
-            .render
-            .plain_lines_for_range(start, end.min(self.transcript_line_count) - start)
-    }
-
     /// `lines_for_range` 返回给定连续范围内的带样式行。
-    pub(crate) fn lines_for_range(
-        &self,
-        mut start: usize,
-        count: usize,
-    ) -> Vec<ratatui::text::Line<'static>> {
+    pub(crate) fn lines_for_range(&self, mut start: usize, count: usize) -> Vec<Line<'static>> {
         if count == 0 || self.line_count() == 0 || start >= self.line_count() {
             return Vec::new();
         }
@@ -237,7 +506,10 @@ impl DocumentLayout {
         let mut lines = Vec::with_capacity(end - start);
         if start < self.transcript_line_count {
             let transcript_end = end.min(self.transcript_line_count);
-            lines.extend(self.transcript_lines_for_range(start, transcript_end));
+            lines.extend(
+                self.transcript
+                    .lines_for_range(start, transcript_end - start),
+            );
             start = transcript_end;
         }
         if start < end {
@@ -264,120 +536,6 @@ impl DocumentLayout {
             })
             .filter(|item| item.content_line_count > 0)
     }
-
-    fn transcript_line_at(&self, index: usize) -> Option<DocumentLayoutLine> {
-        let rendered = self.transcript.render.line_at(index)?;
-        let anchor = document_anchor_for_transcript(rendered.anchor);
-        let plain_line = rendered.plain_line;
-        let selectable = self.transcript_selectable_at(anchor, &plain_line);
-
-        Some(DocumentLayoutLine {
-            line: rendered.line,
-            plain_line,
-            anchor,
-            selectable,
-        })
-    }
-
-    fn transcript_selection_line_at(&self, index: usize) -> Option<DocumentSelectionLine> {
-        let rendered = self.transcript.render.line_at(index)?;
-        let anchor = document_anchor_for_transcript(rendered.anchor);
-        let text = rendered.plain_line;
-        let selectable = self.transcript_selectable_at(anchor, &text);
-
-        Some(DocumentSelectionLine {
-            text,
-            anchor,
-            selectable,
-        })
-    }
-
-    fn transcript_selectable_at(
-        &self,
-        anchor: DocumentLineAnchor,
-        plain_line: &str,
-    ) -> SelectableLineRange {
-        if anchor.region != DocumentAnchorRegion::Transcript
-            || matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap)
-        {
-            return SelectableLineRange::default();
-        }
-
-        if let Some(item_ranges) =
-            self.transcript_selectable_ranges_for_item(anchor.transcript.item_index)
-            && anchor.transcript.item_anchor.rendered_line < item_ranges.len()
-        {
-            return item_ranges[anchor.transcript.item_anchor.rendered_line];
-        }
-
-        normalize_transcript_selectable_range(
-            plain_line,
-            usize::from(self.transcript.width.max(1)),
-            true,
-        )
-    }
-
-    fn transcript_selectable_ranges_for_item(
-        &self,
-        item_index: usize,
-    ) -> Option<Vec<SelectableLineRange>> {
-        if let Some(ranges) = self
-            .transcript
-            .selectable_cache
-            .borrow()
-            .get(&item_index)
-            .cloned()
-        {
-            return Some(ranges);
-        }
-
-        let plain_lines = self.transcript_item_text_lines(item_index)?;
-        let item = self.transcript.items.get(item_index)?.as_ref();
-        let ranges = item.render_selectable_line_ranges(
-            self.transcript.width.max(1),
-            self.transcript.palette,
-            &plain_lines,
-        );
-        self.transcript
-            .selectable_cache
-            .borrow_mut()
-            .insert(item_index, ranges.clone());
-        Some(ranges)
-    }
-
-    fn transcript_item_text_lines(&self, item_index: usize) -> Option<Vec<String>> {
-        if let Some(lines) = self
-            .transcript
-            .item_text_lines_cache
-            .borrow()
-            .get(&item_index)
-            .cloned()
-        {
-            return Some(lines);
-        }
-
-        let item = self.transcript.items.get(item_index)?.as_ref();
-        let lines = item.render_plain_lines(self.transcript.width.max(1), self.transcript.palette);
-        self.transcript
-            .item_text_lines_cache
-            .borrow_mut()
-            .insert(item_index, lines.clone());
-        Some(lines)
-    }
-
-    fn transcript_lines_for_range(
-        &self,
-        start: usize,
-        end: usize,
-    ) -> Vec<ratatui::text::Line<'static>> {
-        if start >= end || start >= self.transcript_line_count {
-            return Vec::new();
-        }
-
-        self.transcript
-            .render
-            .lines_for_range(start, end.min(self.transcript_line_count) - start)
-    }
 }
 
 fn plain_lines_len(lines: &[String]) -> usize {
@@ -388,9 +546,7 @@ fn plain_lines_len(lines: &[String]) -> usize {
     lines.iter().map(String::len).sum::<usize>() + lines.len().saturating_sub(1)
 }
 
-fn document_anchor_for_transcript(
-    transcript: crate::frontend::tui::transcript::LineAnchor,
-) -> DocumentLineAnchor {
+fn document_anchor_for_transcript(transcript: LineAnchor) -> DocumentLineAnchor {
     DocumentLineAnchor {
         region: DocumentAnchorRegion::Transcript,
         transcript,

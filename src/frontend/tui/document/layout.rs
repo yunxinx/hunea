@@ -160,7 +160,7 @@ impl Model {
 }
 
 pub(crate) fn compose_document_layout(input: DocumentLayoutInput) -> DocumentLayout {
-    let transcript_line_count = input.transcript.render.line_count;
+    let transcript_line_count = input.transcript.line_count();
     let transcript = Rc::clone(&input.transcript);
     let composer_slot = offset_slot_frame(input.tail.composer_slot, transcript_line_count);
 
@@ -258,7 +258,7 @@ fn document_range_snapshot(
 
     let end = (start + count).min(layout.line_count());
     let mut lines = Vec::with_capacity(end - start);
-    let mut plain_char_len = 0;
+    let mut plain_text_len = 0;
     let mut line_count = 0;
     #[cfg(test)]
     let mut plain_lines = Vec::with_capacity(end - start);
@@ -267,10 +267,9 @@ fn document_range_snapshot(
         let transcript_end = end.min(layout.transcript_line_count);
         let transcript_slice = layout
             .transcript
-            .render
-            .range_slice(start, transcript_end - start);
-        plain_char_len += transcript_slice.plain_char_len;
-        line_count += transcript_slice.line_count;
+            .viewport_snapshot(start, transcript_end - start);
+        plain_text_len += transcript_slice.plain_text_len;
+        line_count += transcript_slice.lines.len();
         lines.extend(transcript_slice.lines);
         #[cfg(test)]
         plain_lines.extend(transcript_slice.plain_lines);
@@ -282,22 +281,25 @@ fn document_range_snapshot(
         let tail_end = end - layout.transcript_line_count;
         let tail_line_count = tail_end - tail_start;
         lines.extend_from_slice(&layout.tail.lines[tail_start..tail_end]);
-        plain_char_len += layout.tail.text_lines[tail_start..tail_end]
-            .iter()
-            .map(String::len)
-            .sum::<usize>();
-        line_count += tail_line_count;
+        if line_count > 0 && tail_line_count > 0 {
+            plain_text_len += 1;
+        }
+        plain_text_len += if tail_line_count == 0 {
+            0
+        } else {
+            layout.tail.text_lines[tail_start..tail_end]
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
+                + tail_line_count.saturating_sub(1)
+        };
         #[cfg(test)]
         plain_lines.extend_from_slice(&layout.tail.text_lines[tail_start..tail_end]);
     }
 
     DocumentRangeSnapshot {
         lines,
-        plain_text_len: if line_count == 0 {
-            0
-        } else {
-            plain_char_len + line_count.saturating_sub(1)
-        },
+        plain_text_len,
         #[cfg(test)]
         plain_lines,
     }
@@ -315,9 +317,10 @@ impl Model {
             return Rc::clone(&self.document_transcript_cache.snapshot);
         }
 
+        let index = self.transcript.item_metrics_index();
+        let warmed_item_block_cache = self.transcript.cached_screen_blocks_snapshot();
         let snapshot = Rc::new(DocumentTranscriptSnapshot {
-            render: Rc::clone(&self.transcript_render),
-            index: self.transcript.item_metrics_index(),
+            index,
             width: if self.width == 0 {
                 crate::frontend::tui::transcript::DEFAULT_RENDER_WIDTH as u16
             } else {
@@ -325,6 +328,8 @@ impl Model {
             },
             palette: self.palette,
             items: self.transcript.items_snapshot(),
+            warmed_item_block_cache,
+            item_block_cache: Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
             item_text_lines_cache: Rc::new(std::cell::RefCell::new(
                 std::collections::HashMap::new(),
             )),

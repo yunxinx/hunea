@@ -18,7 +18,7 @@ use super::{
     status_line::{StatusLineItem, StatusLineRenderResult},
     style_mode::StyleMode,
     theme::{TerminalPalette, default_palette},
-    transcript::{RenderResult, Transcript},
+    transcript::{RenderResult, Transcript, index_only_render_result},
     view,
 };
 
@@ -129,7 +129,7 @@ impl Model {
         let mut transcript = Transcript::new(palette);
         transcript.set_gap(1);
         transcript.append_hero(hero_options);
-        let transcript_render = transcript.render();
+        let transcript_render = Rc::new(index_only_render_result(transcript.item_metrics_index()));
         let style_mode = options.style_mode.normalized();
         let status_line_items = options.status_line_items;
 
@@ -364,7 +364,9 @@ impl Model {
     }
 
     pub(crate) fn sync_transcript_render(&mut self) {
-        self.transcript_render = self.transcript.render();
+        self.transcript_render = Rc::new(index_only_render_result(
+            self.transcript.item_metrics_index(),
+        ));
         self.transcript_render_version += 1;
         self.invalidate_document_viewport_cache();
     }

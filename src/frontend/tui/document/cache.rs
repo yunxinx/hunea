@@ -4,15 +4,14 @@ use ratatui::text::Line;
 
 #[cfg(test)]
 use crate::frontend::tui::transcript::{
-    CachedLineAnchors, CachedRenderBlock, ItemLineAnchor, LineAnchorKind, RenderItemSummary,
-    new_render_result,
+    CachedLineAnchors, ItemLineAnchor, LineAnchorKind, RenderItemSummary, new_render_result,
 };
 use crate::frontend::tui::{
     composer,
     selection::SelectableLineRange,
     style_mode::StyleMode,
     theme::TerminalPalette,
-    transcript::{self, TranscriptItem, TranscriptItemMetricsIndex},
+    transcript::{self, CachedRenderBlock, TranscriptItem, TranscriptItemMetricsIndex},
 };
 
 use super::{slot_frame::SlotFrame, tail::DocumentTailLayout};
@@ -27,11 +26,12 @@ pub(crate) struct DocumentTranscriptKey {
 /// `DocumentTranscriptSnapshot` 缓存 unified document 真正需要的 transcript 行级数据。
 #[derive(Debug, Clone)]
 pub(crate) struct DocumentTranscriptSnapshot {
-    pub(super) render: Rc<transcript::RenderResult>,
     pub(super) index: TranscriptItemMetricsIndex,
     pub(super) width: u16,
     pub(super) palette: TerminalPalette,
     pub(super) items: Rc<Vec<Rc<TranscriptItem>>>,
+    pub(super) warmed_item_block_cache: Rc<RefCell<HashMap<usize, Rc<CachedRenderBlock>>>>,
+    pub(super) item_block_cache: Rc<RefCell<HashMap<usize, Rc<CachedRenderBlock>>>>,
     pub(super) item_text_lines_cache: Rc<RefCell<HashMap<usize, Vec<String>>>>,
     pub(super) selectable_cache: Rc<RefCell<HashMap<usize, Vec<SelectableLineRange>>>>,
 }
@@ -39,11 +39,12 @@ pub(crate) struct DocumentTranscriptSnapshot {
 impl Default for DocumentTranscriptSnapshot {
     fn default() -> Self {
         Self {
-            render: Rc::new(transcript::RenderResult::default()),
             index: TranscriptItemMetricsIndex::default(),
             width: 0,
             palette: crate::frontend::tui::theme::default_palette(),
             items: Rc::new(Vec::new()),
+            warmed_item_block_cache: Rc::new(RefCell::new(HashMap::new())),
+            item_block_cache: Rc::new(RefCell::new(HashMap::new())),
             item_text_lines_cache: Rc::new(RefCell::new(HashMap::new())),
             selectable_cache: Rc::new(RefCell::new(HashMap::new())),
         }
@@ -98,40 +99,54 @@ impl DocumentLayout {
         let transcript_line_count = transcript_line_count.min(plain_lines.len());
         let transcript_plain_lines = &plain_lines[..transcript_line_count];
         let tail_plain_lines = &plain_lines[transcript_line_count..];
+        let render = new_render_result(
+            transcript_plain_lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| {
+                    let block = Rc::new(CachedRenderBlock {
+                        cache_key: 0,
+                        width: 1,
+                        palette: crate::frontend::tui::theme::default_palette(),
+                        lines: Rc::new(vec![Line::raw((*line).to_string())]),
+                        projected_user: None,
+                        line_count: 1,
+                        plain_line_byte_lens: Rc::new(vec![line.len()]),
+                        anchors: CachedLineAnchors::Explicit(Rc::new(vec![ItemLineAnchor {
+                            kind: LineAnchorKind::RenderedLine,
+                            rendered_line: 0,
+                            ..ItemLineAnchor::default()
+                        }])),
+                        plain_text_char_len: line.len(),
+                    });
+                    RenderItemSummary {
+                        item_index: index,
+                        start_line: index,
+                        gap_before: 0,
+                        content_line_count: 1,
+                        total_line_count: 1,
+                        gap_owner_item_index: index.checked_sub(1),
+                        block,
+                    }
+                })
+                .collect(),
+        );
+        let item_block_cache = render
+            .items
+            .iter()
+            .map(|summary| (summary.item_index, Rc::clone(&summary.block)))
+            .collect();
         Self {
             transcript_line_count,
             transcript: Rc::new(DocumentTranscriptSnapshot {
-                render: Rc::new(new_render_result(
+                index: render.index.clone(),
+                warmed_item_block_cache: Rc::new(RefCell::new(HashMap::new())),
+                item_block_cache: Rc::new(RefCell::new(item_block_cache)),
+                item_text_lines_cache: Rc::new(RefCell::new(
                     transcript_plain_lines
                         .iter()
                         .enumerate()
-                        .map(|(index, line)| {
-                            let block = Rc::new(CachedRenderBlock {
-                                cache_key: 0,
-                                width: 1,
-                                lines: Rc::new(vec![Line::raw((*line).to_string())]),
-                                projected_user: None,
-                                line_count: 1,
-                                plain_line_byte_lens: Rc::new(vec![line.len()]),
-                                anchors: CachedLineAnchors::Explicit(Rc::new(vec![
-                                    ItemLineAnchor {
-                                        kind: LineAnchorKind::RenderedLine,
-                                        rendered_line: 0,
-                                        ..ItemLineAnchor::default()
-                                    },
-                                ])),
-                                plain_text_char_len: line.len(),
-                            });
-                            RenderItemSummary {
-                                item_index: index,
-                                start_line: index,
-                                gap_before: 0,
-                                content_line_count: 1,
-                                total_line_count: 1,
-                                gap_owner_item_index: index.checked_sub(1),
-                                block,
-                            }
-                        })
+                        .map(|(index, line)| (index, vec![(*line).to_string()]))
                         .collect(),
                 )),
                 ..DocumentTranscriptSnapshot::default()

@@ -176,6 +176,7 @@ fn user_render_projection_stays_smaller_than_eager_styled_line_cache_for_long_pr
     let projected_block = CachedRenderBlock {
         cache_key: 0,
         width,
+        palette,
         lines: Rc::new(Vec::new()),
         projected_user: Some(Rc::new(projection)),
         line_count: eager_line_count,
@@ -186,6 +187,7 @@ fn user_render_projection_stays_smaller_than_eager_styled_line_cache_for_long_pr
     let eager_block = CachedRenderBlock {
         cache_key: 0,
         width,
+        palette,
         lines: Rc::new(eager_lines),
         projected_user: None,
         line_count: eager_line_count,

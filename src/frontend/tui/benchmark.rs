@@ -10,8 +10,7 @@ use super::{
     styled_text::lines_to_plain_text,
     theme::{TerminalPalette, default_palette},
     transcript::{
-        CachedLineAnchors, RenderResult, Transcript, TranscriptItem, render_markdown_lines,
-        wrap_prompt_visual_lines,
+        RenderResult, Transcript, TranscriptItem, render_markdown_lines, wrap_prompt_visual_lines,
     },
 };
 
@@ -87,6 +86,8 @@ pub enum DocumentStressScenario {
 }
 
 /// `DocumentMemorySummary` 粗略估算 benchmark fixture 常驻结构的体积拆分。
+/// Phase C 之后，`RenderResult` 本身只保留 index，但 transcript warmed item block cache
+/// 仍会在 steady-state 中常驻，因此这里需要单独计入其 retained block 开销。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DocumentMemorySummary {
     pub raw_text_bytes: usize,
@@ -312,7 +313,11 @@ fn measure_document_pipeline_stress_with_model(
     model.sync_transcript_render();
     let transcript_render_time = transcript_render_started_at.elapsed();
     let rss_after_transcript_kib = process_rss_kib();
-    let memory = estimate_document_memory_summary(items.as_slice(), &model.transcript_render);
+    let memory = estimate_document_memory_summary(
+        items.as_slice(),
+        &model.transcript_render,
+        model.transcript.retained_block_memory_summary(),
+    );
 
     model.sync_command_panel_navigation();
     model.sync_composer_height();
@@ -762,25 +767,16 @@ fn format_document_stress_scenario(scenario: DocumentStressScenario) -> String {
 fn estimate_document_memory_summary(
     items: &[Rc<TranscriptItem>],
     render: &RenderResult,
+    retained_blocks: super::transcript::RetainedBlockMemorySummary,
 ) -> DocumentMemorySummary {
     let raw_text_bytes = items.iter().map(|item| item.source_text_byte_len()).sum();
     let estimated_item_bytes = size_of::<Vec<Rc<TranscriptItem>>>()
         + size_of_val(items)
         + items.len() * size_of::<TranscriptItem>()
         + raw_text_bytes;
-    let mut estimated_render_ui_bytes = 0;
-    let mut estimated_plain_line_bytes = 0;
-    let mut estimated_anchor_bytes = 0;
-
-    for summary in render.items.iter() {
-        estimated_render_ui_bytes += summary.block.estimated_render_ui_bytes();
-
-        estimated_plain_line_bytes += size_of_val(summary.block.plain_line_byte_lens.as_slice());
-        estimated_anchor_bytes += match &summary.block.anchors {
-            CachedLineAnchors::Explicit(anchors) => size_of_val(anchors.as_slice()),
-            CachedLineAnchors::GeneratedRenderedLines => 0,
-        };
-    }
+    let estimated_render_ui_bytes = retained_blocks.estimated_render_ui_bytes;
+    let estimated_plain_line_bytes = retained_blocks.estimated_plain_line_bytes;
+    let estimated_anchor_bytes = retained_blocks.estimated_anchor_bytes;
 
     let estimated_index_bytes = size_of::<RenderResult>()
         + size_of_val(render.items.as_slice())
@@ -788,7 +784,8 @@ fn estimate_document_memory_summary(
         + size_of_val(render.index.visible_items.as_slice())
         + size_of_val(render.index.visible_positions.as_slice())
         + size_of_val(render.index.content_prefix_sums.as_slice())
-        + size_of_val(render.selectable_ranges.as_slice());
+        + size_of_val(render.selectable_ranges.as_slice())
+        + retained_blocks.estimated_cache_slot_bytes;
 
     DocumentMemorySummary {
         raw_text_bytes,
@@ -883,9 +880,18 @@ mod tests {
         assert!(summary.frame_non_empty_cells > 0);
         assert!(summary.memory.raw_text_bytes > 0);
         assert!(summary.memory.estimated_item_bytes >= summary.memory.raw_text_bytes);
-        assert!(summary.memory.estimated_render_ui_bytes > 0);
-        assert!(summary.memory.estimated_plain_line_bytes > 0);
-        assert!(summary.memory.estimated_anchor_bytes > 0);
+        assert!(
+            summary.memory.estimated_render_ui_bytes > 0,
+            "stress measurement runs after sync_transcript_render, so warmed transcript blocks should still be retained"
+        );
+        assert!(
+            summary.memory.estimated_plain_line_bytes > 0,
+            "retained warmed blocks should include their per-line plain-text metadata"
+        );
+        assert!(
+            summary.memory.estimated_anchor_bytes > 0,
+            "retained warmed blocks should include anchor metadata"
+        );
         assert!(summary.memory.estimated_index_bytes > 0);
         let formatted = format_document_stress_summary(&summary);
         assert!(formatted.contains("scenario=cold_resume"));

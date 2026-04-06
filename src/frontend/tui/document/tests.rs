@@ -1,14 +1,18 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::text::Line;
-use std::hint::black_box;
-use std::rc::Rc;
+use std::{cell::RefCell, collections::HashMap, hint::black_box, rc::Rc};
 
 use super::layout::{compose_document_layout, compose_document_viewport, visible_document_lines};
 use super::*;
 use crate::frontend::tui::{
     HeroOptions, Model, Sender, StatusLineItem, StyleMode,
-    selection::SelectableLineRange as DocumentSelectable, theme::default_palette,
-    transcript::LineAnchorKind,
+    selection::SelectableLineRange as DocumentSelectable,
+    theme::{default_palette, terminal_default_palette},
+    transcript::{
+        CachedLineAnchors, CachedRenderBlock, ItemLineAnchor, LineAnchorKind, RenderItemSummary,
+        new_render_result, reset_tracked_cached_render_block_access,
+        tracked_cached_render_block_access,
+    },
 };
 
 #[test]
@@ -192,44 +196,181 @@ fn status_line_selectable_range_skips_leading_inset() {
 }
 
 #[test]
-fn current_document_transcript_snapshot_reuses_render_storage() {
+fn current_document_transcript_snapshot_stays_usable_without_full_render_storage() {
     let mut model = ready_document_model(20, 4);
     model.transcript_mut().clear();
     model
         .transcript_mut()
         .append_message(Sender::Assistant, "alpha\nbeta\ngamma");
     model.sync_transcript_render();
+    model.transcript_render = Rc::new(crate::frontend::tui::transcript::RenderResult::default());
+    model.document_transcript_cache = Default::default();
+    model.document_layout_cache = Default::default();
+    model.document_viewport_cache = Default::default();
 
     let snapshot = model.current_document_transcript_snapshot();
+    let layout = model.build_document_layout();
+    let viewport = compose_document_viewport(&layout, 0, 2);
 
-    assert!(
-        Rc::ptr_eq(&snapshot.render, &model.transcript_render),
-        "document transcript snapshot should share the transcript render result instead of cloning it"
+    assert_eq!(snapshot.index.line_count, 3);
+    assert_eq!(
+        viewport.plain_lines,
+        vec!["alpha".to_string(), "beta".to_string()]
     );
 }
 
 #[test]
-fn transcript_line_access_uses_structured_render_result() {
+fn current_document_transcript_snapshot_reuses_warmed_transcript_blocks_without_cloning_cache() {
+    let mut model = ready_document_model(20, 4);
+    model.transcript_mut().clear();
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "alpha");
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "beta");
+    model.sync_transcript_render();
+    let warmed_render = model.transcript.render();
+
+    let snapshot = model.current_document_transcript_snapshot();
+    assert!(
+        snapshot.item_block_cache.borrow().is_empty(),
+        "document transcript snapshot should not clone the entire warmed transcript cache up front"
+    );
+
+    let first_line = snapshot
+        .line_at(0)
+        .expect("reading a transcript line should reuse the warmed block");
+    assert_eq!(first_line.plain_line, "alpha");
+    assert!(
+        !warmed_render.items.is_empty(),
+        "warmed render should still retain the original block"
+    );
+    assert_eq!(
+        snapshot.item_block_cache.borrow().len(),
+        0,
+        "reading a warmed transcript line should not duplicate that block into the snapshot cache"
+    );
+}
+
+#[test]
+fn current_document_transcript_snapshot_keeps_old_palette_lines_after_palette_switch() {
+    let mut model = ready_document_model(20, 4);
+    model.transcript_mut().clear();
+    model.transcript_mut().append_message(Sender::User, "hello");
+    model.sync_transcript_render();
+
+    let snapshot = model.current_document_transcript_snapshot();
+    assert_eq!(
+        snapshot.plain_lines_for_range(0, snapshot.line_count()),
+        vec![
+            "                    ".to_string(),
+            "› hello             ".to_string(),
+            "                    ".to_string(),
+        ]
+    );
+    assert!(
+        snapshot.item_block_cache.borrow().is_empty(),
+        "snapshot should still be reading through the shared warmed cache before palette changes"
+    );
+
+    model.set_palette(terminal_default_palette(), false);
+    let _ = model.transcript.render();
+
+    assert_eq!(
+        snapshot.plain_lines_for_range(0, snapshot.line_count()),
+        vec![
+            "                    ".to_string(),
+            "› hello             ".to_string(),
+            "                    ".to_string(),
+        ],
+        "older document snapshots should stay pinned to the palette they were created with"
+    );
+}
+
+#[test]
+fn transcript_plain_text_len_for_range_avoids_plain_line_and_anchor_materialization() {
+    const TRACKED_BLOCK_KEY: u64 = 0xD0C0_0001;
+
+    reset_tracked_cached_render_block_access(TRACKED_BLOCK_KEY);
+    let block = Rc::new(CachedRenderBlock {
+        cache_key: TRACKED_BLOCK_KEY,
+        width: 24,
+        palette: default_palette(),
+        lines: Rc::new(vec![Line::raw("alpha".to_string())]),
+        projected_user: None,
+        line_count: 1,
+        plain_line_byte_lens: Rc::new(vec![5]),
+        anchors: CachedLineAnchors::Explicit(Rc::new(vec![ItemLineAnchor {
+            kind: LineAnchorKind::RenderedLine,
+            rendered_line: 0,
+            ..ItemLineAnchor::default()
+        }])),
+        plain_text_char_len: 5,
+    });
+    let render = new_render_result(vec![RenderItemSummary {
+        item_index: 0,
+        start_line: 0,
+        gap_before: 0,
+        content_line_count: 1,
+        total_line_count: 1,
+        gap_owner_item_index: None,
+        block: Rc::clone(&block),
+    }]);
+    let snapshot = DocumentTranscriptSnapshot {
+        index: render.index.clone(),
+        width: 24,
+        palette: default_palette(),
+        items: Rc::new(Vec::new()),
+        warmed_item_block_cache: Rc::new(RefCell::new(HashMap::new())),
+        item_block_cache: Rc::new(RefCell::new(HashMap::from([(0, Rc::clone(&block))]))),
+        item_text_lines_cache: Rc::new(RefCell::new(HashMap::new())),
+        selectable_cache: Rc::new(RefCell::new(HashMap::new())),
+    };
+
+    assert_eq!(snapshot.plain_text_len_for_range(0, 1), 5);
+
+    let access = tracked_cached_render_block_access(TRACKED_BLOCK_KEY);
+    assert_eq!(
+        access.line_reads, 0,
+        "full-range plain-text length should come from cached totals without materializing rendered lines"
+    );
+    assert_eq!(
+        access.plain_line_reads, 0,
+        "plain-text length should come from cached byte lengths instead of cloning strings"
+    );
+    assert_eq!(
+        access.anchor_reads, 0,
+        "range reads without selection should not walk transcript anchors"
+    );
+}
+
+#[test]
+fn transcript_line_access_resolves_without_full_render_result() {
     let mut model = ready_document_model(20, 4);
     model.transcript_mut().clear();
     model
         .transcript_mut()
         .append_message(Sender::Assistant, "alpha\nbeta");
     model.sync_transcript_render();
+    model.transcript_render = Rc::new(crate::frontend::tui::transcript::RenderResult::default());
+    model.document_transcript_cache = Default::default();
+    model.document_layout_cache = Default::default();
+    model.document_viewport_cache = Default::default();
 
     let layout = model.build_document_layout();
     let first_line = layout
         .line_at(0)
-        .expect("transcript line should resolve from the structured render result");
+        .expect("transcript line should resolve without the full render result");
+    let second_line = layout
+        .line_at(1)
+        .expect("second transcript line should still materialize");
 
     assert_eq!(first_line.plain_line, "alpha");
     assert_eq!(first_line.anchor.transcript.item_index, 0);
-    assert_eq!(
-        layout.transcript.render.all_line_anchors()[1]
-            .item_anchor
-            .rendered_line,
-        1
-    );
+    assert_eq!(second_line.plain_line, "beta");
+    assert_eq!(second_line.anchor.transcript.item_anchor.rendered_line, 1);
+    assert_eq!(layout.line_index_for_anchor(second_line.anchor), Some(1));
 }
 
 #[test]
@@ -724,6 +865,29 @@ fn transcript_render_defers_transcript_selectable_ranges_to_document_access() {
     assert!(
         model.transcript_render.selectable_ranges.is_empty(),
         "transcript render should leave transcript selectable ranges empty for lazy document access"
+    );
+}
+
+#[test]
+fn document_viewport_materialization_keeps_transcript_selectable_ranges_lazy() {
+    let mut model = ready_document_model(24, 6);
+    model
+        .transcript_mut()
+        .append_message(Sender::User, "alpha beta gamma");
+    model.sync_transcript_render();
+
+    let layout = model.build_document_layout();
+    assert!(
+        layout.transcript.selectable_cache.borrow().is_empty(),
+        "transcript selectable cache should start empty before any selection-aware read"
+    );
+
+    let viewport = compose_document_viewport(&layout, 0, 1);
+
+    assert_eq!(viewport.plain_lines.len(), 1);
+    assert!(
+        layout.transcript.selectable_cache.borrow().is_empty(),
+        "plain viewport materialization should not populate transcript selectable ranges"
     );
 }
 

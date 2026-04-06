@@ -701,16 +701,7 @@ fn estimate_document_memory_summary(
     let mut estimated_anchor_bytes = 0;
 
     for summary in render.items.iter() {
-        estimated_render_ui_bytes += size_of_val(summary.block.as_ref());
-        estimated_render_ui_bytes += size_of_val(summary.block.lines.as_slice());
-        for line in summary.block.lines.iter() {
-            estimated_render_ui_bytes += size_of_val(line.spans.as_slice());
-            estimated_render_ui_bytes += line
-                .spans
-                .iter()
-                .map(|span| span.content.len())
-                .sum::<usize>();
-        }
+        estimated_render_ui_bytes += summary.block.estimated_render_ui_bytes();
 
         estimated_plain_line_bytes += size_of_val(summary.block.plain_line_byte_lens.as_slice());
         estimated_anchor_bytes += match &summary.block.anchors {

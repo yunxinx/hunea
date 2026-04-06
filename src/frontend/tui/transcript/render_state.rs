@@ -179,7 +179,7 @@ impl RenderResult {
 
         let block_index = relative - summary.gap_before;
         Some(RenderedTranscriptLine {
-            line: summary.block.lines.get(block_index)?.clone(),
+            line: summary.block.line_at(block_index)?,
             plain_line: summary.block.plain_line_at(block_index)?,
             anchor: LineAnchor {
                 item_index: summary.item_index,
@@ -271,9 +271,9 @@ impl RenderResult {
                 .saturating_sub(summary.gap_before)
                 .min(summary.content_line_count);
             if block_start < block_end {
-                slice
-                    .lines
-                    .extend(summary.block.lines[block_start..block_end].iter().cloned());
+                summary
+                    .block
+                    .extend_lines(&mut slice.lines, block_start, block_end);
                 slice.plain_char_len += (block_start..block_end)
                     .filter_map(|index| summary.block.plain_line_len(index))
                     .sum::<usize>();
@@ -430,6 +430,8 @@ mod tests {
             cache_key: 0,
             width: 80,
             lines: Rc::new(vec![Line::raw(text.to_string()); anchors.len()]),
+            projected_user: None,
+            line_count: anchors.len(),
             plain_line_byte_lens: Rc::new(vec![text.len(); anchors.len()]),
             anchors: CachedLineAnchors::Explicit(Rc::new(anchors)),
             plain_text_char_len,

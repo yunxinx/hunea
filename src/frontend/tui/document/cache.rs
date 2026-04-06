@@ -108,6 +108,8 @@ impl DocumentLayout {
                                 cache_key: 0,
                                 width: 1,
                                 lines: Rc::new(vec![Line::raw((*line).to_string())]),
+                                projected_user: None,
+                                line_count: 1,
                                 plain_line_byte_lens: Rc::new(vec![line.len()]),
                                 anchors: CachedLineAnchors::Explicit(Rc::new(vec![
                                     ItemLineAnchor {

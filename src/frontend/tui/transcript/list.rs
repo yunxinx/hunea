@@ -245,7 +245,7 @@ impl Transcript {
 
         for index in dirty_from..self.items.len() {
             let block = self.render_screen_block(index, width);
-            if block.lines.is_empty() {
+            if block.line_count() == 0 {
                 continue;
             }
 
@@ -254,8 +254,8 @@ impl Transcript {
                 item_index: index,
                 start_line: total_lines,
                 gap_before,
-                content_line_count: block.lines.len(),
-                total_line_count: gap_before + block.lines.len(),
+                content_line_count: block.line_count(),
+                total_line_count: gap_before + block.line_count(),
                 content_char_len: block.plain_text_char_len,
                 gap_owner_item_index: previous_visible_item_index,
                 block,
@@ -277,6 +277,27 @@ impl Transcript {
             return Rc::clone(cached);
         }
 
+        if let TranscriptItem::Message(item) = self.items[index].as_ref()
+            && let Some(projection) = item.render_projection(width, self.palette)
+        {
+            let plain_line_byte_lens = projection.plain_line_lens();
+            let plain_text_char_len = plain_line_byte_lens.iter().sum();
+            let anchors = projection.line_anchors();
+            let line_count = projection.line_count();
+            let block = Rc::new(CachedRenderBlock {
+                cache_key,
+                width,
+                lines: Rc::new(Vec::new()),
+                projected_user: Some(Rc::new(projection)),
+                line_count,
+                plain_text_char_len,
+                plain_line_byte_lens: Rc::new(plain_line_byte_lens),
+                anchors: CachedLineAnchors::Explicit(Rc::new(anchors)),
+            });
+            self.screen_cache.items.insert(index, Rc::clone(&block));
+            return block;
+        }
+
         let lines = self.items[index].render_lines(width, self.palette);
         let anchors = self.items[index].render_line_anchors(width, self.palette);
         let plain_line_byte_lens = lines.iter().map(line_plain_text_len).collect::<Vec<_>>();
@@ -286,7 +307,9 @@ impl Transcript {
             cache_key,
             width,
             plain_text_char_len,
+            line_count: lines.len(),
             lines: Rc::new(lines),
+            projected_user: None,
             plain_line_byte_lens: Rc::new(plain_line_byte_lens),
             anchors: if uses_explicit_anchors {
                 CachedLineAnchors::Explicit(Rc::new(anchors))
@@ -406,6 +429,8 @@ mod tests {
         message_item::{
             message_item_render_cache_key_call_count,
             reset_message_item_render_cache_key_call_count,
+            reset_user_message_projection_plain_line_len_call_count,
+            user_message_projection_plain_line_len_call_count,
         },
         theme::default_palette,
     };
@@ -624,6 +649,95 @@ mod tests {
             "plain text should still be recoverable when the block only stores structured render data"
         );
         assert_eq!(render.line_index_for_anchor(rendered.anchor), Some(1));
+    }
+
+    #[test]
+    fn user_render_blocks_project_lines_without_eager_styled_line_storage() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_width(16);
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(
+            MessageItem::new_with_style_mode(
+                Sender::User,
+                "user message keeps wrapped projection stable across renders",
+                StyleMode::Cx,
+            ),
+        ))]);
+
+        let render = transcript.render();
+        let block = render
+            .items
+            .first()
+            .expect("user item should produce a render block")
+            .block
+            .as_ref();
+
+        assert!(
+            block.lines.is_empty(),
+            "user blocks should keep a compact projection and materialize styled lines on demand"
+        );
+    }
+
+    #[test]
+    fn projected_user_render_block_reuses_plain_line_lengths_during_cache_population() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_width(16);
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(
+            MessageItem::new_with_style_mode(
+                Sender::User,
+                "user message keeps wrapped projection stable across renders",
+                StyleMode::Cx,
+            ),
+        ))]);
+        reset_user_message_projection_plain_line_len_call_count();
+
+        let render = transcript.render();
+        let block = render
+            .items
+            .first()
+            .expect("user item should produce a render block")
+            .block
+            .as_ref();
+
+        assert_eq!(
+            user_message_projection_plain_line_len_call_count(),
+            block.line_count(),
+            "projected user cache population should compute each plain line length only once"
+        );
+    }
+
+    #[test]
+    fn projected_user_blocks_still_round_trip_plain_text_and_anchor_lookup() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_width(16);
+        transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(
+            MessageItem::new_with_style_mode(
+                Sender::User,
+                "user message keeps wrapped projection stable across renders",
+                StyleMode::Cx,
+            ),
+        ))]);
+
+        let expected_plain_lines = transcript.items[0]
+            .render_lines(16, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+        let render = transcript.render();
+        let actual_plain_lines = (0..render.line_count)
+            .map(|index| {
+                render
+                    .line_at(index)
+                    .expect("projected user block should materialize every visible line")
+                    .plain_line
+            })
+            .collect::<Vec<_>>();
+        let anchor = render
+            .line_at(1)
+            .expect("projected user block should expose wrapped content lines")
+            .anchor;
+
+        assert_eq!(actual_plain_lines, expected_plain_lines);
+        assert_eq!(render.line_index_for_anchor(anchor), Some(1));
     }
 
     #[test]

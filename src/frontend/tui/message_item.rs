@@ -1,6 +1,7 @@
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    rc::Rc,
 };
 
 #[cfg(test)]
@@ -21,7 +22,7 @@ use super::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct UserMessageRenderLayout {
+pub(crate) struct UserMessageRenderLayout {
     frame_width: usize,
     content_width: usize,
     line_prefix_width: usize,
@@ -38,9 +39,40 @@ pub struct MessageItem {
     render_cache_key: u64,
 }
 
+/// `UserMessageRenderProjection` 保存用户消息在固定宽度下的轻量投影视图。
+#[derive(Debug, Clone)]
+pub(crate) struct UserMessageRenderProjection {
+    lines: Rc<Vec<UserMessageProjectedLine>>,
+    layout: UserMessageRenderLayout,
+    has_frame: bool,
+    palette: TerminalPalette,
+    style_mode: StyleMode,
+}
+
+#[derive(Debug, Clone)]
+struct UserMessageProjectedLine {
+    // transcript render cache 只会消费渲染文本与 anchor 元数据，不需要列映射。
+    text: String,
+    logical_line: usize,
+    visible_start_char: usize,
+    end_char: usize,
+}
+
+impl From<crate::frontend::tui::transcript::PromptVisualLine> for UserMessageProjectedLine {
+    fn from(line: crate::frontend::tui::transcript::PromptVisualLine) -> Self {
+        Self {
+            text: line.text,
+            logical_line: line.logical_line,
+            visible_start_char: line.visible_start_char,
+            end_char: line.end_char,
+        }
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static MESSAGE_ITEM_RENDER_CACHE_KEY_CALL_COUNT: Cell<usize> = const { Cell::new(0) };
+    static USER_MESSAGE_PROJECTION_PLAIN_LINE_LEN_CALL_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 impl MessageItem {
@@ -214,6 +246,32 @@ impl MessageItem {
         ranges
     }
 
+    pub(crate) fn render_projection(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+    ) -> Option<UserMessageRenderProjection> {
+        (self.sender == Sender::User).then(|| {
+            let UserMessageWrapSnapshot {
+                lines,
+                layout,
+                has_frame,
+            } = user_message_wrap_snapshot(&self.content, width, palette, self.style_mode);
+            UserMessageRenderProjection {
+                lines: Rc::new(
+                    lines
+                        .into_iter()
+                        .map(UserMessageProjectedLine::from)
+                        .collect(),
+                ),
+                layout,
+                has_frame,
+                palette,
+                style_mode: self.style_mode,
+            }
+        })
+    }
+
     #[cfg(test)]
     fn render_plain_for_test(&self, width: u16) -> String {
         self.render_plain_text(width, crate::frontend::tui::theme::default_palette())
@@ -228,6 +286,16 @@ pub(crate) fn reset_message_item_render_cache_key_call_count() {
 #[cfg(test)]
 pub(crate) fn message_item_render_cache_key_call_count() -> usize {
     MESSAGE_ITEM_RENDER_CACHE_KEY_CALL_COUNT.get()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_user_message_projection_plain_line_len_call_count() {
+    USER_MESSAGE_PROJECTION_PLAIN_LINE_LEN_CALL_COUNT.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn user_message_projection_plain_line_len_call_count() -> usize {
+    USER_MESSAGE_PROJECTION_PLAIN_LINE_LEN_CALL_COUNT.get()
 }
 
 fn message_item_render_cache_key(sender: Sender, content: &str, style_mode: StyleMode) -> u64 {
@@ -354,6 +422,163 @@ struct UserMessageWrapSnapshot {
     has_frame: bool,
 }
 
+impl UserMessageRenderProjection {
+    pub(crate) fn line_count(&self) -> usize {
+        self.lines.len() + usize::from(self.has_frame) * 2
+    }
+
+    pub(crate) fn line_at(&self, index: usize) -> Option<Line<'static>> {
+        if self.has_frame && self.is_frame_line(index) {
+            return Some(user_message_surface_padding_line(
+                self.layout.frame_width,
+                self.palette,
+            ));
+        }
+
+        let content_index = self.content_line_index(index)?;
+        let line = self.lines.get(content_index)?;
+        let is_first = content_index == 0;
+
+        Some(match self.style_mode.normalized() {
+            StyleMode::Cx => render_projected_framed_user_line(
+                line,
+                is_first,
+                self.layout,
+                self.palette,
+                self.style_mode,
+            ),
+            StyleMode::Cc => render_projected_compact_user_line(
+                line,
+                is_first,
+                self.layout.frame_width.max(1),
+                self.palette,
+                self.style_mode,
+            ),
+            StyleMode::Ms => {
+                render_projected_legacy_user_line(line, is_first, self.palette, self.style_mode)
+            }
+        })
+    }
+
+    pub(crate) fn plain_line_at(&self, index: usize) -> Option<String> {
+        if self.has_frame && self.is_frame_line(index) {
+            return Some(" ".repeat(self.layout.frame_width.max(1)));
+        }
+
+        let content_index = self.content_line_index(index)?;
+        let line = self.lines.get(content_index)?;
+        let is_first = content_index == 0;
+
+        Some(match self.style_mode.normalized() {
+            StyleMode::Cx => {
+                projected_framed_user_plain_line(line, is_first, self.layout, self.style_mode)
+            }
+            StyleMode::Cc => projected_compact_user_plain_line(
+                line,
+                is_first,
+                self.layout.frame_width,
+                self.style_mode,
+            ),
+            StyleMode::Ms => projected_legacy_user_plain_line(line, is_first, self.style_mode),
+        })
+    }
+
+    pub(crate) fn plain_line_lens(&self) -> Vec<usize> {
+        (0..self.line_count())
+            .filter_map(|index| self.plain_line_len(index))
+            .collect()
+    }
+
+    pub(crate) fn plain_line_len(&self, index: usize) -> Option<usize> {
+        #[cfg(test)]
+        USER_MESSAGE_PROJECTION_PLAIN_LINE_LEN_CALL_COUNT.with(|count| count.set(count.get() + 1));
+
+        if self.has_frame && self.is_frame_line(index) {
+            return Some(self.layout.frame_width.max(1));
+        }
+
+        let content_index = self.content_line_index(index)?;
+        let line = self.lines.get(content_index)?;
+        let is_first = content_index == 0;
+
+        Some(match self.style_mode.normalized() {
+            StyleMode::Cx => {
+                projected_framed_user_plain_line_len(line, is_first, self.layout, self.style_mode)
+            }
+            StyleMode::Cc => projected_compact_user_plain_line_len(
+                line,
+                is_first,
+                self.layout.frame_width,
+                self.style_mode,
+            ),
+            StyleMode::Ms => projected_legacy_user_plain_line_len(line, is_first, self.style_mode),
+        })
+    }
+
+    pub(crate) fn line_anchors(&self) -> Vec<ItemLineAnchor> {
+        match self.style_mode.normalized() {
+            StyleMode::Cx => {
+                let mut anchors =
+                    Vec::with_capacity(self.lines.len() + usize::from(self.has_frame) * 2);
+                if self.has_frame {
+                    anchors.push(rendered_line_anchor(0));
+                }
+
+                let rendered_offset = usize::from(self.has_frame);
+                for (index, line) in self.lines.iter().enumerate() {
+                    anchors.push(ItemLineAnchor {
+                        kind: LineAnchorKind::LogicalPosition,
+                        logical_line: line.logical_line,
+                        range_start: line.visible_start_char,
+                        range_end: line.end_char,
+                        rendered_line: index + rendered_offset,
+                        gap_offset: 0,
+                    });
+                }
+
+                if self.has_frame {
+                    anchors.push(rendered_line_anchor(anchors.len()));
+                }
+
+                anchors
+            }
+            StyleMode::Cc | StyleMode::Ms => self
+                .lines
+                .iter()
+                .enumerate()
+                .map(|(rendered_line, line)| ItemLineAnchor {
+                    kind: LineAnchorKind::LogicalPosition,
+                    logical_line: line.logical_line,
+                    range_start: line.visible_start_char,
+                    range_end: line.end_char,
+                    rendered_line,
+                    gap_offset: 0,
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn estimated_render_ui_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of_val(self.lines.as_slice())
+            + self.lines.iter().map(|line| line.text.len()).sum::<usize>()
+    }
+
+    fn is_frame_line(&self, index: usize) -> bool {
+        index == 0 || index + 1 == self.line_count()
+    }
+
+    fn content_line_index(&self, index: usize) -> Option<usize> {
+        if self.has_frame {
+            index
+                .checked_sub(1)
+                .filter(|index| *index < self.lines.len())
+        } else {
+            (index < self.lines.len()).then_some(index)
+        }
+    }
+}
+
 fn user_message_wrap_snapshot(
     content: &str,
     width: u16,
@@ -454,6 +679,41 @@ fn format_framed_user_lines(
         .collect()
 }
 
+fn render_projected_framed_user_line(
+    line: &UserMessageProjectedLine,
+    is_first: bool,
+    layout: UserMessageRenderLayout,
+    palette: TerminalPalette,
+    style_mode: StyleMode,
+) -> Line<'static> {
+    let prefix_style = surface_text_style(palette);
+    let mut prefix_glyph_style = secondary_text_style(palette);
+    if let Some(surface) = palette.surface {
+        prefix_glyph_style = prefix_glyph_style.bg(surface);
+    }
+    let content_style = surface_text_style(palette);
+    let continuation_prefix = " ".repeat(layout.line_prefix_width);
+    let trailing_fill_width = layout
+        .frame_width
+        .saturating_sub(layout.line_prefix_width + measure_width(&line.text));
+    let trailing_fill = " ".repeat(trailing_fill_width);
+
+    if is_first && layout.shows_prefix {
+        Line::default().spans([
+            Span::styled(user_message_prefix_glyph(style_mode), prefix_glyph_style),
+            Span::styled(" ", prefix_style),
+            Span::styled(line.text.clone(), content_style),
+            Span::styled(trailing_fill, prefix_style),
+        ])
+    } else {
+        Line::default().spans([
+            Span::styled(continuation_prefix, prefix_style),
+            Span::styled(line.text.clone(), content_style),
+            Span::styled(trailing_fill, prefix_style),
+        ])
+    }
+}
+
 fn format_compact_user_lines(
     lines: &[String],
     width: usize,
@@ -494,6 +754,40 @@ fn format_compact_user_lines(
         .collect()
 }
 
+fn render_projected_compact_user_line(
+    line: &UserMessageProjectedLine,
+    is_first: bool,
+    width: usize,
+    palette: TerminalPalette,
+    style_mode: StyleMode,
+) -> Line<'static> {
+    let prefix_style = surface_text_style(palette);
+    let mut prefix_glyph_style = secondary_text_style(palette);
+    if let Some(surface) = palette.surface {
+        prefix_glyph_style = prefix_glyph_style.bg(surface);
+    }
+    let content_style = surface_text_style(palette);
+    let continuation_prefix = " ".repeat(user_message_inset_width(style_mode));
+    let trailing_fill_width =
+        width.saturating_sub(user_message_inset_width(style_mode) + measure_width(&line.text));
+    let trailing_fill = " ".repeat(trailing_fill_width);
+
+    if is_first {
+        Line::default().spans([
+            Span::styled(user_message_prefix_glyph(style_mode), prefix_glyph_style),
+            Span::styled(" ", prefix_style),
+            Span::styled(line.text.clone(), content_style),
+            Span::styled(trailing_fill, prefix_style),
+        ])
+    } else {
+        Line::default().spans([
+            Span::styled(continuation_prefix, prefix_style),
+            Span::styled(line.text.clone(), content_style),
+            Span::styled(trailing_fill, prefix_style),
+        ])
+    }
+}
+
 fn format_legacy_user_lines(
     lines: &[String],
     palette: TerminalPalette,
@@ -522,6 +816,29 @@ fn format_legacy_user_lines(
         .collect()
 }
 
+fn render_projected_legacy_user_line(
+    line: &UserMessageProjectedLine,
+    is_first: bool,
+    palette: TerminalPalette,
+    style_mode: StyleMode,
+) -> Line<'static> {
+    let prefix_style = surface_text_style(palette);
+    let content_style = surface_emphasis_style(palette);
+    let continuation_prefix = " ".repeat(user_message_inset_width(style_mode));
+
+    if is_first {
+        Line::default().spans([
+            Span::styled(user_message_prefix(style_mode), prefix_style),
+            Span::styled(line.text.clone(), content_style),
+        ])
+    } else {
+        Line::default().spans([
+            Span::styled(continuation_prefix, prefix_style),
+            Span::styled(line.text.clone(), content_style),
+        ])
+    }
+}
+
 fn format_user_plain_lines(lines: &[String], style_mode: StyleMode) -> String {
     let continuation_prefix = " ".repeat(user_message_inset_width(style_mode));
 
@@ -537,6 +854,103 @@ fn format_user_plain_lines(lines: &[String], style_mode: StyleMode) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn projected_framed_user_plain_line(
+    line: &UserMessageProjectedLine,
+    is_first: bool,
+    layout: UserMessageRenderLayout,
+    style_mode: StyleMode,
+) -> String {
+    let trailing_fill_width = layout
+        .frame_width
+        .saturating_sub(layout.line_prefix_width + measure_width(&line.text));
+    let trailing_fill = " ".repeat(trailing_fill_width);
+
+    if is_first && layout.shows_prefix {
+        format!(
+            "{} {}{}",
+            user_message_prefix_glyph(style_mode),
+            line.text,
+            trailing_fill
+        )
+    } else {
+        format!(
+            "{}{}{}",
+            " ".repeat(layout.line_prefix_width),
+            line.text,
+            trailing_fill
+        )
+    }
+}
+
+fn projected_compact_user_plain_line(
+    line: &UserMessageProjectedLine,
+    is_first: bool,
+    width: usize,
+    style_mode: StyleMode,
+) -> String {
+    let trailing_fill_width =
+        width.saturating_sub(user_message_inset_width(style_mode) + measure_width(&line.text));
+    let trailing_fill = " ".repeat(trailing_fill_width);
+
+    if is_first {
+        format!(
+            "{} {}{}",
+            user_message_prefix_glyph(style_mode),
+            line.text,
+            trailing_fill
+        )
+    } else {
+        format!(
+            "{}{}{}",
+            " ".repeat(user_message_inset_width(style_mode)),
+            line.text,
+            trailing_fill
+        )
+    }
+}
+
+fn projected_legacy_user_plain_line(
+    line: &UserMessageProjectedLine,
+    is_first: bool,
+    style_mode: StyleMode,
+) -> String {
+    if is_first {
+        format!("{}{}", user_message_prefix(style_mode), line.text)
+    } else {
+        format!(
+            "{}{}",
+            " ".repeat(user_message_inset_width(style_mode)),
+            line.text
+        )
+    }
+}
+
+fn projected_framed_user_plain_line_len(
+    line: &UserMessageProjectedLine,
+    is_first: bool,
+    layout: UserMessageRenderLayout,
+    style_mode: StyleMode,
+) -> usize {
+    projected_framed_user_plain_line(line, is_first, layout, style_mode).len()
+}
+
+fn projected_compact_user_plain_line_len(
+    line: &UserMessageProjectedLine,
+    is_first: bool,
+    width: usize,
+    style_mode: StyleMode,
+) -> usize {
+    projected_compact_user_plain_line(line, is_first, width, style_mode).len()
+}
+
+fn projected_legacy_user_plain_line_len(
+    line: &UserMessageProjectedLine,
+    is_first: bool,
+    style_mode: StyleMode,
+) -> usize {
+    projected_legacy_user_plain_line(line, is_first, style_mode).len()
 }
 
 fn measure_width(text: &str) -> usize {

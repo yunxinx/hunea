@@ -2,7 +2,9 @@ use super::*;
 use crate::frontend::tui::{
     selection::SelectableLineRange,
     theme::{default_palette, secondary_text_style, surface_text_style},
+    transcript::{CachedLineAnchors, CachedRenderBlock},
 };
+use std::rc::Rc;
 
 #[test]
 fn assistant_plain_output_preserves_the_raw_command_text() {
@@ -153,6 +155,49 @@ fn user_message_selectable_ranges_ignore_trailing_fill() {
 
     assert_eq!(ranges.len(), 3);
     assert_eq!(ranges[1], SelectableLineRange::new(0, 4));
+}
+
+#[test]
+fn user_render_projection_stays_smaller_than_eager_styled_line_cache_for_long_prose() {
+    let palette = default_palette();
+    let width = 80;
+    let item = MessageItem::new_with_style_mode(
+        Sender::User,
+        "This projection should stay lightweight even when the user message wraps across many lines with ordinary prose content that would otherwise keep a full per-column cursor map alive in the render cache. ".repeat(8),
+        StyleMode::Cx,
+    );
+
+    let projection = item
+        .render_projection(width, palette)
+        .expect("user messages should produce a render projection");
+    let eager_lines = item.render_lines(width, palette);
+    let eager_line_count = eager_lines.len();
+
+    let projected_block = CachedRenderBlock {
+        cache_key: 0,
+        width,
+        lines: Rc::new(Vec::new()),
+        projected_user: Some(Rc::new(projection)),
+        line_count: eager_line_count,
+        plain_line_byte_lens: Rc::new(Vec::new()),
+        anchors: CachedLineAnchors::default(),
+        plain_text_char_len: 0,
+    };
+    let eager_block = CachedRenderBlock {
+        cache_key: 0,
+        width,
+        lines: Rc::new(eager_lines),
+        projected_user: None,
+        line_count: eager_line_count,
+        plain_line_byte_lens: Rc::new(Vec::new()),
+        anchors: CachedLineAnchors::default(),
+        plain_text_char_len: 0,
+    };
+
+    assert!(
+        projected_block.estimated_render_ui_bytes() < eager_block.estimated_render_ui_bytes(),
+        "projected user cache should stay smaller than the old eager styled-line cache for long prose messages"
+    );
 }
 
 fn plain_line(line: Line<'static>) -> String {

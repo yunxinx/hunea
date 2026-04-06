@@ -2,6 +2,7 @@ use std::{collections::HashMap, rc::Rc};
 
 use ratatui::text::Line;
 
+use crate::frontend::tui::message_item::UserMessageRenderProjection;
 use crate::frontend::tui::styled_text::line_to_plain_text;
 
 use super::render_state::{ItemLineAnchor, RenderResult};
@@ -25,14 +26,54 @@ pub(crate) struct CachedRenderBlock {
     pub(crate) cache_key: u64,
     pub(crate) width: u16,
     pub(crate) lines: Rc<Vec<Line<'static>>>,
+    pub(crate) projected_user: Option<Rc<UserMessageRenderProjection>>,
+    pub(crate) line_count: usize,
     pub(crate) plain_line_byte_lens: Rc<Vec<usize>>,
     pub(crate) anchors: CachedLineAnchors,
     pub(crate) plain_text_char_len: usize,
 }
 
 impl CachedRenderBlock {
+    pub(crate) fn line_count(&self) -> usize {
+        self.line_count
+    }
+
+    pub(crate) fn line_at(&self, index: usize) -> Option<Line<'static>> {
+        if let Some(line) = self.lines.get(index) {
+            return Some(line.clone());
+        }
+
+        self.projected_user
+            .as_ref()
+            .and_then(|projection| projection.line_at(index))
+    }
+
+    pub(crate) fn extend_lines(&self, target: &mut Vec<Line<'static>>, start: usize, end: usize) {
+        if start >= end || start >= self.line_count() {
+            return;
+        }
+
+        let end = end.min(self.line_count());
+        if self.projected_user.is_none() {
+            target.extend(self.lines[start..end].iter().cloned());
+            return;
+        }
+
+        for index in start..end {
+            if let Some(line) = self.line_at(index) {
+                target.push(line);
+            }
+        }
+    }
+
     pub(crate) fn plain_line_at(&self, index: usize) -> Option<String> {
-        self.lines.get(index).map(line_to_plain_text)
+        if let Some(line) = self.lines.get(index) {
+            return Some(line_to_plain_text(line));
+        }
+
+        self.projected_user
+            .as_ref()
+            .and_then(|projection| projection.plain_line_at(index))
     }
 
     pub(crate) fn plain_line_len(&self, index: usize) -> Option<usize> {
@@ -65,8 +106,29 @@ impl CachedRenderBlock {
             CachedLineAnchors::GeneratedRenderedLines => (target.kind
                 == super::render_state::LineAnchorKind::RenderedLine)
                 .then_some(target.rendered_line)
-                .filter(|&index| index < self.lines.len()),
+                .filter(|&index| index < self.line_count()),
         }
+    }
+
+    pub(crate) fn estimated_render_ui_bytes(&self) -> usize {
+        if let Some(projection) = &self.projected_user {
+            return std::mem::size_of_val(self) + projection.estimated_render_ui_bytes();
+        }
+
+        std::mem::size_of_val(self)
+            + std::mem::size_of_val(self.lines.as_slice())
+            + self
+                .lines
+                .iter()
+                .map(|line| {
+                    std::mem::size_of_val(line.spans.as_slice())
+                        + line
+                            .spans
+                            .iter()
+                            .map(|span| span.content.len())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
     }
 
     #[cfg(test)]

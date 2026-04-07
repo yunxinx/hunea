@@ -19,7 +19,7 @@ pub(crate) use item_index::{
     TranscriptItemPosition,
 };
 pub(crate) use list::{Transcript, TranscriptItem, materialize_transcript_item_render_block};
-pub(crate) use markdown::render_markdown_lines;
+pub(crate) use markdown::{render_markdown_lines, render_markdown_metrics};
 pub(crate) use prompt_wrap::{PromptVisualLine, wrap_prompt_visual_lines};
 #[cfg(test)]
 pub(crate) use render_state::RenderItemSummary;

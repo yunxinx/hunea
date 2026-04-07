@@ -340,6 +340,16 @@ fn width_refresh_keeps_scrolled_viewport_blocks_warm_for_snapshot_reuse() {
     model.apply_document_viewport_position(&layout, 20, 0, false, true);
 
     model.set_window(23, 6);
+    assert!(
+        model
+            .transcript
+            .cached_screen_blocks_snapshot()
+            .borrow()
+            .is_empty(),
+        "Phase E width refresh should stop after metrics rebuild and leave viewport prewarm to snapshot construction"
+    );
+
+    let snapshot = model.current_document_transcript_snapshot();
 
     let warmed_after_refresh = model
         .transcript
@@ -347,9 +357,8 @@ fn width_refresh_keeps_scrolled_viewport_blocks_warm_for_snapshot_reuse() {
         .borrow()
         .get(&20)
         .cloned()
-        .expect("width refresh should keep the current scrolled viewport warm");
+        .expect("snapshot refresh should prewarm the current scrolled viewport on demand");
 
-    let snapshot = model.current_document_transcript_snapshot();
     let viewport = snapshot.viewport_snapshot(20, 1);
     assert_eq!(viewport.plain_lines, vec!["item 20".to_string()]);
     let snapshot_block = snapshot

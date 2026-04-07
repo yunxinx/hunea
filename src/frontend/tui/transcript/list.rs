@@ -170,19 +170,19 @@ impl Transcript {
 
         let item_count = self.items.len();
         let metrics_dirty_from = self.metrics_cache.metrics_dirty_from.min(item_count);
-        self.screen_cache.begin_recent_limit_batch();
         let updated_metrics = (metrics_dirty_from..item_count)
             .map(|index| {
                 let cache_key = self.items[index].render_cache_key();
-                let block = self.render_screen_block(index, width);
+                let (content_line_count, content_char_len) =
+                    self.items[index].measure_render_metrics(width, self.palette);
                 (
                     index,
                     TranscriptItemMetrics {
                         item_index: index,
                         width,
                         cache_key,
-                        content_line_count: block.line_count(),
-                        content_char_len: block.plain_text_char_len,
+                        content_line_count,
+                        content_char_len,
                         is_valid: true,
                     },
                 )
@@ -253,8 +253,6 @@ impl Transcript {
                 visible_items.push(position);
             }
         }
-        self.screen_cache
-            .finish_recent_limit_batch(MAX_RECENT_RENDER_BLOCKS);
 
         self.metrics_cache.index.line_count = self
             .metrics_cache
@@ -681,6 +679,13 @@ fn resize_content_prefix_sums(prefix_sums: &mut Vec<usize>, item_count: usize) {
 }
 
 impl TranscriptItem {
+    fn measure_render_metrics(&self, width: u16, palette: TerminalPalette) -> (usize, usize) {
+        match self {
+            Self::Hero(item) => item.measure_render_metrics(width, palette),
+            Self::Message(item) => item.measure_render_metrics(width, palette),
+        }
+    }
+
     fn render_lines(&self, width: u16, palette: TerminalPalette) -> Vec<Line<'static>> {
         match self {
             Self::Hero(item) => item.render_lines(width, palette),
@@ -766,7 +771,7 @@ mod tests {
 
     use super::*;
     use crate::frontend::tui::{
-        StyleMode,
+        HeroOptions, StyleMode,
         message_item::{
             message_item_render_cache_key_call_count,
             reset_message_item_render_cache_key_call_count,
@@ -842,6 +847,47 @@ mod tests {
         assert_eq!(index.item_index_for_line(0), Some(0));
         assert_eq!(index.item_index_for_line(2), Some(0));
         assert_eq!(index.item_index_for_line(3), Some(1));
+    }
+
+    #[test]
+    fn item_metrics_index_matches_materialized_block_metrics_for_mixed_item_types() {
+        let palette = default_palette();
+        let mut transcript = Transcript::new(palette);
+        transcript.set_gap(1);
+        transcript.set_width(18);
+        transcript.append_hero(HeroOptions {
+            app_name: Some("Lumos".to_string()),
+            version: Some("v0.1.0".to_string()),
+            work_dir: Some("/tmp/phase-e-metrics".to_string()),
+            width: 0,
+        });
+        transcript.append_message(Sender::Assistant, "## Wrapped heading\n\nassistant body");
+        transcript.append_message_with_style_mode(
+            Sender::User,
+            "user message keeps metrics-only rebuild honest",
+            StyleMode::Cx,
+        );
+
+        let index = transcript.item_metrics_index();
+
+        for (item_index, item) in transcript.items.iter().enumerate() {
+            let block = materialize_transcript_item_render_block(
+                item.as_ref(),
+                transcript.render_width(),
+                palette,
+            );
+            let metrics = index.metrics[item_index];
+
+            assert_eq!(
+                metrics.content_line_count,
+                block.line_count(),
+                "metrics-only path should preserve line_count for item {item_index}"
+            );
+            assert_eq!(
+                metrics.content_char_len, block.plain_text_char_len,
+                "metrics-only path should preserve plain_text_char_len for item {item_index}"
+            );
+        }
     }
 
     #[test]
@@ -1222,20 +1268,9 @@ mod tests {
         }
 
         let _ = transcript.item_metrics_index();
-        let retained = transcript.screen_cache.items.borrow();
-
         assert!(
-            retained.len() <= EXPECTED_MAX_RECENT_RENDER_BLOCKS,
-            "metrics rebuild should keep only a bounded recent block cache, got {} retained blocks",
-            retained.len()
-        );
-        assert!(
-            !retained.contains_key(&0),
-            "bounded recent cache should evict long-stale head items after a full metrics pass"
-        );
-        assert!(
-            retained.contains_key(&95),
-            "bounded recent cache should keep the most recently touched tail items warm"
+            transcript.screen_cache.items.borrow().is_empty(),
+            "Phase E metrics rebuild should stay metrics-only and avoid materializing render blocks"
         );
     }
 
@@ -1264,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn render_reuses_metrics_pass_blocks_before_recent_cache_trim() {
+    fn metrics_rebuild_keeps_screen_block_cache_cold_until_render_materialization() {
         let mut transcript = Transcript::new(default_palette());
         transcript.set_gap(0);
         transcript.set_width(32);
@@ -1273,20 +1308,18 @@ mod tests {
             transcript.append_message(Sender::Assistant, format!("item {index}"));
         }
 
-        let width = transcript.render_width();
-        let head_block = transcript.render_screen_block(0, width);
+        let _ = transcript.item_metrics_index();
+        assert!(
+            transcript.screen_cache.items.borrow().is_empty(),
+            "metrics rebuild should not prewarm render blocks before a real materialization path asks for them"
+        );
 
         let render = transcript.render();
-        let rendered_head = render
-            .items
-            .iter()
-            .find(|summary| summary.item_index == 0)
-            .expect("full render should include the head item");
-
         assert!(
-            Rc::ptr_eq(&rendered_head.block, &head_block),
-            "full render should reuse the block already materialized during metrics rebuild"
+            !transcript.screen_cache.items.borrow().is_empty(),
+            "full render should still populate render blocks once the materialization path runs"
         );
+        assert_eq!(render.items.len(), 96);
     }
 
     #[test]

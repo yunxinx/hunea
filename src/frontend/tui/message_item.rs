@@ -17,7 +17,7 @@ use super::{
     theme::{TerminalPalette, secondary_text_style, surface_emphasis_style, surface_text_style},
     transcript::{
         DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchorKind, render_markdown_lines,
-        wrap_assistant_text, wrap_prompt_text, wrap_prompt_visual_lines,
+        render_markdown_metrics, wrap_assistant_text, wrap_prompt_text, wrap_prompt_visual_lines,
     },
 };
 
@@ -140,6 +140,19 @@ impl MessageItem {
 
     pub(crate) fn source_text_byte_len(&self) -> usize {
         self.content.len()
+    }
+
+    pub(crate) fn measure_render_metrics(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+    ) -> (usize, usize) {
+        match self.sender {
+            Sender::User => {
+                measure_user_message_metrics(&self.content, width, palette, self.style_mode)
+            }
+            Sender::Assistant => render_assistant_message_metrics(&self.content, width, palette),
+        }
     }
 
     pub(crate) fn render_line_anchors(
@@ -392,6 +405,55 @@ fn render_assistant_message(
     }
 
     rendered
+}
+
+fn render_assistant_message_metrics(
+    content: &str,
+    width: u16,
+    palette: TerminalPalette,
+) -> (usize, usize) {
+    let width = if width == 0 {
+        DEFAULT_RENDER_WIDTH
+    } else {
+        usize::from(width)
+    };
+    let metrics = render_markdown_metrics(content, width, palette);
+    if metrics.0 > 0 {
+        return metrics;
+    }
+
+    let wrapped = wrap_assistant_text(content, width, 0);
+    (wrapped.len(), wrapped.iter().map(String::len).sum())
+}
+
+fn measure_user_message_metrics(
+    content: &str,
+    width: u16,
+    palette: TerminalPalette,
+    style_mode: StyleMode,
+) -> (usize, usize) {
+    let snapshot = user_message_wrap_snapshot(content, width, palette, style_mode);
+    let line_count = snapshot.lines.len() + usize::from(snapshot.has_frame) * 2;
+    let mut plain_text_char_len =
+        usize::from(snapshot.has_frame) * 2 * snapshot.layout.frame_width.max(1);
+
+    for (index, line) in snapshot.lines.iter().enumerate() {
+        let is_first = index == 0;
+        plain_text_char_len += match style_mode.normalized() {
+            StyleMode::Cx => {
+                framed_user_plain_line_len(&line.text, is_first, snapshot.layout, style_mode)
+            }
+            StyleMode::Cc => compact_user_plain_line_len(
+                &line.text,
+                is_first,
+                snapshot.layout.frame_width,
+                style_mode,
+            ),
+            StyleMode::Ms => legacy_user_plain_line_len(&line.text, is_first, style_mode),
+        };
+    }
+
+    (line_count, plain_text_char_len)
 }
 
 fn render_user_plain_text(content: &str, width: u16, style_mode: StyleMode) -> String {
@@ -933,7 +995,7 @@ fn projected_framed_user_plain_line_len(
     layout: UserMessageRenderLayout,
     style_mode: StyleMode,
 ) -> usize {
-    projected_framed_user_plain_line(line, is_first, layout, style_mode).len()
+    framed_user_plain_line_len(&line.text, is_first, layout, style_mode)
 }
 
 fn projected_compact_user_plain_line_len(
@@ -942,7 +1004,7 @@ fn projected_compact_user_plain_line_len(
     width: usize,
     style_mode: StyleMode,
 ) -> usize {
-    projected_compact_user_plain_line(line, is_first, width, style_mode).len()
+    compact_user_plain_line_len(&line.text, is_first, width, style_mode)
 }
 
 fn projected_legacy_user_plain_line_len(
@@ -950,7 +1012,48 @@ fn projected_legacy_user_plain_line_len(
     is_first: bool,
     style_mode: StyleMode,
 ) -> usize {
-    projected_legacy_user_plain_line(line, is_first, style_mode).len()
+    legacy_user_plain_line_len(&line.text, is_first, style_mode)
+}
+
+fn framed_user_plain_line_len(
+    text: &str,
+    is_first: bool,
+    layout: UserMessageRenderLayout,
+    style_mode: StyleMode,
+) -> usize {
+    let trailing_fill_width = layout
+        .frame_width
+        .saturating_sub(layout.line_prefix_width + measure_width(text));
+
+    if is_first && layout.shows_prefix {
+        user_message_prefix_glyph(style_mode).len() + 1 + text.len() + trailing_fill_width
+    } else {
+        layout.line_prefix_width + text.len() + trailing_fill_width
+    }
+}
+
+fn compact_user_plain_line_len(
+    text: &str,
+    is_first: bool,
+    width: usize,
+    style_mode: StyleMode,
+) -> usize {
+    let trailing_fill_width =
+        width.saturating_sub(user_message_inset_width(style_mode) + measure_width(text));
+
+    if is_first {
+        user_message_prefix_glyph(style_mode).len() + 1 + text.len() + trailing_fill_width
+    } else {
+        user_message_inset_width(style_mode) + text.len() + trailing_fill_width
+    }
+}
+
+fn legacy_user_plain_line_len(text: &str, is_first: bool, style_mode: StyleMode) -> usize {
+    if is_first {
+        user_message_prefix(style_mode).len() + text.len()
+    } else {
+        user_message_inset_width(style_mode) + text.len()
+    }
 }
 
 fn measure_width(text: &str) -> usize {

@@ -370,7 +370,7 @@ fn measure_document_pipeline_stress_with_model(
 /// `format_document_stress_summary` 输出便于人工比较的 stress 摘要。
 pub fn format_document_stress_summary(summary: &DocumentStressSummary) -> String {
     format!(
-        "scenario={scenario} items={items} size={width}x{height} transcript_lines={transcript_lines} document_lines={document_lines} viewport_lines={viewport_lines} frame_cells={frame_cells} timings_ms={{render:{render:.3}, layout:{layout:.3}, viewport:{viewport:.3}, frame:{frame:.3}}} rss_kib={{before:{rss_before:?}, after_render:{rss_render:?}, after_layout:{rss_layout:?}, after_viewport:{rss_viewport:?}, after_frame:{rss_frame:?}}} memory_bytes={{raw_text:{raw_text}, items:{item_bytes}, render_ui:{render_ui}, plain_lines:{plain_lines}, anchors:{anchors}, indexes:{indexes}, estimated_total:{estimated_total}}}",
+        "scenario={scenario} items={items} size={width}x{height} transcript_lines={transcript_lines} document_lines={document_lines} viewport_lines={viewport_lines} frame_cells={frame_cells} timings_ms={{metrics:{render:.3}, layout:{layout:.3}, viewport:{viewport:.3}, frame:{frame:.3}}} rss_kib={{before:{rss_before:?}, after_metrics:{rss_render:?}, after_layout:{rss_layout:?}, after_viewport:{rss_viewport:?}, after_frame:{rss_frame:?}}} memory_bytes={{raw_text:{raw_text}, items:{item_bytes}, render_ui:{render_ui}, plain_lines:{plain_lines}, anchors:{anchors}, indexes:{indexes}, estimated_total:{estimated_total}}}",
         scenario = format_document_stress_scenario(summary.scenario),
         items = summary.item_count,
         width = summary.width,
@@ -880,22 +880,24 @@ mod tests {
         assert!(summary.frame_non_empty_cells > 0);
         assert!(summary.memory.raw_text_bytes > 0);
         assert!(summary.memory.estimated_item_bytes >= summary.memory.raw_text_bytes);
-        assert!(
-            summary.memory.estimated_render_ui_bytes > 0,
-            "stress measurement runs after sync_transcript_render, so warmed transcript blocks should still be retained"
+        assert_eq!(
+            summary.memory.estimated_render_ui_bytes, 0,
+            "Phase E sync_transcript_render should stop after metrics rebuild instead of retaining warmed render UI blocks"
         );
-        assert!(
-            summary.memory.estimated_plain_line_bytes > 0,
-            "retained warmed blocks should include their per-line plain-text metadata"
+        assert_eq!(
+            summary.memory.estimated_plain_line_bytes, 0,
+            "metrics-only rebuild should not retain per-line plain-text block metadata before viewport materialization"
         );
-        assert!(
-            summary.memory.estimated_anchor_bytes > 0,
-            "retained warmed blocks should include anchor metadata"
+        assert_eq!(
+            summary.memory.estimated_anchor_bytes, 0,
+            "metrics-only rebuild should not retain anchor metadata before viewport materialization"
         );
         assert!(summary.memory.estimated_index_bytes > 0);
         let formatted = format_document_stress_summary(&summary);
         assert!(formatted.contains("scenario=cold_resume"));
         assert!(formatted.contains("items=24"));
+        assert!(formatted.contains("timings_ms={metrics:"));
+        assert!(formatted.contains("after_metrics"));
         assert!(formatted.contains("memory_bytes={"));
     }
 
@@ -922,8 +924,13 @@ mod tests {
         assert!(summary.frame_non_empty_cells > 0);
         assert!(summary.memory.raw_text_bytes > 0);
         assert!(summary.memory.estimated_total_bytes >= summary.memory.raw_text_bytes);
+        assert_eq!(summary.memory.estimated_render_ui_bytes, 0);
+        assert_eq!(summary.memory.estimated_plain_line_bytes, 0);
+        assert_eq!(summary.memory.estimated_anchor_bytes, 0);
         let formatted = format_document_stress_summary(&summary);
         assert!(formatted.contains("scenario=width_change(80->56)"));
+        assert!(formatted.contains("timings_ms={metrics:"));
+        assert!(formatted.contains("after_metrics"));
         assert!(formatted.contains("memory_bytes={"));
     }
 

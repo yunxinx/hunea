@@ -44,6 +44,32 @@ pub(crate) fn render_markdown_lines(
     lines
 }
 
+pub(crate) fn render_markdown_metrics(
+    markdown: &str,
+    width: usize,
+    palette: TerminalPalette,
+) -> (usize, usize) {
+    let width = width.max(1);
+    let leading_blank_lines = count_leading_blank_lines(markdown);
+    let trailing_blank_lines = count_trailing_blank_lines(markdown);
+    let mut renderer = MarkdownRenderer::new(palette);
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+
+    renderer.render(Parser::new_ext(markdown, options));
+
+    let (line_count, plain_text_len) = renderer.finish_metrics(width);
+    if plain_text_len == 0 {
+        return (0, 0);
+    }
+
+    (
+        line_count + leading_blank_lines + trailing_blank_lines,
+        plain_text_len,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WrapMode {
     Prose,
@@ -262,6 +288,18 @@ impl MarkdownRenderer {
             .drain(..)
             .flat_map(|line| wrap_logical_line(line, width.max(1)))
             .collect()
+    }
+
+    fn finish_metrics(mut self, width: usize) -> (usize, usize) {
+        self.output
+            .drain(..)
+            .map(|line| measure_wrapped_logical_line(line, width.max(1)))
+            .fold(
+                (0, 0),
+                |(line_count, plain_text_len), (next_lines, next_len)| {
+                    (line_count + next_lines, plain_text_len + next_len)
+                },
+            )
     }
 
     fn start_tag(&mut self, tag: Tag<'_>) {
@@ -672,6 +710,38 @@ fn wrap_logical_line(line: LogicalLine, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn measure_wrapped_logical_line(line: LogicalLine, width: usize) -> (usize, usize) {
+    if line.chunks.is_empty() && line.first_prefix.is_empty() {
+        return (1, 0);
+    }
+
+    let first_width = width.saturating_sub(chunk_width(&line.first_prefix)).max(1);
+    let continuation_width = width
+        .saturating_sub(chunk_width(&line.continuation_prefix))
+        .max(1);
+
+    let wrapped_content = match line.wrap_mode {
+        WrapMode::Prose => wrap_prose_chunks(&line.chunks, first_width, continuation_width),
+        WrapMode::Literal => hard_wrap_chunks(&line.chunks, first_width, continuation_width),
+    };
+
+    wrapped_content.into_iter().enumerate().fold(
+        (0, 0),
+        |(line_count, plain_text_len), (index, chunks)| {
+            let prefix = if index == 0 {
+                &line.first_prefix
+            } else {
+                &line.continuation_prefix
+            };
+
+            (
+                line_count + 1,
+                plain_text_len + chunk_text_len(prefix) + chunk_text_len(&chunks),
+            )
+        },
+    )
+}
+
 #[derive(Debug, Clone)]
 struct StyledSegment {
     text: String,
@@ -929,6 +999,10 @@ fn tab_stop_width(column: usize) -> usize {
 
 fn chunk_width(chunks: &[StyledChunk]) -> usize {
     chunks.iter().map(|chunk| measure_width(&chunk.text)).sum()
+}
+
+fn chunk_text_len(chunks: &[StyledChunk]) -> usize {
+    chunks.iter().map(|chunk| chunk.text.len()).sum()
 }
 
 fn measure_width(text: &str) -> usize {

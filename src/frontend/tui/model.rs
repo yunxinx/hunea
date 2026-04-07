@@ -364,18 +364,10 @@ impl Model {
     }
 
     pub(crate) fn sync_transcript_render(&mut self) {
+        // metrics-only rebuild 不应保留旧 viewport 预热留下的 render block。
         self.transcript.begin_recent_render_block_batch();
         let index = self.transcript.item_metrics_index();
-        let warmed_item_count = if let Some((start, count)) =
-            self.current_visible_transcript_window(index.line_count)
-        {
-            self.transcript
-                .prewarm_viewport_window(&index, start, count)
-        } else {
-            0
-        };
-        self.transcript
-            .finish_recent_render_block_batch(warmed_item_count);
+        self.transcript.finish_recent_render_block_batch(0);
         self.transcript_render = Rc::new(index_only_render_result(index));
         self.transcript_render_version += 1;
         self.invalidate_document_viewport_cache();
@@ -682,6 +674,51 @@ mod tests {
     }
 
     #[test]
+    fn sync_transcript_render_evicts_warmed_transcript_blocks_during_metrics_only_refresh() {
+        let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
+        model.set_window(24, 6);
+        model.set_palette(default_palette(), true);
+        model.transcript_mut().clear();
+        model.transcript_mut().set_gap(0);
+        for index in 0..96 {
+            model
+                .transcript_mut()
+                .append_message(Sender::Assistant, format!("item {index}"));
+        }
+
+        model.sync_transcript_render();
+        assert!(
+            model
+                .transcript
+                .cached_screen_blocks_snapshot()
+                .borrow()
+                .is_empty(),
+            "metrics-only sync should keep transcript blocks cold before any viewport materialization"
+        );
+
+        model.document_transcript_cache = Default::default();
+        let _snapshot = model.current_document_transcript_snapshot();
+        assert!(
+            !model
+                .transcript
+                .cached_screen_blocks_snapshot()
+                .borrow()
+                .is_empty(),
+            "document transcript snapshot should prewarm the visible transcript neighborhood"
+        );
+
+        model.sync_transcript_render();
+        assert!(
+            model
+                .transcript
+                .cached_screen_blocks_snapshot()
+                .borrow()
+                .is_empty(),
+            "metrics-only refresh should evict warmed transcript blocks from the previous viewport snapshot"
+        );
+    }
+
+    #[test]
     fn current_visible_transcript_window_reresolves_manual_scroll_viewport_after_resize() {
         let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
         model.transcript_mut().clear();
@@ -775,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_prewarm_skips_when_document_viewport_is_unavailable() {
+    fn sync_transcript_render_keeps_transcript_blocks_cold_when_document_viewport_is_unavailable() {
         #[derive(Clone, Copy)]
         enum ViewportState {
             MissingWindow,
@@ -796,12 +833,23 @@ mod tests {
 
             model.sync_transcript_render();
             assert!(
+                model
+                    .transcript
+                    .cached_screen_blocks_snapshot()
+                    .borrow()
+                    .is_empty(),
+                "Phase E sync_transcript_render should stop after metrics rebuild even while the viewport is still available"
+            );
+
+            model.document_transcript_cache = Default::default();
+            let _snapshot = model.current_document_transcript_snapshot();
+            assert!(
                 !model
                     .transcript
                     .cached_screen_blocks_snapshot()
                     .borrow()
                     .is_empty(),
-                "test fixture should prewarm transcript blocks before making the viewport unavailable"
+                "test fixture should warm transcript blocks before making the viewport unavailable"
             );
 
             match viewport_state {
@@ -828,7 +876,7 @@ mod tests {
                     .cached_screen_blocks_snapshot()
                     .borrow()
                     .is_empty(),
-                "sync_transcript_render should not retain transcript blocks when no viewport is available"
+                "sync_transcript_render should keep transcript blocks cold when no viewport is available"
             );
 
             model.document_transcript_cache = Default::default();

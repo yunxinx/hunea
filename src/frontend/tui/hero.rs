@@ -62,6 +62,16 @@ pub fn render_hero_plain_lines_with_palette(
     buffer_to_plain_lines(&render_hero_buffer_with_palette(options, palette))
 }
 
+pub(crate) fn hero_total_width(options: &HeroOptions) -> u16 {
+    let work_dir = options.work_dir.clone().unwrap_or_else(short_work_dir);
+    let app_name = options.app_name.as_deref().unwrap_or(DEFAULT_APP_NAME);
+    let version = options.version.as_deref().unwrap_or(DEFAULT_VERSION);
+    let title_text = hero_title_plain_text(app_name, version);
+    let content_width = resolved_content_width(options.width, &title_text, &work_dir);
+
+    content_width + BORDER_WIDTH + (HORIZONTAL_PADDING * 2)
+}
+
 /// `print_hero` 直接把启动 hero 输出到标准输出。
 pub fn print_hero(options: &HeroOptions) -> io::Result<()> {
     let stdout = io::stdout();

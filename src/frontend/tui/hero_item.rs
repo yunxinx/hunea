@@ -8,8 +8,8 @@ use ratatui::text::Line;
 use super::{
     HeroOptions,
     hero::{
-        hero_title_plain_text, render_hero_buffer_with_palette, render_hero_lines_with_palette,
-        resolved_content_width,
+        hero_title_plain_text, hero_total_width, render_hero_lines_with_palette,
+        render_hero_plain_lines_with_palette, resolved_content_width,
     },
     theme::TerminalPalette,
     transcript::{DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchorKind, wrap_prompt_visual_lines},
@@ -95,6 +95,22 @@ impl HeroItem {
             + self.options.work_dir.as_deref().unwrap_or("").len()
     }
 
+    pub(crate) fn measure_render_metrics(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+    ) -> (usize, usize) {
+        let options = self
+            .adjusted_options(width, palette)
+            .unwrap_or_else(|| self.options.clone());
+        let plain_lines = render_hero_plain_lines_with_palette(&options, palette);
+
+        (
+            plain_lines.len(),
+            plain_lines.iter().map(String::len).sum::<usize>(),
+        )
+    }
+
     pub(crate) fn render_line_anchors(
         &self,
         width: u16,
@@ -128,14 +144,12 @@ impl HeroItem {
         anchors
     }
 
-    fn adjusted_options(&self, width: u16, palette: TerminalPalette) -> Option<HeroOptions> {
+    fn adjusted_options(&self, width: u16, _palette: TerminalPalette) -> Option<HeroOptions> {
         if width == 0 {
             return None;
         }
 
-        let natural_width = render_hero_buffer_with_palette(&self.options, palette)
-            .area
-            .width;
+        let natural_width = hero_total_width(&self.options);
         if natural_width <= width {
             return None;
         }

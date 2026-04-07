@@ -105,6 +105,29 @@ impl TranscriptItemMetricsIndex {
             })
             .ok()
     }
+
+    pub(crate) fn summary_positions_for_line_window(
+        &self,
+        start_line: usize,
+        line_count: usize,
+        overscan_lines: usize,
+    ) -> Option<(usize, usize)> {
+        if line_count == 0 || self.line_count == 0 || start_line >= self.line_count {
+            return None;
+        }
+
+        let visible_end = start_line.saturating_add(line_count).min(self.line_count);
+        let overscanned_start = start_line.saturating_sub(overscan_lines);
+        let overscanned_end = visible_end
+            .saturating_add(overscan_lines)
+            .min(self.line_count);
+        let last_line = overscanned_end.saturating_sub(1);
+
+        Some((
+            self.summary_position_for_line(overscanned_start)?,
+            self.summary_position_for_line(last_line)?,
+        ))
+    }
 }
 
 /// `TranscriptItemMetricsCache` 管理 item metrics/index 的失效边界。

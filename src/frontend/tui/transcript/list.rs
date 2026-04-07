@@ -6,9 +6,10 @@ use super::{
     DEFAULT_RENDER_WIDTH, ItemLineAnchor, RenderResult, TranscriptItemMetrics,
     TranscriptItemMetricsCache, TranscriptItemMetricsIndex, TranscriptItemPosition,
     ViewportRenderResult,
-    cache::{CachedLineAnchors, CachedRenderBlock, ScreenRenderCache},
+    cache::{CachedLineAnchors, CachedRenderBlock, MAX_RECENT_RENDER_BLOCKS, ScreenRenderCache},
     new_render_result_with_append_start,
     render_state::RenderItemSummary,
+    viewport_overscan_line_budget,
 };
 
 #[cfg(test)]
@@ -169,6 +170,7 @@ impl Transcript {
 
         let item_count = self.items.len();
         let metrics_dirty_from = self.metrics_cache.metrics_dirty_from.min(item_count);
+        self.screen_cache.begin_recent_limit_batch();
         let updated_metrics = (metrics_dirty_from..item_count)
             .map(|index| {
                 let cache_key = self.items[index].render_cache_key();
@@ -251,6 +253,8 @@ impl Transcript {
                 visible_items.push(position);
             }
         }
+        self.screen_cache
+            .finish_recent_limit_batch(MAX_RECENT_RENDER_BLOCKS);
 
         self.metrics_cache.index.line_count = self
             .metrics_cache
@@ -329,6 +333,7 @@ impl Transcript {
         } else {
             -1
         };
+        self.screen_cache.begin_recent_limit_batch();
         let index = self.item_metrics_index();
         let result = Rc::new(self.build_render_result(width, dirty_from, append_start_line, index));
         self.screen_cache.store_result(
@@ -338,14 +343,18 @@ impl Transcript {
             self.items_version,
             Rc::clone(&result),
         );
+        self.screen_cache
+            .finish_recent_limit_batch(MAX_RECENT_RENDER_BLOCKS);
         result
     }
 
     /// `render_viewport` 返回 transcript 的可视切片。
     #[allow(dead_code)]
     pub(crate) fn render_viewport(&mut self, offset: usize, height: usize) -> ViewportRenderResult {
+        self.begin_recent_render_block_batch();
         let index = self.item_metrics_index();
         if index.line_count == 0 {
+            self.finish_recent_render_block_batch(0);
             return ViewportRenderResult::default();
         }
 
@@ -359,7 +368,10 @@ impl Transcript {
         } else {
             height
         };
+        let warmed_item_count =
+            self.prewarm_viewport_window(&index, resolved_offset, visible_line_count);
         let slice = self.materialize_viewport_slice(&index, resolved_offset, visible_line_count);
+        self.finish_recent_render_block_batch(warmed_item_count);
 
         ViewportRenderResult {
             lines: slice.lines,
@@ -382,6 +394,33 @@ impl Transcript {
     /// `retained_block_memory_summary` 返回 warmed item block cache 当前仍被 transcript 保留的体积拆分。
     pub(crate) fn retained_block_memory_summary(&self) -> super::RetainedBlockMemorySummary {
         self.screen_cache.retained_block_memory_summary()
+    }
+
+    /// `begin_recent_render_block_batch` 延迟 recent block cache 的裁剪，直到调用方完成预热。
+    pub(crate) fn begin_recent_render_block_batch(&mut self) {
+        self.screen_cache.begin_recent_limit_batch();
+    }
+
+    /// `finish_recent_render_block_batch` 在调用方完成预热后恢复 recent cache，
+    /// 但不会把本次 viewport 预热窗口立刻逐出。
+    pub(crate) fn finish_recent_render_block_batch(&mut self, warmed_item_count: usize) {
+        let retained_limit = if warmed_item_count == 0 {
+            0
+        } else {
+            MAX_RECENT_RENDER_BLOCKS.max(warmed_item_count)
+        };
+        self.screen_cache.finish_recent_limit_batch(retained_limit);
+    }
+
+    /// `prewarm_viewport_window` 预热当前 viewport 及 overscan 邻域对应的 item block，
+    /// 并返回本次触达的 item 数量。
+    pub(crate) fn prewarm_viewport_window(
+        &mut self,
+        index: &TranscriptItemMetricsIndex,
+        start: usize,
+        count: usize,
+    ) -> usize {
+        self.prewarm_viewport_neighborhood(index, start, count, self.render_width())
     }
 
     fn render_width(&self) -> u16 {
@@ -435,11 +474,11 @@ impl Transcript {
 
     fn render_screen_block(&mut self, index: usize, width: u16) -> Rc<CachedRenderBlock> {
         let cache_key = self.items[index].render_cache_key();
-        if let Some(cached) = self.screen_cache.items.borrow().get(&index)
-            && cached.width == width
-            && cached.cache_key == cache_key
+        if let Some(cached) = self
+            .screen_cache
+            .reusable_item_block(index, width, cache_key)
         {
-            return Rc::clone(cached);
+            return cached;
         }
 
         let block = Rc::new(materialize_transcript_item_render_block(
@@ -447,11 +486,33 @@ impl Transcript {
             width,
             self.palette,
         ));
-        self.screen_cache
-            .items
-            .borrow_mut()
-            .insert(index, Rc::clone(&block));
+        self.screen_cache.store_item_block(index, Rc::clone(&block));
         block
+    }
+
+    fn prewarm_viewport_neighborhood(
+        &mut self,
+        index: &TranscriptItemMetricsIndex,
+        start: usize,
+        count: usize,
+        width: u16,
+    ) -> usize {
+        let overscan_lines = viewport_overscan_line_budget(count);
+        let Some((start_position, end_position)) =
+            index.summary_positions_for_line_window(start, count, overscan_lines)
+        else {
+            return 0;
+        };
+
+        let item_indices = index.visible_items[start_position..=end_position]
+            .iter()
+            .map(|position| position.item_index)
+            .collect::<Vec<_>>();
+        let warmed_item_count = item_indices.len();
+        for item_index in item_indices {
+            let _ = self.render_screen_block(item_index, width);
+        }
+        warmed_item_count
     }
 
     fn materialize_viewport_slice(
@@ -479,8 +540,8 @@ impl Transcript {
             Some(position_index) => position_index,
             None => return super::render_state::RenderRangeSlice::default(),
         };
-        let mut line_offset = start.saturating_sub(index.visible_items[position_index].start_line);
         let width = self.render_width();
+        let mut line_offset = start.saturating_sub(index.visible_items[position_index].start_line);
 
         while remaining > 0 {
             let Some(position) = index.visible_items.get(position_index).copied() else {
@@ -699,6 +760,8 @@ impl TranscriptItem {
 
 #[cfg(test)]
 mod tests {
+    const EXPECTED_MAX_RECENT_RENDER_BLOCKS: usize = 48;
+
     use ratatui::text::Span;
 
     use super::*;
@@ -1149,7 +1212,120 @@ mod tests {
     }
 
     #[test]
-    fn render_viewport_materializes_only_visible_items_once_metrics_are_warm() {
+    fn item_metrics_index_keeps_recent_render_block_cache_bounded() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_gap(0);
+        transcript.set_width(32);
+
+        for index in 0..96 {
+            transcript.append_message(Sender::Assistant, format!("item {index}"));
+        }
+
+        let _ = transcript.item_metrics_index();
+        let retained = transcript.screen_cache.items.borrow();
+
+        assert!(
+            retained.len() <= EXPECTED_MAX_RECENT_RENDER_BLOCKS,
+            "metrics rebuild should keep only a bounded recent block cache, got {} retained blocks",
+            retained.len()
+        );
+        assert!(
+            !retained.contains_key(&0),
+            "bounded recent cache should evict long-stale head items after a full metrics pass"
+        );
+        assert!(
+            retained.contains_key(&95),
+            "bounded recent cache should keep the most recently touched tail items warm"
+        );
+    }
+
+    #[test]
+    fn item_metrics_index_avoids_linear_recent_cache_bookkeeping_for_large_batches() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_gap(0);
+        transcript.set_width(32);
+
+        for index in 0..96 {
+            transcript.append_message(Sender::Assistant, format!("item {index}"));
+        }
+
+        transcript.screen_cache.reset_recent_item_tracking_work();
+        let _ = transcript.item_metrics_index();
+        let work = transcript.screen_cache.recent_item_tracking_work();
+
+        assert_eq!(
+            work.linear_scan_steps, 0,
+            "recent cache tracking should not linearly scan bookkeeping state during large metrics batches: {work:?}"
+        );
+        assert_eq!(
+            work.shifted_entries, 0,
+            "recent cache tracking should not shift bookkeeping entries during large metrics batches: {work:?}"
+        );
+    }
+
+    #[test]
+    fn render_reuses_metrics_pass_blocks_before_recent_cache_trim() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_gap(0);
+        transcript.set_width(32);
+
+        for index in 0..96 {
+            transcript.append_message(Sender::Assistant, format!("item {index}"));
+        }
+
+        let width = transcript.render_width();
+        let head_block = transcript.render_screen_block(0, width);
+
+        let render = transcript.render();
+        let rendered_head = render
+            .items
+            .iter()
+            .find(|summary| summary.item_index == 0)
+            .expect("full render should include the head item");
+
+        assert!(
+            Rc::ptr_eq(&rendered_head.block, &head_block),
+            "full render should reuse the block already materialized during metrics rebuild"
+        );
+    }
+
+    #[test]
+    fn retained_block_memory_summary_counts_result_owned_blocks_after_full_render() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_gap(0);
+        transcript.set_width(32);
+
+        for index in 0..96 {
+            transcript.append_message(
+                Sender::Assistant,
+                format!("item {index}\nalpha beta gamma delta epsilon"),
+            );
+        }
+
+        let render = transcript.render();
+        let summary = transcript.retained_block_memory_summary();
+        let expected = retained_block_memory_summary_for_render(&render, summary);
+
+        assert!(
+            render.items.len() > EXPECTED_MAX_RECENT_RENDER_BLOCKS,
+            "test fixture should exceed the bounded recent cache size"
+        );
+        assert_eq!(
+            summary.estimated_render_ui_bytes, expected.estimated_render_ui_bytes,
+            "retained memory should count every unique block still owned by the render result"
+        );
+        assert_eq!(
+            summary.estimated_plain_line_bytes, expected.estimated_plain_line_bytes,
+            "retained memory should include plain-line metadata for result-owned blocks"
+        );
+        assert_eq!(
+            summary.estimated_anchor_bytes, expected.estimated_anchor_bytes,
+            "retained memory should include anchor metadata for result-owned blocks"
+        );
+    }
+
+    #[test]
+    fn render_viewport_prewarms_overscan_neighbors_once_metrics_are_warm() {
         let mut transcript = Transcript::new(default_palette());
         transcript.set_gap(0);
         transcript.set_width(32);
@@ -1163,19 +1339,77 @@ mod tests {
         transcript.screen_cache.result = Rc::new(RenderResult::default());
         transcript.screen_cache.valid = false;
 
-        let viewport = transcript.render_viewport(3, 2);
+        let viewport = transcript.render_viewport(5, 1);
 
-        assert_eq!(
-            viewport.plain_lines,
-            vec!["item 3".to_string(), "item 4".to_string()]
-        );
+        assert_eq!(viewport.plain_lines, vec!["item 5".to_string()]);
         assert_eq!(
             transcript.screen_cache.items.borrow().len(),
-            2,
-            "viewport materialization should only populate caches for visible items"
+            9,
+            "viewport materialization should prewarm a bounded overscan neighborhood"
         );
-        assert!(transcript.screen_cache.items.borrow().contains_key(&3));
-        assert!(transcript.screen_cache.items.borrow().contains_key(&4));
+        for expected in 1..=9 {
+            assert!(
+                transcript
+                    .screen_cache
+                    .items
+                    .borrow()
+                    .contains_key(&expected),
+                "overscan neighborhood should keep item {expected} warm"
+            );
+        }
+    }
+
+    #[test]
+    fn render_viewport_keeps_large_visible_window_warm() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_gap(0);
+        transcript.set_width(32);
+
+        for index in 0..96 {
+            transcript.append_message(Sender::Assistant, format!("item {index}"));
+        }
+
+        let visible_count = EXPECTED_MAX_RECENT_RENDER_BLOCKS + 16;
+        let viewport = transcript.render_viewport(0, visible_count);
+
+        assert_eq!(viewport.plain_lines.len(), visible_count);
+        for expected in 0..visible_count {
+            assert!(
+                transcript
+                    .screen_cache
+                    .items
+                    .borrow()
+                    .contains_key(&expected),
+                "large viewport warm cache should retain visible item {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn finish_recent_render_block_batch_evicts_all_warmed_blocks_when_visible_window_is_empty() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_gap(0);
+        transcript.set_width(32);
+
+        for index in 0..96 {
+            transcript.append_message(Sender::Assistant, format!("item {index}"));
+        }
+
+        let visible_count = EXPECTED_MAX_RECENT_RENDER_BLOCKS + 16;
+        let viewport = transcript.render_viewport(0, visible_count);
+        assert_eq!(viewport.plain_lines.len(), visible_count);
+        assert!(
+            !transcript.screen_cache.items.borrow().is_empty(),
+            "test fixture should start from an already warmed block cache"
+        );
+
+        transcript.begin_recent_render_block_batch();
+        transcript.finish_recent_render_block_batch(0);
+
+        assert!(
+            transcript.screen_cache.items.borrow().is_empty(),
+            "empty visible window should evict every warmed block instead of retaining the default recent limit"
+        );
     }
 
     #[test]
@@ -1242,5 +1476,36 @@ mod tests {
     #[allow(dead_code)]
     fn styled_line(text: &str) -> Line<'static> {
         Line::from(Span::raw(text.to_string()))
+    }
+
+    fn retained_block_memory_summary_for_render(
+        render: &RenderResult,
+        actual: super::super::RetainedBlockMemorySummary,
+    ) -> super::super::RetainedBlockMemorySummary {
+        let mut summary = super::super::RetainedBlockMemorySummary {
+            estimated_cache_slot_bytes: actual.estimated_cache_slot_bytes,
+            ..super::super::RetainedBlockMemorySummary::default()
+        };
+        let mut seen = std::collections::HashSet::new();
+
+        for item in render.items.iter() {
+            let block_ptr = Rc::as_ptr(&item.block) as usize;
+            if !seen.insert(block_ptr) {
+                continue;
+            }
+
+            let block = item.block.as_ref();
+            summary.estimated_render_ui_bytes += block.estimated_render_ui_bytes();
+            summary.estimated_plain_line_bytes +=
+                std::mem::size_of_val(block.plain_line_byte_lens.as_slice());
+            summary.estimated_anchor_bytes += match &block.anchors {
+                super::super::CachedLineAnchors::Explicit(anchors) => {
+                    std::mem::size_of_val(anchors.as_slice())
+                }
+                super::super::CachedLineAnchors::GeneratedRenderedLines => 0,
+            };
+        }
+
+        summary
     }
 }

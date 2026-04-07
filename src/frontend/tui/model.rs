@@ -364,9 +364,19 @@ impl Model {
     }
 
     pub(crate) fn sync_transcript_render(&mut self) {
-        self.transcript_render = Rc::new(index_only_render_result(
-            self.transcript.item_metrics_index(),
-        ));
+        self.transcript.begin_recent_render_block_batch();
+        let index = self.transcript.item_metrics_index();
+        let warmed_item_count = if let Some((start, count)) =
+            self.current_visible_transcript_window(index.line_count)
+        {
+            self.transcript
+                .prewarm_viewport_window(&index, start, count)
+        } else {
+            0
+        };
+        self.transcript
+            .finish_recent_render_block_batch(warmed_item_count);
+        self.transcript_render = Rc::new(index_only_render_result(index));
         self.transcript_render_version += 1;
         self.invalidate_document_viewport_cache();
     }
@@ -424,6 +434,52 @@ impl Model {
             })
             .count()
     }
+
+    /// `current_visible_transcript_window` 返回当前 document viewport 与 transcript 的交集窗口。
+    pub(crate) fn current_visible_transcript_window(
+        &mut self,
+        transcript_line_count: usize,
+    ) -> Option<(usize, usize)> {
+        if transcript_line_count == 0 || self.document_viewport_height() == 0 {
+            return None;
+        }
+
+        let manual_scroll = self.document_viewport_state.manual_scroll();
+        let layout = if manual_scroll {
+            let index = self.transcript.item_metrics_index();
+            self.document_layout_for_transcript_index(index)
+        } else {
+            self.transcript_window_layout(transcript_line_count)
+        };
+        let document_offset = if manual_scroll {
+            self.document_viewport_state
+                .resolve_offset(&layout, self.document_viewport_height())
+        } else {
+            self.document_viewport_state.resolved_offset()
+        };
+        let line_indices = self.document_viewport_line_indices_for_mode(
+            &layout,
+            document_offset,
+            self.document_viewport_state.follow_bottom(),
+            manual_scroll,
+        );
+
+        let mut start = None;
+        let mut count = 0usize;
+        for line_index in line_indices {
+            if line_index >= transcript_line_count {
+                if start.is_some() {
+                    break;
+                }
+                continue;
+            }
+
+            start.get_or_insert(line_index);
+            count += 1;
+        }
+
+        start.map(|start| (start, count))
+    }
 }
 
 fn resolve_initial_git_branch(items: &[StatusLineItem]) -> String {
@@ -453,7 +509,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::frontend::tui::{Sender, StyleMode};
+    use crate::frontend::tui::{Sender, StyleMode, document::DocumentAnchorRegion};
 
     #[test]
     fn overflowing_document_bottom_slice_keeps_full_draft_height() {
@@ -546,5 +602,245 @@ mod tests {
             Rc::ptr_eq(&before_render, &model.transcript_render),
             "setting the same palette should keep the existing transcript render result"
         );
+    }
+
+    #[test]
+    fn current_visible_transcript_window_matches_actual_viewport_line_indices() {
+        #[derive(Clone, Copy)]
+        enum TailState {
+            Plain,
+            StatusLine,
+            CommandPanel,
+        }
+
+        for (name, style_mode, height, composer_text, tail_state) in [
+            ("plain draft", StyleMode::Ms, 6, "draft", TailState::Plain),
+            (
+                "status line with tall draft",
+                StyleMode::Ms,
+                6,
+                "1\n2\n3\n4\n5\n6\n7\n8",
+                TailState::StatusLine,
+            ),
+            (
+                "command panel",
+                StyleMode::Ms,
+                6,
+                "/",
+                TailState::CommandPanel,
+            ),
+            ("framed draft", StyleMode::Cc, 3, "draft", TailState::Plain),
+            (
+                "framed tall draft",
+                StyleMode::Cc,
+                4,
+                "1\n2\n3\n4\n5\n6",
+                TailState::Plain,
+            ),
+        ] {
+            let mut model = Model::new_with_style_mode(HeroOptions::default(), style_mode);
+            model.transcript_mut().clear();
+            model.transcript_mut().set_gap(0);
+            for index in 0..48 {
+                model
+                    .transcript_mut()
+                    .append_message(Sender::Assistant, format!("item {index}"));
+            }
+            model.set_window(24, height);
+            model.set_palette(default_palette(), true);
+            match tail_state {
+                TailState::Plain => {}
+                TailState::StatusLine => {
+                    model.status_line_items = vec![StatusLineItem::GitBranch];
+                    model.git_branch = "main".to_string();
+                }
+                TailState::CommandPanel => {}
+            }
+            model.composer_mut().set_text_for_test(composer_text);
+            model.sync_command_panel_navigation();
+            model.sync_composer_height();
+            model.sync_transcript_render();
+            model.sync_document_viewport_to_bottom();
+
+            let layout = model.build_document_layout();
+            let visible_transcript_indices = model
+                .document_viewport_line_indices(&layout)
+                .into_iter()
+                .filter(|line_index| *line_index < layout.transcript_line_count)
+                .collect::<Vec<_>>();
+            let expected_window = visible_transcript_indices
+                .first()
+                .copied()
+                .map(|start| (start, visible_transcript_indices.len()));
+
+            assert_eq!(
+                model.current_visible_transcript_window(layout.transcript_line_count),
+                expected_window,
+                "{name} should derive the warmed transcript window from the actual viewport line indices"
+            );
+        }
+    }
+
+    #[test]
+    fn current_visible_transcript_window_reresolves_manual_scroll_viewport_after_resize() {
+        let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
+        model.transcript_mut().clear();
+        model.transcript_mut().set_gap(0);
+        model.transcript_mut().append_message(
+            Sender::Assistant,
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega",
+        );
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, "target item");
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, "tail item");
+        model.set_window(24, 4);
+        model.set_palette(default_palette(), true);
+        model.sync_transcript_render();
+
+        let layout = model.build_document_layout();
+        let target_document_line = (0..layout.line_count())
+            .find(|&line_index| {
+                layout.line_anchor_at(line_index).is_some_and(|anchor| {
+                    anchor.region == DocumentAnchorRegion::Transcript
+                        && anchor.transcript.item_index == 1
+                })
+            })
+            .expect("target item should exist in the initial transcript layout");
+        let document_offset = target_document_line;
+        model.apply_document_viewport_position(&layout, document_offset, 0, false, true);
+        let preserved_viewport_state = model.current_document_viewport_state();
+
+        model.set_window(12, 4);
+
+        let transcript_line_count = model.transcript.item_metrics_index().line_count;
+        let resized_layout = model.build_document_layout();
+        let resized_target_document_line = (0..resized_layout.line_count())
+            .find(|&line_index| {
+                resized_layout
+                    .line_anchor_at(line_index)
+                    .is_some_and(|anchor| {
+                        anchor.region == DocumentAnchorRegion::Transcript
+                            && anchor.transcript.item_index == 1
+                    })
+            })
+            .expect("target item should still exist after resize");
+        let expected_offset = preserved_viewport_state
+            .resolve_offset(&resized_layout, model.document_viewport_height());
+        let stale_offset = preserved_viewport_state.resolved_offset();
+        let expected_window = model
+            .document_viewport_line_indices_for_mode(
+                &resized_layout,
+                expected_offset,
+                preserved_viewport_state.follow_bottom(),
+                preserved_viewport_state.manual_scroll(),
+            )
+            .into_iter()
+            .filter(|line_index| *line_index < transcript_line_count)
+            .collect::<Vec<_>>();
+        let stale_window = model
+            .document_viewport_line_indices_for_mode(
+                &resized_layout,
+                stale_offset,
+                preserved_viewport_state.follow_bottom(),
+                preserved_viewport_state.manual_scroll(),
+            )
+            .into_iter()
+            .filter(|line_index| *line_index < transcript_line_count)
+            .collect::<Vec<_>>();
+        let expected_window = expected_window
+            .first()
+            .copied()
+            .map(|start| (start, expected_window.len()));
+
+        assert_ne!(
+            expected_offset, stale_offset,
+            "test fixture should force manual-scroll restore to resolve a different offset after reflow (before={target_document_line}, after={resized_target_document_line})"
+        );
+        assert_ne!(
+            stale_window
+                .first()
+                .copied()
+                .map(|start| (start, stale_window.len())),
+            expected_window,
+            "test fixture should expose a mismatch between stale and re-resolved viewport windows"
+        );
+        assert_eq!(
+            model.current_visible_transcript_window(transcript_line_count),
+            expected_window,
+            "manual-scroll prewarm should follow the re-resolved viewport that will be restored after resize"
+        );
+    }
+
+    #[test]
+    fn transcript_prewarm_skips_when_document_viewport_is_unavailable() {
+        #[derive(Clone, Copy)]
+        enum ViewportState {
+            MissingWindow,
+            ZeroHeight,
+        }
+
+        for viewport_state in [ViewportState::MissingWindow, ViewportState::ZeroHeight] {
+            let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
+            model.set_window(24, 6);
+            model.set_palette(default_palette(), true);
+            model.transcript_mut().clear();
+            model.transcript_mut().set_gap(0);
+            for index in 0..96 {
+                model
+                    .transcript_mut()
+                    .append_message(Sender::Assistant, format!("item {index}"));
+            }
+
+            model.sync_transcript_render();
+            assert!(
+                !model
+                    .transcript
+                    .cached_screen_blocks_snapshot()
+                    .borrow()
+                    .is_empty(),
+                "test fixture should prewarm transcript blocks before making the viewport unavailable"
+            );
+
+            match viewport_state {
+                ViewportState::MissingWindow => {
+                    model.has_window = false;
+                }
+                ViewportState::ZeroHeight => {
+                    model.height = 0;
+                }
+            }
+
+            assert_eq!(model.document_viewport_height(), 0);
+            let transcript_line_count = model.transcript.item_metrics_index().line_count;
+            assert_eq!(
+                model.current_visible_transcript_window(transcript_line_count),
+                None,
+                "unavailable viewport should not report any transcript line as visible"
+            );
+
+            model.sync_transcript_render();
+            assert!(
+                model
+                    .transcript
+                    .cached_screen_blocks_snapshot()
+                    .borrow()
+                    .is_empty(),
+                "sync_transcript_render should not retain transcript blocks when no viewport is available"
+            );
+
+            model.document_transcript_cache = Default::default();
+            let _snapshot = model.current_document_transcript_snapshot();
+            assert!(
+                model
+                    .transcript
+                    .cached_screen_blocks_snapshot()
+                    .borrow()
+                    .is_empty(),
+                "document transcript snapshots should not retain transcript blocks when no viewport is available"
+            );
+        }
     }
 }

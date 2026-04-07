@@ -2,7 +2,9 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::text::Line;
 use std::{cell::RefCell, collections::HashMap, hint::black_box, rc::Rc};
 
-use super::layout::{compose_document_layout, compose_document_viewport, visible_document_lines};
+use super::layout::{
+    DocumentLayoutInput, compose_document_layout, compose_document_viewport, visible_document_lines,
+};
 use super::*;
 use crate::frontend::tui::{
     HeroOptions, Model, Sender, StatusLineItem, StyleMode,
@@ -10,7 +12,7 @@ use crate::frontend::tui::{
     theme::{default_palette, terminal_default_palette},
     transcript::{
         CachedLineAnchors, CachedRenderBlock, ItemLineAnchor, LineAnchorKind, RenderItemSummary,
-        new_render_result, reset_tracked_cached_render_block_access,
+        TranscriptItemMetricsIndex, new_render_result, reset_tracked_cached_render_block_access,
         tracked_cached_render_block_access,
     },
 };
@@ -269,9 +271,10 @@ fn current_document_transcript_snapshot_keeps_old_palette_lines_after_palette_sw
             "                    ".to_string(),
         ]
     );
-    assert!(
-        snapshot.item_block_cache.borrow().is_empty(),
-        "snapshot should still be reading through the shared warmed cache before palette changes"
+    assert_eq!(
+        snapshot.item_block_cache.borrow().len(),
+        1,
+        "viewport-local snapshot cache should pin the current overscan neighborhood without cloning the whole warmed cache"
     );
 
     model.set_palette(terminal_default_palette(), false);
@@ -285,6 +288,164 @@ fn current_document_transcript_snapshot_keeps_old_palette_lines_after_palette_sw
             "                    ".to_string(),
         ],
         "older document snapshots should stay pinned to the palette they were created with"
+    );
+}
+
+#[test]
+fn document_transcript_snapshot_bounds_item_block_cache_to_overscanned_viewport_window() {
+    let mut model = ready_document_model(24, 6);
+    model.transcript_mut().clear();
+    model.transcript_mut().set_gap(0);
+
+    for index in 0..20 {
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, format!("item {index}"));
+    }
+
+    model.sync_transcript_render();
+    let snapshot = model.current_document_transcript_snapshot();
+
+    let first = snapshot.viewport_snapshot(8, 1);
+    assert_eq!(first.plain_lines, vec!["item 8".to_string()]);
+    assert_eq!(
+        sorted_cache_keys(snapshot.item_block_cache.borrow().keys().copied().collect()),
+        vec![4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "viewport snapshot should prewarm a bounded overscan neighborhood around the visible line"
+    );
+
+    let second = snapshot.viewport_snapshot(14, 1);
+    assert_eq!(second.plain_lines, vec!["item 14".to_string()]);
+    assert_eq!(
+        sorted_cache_keys(snapshot.item_block_cache.borrow().keys().copied().collect()),
+        vec![10, 11, 12, 13, 14, 15, 16, 17, 18],
+        "moving the viewport should evict blocks that fall outside the new overscan neighborhood"
+    );
+}
+
+#[test]
+fn width_refresh_keeps_scrolled_viewport_blocks_warm_for_snapshot_reuse() {
+    let mut model = ready_document_model(24, 6);
+    model.transcript_mut().clear();
+    model.transcript_mut().set_gap(0);
+
+    for index in 0..96 {
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, format!("item {index}"));
+    }
+    model.sync_transcript_render();
+
+    let layout = model.build_document_layout();
+    model.apply_document_viewport_position(&layout, 20, 0, false, true);
+
+    model.set_window(23, 6);
+
+    let warmed_after_refresh = model
+        .transcript
+        .cached_screen_blocks_snapshot()
+        .borrow()
+        .get(&20)
+        .cloned()
+        .expect("width refresh should keep the current scrolled viewport warm");
+
+    let snapshot = model.current_document_transcript_snapshot();
+    let viewport = snapshot.viewport_snapshot(20, 1);
+    assert_eq!(viewport.plain_lines, vec!["item 20".to_string()]);
+    let snapshot_block = snapshot
+        .item_block_cache
+        .borrow()
+        .get(&20)
+        .cloned()
+        .expect("viewport snapshot should pin the current item locally");
+    assert!(
+        Rc::ptr_eq(&warmed_after_refresh, &snapshot_block),
+        "document snapshot should reuse the warmed viewport block instead of rematerializing it"
+    );
+}
+
+#[test]
+fn current_document_transcript_snapshot_keeps_large_visible_window_warm() {
+    const EXPECTED_MAX_RECENT_RENDER_BLOCKS: usize = 48;
+
+    let mut model = ready_document_model(24, 72);
+    model.transcript_mut().clear();
+    model.transcript_mut().set_gap(0);
+
+    for index in 0..96 {
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, format!("item {index}"));
+    }
+    model.sync_transcript_render();
+
+    let (visible_start, visible_count) = model
+        .current_visible_transcript_window(96)
+        .expect("test fixture should expose a transcript viewport");
+    assert!(
+        visible_count > EXPECTED_MAX_RECENT_RENDER_BLOCKS,
+        "test fixture should exceed the bounded recent cache size"
+    );
+
+    let snapshot = model.current_document_transcript_snapshot();
+
+    for expected in visible_start..visible_start + visible_count {
+        assert!(
+            snapshot
+                .warmed_item_block_cache
+                .borrow()
+                .contains_key(&expected),
+            "document snapshot should retain warmed visible item {expected}"
+        );
+    }
+}
+
+#[test]
+fn current_visible_transcript_window_tracks_tail_growth_before_viewport_sync() {
+    let mut model = ready_document_model(24, 6);
+    model.transcript_mut().clear();
+    model.transcript_mut().set_gap(0);
+
+    for index in 0..96 {
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, format!("item {index}"));
+    }
+    model.sync_transcript_render();
+    model.sync_document_viewport_to_bottom();
+
+    model.status_line_items = vec![StatusLineItem::GitBranch];
+    model.git_branch = "main".to_string();
+    model
+        .composer_mut()
+        .set_text_for_test("1\n2\n3\n4\n5\n6\n7\n8");
+    model.sync_composer_height();
+
+    let transcript_line_count = model.transcript.item_metrics_index().line_count;
+    let layout = compose_document_layout(DocumentLayoutInput {
+        transcript: Rc::new(DocumentTranscriptSnapshot {
+            index: TranscriptItemMetricsIndex {
+                line_count: transcript_line_count,
+                ..TranscriptItemMetricsIndex::default()
+            },
+            ..DocumentTranscriptSnapshot::default()
+        }),
+        tail: model.build_document_tail_layout(),
+    });
+    let visible_transcript_indices = model
+        .document_viewport_line_indices(&layout)
+        .into_iter()
+        .filter(|line_index| *line_index < transcript_line_count)
+        .collect::<Vec<_>>();
+    let expected_window = visible_transcript_indices
+        .first()
+        .copied()
+        .map(|start| (start, visible_transcript_indices.len()));
+
+    assert_eq!(
+        model.current_visible_transcript_window(transcript_line_count),
+        expected_window,
+        "tail growth should not leave the warmed transcript window pinned to the old viewport offset"
     );
 }
 
@@ -948,6 +1109,11 @@ fn ready_document_model(width: u16, height: u16) -> Model {
     model.set_window(width, height);
     model.set_palette(default_palette(), true);
     model
+}
+
+fn sorted_cache_keys(mut keys: Vec<usize>) -> Vec<usize> {
+    keys.sort_unstable();
+    keys
 }
 
 fn cursor_visible_in_document_viewport(

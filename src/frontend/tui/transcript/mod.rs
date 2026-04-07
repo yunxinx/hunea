@@ -8,6 +8,7 @@ mod wrap;
 
 #[cfg(test)]
 pub(crate) use cache::CachedLineAnchors;
+pub(crate) use cache::viewport_overscan_line_budget;
 pub(crate) use cache::{CachedRenderBlock, RetainedBlockMemorySummary};
 #[cfg(test)]
 pub(crate) use cache::{

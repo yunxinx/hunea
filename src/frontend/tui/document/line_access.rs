@@ -9,7 +9,7 @@ use crate::frontend::tui::{
     },
     transcript::{
         CachedRenderBlock, ItemLineAnchor, LineAnchor, LineAnchorKind,
-        materialize_transcript_item_render_block,
+        materialize_transcript_item_render_block, viewport_overscan_line_budget,
     },
 };
 
@@ -210,6 +210,7 @@ impl DocumentTranscriptSnapshot {
             return DocumentTranscriptViewportSnapshot::default();
         }
 
+        self.prewarm_item_blocks_for_window(start, count);
         let end = (start + count).min(self.line_count());
         let mut lines = Vec::with_capacity(end - start);
         let mut plain_text_len = 0;
@@ -246,11 +247,68 @@ impl DocumentTranscriptSnapshot {
         }
     }
 
+    fn prewarm_item_blocks_for_window(&self, start: usize, count: usize) {
+        let overscan_lines = viewport_overscan_line_budget(count);
+        let Some((start_position, end_position)) =
+            self.index
+                .summary_positions_for_line_window(start, count, overscan_lines)
+        else {
+            return;
+        };
+
+        let required_items = self.index.visible_items[start_position..=end_position]
+            .iter()
+            .map(|position| position.item_index)
+            .collect::<Vec<_>>();
+        self.item_block_cache
+            .borrow_mut()
+            .retain(|item_index, _| required_items.contains(item_index));
+
+        for item_index in required_items {
+            if self.item_block_cache.borrow().contains_key(&item_index) {
+                continue;
+            }
+
+            let Some(block) = self.materialize_block(item_index) else {
+                continue;
+            };
+            self.item_block_cache.borrow_mut().insert(item_index, block);
+        }
+    }
+
     fn render_block(&self, item_index: usize) -> Option<Rc<CachedRenderBlock>> {
         if let Some(block) = self.item_block_cache.borrow().get(&item_index).cloned() {
             return Some(block);
         }
 
+        if let Some(block) = self.warmed_block(item_index) {
+            return Some(block);
+        }
+
+        let block = Rc::new(materialize_transcript_item_render_block(
+            self.items.get(item_index)?.as_ref(),
+            self.width.max(1),
+            self.palette,
+        ));
+        self.item_block_cache
+            .borrow_mut()
+            .insert(item_index, Rc::clone(&block));
+        Some(block)
+    }
+
+    fn materialize_block(&self, item_index: usize) -> Option<Rc<CachedRenderBlock>> {
+        if let Some(block) = self.warmed_block(item_index) {
+            return Some(block);
+        }
+
+        Some(Rc::new(materialize_transcript_item_render_block(
+            self.items.get(item_index)?.as_ref(),
+            self.width.max(1),
+            self.palette,
+        )))
+    }
+
+    fn warmed_block(&self, item_index: usize) -> Option<Rc<CachedRenderBlock>> {
         let item = self.items.get(item_index)?.as_ref();
         let warmed_block = self
             .warmed_item_block_cache
@@ -265,15 +323,7 @@ impl DocumentTranscriptSnapshot {
             return Some(block);
         }
 
-        let block = Rc::new(materialize_transcript_item_render_block(
-            item,
-            self.width.max(1),
-            self.palette,
-        ));
-        self.item_block_cache
-            .borrow_mut()
-            .insert(item_index, Rc::clone(&block));
-        Some(block)
+        None
     }
 
     fn selectable_at(&self, anchor: DocumentLineAnchor, plain_line: &str) -> SelectableLineRange {

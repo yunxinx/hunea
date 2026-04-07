@@ -1,8 +1,10 @@
-use std::rc::Rc;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use ratatui::text::Line;
 
-use crate::frontend::tui::{Model, selection::apply_selection_to_viewport};
+use crate::frontend::tui::{
+    Model, selection::apply_selection_to_viewport, transcript::TranscriptItemMetricsIndex,
+};
 
 use super::{
     DocumentLayout, DocumentLayoutCache, DocumentLayoutKey, DocumentTranscriptCache,
@@ -137,6 +139,65 @@ impl Model {
         DocumentLayoutInput {
             transcript: self.current_document_transcript_snapshot(),
             tail: self.build_document_tail_layout(),
+        }
+    }
+
+    /// `transient_document_transcript_snapshot` 用当前 transcript index 构造可解析锚点的临时快照，
+    /// 避免在预热窗口计算里递归走完整的 snapshot 预热路径。
+    pub(crate) fn transient_document_transcript_snapshot(
+        &self,
+        index: TranscriptItemMetricsIndex,
+    ) -> DocumentTranscriptSnapshot {
+        DocumentTranscriptSnapshot {
+            index,
+            width: if self.width == 0 {
+                crate::frontend::tui::transcript::DEFAULT_RENDER_WIDTH as u16
+            } else {
+                self.width
+            },
+            palette: self.palette,
+            items: self.transcript.items_snapshot(),
+            warmed_item_block_cache: self.transcript.cached_screen_blocks_snapshot(),
+            item_block_cache: Rc::new(RefCell::new(HashMap::new())),
+            item_text_lines_cache: Rc::new(RefCell::new(HashMap::new())),
+            selectable_cache: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+
+    /// `document_layout_for_transcript_index` 组合当前 tail 与 transcript index，
+    /// 生成一份可用于 viewport 恢复解析的临时文档布局。
+    pub(crate) fn document_layout_for_transcript_index(
+        &mut self,
+        index: TranscriptItemMetricsIndex,
+    ) -> DocumentLayout {
+        compose_document_layout(DocumentLayoutInput {
+            transcript: Rc::new(self.transient_document_transcript_snapshot(index)),
+            tail: self.build_document_tail_layout(),
+        })
+    }
+
+    pub(crate) fn transcript_window_layout(
+        &mut self,
+        transcript_line_count: usize,
+    ) -> DocumentLayout {
+        let tail = self.build_document_tail_layout();
+        let composer_slot = offset_slot_frame(tail.composer_slot, transcript_line_count);
+
+        DocumentLayout {
+            transcript: Rc::new(DocumentTranscriptSnapshot {
+                index: TranscriptItemMetricsIndex {
+                    line_count: transcript_line_count,
+                    ..TranscriptItemMetricsIndex::default()
+                },
+                ..DocumentTranscriptSnapshot::default()
+            }),
+            transcript_line_count,
+            tail: Rc::clone(&tail),
+            composer_slot,
+            composer_start_line: composer_slot.content_start_line,
+            composer_line_count: composer_slot.content_line_count,
+            cursor_x: tail.cursor_x,
+            cursor_y: transcript_line_count + tail.cursor_y,
         }
     }
 
@@ -317,23 +378,22 @@ impl Model {
             return Rc::clone(&self.document_transcript_cache.snapshot);
         }
 
+        self.transcript.begin_recent_render_block_batch();
         let index = self.transcript.item_metrics_index();
+        let warmed_item_count = if let Some((start, count)) =
+            self.current_visible_transcript_window(index.line_count)
+        {
+            self.transcript
+                .prewarm_viewport_window(&index, start, count)
+        } else {
+            0
+        };
         let warmed_item_block_cache = self.transcript.cached_screen_blocks_snapshot();
+        self.transcript
+            .finish_recent_render_block_batch(warmed_item_count);
         let snapshot = Rc::new(DocumentTranscriptSnapshot {
-            index,
-            width: if self.width == 0 {
-                crate::frontend::tui::transcript::DEFAULT_RENDER_WIDTH as u16
-            } else {
-                self.width
-            },
-            palette: self.palette,
-            items: self.transcript.items_snapshot(),
             warmed_item_block_cache,
-            item_block_cache: Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
-            item_text_lines_cache: Rc::new(std::cell::RefCell::new(
-                std::collections::HashMap::new(),
-            )),
-            selectable_cache: Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
+            ..self.transient_document_transcript_snapshot(index)
         });
         self.document_transcript_cache = DocumentTranscriptCache {
             key,

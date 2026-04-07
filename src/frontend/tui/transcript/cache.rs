@@ -1,4 +1,8 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use ratatui::text::Line;
 
@@ -7,6 +11,19 @@ use crate::frontend::tui::styled_text::line_to_plain_text;
 use crate::frontend::tui::theme::{TerminalPalette, default_palette};
 
 use super::render_state::{ItemLineAnchor, RenderResult};
+
+pub(crate) const MIN_VIEWPORT_OVERSCAN_LINES: usize = 4;
+pub(crate) const MAX_VIEWPORT_OVERSCAN_LINES: usize = 12;
+pub(crate) const MAX_RECENT_RENDER_BLOCKS: usize = 48;
+
+/// `viewport_overscan_line_budget` 返回 viewport 邻域预热允许扩展的渲染行数。
+pub(crate) fn viewport_overscan_line_budget(visible_line_count: usize) -> usize {
+    if visible_line_count == 0 {
+        return 0;
+    }
+
+    visible_line_count.clamp(MIN_VIEWPORT_OVERSCAN_LINES, MAX_VIEWPORT_OVERSCAN_LINES)
+}
 
 /// `RetainedBlockMemorySummary` 描述 transcript warmed item block cache 当前驻留的体积拆分。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -60,12 +77,137 @@ impl Default for CachedRenderBlock {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct RecentItemLinks {
+    prev: Option<usize>,
+    next: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RecentItemTracker {
+    links: HashMap<usize, RecentItemLinks>,
+    head: Option<usize>,
+    tail: Option<usize>,
+}
+
+impl RecentItemTracker {
+    fn clear(&mut self) {
+        self.links.clear();
+        self.head = None;
+        self.tail = None;
+    }
+
+    fn len(&self) -> usize {
+        self.links.len()
+    }
+
+    fn touch(&mut self, item_index: usize) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.links.entry(item_index) {
+            entry.insert(RecentItemLinks::default());
+            self.append_to_tail(item_index);
+            return;
+        }
+
+        if self.tail == Some(item_index) {
+            return;
+        }
+
+        self.detach(item_index);
+        self.append_to_tail(item_index);
+    }
+
+    fn pop_lru(&mut self) -> Option<usize> {
+        let head = self.head?;
+        let removed = self.remove(head);
+        debug_assert!(
+            removed,
+            "recent item tracker should remove its current head"
+        );
+        Some(head)
+    }
+
+    fn remove(&mut self, item_index: usize) -> bool {
+        if !self.links.contains_key(&item_index) {
+            return false;
+        }
+
+        self.detach(item_index);
+        self.links.remove(&item_index);
+        true
+    }
+
+    fn detach(&mut self, item_index: usize) {
+        let Some(links) = self.links.get(&item_index).copied() else {
+            return;
+        };
+
+        match links.prev {
+            Some(prev) => {
+                self.links
+                    .get_mut(&prev)
+                    .expect("recent item tracker prev link should exist")
+                    .next = links.next;
+            }
+            None => {
+                self.head = links.next;
+            }
+        }
+
+        match links.next {
+            Some(next) => {
+                self.links
+                    .get_mut(&next)
+                    .expect("recent item tracker next link should exist")
+                    .prev = links.prev;
+            }
+            None => {
+                self.tail = links.prev;
+            }
+        }
+
+        if let Some(current) = self.links.get_mut(&item_index) {
+            current.prev = None;
+            current.next = None;
+        }
+    }
+
+    fn append_to_tail(&mut self, item_index: usize) {
+        let previous_tail = self.tail;
+        match previous_tail {
+            Some(tail) => {
+                self.links
+                    .get_mut(&tail)
+                    .expect("recent item tracker tail should exist")
+                    .next = Some(item_index);
+            }
+            None => {
+                self.head = Some(item_index);
+            }
+        }
+
+        let links = self
+            .links
+            .get_mut(&item_index)
+            .expect("recent item tracker entry should exist before append");
+        links.prev = previous_tail;
+        links.next = None;
+        self.tail = Some(item_index);
+    }
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct CachedRenderBlockAccessSummary {
     pub(crate) line_reads: usize,
     pub(crate) plain_line_reads: usize,
     pub(crate) anchor_reads: usize,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct RecentItemTrackingWorkSummary {
+    pub(crate) linear_scan_steps: usize,
+    pub(crate) shifted_entries: usize,
 }
 
 #[cfg(test)]
@@ -254,6 +396,10 @@ impl CachedRenderBlock {
 #[derive(Debug, Default)]
 pub(crate) struct ScreenRenderCache {
     pub(crate) items: Rc<RefCell<HashMap<usize, Rc<CachedRenderBlock>>>>,
+    recent_items: Rc<RefCell<RecentItemTracker>>,
+    deferred_recent_limit_depth: usize,
+    #[cfg(test)]
+    recent_item_tracking_work: Rc<RefCell<RecentItemTrackingWorkSummary>>,
     pub(crate) result: Rc<RenderResult>,
     pub(crate) width: u16,
     pub(crate) gap: usize,
@@ -269,6 +415,12 @@ impl Clone for ScreenRenderCache {
             // 每个 transcript clone 需要独立的命中表，避免 palette 分叉后复用到
             // 另一份实例重新填回的 block；block 本身仍可通过 Rc 共享只读内容。
             items: Rc::new(RefCell::new(self.items.borrow().clone())),
+            recent_items: Rc::new(RefCell::new(self.recent_items.borrow().clone())),
+            deferred_recent_limit_depth: self.deferred_recent_limit_depth,
+            #[cfg(test)]
+            recent_item_tracking_work: Rc::new(RefCell::new(
+                *self.recent_item_tracking_work.borrow(),
+            )),
             result: Rc::clone(&self.result),
             width: self.width,
             gap: self.gap,
@@ -288,15 +440,14 @@ impl ScreenRenderCache {
                 * std::mem::size_of::<(usize, Rc<CachedRenderBlock>)>(),
             ..RetainedBlockMemorySummary::default()
         };
+        let mut counted_blocks =
+            HashSet::with_capacity(items.len().saturating_add(self.result.items.len()));
 
         for block in items.values() {
-            summary.estimated_render_ui_bytes += block.estimated_render_ui_bytes();
-            summary.estimated_plain_line_bytes +=
-                std::mem::size_of_val(block.plain_line_byte_lens.as_slice());
-            summary.estimated_anchor_bytes += match &block.anchors {
-                CachedLineAnchors::Explicit(anchors) => std::mem::size_of_val(anchors.as_slice()),
-                CachedLineAnchors::GeneratedRenderedLines => 0,
-            };
+            accumulate_retained_block_memory(&mut summary, &mut counted_blocks, block);
+        }
+        for item in self.result.items.iter() {
+            accumulate_retained_block_memory(&mut summary, &mut counted_blocks, &item.block);
         }
 
         summary
@@ -308,13 +459,17 @@ impl ScreenRenderCache {
 
     pub(crate) fn invalidate_all(&mut self) {
         self.items.borrow_mut().clear();
+        self.recent_items.borrow_mut().clear();
+        self.deferred_recent_limit_depth = 0;
         self.dirty_from = 0;
         self.invalidate_result();
     }
 
     pub(crate) fn reset(&mut self) {
         self.items.borrow_mut().clear();
+        self.recent_items.borrow_mut().clear();
         self.result = Rc::new(RenderResult::default());
+        self.deferred_recent_limit_depth = 0;
         self.valid = false;
         self.width = 0;
         self.gap = 0;
@@ -330,8 +485,37 @@ impl ScreenRenderCache {
 
     #[cfg(test)]
     pub(crate) fn clear_item(&mut self, index: usize) {
-        self.items.borrow_mut().remove(&index);
+        self.remove_item(index);
         self.mark_dirty_from(index);
+    }
+
+    pub(crate) fn reusable_item_block(
+        &mut self,
+        item_index: usize,
+        width: u16,
+        cache_key: u64,
+    ) -> Option<Rc<CachedRenderBlock>> {
+        let cached = self.items.borrow().get(&item_index).cloned();
+        if let Some(block) = cached.as_ref()
+            && block.width == width
+            && block.cache_key == cache_key
+        {
+            self.touch_item(item_index);
+            return Some(Rc::clone(block));
+        }
+
+        if cached.is_some() {
+            self.remove_item(item_index);
+        }
+        None
+    }
+
+    pub(crate) fn store_item_block(&mut self, item_index: usize, block: Rc<CachedRenderBlock>) {
+        self.items.borrow_mut().insert(item_index, block);
+        self.touch_item(item_index);
+        if self.deferred_recent_limit_depth == 0 {
+            self.evict_to_recent_limit(MAX_RECENT_RENDER_BLOCKS);
+        }
     }
 
     pub(crate) fn can_reuse_result(
@@ -364,4 +548,74 @@ impl ScreenRenderCache {
         self.dirty_from = item_count;
         self.valid = true;
     }
+
+    #[cfg(test)]
+    pub(crate) fn reset_recent_item_tracking_work(&self) {
+        *self.recent_item_tracking_work.borrow_mut() = RecentItemTrackingWorkSummary::default();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recent_item_tracking_work(&self) -> RecentItemTrackingWorkSummary {
+        *self.recent_item_tracking_work.borrow()
+    }
+
+    fn touch_item(&self, item_index: usize) {
+        self.recent_items.borrow_mut().touch(item_index);
+    }
+
+    pub(crate) fn begin_recent_limit_batch(&mut self) {
+        self.deferred_recent_limit_depth = self.deferred_recent_limit_depth.saturating_add(1);
+    }
+
+    pub(crate) fn finish_recent_limit_batch(&mut self, limit: usize) {
+        if self.deferred_recent_limit_depth == 0 {
+            self.evict_to_recent_limit(limit);
+            return;
+        }
+
+        self.deferred_recent_limit_depth -= 1;
+        if self.deferred_recent_limit_depth == 0 {
+            self.evict_to_recent_limit(limit);
+        }
+    }
+
+    fn evict_to_recent_limit(&mut self, limit: usize) {
+        if limit == 0 {
+            self.items.borrow_mut().clear();
+            self.recent_items.borrow_mut().clear();
+            return;
+        }
+
+        let mut recent_items = self.recent_items.borrow_mut();
+        let mut items = self.items.borrow_mut();
+        while recent_items.len() > limit {
+            let Some(evicted) = recent_items.pop_lru() else {
+                break;
+            };
+            items.remove(&evicted);
+        }
+    }
+
+    fn remove_item(&mut self, item_index: usize) {
+        self.items.borrow_mut().remove(&item_index);
+        self.recent_items.borrow_mut().remove(item_index);
+    }
+}
+
+fn accumulate_retained_block_memory(
+    summary: &mut RetainedBlockMemorySummary,
+    counted_blocks: &mut HashSet<*const CachedRenderBlock>,
+    block: &Rc<CachedRenderBlock>,
+) {
+    if !counted_blocks.insert(Rc::as_ptr(block)) {
+        return;
+    }
+
+    summary.estimated_render_ui_bytes += block.estimated_render_ui_bytes();
+    summary.estimated_plain_line_bytes +=
+        std::mem::size_of_val(block.plain_line_byte_lens.as_slice());
+    summary.estimated_anchor_bytes += match &block.anchors {
+        CachedLineAnchors::Explicit(anchors) => std::mem::size_of_val(anchors.as_slice()),
+        CachedLineAnchors::GeneratedRenderedLines => 0,
+    };
 }

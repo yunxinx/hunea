@@ -36,6 +36,8 @@ pub(crate) struct LineAnchor {
 }
 
 /// `RenderResult` 表示 transcript 在当前宽度下的稳定渲染结果。
+/// steady-state document 主路径通常只保留 index-only 版本；带 item block 的完整结果
+/// 只在显式全量 materialization、benchmark 或冷兜底路径里构造。
 #[derive(Debug, Clone)]
 pub(crate) struct RenderResult {
     pub(crate) index: TranscriptItemMetricsIndex,

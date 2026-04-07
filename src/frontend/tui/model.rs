@@ -363,6 +363,8 @@ impl Model {
         self.composer.set_height(viewport_height);
     }
 
+    /// `sync_transcript_render` 只刷新 transcript 的 metrics/index 摘要，
+    /// 不在 sync 阶段做全文 block materialization。
     pub(crate) fn sync_transcript_render(&mut self) {
         // metrics-only rebuild 不应保留旧 viewport 预热留下的 render block。
         self.transcript.begin_recent_render_block_batch();

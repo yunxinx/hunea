@@ -295,6 +295,8 @@ impl Transcript {
     }
 
     /// `render` 渲染整个 transcript，并返回带锚点的稳定结果。
+    /// 这条路径保留给显式需要完整 transcript block/anchor 的冷路径；steady-state
+    /// document 主路径应继续走 `item_metrics_index()` 与局部 viewport materialization。
     pub(crate) fn render(&mut self) -> Rc<RenderResult> {
         let width = self.render_width();
         if self

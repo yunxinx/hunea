@@ -477,6 +477,7 @@ fn synthesize_metrics_index_from_render_items(
                 item_index,
                 content_line_count: summary.content_line_count,
                 content_char_len: summary.block.plain_text_char_len,
+                quality: super::TranscriptItemMetricsQuality::Exact,
                 is_valid: true,
                 ..super::TranscriptItemMetrics::default()
             };

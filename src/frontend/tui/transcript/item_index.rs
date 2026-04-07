@@ -2,6 +2,14 @@ use std::{cmp::Ordering, rc::Rc};
 
 use super::render_state::RenderItemLines;
 
+/// `TranscriptItemMetricsQuality` 描述当前 metrics 是估算值还是精确值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TranscriptItemMetricsQuality {
+    #[default]
+    Exact,
+    Estimated,
+}
+
 /// `TranscriptItemMetrics` 记录单个 item 在当前宽度下的轻量 metrics。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct TranscriptItemMetrics {
@@ -10,7 +18,18 @@ pub(crate) struct TranscriptItemMetrics {
     pub(crate) cache_key: u64,
     pub(crate) content_line_count: usize,
     pub(crate) content_char_len: usize,
+    pub(crate) quality: TranscriptItemMetricsQuality,
     pub(crate) is_valid: bool,
+}
+
+impl TranscriptItemMetrics {
+    pub(crate) fn is_exact(&self) -> bool {
+        self.is_valid && self.quality == TranscriptItemMetricsQuality::Exact
+    }
+
+    pub(crate) fn is_estimated(&self) -> bool {
+        self.is_valid && self.quality == TranscriptItemMetricsQuality::Estimated
+    }
 }
 
 /// `TranscriptItemPosition` 描述可见 item 在 transcript 中的大致行区间。
@@ -127,6 +146,36 @@ impl TranscriptItemMetricsIndex {
             self.summary_position_for_line(overscanned_start)?,
             self.summary_position_for_line(last_line)?,
         ))
+    }
+
+    pub(crate) fn item_range_for_line_window(
+        &self,
+        start_line: usize,
+        line_count: usize,
+        overscan_lines: usize,
+    ) -> Option<(usize, usize)> {
+        let (start_position, end_position) =
+            self.summary_positions_for_line_window(start_line, line_count, overscan_lines)?;
+        Some((
+            self.visible_items.get(start_position)?.item_index,
+            self.visible_items.get(end_position)?.item_index + 1,
+        ))
+    }
+
+    pub(crate) fn line_window_is_exact(
+        &self,
+        start_line: usize,
+        line_count: usize,
+        overscan_lines: usize,
+    ) -> bool {
+        let Some((start_position, end_position)) =
+            self.summary_positions_for_line_window(start_line, line_count, overscan_lines)
+        else {
+            return true;
+        };
+        self.visible_items[start_position..=end_position]
+            .iter()
+            .all(|position| self.metrics[position.item_index].is_exact())
     }
 }
 

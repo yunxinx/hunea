@@ -701,6 +701,42 @@ fn transcript_refresh_keeps_manual_scrollback_before_restore_target() {
 }
 
 #[test]
+fn transcript_refresh_preserves_viewport_state_only_for_manual_scroll_mode() {
+    let mut model = ready_document_model(20, 4);
+    for index in 0..8 {
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, format!("history {index}"));
+    }
+    model.sync_transcript_render();
+    model
+        .composer_mut()
+        .set_text_for_test("draft line one\ndraft line two\ndraft line three");
+    model.composer_mut().move_to_begin_for_test();
+    model.sync_composer_height();
+    model.follow_bottom = false;
+    model.manual_document_scroll = false;
+    model.sync_document_viewport_for_composer_cursor();
+
+    assert!(
+        model
+            .preserved_viewport_state_for_transcript_refresh()
+            .is_none(),
+        "ordinary non-follow-bottom editing should re-sync around the composer cursor instead of preserving a transcript anchor"
+    );
+
+    let layout = model.build_document_layout();
+    model.apply_document_viewport_position(&layout, 0, 0, false, true);
+
+    assert!(
+        model
+            .preserved_viewport_state_for_transcript_refresh()
+            .is_some(),
+        "manual scroll should still preserve a semantic viewport anchor across transcript reflows"
+    );
+}
+
+#[test]
 fn transcript_viewport_anchor_classifies_rendered_lines_by_semantic_position() {
     let mut model = ready_document_model(18, 3);
     model.transcript_mut().append_message(

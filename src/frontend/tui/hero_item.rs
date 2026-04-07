@@ -12,7 +12,10 @@ use super::{
         render_hero_plain_lines_with_palette, resolved_content_width,
     },
     theme::TerminalPalette,
-    transcript::{DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchorKind, wrap_prompt_visual_lines},
+    transcript::{
+        DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchorKind, TranscriptItemMetrics,
+        wrap_prompt_visual_lines,
+    },
 };
 use crate::{
     envinfo::short_work_dir,
@@ -109,6 +112,15 @@ impl HeroItem {
             plain_lines.len(),
             plain_lines.iter().map(String::len).sum::<usize>(),
         )
+    }
+
+    pub(crate) fn estimate_render_metrics_fast(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+        _previous_metrics: Option<TranscriptItemMetrics>,
+    ) -> (usize, usize) {
+        self.measure_render_metrics(width, palette)
     }
 
     pub(crate) fn render_line_anchors(

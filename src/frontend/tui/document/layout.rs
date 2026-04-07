@@ -32,6 +32,7 @@ impl Model {
     }
 
     pub(crate) fn build_document_layout(&mut self) -> Rc<DocumentLayout> {
+        self.ensure_current_transcript_window_exact();
         let key = self.current_document_layout_key();
         if self.document_layout_cache.valid && self.document_layout_cache.key == key {
             return Rc::clone(&self.document_layout_cache.layout);
@@ -379,7 +380,11 @@ impl Model {
         }
 
         self.transcript.begin_recent_render_block_batch();
-        let index = self.transcript.item_metrics_index();
+        let index = if self.transcript_render.index.metrics.len() == self.transcript.len() {
+            self.transcript_render.index.clone()
+        } else {
+            self.transcript.progressive_item_metrics_index()
+        };
         let warmed_item_count = if let Some((start, count)) =
             self.current_visible_transcript_window(index.line_count)
         {

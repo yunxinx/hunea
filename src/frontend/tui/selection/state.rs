@@ -126,7 +126,6 @@ impl SelectionState {
         self.dragging
     }
 
-    #[cfg(test)]
     pub(crate) const fn anchor(self) -> SelectionPoint {
         self.range.anchor()
     }

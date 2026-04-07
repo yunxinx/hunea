@@ -14,6 +14,13 @@ impl Model {
         DOCUMENT_MOUSE_WHEEL_DELTA
     }
 
+    pub(crate) fn preserved_viewport_state_for_transcript_refresh(
+        &mut self,
+    ) -> Option<ViewportState> {
+        self.manual_document_scroll
+            .then(|| self.current_document_viewport_state())
+    }
+
     pub(crate) fn current_document_viewport_state(&mut self) -> ViewportState {
         let layout = self.build_document_layout();
         self.capture_viewport_state_with_layout(
@@ -263,12 +270,16 @@ impl Model {
             return;
         }
 
-        if self.manual_document_scroll {
-            if let Some(state) = preserved_viewport_state.as_ref() {
-                self.sync_document_viewport_for_viewport_state(state);
-            } else {
-                self.sync_document_viewport_preserving_position();
+        if let Some(state) = preserved_viewport_state.as_ref() {
+            self.sync_document_viewport_for_viewport_state(state);
+            if self.manual_document_scroll {
+                self.complete_manual_document_scroll_if_restored();
             }
+            return;
+        }
+
+        if self.manual_document_scroll {
+            self.sync_document_viewport_preserving_position();
             self.complete_manual_document_scroll_if_restored();
             return;
         }

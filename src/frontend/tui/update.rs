@@ -57,6 +57,9 @@ pub enum AppEvent {
     HistoryScrollIndicatorTimeout {
         token: usize,
     },
+    TranscriptRefineTick {
+        token: usize,
+    },
     ExternalEditorHelperTimeout {
         token: usize,
     },
@@ -139,6 +142,12 @@ impl Model {
             }
             AppEvent::HistoryScrollIndicatorTimeout { token } => {
                 self.dismiss_history_scroll_indicator(token);
+                None
+            }
+            AppEvent::TranscriptRefineTick { token } => {
+                if token == self.transcript_refine_token {
+                    self.run_next_transcript_refinement_batch();
+                }
                 None
             }
             AppEvent::ExternalEditorHelperTimeout { token } => {
@@ -311,11 +320,7 @@ impl Model {
             return None;
         }
 
-        let preserved_viewport_state = if self.manual_document_scroll {
-            Some(self.current_document_viewport_state())
-        } else {
-            None
-        };
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let style_mode = self.style_mode;
         self.transcript_mut().append_message_with_style_mode(
             Sender::User,
@@ -335,11 +340,7 @@ impl Model {
 
     fn handle_resize(&mut self, width: u16, height: u16) {
         self.cancel_exit_confirmation();
-        let preserved_viewport_state = if self.manual_document_scroll {
-            Some(self.current_document_viewport_state())
-        } else {
-            None
-        };
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let previous_width = self.width;
         let had_pending_click = self.pending_composer_cursor_click.active;
 

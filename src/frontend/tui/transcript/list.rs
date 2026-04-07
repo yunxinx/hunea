@@ -4,8 +4,8 @@ use ratatui::text::Line;
 
 use super::{
     DEFAULT_RENDER_WIDTH, ItemLineAnchor, RenderResult, TranscriptItemMetrics,
-    TranscriptItemMetricsCache, TranscriptItemMetricsIndex, TranscriptItemPosition,
-    ViewportRenderResult,
+    TranscriptItemMetricsCache, TranscriptItemMetricsIndex, TranscriptItemMetricsQuality,
+    TranscriptItemPosition, ViewportRenderResult,
     cache::{CachedLineAnchors, CachedRenderBlock, MAX_RECENT_RENDER_BLOCKS, ScreenRenderCache},
     new_render_result_with_append_start,
     render_state::RenderItemSummary,
@@ -158,8 +158,8 @@ impl Transcript {
         Rc::clone(&self.screen_cache.items)
     }
 
-    /// `item_metrics_index` 返回 transcript 当前宽度下的轻量 item metrics 索引。
-    pub(crate) fn item_metrics_index(&mut self) -> TranscriptItemMetricsIndex {
+    /// `progressive_item_metrics_index` 返回 transcript 当前宽度下的混合质量索引。
+    pub(crate) fn progressive_item_metrics_index(&mut self) -> TranscriptItemMetricsIndex {
         let width = self.render_width();
         if self
             .metrics_cache
@@ -172,20 +172,26 @@ impl Transcript {
         let metrics_dirty_from = self.metrics_cache.metrics_dirty_from.min(item_count);
         let updated_metrics = (metrics_dirty_from..item_count)
             .map(|index| {
+                let previous_metrics = self.metrics_cache.index.metrics.get(index).copied();
                 let cache_key = self.items[index].render_cache_key();
-                let (content_line_count, content_char_len) =
-                    self.items[index].measure_render_metrics(width, self.palette);
-                (
-                    index,
+                let metrics_entry = if previous_metrics.is_some_and(|metrics| {
+                    metrics.is_valid && metrics.width == width && metrics.cache_key == cache_key
+                }) {
+                    previous_metrics.expect("previous metrics should exist when reusing")
+                } else {
+                    let (content_line_count, content_char_len) = self.items[index]
+                        .estimate_render_metrics_fast(width, self.palette, previous_metrics);
                     TranscriptItemMetrics {
                         item_index: index,
                         width,
                         cache_key,
                         content_line_count,
                         content_char_len,
+                        quality: TranscriptItemMetricsQuality::Estimated,
                         is_valid: true,
-                    },
-                )
+                    }
+                };
+                (index, metrics_entry)
             })
             .collect::<Vec<_>>();
         {
@@ -195,27 +201,105 @@ impl Transcript {
                 metrics[index] = metrics_entry;
             }
         }
-        {
-            let prefix_sums = Rc::make_mut(&mut self.metrics_cache.index.content_prefix_sums);
-            resize_content_prefix_sums(prefix_sums, item_count);
-            for index in metrics_dirty_from..item_count {
-                prefix_sums[index + 1] = prefix_sums[index]
-                    .saturating_add(self.metrics_cache.index.metrics[index].content_char_len);
-            }
+        self.rebuild_content_prefix_sums_from(metrics_dirty_from, item_count);
+        self.rebuild_visible_positions_from(self.metrics_cache.positions_dirty_from, item_count);
+        self.metrics_cache.store_valid(width, self.gap, item_count);
+
+        self.metrics_cache.index.clone()
+    }
+
+    /// `item_metrics_index` 返回 transcript 当前宽度下的全量精确索引。
+    pub(crate) fn item_metrics_index(&mut self) -> TranscriptItemMetricsIndex {
+        let _ = self.progressive_item_metrics_index();
+        self.exactize_item_range(0, self.items.len());
+        self.metrics_cache.index.clone()
+    }
+
+    /// `exactize_line_window` 把给定行窗口及 overscan 覆盖到的 item 变成精确 metrics。
+    pub(crate) fn exactize_line_window(
+        &mut self,
+        start_line: usize,
+        line_count: usize,
+        overscan_lines: usize,
+    ) -> Option<(usize, usize)> {
+        let index = self.progressive_item_metrics_index();
+        let (start_position, end_position) =
+            index.summary_positions_for_line_window(start_line, line_count, overscan_lines)?;
+        let start_item = index.visible_items.get(start_position)?.item_index;
+        let end_item = index.visible_items.get(end_position)?.item_index + 1;
+        self.exactize_item_range(start_item, end_item);
+        Some((start_item, end_item))
+    }
+
+    /// `exactize_item_range` 把指定 item 范围更新为当前宽度下的精确 metrics。
+    pub(crate) fn exactize_item_range(&mut self, start: usize, end: usize) {
+        let _ = self.progressive_item_metrics_index();
+        let item_count = self.items.len();
+        let start = start.min(item_count);
+        let end = end.min(item_count);
+        if start >= end {
+            return;
         }
 
-        let positions_dirty_from = self.metrics_cache.positions_dirty_from.min(item_count);
+        let width = self.render_width();
+        let mut updated_metrics = Vec::with_capacity(end - start);
+        for index in start..end {
+            let cache_key = self.items[index].render_cache_key();
+            let (content_line_count, content_char_len) =
+                self.items[index].measure_render_metrics(width, self.palette);
+            let next_metrics = TranscriptItemMetrics {
+                item_index: index,
+                width,
+                cache_key,
+                content_line_count,
+                content_char_len,
+                quality: TranscriptItemMetricsQuality::Exact,
+                is_valid: true,
+            };
+            if self.metrics_cache.index.metrics.get(index).copied() == Some(next_metrics) {
+                continue;
+            }
+            updated_metrics.push((index, next_metrics));
+        }
+
+        if updated_metrics.is_empty() {
+            return;
+        }
+
+        {
+            let metrics = Rc::make_mut(&mut self.metrics_cache.index.metrics);
+            for (index, metrics_entry) in updated_metrics {
+                metrics[index] = metrics_entry;
+            }
+        }
+        self.rebuild_content_prefix_sums_from(start, item_count);
+        self.rebuild_visible_positions_from(start, item_count);
+        self.metrics_cache.store_valid(width, self.gap, item_count);
+    }
+
+    fn rebuild_content_prefix_sums_from(&mut self, start: usize, item_count: usize) {
+        let start = start.min(item_count);
+        let prefix_sums = Rc::make_mut(&mut self.metrics_cache.index.content_prefix_sums);
+        resize_content_prefix_sums(prefix_sums, item_count);
+        for index in start..item_count {
+            prefix_sums[index + 1] = prefix_sums[index]
+                .saturating_add(self.metrics_cache.index.metrics[index].content_char_len);
+        }
+        self.metrics_cache.index.content_char_len = *prefix_sums.last().unwrap_or(&0);
+    }
+
+    fn rebuild_visible_positions_from(&mut self, start: usize, item_count: usize) {
+        let start = start.min(item_count);
         {
             let visible_positions = Rc::make_mut(&mut self.metrics_cache.index.visible_positions);
             resize_visible_positions(visible_positions, item_count);
-            if positions_dirty_from < item_count {
-                visible_positions[positions_dirty_from..].fill(usize::MAX);
+            if start < item_count {
+                visible_positions[start..].fill(usize::MAX);
             }
         }
         {
             let visible_items = Rc::make_mut(&mut self.metrics_cache.index.visible_items);
-            let keep_visible_count =
-                visible_items.partition_point(|item| item.item_index < positions_dirty_from);
+            let keep_visible_count = visible_items.partition_point(|item| item.item_index < start);
             visible_items.truncate(keep_visible_count);
 
             let mut total_lines = visible_items
@@ -229,7 +313,7 @@ impl Transcript {
                 .iter_mut()
                 .enumerate()
                 .take(item_count)
-                .skip(positions_dirty_from)
+                .skip(start)
             {
                 *visible_position = usize::MAX;
                 let metrics = self.metrics_cache.index.metrics[index];
@@ -261,15 +345,6 @@ impl Transcript {
             .last()
             .map(|item| item.start_line + item.total_line_count)
             .unwrap_or(0);
-        self.metrics_cache.index.content_char_len = *self
-            .metrics_cache
-            .index
-            .content_prefix_sums
-            .last()
-            .unwrap_or(&0);
-        self.metrics_cache.store_valid(width, self.gap, item_count);
-
-        self.metrics_cache.index.clone()
     }
 
     /// `plain_items` 返回适用于纯文本消费的文本项。
@@ -681,6 +756,20 @@ fn resize_content_prefix_sums(prefix_sums: &mut Vec<usize>, item_count: usize) {
 }
 
 impl TranscriptItem {
+    fn estimate_render_metrics_fast(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+        previous_metrics: Option<TranscriptItemMetrics>,
+    ) -> (usize, usize) {
+        match self {
+            Self::Hero(item) => item.estimate_render_metrics_fast(width, palette, previous_metrics),
+            Self::Message(item) => {
+                item.estimate_render_metrics_fast(width, palette, previous_metrics)
+            }
+        }
+    }
+
     fn measure_render_metrics(&self, width: u16, palette: TerminalPalette) -> (usize, usize) {
         match self {
             Self::Hero(item) => item.measure_render_metrics(width, palette),

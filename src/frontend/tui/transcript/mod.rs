@@ -16,7 +16,7 @@ pub(crate) use cache::{
 };
 pub(crate) use item_index::{
     TranscriptItemMetrics, TranscriptItemMetricsCache, TranscriptItemMetricsIndex,
-    TranscriptItemPosition,
+    TranscriptItemMetricsQuality, TranscriptItemPosition,
 };
 pub(crate) use list::{Transcript, TranscriptItem, materialize_transcript_item_render_block};
 pub(crate) use markdown::{render_markdown_lines, render_markdown_metrics};

@@ -7,6 +7,7 @@ use ratatui::{Terminal, backend::TestBackend};
 use super::{
     HeroOptions, Model, ModelOptions, Sender, StyleMode,
     composer::Composer,
+    document::ViewportState,
     styled_text::lines_to_plain_text,
     theme::{TerminalPalette, default_palette},
     transcript::{
@@ -82,7 +83,9 @@ pub struct FrameRenderSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentStressScenario {
     ColdResume,
+    ColdResumeRestoreAnchor,
     WidthChange { from_width: u16, to_width: u16 },
+    WidthChangeRestoreAnchor { from_width: u16, to_width: u16 },
 }
 
 /// `DocumentMemorySummary` 粗略估算 benchmark fixture 常驻结构的体积拆分。
@@ -113,6 +116,10 @@ pub struct DocumentStressSummary {
     pub viewport_line_count: usize,
     pub frame_non_empty_cells: usize,
     pub transcript_render_time: std::time::Duration,
+    pub estimate_time: std::time::Duration,
+    pub visible_exact_time: std::time::Duration,
+    pub first_visible_time: std::time::Duration,
+    pub full_settle_time: std::time::Duration,
     pub document_layout_time: std::time::Duration,
     pub document_viewport_time: std::time::Duration,
     pub frame_render_time: std::time::Duration,
@@ -276,6 +283,27 @@ pub fn measure_document_pipeline_stress(
     )
 }
 
+/// `measure_document_pipeline_stress_with_restore_anchor` 测量冷恢复时以中段锚点恢复的首帧路径。
+pub fn measure_document_pipeline_stress_with_restore_anchor(
+    item_count: usize,
+    width: u16,
+    height: u16,
+) -> DocumentStressSummary {
+    let restore_viewport_state = mid_history_restore_viewport_state(item_count, width, height);
+    let mut model = new_cold_stress_document_model(item_count, width, height);
+    model.follow_bottom = false;
+    model.manual_document_scroll = true;
+    model.document_viewport_y = restore_viewport_state.resolved_offset();
+    model.document_viewport_state = restore_viewport_state;
+
+    measure_document_pipeline_stress_with_model(
+        model,
+        DocumentStressScenario::ColdResumeRestoreAnchor,
+        width.max(1),
+        height,
+    )
+}
+
 /// `measure_width_change_document_pipeline_stress` 测量宽度变化后的 rerender 冷路径。
 pub fn measure_width_change_document_pipeline_stress(
     item_count: usize,
@@ -297,6 +325,32 @@ pub fn measure_width_change_document_pipeline_stress(
     )
 }
 
+/// `measure_width_change_document_pipeline_stress_with_restore_anchor` 测量中段锚点下的 resize 恢复路径。
+pub fn measure_width_change_document_pipeline_stress_with_restore_anchor(
+    item_count: usize,
+    from_width: u16,
+    to_width: u16,
+    height: u16,
+) -> DocumentStressSummary {
+    let mut model = new_warm_stress_document_model(item_count, from_width, height);
+    let restore_viewport_state = mid_history_restore_viewport_state(item_count, from_width, height);
+    model.follow_bottom = false;
+    model.manual_document_scroll = true;
+    model.document_viewport_y = restore_viewport_state.resolved_offset();
+    model.document_viewport_state = restore_viewport_state;
+    apply_stress_window_resize_without_render(&mut model, to_width, height);
+
+    measure_document_pipeline_stress_with_model(
+        model,
+        DocumentStressScenario::WidthChangeRestoreAnchor {
+            from_width: from_width.max(1),
+            to_width: to_width.max(1),
+        },
+        to_width.max(1),
+        height,
+    )
+}
+
 fn measure_document_pipeline_stress_with_model(
     mut model: Model,
     scenario: DocumentStressScenario,
@@ -309,9 +363,11 @@ fn measure_document_pipeline_stress_with_model(
 
     let rss_before_kib = process_rss_kib();
 
-    let transcript_render_started_at = std::time::Instant::now();
-    model.sync_transcript_render();
-    let transcript_render_time = transcript_render_started_at.elapsed();
+    let generation_started_at = std::time::Instant::now();
+    let sync_profile = model.sync_transcript_render_profile();
+    let transcript_render_time = sync_profile
+        .estimate_time
+        .saturating_add(sync_profile.visible_exact_time);
     let rss_after_transcript_kib = process_rss_kib();
     let memory = estimate_document_memory_summary(
         items.as_slice(),
@@ -338,6 +394,10 @@ fn measure_document_pipeline_stress_with_model(
         .expect("stress benchmark frame render should succeed");
     let frame_render_time = frame_render_started_at.elapsed();
     let rss_after_frame_kib = process_rss_kib();
+    let first_visible_time = generation_started_at.elapsed();
+
+    model.drain_transcript_refinement_for_benchmark();
+    let full_settle_time = generation_started_at.elapsed();
 
     let buffer = terminal.backend().buffer();
     let frame_non_empty_cells = (0..buffer.area.height)
@@ -355,6 +415,10 @@ fn measure_document_pipeline_stress_with_model(
         viewport_line_count: viewport.lines.len(),
         frame_non_empty_cells,
         transcript_render_time,
+        estimate_time: sync_profile.estimate_time,
+        visible_exact_time: sync_profile.visible_exact_time,
+        first_visible_time,
+        full_settle_time,
         document_layout_time,
         document_viewport_time,
         frame_render_time,
@@ -370,7 +434,7 @@ fn measure_document_pipeline_stress_with_model(
 /// `format_document_stress_summary` 输出便于人工比较的 stress 摘要。
 pub fn format_document_stress_summary(summary: &DocumentStressSummary) -> String {
     format!(
-        "scenario={scenario} items={items} size={width}x{height} transcript_lines={transcript_lines} document_lines={document_lines} viewport_lines={viewport_lines} frame_cells={frame_cells} timings_ms={{metrics:{render:.3}, layout:{layout:.3}, viewport:{viewport:.3}, frame:{frame:.3}}} rss_kib={{before:{rss_before:?}, after_metrics:{rss_render:?}, after_layout:{rss_layout:?}, after_viewport:{rss_viewport:?}, after_frame:{rss_frame:?}}} memory_bytes={{raw_text:{raw_text}, items:{item_bytes}, render_ui:{render_ui}, plain_lines:{plain_lines}, anchors:{anchors}, indexes:{indexes}, estimated_total:{estimated_total}}}",
+        "scenario={scenario} items={items} size={width}x{height} transcript_lines={transcript_lines} document_lines={document_lines} viewport_lines={viewport_lines} frame_cells={frame_cells} timings_ms={{metrics:{render:.3}, estimate:{estimate:.3}, visible_exact:{visible_exact:.3}, first_visible:{first_visible:.3}, full_settle:{full_settle:.3}, layout:{layout:.3}, viewport:{viewport:.3}, frame:{frame:.3}}} rss_kib={{before:{rss_before:?}, after_metrics:{rss_render:?}, after_layout:{rss_layout:?}, after_viewport:{rss_viewport:?}, after_frame:{rss_frame:?}}} memory_bytes={{raw_text:{raw_text}, items:{item_bytes}, render_ui:{render_ui}, plain_lines:{plain_lines}, anchors:{anchors}, indexes:{indexes}, estimated_total:{estimated_total}}}",
         scenario = format_document_stress_scenario(summary.scenario),
         items = summary.item_count,
         width = summary.width,
@@ -380,6 +444,10 @@ pub fn format_document_stress_summary(summary: &DocumentStressSummary) -> String
         viewport_lines = summary.viewport_line_count,
         frame_cells = summary.frame_non_empty_cells,
         render = summary.transcript_render_time.as_secs_f64() * 1000.0,
+        estimate = summary.estimate_time.as_secs_f64() * 1000.0,
+        visible_exact = summary.visible_exact_time.as_secs_f64() * 1000.0,
+        first_visible = summary.first_visible_time.as_secs_f64() * 1000.0,
+        full_settle = summary.full_settle_time.as_secs_f64() * 1000.0,
         layout = summary.document_layout_time.as_secs_f64() * 1000.0,
         viewport = summary.document_viewport_time.as_secs_f64() * 1000.0,
         frame = summary.frame_render_time.as_secs_f64() * 1000.0,
@@ -686,6 +754,24 @@ fn apply_stress_window_resize_without_render(model: &mut Model, width: u16, heig
     model.document_viewport_cache = Default::default();
 }
 
+fn mid_history_restore_viewport_state(item_count: usize, width: u16, height: u16) -> ViewportState {
+    let mut model = new_warm_stress_document_model(item_count, width, height);
+    let exact_index = model.transcript.item_metrics_index();
+    let layout = model.document_layout_for_transcript_index(exact_index);
+    let target_item_index = item_count / 2;
+    let target_line = (0..layout.line_count())
+        .find(|&line_index| {
+            layout.line_anchor_at(line_index).is_some_and(|anchor| {
+                anchor.region == super::document::DocumentAnchorRegion::Transcript
+                    && anchor.transcript.item_index == target_item_index
+            })
+        })
+        .unwrap_or(0);
+    let composer_offset = model.current_composer_viewport_offset(&layout, target_line);
+    model.apply_document_viewport_position(&layout, target_line, composer_offset, false, true);
+    model.current_document_viewport_state()
+}
+
 fn process_rss_kib() -> Option<usize> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     status.lines().find_map(|line| {
@@ -757,10 +843,15 @@ fn summarize_document_viewport(
 fn format_document_stress_scenario(scenario: DocumentStressScenario) -> String {
     match scenario {
         DocumentStressScenario::ColdResume => "cold_resume".to_string(),
+        DocumentStressScenario::ColdResumeRestoreAnchor => "cold_resume_restore_anchor".to_string(),
         DocumentStressScenario::WidthChange {
             from_width,
             to_width,
         } => format!("width_change({from_width}->{to_width})"),
+        DocumentStressScenario::WidthChangeRestoreAnchor {
+            from_width,
+            to_width,
+        } => format!("width_change_restore_anchor({from_width}->{to_width})"),
     }
 }
 
@@ -878,6 +969,9 @@ mod tests {
         assert!(summary.document_line_count >= summary.transcript_line_count);
         assert!(summary.viewport_line_count > 0);
         assert!(summary.frame_non_empty_cells > 0);
+        assert!(summary.first_visible_time >= summary.estimate_time);
+        assert!(summary.first_visible_time >= summary.visible_exact_time);
+        assert!(summary.full_settle_time >= summary.first_visible_time);
         assert!(summary.memory.raw_text_bytes > 0);
         assert!(summary.memory.estimated_item_bytes >= summary.memory.raw_text_bytes);
         assert_eq!(
@@ -897,6 +991,10 @@ mod tests {
         assert!(formatted.contains("scenario=cold_resume"));
         assert!(formatted.contains("items=24"));
         assert!(formatted.contains("timings_ms={metrics:"));
+        assert!(formatted.contains("estimate:"));
+        assert!(formatted.contains("visible_exact:"));
+        assert!(formatted.contains("first_visible:"));
+        assert!(formatted.contains("full_settle:"));
         assert!(formatted.contains("after_metrics"));
         assert!(formatted.contains("memory_bytes={"));
     }
@@ -922,6 +1020,9 @@ mod tests {
         assert!(summary.document_line_count >= summary.transcript_line_count);
         assert!(summary.viewport_line_count > 0);
         assert!(summary.frame_non_empty_cells > 0);
+        assert!(summary.first_visible_time >= summary.estimate_time);
+        assert!(summary.first_visible_time >= summary.visible_exact_time);
+        assert!(summary.full_settle_time >= summary.first_visible_time);
         assert!(summary.memory.raw_text_bytes > 0);
         assert!(summary.memory.estimated_total_bytes >= summary.memory.raw_text_bytes);
         assert_eq!(summary.memory.estimated_render_ui_bytes, 0);
@@ -930,8 +1031,50 @@ mod tests {
         let formatted = format_document_stress_summary(&summary);
         assert!(formatted.contains("scenario=width_change(80->56)"));
         assert!(formatted.contains("timings_ms={metrics:"));
+        assert!(formatted.contains("first_visible:"));
+        assert!(formatted.contains("full_settle:"));
         assert!(formatted.contains("after_metrics"));
         assert!(formatted.contains("memory_bytes={"));
+    }
+
+    #[test]
+    fn cold_resume_restore_anchor_stress_reports_restore_scenario() {
+        let summary = measure_document_pipeline_stress_with_restore_anchor(24, 80, 18);
+
+        assert_eq!(
+            summary.scenario,
+            DocumentStressScenario::ColdResumeRestoreAnchor
+        );
+        assert!(summary.transcript_line_count > 0);
+        assert!(summary.first_visible_time >= summary.visible_exact_time);
+        assert!(summary.full_settle_time >= summary.first_visible_time);
+
+        let formatted = format_document_stress_summary(&summary);
+        assert!(formatted.contains("scenario=cold_resume_restore_anchor"));
+        assert!(formatted.contains("first_visible:"));
+        assert!(formatted.contains("full_settle:"));
+    }
+
+    #[test]
+    fn width_change_restore_anchor_stress_reports_restore_scenario() {
+        let summary =
+            measure_width_change_document_pipeline_stress_with_restore_anchor(24, 80, 56, 18);
+
+        assert_eq!(
+            summary.scenario,
+            DocumentStressScenario::WidthChangeRestoreAnchor {
+                from_width: 80,
+                to_width: 56,
+            }
+        );
+        assert!(summary.transcript_line_count > 0);
+        assert!(summary.first_visible_time >= summary.visible_exact_time);
+        assert!(summary.full_settle_time >= summary.first_visible_time);
+
+        let formatted = format_document_stress_summary(&summary);
+        assert!(formatted.contains("scenario=width_change_restore_anchor(80->56)"));
+        assert!(formatted.contains("first_visible:"));
+        assert!(formatted.contains("full_settle:"));
     }
 
     #[test]

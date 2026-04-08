@@ -16,7 +16,8 @@ use super::{
     styled_text::{lines_to_ansi_text, lines_to_plain_text},
     theme::{TerminalPalette, secondary_text_style, surface_emphasis_style, surface_text_style},
     transcript::{
-        DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchorKind, TranscriptItemMetrics,
+        DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchorKind, TranscriptEstimateKind,
+        TranscriptEstimateSource, TranscriptFastEstimate, TranscriptItemMetrics,
         render_markdown_lines, render_markdown_metrics, wrap_assistant_text, wrap_prompt_text,
         wrap_prompt_visual_lines,
     },
@@ -161,10 +162,19 @@ impl MessageItem {
         width: u16,
         palette: TerminalPalette,
         previous_metrics: Option<TranscriptItemMetrics>,
-    ) -> (usize, usize) {
+    ) -> TranscriptFastEstimate {
+        let previous_metrics =
+            previous_metrics.filter(|metrics| metrics.cache_key == self.render_cache_key);
         match self.sender {
             Sender::User => {
-                measure_user_message_metrics(&self.content, width, palette, self.style_mode)
+                let (content_line_count, content_char_len) =
+                    measure_user_message_metrics(&self.content, width, palette, self.style_mode);
+                TranscriptFastEstimate {
+                    content_line_count,
+                    content_char_len,
+                    kind: TranscriptEstimateKind::NonAssistant,
+                    ..TranscriptFastEstimate::default()
+                }
             }
             Sender::Assistant => {
                 estimate_assistant_message_metrics_fast(&self.content, width, previous_metrics)
@@ -447,17 +457,27 @@ fn estimate_assistant_message_metrics_fast(
     content: &str,
     width: u16,
     previous_metrics: Option<TranscriptItemMetrics>,
-) -> (usize, usize) {
+) -> TranscriptFastEstimate {
     let width = usize::from(width.max(1));
     let wrapped = wrap_assistant_text(content, width, 0);
-    (
-        wrapped.len().max(1),
-        wrapped.iter().map(String::len).sum::<usize>().max(
-            previous_metrics
-                .map(|metrics| metrics.content_char_len)
-                .unwrap_or_default(),
-        ),
-    )
+    let content_line_count = wrapped.len().max(1);
+    let estimated_char_len = wrapped.iter().map(String::len).sum::<usize>();
+    let reused_metrics =
+        previous_metrics.filter(|metrics| metrics.is_valid && usize::from(metrics.width) != width);
+    let content_char_len = reused_metrics
+        .map(|metrics| metrics.content_char_len.max(estimated_char_len))
+        .unwrap_or(estimated_char_len);
+
+    TranscriptFastEstimate {
+        content_line_count,
+        content_char_len,
+        kind: TranscriptEstimateKind::Assistant,
+        source: if reused_metrics.is_some() {
+            TranscriptEstimateSource::ReusedOnResize
+        } else {
+            TranscriptEstimateSource::Fresh
+        },
+    }
 }
 
 fn measure_user_message_metrics(

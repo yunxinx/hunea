@@ -3,9 +3,10 @@ use std::{collections::HashMap, rc::Rc};
 use ratatui::text::Line;
 
 use super::{
-    DEFAULT_RENDER_WIDTH, ItemLineAnchor, RenderResult, TranscriptItemMetrics,
-    TranscriptItemMetricsCache, TranscriptItemMetricsIndex, TranscriptItemMetricsQuality,
-    TranscriptItemPosition, ViewportRenderResult,
+    DEFAULT_RENDER_WIDTH, ItemLineAnchor, RenderResult, TranscriptEstimateBreakdown,
+    TranscriptEstimateKind, TranscriptEstimateSource, TranscriptFastEstimate,
+    TranscriptItemMetrics, TranscriptItemMetricsCache, TranscriptItemMetricsIndex,
+    TranscriptItemMetricsQuality, TranscriptItemPosition, ViewportRenderResult,
     cache::{CachedLineAnchors, CachedRenderBlock, MAX_RECENT_RENDER_BLOCKS, ScreenRenderCache},
     new_render_result_with_append_start,
     render_state::RenderItemSummary,
@@ -160,16 +161,33 @@ impl Transcript {
 
     /// `progressive_item_metrics_index` 返回 transcript 当前宽度下的混合质量索引。
     pub(crate) fn progressive_item_metrics_index(&mut self) -> TranscriptItemMetricsIndex {
+        self.progressive_item_metrics_index_impl(false).0
+    }
+
+    pub(crate) fn progressive_item_metrics_index_with_breakdown(
+        &mut self,
+    ) -> (TranscriptItemMetricsIndex, TranscriptEstimateBreakdown) {
+        self.progressive_item_metrics_index_impl(true)
+    }
+
+    fn progressive_item_metrics_index_impl(
+        &mut self,
+        collect_breakdown: bool,
+    ) -> (TranscriptItemMetricsIndex, TranscriptEstimateBreakdown) {
         let width = self.render_width();
         if self
             .metrics_cache
             .can_reuse(width, self.gap, self.items.len())
         {
-            return self.metrics_cache.index.clone();
+            return (
+                self.metrics_cache.index.clone(),
+                TranscriptEstimateBreakdown::default(),
+            );
         }
 
         let item_count = self.items.len();
         let metrics_dirty_from = self.metrics_cache.metrics_dirty_from.min(item_count);
+        let mut estimate_breakdown = TranscriptEstimateBreakdown::default();
         let updated_metrics = (metrics_dirty_from..item_count)
             .map(|index| {
                 let previous_metrics = self.metrics_cache.index.metrics.get(index).copied();
@@ -179,14 +197,30 @@ impl Transcript {
                 }) {
                     previous_metrics.expect("previous metrics should exist when reusing")
                 } else {
-                    let (content_line_count, content_char_len) = self.items[index]
-                        .estimate_render_metrics_fast(width, self.palette, previous_metrics);
+                    let estimated = self.items[index].estimate_render_metrics_fast(
+                        width,
+                        self.palette,
+                        previous_metrics,
+                    );
+                    if collect_breakdown {
+                        match estimated.kind {
+                            TranscriptEstimateKind::Assistant => {
+                                estimate_breakdown.assistant_item_count += 1;
+                                if estimated.source == TranscriptEstimateSource::ReusedOnResize {
+                                    estimate_breakdown.assistant_resize_reuse_count += 1;
+                                }
+                            }
+                            TranscriptEstimateKind::NonAssistant => {
+                                estimate_breakdown.non_assistant_item_count += 1;
+                            }
+                        }
+                    }
                     TranscriptItemMetrics {
                         item_index: index,
                         width,
                         cache_key,
-                        content_line_count,
-                        content_char_len,
+                        content_line_count: estimated.content_line_count,
+                        content_char_len: estimated.content_char_len,
                         quality: TranscriptItemMetricsQuality::Estimated,
                         is_valid: true,
                     }
@@ -205,7 +239,7 @@ impl Transcript {
         self.rebuild_visible_positions_from(self.metrics_cache.positions_dirty_from, item_count);
         self.metrics_cache.store_valid(width, self.gap, item_count);
 
-        self.metrics_cache.index.clone()
+        (self.metrics_cache.index.clone(), estimate_breakdown)
     }
 
     /// `item_metrics_index` 返回 transcript 当前宽度下的全量精确索引。
@@ -223,6 +257,10 @@ impl Transcript {
         overscan_lines: usize,
     ) -> Option<(usize, usize)> {
         let index = self.progressive_item_metrics_index();
+        if index.line_window_is_exact(start_line, line_count, overscan_lines) {
+            return None;
+        }
+
         let (start_position, end_position) =
             index.summary_positions_for_line_window(start_line, line_count, overscan_lines)?;
         let start_item = index.visible_items.get(start_position)?.item_index;
@@ -761,7 +799,7 @@ impl TranscriptItem {
         width: u16,
         palette: TerminalPalette,
         previous_metrics: Option<TranscriptItemMetrics>,
-    ) -> (usize, usize) {
+    ) -> TranscriptFastEstimate {
         match self {
             Self::Hero(item) => item.estimate_render_metrics_fast(width, palette, previous_metrics),
             Self::Message(item) => {
@@ -861,6 +899,9 @@ mod tests {
     use ratatui::text::Span;
 
     use super::*;
+    use crate::frontend::tui::transcript::{
+        render_markdown_metrics_call_count, reset_render_markdown_metrics_call_count,
+    };
     use crate::frontend::tui::{
         HeroOptions, StyleMode,
         message_item::{
@@ -1386,6 +1427,185 @@ mod tests {
         assert_eq!(
             work.shifted_entries, 0,
             "recent cache tracking should not shift bookkeeping entries during large metrics batches: {work:?}"
+        );
+    }
+
+    #[test]
+    fn progressive_metrics_resize_keeps_assistant_markdown_on_fast_estimate_path() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_width(80);
+
+        for index in 0..4 {
+            transcript.append_message(
+                Sender::Assistant,
+                format!(
+                    "## Assistant {index}\n\n- keep estimate cheap\n- keep width changes stable\n\n```rust\nfn item_{index}() {{}}\n```"
+                ),
+            );
+        }
+
+        let _ = transcript.item_metrics_index();
+        reset_render_markdown_metrics_call_count();
+
+        transcript.set_width(120);
+        let (index, breakdown) = transcript.progressive_item_metrics_index_with_breakdown();
+
+        assert_eq!(
+            breakdown.assistant_resize_reuse_count, 4,
+            "resize should report semantic reuse for every assistant item whose previous metrics were reused"
+        );
+        assert_eq!(
+            render_markdown_metrics_call_count(),
+            0,
+            "assistant resize should stay on the fast estimate path instead of reparsing Markdown metrics for every cached item"
+        );
+        assert!(
+            index
+                .metrics
+                .iter()
+                .all(TranscriptItemMetrics::is_estimated),
+            "resize reuse should keep assistant metrics estimated until the visible window is exactized"
+        );
+    }
+
+    #[test]
+    fn progressive_metrics_assistant_estimate_skips_exact_markdown_metrics_on_cold_resume() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_width(80);
+        transcript.append_message(
+            Sender::Assistant,
+            "## Overview\n\n- keep the fast path cheap\n- render exactly later",
+        );
+
+        reset_render_markdown_metrics_call_count();
+        let _ = transcript.progressive_item_metrics_index();
+
+        assert_eq!(
+            render_markdown_metrics_call_count(),
+            0,
+            "progressive assistant metrics should stay on the fast estimate path instead of paying exact Markdown metrics during cold resume"
+        );
+    }
+
+    #[test]
+    fn progressive_metrics_resize_keeps_assistant_line_count_equal_to_exact_metrics() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_gap(0);
+        transcript.set_width(10);
+        transcript.append_message(Sender::Assistant, "foo  bar baz");
+
+        let _ = transcript.progressive_item_metrics_index();
+
+        transcript.set_width(5);
+        let estimated_line_count = transcript.progressive_item_metrics_index().line_count;
+        let exact_line_count = transcript.item_metrics_index().line_count;
+
+        assert_eq!(estimated_line_count, exact_line_count);
+        assert_eq!(exact_line_count, 3);
+    }
+
+    #[test]
+    fn progressive_metrics_keep_plain_text_prefix_sums_equal_to_exact_for_tabs() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_gap(0);
+        transcript.set_width(9);
+        transcript.append_message(Sender::Assistant, "a\tb");
+        transcript.append_message(Sender::Assistant, "tail");
+
+        let estimated_index = transcript.progressive_item_metrics_index();
+        let exact_index = transcript.item_metrics_index();
+
+        assert_eq!(
+            estimated_index.metrics[0].content_char_len,
+            exact_index.metrics[0].content_char_len
+        );
+        assert_eq!(
+            estimated_index.content_prefix_sums,
+            exact_index.content_prefix_sums
+        );
+        assert_eq!(
+            estimated_index.content_char_len,
+            exact_index.content_char_len
+        );
+    }
+
+    #[test]
+    fn progressive_metrics_resize_defers_tabbed_markdown_prefix_sum_exactization() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_gap(0);
+        transcript.set_width(20);
+        transcript.append_message(Sender::Assistant, "- item with a tab\tand tail");
+        transcript.append_message(Sender::Assistant, "tail");
+
+        let exact_before_resize = transcript.item_metrics_index();
+        reset_render_markdown_metrics_call_count();
+
+        transcript.set_width(10);
+        let estimated_index = transcript.progressive_item_metrics_index();
+        assert_eq!(
+            render_markdown_metrics_call_count(),
+            0,
+            "progressive resize should keep tabbed Markdown on the fast estimate path"
+        );
+        assert!(estimated_index.metrics[0].is_estimated());
+
+        let exact_index = transcript.item_metrics_index();
+        assert_eq!(
+            render_markdown_metrics_call_count(),
+            2,
+            "exactization should pay the Markdown metrics cost only when the exact path is requested, including the remaining assistant items in range"
+        );
+
+        assert!(exact_index.metrics[0].is_exact());
+        assert!(
+            estimated_index.metrics[0].content_char_len
+                >= exact_before_resize.metrics[0].content_char_len,
+            "resize reuse should preserve the previous assistant plain-text length floor until exactization"
+        );
+        assert!(
+            estimated_index.content_char_len >= exact_before_resize.content_char_len,
+            "full-range plain-text totals should not shrink while resize reuse is still estimated"
+        );
+        assert!(
+            estimated_index.metrics[0].content_char_len <= exact_index.metrics[0].content_char_len
+        );
+    }
+
+    #[test]
+    fn progressive_metrics_breakdown_counts_assistant_semantic_resize_reuse() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_width(80);
+        transcript.append_message(Sender::Assistant, "make the handler return early");
+
+        let _ = transcript.progressive_item_metrics_index();
+
+        transcript.set_width(20);
+        let (_, breakdown) = transcript.progressive_item_metrics_index_with_breakdown();
+
+        assert_eq!(breakdown.assistant_item_count, 1);
+        assert_eq!(breakdown.assistant_resize_reuse_count, 1);
+    }
+
+    #[test]
+    fn progressive_metrics_resize_keeps_reused_assistant_metrics_estimated() {
+        let mut transcript = Transcript::new(default_palette());
+        transcript.set_width(80);
+        transcript.append_message(
+            Sender::Assistant,
+            "## Resize\n\n- keep resize cheap\n- exactize only the visible window later",
+        );
+
+        let _ = transcript.item_metrics_index();
+        reset_render_markdown_metrics_call_count();
+
+        transcript.set_width(24);
+        let index = transcript.progressive_item_metrics_index();
+
+        assert!(index.metrics[0].is_estimated());
+        assert_eq!(
+            render_markdown_metrics_call_count(),
+            0,
+            "progressive resize should not pay a Markdown metrics pass before the visible window requests exactization"
         );
     }
 

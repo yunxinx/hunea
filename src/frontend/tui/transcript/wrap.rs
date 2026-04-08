@@ -133,7 +133,7 @@ fn should_hard_wrap_line(line: &str, mode: WrapMode) -> bool {
     mode == WrapMode::Assistant && looks_like_assistant_literal_line(line)
 }
 
-pub(super) fn split_short_indent(line: &str) -> (String, &str) {
+pub(in crate::frontend::tui::transcript) fn split_short_indent(line: &str) -> (String, &str) {
     let prefix_len = line
         .chars()
         .take_while(|character| *character == ' ')
@@ -487,7 +487,7 @@ pub(super) fn leading_space_count(line: &str) -> usize {
         .count()
 }
 
-fn looks_like_assistant_literal_line(line: &str) -> bool {
+pub(in crate::frontend::tui::transcript) fn looks_like_assistant_literal_line(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return false;
@@ -619,20 +619,30 @@ fn normalize_command_token(token: &str) -> String {
         .to_ascii_lowercase()
 }
 
-pub(super) fn render_cluster_for_display(cluster: &str, absolute_column: usize) -> (String, usize) {
+pub(in crate::frontend::tui::transcript) fn render_cluster_for_display(
+    cluster: &str,
+    absolute_column: usize,
+) -> (String, usize) {
     if cluster != "\t" {
         return (cluster.to_string(), measure_width(cluster));
     }
 
+    let tab_width = display_tab_width(absolute_column);
+    (" ".repeat(tab_width), tab_width)
+}
+
+pub(in crate::frontend::tui::transcript) fn display_tab_width(absolute_column: usize) -> usize {
     let mut tab_width = DISPLAY_TAB_WIDTH - (absolute_column % DISPLAY_TAB_WIDTH);
     if tab_width == 0 {
         tab_width = DISPLAY_TAB_WIDTH;
     }
 
-    (" ".repeat(tab_width), tab_width)
+    tab_width
 }
 
-fn detect_fence_marker(line: &str) -> Option<&'static str> {
+pub(in crate::frontend::tui::transcript) fn detect_fence_marker(
+    line: &str,
+) -> Option<&'static str> {
     let trimmed = line.trim();
     if trimmed.starts_with("```") {
         return Some("```");

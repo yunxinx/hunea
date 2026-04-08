@@ -1,5 +1,8 @@
 use std::collections::VecDeque;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Modifier, Style},
@@ -11,6 +14,11 @@ use unicode_width::UnicodeWidthStr;
 use crate::frontend::tui::theme::TerminalPalette;
 
 const DISPLAY_TAB_WIDTH: usize = 8;
+
+#[cfg(test)]
+thread_local! {
+    static RENDER_MARKDOWN_METRICS_CALL_COUNT: Cell<usize> = const { Cell::new(0) };
+}
 
 /// `render_markdown_lines` 把 assistant Markdown 渲染成宽度敏感的最终文本行。
 pub(crate) fn render_markdown_lines(
@@ -49,6 +57,9 @@ pub(crate) fn render_markdown_metrics(
     width: usize,
     palette: TerminalPalette,
 ) -> (usize, usize) {
+    #[cfg(test)]
+    RENDER_MARKDOWN_METRICS_CALL_COUNT.with(|count| count.set(count.get() + 1));
+
     let width = width.max(1);
     let leading_blank_lines = count_leading_blank_lines(markdown);
     let trailing_blank_lines = count_trailing_blank_lines(markdown);
@@ -68,6 +79,16 @@ pub(crate) fn render_markdown_metrics(
         line_count + leading_blank_lines + trailing_blank_lines,
         plain_text_len,
     )
+}
+
+#[cfg(test)]
+pub(crate) fn reset_render_markdown_metrics_call_count() {
+    RENDER_MARKDOWN_METRICS_CALL_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn render_markdown_metrics_call_count() -> usize {
+    RENDER_MARKDOWN_METRICS_CALL_COUNT.with(Cell::get)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

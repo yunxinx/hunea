@@ -18,7 +18,7 @@ use super::{
     status_line::{StatusLineItem, StatusLineRenderResult},
     style_mode::StyleMode,
     theme::{TerminalPalette, default_palette},
-    transcript::{RenderResult, Transcript, index_only_render_result},
+    transcript::{RenderResult, Transcript, TranscriptEstimateBreakdown, index_only_render_result},
     view,
 };
 
@@ -115,6 +115,7 @@ impl Default for ModelOptions {
 pub(crate) struct TranscriptSyncProfile {
     pub(crate) estimate_time: Duration,
     pub(crate) visible_exact_time: Duration,
+    pub(crate) estimate_breakdown: TranscriptEstimateBreakdown,
 }
 
 const TRANSCRIPT_REFINE_INTERVAL: Duration = Duration::from_millis(8);
@@ -390,14 +391,29 @@ impl Model {
     /// `sync_transcript_render` 只刷新 transcript 的 metrics/index 摘要，
     /// 不在 sync 阶段做全文 block materialization。
     pub(crate) fn sync_transcript_render(&mut self) {
-        let _ = self.sync_transcript_render_profile();
+        let _ = self.sync_transcript_render_profile_impl(false);
     }
 
     pub(crate) fn sync_transcript_render_profile(&mut self) -> TranscriptSyncProfile {
+        self.sync_transcript_render_profile_impl(true)
+    }
+
+    fn sync_transcript_render_profile_impl(
+        &mut self,
+        collect_breakdown: bool,
+    ) -> TranscriptSyncProfile {
         // metrics-only rebuild 不应保留旧 viewport 预热留下的 render block。
         self.transcript.begin_recent_render_block_batch();
         let estimate_started_at = Instant::now();
-        let index = self.transcript.progressive_item_metrics_index();
+        let (index, estimate_breakdown) = if collect_breakdown {
+            self.transcript
+                .progressive_item_metrics_index_with_breakdown()
+        } else {
+            (
+                self.transcript.progressive_item_metrics_index(),
+                TranscriptEstimateBreakdown::default(),
+            )
+        };
         let estimate_time = estimate_started_at.elapsed();
         self.transcript.finish_recent_render_block_batch(0);
         let visible_exact_started_at = Instant::now();
@@ -412,6 +428,7 @@ impl Model {
         TranscriptSyncProfile {
             estimate_time,
             visible_exact_time,
+            estimate_breakdown,
         }
     }
 
@@ -1328,15 +1345,14 @@ mod tests {
     }
 
     #[test]
-    fn build_document_layout_rechecks_visible_window_after_one_pass_exactization_shifts_it() {
+    fn build_document_layout_stable_exactization_loop_keeps_visible_window_exact() {
         let base = progressive_exactization_fixture();
         let layout = base.clone().build_document_layout();
         let max_offset = layout
             .line_count()
             .saturating_sub(base.document_viewport_height());
-        let mut candidate = None;
 
-        'search: for manual_scroll in [false, true] {
+        for manual_scroll in [false, true] {
             for offset in 0..=max_offset {
                 let mut model = base.clone();
                 apply_scrolled_offset(&mut model, offset, manual_scroll);
@@ -1353,10 +1369,7 @@ mod tests {
                     continue;
                 }
 
-                model
-                    .transcript
-                    .exactize_line_window(start, count, overscan_lines);
-                let index = model.transcript.progressive_item_metrics_index();
+                let index = model.exactize_visible_transcript_window_until_stable(index);
                 let Some((next_start, next_count)) =
                     model.current_visible_transcript_window_for_index(&index)
                 else {
@@ -1364,84 +1377,76 @@ mod tests {
                 };
                 let next_overscan_lines =
                     crate::frontend::tui::transcript::viewport_overscan_line_budget(next_count);
-                if !index.line_window_is_exact(next_start, next_count, next_overscan_lines) {
-                    candidate = Some((offset, manual_scroll));
-                    break 'search;
-                }
+                assert!(
+                    index.line_window_is_exact(next_start, next_count, next_overscan_lines),
+                    "stable exactization should converge the visible transcript window to exact metrics at offset {offset} (manual_scroll={manual_scroll})"
+                );
             }
         }
+    }
 
-        let (offset, manual_scroll) = candidate.expect(
-            "test fixture should expose a viewport whose visible window moves onto still-estimated items after one exactization pass",
-        );
-
-        let mut model = base;
-        apply_scrolled_offset(&mut model, offset, manual_scroll);
-        let _ = model.build_document_layout();
+    #[test]
+    fn exactize_line_window_keeps_manual_scroll_window_local_after_reflow() {
+        let mut model = progressive_exactization_fixture();
+        let offset = 10;
+        apply_scrolled_offset(&mut model, offset, true);
 
         let index = model.transcript_render.index.clone();
         let (start, count) = model
-            .current_visible_transcript_window(index.line_count)
-            .expect("exactized layout should still expose a visible transcript window");
+            .current_visible_transcript_window_for_index(&index)
+            .expect("manual-scroll viewport should expose a visible transcript window");
         let overscan_lines = crate::frontend::tui::transcript::viewport_overscan_line_budget(count);
-
         assert!(
-            index.line_window_is_exact(start, count, overscan_lines),
-            "building the document layout should keep exactizing until the transcript lines that are now on screen are all exact"
+            !index.line_window_is_exact(start, count, overscan_lines),
+            "test fixture should keep manual offset {offset} on the progressive path before render-time exactization"
+        );
+
+        let expected_item_range = index
+            .item_range_for_line_window(start, count, overscan_lines)
+            .expect("visible transcript window should resolve to an item range");
+        let actual_item_range = model
+            .transcript
+            .exactize_line_window(start, count, overscan_lines)
+            .expect("exactization should cover the visible transcript items");
+
+        assert_eq!(
+            actual_item_range, expected_item_range,
+            "exactize_line_window should only exactize the item range resolved for the requested line window before reflow"
         );
     }
 
     #[test]
-    fn build_document_layout_resyncs_manual_scroll_viewport_after_exactization_reflow() {
+    fn build_document_layout_keeps_manual_scroll_viewport_stable_without_exactization_reflow() {
         let base = progressive_exactization_fixture();
         let layout = base.clone().build_document_layout();
         let max_offset = layout
             .line_count()
             .saturating_sub(base.document_viewport_height());
-        let mut candidate = None;
 
         for offset in 0..=max_offset {
-            let mut probe = base.clone();
-            apply_scrolled_offset(&mut probe, offset, true);
-            let preserved_viewport_state = probe.document_viewport_state.clone();
-            let stale_offset = preserved_viewport_state.resolved_offset();
+            let mut model = base.clone();
+            apply_scrolled_offset(&mut model, offset, true);
+            let preserved_viewport_state = model.document_viewport_state.clone();
 
-            let mut exactized = probe.clone();
-            let layout = exactized.build_document_layout();
-            let expected_offset = preserved_viewport_state
-                .resolve_offset(&layout, exactized.document_viewport_height());
-            if expected_offset != stale_offset {
-                candidate = Some(offset);
-                break;
-            }
+            let layout = model.build_document_layout();
+            let expected_offset =
+                preserved_viewport_state.resolve_offset(&layout, model.document_viewport_height());
+            let viewport = model.build_document_viewport(&layout);
+
+            assert_eq!(
+                model.document_viewport_y, expected_offset,
+                "manual-scroll viewport should stay aligned with the preserved transcript anchor at offset {offset}"
+            );
+            assert_eq!(
+                model.document_viewport_state.resolved_offset(),
+                expected_offset,
+                "viewport state should store the stable manual-scroll offset at offset {offset}"
+            );
+            assert_eq!(
+                viewport.resolved_offset, expected_offset,
+                "document viewport materialization should keep using the resolved manual-scroll offset at offset {offset}"
+            );
         }
-
-        let offset = candidate.expect(
-            "test fixture should expose a manual-scroll viewport whose transcript anchor resolves to a new offset after render-time exactization",
-        );
-
-        let mut model = base;
-        apply_scrolled_offset(&mut model, offset, true);
-        let preserved_viewport_state = model.document_viewport_state.clone();
-
-        let layout = model.build_document_layout();
-        let expected_offset =
-            preserved_viewport_state.resolve_offset(&layout, model.document_viewport_height());
-        let viewport = model.build_document_viewport(&layout);
-
-        assert_eq!(
-            model.document_viewport_y, expected_offset,
-            "render-time exactization should immediately move the manual-scroll viewport onto the re-resolved transcript anchor"
-        );
-        assert_eq!(
-            model.document_viewport_state.resolved_offset(),
-            expected_offset,
-            "viewport state should store the re-resolved manual-scroll offset after exactization"
-        );
-        assert_eq!(
-            viewport.resolved_offset, expected_offset,
-            "document viewport materialization should slice with the re-resolved manual-scroll offset"
-        );
     }
 
     #[test]

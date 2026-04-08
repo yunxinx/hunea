@@ -13,8 +13,8 @@ use super::{
     },
     theme::TerminalPalette,
     transcript::{
-        DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchorKind, TranscriptItemMetrics,
-        wrap_prompt_visual_lines,
+        DEFAULT_RENDER_WIDTH, ItemLineAnchor, LineAnchorKind, TranscriptEstimateKind,
+        TranscriptFastEstimate, TranscriptItemMetrics, wrap_prompt_visual_lines,
     },
 };
 use crate::{
@@ -119,8 +119,14 @@ impl HeroItem {
         width: u16,
         palette: TerminalPalette,
         _previous_metrics: Option<TranscriptItemMetrics>,
-    ) -> (usize, usize) {
-        self.measure_render_metrics(width, palette)
+    ) -> TranscriptFastEstimate {
+        let (content_line_count, content_char_len) = self.measure_render_metrics(width, palette);
+        TranscriptFastEstimate {
+            content_line_count,
+            content_char_len,
+            kind: TranscriptEstimateKind::NonAssistant,
+            ..TranscriptFastEstimate::default()
+        }
     }
 
     pub(crate) fn render_line_anchors(

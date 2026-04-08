@@ -14,9 +14,11 @@ TUI 框架**采用 `ratatui`**。
 ```bash
 cargo build                                             # Build
 cargo test                                              # Test
+cargo nextest run                                       # Faster daily regression test runner
 cargo run --bin lumos                                   # Run
 cargo fmt --all                                         # Format
 cargo clippy --workspace --all-targets -- -D warnings   # Lint
+cargo audit                                             # Dependency vulnerability scan (pre-merge / release)
 ```
 
 ## Directory Structure
@@ -82,6 +84,8 @@ cargo clippy --workspace --all-targets -- -D warnings   # Lint
 - 对用户使用中文回复；文档使用中文；tooling 与内部推理使用英文。
 - 项目处于活跃开发阶段，应优先保证改动干净、准确，而不是向后兼容。
 - 使用工具时，以提高正确性、完整性或基于代码库/文档的依据为准；不要为节省工具调用而过早停止。
+- `cargo nextest`，日常回归测试优先使用 `cargo nextest run`；保留 `cargo test` 作为回退与兼容检查。
+- `cargo audit`，在合并前、发版前、依赖更新后或需要安全确认时运行；不要求每次小改动都执行。
 - 涉及 shell、构建、测试、格式化或 lint 时，只通过 terminal 工具执行命令；若有可用的专用编辑或 patch 工具，优先直接使用，不要把工具名当作 shell 命令运行。
 - 若代码检索、文档查阅或其他 lookup 结果为空、明显不完整或可疑，先更换关键词、路径或来源重试一到两次，再下结论。
 - 如果用户意图清晰且下一步可逆、低风险，则直接推进；仅在不可逆操作、外部副作用或缺失会实质改变结果的关键选择时请求确认。
@@ -91,7 +95,8 @@ cargo clippy --workspace --all-targets -- -D warnings   # Lint
 
 - 先基于现有代码结构与模式制定实现方案。
 - 实现过程中持续检查是否违反分层、命名、注释、主题复用与 Rust 风格约束。
-- 完成后验证 build、test、format、lint 是否全部通过。
+- 完成后验证 build、format、lint 与测试是否通过；若有 `cargo nextest`，优先运行 `cargo nextest run` 作为日常测试验证，必要时再补 `cargo test`。
+- 对依赖有改动，或在合并前、发版前需要安全确认时，补充运行 `cargo audit`。
 - 在最终答复前，再检查一次：任务是否已完整交付、结论是否与代码或工具输出一致、输出格式是否符合本提示与用户要求。
 - 将任务视为未完成，直到所有请求项都已覆盖，或被明确标记为 `[blocked]` 并说明缺失信息。
 

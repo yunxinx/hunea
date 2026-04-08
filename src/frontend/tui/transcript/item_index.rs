@@ -2,6 +2,39 @@ use std::{cmp::Ordering, rc::Rc};
 
 use super::render_state::RenderItemLines;
 
+/// `TranscriptEstimateKind` 标记 estimated metrics 属于 assistant 还是其它 item。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TranscriptEstimateKind {
+    Assistant,
+    #[default]
+    NonAssistant,
+}
+
+/// `TranscriptEstimateSource` 标记 estimated metrics 是重新估算还是在 resize 时复用缓存语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TranscriptEstimateSource {
+    #[default]
+    Fresh,
+    ReusedOnResize,
+}
+
+/// `TranscriptFastEstimate` 收敛 estimated metrics 路径返回的轻量结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct TranscriptFastEstimate {
+    pub(crate) content_line_count: usize,
+    pub(crate) content_char_len: usize,
+    pub(crate) kind: TranscriptEstimateKind,
+    pub(crate) source: TranscriptEstimateSource,
+}
+
+/// `TranscriptEstimateBreakdown` 收敛 benchmark 关心的 estimated 路径拆分。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct TranscriptEstimateBreakdown {
+    pub(crate) assistant_item_count: usize,
+    pub(crate) non_assistant_item_count: usize,
+    pub(crate) assistant_resize_reuse_count: usize,
+}
+
 /// `TranscriptItemMetricsQuality` 描述当前 metrics 是估算值还是精确值。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum TranscriptItemMetricsQuality {

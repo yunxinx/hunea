@@ -117,9 +117,17 @@ pub struct DocumentStressSummary {
     pub frame_non_empty_cells: usize,
     pub transcript_render_time: std::time::Duration,
     pub estimate_time: std::time::Duration,
+    pub assistant_estimate_time: std::time::Duration,
+    pub user_estimate_time: std::time::Duration,
+    pub hero_estimate_time: std::time::Duration,
+    pub other_non_assistant_estimate_time: std::time::Duration,
     pub assistant_estimate_items: usize,
+    pub user_estimate_items: usize,
+    pub hero_estimate_items: usize,
+    pub other_non_assistant_estimate_items: usize,
     pub non_assistant_estimate_items: usize,
     pub assistant_resize_reuse_items: usize,
+    pub user_resize_reuse_items: usize,
     pub visible_exact_time: std::time::Duration,
     pub first_visible_time: std::time::Duration,
     pub full_settle_time: std::time::Duration,
@@ -419,9 +427,21 @@ fn measure_document_pipeline_stress_with_model(
         frame_non_empty_cells,
         transcript_render_time,
         estimate_time: sync_profile.estimate_time,
+        assistant_estimate_time: sync_profile.estimate_breakdown.assistant_estimate_time,
+        user_estimate_time: sync_profile.estimate_breakdown.user_estimate_time,
+        hero_estimate_time: sync_profile.estimate_breakdown.hero_estimate_time,
+        other_non_assistant_estimate_time: sync_profile
+            .estimate_breakdown
+            .other_non_assistant_estimate_time,
         assistant_estimate_items: sync_profile.estimate_breakdown.assistant_item_count,
+        user_estimate_items: sync_profile.estimate_breakdown.user_item_count,
+        hero_estimate_items: sync_profile.estimate_breakdown.hero_item_count,
+        other_non_assistant_estimate_items: sync_profile
+            .estimate_breakdown
+            .other_non_assistant_item_count,
         non_assistant_estimate_items: sync_profile.estimate_breakdown.non_assistant_item_count,
         assistant_resize_reuse_items: sync_profile.estimate_breakdown.assistant_resize_reuse_count,
+        user_resize_reuse_items: sync_profile.estimate_breakdown.user_resize_reuse_count,
         visible_exact_time: sync_profile.visible_exact_time,
         first_visible_time,
         full_settle_time,
@@ -440,7 +460,7 @@ fn measure_document_pipeline_stress_with_model(
 /// `format_document_stress_summary` 输出便于人工比较的 stress 摘要。
 pub fn format_document_stress_summary(summary: &DocumentStressSummary) -> String {
     format!(
-        "scenario={scenario} items={items} size={width}x{height} transcript_lines={transcript_lines} document_lines={document_lines} viewport_lines={viewport_lines} frame_cells={frame_cells} timings_ms={{metrics:{render:.3}, estimate:{estimate:.3}, visible_exact:{visible_exact:.3}, first_visible:{first_visible:.3}, full_settle:{full_settle:.3}, layout:{layout:.3}, viewport:{viewport:.3}, frame:{frame:.3}}} estimate_items={{assistant:{assistant_items}, non_assistant:{non_assistant_items}, assistant_resize_reuse:{assistant_resize_reuse}}} rss_kib={{before:{rss_before:?}, after_metrics:{rss_render:?}, after_layout:{rss_layout:?}, after_viewport:{rss_viewport:?}, after_frame:{rss_frame:?}}} memory_bytes={{raw_text:{raw_text}, items:{item_bytes}, render_ui:{render_ui}, plain_lines:{plain_lines}, anchors:{anchors}, indexes:{indexes}, estimated_total:{estimated_total}}}",
+        "scenario={scenario} items={items} size={width}x{height} transcript_lines={transcript_lines} document_lines={document_lines} viewport_lines={viewport_lines} frame_cells={frame_cells} timings_ms={{metrics:{render:.3}, estimate:{estimate:.3}, visible_exact:{visible_exact:.3}, first_visible:{first_visible:.3}, full_settle:{full_settle:.3}, layout:{layout:.3}, viewport:{viewport:.3}, frame:{frame:.3}}} estimate_breakdown_ms={{assistant:{assistant_estimate_ms:.3}, user:{user_estimate_ms:.3}, hero:{hero_estimate_ms:.3}, other_non_assistant:{other_non_assistant_estimate_ms:.3}}} estimate_items={{assistant:{assistant_items}, user:{user_items}, hero:{hero_items}, other_non_assistant:{other_non_assistant_items}, non_assistant:{non_assistant_items}, assistant_resize_reuse:{assistant_resize_reuse}, user_resize_reuse:{user_resize_reuse}}} rss_kib={{before:{rss_before:?}, after_metrics:{rss_render:?}, after_layout:{rss_layout:?}, after_viewport:{rss_viewport:?}, after_frame:{rss_frame:?}}} memory_bytes={{raw_text:{raw_text}, items:{item_bytes}, render_ui:{render_ui}, plain_lines:{plain_lines}, anchors:{anchors}, indexes:{indexes}, estimated_total:{estimated_total}}}",
         scenario = format_document_stress_scenario(summary.scenario),
         items = summary.item_count,
         width = summary.width,
@@ -457,9 +477,18 @@ pub fn format_document_stress_summary(summary: &DocumentStressSummary) -> String
         layout = summary.document_layout_time.as_secs_f64() * 1000.0,
         viewport = summary.document_viewport_time.as_secs_f64() * 1000.0,
         frame = summary.frame_render_time.as_secs_f64() * 1000.0,
+        assistant_estimate_ms = summary.assistant_estimate_time.as_secs_f64() * 1000.0,
+        user_estimate_ms = summary.user_estimate_time.as_secs_f64() * 1000.0,
+        hero_estimate_ms = summary.hero_estimate_time.as_secs_f64() * 1000.0,
+        other_non_assistant_estimate_ms =
+            summary.other_non_assistant_estimate_time.as_secs_f64() * 1000.0,
         assistant_items = summary.assistant_estimate_items,
+        user_items = summary.user_estimate_items,
+        hero_items = summary.hero_estimate_items,
+        other_non_assistant_items = summary.other_non_assistant_estimate_items,
         non_assistant_items = summary.non_assistant_estimate_items,
         assistant_resize_reuse = summary.assistant_resize_reuse_items,
+        user_resize_reuse = summary.user_resize_reuse_items,
         rss_before = summary.rss_before_kib,
         rss_render = summary.rss_after_transcript_kib,
         rss_layout = summary.rss_after_layout_kib,
@@ -1003,7 +1032,9 @@ mod tests {
         assert!(formatted.contains("estimate:"));
         assert!(!formatted.contains("assistant_estimate:"));
         assert!(!formatted.contains("non_assistant_estimate:"));
+        assert!(formatted.contains("estimate_breakdown_ms={assistant:"));
         assert!(formatted.contains("estimate_items={assistant:"));
+        assert!(formatted.contains("user_resize_reuse:"));
         assert!(formatted.contains("visible_exact:"));
         assert!(formatted.contains("first_visible:"));
         assert!(formatted.contains("full_settle:"));
@@ -1045,8 +1076,10 @@ mod tests {
         assert!(formatted.contains("timings_ms={metrics:"));
         assert!(!formatted.contains("assistant_estimate:"));
         assert!(!formatted.contains("non_assistant_estimate:"));
+        assert!(formatted.contains("estimate_breakdown_ms={assistant:"));
         assert!(formatted.contains("estimate_items={assistant:"));
         assert!(formatted.contains("assistant_resize_reuse:"));
+        assert!(formatted.contains("user_resize_reuse:"));
         assert!(formatted.contains("first_visible:"));
         assert!(formatted.contains("full_settle:"));
         assert!(formatted.contains("after_metrics"));

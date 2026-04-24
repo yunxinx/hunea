@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, rc::Rc};
+use std::{cmp::Ordering, rc::Rc, time::Duration};
 
 use super::render_state::RenderItemLines;
 
@@ -31,8 +31,16 @@ pub(crate) struct TranscriptFastEstimate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct TranscriptEstimateBreakdown {
     pub(crate) assistant_item_count: usize,
+    pub(crate) user_item_count: usize,
+    pub(crate) hero_item_count: usize,
+    pub(crate) other_non_assistant_item_count: usize,
     pub(crate) non_assistant_item_count: usize,
     pub(crate) assistant_resize_reuse_count: usize,
+    pub(crate) user_resize_reuse_count: usize,
+    pub(crate) assistant_estimate_time: Duration,
+    pub(crate) user_estimate_time: Duration,
+    pub(crate) hero_estimate_time: Duration,
+    pub(crate) other_non_assistant_estimate_time: Duration,
 }
 
 /// `TranscriptItemMetricsQuality` 描述当前 metrics 是估算值还是精确值。

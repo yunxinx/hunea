@@ -631,7 +631,7 @@ pub(in crate::frontend::tui::transcript) fn render_cluster_for_display(
     (" ".repeat(tab_width), tab_width)
 }
 
-pub(in crate::frontend::tui::transcript) fn display_tab_width(absolute_column: usize) -> usize {
+pub(crate) fn display_tab_width(absolute_column: usize) -> usize {
     let mut tab_width = DISPLAY_TAB_WIDTH - (absolute_column % DISPLAY_TAB_WIDTH);
     if tab_width == 0 {
         tab_width = DISPLAY_TAB_WIDTH;

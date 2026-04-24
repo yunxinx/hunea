@@ -34,4 +34,6 @@ pub(crate) use render_state::{
     ItemLineAnchor, LineAnchor, LineAnchorKind, RenderResult, ViewportRenderResult,
     index_only_render_result, new_render_result_with_append_start,
 };
-pub(crate) use wrap::{DEFAULT_RENDER_WIDTH, wrap_assistant_text, wrap_prompt_text};
+pub(crate) use wrap::{
+    DEFAULT_RENDER_WIDTH, display_tab_width, wrap_assistant_text, wrap_prompt_text,
+};

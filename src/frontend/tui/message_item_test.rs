@@ -202,6 +202,282 @@ fn user_render_projection_stays_smaller_than_eager_styled_line_cache_for_long_pr
     );
 }
 
+#[test]
+fn user_fast_estimate_stays_conservative_for_basic_wrapping_cases() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode(
+        Sender::User,
+        " hello world and some extra words",
+        StyleMode::Cx,
+    );
+
+    for width in [10_u16, 20_u16, 40_u16] {
+        let (exact_line_count, _) = item.measure_render_metrics(width, palette);
+        let estimated = item.estimate_render_metrics_fast(width, palette, None);
+
+        assert!(
+            estimated.content_line_count >= exact_line_count,
+            "fast estimate should avoid undercounting wrapped user content: exact={exact_line_count}, estimated={estimated:?}, width={width}"
+        );
+    }
+}
+
+#[test]
+fn user_fast_estimate_stays_conservative_for_narrow_wrapped_words() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode(Sender::User, "abcd efgh ijkl", StyleMode::Cx);
+    let width = 11_u16; // Cx 模式下 content_width == 7，容易触发单词边界的额外换行。
+
+    let (exact_line_count, _) = item.measure_render_metrics(width, palette);
+    let estimated = item.estimate_render_metrics_fast(width, palette, None);
+
+    assert!(
+        estimated.content_line_count >= exact_line_count,
+        "fast estimate should avoid undercounting narrow wrapped prose: exact={exact_line_count}, estimated={estimated:?}, width={width}"
+    );
+}
+
+#[test]
+fn user_fast_estimate_stays_conservative_for_wide_grapheme_unbroken_tokens() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode(Sender::User, "aaaaa中aaa中", StyleMode::Cx);
+    let width = 10_u16; // Cx 模式下 content_width == 6，宽字形刚好容易触发“剩 1 列”浪费。
+
+    let (exact_line_count, _) = item.measure_render_metrics(width, palette);
+    let estimated = item.estimate_render_metrics_fast(width, palette, None);
+
+    assert!(
+        estimated.content_line_count >= exact_line_count,
+        "fast estimate should avoid undercounting wide grapheme wrapping: exact={exact_line_count}, estimated={estimated:?}, width={width}"
+    );
+}
+
+#[test]
+fn user_fast_estimate_stays_conservative_for_tabbed_narrow_literal_wraps() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode(Sender::User, "a\tb", StyleMode::Cx);
+    let width = 6_u16; // Cx 模式下 content_width == 2；tab 展开后会跨 continuation line。
+
+    let (exact_line_count, exact_plain_text_len) = item.measure_render_metrics(width, palette);
+    let estimated = item.estimate_render_metrics_fast(width, palette, None);
+
+    assert_eq!(exact_line_count, 6);
+    assert!(
+        estimated.content_line_count >= exact_line_count,
+        "fast estimate should avoid undercounting tab-expanded literal wraps: exact={exact_line_count}, estimated={estimated:?}, width={width}"
+    );
+    assert!(
+        estimated.content_char_len >= exact_plain_text_len,
+        "fast estimate should avoid shrinking tab-expanded plain text metrics: exact={exact_plain_text_len}, estimated={estimated:?}, width={width}"
+    );
+}
+
+#[test]
+fn user_fast_estimate_stays_conservative_for_short_indent_wide_grapheme_fallback() {
+    let palette = default_palette();
+
+    for (style_mode, width) in [(StyleMode::Cx, 6_u16), (StyleMode::Ms, 4_u16)] {
+        let item = MessageItem::new_with_style_mode(Sender::User, " 中", style_mode);
+        let (exact_line_count, _) = item.measure_render_metrics(width, palette);
+        let estimated = item.estimate_render_metrics_fast(width, palette, None);
+
+        assert!(
+            estimated.content_line_count >= exact_line_count,
+            "fast estimate should preserve the short-indent fallback when a wide grapheme does not fit the first-line remainder: style_mode={style_mode:?}, width={width}, exact={exact_line_count}, estimated={estimated:?}"
+        );
+    }
+}
+
+#[test]
+fn prompt_wrap_estimate_reflows_exact_fit_blocks_before_multi_space_followups() {
+    let content = "aaa  a  a  a";
+    let exact_line_count = wrap_prompt_visual_lines(content, 6, 0).len();
+    let estimated_line_count = estimate_wrapped_line_count_by_display_width(content, 6, 0);
+
+    assert_eq!(exact_line_count, 3);
+    assert!(
+        estimated_line_count >= exact_line_count,
+        "fast prose estimate should mirror exact-fit reflow when the next block preserves a multi-space prefix: exact={exact_line_count}, estimated={estimated_line_count}"
+    );
+}
+
+#[test]
+fn hard_wrap_estimate_flushes_full_line_before_zero_width_graphemes() {
+    let content = "\t\u{200d}";
+    let exact_line_count = wrap_prompt_visual_lines(content, 7, 1).len();
+    let estimated_line_count = estimate_wrapped_line_count_by_display_width(content, 7, 1);
+
+    assert_eq!(exact_line_count, 2);
+    assert!(
+        estimated_line_count >= exact_line_count,
+        "literal fast estimate should start a new line before a zero-width grapheme when the current line is already full: exact={exact_line_count}, estimated={estimated_line_count}"
+    );
+}
+
+#[test]
+fn hard_wrap_estimate_treats_zero_width_prefix_as_occupied_content() {
+    let content = "\u{200d}中";
+    let exact_line_count = wrap_prompt_visual_lines(content, 1, 0).len();
+    let estimated_line_count = estimate_hard_wrap_line_count(content, 1, 0);
+
+    assert_eq!(exact_line_count, 2);
+    assert!(
+        estimated_line_count >= exact_line_count,
+        "literal fast estimate should wrap after a zero-width prefix before a wide grapheme: exact={exact_line_count}, estimated={estimated_line_count}"
+    );
+}
+
+#[test]
+fn hard_wrap_visible_text_flushes_a_full_line_before_expanding_a_tab_stop() {
+    let (line_count, last_line_width) = estimate_hard_wrap_visible_text("ab\t", 2, 2, 2);
+
+    assert_eq!(line_count, 4);
+    assert_eq!(last_line_width, 2);
+}
+
+#[test]
+fn user_fast_estimate_stays_conservative_when_tab_starts_on_a_full_line() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode(Sender::User, "ab\t", StyleMode::Cx);
+    let width = 6_u16; // Cx 模式下 content_width == 2；tab 应从 continuation line 的列 0 重新计算。
+
+    let (exact_line_count, _) = item.measure_render_metrics(width, palette);
+    let estimated = item.estimate_render_metrics_fast(width, palette, None);
+
+    assert_eq!(exact_line_count, 6);
+    assert!(
+        estimated.content_line_count >= exact_line_count,
+        "fast estimate should stay conservative when a tab starts on a full line: exact={exact_line_count}, estimated={estimated:?}, width={width}"
+    );
+}
+
+#[test]
+fn user_fast_estimate_stays_conservative_for_zero_width_prefix_before_wide_grapheme() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode(Sender::User, "\u{200d}中", StyleMode::Cx);
+    let width = 5_u16; // Cx 模式下 content_width == 1；zero-width cluster 也应占住当前逻辑行。
+
+    let (exact_line_count, _) = item.measure_render_metrics(width, palette);
+    let estimated = item.estimate_render_metrics_fast(width, palette, None);
+
+    assert_eq!(exact_line_count, 4);
+    assert!(
+        estimated.content_line_count >= exact_line_count,
+        "fast estimate should stay conservative when a zero-width prefix is followed by a wide grapheme: exact={exact_line_count}, estimated={estimated:?}, width={width}"
+    );
+}
+
+#[test]
+fn user_fast_estimate_tracks_plain_text_utf8_bytes_for_prefix_glyphs() {
+    let palette = default_palette();
+    let width = 20_u16;
+
+    for style_mode in [StyleMode::Cx, StyleMode::Cc] {
+        let item = MessageItem::new_with_style_mode(Sender::User, "hello", style_mode);
+        let (_, exact_plain_text_len) = item.measure_render_metrics(width, palette);
+        let estimated = item.estimate_render_metrics_fast(width, palette, None);
+
+        assert_eq!(
+            estimated.content_char_len, exact_plain_text_len,
+            "fast estimate should track UTF-8 bytes for user plain text: style_mode={style_mode:?}"
+        );
+    }
+}
+
+#[test]
+fn user_fast_estimate_tracks_plain_text_utf8_bytes_for_grapheme_clusters() {
+    let palette = default_palette();
+    let width = 40_u16;
+    let content = format!("👨\u{200d}👩\u{200d}👧\u{200d}👦 {}", "e\u{0301}");
+
+    for style_mode in [StyleMode::Cx, StyleMode::Cc] {
+        let item = MessageItem::new_with_style_mode(Sender::User, content.clone(), style_mode);
+        let (_, exact_plain_text_len) = item.measure_render_metrics(width, palette);
+        let estimated = item.estimate_render_metrics_fast(width, palette, None);
+
+        assert_eq!(
+            estimated.content_char_len, exact_plain_text_len,
+            "fast estimate should track UTF-8 bytes for grapheme clusters: style_mode={style_mode:?}"
+        );
+    }
+}
+
+#[test]
+fn user_fast_estimate_keeps_plain_text_len_conservative_when_visible_line_overflows_width() {
+    let palette = default_palette();
+
+    for (style_mode, content, width) in [(StyleMode::Cc, "a", 2_u16), (StyleMode::Cx, "中", 3_u16)]
+    {
+        let item = MessageItem::new_with_style_mode(Sender::User, content, style_mode);
+        let (_, exact_plain_text_len) = item.measure_render_metrics(width, palette);
+        let estimated = item.estimate_render_metrics_fast(width, palette, None);
+
+        assert!(
+            estimated.content_char_len >= exact_plain_text_len,
+            "fast estimate should derive plain-text length from the actual visible line shape instead of assuming every line is capped at width: style_mode={style_mode:?}, width={width}, exact={exact_plain_text_len}, estimated={estimated:?}"
+        );
+    }
+}
+
+#[test]
+fn user_fast_estimate_reports_resize_reuse_and_keeps_plain_text_len_non_decreasing() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode(
+        Sender::User,
+        "keep user resize estimates cheap while preserving selection boundaries",
+        StyleMode::Cx,
+    );
+
+    let old_width = 20_u16;
+    let old_estimate = item.estimate_render_metrics_fast(old_width, palette, None);
+    let previous_metrics = TranscriptItemMetrics {
+        item_index: 0,
+        width: old_width,
+        cache_key: item.render_cache_key(),
+        content_line_count: old_estimate.content_line_count,
+        content_char_len: old_estimate.content_char_len,
+        quality: crate::frontend::tui::transcript::TranscriptItemMetricsQuality::Estimated,
+        is_valid: true,
+    };
+
+    let new_estimate = item.estimate_render_metrics_fast(40, palette, Some(previous_metrics));
+    assert_eq!(
+        new_estimate.source,
+        TranscriptEstimateSource::ReusedOnResize
+    );
+    assert!(new_estimate.content_char_len >= old_estimate.content_char_len);
+}
+
+#[test]
+fn user_fast_estimate_resize_reuse_stays_conservative_for_narrower_prose_wraps() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode(Sender::User, "abc def ghi jkl", StyleMode::Cx);
+    let old_width = 11_u16; // Cx 模式下 content_width == 7。
+    let new_width = 9_u16; // Cx 模式下 content_width == 5。
+
+    let (old_exact_line_count, old_exact_plain_text_len) =
+        item.measure_render_metrics(old_width, palette);
+    let previous_metrics = TranscriptItemMetrics {
+        item_index: 0,
+        width: old_width,
+        cache_key: item.render_cache_key(),
+        content_line_count: old_exact_line_count,
+        content_char_len: old_exact_plain_text_len,
+        quality: crate::frontend::tui::transcript::TranscriptItemMetricsQuality::Exact,
+        is_valid: true,
+    };
+
+    let (new_exact_line_count, _) = item.measure_render_metrics(new_width, palette);
+    let estimated = item.estimate_render_metrics_fast(new_width, palette, Some(previous_metrics));
+
+    assert_eq!(old_exact_line_count, 4);
+    assert_eq!(new_exact_line_count, 6);
+    assert!(
+        estimated.content_line_count >= new_exact_line_count,
+        "resize reuse should stay conservative after narrowing prose wraps: exact={new_exact_line_count}, estimated={estimated:?}, old_exact={old_exact_line_count}"
+    );
+}
+
 fn plain_line(line: Line<'static>) -> String {
     line.spans
         .iter()

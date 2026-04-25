@@ -4,7 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::runtime::session::AcpSessionCatalog;
+use crate::runtime::session::{
+    AcpInitializeOutcome, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
+};
 use arboard::Clipboard;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use color_eyre::eyre::Result;
@@ -57,6 +59,7 @@ pub fn run_with_runtime_options(
     runtime_options: RuntimeOptions,
 ) -> Result<Model> {
     let mut model = Model::new_with_options(hero_options, options);
+    let mut acp_runtime = AcpRuntimeState::default();
 
     if let Some(detection) = theme::try_detect_palette() {
         let _ = model.update(AppEvent::DetectedPalette {
@@ -75,6 +78,7 @@ pub fn run_with_runtime_options(
     let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;
 
     loop {
+        drain_acp_runtime_events(&mut model, &mut acp_runtime);
         terminal.draw(|frame| model.render(frame))?;
 
         if model.is_quitting() {
@@ -84,13 +88,25 @@ pub fn run_with_runtime_options(
         let now = Instant::now();
         if !model.has_palette() && now >= startup_deadline {
             let effect = model.update(AppEvent::StartupReadyTimeout);
-            apply_effect_if_needed(&mut terminal, &mut model, &runtime_options, effect)?;
+            apply_effect_if_needed(
+                &mut terminal,
+                &mut model,
+                &runtime_options,
+                &mut acp_runtime,
+                effect,
+            )?;
             continue;
         }
 
         if let Some(timeout_event) = model.timeout_event(now) {
             let effect = model.update(timeout_event);
-            apply_effect_if_needed(&mut terminal, &mut model, &runtime_options, effect)?;
+            apply_effect_if_needed(
+                &mut terminal,
+                &mut model,
+                &runtime_options,
+                &mut acp_runtime,
+                effect,
+            )?;
             continue;
         }
 
@@ -99,10 +115,22 @@ pub fn run_with_runtime_options(
         if !event::poll(wait_duration)? {
             if !model.has_palette() {
                 let effect = model.update(AppEvent::StartupReadyTimeout);
-                apply_effect_if_needed(&mut terminal, &mut model, &runtime_options, effect)?;
+                apply_effect_if_needed(
+                    &mut terminal,
+                    &mut model,
+                    &runtime_options,
+                    &mut acp_runtime,
+                    effect,
+                )?;
             } else if let Some(timeout_event) = model.timeout_event(Instant::now()) {
                 let effect = model.update(timeout_event);
-                apply_effect_if_needed(&mut terminal, &mut model, &runtime_options, effect)?;
+                apply_effect_if_needed(
+                    &mut terminal,
+                    &mut model,
+                    &runtime_options,
+                    &mut acp_runtime,
+                    effect,
+                )?;
             }
             continue;
         }
@@ -112,7 +140,13 @@ pub fn run_with_runtime_options(
             match action {
                 TerminalInputAction::App(app_event) => {
                     let effect = model.update(app_event);
-                    apply_effect_if_needed(&mut terminal, &mut model, &runtime_options, effect)?;
+                    apply_effect_if_needed(
+                        &mut terminal,
+                        &mut model,
+                        &runtime_options,
+                        &mut acp_runtime,
+                        effect,
+                    )?;
                 }
                 TerminalInputAction::CancelExitConfirmation => model.cancel_exit_confirmation(),
             }
@@ -304,6 +338,7 @@ fn apply_effect_if_needed(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     model: &mut Model,
     runtime_options: &RuntimeOptions,
+    acp_runtime: &mut AcpRuntimeState,
     effect: Option<AppEffect>,
 ) -> Result<()> {
     let Some(effect) = effect else {
@@ -316,7 +351,89 @@ fn apply_effect_if_needed(
         }
         AppEffect::CopySelection(text) => run_copy_selection_effect(terminal, model, &text),
         AppEffect::StartAcpSession { agent_id } => {
-            run_start_acp_session_effect(model, runtime_options, &agent_id)
+            run_start_acp_session_effect(model, runtime_options, acp_runtime, &agent_id)
+        }
+        AppEffect::SendAcpPrompt { agent_id, prompt } => {
+            run_send_acp_prompt_effect(model, acp_runtime, &agent_id, prompt);
+            Ok(())
+        }
+    }
+}
+
+#[derive(Default)]
+struct AcpRuntimeState {
+    worker: Option<AcpSessionWorker>,
+}
+
+impl AcpRuntimeState {
+    fn start(&mut self, command: AcpSessionCommand) {
+        self.worker = Some(AcpSessionWorker::start(command));
+    }
+
+    fn send_prompt(&self, agent_id: &str, prompt: String) -> Result<(), String> {
+        let Some(worker) = self.worker.as_ref() else {
+            return Err(format!("ACP session is not ready: {agent_id}"));
+        };
+        if worker.agent_id() != agent_id {
+            return Err(format!("ACP session is not active: {agent_id}"));
+        }
+
+        worker
+            .send_prompt(prompt)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn drain_acp_runtime_events(model: &mut Model, acp_runtime: &mut AcpRuntimeState) {
+    let Some(worker) = acp_runtime.worker.as_ref() else {
+        return;
+    };
+
+    let mut events = Vec::new();
+    while let Some(event) = worker.try_recv_event() {
+        events.push(event);
+    }
+
+    for event in events {
+        apply_acp_session_event(model, event);
+    }
+}
+
+fn apply_acp_session_event(model: &mut Model, event: AcpSessionEvent) {
+    match event {
+        AcpSessionEvent::Started { outcome, .. } => {
+            model.show_transient_status_notice(&format!(
+                "ACP session ready: {}",
+                acp_agent_display_name(&outcome)
+            ));
+        }
+        AcpSessionEvent::StartFailed { message, .. } => {
+            model.show_transient_status_notice(&format!("ACP start failed: {message}"));
+        }
+        AcpSessionEvent::PromptStarted { .. } => {
+            model.show_transient_status_notice("ACP prompt sent");
+        }
+        AcpSessionEvent::PromptResponse {
+            content,
+            stop_reason,
+            ..
+        } => {
+            if content.is_empty() {
+                model.show_transient_status_notice(&format!("ACP prompt finished: {stop_reason}"));
+            } else {
+                model.append_assistant_message_from_runtime(content);
+            }
+        }
+        AcpSessionEvent::PromptFailed { message, .. } => {
+            model.show_transient_status_notice(&format!("ACP prompt failed: {message}"));
+        }
+        AcpSessionEvent::PermissionRequestCancelled { .. } => {
+            model.show_transient_status_notice("ACP permission request cancelled");
+        }
+        AcpSessionEvent::Stopped { message, .. } => {
+            if let Some(message) = message {
+                model.show_transient_status_notice(&format!("ACP session stopped: {message}"));
+            }
         }
     }
 }
@@ -324,16 +441,39 @@ fn apply_effect_if_needed(
 fn run_start_acp_session_effect(
     model: &mut Model,
     runtime_options: &RuntimeOptions,
+    acp_runtime: &mut AcpRuntimeState,
     agent_id: &str,
 ) -> Result<()> {
-    if runtime_options.acp_sessions.command(agent_id).is_some() {
-        model.show_transient_status_notice(&format!("ACP launch prepared: {agent_id}"));
-    } else {
+    let Some(command) = runtime_options.acp_sessions.command(agent_id) else {
         model.show_transient_status_notice(&format!(
             "ACP agent needs installation before starting: {agent_id}"
         ));
-    }
+        return Ok(());
+    };
+
+    acp_runtime.start(command.clone());
+    model.show_transient_status_notice(&format!("Starting ACP agent: {agent_id}"));
     Ok(())
+}
+
+fn run_send_acp_prompt_effect(
+    model: &mut Model,
+    acp_runtime: &AcpRuntimeState,
+    agent_id: &str,
+    prompt: String,
+) {
+    if let Err(message) = acp_runtime.send_prompt(agent_id, prompt) {
+        model.show_transient_status_notice(&message);
+    }
+}
+
+fn acp_agent_display_name(outcome: &AcpInitializeOutcome) -> String {
+    outcome
+        .agent_title
+        .as_deref()
+        .or(outcome.agent_name.as_deref())
+        .unwrap_or("unknown agent")
+        .to_string()
 }
 
 fn run_external_editor_effect(

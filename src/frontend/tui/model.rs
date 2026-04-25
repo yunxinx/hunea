@@ -6,7 +6,7 @@ use ratatui::Frame;
 use crate::envinfo;
 
 use super::{
-    HeroOptions,
+    HeroOptions, Sender,
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
     document::{
@@ -363,6 +363,25 @@ impl Model {
 
     pub(crate) fn maybe_prepare_external_editor_launch(&mut self) -> Option<ExternalEditorLaunch> {
         self.prepare_external_editor_launch()
+    }
+
+    pub(crate) fn append_assistant_message_from_runtime(&mut self, content: impl Into<String>) {
+        let content = content.into();
+        if content.is_empty() {
+            return;
+        }
+
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        let style_mode = self.style_mode;
+        self.transcript_mut().append_message_with_style_mode(
+            Sender::Assistant,
+            content,
+            style_mode,
+        );
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
     }
 
     pub(crate) fn sync_composer_height(&mut self) {

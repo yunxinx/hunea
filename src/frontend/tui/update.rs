@@ -16,6 +16,7 @@ pub enum AppEffect {
     LaunchExternalEditor(ExternalEditorLaunch),
     CopySelection(String),
     StartAcpSession { agent_id: String },
+    SendAcpPrompt { agent_id: String, prompt: String },
 }
 
 /// `AppEvent` 描述 TUI 模型可处理的外部事件。
@@ -329,7 +330,12 @@ impl Model {
         self.sync_composer_height();
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-        None
+        self.selected_acp_agent
+            .clone()
+            .map(|agent_id| AppEffect::SendAcpPrompt {
+                agent_id,
+                prompt: content,
+            })
     }
 
     fn handle_resize(&mut self, width: u16, height: u16) {

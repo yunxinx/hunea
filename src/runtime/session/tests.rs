@@ -161,3 +161,161 @@ fn catalog_keeps_directly_launchable_agents_only() {
     assert!(catalog.command("local-kimi").is_some());
     assert!(catalog.command("registry-kimi").is_none());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn initialize_agent_over_acp_transport_returns_agent_info() {
+    use acp::schema::{Implementation, InitializeRequest, InitializeResponse};
+    use agent_client_protocol as acp;
+
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    tokio::task::spawn(async move {
+        acp::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _connection| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version).agent_info(
+                            Implementation::new("fake-agent", "0.1.0").title("Fake Agent"),
+                        ),
+                    )
+                },
+                acp::on_receive_request!(),
+            )
+            .connect_to(agent_transport)
+            .await
+    });
+
+    let outcome = crate::runtime::session::initialize_agent_transport(client_transport)
+        .await
+        .expect("initialize should succeed");
+
+    assert_eq!(outcome.agent_name.as_deref(), Some("fake-agent"));
+    assert_eq!(outcome.agent_title.as_deref(), Some("Fake Agent"));
+    assert_eq!(outcome.agent_version.as_deref(), Some("0.1.0"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn initialize_agent_command_reports_spawn_failure() {
+    let command = crate::runtime::session::AcpSessionCommand {
+        agent_id: "missing".to_string(),
+        command: "lumos-definitely-missing-acp-agent".to_string(),
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        default_model: None,
+        default_mode: None,
+    };
+
+    let error = crate::runtime::session::initialize_agent_command(&command)
+        .await
+        .expect_err("missing command should fail before protocol handshake");
+
+    assert!(error.to_string().contains("spawn ACP agent missing"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_worker_transport_creates_session_and_reads_prompt_response() {
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+
+    use acp::schema::{
+        ContentBlock, ContentChunk, Implementation, InitializeRequest, InitializeResponse,
+        NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionNotification,
+        SessionUpdate, StopReason, TextContent,
+    };
+    use agent_client_protocol as acp;
+
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    tokio::task::spawn(async move {
+        acp::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _connection| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_info(Implementation::new("fake-agent", "0.1.0")),
+                    )
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _connection| {
+                    responder.respond(NewSessionResponse::new("test-session"))
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |request: PromptRequest, responder, connection| {
+                    connection.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new("pong"),
+                        ))),
+                    ))?;
+                    responder.respond(PromptResponse::new(StopReason::EndTurn))
+                },
+                acp::on_receive_request!(),
+            )
+            .connect_to(agent_transport)
+            .await
+    });
+
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let worker = tokio::task::spawn(super::run_agent_transport_worker(
+        "fake".to_string(),
+        client_transport,
+        command_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+    ));
+
+    let started = recv_worker_event(&event_rx, "worker should report session start").await;
+    assert!(matches!(
+        started,
+        super::AcpSessionEvent::Started { ref session_id, .. } if session_id == "test-session"
+    ));
+
+    command_tx
+        .send(super::AcpWorkerCommand::Prompt("ping".to_string()))
+        .expect("prompt command should send");
+
+    let prompt_started = recv_worker_event(&event_rx, "worker should report prompt start").await;
+    assert!(matches!(
+        prompt_started,
+        super::AcpSessionEvent::PromptStarted { .. }
+    ));
+
+    let prompt_response =
+        recv_worker_event(&event_rx, "worker should report prompt response").await;
+    assert!(matches!(
+        prompt_response,
+        super::AcpSessionEvent::PromptResponse { ref content, .. } if content == "pong"
+    ));
+
+    command_tx
+        .send(super::AcpWorkerCommand::Shutdown)
+        .expect("shutdown command should send");
+    worker
+        .await
+        .expect("worker task should join")
+        .expect("worker should stop cleanly");
+
+    let stopped = recv_worker_event(&event_rx, "worker should report stop").await;
+    assert!(matches!(
+        stopped,
+        super::AcpSessionEvent::Stopped { message: None, .. }
+    ));
+}
+
+async fn recv_worker_event(
+    event_rx: &std::sync::mpsc::Receiver<super::AcpSessionEvent>,
+    context: &str,
+) -> super::AcpSessionEvent {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        if let Ok(event) = event_rx.try_recv() {
+            return event;
+        }
+        assert!(std::time::Instant::now() < deadline, "{context}");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}

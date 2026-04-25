@@ -245,10 +245,16 @@ fn command_panel_enter_selects_acp_agent_for_current_session() {
     type_text(&mut model, "/acp");
     model.update(AppEvent::Key(KeyCode::Down.into()));
 
-    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    let effect = model.update(AppEvent::Key(KeyCode::Enter.into()));
 
     assert_eq!(model.selected_acp_agent(), Some("codex-acp"));
     assert_eq!(model.composer_text(), "");
+    assert_eq!(
+        effect,
+        Some(AppEffect::StartAcpSession {
+            agent_id: "codex-acp".to_string(),
+        })
+    );
 }
 
 #[test]

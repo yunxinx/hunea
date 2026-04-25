@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::runtime::session::AcpSessionCatalog;
 use arboard::Clipboard;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use color_eyre::eyre::Result;
@@ -21,6 +22,12 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use super::{
     AppEffect, AppEvent, HeroOptions, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StyleMode, theme,
 };
+
+/// `RuntimeOptions` 表示 TUI runner 可执行的外部 runtime 能力。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeOptions {
+    pub acp_sessions: AcpSessionCatalog,
+}
 
 /// `run` 启动交互式 TUI，并在退出后返回最终模型。
 pub fn run(hero_options: HeroOptions) -> Result<Model> {
@@ -40,6 +47,15 @@ pub fn run_with_style_mode(hero_options: HeroOptions, style_mode: StyleMode) -> 
 
 /// `run_with_options` 启动带显式选项的交互式 TUI。
 pub fn run_with_options(hero_options: HeroOptions, options: ModelOptions) -> Result<Model> {
+    run_with_runtime_options(hero_options, options, RuntimeOptions::default())
+}
+
+/// `run_with_runtime_options` 启动带显式 runtime 能力的交互式 TUI。
+pub fn run_with_runtime_options(
+    hero_options: HeroOptions,
+    options: ModelOptions,
+    runtime_options: RuntimeOptions,
+) -> Result<Model> {
     let mut model = Model::new_with_options(hero_options, options);
 
     if let Some(detection) = theme::try_detect_palette() {
@@ -68,13 +84,13 @@ pub fn run_with_options(hero_options: HeroOptions, options: ModelOptions) -> Res
         let now = Instant::now();
         if !model.has_palette() && now >= startup_deadline {
             let effect = model.update(AppEvent::StartupReadyTimeout);
-            apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+            apply_effect_if_needed(&mut terminal, &mut model, &runtime_options, effect)?;
             continue;
         }
 
         if let Some(timeout_event) = model.timeout_event(now) {
             let effect = model.update(timeout_event);
-            apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+            apply_effect_if_needed(&mut terminal, &mut model, &runtime_options, effect)?;
             continue;
         }
 
@@ -83,10 +99,10 @@ pub fn run_with_options(hero_options: HeroOptions, options: ModelOptions) -> Res
         if !event::poll(wait_duration)? {
             if !model.has_palette() {
                 let effect = model.update(AppEvent::StartupReadyTimeout);
-                apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+                apply_effect_if_needed(&mut terminal, &mut model, &runtime_options, effect)?;
             } else if let Some(timeout_event) = model.timeout_event(Instant::now()) {
                 let effect = model.update(timeout_event);
-                apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+                apply_effect_if_needed(&mut terminal, &mut model, &runtime_options, effect)?;
             }
             continue;
         }
@@ -96,7 +112,7 @@ pub fn run_with_options(hero_options: HeroOptions, options: ModelOptions) -> Res
             match action {
                 TerminalInputAction::App(app_event) => {
                     let effect = model.update(app_event);
-                    apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+                    apply_effect_if_needed(&mut terminal, &mut model, &runtime_options, effect)?;
                 }
                 TerminalInputAction::CancelExitConfirmation => model.cancel_exit_confirmation(),
             }
@@ -287,6 +303,7 @@ fn next_wait_duration(model: &Model, startup_deadline: Instant, now: Instant) ->
 fn apply_effect_if_needed(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     model: &mut Model,
+    runtime_options: &RuntimeOptions,
     effect: Option<AppEffect>,
 ) -> Result<()> {
     let Some(effect) = effect else {
@@ -298,7 +315,25 @@ fn apply_effect_if_needed(
             run_external_editor_effect(terminal, model, launch)
         }
         AppEffect::CopySelection(text) => run_copy_selection_effect(terminal, model, &text),
+        AppEffect::StartAcpSession { agent_id } => {
+            run_start_acp_session_effect(model, runtime_options, &agent_id)
+        }
     }
+}
+
+fn run_start_acp_session_effect(
+    model: &mut Model,
+    runtime_options: &RuntimeOptions,
+    agent_id: &str,
+) -> Result<()> {
+    if runtime_options.acp_sessions.command(agent_id).is_some() {
+        model.show_transient_status_notice(&format!("ACP launch prepared: {agent_id}"));
+    } else {
+        model.show_transient_status_notice(&format!(
+            "ACP agent needs installation before starting: {agent_id}"
+        ));
+    }
+    Ok(())
 }
 
 fn run_external_editor_effect(

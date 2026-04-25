@@ -15,6 +15,7 @@ pub const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 pub enum AppEffect {
     LaunchExternalEditor(ExternalEditorLaunch),
     CopySelection(String),
+    StartAcpSession { agent_id: String },
 }
 
 /// `AppEvent` 描述 TUI 模型可处理的外部事件。
@@ -199,8 +200,8 @@ impl Model {
                 .map(AppEffect::LaunchExternalEditor);
         }
 
-        if self.handle_command_panel_key(key) {
-            return None;
+        if let Some(effect) = self.handle_command_panel_key(key) {
+            return effect;
         }
 
         if key.code == KeyCode::Enter {

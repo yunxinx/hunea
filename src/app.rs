@@ -5,7 +5,10 @@ use color_eyre::eyre::{Result, WrapErr};
 use crate::{
     appconfig::{self, Config, RuntimeConfig, TuiConfig, UserInputStyle},
     envinfo,
-    frontend::tui::{self, HeroOptions, Model, ModelOptions, StatusLineItem, StyleMode},
+    frontend::tui::{
+        self, HeroOptions, Model, ModelOptions, RuntimeOptions, StatusLineItem, StyleMode,
+    },
+    runtime::session::AcpSessionCatalog,
 };
 
 /// `run` 负责组装并启动交互式 TUI 应用。
@@ -37,9 +40,10 @@ pub fn run_with_config_writer<W: Write>(
     preserve_ansi: bool,
     config: &Config,
 ) -> Result<()> {
-    let model = tui::run_with_options(
+    let model = tui::run_with_runtime_options(
         HeroOptions::default(),
         model_options_from_app_config(config),
+        runtime_options_from_app_config(config),
     )
     .wrap_err("failed to run tui application")?;
     write_terminal_replay_on_exit(writer, &model, preserve_ansi, &config.tui)
@@ -112,6 +116,12 @@ fn model_options_from_config(tui_config: &TuiConfig) -> ModelOptions {
 
 fn model_options_from_app_config(config: &Config) -> ModelOptions {
     model_options_from_configs(&config.tui, Some(&config.runtime))
+}
+
+fn runtime_options_from_app_config(config: &Config) -> RuntimeOptions {
+    RuntimeOptions {
+        acp_sessions: AcpSessionCatalog::from_runtime_config(&config.runtime),
+    }
 }
 
 fn model_options_from_configs(
@@ -208,6 +218,44 @@ mod tests {
         });
 
         assert!(!options.ctrl_c_clears_input);
+    }
+
+    #[test]
+    fn runtime_options_from_app_config_exposes_direct_acp_commands() {
+        let mut agent_servers = std::collections::BTreeMap::new();
+        agent_servers.insert(
+            "local-kimi".to_string(),
+            AgentServerConfig {
+                server_type: AgentServerType::Custom,
+                agent: String::new(),
+                command: "kimi".to_string(),
+                args: vec!["acp".to_string()],
+                env: std::collections::BTreeMap::new(),
+                default_model: None,
+                default_mode: None,
+            },
+        );
+        let config = Config {
+            tui: default_tui_config(),
+            runtime: RuntimeConfig {
+                enabled: true,
+                registry_url: "https://example.test/registry.json".to_string(),
+                install_root: RuntimeInstallRoot::Config,
+                custom_install_dir: std::path::PathBuf::new(),
+                distribution_preference: vec![RuntimeDistribution::Binary],
+                auto_update_check: true,
+                agent_servers,
+            },
+        };
+
+        let options = runtime_options_from_app_config(&config);
+        let command = options
+            .acp_sessions
+            .command("local-kimi")
+            .expect("local-kimi should be directly launchable");
+
+        assert_eq!(command.command, "kimi");
+        assert_eq!(command.args, vec!["acp"]);
     }
 
     #[test]

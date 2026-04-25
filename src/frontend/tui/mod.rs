@@ -36,7 +36,9 @@ pub use hero::{
     write_hero_to,
 };
 pub use model::{Model, ModelOptions};
-pub use runner::{run, run_with_options, run_with_style_mode};
+pub use runner::{
+    RuntimeOptions, run, run_with_options, run_with_runtime_options, run_with_style_mode,
+};
 pub use sender::Sender;
 pub use status_line::StatusLineItem;
 pub use style_mode::StyleMode;

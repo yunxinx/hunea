@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::{
-    Model,
+    AppEffect, Model,
     selection::SelectableLineRange,
     status_line::truncate_display_width_with_ellipsis,
     theme::{primary_text_style, secondary_text_style, tertiary_text_style},
@@ -90,42 +90,35 @@ impl Model {
         }
     }
 
-    pub(crate) fn handle_command_panel_key(&mut self, key: KeyEvent) -> bool {
-        let Some(state) = self.current_command_panel_state() else {
-            return false;
-        };
+    pub(crate) fn handle_command_panel_key(&mut self, key: KeyEvent) -> Option<Option<AppEffect>> {
+        let state = self.current_command_panel_state()?;
 
         match key.code {
             KeyCode::Up if key.modifiers.is_empty() => {
                 if state.items.len() <= 1 {
-                    return false;
+                    return None;
                 }
                 self.move_command_panel_selection(-1);
-                true
+                Some(None)
             }
             KeyCode::Down if key.modifiers.is_empty() => {
                 if state.items.len() <= 1 {
-                    return false;
+                    return None;
                 }
                 self.move_command_panel_selection(1);
-                true
+                Some(None)
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
-                let Some(item) = state.items.get(state.selected) else {
-                    return false;
-                };
+                let item = state.items.get(state.selected)?;
                 self.complete_command_panel_selection(item.name.as_str());
-                true
+                Some(None)
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
-                let Some(item) = state.items.get(state.selected).cloned() else {
-                    return false;
-                };
-                self.execute_command_panel_item(item);
-                true
+                let item = state.items.get(state.selected).cloned()?;
+                Some(self.execute_command_panel_item(item))
             }
-            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => false,
-            _ => false,
+            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => None,
+            _ => None,
         }
     }
 
@@ -349,12 +342,21 @@ impl Model {
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
     }
 
-    fn execute_command_panel_item(&mut self, item: CommandPanelItem) {
+    fn execute_command_panel_item(&mut self, item: CommandPanelItem) -> Option<AppEffect> {
         match item.action {
-            CommandPanelAction::Exit => self.mark_quitting(),
-            CommandPanelAction::OpenAcpPicker => self.open_acp_picker(),
-            CommandPanelAction::ShowAcpMissingConfig => self.show_acp_missing_config(),
-            CommandPanelAction::SelectAcp { agent_id } => self.select_acp_agent(agent_id),
+            CommandPanelAction::Exit => {
+                self.mark_quitting();
+                None
+            }
+            CommandPanelAction::OpenAcpPicker => {
+                self.open_acp_picker();
+                None
+            }
+            CommandPanelAction::ShowAcpMissingConfig => {
+                self.show_acp_missing_config();
+                None
+            }
+            CommandPanelAction::SelectAcp { agent_id } => Some(self.select_acp_agent(agent_id)),
         }
     }
 
@@ -373,7 +375,7 @@ impl Model {
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
     }
 
-    fn select_acp_agent(&mut self, agent_id: String) {
+    fn select_acp_agent(&mut self, agent_id: String) -> AppEffect {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
@@ -384,6 +386,7 @@ impl Model {
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
         self.show_transient_status_notice(&format!("ACP agent selected: {agent_id}"));
+        AppEffect::StartAcpSession { agent_id }
     }
 
     fn filter_command_panel_items(&self, query: &str) -> Vec<CommandPanelItem> {

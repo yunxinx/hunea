@@ -17,7 +17,8 @@ impl Model {
     pub(crate) fn preserved_viewport_state_for_transcript_refresh(
         &mut self,
     ) -> Option<ViewportState> {
-        self.manual_document_scroll
+        self.document_runtime
+            .manual_scroll
             .then(|| self.current_document_viewport_state())
     }
 
@@ -25,9 +26,9 @@ impl Model {
         let layout = self.build_document_layout();
         self.capture_viewport_state_with_layout(
             &layout,
-            self.document_viewport_y,
-            self.follow_bottom,
-            self.manual_document_scroll,
+            self.document_runtime.viewport_y,
+            self.document_runtime.follow_bottom,
+            self.document_runtime.manual_scroll,
         )
     }
 
@@ -43,8 +44,8 @@ impl Model {
             return;
         }
 
-        let current_offset =
-            self.clamp_document_viewport_offset(self.document_viewport_y, layout.line_count());
+        let current_offset = self
+            .clamp_document_viewport_offset(self.document_runtime.viewport_y, layout.line_count());
         let next_offset =
             self.clamp_document_viewport_offset_signed(current_offset, lines, layout.line_count());
         if next_offset == current_offset {
@@ -90,13 +91,13 @@ impl Model {
 
     pub(crate) fn sync_document_viewport_for_composer_cursor(&mut self) {
         let layout = self.build_document_layout();
-        if self.follow_bottom {
+        if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
             return;
         }
 
-        let mut current_offset =
-            self.clamp_document_viewport_offset(self.document_viewport_y, layout.line_count());
+        let mut current_offset = self
+            .clamp_document_viewport_offset(self.document_runtime.viewport_y, layout.line_count());
         let viewport_height = self.document_viewport_height();
         if viewport_height == 0 {
             self.apply_document_viewport_position(&layout, 0, 0, false, false);
@@ -132,20 +133,20 @@ impl Model {
                 0,
                 0,
                 false,
-                self.manual_document_scroll,
+                self.document_runtime.manual_scroll,
             );
             return;
         }
 
-        let document_offset =
-            self.clamp_document_viewport_offset(self.document_viewport_y, layout.line_count());
+        let document_offset = self
+            .clamp_document_viewport_offset(self.document_runtime.viewport_y, layout.line_count());
         let composer_offset = self.current_composer_viewport_offset(&layout, document_offset);
         self.apply_document_viewport_position(
             &layout,
             document_offset,
             composer_offset,
-            self.follow_bottom,
-            self.manual_document_scroll,
+            self.document_runtime.follow_bottom,
+            self.document_runtime.manual_scroll,
         );
     }
 
@@ -220,15 +221,15 @@ impl Model {
         old_column: usize,
     ) {
         if self.composer.value() != old_value {
-            if self.selection.is_active() {
+            if self.selection_runtime.selection.is_active() {
                 self.invalidate_selection_for_reflow();
             }
-            if self.manual_document_scroll {
+            if self.document_runtime.manual_scroll {
                 self.restore_from_manual_document_scroll();
                 return;
             }
 
-            if self.follow_bottom {
+            if self.document_runtime.follow_bottom {
                 self.sync_document_viewport_to_bottom();
                 return;
             }
@@ -238,8 +239,8 @@ impl Model {
         }
 
         if self.composer.line() != old_line || self.composer.column() != old_column {
-            self.follow_bottom = self.composer_at_bottom_follow_anchor();
-            if self.follow_bottom {
+            self.document_runtime.follow_bottom = self.composer_at_bottom_follow_anchor();
+            if self.document_runtime.follow_bottom {
                 self.sync_document_viewport_to_bottom();
                 return;
             }
@@ -248,12 +249,12 @@ impl Model {
             return;
         }
 
-        if self.follow_bottom {
+        if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
             return;
         }
 
-        if self.manual_document_scroll {
+        if self.document_runtime.manual_scroll {
             self.sync_document_viewport_preserving_position();
             return;
         }
@@ -265,20 +266,20 @@ impl Model {
         &mut self,
         preserved_viewport_state: Option<ViewportState>,
     ) {
-        if self.follow_bottom {
+        if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
             return;
         }
 
         if let Some(state) = preserved_viewport_state.as_ref() {
             self.sync_document_viewport_for_viewport_state(state);
-            if self.manual_document_scroll {
+            if self.document_runtime.manual_scroll {
                 self.complete_manual_document_scroll_if_restored();
             }
             return;
         }
 
-        if self.manual_document_scroll {
+        if self.document_runtime.manual_scroll {
             self.sync_document_viewport_preserving_position();
             self.complete_manual_document_scroll_if_restored();
             return;
@@ -357,11 +358,11 @@ impl Model {
     ) {
         let document_offset =
             self.clamp_document_viewport_offset(document_offset, layout.line_count());
-        self.document_viewport_y = document_offset;
+        self.document_runtime.viewport_y = document_offset;
         self.composer.set_viewport_offset(composer_offset);
-        self.follow_bottom = follow_bottom;
-        self.manual_document_scroll = manual_scroll;
-        self.document_viewport_state = self.capture_viewport_state_with_layout(
+        self.document_runtime.follow_bottom = follow_bottom;
+        self.document_runtime.manual_scroll = manual_scroll;
+        self.document_runtime.viewport_state = self.capture_viewport_state_with_layout(
             layout,
             document_offset,
             follow_bottom,

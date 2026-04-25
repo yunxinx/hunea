@@ -42,21 +42,22 @@ impl ManualScrollRestoreState {
 
 impl Model {
     pub(crate) fn clear_manual_document_scroll_restore_target(&mut self) {
-        self.manual_scroll_restore.clear();
+        self.document_runtime.restore.clear();
     }
 
     pub(crate) fn start_manual_document_scroll_if_needed(&mut self) {
-        if self.manual_document_scroll {
+        if self.document_runtime.manual_scroll {
             return;
         }
 
-        if self.follow_bottom {
-            self.manual_scroll_restore.track_bottom_follow();
+        if self.document_runtime.follow_bottom {
+            self.document_runtime.restore.track_bottom_follow();
             return;
         }
 
         let viewport_state = self.current_document_viewport_state();
-        self.manual_scroll_restore
+        self.document_runtime
+            .restore
             .track_composer_cursor(Some(viewport_state));
     }
 
@@ -73,13 +74,13 @@ impl Model {
     }
 
     pub(crate) fn complete_manual_document_scroll_if_restored(&mut self) {
-        if !self.manual_document_scroll || !self.manual_scroll_restore.is_pending() {
+        if !self.document_runtime.manual_scroll || !self.document_runtime.restore.is_pending() {
             return;
         }
 
         let layout = self.build_document_layout();
         let offsets = self.restore_offsets(&layout);
-        if self.document_viewport_y != offsets.document_offset
+        if self.document_runtime.viewport_y != offsets.document_offset
             || self.composer.viewport_offset() != offsets.composer_offset
         {
             return;
@@ -153,7 +154,7 @@ impl Model {
     }
 
     fn restore_offsets(&self, layout: &DocumentLayout) -> ManualScrollRestoreOffsets {
-        match self.manual_scroll_restore.target() {
+        match self.document_runtime.restore.target() {
             ManualDocumentScrollRestoreTarget::BottomFollow => {
                 let (document_offset, composer_offset) =
                     self.bottom_follow_viewport_offsets(layout);
@@ -161,7 +162,8 @@ impl Model {
             }
             _ => {
                 let document_offset = self
-                    .manual_scroll_restore
+                    .document_runtime
+                    .restore
                     .viewport_state()
                     .resolve_offset(layout, self.document_viewport_height());
                 if self.document_offset_keeps_cursor_visible(layout, document_offset) {
@@ -182,7 +184,7 @@ impl Model {
     }
 
     fn edit_restore_offsets(&self, layout: &DocumentLayout) -> ManualScrollRestoreOffsets {
-        match self.manual_scroll_restore.target() {
+        match self.document_runtime.restore.target() {
             ManualDocumentScrollRestoreTarget::BottomFollow => {
                 let (document_offset, composer_offset) =
                     self.bottom_follow_viewport_offsets(layout);

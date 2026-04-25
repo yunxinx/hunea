@@ -124,7 +124,9 @@ impl Model {
     }
 
     pub(crate) fn dismiss_external_editor_helper(&mut self, token: usize) {
-        if !self.external_editor_helper_visible || token != self.external_editor_helper_token {
+        if !self.notice_state.external_editor_helper_visible
+            || token != self.notice_state.external_editor_helper_token
+        {
             return;
         }
 
@@ -132,7 +134,8 @@ impl Model {
     }
 
     pub(crate) fn current_external_editor_helper_text(&self) -> String {
-        if !self.external_editor_helper_visible || self.external_editor_hint.is_empty() {
+        if !self.notice_state.external_editor_helper_visible || self.external_editor_hint.is_empty()
+        {
             return String::new();
         }
 
@@ -151,39 +154,41 @@ impl Model {
     }
 
     fn show_external_editor_helper(&mut self) {
-        self.external_editor_helper_token += 1;
-        self.external_editor_helper_deadline = Some(Instant::now() + EXTERNAL_EDITOR_HELPER_WINDOW);
+        self.notice_state.external_editor_helper_token += 1;
+        self.notice_state.external_editor_helper_deadline =
+            Some(Instant::now() + EXTERNAL_EDITOR_HELPER_WINDOW);
         self.set_external_editor_helper_visible(true);
     }
 
     fn refresh_external_editor_helper_deadline(&mut self) {
-        if !self.external_editor_helper_visible {
+        if !self.notice_state.external_editor_helper_visible {
             return;
         }
 
-        self.external_editor_helper_deadline = Some(Instant::now() + EXTERNAL_EDITOR_HELPER_WINDOW);
+        self.notice_state.external_editor_helper_deadline =
+            Some(Instant::now() + EXTERNAL_EDITOR_HELPER_WINDOW);
     }
 
     fn set_external_editor_helper_visible(&mut self, visible: bool) {
-        if self.external_editor_helper_visible == visible {
+        if self.notice_state.external_editor_helper_visible == visible {
             if !visible {
-                self.external_editor_helper_deadline = None;
+                self.notice_state.external_editor_helper_deadline = None;
             }
             return;
         }
 
         self.maybe_clear_selection_for_bottom_status_slot_change();
         self.maybe_clear_pending_composer_cursor_click_for_bottom_status_slot_change();
-        let preserved_viewport_state = if self.manual_document_scroll {
+        let preserved_viewport_state = if self.document_runtime.manual_scroll {
             Some(self.current_document_viewport_state())
         } else {
             None
         };
 
-        self.external_editor_helper_visible = visible;
+        self.notice_state.external_editor_helper_visible = visible;
         self.bump_status_line_revision();
         if !visible {
-            self.external_editor_helper_deadline = None;
+            self.notice_state.external_editor_helper_deadline = None;
         }
         self.sync_after_bottom_status_slot_change(preserved_viewport_state);
     }

@@ -58,19 +58,19 @@ impl Model {
     pub(crate) fn document_viewport_line_indices(&self, layout: &DocumentLayout) -> Vec<usize> {
         self.document_viewport_line_indices_for_mode(
             layout,
-            self.document_viewport_state.resolved_offset(),
-            self.document_viewport_state.follow_bottom(),
-            self.document_viewport_state.manual_scroll(),
+            self.document_runtime.viewport_state.resolved_offset(),
+            self.document_runtime.viewport_state.follow_bottom(),
+            self.document_runtime.viewport_state.manual_scroll(),
         )
     }
 
     pub(crate) fn maybe_clear_selection_for_bottom_status_slot_change(&mut self) {
-        if !self.selection.is_active() {
+        if !self.selection_runtime.selection.is_active() {
             return;
         }
 
         let layout = self.build_document_layout();
-        if selection_intersects_status_line(&layout, self.selection) {
+        if selection_intersects_status_line(&layout, self.selection_runtime.selection) {
             self.clear_selection();
         }
     }

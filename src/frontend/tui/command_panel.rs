@@ -406,5 +406,4 @@ fn command_panel_selectable_range(plain_line: &str, width: usize) -> SelectableL
 }
 
 #[cfg(test)]
-#[path = "command_panel_test.rs"]
 mod tests;

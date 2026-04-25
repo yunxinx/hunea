@@ -70,14 +70,16 @@ pub(crate) struct DocumentTailLayoutInput {
 impl Model {
     pub(crate) fn build_document_tail_layout(&mut self) -> Rc<DocumentTailLayout> {
         let key = self.current_document_tail_layout_key();
-        if self.document_tail_layout_cache.valid && self.document_tail_layout_cache.key == key {
+        if self.document_runtime.tail_layout_cache.valid
+            && self.document_runtime.tail_layout_cache.key == key
+        {
             return self.current_document_tail_layout_with_refreshed_cursor();
         }
 
         let tail = Rc::new(compose_document_tail_layout(
             self.current_document_tail_layout_input(),
         ));
-        self.document_tail_layout_cache = DocumentTailLayoutCache {
+        self.document_runtime.tail_layout_cache = DocumentTailLayoutCache {
             key,
             tail: Rc::clone(&tail),
             valid: true,
@@ -104,7 +106,7 @@ impl Model {
     }
 
     fn current_document_tail_layout_with_refreshed_cursor(&mut self) -> Rc<DocumentTailLayout> {
-        let cached = Rc::clone(&self.document_tail_layout_cache.tail);
+        let cached = Rc::clone(&self.document_runtime.tail_layout_cache.tail);
         let Some((cursor_x, composer_cursor_y)) = self.composer_cursor_from_tail(&cached) else {
             return cached;
         };
@@ -121,7 +123,7 @@ impl Model {
             cursor_y,
             ..(*cached).clone()
         });
-        self.document_tail_layout_cache.tail = Rc::clone(&tail);
+        self.document_runtime.tail_layout_cache.tail = Rc::clone(&tail);
         tail
     }
 

@@ -111,7 +111,11 @@ impl Model {
                 self.reset_selection_click();
                 let layout = self.build_document_layout();
                 if self.copy_on_mouse_selection_release
-                    && self.selection.ordered_points(&layout).is_some()
+                    && self
+                        .selection_runtime
+                        .selection
+                        .ordered_points(&layout)
+                        .is_some()
                 {
                     return self.request_copy_selection();
                 }
@@ -129,23 +133,27 @@ impl Model {
             return None;
         }
 
-        if button != MouseButton::Left || !self.selection.is_active() {
+        if button != MouseButton::Left || !self.selection_runtime.selection.is_active() {
             return None;
         }
 
-        let was_dragging = self.selection.is_dragging();
+        let was_dragging = self.selection_runtime.selection.is_dragging();
         self.stop_selection_auto_scroll();
         if was_dragging {
             if let Some(point) = self.selection_point_for_drag_mouse(column, row) {
                 self.finish_selection(point);
             } else {
-                self.selection.stop_drag();
+                self.selection_runtime.selection.stop_drag();
             }
         }
 
         let layout = self.build_document_layout();
-        let completed_drag_selection =
-            was_dragging && self.selection.ordered_points(&layout).is_some();
+        let completed_drag_selection = was_dragging
+            && self
+                .selection_runtime
+                .selection
+                .ordered_points(&layout)
+                .is_some();
         if completed_drag_selection {
             self.reset_selection_click();
         }
@@ -220,7 +228,7 @@ impl Model {
             return None;
         }
 
-        if !self.selection.is_dragging() {
+        if !self.selection_runtime.selection.is_dragging() {
             return None;
         }
 
@@ -232,28 +240,28 @@ impl Model {
     }
 
     pub(crate) fn handle_selection_auto_scroll_tick(&mut self, token: usize) {
-        if !self.selection.is_dragging()
-            || self.selection_auto_scroll_direction == AutoScrollDirection::None
-            || token != self.selection_auto_scroll_token
+        if !self.selection_runtime.selection.is_dragging()
+            || self.selection_runtime.auto_scroll_direction == AutoScrollDirection::None
+            || token != self.selection_runtime.auto_scroll_token
         {
             return;
         }
 
-        let previous_viewport_y = self.document_viewport_y;
-        match self.selection_auto_scroll_direction {
+        let previous_viewport_y = self.document_runtime.viewport_y;
+        match self.selection_runtime.auto_scroll_direction {
             AutoScrollDirection::Down => self.scroll_document_by(1),
             AutoScrollDirection::Up => self.scroll_document_by(-1),
             AutoScrollDirection::None => {}
         }
 
-        if self.document_viewport_y == previous_viewport_y {
+        if self.document_runtime.viewport_y == previous_viewport_y {
             self.stop_selection_auto_scroll();
             return;
         }
 
         if let Some(point) = self.selection_point_for_drag_mouse(
-            self.selection_auto_scroll_mouse.column(),
-            self.selection_auto_scroll_mouse.row(),
+            self.selection_runtime.auto_scroll_mouse.column(),
+            self.selection_runtime.auto_scroll_mouse.row(),
         ) {
             self.update_selection_focus(point);
         }

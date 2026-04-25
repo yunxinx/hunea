@@ -1,3 +1,8 @@
+#[cfg(not(feature = "bench-support"))]
+#[doc(hidden)]
+#[allow(dead_code)]
+mod benchmark;
+#[cfg(feature = "bench-support")]
 #[doc(hidden)]
 pub mod benchmark;
 
@@ -10,7 +15,7 @@ mod external_editor;
 mod hero;
 mod hero_item;
 mod history_scroll_indicator;
-mod message_item;
+mod message;
 mod model;
 mod runner;
 mod selection;

@@ -3,9 +3,14 @@ name = "lumos"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+bench-support = []
+
 [[bench]]
 name = "frontend_tui"
 harness = false
+required-features = ["bench-support"]
 
 [dependencies]
 color-eyre = "0.6.5"

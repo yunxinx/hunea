@@ -6,7 +6,7 @@ use std::{
 
 use ratatui::text::Line;
 
-use crate::frontend::tui::message_item::UserMessageRenderProjection;
+use crate::frontend::tui::message::UserMessageRenderProjection;
 use crate::frontend::tui::styled_text::line_to_plain_text;
 use crate::frontend::tui::theme::{TerminalPalette, default_palette};
 

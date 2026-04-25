@@ -206,9 +206,9 @@ fn current_document_transcript_snapshot_stays_usable_without_full_render_storage
         .append_message(Sender::Assistant, "alpha\nbeta\ngamma");
     model.sync_transcript_render();
     model.transcript_render = Rc::new(crate::frontend::tui::transcript::RenderResult::default());
-    model.document_transcript_cache = Default::default();
-    model.document_layout_cache = Default::default();
-    model.document_viewport_cache = Default::default();
+    model.document_runtime.transcript_cache = Default::default();
+    model.document_runtime.layout_cache = Default::default();
+    model.document_runtime.viewport_cache = Default::default();
 
     let snapshot = model.current_document_transcript_snapshot();
     let layout = model.build_document_layout();
@@ -587,9 +587,9 @@ fn transcript_line_access_resolves_without_full_render_result() {
         .append_message(Sender::Assistant, "alpha\nbeta");
     model.sync_transcript_render();
     model.transcript_render = Rc::new(crate::frontend::tui::transcript::RenderResult::default());
-    model.document_transcript_cache = Default::default();
-    model.document_layout_cache = Default::default();
-    model.document_viewport_cache = Default::default();
+    model.document_runtime.transcript_cache = Default::default();
+    model.document_runtime.layout_cache = Default::default();
+    model.document_runtime.viewport_cache = Default::default();
 
     let layout = model.build_document_layout();
     let first_line = layout
@@ -685,17 +685,18 @@ fn scroll_document_by_restores_composer_viewport_when_crossing_restore_target() 
     let layout = model.build_document_layout();
     model.apply_document_viewport_position(&layout, 0, 0, false, true);
     model
-        .manual_scroll_restore
+        .document_runtime
+        .restore
         .track_composer_cursor(Some(restore_viewport_state));
 
     model.scroll_document_by(Model::document_mouse_wheel_delta());
 
-    assert!(!model.follow_bottom);
-    assert!(!model.manual_document_scroll);
-    assert_eq!(model.document_viewport_y, 2);
+    assert!(!model.document_runtime.follow_bottom);
+    assert!(!model.document_runtime.manual_scroll);
+    assert_eq!(model.document_runtime.viewport_y, 2);
     assert_eq!(model.composer.viewport_offset(), 2);
     assert_eq!(
-        model.manual_scroll_restore.target(),
+        model.document_runtime.restore.target(),
         ManualDocumentScrollRestoreTarget::None
     );
 }
@@ -707,8 +708,8 @@ fn moving_cursor_back_to_draft_end_restores_bottom_follow() {
     model.sync_composer_height();
     model.composer_mut().handle_key(KeyEvent::from(KeyCode::Up));
     model.composer_mut().handle_key(KeyEvent::from(KeyCode::Up));
-    model.follow_bottom = false;
-    model.manual_document_scroll = false;
+    model.document_runtime.follow_bottom = false;
+    model.document_runtime.manual_scroll = false;
     model.sync_document_viewport_for_composer_cursor();
 
     let old_value = model.composer_text().to_string();
@@ -723,9 +724,9 @@ fn moving_cursor_back_to_draft_end_restores_bottom_follow() {
 
     model.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
 
-    assert!(model.follow_bottom);
-    assert!(!model.manual_document_scroll);
-    assert_eq!(model.document_viewport_y, expected_document_offset);
+    assert!(model.document_runtime.follow_bottom);
+    assert!(!model.document_runtime.manual_scroll);
+    assert_eq!(model.document_runtime.viewport_y, expected_document_offset);
     assert_eq!(model.composer.viewport_offset(), expected_composer_offset);
 }
 
@@ -741,10 +742,10 @@ fn transcript_refresh_keeps_manual_scrollback_before_restore_target() {
 
     let layout = model.build_document_layout();
     model.apply_document_viewport_position(&layout, 0, 0, false, true);
-    model.manual_scroll_restore.track_bottom_follow();
+    model.document_runtime.restore.track_bottom_follow();
 
     let preserved_viewport_state = model.current_document_viewport_state();
-    let original_document_offset = model.document_viewport_y;
+    let original_document_offset = model.document_runtime.viewport_y;
     let original_composer_offset = model.composer.viewport_offset();
 
     model
@@ -753,12 +754,12 @@ fn transcript_refresh_keeps_manual_scrollback_before_restore_target() {
     model.sync_transcript_render();
     model.sync_document_viewport_after_transcript_refresh(Some(preserved_viewport_state));
 
-    assert!(!model.follow_bottom);
-    assert!(model.manual_document_scroll);
-    assert_eq!(model.document_viewport_y, original_document_offset);
+    assert!(!model.document_runtime.follow_bottom);
+    assert!(model.document_runtime.manual_scroll);
+    assert_eq!(model.document_runtime.viewport_y, original_document_offset);
     assert_eq!(model.composer.viewport_offset(), original_composer_offset);
     assert_eq!(
-        model.manual_scroll_restore.target(),
+        model.document_runtime.restore.target(),
         ManualDocumentScrollRestoreTarget::BottomFollow
     );
 }
@@ -777,8 +778,8 @@ fn transcript_refresh_preserves_viewport_state_only_for_manual_scroll_mode() {
         .set_text_for_test("draft line one\ndraft line two\ndraft line three");
     model.composer_mut().move_to_begin_for_test();
     model.sync_composer_height();
-    model.follow_bottom = false;
-    model.manual_document_scroll = false;
+    model.document_runtime.follow_bottom = false;
+    model.document_runtime.manual_scroll = false;
     model.sync_document_viewport_for_composer_cursor();
 
     assert!(

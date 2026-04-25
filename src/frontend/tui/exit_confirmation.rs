@@ -9,30 +9,31 @@ pub(crate) const EXIT_CONFIRMATION_WINDOW: Duration = Duration::from_secs(1);
 
 impl Model {
     pub(crate) fn current_status_notice_text(&self) -> &str {
-        &self.status_notice_text
+        &self.notice_state.status_text
     }
 
     pub(crate) fn show_exit_confirmation(&mut self) {
-        self.exit_confirmation_deadline = Some(Instant::now() + EXIT_CONFIRMATION_WINDOW);
+        self.notice_state.exit_confirmation_deadline =
+            Some(Instant::now() + EXIT_CONFIRMATION_WINDOW);
         self.show_status_notice(EXIT_CONFIRMATION_PROMPT);
     }
 
     pub(crate) fn cancel_exit_confirmation(&mut self) {
-        if self.exit_confirmation_deadline.is_none() {
+        if self.notice_state.exit_confirmation_deadline.is_none() {
             return;
         }
 
-        self.exit_confirmation_deadline = None;
-        if self.status_notice_text != EXIT_CONFIRMATION_PROMPT {
+        self.notice_state.exit_confirmation_deadline = None;
+        if self.notice_state.status_text != EXIT_CONFIRMATION_PROMPT {
             return;
         }
 
-        self.status_notice_deadline = None;
+        self.notice_state.status_deadline = None;
         self.set_status_notice_text(String::new());
     }
 
     pub(crate) fn dismiss_status_notice(&mut self, token: usize) {
-        if self.status_notice_text.is_empty() || token != self.status_notice_token {
+        if self.notice_state.status_text.is_empty() || token != self.notice_state.status_token {
             return;
         }
 
@@ -40,18 +41,19 @@ impl Model {
     }
 
     pub(crate) fn clear_status_notice(&mut self) {
-        self.exit_confirmation_deadline = None;
-        self.status_notice_deadline = None;
+        self.notice_state.exit_confirmation_deadline = None;
+        self.notice_state.status_deadline = None;
         self.set_status_notice_text(String::new());
     }
 
     pub(crate) fn exit_confirmation_active(&self, now: Instant) -> bool {
-        self.exit_confirmation_deadline
+        self.notice_state
+            .exit_confirmation_deadline
             .is_some_and(|deadline| now <= deadline)
     }
 
     pub(crate) fn show_transient_status_notice(&mut self, text: &str) {
-        self.exit_confirmation_deadline = None;
+        self.notice_state.exit_confirmation_deadline = None;
         self.show_status_notice(text);
     }
 
@@ -99,12 +101,12 @@ impl Model {
         preserved_viewport_state: Option<ViewportState>,
     ) {
         self.sync_composer_height();
-        if self.follow_bottom {
+        if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
             return;
         }
 
-        if self.manual_document_scroll {
+        if self.document_runtime.manual_scroll {
             if let Some(state) = preserved_viewport_state.as_ref() {
                 self.sync_document_viewport_for_viewport_state(state);
             } else {
@@ -118,25 +120,25 @@ impl Model {
     }
 
     fn show_status_notice(&mut self, text: &str) {
-        self.status_notice_token += 1;
-        self.status_notice_deadline = Some(Instant::now() + EXIT_CONFIRMATION_WINDOW);
+        self.notice_state.status_token += 1;
+        self.notice_state.status_deadline = Some(Instant::now() + EXIT_CONFIRMATION_WINDOW);
         self.set_status_notice_text(text.to_string());
     }
 
     fn set_status_notice_text(&mut self, text: String) {
-        if self.status_notice_text == text {
+        if self.notice_state.status_text == text {
             return;
         }
 
         self.maybe_clear_selection_for_bottom_status_slot_change();
         self.maybe_clear_pending_composer_cursor_click_for_bottom_status_slot_change();
-        let preserved_viewport_state = if self.manual_document_scroll {
+        let preserved_viewport_state = if self.document_runtime.manual_scroll {
             Some(self.current_document_viewport_state())
         } else {
             None
         };
 
-        self.status_notice_text = text;
+        self.notice_state.status_text = text;
         self.bump_status_line_revision();
         self.sync_after_bottom_status_slot_change(preserved_viewport_state);
     }

@@ -21,27 +21,28 @@ pub(crate) struct DocumentLayoutInput {
 
 impl Model {
     pub(crate) fn invalidate_document_viewport_cache(&mut self) {
-        self.document_viewport_cache.valid = false;
+        self.document_runtime.viewport_cache.valid = false;
     }
 
     #[cfg(test)]
     pub(crate) fn invalidate_document_caches_for_test(&mut self) {
-        self.document_tail_layout_cache.valid = false;
-        self.document_layout_cache.valid = false;
-        self.document_viewport_cache.valid = false;
+        self.document_runtime.tail_layout_cache.valid = false;
+        self.document_runtime.layout_cache.valid = false;
+        self.document_runtime.viewport_cache.valid = false;
     }
 
     pub(crate) fn build_document_layout(&mut self) -> Rc<DocumentLayout> {
         self.ensure_current_transcript_window_exact();
         let key = self.current_document_layout_key();
-        if self.document_layout_cache.valid && self.document_layout_cache.key == key {
-            return Rc::clone(&self.document_layout_cache.layout);
+        if self.document_runtime.layout_cache.valid && self.document_runtime.layout_cache.key == key
+        {
+            return Rc::clone(&self.document_runtime.layout_cache.layout);
         }
 
         let layout = Rc::new(compose_document_layout(
             self.current_document_layout_input(),
         ));
-        self.document_transcript_cache = DocumentTranscriptCache {
+        self.document_runtime.transcript_cache = DocumentTranscriptCache {
             key: DocumentTranscriptKey {
                 transcript_render_version: self.transcript_render_version,
                 document_width: self.width,
@@ -49,7 +50,7 @@ impl Model {
             snapshot: Rc::clone(&layout.transcript),
             valid: true,
         };
-        self.document_layout_cache = DocumentLayoutCache {
+        self.document_runtime.layout_cache = DocumentLayoutCache {
             key,
             layout: Rc::clone(&layout),
             valid: true,
@@ -61,22 +62,24 @@ impl Model {
         &mut self,
         layout: &DocumentLayout,
     ) -> Rc<DocumentViewport> {
-        let uses_bottom_follow = self.document_viewport_state.follow_bottom()
-            && !self.document_viewport_state.manual_scroll();
+        let uses_bottom_follow = self.document_runtime.viewport_state.follow_bottom()
+            && !self.document_runtime.viewport_state.manual_scroll();
         let key = DocumentViewportKey {
             layout_key: self.current_document_layout_key(),
-            offset: self.document_viewport_state.resolved_offset(),
+            offset: self.document_runtime.viewport_state.resolved_offset(),
             height: self.document_viewport_height(),
             bottom_follow: uses_bottom_follow,
-            selection_version: self.selection_version,
+            selection_version: self.selection_runtime.version,
         };
-        if self.document_viewport_cache.valid && self.document_viewport_cache.key == key {
-            return Rc::clone(&self.document_viewport_cache.viewport);
+        if self.document_runtime.viewport_cache.valid
+            && self.document_runtime.viewport_cache.key == key
+        {
+            return Rc::clone(&self.document_runtime.viewport_cache.viewport);
         }
 
         let mut viewport = compose_document_viewport(
             layout,
-            self.document_viewport_state.resolved_offset(),
+            self.document_runtime.viewport_state.resolved_offset(),
             self.document_viewport_height(),
         );
         if uses_bottom_follow {
@@ -86,10 +89,10 @@ impl Model {
                 self.bottom_follow_presentation(layout),
             );
         }
-        apply_selection_to_viewport(&mut viewport, layout, self.selection);
+        apply_selection_to_viewport(&mut viewport, layout, self.selection_runtime.selection);
 
         let viewport = Rc::new(viewport);
-        self.document_viewport_cache = DocumentViewportCache {
+        self.document_runtime.viewport_cache = DocumentViewportCache {
             key,
             viewport: Rc::clone(&viewport),
             valid: true,
@@ -375,8 +378,10 @@ impl Model {
             transcript_render_version: self.transcript_render_version,
             document_width: self.width,
         };
-        if self.document_transcript_cache.valid && self.document_transcript_cache.key == key {
-            return Rc::clone(&self.document_transcript_cache.snapshot);
+        if self.document_runtime.transcript_cache.valid
+            && self.document_runtime.transcript_cache.key == key
+        {
+            return Rc::clone(&self.document_runtime.transcript_cache.snapshot);
         }
 
         self.transcript.begin_recent_render_block_batch();
@@ -400,7 +405,7 @@ impl Model {
             warmed_item_block_cache,
             ..self.transient_document_transcript_snapshot(index)
         });
-        self.document_transcript_cache = DocumentTranscriptCache {
+        self.document_runtime.transcript_cache = DocumentTranscriptCache {
             key,
             snapshot: Rc::clone(&snapshot),
             valid: true,

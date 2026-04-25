@@ -86,16 +86,16 @@ impl Model {
             }
             AppEvent::MouseWheel { delta_lines } => {
                 self.cancel_exit_confirmation();
-                let before_document_viewport_y = self.document_viewport_y;
+                let before_document_viewport_y = self.document_runtime.viewport_y;
                 let before_composer_viewport_y = self.composer.viewport_offset();
-                let before_follow_bottom = self.follow_bottom;
-                let before_manual_document_scroll = self.manual_document_scroll;
+                let before_follow_bottom = self.document_runtime.follow_bottom;
+                let before_manual_document_scroll = self.document_runtime.manual_scroll;
                 let had_pending_click = self.pending_composer_cursor_click.active;
                 self.scroll_document_by(delta_lines);
-                if self.document_viewport_y != before_document_viewport_y
+                if self.document_runtime.viewport_y != before_document_viewport_y
                     || self.composer.viewport_offset() != before_composer_viewport_y
-                    || self.follow_bottom != before_follow_bottom
-                    || self.manual_document_scroll != before_manual_document_scroll
+                    || self.document_runtime.follow_bottom != before_follow_bottom
+                    || self.document_runtime.manual_scroll != before_manual_document_scroll
                 {
                     self.clear_pending_composer_cursor_click();
                     if had_pending_click {
@@ -224,7 +224,9 @@ impl Model {
             return self.handle_composer_insert_newline();
         }
 
-        if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) && self.manual_document_scroll {
+        if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+            && self.document_runtime.manual_scroll
+        {
             return None;
         }
 
@@ -235,12 +237,12 @@ impl Model {
             let direction = if key.code == KeyCode::PageUp { -1 } else { 1 };
             if self.composer_mut().handle_page_key(direction) {
                 self.sync_composer_height();
-                self.follow_bottom = self.composer.viewport_offset()
+                self.document_runtime.follow_bottom = self.composer.viewport_offset()
                     == self.composer.bottom_viewport_offset()
                     && self.composer_at_bottom_follow_anchor();
-                self.manual_document_scroll = false;
+                self.document_runtime.manual_scroll = false;
                 self.clear_manual_document_scroll_restore_target();
-                if self.follow_bottom {
+                if self.document_runtime.follow_bottom {
                     self.sync_document_viewport_to_bottom();
                 } else {
                     self.sync_document_viewport_for_composer_page();
@@ -324,7 +326,7 @@ impl Model {
         self.sync_command_panel_navigation();
         self.sync_external_editor_helper_after_draft_change(&content);
         self.sync_composer_height();
-        self.follow_bottom = true;
+        self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         None
     }
@@ -335,7 +337,7 @@ impl Model {
         let previous_width = self.width;
         let had_pending_click = self.pending_composer_cursor_click.active;
 
-        if self.selection.is_active() {
+        if self.selection_runtime.selection.is_active() {
             self.invalidate_selection_for_reflow();
         }
         self.set_window(width, height);

@@ -22,18 +22,18 @@ pub(crate) struct HistoryScrollIndicatorBounds {
 
 impl Model {
     pub(crate) fn show_history_scroll_indicator(&mut self) {
-        if self.follow_bottom || !self.manual_document_scroll {
+        if self.document_runtime.follow_bottom || !self.document_runtime.manual_scroll {
             self.clear_history_scroll_indicator();
             return;
         }
 
-        self.history_scroll_indicator_token += 1;
-        self.history_scroll_indicator_deadline =
+        self.notice_state.history_scroll_indicator_token += 1;
+        self.notice_state.history_scroll_indicator_deadline =
             Some(Instant::now() + HISTORY_SCROLL_INDICATOR_WINDOW);
     }
 
     pub(crate) fn dismiss_history_scroll_indicator(&mut self, token: usize) {
-        if token != self.history_scroll_indicator_token {
+        if token != self.notice_state.history_scroll_indicator_token {
             return;
         }
 
@@ -41,15 +41,16 @@ impl Model {
     }
 
     pub(crate) fn clear_history_scroll_indicator(&mut self) {
-        self.history_scroll_indicator_deadline = None;
+        self.notice_state.history_scroll_indicator_deadline = None;
     }
 
     pub(crate) fn history_scroll_indicator_visible(&self) -> bool {
-        if self.follow_bottom || !self.manual_document_scroll {
+        if self.document_runtime.follow_bottom || !self.document_runtime.manual_scroll {
             return false;
         }
 
-        self.history_scroll_indicator_deadline
+        self.notice_state
+            .history_scroll_indicator_deadline
             .is_some_and(|deadline| Instant::now() < deadline)
     }
 
@@ -230,7 +231,7 @@ mod tests {
         model.sync_document_viewport_to_bottom();
         model.scroll_document_by(-3);
         model.show_history_scroll_indicator();
-        let token = model.history_scroll_indicator_token;
+        let token = model.notice_state.history_scroll_indicator_token;
 
         model.dismiss_history_scroll_indicator(token.saturating_sub(1));
 

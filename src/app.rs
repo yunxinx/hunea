@@ -28,7 +28,7 @@ pub fn run_with_writer<W: Write>(
         model_options_from_config(tui_config),
     )
     .wrap_err("failed to run tui application")?;
-    write_terminal_replay_with_context(writer, &model, preserve_ansi)
+    write_terminal_replay_on_exit(writer, &model, preserve_ansi, tui_config)
 }
 
 /// `write_terminal_replay` 将 terminal replay 内容输出到目标 writer。
@@ -69,6 +69,19 @@ pub fn write_terminal_replay_with_context<W: Write>(
 ) -> Result<()> {
     write_terminal_replay_with_mode(writer, model, preserve_ansi)
         .wrap_err("failed to write terminal replay")
+}
+
+fn write_terminal_replay_on_exit<W: Write>(
+    writer: &mut W,
+    model: &Model,
+    preserve_ansi: bool,
+    tui_config: &TuiConfig,
+) -> Result<()> {
+    if !tui_config.print_transcript_on_exit {
+        return Ok(());
+    }
+
+    write_terminal_replay_with_context(writer, model, preserve_ansi)
 }
 
 fn style_mode_from_config(style: UserInputStyle) -> StyleMode {
@@ -119,6 +132,7 @@ mod tests {
             copy_on_mouse_selection_release: true,
             swap_enter_and_send: false,
             ctrl_c_clears_input: true,
+            print_transcript_on_exit: false,
         });
 
         assert!(options.copy_on_mouse_selection_release);
@@ -134,6 +148,7 @@ mod tests {
             copy_on_mouse_selection_release: false,
             swap_enter_and_send: true,
             ctrl_c_clears_input: true,
+            print_transcript_on_exit: false,
         });
 
         assert!(options.swap_enter_and_send);
@@ -149,8 +164,60 @@ mod tests {
             copy_on_mouse_selection_release: false,
             swap_enter_and_send: false,
             ctrl_c_clears_input: false,
+            print_transcript_on_exit: false,
         });
 
         assert!(!options.ctrl_c_clears_input);
+    }
+
+    #[test]
+    fn exit_replay_skips_writer_when_config_disables_transcript_printing() {
+        let model = Model::new(HeroOptions::default());
+        let config = TuiConfig {
+            user_input_style: UserInputStyle::Cx,
+            status_line: Vec::new(),
+            external_editor: Vec::new(),
+            show_external_editor_helper: true,
+            copy_on_mouse_selection_release: false,
+            swap_enter_and_send: false,
+            ctrl_c_clears_input: true,
+            print_transcript_on_exit: false,
+        };
+
+        write_terminal_replay_on_exit(&mut FailingWriter, &model, false, &config)
+            .expect("disabled terminal replay should not touch the writer");
+    }
+
+    #[test]
+    fn exit_replay_writes_when_config_enables_transcript_printing() {
+        let model = Model::new(HeroOptions::default());
+        let config = TuiConfig {
+            user_input_style: UserInputStyle::Cx,
+            status_line: Vec::new(),
+            external_editor: Vec::new(),
+            show_external_editor_helper: true,
+            copy_on_mouse_selection_release: false,
+            swap_enter_and_send: false,
+            ctrl_c_clears_input: true,
+            print_transcript_on_exit: true,
+        };
+        let mut output = Vec::new();
+
+        write_terminal_replay_on_exit(&mut output, &model, false, &config)
+            .expect("enabled terminal replay should write transcript output");
+
+        assert!(!output.is_empty());
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("writer should not be called"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 }

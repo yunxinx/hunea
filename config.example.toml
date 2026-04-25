@@ -63,3 +63,7 @@ swap_enter_and_send = false
 # 单击 Ctrl+C 是否直接清空草稿。
 # 默认开启；关闭后，Ctrl+C 会恢复为退出确认语义。
 ctrl_c_clears_input = true
+
+# `print_transcript_on_exit` 控制退出 TUI 后，是否把当前对话内容
+# 回放打印到终端 scrollback。
+print_transcript_on_exit = false

@@ -1,6 +1,6 @@
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
-};
+use std::hint::black_box;
+
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use lumos::frontend::tui::{StyleMode, benchmark, theme::default_palette};
 
 fn transcript_benches(c: &mut Criterion) {

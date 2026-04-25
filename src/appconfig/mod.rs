@@ -24,6 +24,7 @@ pub struct TuiConfig {
     pub copy_on_mouse_selection_release: bool,
     pub swap_enter_and_send: bool,
     pub ctrl_c_clears_input: bool,
+    pub print_transcript_on_exit: bool,
 }
 
 /// `UserInputStyle` 表示用户输入区与用户消息的展示模式。
@@ -79,6 +80,7 @@ struct FileTuiConfig {
     copy_on_mouse_selection_release: Option<bool>,
     swap_enter_and_send: Option<bool>,
     ctrl_c_clears_input: Option<bool>,
+    print_transcript_on_exit: Option<bool>,
 }
 
 impl Config {
@@ -92,6 +94,7 @@ impl Config {
                 copy_on_mouse_selection_release: false,
                 swap_enter_and_send: false,
                 ctrl_c_clears_input: true,
+                print_transcript_on_exit: false,
             },
         }
     }
@@ -313,6 +316,10 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
 
     if let Some(ctrl_c_clears_input) = file_config.tui.ctrl_c_clears_input {
         config.tui.ctrl_c_clears_input = ctrl_c_clears_input;
+    }
+
+    if let Some(print_transcript_on_exit) = file_config.tui.print_transcript_on_exit {
+        config.tui.print_transcript_on_exit = print_transcript_on_exit;
     }
 
     Ok(config)

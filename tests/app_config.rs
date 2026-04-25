@@ -141,6 +141,17 @@ fn load_defaults_ctrl_c_clears_input_to_true() {
 }
 
 #[test]
+fn load_defaults_print_transcript_on_exit_to_false() {
+    let working_dir = temp_test_dir("load-default-print-transcript-working");
+    let user_config_dir = temp_test_dir("load-default-print-transcript-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep terminal replay disabled");
+
+    assert!(!config.tui.print_transcript_on_exit);
+}
+
+#[test]
 fn load_accepts_enabling_copy_on_mouse_selection_release() {
     let working_dir = temp_test_dir("load-enable-copy-on-selection-working");
     write_config(
@@ -180,6 +191,20 @@ fn load_accepts_disabling_ctrl_c_clears_input() {
         .expect("ctrl_c_clears_input should accept false");
 
     assert!(!config.tui.ctrl_c_clears_input);
+}
+
+#[test]
+fn load_accepts_enabling_print_transcript_on_exit() {
+    let working_dir = temp_test_dir("load-enable-print-transcript-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nprint_transcript_on_exit = true\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("print_transcript_on_exit should accept true");
+
+    assert!(config.tui.print_transcript_on_exit);
 }
 
 #[test]

@@ -3,8 +3,8 @@ use std::{
     fmt,
     process::Stdio,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
@@ -55,6 +55,10 @@ pub enum AcpSessionEvent {
     PromptStarted {
         agent_id: String,
     },
+    AgentMessageChunk {
+        agent_id: String,
+        content: String,
+    },
     PromptResponse {
         agent_id: String,
         content: String,
@@ -63,6 +67,10 @@ pub enum AcpSessionEvent {
     PromptFailed {
         agent_id: String,
         message: String,
+    },
+    PermissionRequested {
+        agent_id: String,
+        request: AcpPermissionRequest,
     },
     PermissionRequestCancelled {
         agent_id: String,
@@ -86,6 +94,7 @@ pub struct AcpSessionWorker {
     commands: tokio::sync::mpsc::UnboundedSender<AcpWorkerCommand>,
     events: mpsc::Receiver<AcpSessionEvent>,
     thread_handle: Option<thread::JoinHandle<()>>,
+    permissions: AcpPermissionRegistry,
 }
 
 impl AcpSessionWorker {
@@ -94,9 +103,17 @@ impl AcpSessionWorker {
         let agent_id = command.agent_id.clone();
         let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::channel();
+        let permissions = AcpPermissionRegistry::default();
         let thread_agent_id = agent_id.clone();
+        let thread_permissions = permissions.clone();
         let thread_handle = thread::spawn(move || {
-            run_worker_thread(thread_agent_id, command, command_rx, event_tx);
+            run_worker_thread(
+                thread_agent_id,
+                command,
+                command_rx,
+                event_tx,
+                thread_permissions,
+            );
         });
 
         Self {
@@ -104,6 +121,7 @@ impl AcpSessionWorker {
             commands: command_tx,
             events: event_rx,
             thread_handle: Some(thread_handle),
+            permissions,
         }
     }
 
@@ -122,6 +140,15 @@ impl AcpSessionWorker {
     /// `try_recv_event` 非阻塞读取一个 worker 事件。
     pub fn try_recv_event(&self) -> Option<AcpSessionEvent> {
         self.events.try_recv().ok()
+    }
+
+    /// `respond_permission` 把用户选择回传给等待中的 ACP 权限请求。
+    pub fn respond_permission(
+        &self,
+        request_id: &str,
+        option_id: Option<String>,
+    ) -> Result<(), AcpPermissionRespondError> {
+        self.permissions.respond(request_id, option_id)
     }
 
     /// `shutdown` 请求 worker 停止当前 ACP session。
@@ -152,6 +179,94 @@ impl fmt::Display for AcpWorkerSendError {
 }
 
 impl std::error::Error for AcpWorkerSendError {}
+
+/// `AcpPermissionRequest` 是传给 TUI 的 ACP 权限确认请求。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpPermissionRequest {
+    pub request_id: String,
+    pub title: Option<String>,
+    pub options: Vec<AcpPermissionOption>,
+}
+
+/// `AcpPermissionOption` 描述权限确认里用户可选择的一项。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpPermissionOption {
+    pub option_id: String,
+    pub name: String,
+    pub kind: AcpPermissionOptionKind,
+}
+
+/// `AcpPermissionOptionKind` 用于 TUI 选择默认允许/拒绝选项。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcpPermissionOptionKind {
+    AllowOnce,
+    AllowAlways,
+    RejectOnce,
+    RejectAlways,
+    Unknown,
+}
+
+#[derive(Debug, Default, Clone)]
+pub(crate) struct AcpPermissionRegistry {
+    inner: Arc<AcpPermissionRegistryInner>,
+}
+
+#[derive(Debug, Default)]
+struct AcpPermissionRegistryInner {
+    next_id: AtomicUsize,
+    pending: Mutex<BTreeMap<String, tokio::sync::oneshot::Sender<Option<String>>>>,
+}
+
+impl AcpPermissionRegistry {
+    fn register(&self) -> (String, tokio::sync::oneshot::Receiver<Option<String>>) {
+        let id = format!(
+            "permission-{}",
+            self.inner.next_id.fetch_add(1, Ordering::SeqCst)
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .pending
+            .lock()
+            .expect("ACP permission registry lock should not be poisoned")
+            .insert(id.clone(), tx);
+        (id, rx)
+    }
+
+    pub(crate) fn respond(
+        &self,
+        request_id: &str,
+        option_id: Option<String>,
+    ) -> Result<(), AcpPermissionRespondError> {
+        let sender = self
+            .inner
+            .pending
+            .lock()
+            .expect("ACP permission registry lock should not be poisoned")
+            .remove(request_id)
+            .ok_or(AcpPermissionRespondError::NotFound)?;
+        sender
+            .send(option_id)
+            .map_err(|_| AcpPermissionRespondError::Closed)
+    }
+}
+
+/// `AcpPermissionRespondError` 描述权限确认回传失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcpPermissionRespondError {
+    NotFound,
+    Closed,
+}
+
+impl fmt::Display for AcpPermissionRespondError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "ACP permission request not found"),
+            Self::Closed => write!(f, "ACP permission request is closed"),
+        }
+    }
+}
+
+impl std::error::Error for AcpPermissionRespondError {}
 
 /// `AcpHandshakeError` 描述 ACP 协议握手失败。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +313,7 @@ fn run_worker_thread(
     command: AcpSessionCommand,
     command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
+    permissions: AcpPermissionRegistry,
 ) {
     let started = Arc::new(AtomicBool::new(false));
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -220,6 +336,7 @@ fn run_worker_thread(
         command_rx,
         event_tx.clone(),
         Arc::clone(&started),
+        permissions,
     ));
 
     if let Err(message) = result {
@@ -240,6 +357,7 @@ async fn run_agent_command_worker(
     command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
     started: Arc<AtomicBool>,
+    permissions: AcpPermissionRegistry,
 ) -> Result<(), String> {
     use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
@@ -269,6 +387,7 @@ async fn run_agent_command_worker(
         command_rx,
         event_tx,
         started,
+        permissions,
     )
     .await;
 
@@ -282,33 +401,17 @@ async fn run_agent_transport_worker<T>(
     command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
     started: Arc<AtomicBool>,
+    permissions: AcpPermissionRegistry,
 ) -> Result<(), String>
 where
     T: agent_client_protocol::ConnectTo<agent_client_protocol::Client> + 'static,
 {
-    use acp::schema::{
-        Implementation, InitializeRequest, ProtocolVersion, RequestPermissionOutcome,
-        RequestPermissionRequest, RequestPermissionResponse,
-    };
+    use acp::schema::{Implementation, InitializeRequest, ProtocolVersion};
     use agent_client_protocol as acp;
-
-    let permission_agent_id = agent_id.clone();
-    let permission_event_tx = event_tx.clone();
 
     acp::Client
         .builder()
         .name("lumos")
-        .on_receive_request(
-            async move |_request: RequestPermissionRequest, responder, _connection| {
-                let _ = permission_event_tx.send(AcpSessionEvent::PermissionRequestCancelled {
-                    agent_id: permission_agent_id.clone(),
-                });
-                responder.respond(RequestPermissionResponse::new(
-                    RequestPermissionOutcome::Cancelled,
-                ))
-            },
-            acp::on_receive_request!(),
-        )
         .connect_with(transport, async move |connection| {
             let response = connection
                 .send_request(InitializeRequest::new(ProtocolVersion::LATEST).client_info(
@@ -332,8 +435,14 @@ where
                 })
                 .map_err(|_| acp::Error::internal_error())?;
 
-            run_agent_prompt_loop(agent_id.clone(), &mut session, command_rx, event_tx.clone())
-                .await;
+            run_agent_prompt_loop(
+                agent_id.clone(),
+                &mut session,
+                command_rx,
+                event_tx.clone(),
+                permissions,
+            )
+            .await;
 
             let _ = event_tx.send(AcpSessionEvent::Stopped {
                 agent_id,
@@ -345,11 +454,45 @@ where
         .map_err(|error| error.to_string())
 }
 
+fn acp_permission_request_from_sdk(
+    request_id: String,
+    request: &agent_client_protocol::schema::RequestPermissionRequest,
+) -> AcpPermissionRequest {
+    AcpPermissionRequest {
+        request_id,
+        title: request.tool_call.fields.title.clone(),
+        options: request
+            .options
+            .iter()
+            .map(|option| AcpPermissionOption {
+                option_id: option.option_id.to_string(),
+                name: option.name.clone(),
+                kind: acp_permission_option_kind(option.kind),
+            })
+            .collect(),
+    }
+}
+
+fn acp_permission_option_kind(
+    kind: agent_client_protocol::schema::PermissionOptionKind,
+) -> AcpPermissionOptionKind {
+    use agent_client_protocol::schema::PermissionOptionKind;
+
+    match kind {
+        PermissionOptionKind::AllowOnce => AcpPermissionOptionKind::AllowOnce,
+        PermissionOptionKind::AllowAlways => AcpPermissionOptionKind::AllowAlways,
+        PermissionOptionKind::RejectOnce => AcpPermissionOptionKind::RejectOnce,
+        PermissionOptionKind::RejectAlways => AcpPermissionOptionKind::RejectAlways,
+        _ => AcpPermissionOptionKind::Unknown,
+    }
+}
+
 async fn run_agent_prompt_loop(
     agent_id: String,
     session: &mut agent_client_protocol::ActiveSession<'static, agent_client_protocol::Agent>,
     mut command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
+    permissions: AcpPermissionRegistry,
 ) {
     while let Some(command) = command_rx.recv().await {
         match command {
@@ -365,11 +508,11 @@ async fn run_agent_prompt_loop(
                     continue;
                 }
 
-                match read_prompt_response(session).await {
-                    Ok((content, stop_reason)) => {
+                match read_prompt_response(session, &agent_id, &event_tx, &permissions).await {
+                    Ok(stop_reason) => {
                         let _ = event_tx.send(AcpSessionEvent::PromptResponse {
                             agent_id: agent_id.clone(),
-                            content,
+                            content: String::new(),
                             stop_reason,
                         });
                     }
@@ -388,34 +531,65 @@ async fn run_agent_prompt_loop(
 
 async fn read_prompt_response(
     session: &mut agent_client_protocol::ActiveSession<'static, agent_client_protocol::Agent>,
-) -> Result<(String, String), String> {
-    use acp::schema::{ContentBlock, ContentChunk, SessionNotification, SessionUpdate};
+    agent_id: &str,
+    event_tx: &mpsc::Sender<AcpSessionEvent>,
+    permissions: &AcpPermissionRegistry,
+) -> Result<String, String> {
+    use acp::schema::{
+        ContentBlock, ContentChunk, RequestPermissionOutcome, RequestPermissionRequest,
+        RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
+    };
     use agent_client_protocol as acp;
     use agent_client_protocol::{SessionMessage, util::MatchDispatch};
 
-    let mut output = String::new();
     loop {
         let update = session
             .read_update()
             .await
             .map_err(|error| error.to_string())?;
         match update {
-            SessionMessage::SessionMessage(dispatch) => MatchDispatch::new(dispatch)
-                .if_notification(async |notification: SessionNotification| {
-                    if let SessionUpdate::AgentMessageChunk(ContentChunk {
-                        content: ContentBlock::Text(text),
-                        ..
-                    }) = notification.update
-                    {
-                        output.push_str(&text.text);
-                    }
-                    Ok(())
-                })
-                .await
-                .otherwise_ignore()
-                .map_err(|error| error.to_string())?,
+            SessionMessage::SessionMessage(dispatch) => {
+                let permission_agent_id = agent_id.to_string();
+                let permission_event_tx = event_tx.clone();
+                let permission_registry = permissions.clone();
+                MatchDispatch::new(dispatch)
+                    .if_notification(async |notification: SessionNotification| {
+                        if let SessionUpdate::AgentMessageChunk(ContentChunk {
+                            content: ContentBlock::Text(text),
+                            ..
+                        }) = notification.update
+                        {
+                            let _ = event_tx.send(AcpSessionEvent::AgentMessageChunk {
+                                agent_id: agent_id.to_string(),
+                                content: text.text,
+                            });
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .if_request(async move |request: RequestPermissionRequest, responder| {
+                        let (request_id, response_rx) = permission_registry.register();
+                        let permission_request =
+                            acp_permission_request_from_sdk(request_id, &request);
+                        let _ = permission_event_tx.send(AcpSessionEvent::PermissionRequested {
+                            agent_id: permission_agent_id.clone(),
+                            request: permission_request,
+                        });
+
+                        let outcome = match response_rx.await {
+                            Ok(Some(option_id)) => RequestPermissionOutcome::Selected(
+                                SelectedPermissionOutcome::new(option_id),
+                            ),
+                            Ok(None) | Err(_) => RequestPermissionOutcome::Cancelled,
+                        };
+                        responder.respond(RequestPermissionResponse::new(outcome))
+                    })
+                    .await
+                    .otherwise_ignore()
+                    .map_err(|error| error.to_string())?;
+            }
             SessionMessage::StopReason(stop_reason) => {
-                return Ok((output, format!("{stop_reason:?}")));
+                return Ok(format!("{stop_reason:?}"));
             }
             _ => {}
         }

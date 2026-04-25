@@ -161,7 +161,7 @@ fn score_document_anchor_match(
         DocumentAnchorRegion::ComposerPadding => {
             (candidate.gap_index == target.gap_index).then_some(0)
         }
-        DocumentAnchorRegion::StatusLine => Some(0),
+        DocumentAnchorRegion::AcpActivity | DocumentAnchorRegion::StatusLine => Some(0),
         DocumentAnchorRegion::None => Some(0),
     }
 }

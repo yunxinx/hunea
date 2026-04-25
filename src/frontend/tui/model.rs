@@ -7,6 +7,8 @@ use crate::envinfo;
 
 use super::{
     HeroOptions, Sender,
+    acp_activity::AcpActivityState,
+    acp_permission::PendingAcpPermission,
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
     document::{
@@ -32,6 +34,8 @@ pub struct Model {
     pub(super) external_editor_helper_enabled: bool,
     pub(super) acp_agent_servers: Vec<String>,
     pub(super) selected_acp_agent: Option<String>,
+    pub(super) pending_acp_permission: Option<PendingAcpPermission>,
+    pub(super) acp_activity: Option<AcpActivityState>,
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
     pub(super) copy_on_mouse_selection_release: bool,
@@ -187,6 +191,8 @@ impl Model {
             external_editor_helper_enabled: options.show_external_editor_helper,
             acp_agent_servers: options.acp_agent_servers,
             selected_acp_agent: None,
+            pending_acp_permission: None,
+            acp_activity: None,
             command_panel_selected: 0,
             command_panel_scroll: 0,
             copy_on_mouse_selection_release: options.copy_on_mouse_selection_release,
@@ -523,7 +529,11 @@ impl Model {
         command_panel: &super::command_panel::CommandPanelRenderResult,
     ) -> usize {
         let viewport_height = usize::from(self.height.max(1));
+        let acp_activity = self.current_acp_activity_render_result();
         let mut tail_rows = command_panel.lines.len();
+        if acp_activity.has_content {
+            tail_rows += 1;
+        }
         if status_line.has_content {
             tail_rows += status_line.gap_before + 1;
         }

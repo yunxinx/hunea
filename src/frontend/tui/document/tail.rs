@@ -29,6 +29,7 @@ pub(crate) struct DocumentTailLayoutKey {
     pub(crate) command_panel_scroll: usize,
     pub(crate) status_line_config: u8,
     pub(crate) status_line_revision: usize,
+    pub(crate) acp_activity_frame: usize,
 }
 
 /// `DocumentTailLayout` 保存 composer / command panel / status line 的独立 tail 布局。
@@ -63,6 +64,7 @@ pub(crate) struct DocumentTailLayoutInput {
     pub(crate) composer_frame_decoration_text_line: Option<String>,
     pub(crate) composer_cursor_x: u16,
     pub(crate) composer_cursor_y: usize,
+    pub(crate) acp_activity: StatusLineRenderResult,
     pub(crate) command_panel: CommandPanelRenderResult,
     pub(crate) status_line: StatusLineRenderResult,
 }
@@ -102,6 +104,7 @@ impl Model {
             command_panel_scroll: self.command_panel_scroll,
             status_line_config: self.status_line_config_bits(),
             status_line_revision: self.status_line_revision(),
+            acp_activity_frame: self.acp_activity_frame_key(std::time::Instant::now()),
         }
     }
 
@@ -154,6 +157,7 @@ impl Model {
             composer_frame_decoration_text_line: composer_document.frame_decoration_plain_line,
             composer_cursor_x: composer_document.cursor_x,
             composer_cursor_y: composer_document.cursor_y,
+            acp_activity: self.current_acp_activity_render_result(),
             command_panel: self.current_inline_command_panel_render_result(),
             status_line: self.current_status_line_render_result(),
         }
@@ -166,6 +170,7 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
     let has_composer_padding = input.composer_frame_decoration_line.is_some();
     let mut lines = Vec::with_capacity(
         extra_gap
+            + usize::from(input.acp_activity.has_content)
             + input.composer_lines.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
@@ -174,6 +179,7 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
     );
     let mut text_lines = Vec::with_capacity(
         extra_gap
+            + usize::from(input.acp_activity.has_content)
             + input.composer_text_lines.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.plain_lines.len()
@@ -182,6 +188,7 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
     );
     let mut anchors = Vec::with_capacity(
         extra_gap
+            + usize::from(input.acp_activity.has_content)
             + input.composer_anchors.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
@@ -190,6 +197,7 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
     );
     let mut selectable = Vec::with_capacity(
         extra_gap
+            + usize::from(input.acp_activity.has_content)
             + input.composer_selectable.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
@@ -199,6 +207,18 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
 
     if input.transcript_has_content {
         append_transcript_gap(&mut lines, &mut text_lines, &mut anchors, &mut selectable);
+    }
+
+    if input.acp_activity.has_content
+        && let Some(line) = input.acp_activity.line
+    {
+        lines.push(line);
+        text_lines.push(input.acp_activity.plain_line);
+        anchors.push(DocumentLineAnchor {
+            region: DocumentAnchorRegion::AcpActivity,
+            ..DocumentLineAnchor::default()
+        });
+        selectable.push(input.acp_activity.selectable);
     }
 
     let composer_slot = SlotFrame::new(

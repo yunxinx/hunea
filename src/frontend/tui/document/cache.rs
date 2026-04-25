@@ -252,6 +252,7 @@ pub(crate) enum DocumentAnchorRegion {
     #[default]
     None,
     Transcript,
+    AcpActivity,
     Composer,
     CommandPanel,
     ComposerPadding,

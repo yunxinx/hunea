@@ -329,6 +329,14 @@ fn next_wait_duration(model: &Model, startup_deadline: Instant, now: Instant) ->
         });
     }
 
+    if let Some(activity_interval) = model.acp_activity_frame_interval() {
+        let activity_deadline = now + activity_interval;
+        next_deadline = Some(match next_deadline {
+            Some(deadline) => deadline.min(activity_deadline),
+            None => activity_deadline,
+        });
+    }
+
     next_deadline
         .map(|deadline| deadline.saturating_duration_since(now))
         .unwrap_or_else(|| Duration::from_millis(250))
@@ -357,17 +365,42 @@ fn apply_effect_if_needed(
             run_send_acp_prompt_effect(model, acp_runtime, &agent_id, prompt);
             Ok(())
         }
+        AppEffect::RespondAcpPermission {
+            request_id,
+            option_id,
+        } => {
+            run_respond_acp_permission_effect(model, acp_runtime, &request_id, option_id);
+            Ok(())
+        }
     }
 }
 
 #[derive(Default)]
 struct AcpRuntimeState {
     worker: Option<AcpSessionWorker>,
+    response_buffer: String,
 }
 
 impl AcpRuntimeState {
     fn start(&mut self, command: AcpSessionCommand) {
+        self.response_buffer.clear();
         self.worker = Some(AcpSessionWorker::start(command));
+    }
+
+    fn reset_response_buffer(&mut self) {
+        self.response_buffer.clear();
+    }
+
+    fn push_response_chunk(&mut self, content: &str) {
+        self.response_buffer.push_str(content);
+    }
+
+    fn take_response_buffer(&mut self) -> Option<String> {
+        if self.response_buffer.is_empty() {
+            return None;
+        }
+
+        Some(std::mem::take(&mut self.response_buffer))
     }
 
     fn send_prompt(&self, agent_id: &str, prompt: String) -> Result<(), String> {
@@ -380,6 +413,20 @@ impl AcpRuntimeState {
 
         worker
             .send_prompt(prompt)
+            .map_err(|error| error.to_string())
+    }
+
+    fn respond_permission(
+        &self,
+        request_id: &str,
+        option_id: Option<String>,
+    ) -> Result<(), String> {
+        let Some(worker) = self.worker.as_ref() else {
+            return Err("ACP session is not ready".to_string());
+        };
+
+        worker
+            .respond_permission(request_id, option_id)
             .map_err(|error| error.to_string())
     }
 }
@@ -395,11 +442,15 @@ fn drain_acp_runtime_events(model: &mut Model, acp_runtime: &mut AcpRuntimeState
     }
 
     for event in events {
-        apply_acp_session_event(model, event);
+        apply_acp_session_event(model, acp_runtime, event);
     }
 }
 
-fn apply_acp_session_event(model: &mut Model, event: AcpSessionEvent) {
+fn apply_acp_session_event(
+    model: &mut Model,
+    acp_runtime: &mut AcpRuntimeState,
+    event: AcpSessionEvent,
+) {
     match event {
         AcpSessionEvent::Started { outcome, .. } => {
             model.show_transient_status_notice(&format!(
@@ -410,31 +461,58 @@ fn apply_acp_session_event(model: &mut Model, event: AcpSessionEvent) {
         AcpSessionEvent::StartFailed { message, .. } => {
             model.show_transient_status_notice(&format!("ACP start failed: {message}"));
         }
-        AcpSessionEvent::PromptStarted { .. } => {
-            model.show_transient_status_notice("ACP prompt sent");
+        AcpSessionEvent::PromptStarted { agent_id } => {
+            acp_runtime.reset_response_buffer();
+            model.show_acp_activity(agent_id);
+        }
+        AcpSessionEvent::AgentMessageChunk { content, .. } => {
+            acp_runtime.push_response_chunk(&content);
         }
         AcpSessionEvent::PromptResponse {
             content,
             stop_reason,
             ..
         } => {
-            if content.is_empty() {
+            if !content.is_empty() {
+                acp_runtime.push_response_chunk(&content);
+            }
+            flush_acp_response_buffer(model, acp_runtime);
+            model.clear_acp_activity();
+            if stop_reason != "EndTurn" {
                 model.show_transient_status_notice(&format!("ACP prompt finished: {stop_reason}"));
-            } else {
-                model.append_assistant_message_from_runtime(content);
             }
         }
         AcpSessionEvent::PromptFailed { message, .. } => {
+            flush_acp_response_buffer(model, acp_runtime);
+            model.clear_acp_activity();
             model.show_transient_status_notice(&format!("ACP prompt failed: {message}"));
+        }
+        AcpSessionEvent::PermissionRequested { request, .. } => {
+            flush_acp_response_buffer(model, acp_runtime);
+            let (allow_option_id, reject_option_id) = acp_permission_option_ids(&request);
+            model.update(AppEvent::AcpPermissionRequested {
+                request_id: request.request_id,
+                title: request.title,
+                allow_option_id,
+                reject_option_id,
+            });
         }
         AcpSessionEvent::PermissionRequestCancelled { .. } => {
             model.show_transient_status_notice("ACP permission request cancelled");
         }
         AcpSessionEvent::Stopped { message, .. } => {
+            flush_acp_response_buffer(model, acp_runtime);
+            model.clear_acp_activity();
             if let Some(message) = message {
                 model.show_transient_status_notice(&format!("ACP session stopped: {message}"));
             }
         }
+    }
+}
+
+fn flush_acp_response_buffer(model: &mut Model, acp_runtime: &mut AcpRuntimeState) {
+    if let Some(content) = acp_runtime.take_response_buffer() {
+        model.append_assistant_message_from_runtime(content);
     }
 }
 
@@ -465,6 +543,57 @@ fn run_send_acp_prompt_effect(
     if let Err(message) = acp_runtime.send_prompt(agent_id, prompt) {
         model.show_transient_status_notice(&message);
     }
+}
+
+fn run_respond_acp_permission_effect(
+    model: &mut Model,
+    acp_runtime: &AcpRuntimeState,
+    request_id: &str,
+    option_id: Option<String>,
+) {
+    if let Err(message) = acp_runtime.respond_permission(request_id, option_id) {
+        model.show_transient_status_notice(&message);
+    }
+}
+
+fn acp_permission_option_ids(
+    request: &crate::runtime::session::AcpPermissionRequest,
+) -> (Option<String>, Option<String>) {
+    use crate::runtime::session::AcpPermissionOptionKind;
+
+    let allow = request
+        .options
+        .iter()
+        .find(|option| option.kind == AcpPermissionOptionKind::AllowOnce)
+        .or_else(|| {
+            request
+                .options
+                .iter()
+                .find(|option| option.kind == AcpPermissionOptionKind::AllowAlways)
+        })
+        .or_else(|| {
+            request.options.iter().find(|option| {
+                matches!(
+                    option.kind,
+                    AcpPermissionOptionKind::AllowOnce | AcpPermissionOptionKind::AllowAlways
+                )
+            })
+        })
+        .map(|option| option.option_id.clone());
+
+    let reject = request
+        .options
+        .iter()
+        .find(|option| option.kind == AcpPermissionOptionKind::RejectOnce)
+        .or_else(|| {
+            request
+                .options
+                .iter()
+                .find(|option| option.kind == AcpPermissionOptionKind::RejectAlways)
+        })
+        .map(|option| option.option_id.clone());
+
+    (allow, reject)
 }
 
 fn acp_agent_display_name(outcome: &AcpInitializeOutcome) -> String {
@@ -559,6 +688,119 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
+    #[test]
+    fn acp_chunks_buffer_until_prompt_response() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        let mut acp_runtime = AcpRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptStarted {
+                agent_id: "Kimi Code CLI".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentMessageChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: "你好".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentMessageChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: "！我是 Kimi Code CLI".to_string(),
+            },
+        );
+
+        assert!(model.transcript_plain_items().is_empty());
+        assert!(model.current_acp_activity_render_result().has_content);
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptResponse {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: String::new(),
+                stop_reason: "EndTurn".to_string(),
+            },
+        );
+
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec!["你好！我是 Kimi Code CLI".to_string()]
+        );
+        assert!(!model.current_acp_activity_render_result().has_content);
+    }
+
+    #[test]
+    fn acp_permission_request_flushes_buffered_agent_text() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        let mut acp_runtime = AcpRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptStarted {
+                agent_id: "Kimi Code CLI".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentMessageChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: "需要先确认".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PermissionRequested {
+                agent_id: "Kimi Code CLI".to_string(),
+                request: crate::runtime::session::AcpPermissionRequest {
+                    request_id: "permission-1".to_string(),
+                    title: Some("Write file".to_string()),
+                    options: Vec::new(),
+                },
+            },
+        );
+
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec!["需要先确认".to_string()]
+        );
+        assert!(model.current_status_notice_text().contains("Write file"));
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentMessageChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: "确认后继续".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptResponse {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: String::new(),
+                stop_reason: "EndTurn".to_string(),
+            },
+        );
+
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec!["需要先确认".to_string(), "确认后继续".to_string()]
+        );
+    }
     #[test]
     fn ready_input_batch_coalesces_wheel_burst_before_key() {
         let events = (0..128)

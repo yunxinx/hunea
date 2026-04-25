@@ -660,16 +660,15 @@ fn progressive_metrics_resize_defers_tabbed_markdown_prefix_sum_exactization() {
     );
 
     assert!(exact_index.metrics[0].is_exact());
-    assert!(
-        estimated_index.metrics[0].content_char_len
-            >= exact_before_resize.metrics[0].content_char_len,
-        "resize reuse should preserve the previous assistant plain-text length floor until exactization"
+    assert!(exact_before_resize.metrics[0].is_exact());
+    assert_eq!(
+        estimated_index.metrics[0].content_char_len, exact_index.metrics[0].content_char_len,
+        "tabbed Markdown estimates use the current-width Markdown measurement without bumping the tracked exactization counter"
     );
-    assert!(
-        estimated_index.content_char_len >= exact_before_resize.content_char_len,
-        "full-range plain-text totals should not shrink while resize reuse is still estimated"
+    assert_eq!(
+        estimated_index.content_char_len,
+        exact_index.content_char_len
     );
-    assert!(estimated_index.metrics[0].content_char_len <= exact_index.metrics[0].content_char_len);
 }
 
 #[test]

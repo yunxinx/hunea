@@ -1,9 +1,11 @@
 use ratatui::{Frame, buffer::Buffer, layout::Rect, text::Line, widgets::Widget};
 
-use super::Model;
+use super::{Model, document::DocumentLayout, message::assistant_message_visual_inset};
 
 struct DocumentViewportWidget<'a> {
     lines: &'a [Line<'static>],
+    layout: &'a DocumentLayout,
+    resolved_offset: usize,
 }
 
 impl Widget for DocumentViewportWidget<'_> {
@@ -15,9 +17,30 @@ impl Widget for DocumentViewportWidget<'_> {
 
         for (row, line) in self.lines.iter().take(usize::from(area.height)).enumerate() {
             let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
-            buf.set_line(area.x, y, line, area.width);
+            let line_index = self.resolved_offset + row;
+            if self.layout.is_assistant_message_line(line_index) {
+                render_inset_line(line, area, y, buf);
+            } else {
+                buf.set_line(area.x, y, line, area.width);
+            }
         }
     }
+}
+
+fn render_inset_line(line: &Line<'static>, area: Rect, y: u16, buf: &mut Buffer) {
+    let inset = assistant_message_visual_inset(area.width);
+    if inset == 0 || area.width <= inset.saturating_mul(2) {
+        buf.set_line(area.x, y, line, area.width);
+        return;
+    }
+
+    buf.set_line(area.x, y, &Line::raw(""), area.width);
+    buf.set_line(
+        area.x + inset,
+        y,
+        line,
+        area.width.saturating_sub(inset.saturating_mul(2)),
+    );
 }
 
 /// `render` 负责将统一文档流映射到当前帧内容。
@@ -37,6 +60,8 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
     frame.render_widget(
         DocumentViewportWidget {
             lines: &viewport.lines,
+            layout: &document,
+            resolved_offset: viewport.resolved_offset,
         },
         area,
     );
@@ -48,5 +73,67 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
             area.x + document.cursor_x,
             area.y + u16::try_from(cursor_y).unwrap_or(u16::MAX),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use super::*;
+    use crate::frontend::tui::{HeroOptions, theme::default_palette};
+
+    #[test]
+    fn assistant_message_uses_two_column_visual_inset() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.set_window(20, 8);
+        model.set_palette(default_palette(), true);
+        model.append_assistant_message_from_runtime("hello world");
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        terminal.draw(|frame| model.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            rendered_rows(buffer)
+                .iter()
+                .any(|row| row == "  hello world       "),
+            "assistant row should be rendered with a two-column visual inset: {:?}",
+            rendered_rows(buffer)
+        );
+    }
+
+    #[test]
+    fn assistant_visual_inset_does_not_change_viewport_plain_lines() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.set_window(20, 8);
+        model.set_palette(default_palette(), true);
+        model.append_assistant_message_from_runtime("hello world");
+
+        let layout = model.build_document_layout();
+        let viewport = model.build_document_viewport(&layout);
+
+        assert!(
+            viewport
+                .plain_lines
+                .iter()
+                .any(|line| line.as_str() == "hello world"),
+            "assistant visual inset must not add spaces to viewport plain lines: {:?}",
+            viewport.plain_lines
+        );
+    }
+
+    fn rendered_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+        (0..buffer.area.height)
+            .map(|row| {
+                let mut line = String::new();
+                for column in 0..buffer.area.width {
+                    line.push_str(buffer[(column, row)].symbol());
+                }
+                line
+            })
+            .collect()
     }
 }

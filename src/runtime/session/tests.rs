@@ -266,6 +266,7 @@ async fn acp_worker_transport_creates_session_and_reads_prompt_response() {
         command_rx,
         event_tx,
         Arc::new(AtomicBool::new(false)),
+        super::AcpPermissionRegistry::default(),
     ));
 
     let started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -284,11 +285,17 @@ async fn acp_worker_transport_creates_session_and_reads_prompt_response() {
         super::AcpSessionEvent::PromptStarted { .. }
     ));
 
+    let prompt_chunk = recv_worker_event(&event_rx, "worker should stream prompt chunk").await;
+    assert!(matches!(
+        prompt_chunk,
+        super::AcpSessionEvent::AgentMessageChunk { ref content, .. } if content == "pong"
+    ));
+
     let prompt_response =
         recv_worker_event(&event_rx, "worker should report prompt response").await;
     assert!(matches!(
         prompt_response,
-        super::AcpSessionEvent::PromptResponse { ref content, .. } if content == "pong"
+        super::AcpSessionEvent::PromptResponse { ref stop_reason, .. } if stop_reason == "EndTurn"
     ));
 
     command_tx
@@ -318,4 +325,132 @@ async fn recv_worker_event(
         assert!(std::time::Instant::now() < deadline, "{context}");
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_worker_round_trips_permission_selection() {
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+
+    use acp::schema::{
+        ContentBlock, ContentChunk, Implementation, InitializeRequest, InitializeResponse,
+        NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
+        PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
+        SessionNotification, SessionUpdate, StopReason, TextContent, ToolCallUpdate,
+        ToolCallUpdateFields,
+    };
+    use agent_client_protocol as acp;
+
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    tokio::task::spawn(async move {
+        acp::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _connection| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_info(Implementation::new("fake-agent", "0.1.0")),
+                    )
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _connection| {
+                    responder.respond(NewSessionResponse::new("test-session"))
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |request: PromptRequest, responder, connection| {
+                    let session_id = request.session_id.clone();
+                    let response_connection = connection.clone();
+                    connection
+                        .send_request(RequestPermissionRequest::new(
+                            request.session_id.clone(),
+                            ToolCallUpdate::new(
+                                "tool-1",
+                                ToolCallUpdateFields::new().title("Write file"),
+                            ),
+                            vec![
+                                PermissionOption::new(
+                                    "allow-once",
+                                    "Allow once",
+                                    PermissionOptionKind::AllowOnce,
+                                ),
+                                PermissionOption::new(
+                                    "reject-once",
+                                    "Reject once",
+                                    PermissionOptionKind::RejectOnce,
+                                ),
+                            ],
+                        ))
+                        .on_receiving_result(async move |permission| {
+                            let permission = permission?;
+                            let text = match permission.outcome {
+                                RequestPermissionOutcome::Selected(selected)
+                                    if selected.option_id.to_string() == "allow-once" =>
+                                {
+                                    "permission granted"
+                                }
+                                _ => "permission denied",
+                            };
+                            response_connection.send_notification(SessionNotification::new(
+                                session_id,
+                                SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                    ContentBlock::Text(TextContent::new(text)),
+                                )),
+                            ))?;
+                            responder.respond(PromptResponse::new(StopReason::EndTurn))
+                        })?;
+                    Ok(())
+                },
+                acp::on_receive_request!(),
+            )
+            .connect_to(agent_transport)
+            .await
+    });
+
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let permissions = super::AcpPermissionRegistry::default();
+    let worker = tokio::task::spawn(super::run_agent_transport_worker(
+        "fake".to_string(),
+        client_transport,
+        command_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+        permissions.clone(),
+    ));
+
+    let _started = recv_worker_event(&event_rx, "worker should report session start").await;
+    command_tx
+        .send(super::AcpWorkerCommand::Prompt("ping".to_string()))
+        .expect("prompt command should send");
+    let _prompt_started = recv_worker_event(&event_rx, "worker should report prompt start").await;
+
+    let permission_event = recv_worker_event(&event_rx, "worker should request permission").await;
+    let request_id = match permission_event {
+        super::AcpSessionEvent::PermissionRequested { request, .. } => {
+            assert_eq!(request.title.as_deref(), Some("Write file"));
+            assert_eq!(request.options.len(), 2);
+            request.request_id
+        }
+        other => panic!("expected permission request, got {other:?}"),
+    };
+    permissions
+        .respond(&request_id, Some("allow-once".to_string()))
+        .expect("permission response should be accepted");
+
+    let prompt_chunk = recv_worker_event(&event_rx, "worker should stream granted chunk").await;
+    assert!(matches!(
+        prompt_chunk,
+        super::AcpSessionEvent::AgentMessageChunk { ref content, .. } if content == "permission granted"
+    ));
+
+    command_tx
+        .send(super::AcpWorkerCommand::Shutdown)
+        .expect("shutdown command should send");
+    worker
+        .await
+        .expect("worker task should join")
+        .expect("worker should stop cleanly");
 }

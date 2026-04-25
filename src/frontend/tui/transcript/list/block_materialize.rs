@@ -208,6 +208,10 @@ impl TranscriptItem {
             .collect()
     }
 
+    pub(crate) fn is_assistant_message(&self) -> bool {
+        matches!(self, Self::Message(item) if item.is_assistant())
+    }
+
     pub(crate) fn render_cache_key(&self) -> u64 {
         match self {
             Self::Hero(item) => item.render_cache_key(),

@@ -515,6 +515,23 @@ impl DocumentLayout {
             .copied()
     }
 
+    /// `is_assistant_message_line` 判断指定文档行是否属于 assistant 消息正文。
+    pub(crate) fn is_assistant_message_line(&self, index: usize) -> bool {
+        let Some(anchor) = self.line_anchor_at(index) else {
+            return false;
+        };
+        if anchor.region != DocumentAnchorRegion::Transcript
+            || matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap)
+        {
+            return false;
+        }
+
+        self.transcript
+            .items
+            .get(anchor.transcript.item_index)
+            .is_some_and(|item| item.as_ref().is_assistant_message())
+    }
+
     /// `line_index_for_anchor` 把语义锚点解析回当前布局中的视觉行。
     pub(crate) fn line_index_for_anchor(&self, target: DocumentLineAnchor) -> Option<usize> {
         if target.region == DocumentAnchorRegion::Transcript {

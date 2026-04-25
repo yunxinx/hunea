@@ -1,7 +1,9 @@
 use std::rc::Rc;
 
 use super::*;
-use crate::frontend::tui::{Sender, StyleMode, document::DocumentAnchorRegion};
+use crate::frontend::tui::{
+    AppEffect, AppEvent, Sender, StyleMode, document::DocumentAnchorRegion,
+};
 
 fn progressive_exactization_fixture() -> Model {
     let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
@@ -81,7 +83,10 @@ fn transcript_plain_items_use_assistant_markdown_render_path() {
         .transcript_mut()
         .append_message(Sender::Assistant, "# Overview of the API");
 
-    assert_eq!(model.transcript_plain_items(), vec!["Overview of the API"]);
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["# Overview of the API"]
+    );
 }
 
 #[test]
@@ -819,4 +824,97 @@ fn build_document_layout_resyncs_idle_viewport_after_exactization_reflow() {
                     .saturating_add(model.document_viewport_height()),
         "render-time exactization should leave the active composer cursor inside the visible document viewport"
     );
+}
+
+#[test]
+fn acp_permission_accept_key_returns_selected_option() {
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    let mut model = Model::new(HeroOptions::default());
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-1".to_string(),
+        title: Some("Write file".to_string()),
+        allow_option_id: Some("allow-once".to_string()),
+        reject_option_id: Some("reject-once".to_string()),
+    });
+
+    assert!(model.current_status_notice_text().contains("Write file"));
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('y'))));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-1".to_string(),
+            option_id: Some("allow-once".to_string()),
+        })
+    );
+    assert!(model.current_status_notice_text().is_empty());
+}
+
+#[test]
+fn acp_permission_reject_key_returns_reject_option() {
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    let mut model = Model::new(HeroOptions::default());
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-2".to_string(),
+        title: None,
+        allow_option_id: Some("allow-once".to_string()),
+        reject_option_id: Some("reject-once".to_string()),
+    });
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-2".to_string(),
+            option_id: Some("reject-once".to_string()),
+        })
+    );
+}
+
+#[test]
+fn acp_activity_line_uses_dynamic_codex_style_indicator() {
+    let mut model = Model::new(HeroOptions::default());
+    model.set_window(50, 6);
+    model.set_palette(default_palette(), true);
+    model.show_acp_activity("Kimi Code CLI");
+
+    let first = model
+        .current_acp_activity_render_result_at(std::time::Instant::now())
+        .plain_line;
+    let second = model
+        .current_acp_activity_render_result_at(
+            std::time::Instant::now() + std::time::Duration::from_millis(700),
+        )
+        .plain_line;
+
+    assert!(first.contains("Working (0s)"));
+    assert!(first.starts_with("  • Working (0s)"));
+    assert!(!first.contains("Kimi Code CLI"));
+    assert!(!first.contains('⠋'));
+    assert_ne!(first, second);
+}
+
+#[test]
+fn acp_activity_line_renders_above_composer() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    model.set_window(40, 6);
+    model.set_palette(default_palette(), true);
+    model.show_acp_activity("Kimi Code CLI");
+
+    let layout = model.build_document_layout();
+
+    let activity_line = layout
+        .tail
+        .text_lines
+        .first()
+        .map(|line| line.trim())
+        .unwrap_or_default();
+    assert!(activity_line.contains("Working"));
+    assert!(!activity_line.contains("Kimi Code CLI"));
+    assert!(layout.composer_slot.content_start_line > 0);
 }

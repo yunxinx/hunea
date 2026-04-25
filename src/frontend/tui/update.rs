@@ -15,8 +15,17 @@ pub const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 pub enum AppEffect {
     LaunchExternalEditor(ExternalEditorLaunch),
     CopySelection(String),
-    StartAcpSession { agent_id: String },
-    SendAcpPrompt { agent_id: String, prompt: String },
+    StartAcpSession {
+        agent_id: String,
+    },
+    SendAcpPrompt {
+        agent_id: String,
+        prompt: String,
+    },
+    RespondAcpPermission {
+        request_id: String,
+        option_id: Option<String>,
+    },
 }
 
 /// `AppEvent` 描述 TUI 模型可处理的外部事件。
@@ -66,6 +75,12 @@ pub enum AppEvent {
         draft_path: PathBuf,
         original_draft: String,
         failed: bool,
+    },
+    AcpPermissionRequested {
+        request_id: String,
+        title: Option<String>,
+        allow_option_id: Option<String>,
+        reject_option_id: Option<String>,
     },
     SelectionAutoScrollTick {
         token: usize,
@@ -155,6 +170,20 @@ impl Model {
                 self.apply_external_editor_finished(&draft_path, &original_draft, failed);
                 None
             }
+            AppEvent::AcpPermissionRequested {
+                request_id,
+                title,
+                allow_option_id,
+                reject_option_id,
+            } => {
+                self.show_acp_permission_request(
+                    request_id,
+                    title,
+                    allow_option_id,
+                    reject_option_id,
+                );
+                None
+            }
             AppEvent::SelectionAutoScrollTick { token } => {
                 self.handle_selection_auto_scroll_tick(token);
                 None
@@ -199,6 +228,10 @@ impl Model {
             return self
                 .maybe_prepare_external_editor_launch()
                 .map(AppEffect::LaunchExternalEditor);
+        }
+
+        if let Some(effect) = self.handle_acp_permission_key(key) {
+            return effect;
         }
 
         if let Some(effect) = self.handle_command_panel_key(key) {

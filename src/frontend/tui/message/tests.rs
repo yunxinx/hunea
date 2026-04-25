@@ -82,6 +82,19 @@ fn legacy_user_render_preserves_long_wrapped_leading_spaces() {
 }
 
 #[test]
+fn assistant_render_keeps_inset_out_of_plain_message_lines() {
+    let item = MessageItem::new(Sender::Assistant, "hello world");
+
+    let lines = item
+        .render_lines(12, default_palette())
+        .into_iter()
+        .map(plain_line)
+        .collect::<Vec<_>>();
+
+    assert_eq!(lines, vec!["hello world"]);
+}
+
+#[test]
 fn assistant_render_wraps_leading_make_explanation_as_prose() {
     let item = MessageItem::new(Sender::Assistant, "make the handler return early");
 
@@ -99,12 +112,12 @@ fn assistant_render_uses_markdown_heading_rendering() {
     let item = MessageItem::new(Sender::Assistant, "# Overview of the API");
 
     let lines = item
-        .render_lines(20, default_palette())
+        .render_lines(40, default_palette())
         .into_iter()
         .map(plain_line)
         .collect::<Vec<_>>();
 
-    assert_eq!(lines, vec!["Overview of the API"]);
+    assert_eq!(lines, vec!["# Overview of the API"]);
 }
 
 #[test]

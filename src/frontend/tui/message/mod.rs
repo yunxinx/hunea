@@ -21,6 +21,7 @@ mod user;
 mod user_estimate;
 mod user_projection;
 
+pub(crate) use self::assistant::assistant_message_visual_inset;
 #[cfg(test)]
 use self::user_estimate::{
     estimate_hard_wrap_line_count, estimate_hard_wrap_visible_text,
@@ -125,6 +126,10 @@ impl MessageItem {
         }
     }
 
+    pub(crate) fn is_assistant(&self) -> bool {
+        self.sender == Sender::Assistant
+    }
+
     pub(crate) fn render_cache_key(&self) -> u64 {
         self.render_cache_key
     }
@@ -162,9 +167,12 @@ impl MessageItem {
                 self.style_mode,
                 previous_metrics,
             ),
-            Sender::Assistant => {
-                estimate_assistant_message_metrics_fast(&self.content, width, previous_metrics)
-            }
+            Sender::Assistant => estimate_assistant_message_metrics_fast(
+                &self.content,
+                width,
+                palette,
+                previous_metrics,
+            ),
         }
     }
 

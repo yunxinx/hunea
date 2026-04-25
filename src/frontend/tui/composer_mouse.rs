@@ -96,7 +96,6 @@ impl Model {
             click.logical_line,
             click.logical_column,
         );
-        self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
     }
 

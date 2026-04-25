@@ -212,3 +212,27 @@ fn plain_lines(render: &super::render::RenderResult) -> Vec<String> {
         })
         .collect()
 }
+
+#[test]
+fn cursor_position_for_line_anchor_click_does_not_rewrap_long_composer() {
+    use super::{
+        cursor_position_for_line_anchor_click, reset_visual_lines_call_count,
+        visual_lines_call_count,
+    };
+
+    let mut composer = Composer::new(StyleMode::Cx);
+    composer.set_width(80);
+    composer.replace_text_and_move_to_end("中英 mixed long composer text ".repeat(120));
+    let document = composer.render_document(default_palette());
+    let anchor = document.anchors[0];
+
+    reset_visual_lines_call_count();
+    let position = cursor_position_for_line_anchor_click(&composer, anchor, 10);
+
+    assert!(position.is_some());
+    assert_eq!(
+        visual_lines_call_count(),
+        0,
+        "click hit-testing should use the clicked anchor segment instead of wrapping the full composer"
+    );
+}

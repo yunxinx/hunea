@@ -5,6 +5,11 @@ use unicode_width::UnicodeWidthStr;
 
 use super::prompt_wrap::wrap_prompt_visual_lines;
 
+#[cfg(test)]
+thread_local! {
+    static PROMPT_TEXT_WRAP_CALL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) const DEFAULT_RENDER_WIDTH: usize = 80;
 
 pub(super) const DISPLAY_TAB_WIDTH: usize = 8;
@@ -36,10 +41,23 @@ pub(crate) fn wrap_prompt_text(
     width: usize,
     line_prefix_width: usize,
 ) -> Vec<String> {
+    #[cfg(test)]
+    PROMPT_TEXT_WRAP_CALL_COUNT.with(|count| count.set(count.get() + 1));
+
     wrap_prompt_visual_lines(value.as_ref(), width, line_prefix_width)
         .into_iter()
         .map(|line| line.text)
         .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_prompt_text_wrap_call_count() {
+    PROMPT_TEXT_WRAP_CALL_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn prompt_text_wrap_call_count() -> usize {
+    PROMPT_TEXT_WRAP_CALL_COUNT.with(std::cell::Cell::get)
 }
 
 /// `wrap_assistant_text` 按 assistant transcript 的展示需求换行。

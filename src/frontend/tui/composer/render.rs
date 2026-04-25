@@ -1,3 +1,8 @@
+#[cfg(test)]
+thread_local! {
+    static COMPOSER_RENDER_DOCUMENT_CALL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 use ratatui::{
     style::Style,
     text::{Line, Span},
@@ -104,6 +109,9 @@ pub(crate) fn render_document(
     composer: &Composer,
     palette: TerminalPalette,
 ) -> DocumentRenderResult {
+    #[cfg(test)]
+    COMPOSER_RENDER_DOCUMENT_CALL_COUNT.with(|count| count.set(count.get() + 1));
+
     let prompt_width = measure_width(composer.prompt());
     let frame_width = usize::from(composer.width.max(1));
     let frame_mode = frame_decoration_mode(composer.style_mode());
@@ -221,6 +229,16 @@ pub(crate) fn render_document(
         cursor_x: u16::try_from(cursor_visual_x).unwrap_or(u16::MAX),
         cursor_y,
     }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_render_document_call_count() {
+    COMPOSER_RENDER_DOCUMENT_CALL_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn render_document_call_count() -> usize {
+    COMPOSER_RENDER_DOCUMENT_CALL_COUNT.with(std::cell::Cell::get)
 }
 
 fn selectable_ranges_for_visual_lines(

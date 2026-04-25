@@ -71,7 +71,7 @@ impl Model {
     pub(crate) fn build_document_tail_layout(&mut self) -> Rc<DocumentTailLayout> {
         let key = self.current_document_tail_layout_key();
         if self.document_tail_layout_cache.valid && self.document_tail_layout_cache.key == key {
-            return Rc::clone(&self.document_tail_layout_cache.tail);
+            return self.current_document_tail_layout_with_refreshed_cursor();
         }
 
         let tail = Rc::new(compose_document_tail_layout(
@@ -94,13 +94,49 @@ impl Model {
             document_viewport_height: self.document_viewport_height(),
             composer_viewport_height: self.composer.viewport_height(),
             composer_content_revision: self.composer.content_revision(),
-            composer_cursor_revision: self.composer.cursor_revision(),
+            composer_cursor_revision: 0,
             composer_width: self.composer.content_width(),
             command_panel_selected: self.command_panel_selected,
             command_panel_scroll: self.command_panel_scroll,
             status_line_config: self.status_line_config_bits(),
             status_line_revision: self.status_line_revision(),
         }
+    }
+
+    fn current_document_tail_layout_with_refreshed_cursor(&mut self) -> Rc<DocumentTailLayout> {
+        let cached = Rc::clone(&self.document_tail_layout_cache.tail);
+        let Some((cursor_x, composer_cursor_y)) = self.composer_cursor_from_tail(&cached) else {
+            return cached;
+        };
+        let cursor_y = cached
+            .composer_slot
+            .content_start_line
+            .saturating_add(composer_cursor_y);
+        if cached.cursor_x == cursor_x && cached.cursor_y == cursor_y {
+            return cached;
+        }
+
+        let tail = Rc::new(DocumentTailLayout {
+            cursor_x,
+            cursor_y,
+            ..(*cached).clone()
+        });
+        self.document_tail_layout_cache.tail = Rc::clone(&tail);
+        tail
+    }
+
+    fn composer_cursor_from_tail(&self, tail: &DocumentTailLayout) -> Option<(u16, usize)> {
+        let start = tail.composer_slot.content_start_line;
+        let end = start.saturating_add(tail.composer_slot.content_line_count);
+        let anchors = tail.anchors.get(start..end)?;
+        let composer_anchors = anchors
+            .iter()
+            .filter_map(|anchor| {
+                (anchor.region == DocumentAnchorRegion::Composer).then_some(anchor.composer)
+            })
+            .collect::<Vec<_>>();
+        self.composer
+            .cursor_visual_position_for_anchors(&composer_anchors)
     }
 
     pub(crate) fn current_document_tail_layout_input(&mut self) -> DocumentTailLayoutInput {

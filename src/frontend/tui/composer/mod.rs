@@ -11,8 +11,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use self::{
     grapheme::{
-        grapheme_range_at_or_after_cursor, grapheme_range_before_cursor, grapheme_target_left,
-        grapheme_target_right, logical_column_for_visual_offset, measure_width,
+        grapheme_clusters, grapheme_range_at_or_after_cursor, grapheme_range_before_cursor,
+        grapheme_target_left, grapheme_target_right, logical_column_for_visual_offset,
+        measure_width,
     },
     layout::{visual_line_count, visual_lines_for_text},
     render::{DocumentRenderResult, render_document},
@@ -26,6 +27,11 @@ pub(crate) use self::mouse::{
 pub(crate) use self::render::LineAnchor;
 #[cfg(test)]
 use self::render::{RenderResult, render};
+#[cfg(test)]
+pub(crate) use self::{
+    layout::{reset_visual_lines_call_count, visual_lines_call_count},
+    render::{render_document_call_count, reset_render_document_call_count},
+};
 
 const PLACEHOLDER: &str = "Enter to send Prompt";
 
@@ -224,6 +230,22 @@ impl Composer {
 
     pub(crate) fn cursor_position(&self) -> (usize, usize) {
         logical_position(&self.value, self.cursor)
+    }
+
+    pub(crate) fn cursor_visual_position_for_anchors(
+        &self,
+        anchors: &[LineAnchor],
+    ) -> Option<(u16, usize)> {
+        let (logical_line, logical_column) = self.cursor_position();
+        let prompt_width = measure_width(self.prompt());
+        let (visual_line, visual_x) = cursor_visual_position_for_anchors(
+            self.value(),
+            anchors,
+            logical_line,
+            logical_column,
+            prompt_width,
+        )?;
+        Some((u16::try_from(visual_x).unwrap_or(u16::MAX), visual_line))
     }
 
     pub(crate) fn line(&self) -> usize {
@@ -639,6 +661,99 @@ pub(crate) fn char_to_byte_index(value: &str, char_index: usize) -> usize {
         .nth(char_index)
         .map(|(byte_index, _)| byte_index)
         .unwrap_or(value.len())
+}
+
+fn cursor_visual_position_for_anchors(
+    value: &str,
+    anchors: &[LineAnchor],
+    logical_line: usize,
+    logical_column: usize,
+    prompt_width: usize,
+) -> Option<(usize, usize)> {
+    let (first_line, last_line) = line_anchor_bounds(anchors, logical_line)?;
+    if logical_column == 0 {
+        return Some((first_line, prompt_width));
+    }
+
+    let last_anchor = anchors[last_line];
+    let logical_column = logical_column.min(last_anchor.end_char);
+    for line_index in first_line..=last_line {
+        let anchor = anchors[line_index];
+        if logical_column == anchor.end_char && line_index < last_line {
+            let next_anchor = anchors[line_index + 1];
+            if next_anchor.visible_start_char <= logical_column
+                && logical_column <= next_anchor.end_char
+            {
+                continue;
+            }
+            if next_anchor.visible_start_char == logical_column {
+                return Some((line_index + 1, prompt_width));
+            }
+        }
+
+        if logical_column > anchor.end_char {
+            continue;
+        }
+
+        if logical_column <= anchor.visible_start_char {
+            return Some((line_index, prompt_width));
+        }
+
+        return Some((
+            line_index,
+            prompt_width + visual_width_for_anchor_prefix(value, anchor, logical_column)?,
+        ));
+    }
+
+    Some((
+        last_line,
+        prompt_width + visual_width_for_anchor_prefix(value, last_anchor, last_anchor.end_char)?,
+    ))
+}
+
+fn line_anchor_bounds(anchors: &[LineAnchor], logical_line: usize) -> Option<(usize, usize)> {
+    let mut first = None;
+    let mut last = None;
+    for (index, anchor) in anchors.iter().enumerate() {
+        if anchor.logical_line != logical_line {
+            if first.is_some() {
+                break;
+            }
+            continue;
+        }
+        first.get_or_insert(index);
+        last = Some(index);
+    }
+    match (first, last) {
+        (Some(first), Some(last)) => Some((first, last)),
+        _ => None,
+    }
+}
+
+fn visual_width_for_anchor_prefix(
+    value: &str,
+    anchor: LineAnchor,
+    logical_column: usize,
+) -> Option<usize> {
+    let lines = logical_lines(value);
+    let line = lines.get(anchor.logical_line)?;
+    let end_char = logical_column.min(anchor.end_char).min(line.len_chars());
+    if end_char <= anchor.visible_start_char {
+        return Some(0);
+    }
+
+    let text = line
+        .text
+        .chars()
+        .skip(anchor.visible_start_char)
+        .take(end_char - anchor.visible_start_char)
+        .collect::<String>();
+    Some(
+        grapheme_clusters(&text)
+            .iter()
+            .map(|cluster| cluster.width)
+            .sum(),
+    )
 }
 
 fn total_chars(value: &str) -> usize {

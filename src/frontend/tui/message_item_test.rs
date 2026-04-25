@@ -2,7 +2,10 @@ use super::*;
 use crate::frontend::tui::{
     selection::SelectableLineRange,
     theme::{default_palette, secondary_text_style, surface_text_style},
-    transcript::{CachedLineAnchors, CachedRenderBlock},
+    transcript::{
+        CachedLineAnchors, CachedRenderBlock, prompt_text_wrap_call_count,
+        reset_prompt_text_wrap_call_count,
+    },
 };
 use std::rc::Rc;
 
@@ -417,6 +420,25 @@ fn user_fast_estimate_keeps_plain_text_len_conservative_when_visible_line_overfl
             "fast estimate should derive plain-text length from the actual visible line shape instead of assuming every line is capped at width: style_mode={style_mode:?}, width={width}, exact={exact_plain_text_len}, estimated={estimated:?}"
         );
     }
+}
+
+#[test]
+fn user_fast_estimate_does_not_materialize_wrapped_prompt_lines() {
+    let item = MessageItem::new_with_style_mode(
+        Sender::User,
+        "long user message should stay on the metrics-only path ".repeat(20),
+        StyleMode::Cx,
+    );
+
+    reset_prompt_text_wrap_call_count();
+    let estimated = item.estimate_render_metrics_fast(24, default_palette(), None);
+
+    assert!(estimated.content_line_count > 1);
+    assert_eq!(
+        prompt_text_wrap_call_count(),
+        0,
+        "fast estimate should not allocate full wrapped prompt lines"
+    );
 }
 
 #[test]

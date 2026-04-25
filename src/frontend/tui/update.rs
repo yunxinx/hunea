@@ -57,9 +57,6 @@ pub enum AppEvent {
     HistoryScrollIndicatorTimeout {
         token: usize,
     },
-    TranscriptRefineTick {
-        token: usize,
-    },
     ExternalEditorHelperTimeout {
         token: usize,
     },
@@ -142,12 +139,6 @@ impl Model {
             }
             AppEvent::HistoryScrollIndicatorTimeout { token } => {
                 self.dismiss_history_scroll_indicator(token);
-                None
-            }
-            AppEvent::TranscriptRefineTick { token } => {
-                if token == self.transcript_refine_token {
-                    self.run_next_transcript_refinement_batch();
-                }
                 None
             }
             AppEvent::ExternalEditorHelperTimeout { token } => {

@@ -102,6 +102,38 @@ impl DocumentTranscriptSnapshot {
         self.materialize_line(index, true)
     }
 
+    pub(crate) fn plain_line_at(&self, index: usize) -> Option<String> {
+        let position = self.index.position_for_line(index)?;
+        let relative = index.saturating_sub(position.start_line);
+        if relative < position.gap_before {
+            return Some(String::new());
+        }
+
+        let block = self.render_block(position.item_index)?;
+        block.plain_line_at(relative - position.gap_before)
+    }
+
+    pub(crate) fn anchor_at(&self, index: usize) -> Option<DocumentLineAnchor> {
+        let position = self.index.position_for_line(index)?;
+        let relative = index.saturating_sub(position.start_line);
+        if relative < position.gap_before {
+            return Some(document_anchor_for_transcript(LineAnchor {
+                item_index: position.gap_owner_item_index.unwrap_or(position.item_index),
+                item_anchor: ItemLineAnchor {
+                    kind: LineAnchorKind::ItemGap,
+                    gap_offset: relative,
+                    ..ItemLineAnchor::default()
+                },
+            }));
+        }
+
+        let block = self.render_block(position.item_index)?;
+        Some(document_anchor_for_transcript(LineAnchor {
+            item_index: position.item_index,
+            item_anchor: block.anchor_at(relative - position.gap_before)?,
+        }))
+    }
+
     fn materialize_line(
         &self,
         index: usize,
@@ -455,12 +487,32 @@ impl DocumentLayout {
 
     /// `line_text_at` 返回指定视觉行的纯文本内容。
     pub(crate) fn line_text_at(&self, index: usize) -> Option<String> {
-        self.line_at(index).map(|line| line.plain_line)
+        if index >= self.line_count() {
+            return None;
+        }
+        if index < self.transcript_line_count {
+            return self.transcript.plain_line_at(index);
+        }
+
+        self.tail
+            .text_lines
+            .get(index - self.transcript_line_count)
+            .cloned()
     }
 
     /// `line_anchor_at` 返回指定视觉行的锚点。
     pub(crate) fn line_anchor_at(&self, index: usize) -> Option<DocumentLineAnchor> {
-        self.selection_line_at(index).map(|line| line.anchor)
+        if index >= self.line_count() {
+            return None;
+        }
+        if index < self.transcript_line_count {
+            return self.transcript.anchor_at(index);
+        }
+
+        self.tail
+            .anchors
+            .get(index - self.transcript_line_count)
+            .copied()
     }
 
     /// `line_index_for_anchor` 把语义锚点解析回当前布局中的视觉行。

@@ -407,7 +407,6 @@ fn measure_document_pipeline_stress_with_model(
     let rss_after_frame_kib = process_rss_kib();
     let first_visible_time = generation_started_at.elapsed();
 
-    model.drain_transcript_refinement_for_benchmark();
     let full_settle_time = generation_started_at.elapsed();
 
     let buffer = terminal.backend().buffer();
@@ -1178,6 +1177,278 @@ mod tests {
             render.items.len(),
             render.all_plain_lines()
         );
+    }
+
+    #[test]
+    #[ignore = "targeted long user-message scroll profile"]
+    fn long_user_message_scroll_profile() {
+        let width = 80;
+        let height = 24;
+        let message_count = 15;
+        let scroll_steps = 180;
+        let mut terminal = Terminal::new(TestBackend::new(width, height))
+            .expect("long message scroll profile backend should initialize");
+        let mut model = Model::new_with_options(
+            HeroOptions {
+                app_name: Some("lumos".to_string()),
+                version: Some("dev".to_string()),
+                work_dir: Some("/tmp/lumos".to_string()),
+                width: 0,
+            },
+            ModelOptions {
+                style_mode: StyleMode::Cx,
+                ..ModelOptions::default()
+            },
+        );
+        model.transcript_mut().clear();
+        model.set_window(width, height);
+        model.set_palette(default_palette(), true);
+        let long_user_message = long_scroll_user_message();
+        for _ in 0..message_count {
+            model.transcript_mut().append_message_with_style_mode(
+                Sender::User,
+                long_user_message.clone(),
+                StyleMode::Cx,
+            );
+        }
+        model.composer_mut().replace_text_and_move_to_end("");
+        model.sync_composer_height();
+
+        let sync_started_at = std::time::Instant::now();
+        let sync_profile = model.sync_transcript_render_profile();
+        let sync_time = sync_started_at.elapsed();
+        model.sync_command_panel_navigation();
+        model.sync_composer_height();
+
+        let initial_layout = model.build_document_layout();
+        let document_lines = initial_layout.line_count();
+        let transcript_lines = initial_layout.transcript_line_count;
+        model.apply_document_viewport_position(&initial_layout, 0, 0, false, true);
+        drop(initial_layout);
+
+        let mut scroll_times = Vec::with_capacity(scroll_steps);
+        let mut viewport_times = Vec::with_capacity(scroll_steps);
+        let mut frame_times = Vec::with_capacity(scroll_steps);
+        for _ in 0..scroll_steps {
+            let scroll_started_at = std::time::Instant::now();
+            model.scroll_document_by(Model::document_mouse_wheel_delta());
+            scroll_times.push(scroll_started_at.elapsed());
+
+            let viewport_started_at = std::time::Instant::now();
+            let layout = model.build_document_layout();
+            let viewport = model.build_document_viewport(&layout);
+            assert_eq!(viewport.lines.len(), usize::from(height));
+            viewport_times.push(viewport_started_at.elapsed());
+
+            let frame_started_at = std::time::Instant::now();
+            terminal
+                .draw(|frame| model.render(frame))
+                .expect("long message scroll profile frame render should succeed");
+            frame_times.push(frame_started_at.elapsed());
+        }
+
+        eprintln!(
+            "long_user_scroll messages={message_count} message_bytes={} size={width}x{height} document_lines={document_lines} transcript_lines={transcript_lines} sync_ms={:.3} estimate_ms={:.3} visible_exact_ms={:.3} scroll_ms={} viewport_ms={} frame_ms={}",
+            long_user_message.len(),
+            duration_ms(sync_time),
+            duration_ms(sync_profile.estimate_time),
+            duration_ms(sync_profile.visible_exact_time),
+            format_duration_distribution(&scroll_times),
+            format_duration_distribution(&viewport_times),
+            format_duration_distribution(&frame_times),
+        );
+    }
+
+    fn long_scroll_user_message() -> String {
+        "这是一条用于滚动性能测试的超长用户消息 mixed English content with symbols and wrapping pressure. "
+            .repeat(72)
+    }
+
+    fn format_duration_distribution(values: &[std::time::Duration]) -> String {
+        let mut sorted = values.to_vec();
+        sorted.sort();
+        let total: std::time::Duration = sorted.iter().copied().sum();
+        let mean = if sorted.is_empty() {
+            0.0
+        } else {
+            duration_ms(total) / sorted.len() as f64
+        };
+        format!(
+            "{{mean:{mean:.3},p50:{:.3},p95:{:.3},max:{:.3}}}",
+            percentile_ms(&sorted, 50),
+            percentile_ms(&sorted, 95),
+            sorted
+                .last()
+                .map(|duration| duration_ms(*duration))
+                .unwrap_or_default(),
+        )
+    }
+
+    fn percentile_ms(sorted: &[std::time::Duration], percentile: usize) -> f64 {
+        if sorted.is_empty() {
+            return 0.0;
+        }
+        let index = (sorted.len().saturating_sub(1) * percentile) / 100;
+        duration_ms(sorted[index])
+    }
+
+    fn duration_ms(duration: std::time::Duration) -> f64 {
+        duration.as_secs_f64() * 1000.0
+    }
+
+    #[test]
+    #[ignore = "targeted mixed long-history high-frequency scroll profile"]
+    fn mixed_long_history_high_frequency_scroll_profile() {
+        let width = 100;
+        let height = 30;
+        let item_count = 3_000;
+        let scroll_steps = 900;
+        let mut terminal = Terminal::new(TestBackend::new(width, height))
+            .expect("mixed long-history scroll profile backend should initialize");
+        let mut model = Model::new_with_options(
+            HeroOptions {
+                app_name: Some("lumos".to_string()),
+                version: Some("dev".to_string()),
+                work_dir: Some("/tmp/lumos".to_string()),
+                width: 0,
+            },
+            ModelOptions {
+                style_mode: StyleMode::Cx,
+                ..ModelOptions::default()
+            },
+        );
+        model.transcript_mut().clear();
+        model.set_window(width, height);
+        model.set_palette(default_palette(), true);
+
+        let mut raw_text_bytes = 0usize;
+        let mut long_item_count = 0usize;
+        for index in 0..item_count {
+            let (sender, content, is_long) = mixed_scroll_profile_message(index);
+            raw_text_bytes += content.len();
+            long_item_count += usize::from(is_long);
+            model
+                .transcript_mut()
+                .append_message_with_style_mode(sender, content, StyleMode::Cx);
+        }
+        model
+            .composer_mut()
+            .replace_text_and_move_to_end("ready for high-frequency scroll profile");
+        model.sync_composer_height();
+
+        let sync_started_at = std::time::Instant::now();
+        let sync_profile = model.sync_transcript_render_profile();
+        let sync_time = sync_started_at.elapsed();
+        model.sync_command_panel_navigation();
+        model.sync_composer_height();
+
+        let initial_layout = model.build_document_layout();
+        let document_lines = initial_layout.line_count();
+        let transcript_lines = initial_layout.transcript_line_count;
+        model.apply_document_viewport_position(&initial_layout, 0, 0, false, true);
+        drop(initial_layout);
+
+        let warm_layout = model.build_document_layout();
+        let warm_viewport = model.build_document_viewport(&warm_layout);
+        assert_eq!(warm_viewport.lines.len(), usize::from(height));
+        terminal
+            .draw(|frame| model.render(frame))
+            .expect("mixed long-history warm frame should render");
+
+        let mut scroll_times = Vec::with_capacity(scroll_steps);
+        let mut viewport_times = Vec::with_capacity(scroll_steps);
+        let mut frame_times = Vec::with_capacity(scroll_steps);
+        let mut tick_times = Vec::with_capacity(scroll_steps);
+        for _ in 0..scroll_steps {
+            let tick_started_at = std::time::Instant::now();
+
+            let scroll_started_at = std::time::Instant::now();
+            model.scroll_document_by(Model::document_mouse_wheel_delta());
+            scroll_times.push(scroll_started_at.elapsed());
+
+            let viewport_started_at = std::time::Instant::now();
+            let layout = model.build_document_layout();
+            let viewport = model.build_document_viewport(&layout);
+            assert_eq!(viewport.lines.len(), usize::from(height));
+            viewport_times.push(viewport_started_at.elapsed());
+
+            let frame_started_at = std::time::Instant::now();
+            terminal
+                .draw(|frame| model.render(frame))
+                .expect("mixed long-history frame render should succeed");
+            frame_times.push(frame_started_at.elapsed());
+
+            tick_times.push(tick_started_at.elapsed());
+        }
+
+        let slow_ticks_over_8ms = tick_times
+            .iter()
+            .filter(|duration| duration.as_millis() >= 8)
+            .count();
+        let slow_ticks_over_16ms = tick_times
+            .iter()
+            .filter(|duration| duration.as_millis() >= 16)
+            .count();
+
+        eprintln!(
+            "mixed_long_scroll items={item_count} long_items={long_item_count} raw_bytes={raw_text_bytes} size={width}x{height} document_lines={document_lines} transcript_lines={transcript_lines} sync_ms={:.3} estimate_ms={:.3} visible_exact_ms={:.3} scroll_ms={} viewport_ms={} frame_ms={} tick_ms={} slow_ticks={{over_8ms:{slow_ticks_over_8ms},over_16ms:{slow_ticks_over_16ms}}}",
+            duration_ms(sync_time),
+            duration_ms(sync_profile.estimate_time),
+            duration_ms(sync_profile.visible_exact_time),
+            format_duration_distribution(&scroll_times),
+            format_duration_distribution(&viewport_times),
+            format_duration_distribution(&frame_times),
+            format_duration_distribution(&tick_times),
+        );
+    }
+
+    fn mixed_scroll_profile_message(index: usize) -> (Sender, String, bool) {
+        if index.is_multiple_of(37) {
+            return (Sender::User, mixed_long_user_message(index), true);
+        }
+        if index.is_multiple_of(11) {
+            return (Sender::Assistant, mixed_markdown_code_message(index), false);
+        }
+        if index.is_multiple_of(3) {
+            return (
+                Sender::User,
+                format!(
+                    "short user message {index}: {}",
+                    "中文 mixed English prompt keeps normal rows in the transcript. ".repeat(2)
+                ),
+                false,
+            );
+        }
+
+        (
+            Sender::Assistant,
+            format!(
+                "## Assistant {index}\n\n- short markdown row\n- viewport should remain cheap\n\n```text\n{}\n```\n",
+                "small code block ".repeat(4),
+            ),
+            false,
+        )
+    }
+
+    fn mixed_long_user_message(index: usize) -> String {
+        let target_repeats = match index % 3 {
+            0 => 64,
+            1 => 128,
+            _ => 212,
+        };
+        format!(
+            "long user message {index}: {}",
+            "这是一段高频滚动基准使用的超长消息 mixed English text, symbols, emoji 👨‍👩‍👧, and wrapping pressure. "
+                .repeat(target_repeats)
+        )
+    }
+
+    fn mixed_markdown_code_message(index: usize) -> String {
+        format!(
+            "## Tool output {index}\n\nThe assistant response mixes prose, lists, and code blocks.\n\n- keep markdown parsing active\n- preserve viewport-only rendering\n\n```rust\nfn profile_{index}() -> &'static str {{\n    \"{}\"\n}}\n```\n\n{}",
+            "markdown code content ".repeat(8),
+            "Follow-up prose keeps wrapping across several terminal columns. ".repeat(3),
+        )
     }
 
     #[test]

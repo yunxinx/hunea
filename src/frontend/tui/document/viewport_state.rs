@@ -172,9 +172,8 @@ pub(crate) fn document_viewport_anchor_at_line(
     layout: &DocumentLayout,
     line_index: usize,
 ) -> Option<DocumentViewportAnchor> {
-    let line = layout.line_at(line_index)?;
-    let line_anchor = line.anchor;
-    let mut line_text = line.plain_line;
+    let line_anchor = layout.line_anchor_at(line_index)?;
+    let mut line_text = layout.line_text_at(line_index)?;
     let mut transcript_item_line_count = 0;
     let mut semantic_position = TranscriptSemanticPosition::Unknown;
 

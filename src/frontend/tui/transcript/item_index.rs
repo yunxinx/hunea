@@ -68,6 +68,7 @@ impl TranscriptItemMetrics {
         self.is_valid && self.quality == TranscriptItemMetricsQuality::Exact
     }
 
+    #[cfg(test)]
     pub(crate) fn is_estimated(&self) -> bool {
         self.is_valid && self.quality == TranscriptItemMetricsQuality::Estimated
     }
@@ -189,6 +190,7 @@ impl TranscriptItemMetricsIndex {
         ))
     }
 
+    #[cfg(test)]
     pub(crate) fn item_range_for_line_window(
         &self,
         start_line: usize,

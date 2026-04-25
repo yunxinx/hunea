@@ -5,6 +5,11 @@ use super::wrap::{
     split_short_indent, split_text_to_width,
 };
 
+#[cfg(test)]
+thread_local! {
+    static COLUMN_OFFSET_REBUILD_CALL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// `PromptVisualLine` 描述 prompt 文本在固定宽度下的一条视觉行。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PromptVisualLine {
@@ -342,11 +347,22 @@ impl PromptLineBuilder {
             self.column_offsets = vec![0];
         }
 
-        self.text.push_str(&block.visible_text(at_line_start));
-        self.width += block.visible_width(at_line_start);
+        self.append_segment(
+            &block.visible_text(at_line_start),
+            block.visible_width(at_line_start),
+        );
         self.end_char = block.raw_end_char();
-        self.column_offsets = build_column_offsets(&self.text);
         self.has_content = true;
+    }
+
+    fn append_segment(&mut self, text: &str, width: usize) {
+        self.text.push_str(text);
+        self.width += width;
+        self.column_offsets = append_column_offset_run(
+            std::mem::take(&mut self.column_offsets),
+            text.chars().count(),
+            width,
+        );
     }
 
     fn from_visual_line(line: PromptVisualLine) -> Self {
@@ -621,7 +637,11 @@ fn hard_wrap_prompt_visible_text(
         current.text.push_str(cluster);
         current.width += cluster_width;
         current.end_char += cluster_chars;
-        current.column_offsets = build_column_offsets(&current.text);
+        current.column_offsets = append_column_offset_run(
+            std::mem::take(&mut current.column_offsets),
+            cluster_chars,
+            cluster_width,
+        );
         current.has_content = true;
     }
 
@@ -748,12 +768,25 @@ impl LiteralPromptLineBuilder {
 }
 
 fn build_column_offsets(text: &str) -> Vec<usize> {
+    #[cfg(test)]
+    COLUMN_OFFSET_REBUILD_CALL_COUNT.with(|count| count.set(count.get() + 1));
+
     let mut offsets = vec![0];
     for cluster in UnicodeSegmentation::graphemes(text, true) {
         offsets =
             append_column_offset_run(offsets, cluster.chars().count(), measure_width(cluster));
     }
     offsets
+}
+
+#[cfg(test)]
+fn reset_column_offset_rebuild_call_count() {
+    COLUMN_OFFSET_REBUILD_CALL_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn column_offset_rebuild_call_count() -> usize {
+    COLUMN_OFFSET_REBUILD_CALL_COUNT.with(std::cell::Cell::get)
 }
 
 fn append_column_offset_run(
@@ -781,7 +814,10 @@ fn should_hard_wrap_prompt_line(line: &str) -> bool {
 mod tests {
     use unicode_segmentation::UnicodeSegmentation;
 
-    use super::wrap_prompt_visual_lines;
+    use super::{
+        column_offset_rebuild_call_count, reset_column_offset_rebuild_call_count,
+        wrap_prompt_visual_lines,
+    };
     use crate::frontend::tui::transcript::wrap::measure_width;
 
     #[test]
@@ -819,6 +855,20 @@ mod tests {
             black_box(wrap_prompt_visual_lines(&prose, 36, 2));
             black_box(wrap_prompt_visual_lines(&literal, 24, 2));
         }
+    }
+
+    #[test]
+    fn wrap_prompt_visual_lines_does_not_rebuild_column_offsets_per_word_block() {
+        let prose = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ".repeat(8);
+
+        reset_column_offset_rebuild_call_count();
+        let lines = wrap_prompt_visual_lines(&prose, 24, 2);
+
+        assert!(lines.len() > 8);
+        assert!(
+            column_offset_rebuild_call_count() <= 2,
+            "column offsets should be maintained incrementally instead of rebuilding for every appended word block"
+        );
     }
 
     fn assert_prompt_wrap_invariants(value: &str, width: usize, line_prefix_width: usize) {

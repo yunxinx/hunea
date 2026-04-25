@@ -37,3 +37,5 @@ pub(crate) use render_state::{
 pub(crate) use wrap::{
     DEFAULT_RENDER_WIDTH, display_tab_width, wrap_assistant_text, wrap_prompt_text,
 };
+#[cfg(test)]
+pub(crate) use wrap::{prompt_text_wrap_call_count, reset_prompt_text_wrap_call_count};

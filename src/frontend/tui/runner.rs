@@ -91,59 +91,19 @@ pub fn run_with_options(hero_options: HeroOptions, options: ModelOptions) -> Res
             continue;
         }
 
-        match event::read()? {
-            Event::Key(key) => {
-                let effect = model.update(AppEvent::Key(key));
-                apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+        let terminal_events = read_ready_terminal_events(event::read()?)?;
+        for action in coalesced_input_actions(terminal_events) {
+            match action {
+                TerminalInputAction::App(app_event) => {
+                    let effect = model.update(app_event);
+                    apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+                }
+                TerminalInputAction::CancelExitConfirmation => model.cancel_exit_confirmation(),
             }
-            Event::Paste(text) => {
-                let effect = model.update(AppEvent::Paste(text));
-                apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+
+            if model.is_quitting() {
+                break;
             }
-            Event::Resize(width, height) => {
-                let effect = model.update(AppEvent::Resized { width, height });
-                apply_effect_if_needed(&mut terminal, &mut model, effect)?;
-            }
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    let effect = model.update(AppEvent::MouseWheel {
-                        delta_lines: -Model::document_mouse_wheel_delta(),
-                    });
-                    apply_effect_if_needed(&mut terminal, &mut model, effect)?;
-                }
-                MouseEventKind::ScrollDown => {
-                    let effect = model.update(AppEvent::MouseWheel {
-                        delta_lines: Model::document_mouse_wheel_delta(),
-                    });
-                    apply_effect_if_needed(&mut terminal, &mut model, effect)?;
-                }
-                MouseEventKind::Down(button) => {
-                    let effect = model.update(AppEvent::MouseDown {
-                        button,
-                        column: mouse.column,
-                        row: mouse.row,
-                    });
-                    apply_effect_if_needed(&mut terminal, &mut model, effect)?;
-                }
-                MouseEventKind::Up(button) => {
-                    let effect = model.update(AppEvent::MouseUp {
-                        button,
-                        column: mouse.column,
-                        row: mouse.row,
-                    });
-                    apply_effect_if_needed(&mut terminal, &mut model, effect)?;
-                }
-                MouseEventKind::Drag(button) => {
-                    let effect = model.update(AppEvent::MouseDrag {
-                        button,
-                        column: mouse.column,
-                        row: mouse.row,
-                    });
-                    apply_effect_if_needed(&mut terminal, &mut model, effect)?;
-                }
-                _ => model.cancel_exit_confirmation(),
-            },
-            _ => {}
         }
     }
 
@@ -209,6 +169,100 @@ impl Drop for TerminalSession {
             LeaveAlternateScreen
         );
     }
+}
+
+const MAX_READY_TERMINAL_EVENTS_PER_FRAME: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TerminalInputAction {
+    App(AppEvent),
+    CancelExitConfirmation,
+}
+
+fn read_ready_terminal_events(first_event: Event) -> Result<Vec<Event>> {
+    let mut events = vec![first_event];
+    while events.len() < MAX_READY_TERMINAL_EVENTS_PER_FRAME && event::poll(Duration::ZERO)? {
+        events.push(event::read()?);
+    }
+    Ok(events)
+}
+
+fn coalesced_input_actions(events: impl IntoIterator<Item = Event>) -> Vec<TerminalInputAction> {
+    let mut actions = Vec::new();
+    let mut pending_wheel_delta = 0_isize;
+
+    for event in events {
+        match event {
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    pending_wheel_delta -= Model::document_mouse_wheel_delta();
+                }
+                MouseEventKind::ScrollDown => {
+                    pending_wheel_delta += Model::document_mouse_wheel_delta();
+                }
+                MouseEventKind::Down(button) => {
+                    flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
+                    actions.push(TerminalInputAction::App(AppEvent::MouseDown {
+                        button,
+                        column: mouse.column,
+                        row: mouse.row,
+                    }));
+                }
+                MouseEventKind::Up(button) => {
+                    flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
+                    actions.push(TerminalInputAction::App(AppEvent::MouseUp {
+                        button,
+                        column: mouse.column,
+                        row: mouse.row,
+                    }));
+                }
+                MouseEventKind::Drag(button) => {
+                    flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
+                    actions.push(TerminalInputAction::App(AppEvent::MouseDrag {
+                        button,
+                        column: mouse.column,
+                        row: mouse.row,
+                    }));
+                }
+                _ => {
+                    flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
+                    actions.push(TerminalInputAction::CancelExitConfirmation);
+                }
+            },
+            Event::Key(key) => {
+                flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
+                actions.push(TerminalInputAction::App(AppEvent::Key(key)));
+            }
+            Event::Paste(text) => {
+                flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
+                actions.push(TerminalInputAction::App(AppEvent::Paste(text)));
+            }
+            Event::Resize(width, height) => {
+                flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
+                actions.push(TerminalInputAction::App(AppEvent::Resized {
+                    width,
+                    height,
+                }));
+            }
+            _ => {
+                flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
+            }
+        }
+    }
+
+    flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
+    actions
+}
+
+fn flush_pending_wheel_delta(actions: &mut Vec<TerminalInputAction>, delta: &mut isize) {
+    if *delta == 0 {
+        return;
+    }
+
+    actions.push(TerminalInputAction::App(AppEvent::MouseWheel {
+        delta_lines: *delta,
+    }));
+    *delta = 0;
 }
 
 fn next_wait_duration(model: &Model, startup_deadline: Instant, now: Instant) -> Duration {
@@ -323,4 +377,41 @@ fn copy_selection_to_terminal_clipboard(
     let sequence = format!("\u{1b}]52;c;{encoded}\u{7}");
     terminal.backend_mut().write_all(sequence.as_bytes())?;
     terminal.backend_mut().flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+
+    #[test]
+    fn ready_input_batch_coalesces_wheel_burst_before_key() {
+        let events = (0..128)
+            .map(|_| {
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollUp,
+                    column: 0,
+                    row: 0,
+                    modifiers: KeyModifiers::empty(),
+                })
+            })
+            .chain(std::iter::once(Event::Key(KeyEvent::from(KeyCode::Char(
+                'x',
+            )))))
+            .collect::<Vec<_>>();
+
+        let actions = coalesced_input_actions(events);
+
+        assert_eq!(actions.len(), 2);
+        assert_eq!(
+            actions[0],
+            TerminalInputAction::App(AppEvent::MouseWheel {
+                delta_lines: -128 * Model::document_mouse_wheel_delta(),
+            })
+        );
+        assert_eq!(
+            actions[1],
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Char('x'))))
+        );
+    }
 }

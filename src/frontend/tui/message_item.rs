@@ -558,8 +558,13 @@ fn estimate_user_message_metrics_fast(
         };
 
         let content_line_count = estimated_content_line_count + frame_line_count;
-        let estimated_char_len =
-            estimate_user_plain_text_len_fast(content, layout, style_mode, has_frame);
+        let estimated_char_len = estimate_user_plain_text_len_fast(
+            content,
+            layout,
+            style_mode,
+            has_frame,
+            estimated_content_line_count,
+        );
         let content_char_len = previous_metrics.content_char_len.max(estimated_char_len);
 
         return TranscriptFastEstimate {
@@ -576,8 +581,13 @@ fn estimate_user_message_metrics_fast(
         layout.line_prefix_width,
     );
     let content_line_count = estimated_content_line_count + frame_line_count;
-    let content_char_len =
-        estimate_user_plain_text_len_fast(content, layout, style_mode, has_frame);
+    let content_char_len = estimate_user_plain_text_len_fast(
+        content,
+        layout,
+        style_mode,
+        has_frame,
+        estimated_content_line_count,
+    );
 
     TranscriptFastEstimate {
         content_line_count,
@@ -1039,26 +1049,62 @@ fn estimate_user_plain_text_len_fast(
     layout: UserMessageRenderLayout,
     style_mode: StyleMode,
     has_frame: bool,
+    content_line_count: usize,
 ) -> usize {
-    let wrapped_lines = wrap_prompt_text(
-        content,
-        layout.content_width.max(1),
-        layout.line_prefix_width,
-    );
+    let content_line_count = content_line_count.max(1);
     let mut plain_text_len = usize::from(has_frame) * 2 * layout.frame_width.max(1);
+    let rendered_text = estimate_rendered_prompt_text(content);
 
-    for (index, line) in wrapped_lines.iter().enumerate() {
-        let is_first = index == 0;
-        plain_text_len += match style_mode.normalized() {
-            StyleMode::Cx => framed_user_plain_line_len(line, is_first, layout, style_mode),
-            StyleMode::Cc => {
-                compact_user_plain_line_len(line, is_first, layout.frame_width.max(1), style_mode)
-            }
-            StyleMode::Ms => legacy_user_plain_line_len(line, is_first, style_mode),
-        };
-    }
+    let first_prefix_len = match style_mode.normalized() {
+        StyleMode::Cx | StyleMode::Cc => user_message_prefix_glyph(style_mode).len() + 1,
+        StyleMode::Ms => user_message_prefix(style_mode).len(),
+    };
+    let continuation_prefix_len = layout.line_prefix_width;
+    let prefix_text_len = first_prefix_len
+        + content_line_count
+            .saturating_sub(1)
+            .saturating_mul(continuation_prefix_len);
+    let text_with_prefixes = rendered_text.byte_len.saturating_add(prefix_text_len);
 
+    let estimated_line_len = match style_mode.normalized() {
+        StyleMode::Cx | StyleMode::Cc => {
+            let prefix_width = layout.line_prefix_width.saturating_mul(content_line_count);
+            let trailing_fill_len = layout
+                .frame_width
+                .max(1)
+                .saturating_mul(content_line_count)
+                .saturating_sub(prefix_width.saturating_add(rendered_text.display_width));
+            text_with_prefixes.saturating_add(trailing_fill_len)
+        }
+        StyleMode::Ms => text_with_prefixes,
+    };
+
+    plain_text_len += estimated_line_len;
     plain_text_len
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PromptTextEstimate {
+    byte_len: usize,
+    display_width: usize,
+}
+
+fn estimate_rendered_prompt_text(content: &str) -> PromptTextEstimate {
+    let mut estimate = PromptTextEstimate::default();
+    for cluster in UnicodeSegmentation::graphemes(content, true) {
+        if cluster == "\n" {
+            continue;
+        }
+        if cluster == "\t" {
+            let width = display_tab_width(0);
+            estimate.byte_len = estimate.byte_len.saturating_add(width);
+            estimate.display_width = estimate.display_width.saturating_add(width);
+        } else {
+            estimate.byte_len = estimate.byte_len.saturating_add(cluster.len());
+            estimate.display_width = estimate.display_width.saturating_add(cluster.width());
+        }
+    }
+    estimate
 }
 
 fn measure_user_message_metrics(

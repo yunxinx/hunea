@@ -70,10 +70,6 @@ pub struct Model {
     pub(super) status_notice_deadline: Option<Instant>,
     pub(super) history_scroll_indicator_token: usize,
     pub(super) history_scroll_indicator_deadline: Option<Instant>,
-    pub(super) transcript_refine_token: usize,
-    pub(super) transcript_refine_deadline: Option<Instant>,
-    pub(super) transcript_refine_ranges: Vec<(usize, usize)>,
-    pub(super) transcript_refine_cursor: usize,
     pub(super) external_editor_helper_visible: bool,
     pub(super) external_editor_helper_token: usize,
     pub(super) external_editor_helper_deadline: Option<Instant>,
@@ -117,8 +113,6 @@ pub(crate) struct TranscriptSyncProfile {
     pub(crate) visible_exact_time: Duration,
     pub(crate) estimate_breakdown: TranscriptEstimateBreakdown,
 }
-
-const TRANSCRIPT_REFINE_INTERVAL: Duration = Duration::from_millis(8);
 
 impl Model {
     /// `new` 创建并初始化 TUI 模型。
@@ -195,10 +189,6 @@ impl Model {
             status_notice_deadline: None,
             history_scroll_indicator_token: 0,
             history_scroll_indicator_deadline: None,
-            transcript_refine_token: 0,
-            transcript_refine_deadline: None,
-            transcript_refine_ranges: Vec::new(),
-            transcript_refine_cursor: 0,
             external_editor_helper_visible: false,
             external_editor_helper_token: 0,
             external_editor_helper_deadline: None,
@@ -239,7 +229,6 @@ impl Model {
             self.status_notice_deadline,
             self.external_editor_helper_deadline,
             self.history_scroll_indicator_deadline,
-            self.transcript_refine_deadline,
             self.selection_auto_scroll_deadline,
         ]
         .into_iter()
@@ -326,14 +315,6 @@ impl Model {
         {
             return Some(super::AppEvent::HistoryScrollIndicatorTimeout {
                 token: self.history_scroll_indicator_token,
-            });
-        }
-
-        if let Some(deadline) = self.transcript_refine_deadline
-            && now >= deadline
-        {
-            return Some(super::AppEvent::TranscriptRefineTick {
-                token: self.transcript_refine_token,
             });
         }
 
@@ -424,7 +405,6 @@ impl Model {
         self.invalidate_document_viewport_cache();
         self.document_transcript_cache = Default::default();
         self.document_layout_cache = Default::default();
-        self.schedule_transcript_refinement();
         TranscriptSyncProfile {
             estimate_time,
             visible_exact_time,
@@ -450,7 +430,6 @@ impl Model {
         self.document_layout_cache = Default::default();
         self.document_viewport_cache = Default::default();
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-        self.schedule_transcript_refinement();
     }
 
     fn exactize_visible_transcript_window_until_stable(
@@ -484,68 +463,6 @@ impl Model {
         }
 
         index
-    }
-
-    pub(super) fn schedule_transcript_refinement(&mut self) {
-        let index = self.transcript_render.index.clone();
-        let Some((start, count)) = self.current_visible_transcript_window_for_index(&index) else {
-            self.transcript_refine_ranges.clear();
-            self.transcript_refine_cursor = 0;
-            self.transcript_refine_deadline = None;
-            return;
-        };
-        let overscan_lines = crate::frontend::tui::transcript::viewport_overscan_line_budget(count);
-        let Some((exact_start, exact_end)) =
-            index.item_range_for_line_window(start, count, overscan_lines)
-        else {
-            self.transcript_refine_ranges.clear();
-            self.transcript_refine_cursor = 0;
-            self.transcript_refine_deadline = None;
-            return;
-        };
-
-        self.transcript_refine_ranges =
-            build_transcript_refine_ranges(index.metrics.as_slice(), exact_start, exact_end);
-        self.transcript_refine_cursor = 0;
-        self.transcript_refine_token = self.transcript_refine_token.saturating_add(1);
-        self.transcript_refine_deadline = (!self.transcript_refine_ranges.is_empty())
-            .then_some(Instant::now() + TRANSCRIPT_REFINE_INTERVAL);
-    }
-
-    pub(crate) fn run_next_transcript_refinement_batch(&mut self) -> bool {
-        let scheduled_cursor = self.transcript_refine_cursor;
-        let scheduled_token = self.transcript_refine_token;
-        let Some(&(start, end)) = self.transcript_refine_ranges.get(scheduled_cursor) else {
-            self.transcript_refine_deadline = None;
-            return false;
-        };
-
-        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
-        self.transcript.exactize_item_range(start, end);
-        let index = self.transcript.progressive_item_metrics_index();
-        self.transcript_render = Rc::new(index_only_render_result(index));
-        self.transcript_render_version += 1;
-        self.document_transcript_cache = Default::default();
-        self.document_layout_cache = Default::default();
-        self.document_viewport_cache = Default::default();
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-
-        // viewport exactization 可能会在同步期间重建 refine 队列，此时必须保留新队列的游标。
-        let schedule_preserved = self.transcript_refine_token == scheduled_token
-            && self.transcript_refine_ranges.get(scheduled_cursor).copied() == Some((start, end));
-        if !schedule_preserved {
-            return true;
-        }
-
-        self.transcript_refine_cursor = scheduled_cursor + 1;
-        self.transcript_refine_deadline = (self.transcript_refine_cursor
-            < self.transcript_refine_ranges.len())
-        .then_some(Instant::now() + TRANSCRIPT_REFINE_INTERVAL);
-        true
-    }
-
-    pub(crate) fn drain_transcript_refinement_for_benchmark(&mut self) {
-        while self.run_next_transcript_refinement_batch() {}
     }
 
     pub(crate) fn status_line_revision(&self) -> usize {
@@ -692,56 +609,12 @@ fn resolve_initial_current_dir(items: &[StatusLineItem]) -> String {
     }
 }
 
-fn build_transcript_refine_ranges(
-    metrics: &[crate::frontend::tui::transcript::TranscriptItemMetrics],
-    exact_start: usize,
-    exact_end: usize,
-) -> Vec<(usize, usize)> {
-    const TRANSCRIPT_REFINE_BATCH_ITEMS: usize = 32;
-
-    if metrics.is_empty() {
-        return Vec::new();
-    }
-
-    let mut ranges = Vec::new();
-    let mut left_end = exact_start.min(metrics.len());
-    let mut right_start = exact_end.min(metrics.len());
-
-    while left_end > 0 || right_start < metrics.len() {
-        if right_start < metrics.len() {
-            let right_end = right_start
-                .saturating_add(TRANSCRIPT_REFINE_BATCH_ITEMS)
-                .min(metrics.len());
-            if metrics[right_start..right_end]
-                .iter()
-                .any(crate::frontend::tui::transcript::TranscriptItemMetrics::is_estimated)
-            {
-                ranges.push((right_start, right_end));
-            }
-            right_start = right_end;
-        }
-
-        if left_end > 0 {
-            let left_start = left_end.saturating_sub(TRANSCRIPT_REFINE_BATCH_ITEMS);
-            if metrics[left_start..left_end]
-                .iter()
-                .any(crate::frontend::tui::transcript::TranscriptItemMetrics::is_estimated)
-            {
-                ranges.push((left_start, left_end));
-            }
-            left_end = left_start;
-        }
-    }
-
-    ranges
-}
-
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::frontend::tui::{AppEvent, Sender, StyleMode, document::DocumentAnchorRegion};
+    use crate::frontend::tui::{Sender, StyleMode, document::DocumentAnchorRegion};
 
     fn progressive_exactization_fixture() -> Model {
         let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
@@ -1304,6 +1177,55 @@ mod tests {
     }
 
     #[test]
+    fn composer_cursor_only_layout_refresh_reuses_long_composer_document() {
+        let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Cx);
+        model.set_window(80, 24);
+        model.set_palette(default_palette(), true);
+        model
+            .composer_mut()
+            .replace_text_and_move_to_end("中英 mixed long composer text ".repeat(120));
+        model.sync_composer_height();
+        let _ = model.build_document_layout();
+
+        crate::frontend::tui::composer::reset_render_document_call_count();
+        model.composer_mut().move_to_begin();
+        model.sync_document_viewport_for_composer_cursor();
+        let _ = model.build_document_layout();
+
+        assert_eq!(
+            crate::frontend::tui::composer::render_document_call_count(),
+            0,
+            "cursor-only layout refresh should reuse the cached long composer document"
+        );
+    }
+
+    #[test]
+    fn sync_transcript_render_does_not_schedule_idle_history_refinement() {
+        let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
+        model.transcript_mut().clear();
+        model.transcript_mut().set_gap(0);
+        for index in 0..32 {
+            model.transcript_mut().append_message(
+                Sender::User,
+                format!(
+                    "message {index}: {}",
+                    "long user text should stay estimated unless it enters the viewport "
+                        .repeat(10)
+                ),
+            );
+        }
+        model.set_window(24, 6);
+        model.set_palette(default_palette(), true);
+
+        model.sync_transcript_render();
+
+        assert!(
+            model.next_timeout_deadline().is_none(),
+            "sync should not install a background timer that competes with scroll input"
+        );
+    }
+
+    #[test]
     fn build_document_layout_exactizes_a_newly_scrolled_transcript_window() {
         let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
         model.transcript_mut().clear();
@@ -1519,254 +1441,6 @@ mod tests {
                         .resolved_offset
                         .saturating_add(model.document_viewport_height()),
             "render-time exactization should leave the active composer cursor inside the visible document viewport"
-        );
-    }
-
-    #[test]
-    fn transcript_refinement_batch_restarts_from_new_queue_after_viewport_requeues_work() {
-        let base = progressive_exactization_fixture();
-        let layout = base.clone().build_document_layout();
-        let max_offset = layout
-            .line_count()
-            .saturating_sub(base.document_viewport_height());
-        let mut candidate = None;
-
-        'search: for manual_scroll in [false, true] {
-            for offset in 0..=max_offset {
-                let mut probe = base.clone();
-                apply_scrolled_offset(&mut probe, offset, manual_scroll);
-                if probe.transcript_refine_ranges.is_empty() {
-                    continue;
-                }
-
-                let scheduled_token = probe.transcript_refine_token;
-                if !probe.run_next_transcript_refinement_batch() {
-                    continue;
-                }
-
-                if probe.transcript_refine_token != scheduled_token
-                    && !probe.transcript_refine_ranges.is_empty()
-                {
-                    candidate = Some((offset, manual_scroll));
-                    break 'search;
-                }
-            }
-        }
-
-        let (offset, manual_scroll) = candidate.expect(
-            "test fixture should expose a refinement batch whose viewport sync requeues follow-up work",
-        );
-
-        let mut model = base;
-        apply_scrolled_offset(&mut model, offset, manual_scroll);
-        let scheduled_token = model.transcript_refine_token;
-
-        assert!(
-            model.run_next_transcript_refinement_batch(),
-            "candidate should still execute a refinement batch"
-        );
-        assert_ne!(
-            model.transcript_refine_token, scheduled_token,
-            "candidate should reschedule refinement work while syncing the viewport after the batch"
-        );
-        assert!(
-            !model.transcript_refine_ranges.is_empty(),
-            "rescheduled refinement queue should still contain follow-up work"
-        );
-        assert_eq!(
-            model.transcript_refine_cursor, 0,
-            "requeued refinement work should restart from the new queue instead of skipping its first batch"
-        );
-        assert!(
-            model.transcript_refine_deadline.is_some(),
-            "requeued refinement queue should keep a pending deadline for its next batch"
-        );
-    }
-
-    #[test]
-    fn transcript_refinement_ticks_eventually_settle_remaining_estimated_history() {
-        let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
-        model.transcript_mut().clear();
-        model.transcript_mut().set_gap(0);
-        for index in 0..96 {
-            model.transcript_mut().append_message(
-                Sender::Assistant,
-                format!(
-                    "item {index}: alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
-                ),
-            );
-        }
-        model.set_window(18, 6);
-        model.set_palette(default_palette(), true);
-        model.sync_transcript_render();
-
-        assert!(
-            model
-                .transcript_render
-                .index
-                .metrics
-                .iter()
-                .any(|metrics| metrics.is_estimated()),
-            "test fixture should begin in a mixed-quality state before refinement ticks"
-        );
-
-        for _ in 0..32 {
-            let Some(deadline) = model.transcript_refine_deadline else {
-                break;
-            };
-            let Some(AppEvent::TranscriptRefineTick { token }) = model.timeout_event(deadline)
-            else {
-                break;
-            };
-            let _ = model.update(AppEvent::TranscriptRefineTick { token });
-            if model
-                .transcript_render
-                .index
-                .metrics
-                .iter()
-                .all(|metrics| !metrics.is_estimated())
-            {
-                break;
-            }
-        }
-
-        assert!(
-            model
-                .transcript_render
-                .index
-                .metrics
-                .iter()
-                .all(|metrics| !metrics.is_estimated()),
-            "refinement ticks should eventually settle the remaining estimated transcript history"
-        );
-    }
-
-    #[test]
-    fn transcript_refinement_deadline_yields_before_next_batch() {
-        let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
-        model.transcript_mut().clear();
-        model.transcript_mut().set_gap(0);
-        for index in 0..160 {
-            model.transcript_mut().append_message(
-                Sender::Assistant,
-                format!(
-                    "item {index}: alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
-                ),
-            );
-        }
-        model.set_window(18, 6);
-        model.set_palette(default_palette(), true);
-        model.sync_transcript_render();
-
-        assert!(
-            model.transcript_refine_ranges.len() > 1,
-            "test fixture should schedule more than one refinement batch"
-        );
-        assert!(
-            model
-                .transcript_refine_deadline
-                .is_some_and(|deadline| deadline > Instant::now()),
-            "initial refinement deadline should be deferred so the runner can poll for input before background work continues"
-        );
-
-        assert!(model.run_next_transcript_refinement_batch());
-        assert!(
-            model.transcript_refine_cursor < model.transcript_refine_ranges.len(),
-            "test fixture should still have pending refinement work after the first batch"
-        );
-        assert!(
-            model
-                .transcript_refine_deadline
-                .is_some_and(|deadline| deadline > Instant::now()),
-            "follow-up refinement batches should also defer their deadline instead of immediately rearming another timeout tick"
-        );
-    }
-
-    #[test]
-    fn transcript_refinement_batch_keeps_idle_non_follow_bottom_cursor_visible() {
-        let base = idle_refinement_fixture();
-        let layout = base.clone().build_document_layout();
-        let max_offset = layout
-            .line_count()
-            .saturating_sub(base.document_viewport_height());
-        let mut candidate = None;
-
-        for offset in 0..=max_offset {
-            let mut model = base.clone();
-            apply_scrolled_offset(&mut model, offset, false);
-            if model.follow_bottom || model.manual_document_scroll {
-                continue;
-            }
-            let Some(&(start, end)) = model.transcript_refine_ranges.first() else {
-                continue;
-            };
-
-            let preserved_viewport_state = model.current_document_viewport_state();
-            model.transcript.exactize_item_range(start, end);
-            let index = model.transcript.progressive_item_metrics_index();
-            model.transcript_render = Rc::new(index_only_render_result(index));
-            model.transcript_render_version += 1;
-            model.document_transcript_cache = Default::default();
-            model.document_layout_cache = Default::default();
-            model.document_viewport_cache = Default::default();
-
-            let layout = model.build_document_layout();
-            let restored_offset =
-                preserved_viewport_state.resolve_offset(&layout, model.document_viewport_height());
-            let restored_cursor_visible = layout.cursor_y >= restored_offset
-                && layout.cursor_y
-                    < restored_offset.saturating_add(model.document_viewport_height());
-
-            model.sync_document_viewport_for_composer_cursor();
-            let expected_offset = model.document_viewport_y;
-
-            if !restored_cursor_visible && expected_offset != restored_offset {
-                candidate = Some(offset);
-                break;
-            }
-        }
-
-        let offset = candidate.expect(
-            "test fixture should expose an idle non-follow-bottom viewport whose restored transcript anchor would hide the composer cursor after exactization",
-        );
-
-        let mut model = base;
-        apply_scrolled_offset(&mut model, offset, false);
-        let Some(&(start, end)) = model.transcript_refine_ranges.first() else {
-            panic!("candidate should keep at least one pending refinement batch");
-        };
-
-        let mut expected = model.clone();
-        expected.transcript.exactize_item_range(start, end);
-        let index = expected.transcript.progressive_item_metrics_index();
-        expected.transcript_render = Rc::new(index_only_render_result(index));
-        expected.transcript_render_version += 1;
-        expected.document_transcript_cache = Default::default();
-        expected.document_layout_cache = Default::default();
-        expected.document_viewport_cache = Default::default();
-        expected.sync_document_viewport_for_composer_cursor();
-
-        assert!(
-            model.run_next_transcript_refinement_batch(),
-            "candidate should still execute a refinement batch"
-        );
-        let actual_layout = model.build_document_layout();
-        assert_eq!(
-            model.document_viewport_y, expected.document_viewport_y,
-            "background refinement should keep the composer cursor in view instead of restoring a transcript anchor from ordinary editing mode"
-        );
-        assert_eq!(
-            model.composer.viewport_offset(),
-            expected.composer.viewport_offset(),
-            "composer viewport should match the cursor-tracking path after refinement reflow"
-        );
-        assert!(
-            actual_layout.cursor_y >= model.document_viewport_y
-                && actual_layout.cursor_y
-                    < model
-                        .document_viewport_y
-                        .saturating_add(model.document_viewport_height()),
-            "background refinement should leave the active composer cursor inside the visible document viewport"
         );
     }
 }

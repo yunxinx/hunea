@@ -1,3 +1,8 @@
+#[cfg(test)]
+thread_local! {
+    static COMPOSER_VISUAL_LINES_CALL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 use crate::frontend::tui::transcript::wrap_prompt_visual_lines;
 
 #[derive(Debug, Clone)]
@@ -28,6 +33,9 @@ pub(crate) fn visual_lines_for_text(
     width: usize,
     line_prefix_width: usize,
 ) -> Vec<VisualLine> {
+    #[cfg(test)]
+    COMPOSER_VISUAL_LINES_CALL_COUNT.with(|count| count.set(count.get() + 1));
+
     visual_lines_for_text_with_options(text, width, line_prefix_width)
 }
 
@@ -37,6 +45,16 @@ pub(crate) fn placeholder_visual_lines_for_text(
     line_prefix_width: usize,
 ) -> Vec<VisualLine> {
     visual_lines_for_text_with_options(text, width, line_prefix_width)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_visual_lines_call_count() {
+    COMPOSER_VISUAL_LINES_CALL_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn visual_lines_call_count() -> usize {
+    COMPOSER_VISUAL_LINES_CALL_COUNT.with(std::cell::Cell::get)
 }
 
 fn visual_lines_for_text_with_options(

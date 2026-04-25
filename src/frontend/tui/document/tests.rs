@@ -1075,6 +1075,44 @@ fn transcript_render_defers_transcript_selectable_ranges_to_document_access() {
 }
 
 #[test]
+fn viewport_anchor_reads_keep_long_transcript_selectable_ranges_lazy() {
+    let mut model = ready_document_model(48, 8);
+    model.transcript_mut().append_message_with_style_mode(
+        Sender::User,
+        "长消息 mixed english content keeps scrolling anchor capture lazy ".repeat(120),
+        StyleMode::Cx,
+    );
+    model.sync_transcript_render();
+
+    let layout = model.build_document_layout();
+    assert!(
+        layout.transcript.selectable_cache.borrow().is_empty(),
+        "selectable ranges should start empty before anchor-only reads"
+    );
+
+    let viewport_lines = (0..model
+        .document_viewport_height()
+        .min(layout.transcript_line_count))
+        .collect::<Vec<_>>();
+    let _state = ViewportState::capture(
+        &layout,
+        &viewport_lines,
+        0,
+        false,
+        true,
+        model.document_viewport_height(),
+        model.width,
+    );
+    let _anchor = document_viewport_anchor_at_line(&layout, 1)
+        .expect("long transcript line should expose a viewport anchor");
+
+    assert!(
+        layout.transcript.selectable_cache.borrow().is_empty(),
+        "scroll anchor capture must not materialize whole-item selectable ranges"
+    );
+}
+
+#[test]
 fn document_viewport_materialization_keeps_transcript_selectable_ranges_lazy() {
     let mut model = ready_document_model(24, 6);
     model

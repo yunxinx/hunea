@@ -228,7 +228,6 @@ impl Model {
         self.document_layout_cache = Default::default();
         self.document_viewport_cache = Default::default();
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-        self.schedule_transcript_refinement();
     }
 
     fn selected_transcript_item_range(&self) -> Option<(usize, usize)> {

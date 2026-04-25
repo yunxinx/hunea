@@ -30,6 +30,8 @@ pub struct Model {
     pub(super) external_editor: Vec<String>,
     pub(super) external_editor_hint: String,
     pub(super) external_editor_helper_enabled: bool,
+    pub(super) acp_agent_servers: Vec<String>,
+    pub(super) selected_acp_agent: Option<String>,
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
     pub(super) copy_on_mouse_selection_release: bool,
@@ -121,6 +123,7 @@ pub struct ModelOptions {
     pub copy_on_mouse_selection_release: bool,
     pub swap_enter_and_send: bool,
     pub ctrl_c_clears_input: bool,
+    pub acp_agent_servers: Vec<String>,
 }
 
 impl Default for ModelOptions {
@@ -134,6 +137,7 @@ impl Default for ModelOptions {
             copy_on_mouse_selection_release: false,
             swap_enter_and_send: false,
             ctrl_c_clears_input: true,
+            acp_agent_servers: Vec::new(),
         }
     }
 }
@@ -181,6 +185,8 @@ impl Model {
             external_editor: options.external_editor,
             external_editor_hint: options.external_editor_hint,
             external_editor_helper_enabled: options.show_external_editor_helper,
+            acp_agent_servers: options.acp_agent_servers,
+            selected_acp_agent: None,
             command_panel_selected: 0,
             command_panel_scroll: 0,
             copy_on_mouse_selection_release: options.copy_on_mouse_selection_release,
@@ -234,6 +240,11 @@ impl Model {
     /// `is_quitting` 返回是否正在退出。
     pub fn is_quitting(&self) -> bool {
         self.quitting
+    }
+
+    /// `selected_acp_agent` 返回本次 TUI 会话中用户选择的 ACP Agent。
+    pub fn selected_acp_agent(&self) -> Option<&str> {
+        self.selected_acp_agent.as_deref()
     }
 
     /// `next_timeout_deadline` 返回当前最早需要处理的内部超时。

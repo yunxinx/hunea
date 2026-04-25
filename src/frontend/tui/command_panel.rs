@@ -15,16 +15,19 @@ const COMMAND_PANEL_VISIBLE_ROWS: usize = 7;
 const COMMAND_PANEL_INSET_WIDTH: usize = 2;
 const COMMAND_PANEL_DESCRIPTION_GAP: usize = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum CommandPanelAction {
     Exit,
+    OpenAcpPicker,
+    ShowAcpMissingConfig,
+    SelectAcp { agent_id: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CommandPanelItem {
-    name: &'static str,
-    aliases: &'static [&'static str],
-    description: &'static str,
+    name: String,
+    aliases: Vec<String>,
+    description: String,
     action: CommandPanelAction,
 }
 
@@ -44,16 +47,12 @@ pub(crate) struct CommandPanelRenderResult {
     pub(crate) has_content: bool,
 }
 
-const COMMAND_PANEL_ITEMS: [CommandPanelItem; 1] = [CommandPanelItem {
-    name: "/exit",
-    aliases: &["/quit"],
-    description: "Exit the application",
-    action: CommandPanelAction::Exit,
-}];
-
 impl Model {
     pub(crate) fn command_panel_active(&self) -> bool {
-        command_panel_query(self.composer_text()).is_some()
+        let Some(query) = raw_command_panel_query(self.composer_text()) else {
+            return false;
+        };
+        !self.filter_command_panel_items(&query).is_empty() || query.chars().count() == 1
     }
 
     pub(crate) fn sync_command_panel_navigation(&mut self) {
@@ -112,14 +111,14 @@ impl Model {
                 true
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
-                let Some(item) = state.items.get(state.selected).copied() else {
+                let Some(item) = state.items.get(state.selected) else {
                     return false;
                 };
-                self.complete_command_panel_selection(item.name);
+                self.complete_command_panel_selection(item.name.as_str());
                 true
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
-                let Some(item) = state.items.get(state.selected).copied() else {
+                let Some(item) = state.items.get(state.selected).cloned() else {
                     return false;
                 };
                 self.execute_command_panel_item(item);
@@ -151,8 +150,11 @@ impl Model {
     }
 
     fn current_command_panel_state(&self) -> Option<CommandPanelState> {
-        let query = command_panel_query(self.composer_text())?;
-        let items = filter_command_panel_items(&query);
+        let query = raw_command_panel_query(self.composer_text())?;
+        let items = self.filter_command_panel_items(&query);
+        if items.is_empty() && query.chars().count() > 1 {
+            return None;
+        }
         if items.is_empty() {
             return Some(CommandPanelState {
                 query,
@@ -249,11 +251,17 @@ impl Model {
             return (lines, plain_lines, selectable);
         }
 
+        let command_column_width = command_panel_command_column_width(state, visible_rows);
+
         for row in 0..visible_rows {
             let index = state.scroll + row;
-            if let Some(item) = state.items.get(index).copied() {
-                let (line, plain_line, line_selectable) =
-                    self.render_command_panel_line(item, index == state.selected, width);
+            if let Some(item) = state.items.get(index) {
+                let (line, plain_line, line_selectable) = self.render_command_panel_line(
+                    item,
+                    index == state.selected,
+                    width,
+                    command_column_width,
+                );
                 lines.push(line);
                 plain_lines.push(plain_line);
                 selectable.push(line_selectable);
@@ -270,23 +278,27 @@ impl Model {
 
     fn render_command_panel_line(
         &self,
-        item: CommandPanelItem,
+        item: &CommandPanelItem,
         selected: bool,
         width: usize,
+        command_column_width: usize,
     ) -> (Line<'static>, String, SelectableLineRange) {
         let width = width.max(1);
         let mut remaining_width = width;
         let inset_width = COMMAND_PANEL_INSET_WIDTH.min(remaining_width);
         remaining_width = remaining_width.saturating_sub(inset_width);
 
-        let command_text = truncate_display_width_with_ellipsis(item.name, remaining_width);
-        remaining_width = remaining_width.saturating_sub(command_text.width());
+        let command_column_width = command_column_width.min(remaining_width);
+        let command_text = truncate_display_width_with_ellipsis(&item.name, command_column_width);
+        let command_padding_width = command_column_width.saturating_sub(command_text.width());
+        remaining_width = remaining_width.saturating_sub(command_column_width);
 
-        let gap_text = " ".repeat(COMMAND_PANEL_DESCRIPTION_GAP.min(remaining_width));
-        remaining_width = remaining_width.saturating_sub(gap_text.len());
+        let gap_width = COMMAND_PANEL_DESCRIPTION_GAP.min(remaining_width);
+        let gap_text = " ".repeat(command_padding_width + gap_width);
+        remaining_width = remaining_width.saturating_sub(gap_width);
 
         let description_text =
-            truncate_display_width_with_ellipsis(item.description, remaining_width);
+            truncate_display_width_with_ellipsis(&item.description, remaining_width);
         let mut plain_line = String::new();
         let _ = write!(
             plain_line,
@@ -340,11 +352,98 @@ impl Model {
     fn execute_command_panel_item(&mut self, item: CommandPanelItem) {
         match item.action {
             CommandPanelAction::Exit => self.mark_quitting(),
+            CommandPanelAction::OpenAcpPicker => self.open_acp_picker(),
+            CommandPanelAction::ShowAcpMissingConfig => self.show_acp_missing_config(),
+            CommandPanelAction::SelectAcp { agent_id } => self.select_acp_agent(agent_id),
         }
+    }
+
+    fn open_acp_picker(&mut self) {
+        self.complete_command_panel_selection("/acp");
+    }
+
+    fn show_acp_missing_config(&mut self) {
+        let old_value = self.composer_text().to_string();
+        let old_line = self.composer.line();
+        let old_column = self.composer.column();
+        self.composer.replace_text_and_move_to_end(String::new());
+        self.sync_command_panel_navigation();
+        self.sync_external_editor_helper_after_draft_change(&old_value);
+        self.sync_composer_height();
+        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
+    }
+
+    fn select_acp_agent(&mut self, agent_id: String) {
+        let old_value = self.composer_text().to_string();
+        let old_line = self.composer.line();
+        let old_column = self.composer.column();
+        self.selected_acp_agent = Some(agent_id.clone());
+        self.composer.replace_text_and_move_to_end(String::new());
+        self.sync_command_panel_navigation();
+        self.sync_external_editor_helper_after_draft_change(&old_value);
+        self.sync_composer_height();
+        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
+        self.show_transient_status_notice(&format!("ACP agent selected: {agent_id}"));
+    }
+
+    fn filter_command_panel_items(&self, query: &str) -> Vec<CommandPanelItem> {
+        if query == "acp" {
+            return self.acp_picker_items();
+        }
+
+        filter_base_command_panel_items(query)
+    }
+
+    fn acp_picker_items(&self) -> Vec<CommandPanelItem> {
+        if self.acp_agent_servers.is_empty() {
+            return vec![CommandPanelItem {
+                name: "No ACP agents configured".to_string(),
+                aliases: Vec::new(),
+                description: String::new(),
+                action: CommandPanelAction::ShowAcpMissingConfig,
+            }];
+        }
+
+        self.acp_agent_servers
+            .iter()
+            .map(|agent_id| CommandPanelItem {
+                name: agent_id.clone(),
+                aliases: Vec::new(),
+                description: "Start ACP for this session".to_string(),
+                action: CommandPanelAction::SelectAcp {
+                    agent_id: agent_id.clone(),
+                },
+            })
+            .collect()
     }
 }
 
+#[cfg(test)]
 fn command_panel_query(value: &str) -> Option<String> {
+    if value.is_empty() || !value.starts_with('/') || value.contains('\n') {
+        return None;
+    }
+
+    let query = raw_command_panel_query(value)?;
+    if !filter_base_command_panel_items(&query).is_empty() || query.chars().count() == 1 {
+        return Some(query);
+    }
+
+    None
+}
+
+fn command_panel_command_column_width(state: &CommandPanelState, visible_rows: usize) -> usize {
+    state
+        .items
+        .iter()
+        .skip(state.scroll)
+        .take(visible_rows)
+        .map(|item| item.name.width())
+        .max()
+        .unwrap_or(0)
+}
+
+fn raw_command_panel_query(value: &str) -> Option<String> {
     if value.is_empty() || !value.starts_with('/') || value.contains('\n') {
         return None;
     }
@@ -357,20 +456,30 @@ fn command_panel_query(value: &str) -> Option<String> {
         return None;
     }
 
-    let query = raw_query.to_lowercase();
-    if !filter_command_panel_items(&query).is_empty() || query.chars().count() == 1 {
-        return Some(query);
-    }
-
-    None
+    Some(raw_query.to_lowercase())
 }
 
-fn filter_command_panel_items(query: &str) -> Vec<CommandPanelItem> {
+fn filter_base_command_panel_items(query: &str) -> Vec<CommandPanelItem> {
+    let items = vec![
+        CommandPanelItem {
+            name: "/exit".to_string(),
+            aliases: vec!["/quit".to_string()],
+            description: "Exit the application".to_string(),
+            action: CommandPanelAction::Exit,
+        },
+        CommandPanelItem {
+            name: "/acp".to_string(),
+            aliases: Vec::new(),
+            description: "Select ACP agent for this session".to_string(),
+            action: CommandPanelAction::OpenAcpPicker,
+        },
+    ];
+
     if query.is_empty() {
-        return COMMAND_PANEL_ITEMS.to_vec();
+        return items;
     }
 
-    COMMAND_PANEL_ITEMS
+    items
         .into_iter()
         .filter(|item| command_panel_item_matches_query(item, query))
         .collect()

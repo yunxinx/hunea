@@ -117,6 +117,141 @@ fn command_panel_enter_falls_back_to_send_for_single_unmatched_character() {
 }
 
 #[test]
+fn command_panel_descriptions_align_for_all_root_commands() {
+    let mut model = ready_model(64, 12, ModelOptions::default());
+    type_text(&mut model, "/");
+
+    let rows = render_trimmed_rows(&mut model, 64, 12);
+    let exit_row = rows
+        .iter()
+        .find(|row| row.contains("/exit"))
+        .expect("/exit command should render");
+    let acp_row = rows
+        .iter()
+        .find(|row| row.contains("/acp"))
+        .expect("/acp command should render");
+
+    assert_eq!(
+        exit_row.find("Exit the application"),
+        acp_row.find("Select ACP agent for this session"),
+        "command descriptions should start in the same column: {rows:?}"
+    );
+}
+
+#[test]
+fn command_panel_always_lists_acp_command() {
+    let mut model = ready_model(64, 12, ModelOptions::default());
+    type_text(&mut model, "/");
+
+    let rows = render_trimmed_rows(&mut model, 64, 12);
+
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("/acp") && row.contains("ACP")),
+        "expected /acp command without ACP config, got: {rows:?}"
+    );
+}
+
+#[test]
+fn command_panel_shows_empty_acp_message_without_configured_agents() {
+    let mut model = ready_model(64, 12, ModelOptions::default());
+    type_text(&mut model, "/acp");
+
+    let rows = render_trimmed_rows(&mut model, 64, 12);
+
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("No ACP agents configured")),
+        "expected empty ACP configuration message, got: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("Create acp.toml to enable ACP")),
+        "empty ACP menu should not suggest config creation inline: {rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    assert_eq!(model.composer_text(), "");
+    let rows = render_trimmed_rows(&mut model, 64, 12);
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("No ACP agents configured")),
+        "empty ACP action should not render a transient status notice: {rows:?}"
+    );
+}
+
+#[test]
+fn command_panel_lists_configured_acp_agents_after_acp_command() {
+    let mut model = ready_model(
+        64,
+        12,
+        ModelOptions {
+            acp_agent_servers: vec!["kimi".to_string(), "codex-acp".to_string()],
+            ..ModelOptions::default()
+        },
+    );
+    type_text(&mut model, "/acp");
+
+    let rows = render_trimmed_rows(&mut model, 64, 12);
+
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("kimi") && row.contains("ACP")),
+        "expected kimi ACP choice, got: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("codex-acp") && row.contains("ACP")),
+        "expected codex-acp ACP choice, got: {rows:?}"
+    );
+}
+
+#[test]
+fn command_panel_enter_on_acp_command_opens_acp_picker() {
+    let mut model = ready_model(
+        64,
+        12,
+        ModelOptions {
+            acp_agent_servers: vec!["kimi".to_string()],
+            ..ModelOptions::default()
+        },
+    );
+    type_text(&mut model, "/");
+    model.update(AppEvent::Key(KeyCode::Down.into()));
+
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    assert_eq!(model.composer_text(), "/acp");
+    assert_eq!(model.selected_acp_agent(), None);
+    let rows = render_trimmed_rows(&mut model, 64, 12);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("kimi") && row.contains("ACP")),
+        "expected ACP picker after /acp command, got: {rows:?}"
+    );
+}
+
+#[test]
+fn command_panel_enter_selects_acp_agent_for_current_session() {
+    let mut model = ready_model(
+        64,
+        12,
+        ModelOptions {
+            acp_agent_servers: vec!["kimi".to_string(), "codex-acp".to_string()],
+            ..ModelOptions::default()
+        },
+    );
+    type_text(&mut model, "/acp");
+    model.update(AppEvent::Key(KeyCode::Down.into()));
+
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    assert_eq!(model.selected_acp_agent(), Some("codex-acp"));
+    assert_eq!(model.composer_text(), "");
+}
+
+#[test]
 fn command_panel_tab_completion_can_restore_external_editor_helper_after_panel_exits() {
     let mut model = ready_model(
         12,

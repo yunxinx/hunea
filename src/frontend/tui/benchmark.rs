@@ -1229,7 +1229,10 @@ mod tests {
         let mut scroll_times = Vec::with_capacity(scroll_steps);
         let mut viewport_times = Vec::with_capacity(scroll_steps);
         let mut frame_times = Vec::with_capacity(scroll_steps);
+        let mut tick_times = Vec::with_capacity(scroll_steps);
         for _ in 0..scroll_steps {
+            let tick_started_at = std::time::Instant::now();
+
             let scroll_started_at = std::time::Instant::now();
             model.scroll_document_by(Model::document_mouse_wheel_delta());
             scroll_times.push(scroll_started_at.elapsed());
@@ -1245,10 +1248,11 @@ mod tests {
                 .draw(|frame| model.render(frame))
                 .expect("long message scroll profile frame render should succeed");
             frame_times.push(frame_started_at.elapsed());
+            tick_times.push(tick_started_at.elapsed());
         }
 
         eprintln!(
-            "long_user_scroll messages={message_count} message_bytes={} size={width}x{height} document_lines={document_lines} transcript_lines={transcript_lines} sync_ms={:.3} estimate_ms={:.3} visible_exact_ms={:.3} scroll_ms={} viewport_ms={} frame_ms={}",
+            "long_user_scroll messages={message_count} message_bytes={} size={width}x{height} document_lines={document_lines} transcript_lines={transcript_lines} sync_ms={:.3} estimate_ms={:.3} visible_exact_ms={:.3} scroll_ms={} viewport_ms={} frame_ms={} tick_ms={}",
             long_user_message.len(),
             duration_ms(sync_time),
             duration_ms(sync_profile.estimate_time),
@@ -1256,6 +1260,14 @@ mod tests {
             format_duration_distribution(&scroll_times),
             format_duration_distribution(&viewport_times),
             format_duration_distribution(&frame_times),
+            format_duration_distribution(&tick_times),
+        );
+
+        assert_release_hot_path_budget(
+            "long_user_message_scroll_profile",
+            &viewport_times,
+            &frame_times,
+            &tick_times,
         );
     }
 
@@ -1265,22 +1277,10 @@ mod tests {
     }
 
     fn format_duration_distribution(values: &[std::time::Duration]) -> String {
-        let mut sorted = values.to_vec();
-        sorted.sort();
-        let total: std::time::Duration = sorted.iter().copied().sum();
-        let mean = if sorted.is_empty() {
-            0.0
-        } else {
-            duration_ms(total) / sorted.len() as f64
-        };
+        let distribution = duration_distribution(values);
         format!(
-            "{{mean:{mean:.3},p50:{:.3},p95:{:.3},max:{:.3}}}",
-            percentile_ms(&sorted, 50),
-            percentile_ms(&sorted, 95),
-            sorted
-                .last()
-                .map(|duration| duration_ms(*duration))
-                .unwrap_or_default(),
+            "{{mean:{:.3},p50:{:.3},p95:{:.3},max:{:.3}}}",
+            distribution.mean_ms, distribution.p50_ms, distribution.p95_ms, distribution.max_ms,
         )
     }
 
@@ -1294,6 +1294,409 @@ mod tests {
 
     fn duration_ms(duration: std::time::Duration) -> f64 {
         duration.as_secs_f64() * 1000.0
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct DurationDistribution {
+        mean_ms: f64,
+        p50_ms: f64,
+        p95_ms: f64,
+        max_ms: f64,
+    }
+
+    fn duration_distribution(values: &[std::time::Duration]) -> DurationDistribution {
+        let mut sorted = values.to_vec();
+        sorted.sort();
+        let total: std::time::Duration = sorted.iter().copied().sum();
+        let mean_ms = if sorted.is_empty() {
+            0.0
+        } else {
+            duration_ms(total) / sorted.len() as f64
+        };
+        DurationDistribution {
+            mean_ms,
+            p50_ms: percentile_ms(&sorted, 50),
+            p95_ms: percentile_ms(&sorted, 95),
+            max_ms: sorted
+                .last()
+                .map(|duration| duration_ms(*duration))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn assert_release_hot_path_budget(
+        label: &str,
+        viewport_times: &[std::time::Duration],
+        frame_times: &[std::time::Duration],
+        tick_times: &[std::time::Duration],
+    ) {
+        if cfg!(debug_assertions) {
+            return;
+        }
+
+        let viewport = duration_distribution(viewport_times);
+        let frame = duration_distribution(frame_times);
+        let tick = duration_distribution(tick_times);
+        let slow_ticks_over_8ms = tick_times
+            .iter()
+            .filter(|duration| duration.as_millis() >= 8)
+            .count();
+        let slow_ticks_over_16ms = tick_times
+            .iter()
+            .filter(|duration| duration.as_millis() >= 16)
+            .count();
+
+        assert!(
+            tick.p95_ms < 2.0,
+            "{label} tick p95 should stay under target 2ms, got {tick:?}"
+        );
+        assert!(
+            tick.max_ms < 8.0,
+            "{label} tick max should stay under 120fps frame budget, got {tick:?}"
+        );
+        assert_eq!(
+            slow_ticks_over_8ms, 0,
+            "{label} should not produce ticks over 8ms, tick={tick:?}"
+        );
+        assert_eq!(
+            slow_ticks_over_16ms, 0,
+            "{label} should not produce ticks over 16ms, tick={tick:?}"
+        );
+        assert!(
+            frame.p95_ms < 1.0,
+            "{label} frame p95 should stay under 1ms, got {frame:?}"
+        );
+        assert!(
+            viewport.p95_ms < 2.0,
+            "{label} viewport p95 should stay under 2ms, got {viewport:?}"
+        );
+    }
+
+    #[derive(Debug, Default)]
+    struct HotPathTimings {
+        scroll_times: Vec<std::time::Duration>,
+        viewport_times: Vec<std::time::Duration>,
+        frame_times: Vec<std::time::Duration>,
+        tick_times: Vec<std::time::Duration>,
+    }
+
+    fn new_hot_path_profile_model(width: u16, height: u16) -> Model {
+        let mut model = Model::new_with_options(
+            HeroOptions {
+                app_name: Some("lumos".to_string()),
+                version: Some("dev".to_string()),
+                work_dir: Some("/tmp/lumos".to_string()),
+                width: 0,
+            },
+            ModelOptions {
+                style_mode: StyleMode::Cx,
+                ..ModelOptions::default()
+            },
+        );
+        model.transcript_mut().clear();
+        model.set_window(width, height);
+        model.set_palette(default_palette(), true);
+        model
+    }
+
+    fn prepare_hot_path_profile_model(model: &mut Model, _width: u16, _height: u16) {
+        model
+            .composer_mut()
+            .replace_text_and_move_to_end("ready for high-frequency scroll profile");
+        model.sync_composer_height();
+    }
+
+    fn warm_hot_path_frame(model: &mut Model, terminal: &mut Terminal<TestBackend>, height: u16) {
+        let layout = model.build_document_layout();
+        let viewport = model.build_document_viewport(&layout);
+        assert_eq!(viewport.lines.len(), usize::from(height));
+        terminal
+            .draw(|frame| model.render(frame))
+            .expect("hot path warm frame should render");
+    }
+
+    fn measure_scroll_hot_path(
+        model: &mut Model,
+        terminal: &mut Terminal<TestBackend>,
+        height: u16,
+        steps: usize,
+    ) -> HotPathTimings {
+        let mut timings = HotPathTimings {
+            scroll_times: Vec::with_capacity(steps),
+            viewport_times: Vec::with_capacity(steps),
+            frame_times: Vec::with_capacity(steps),
+            tick_times: Vec::with_capacity(steps),
+        };
+
+        for _ in 0..steps {
+            let tick_started_at = std::time::Instant::now();
+
+            let scroll_started_at = std::time::Instant::now();
+            model.scroll_document_by(Model::document_mouse_wheel_delta());
+            timings.scroll_times.push(scroll_started_at.elapsed());
+
+            let viewport_started_at = std::time::Instant::now();
+            let layout = model.build_document_layout();
+            let viewport = model.build_document_viewport(&layout);
+            assert_eq!(viewport.lines.len(), usize::from(height));
+            timings.viewport_times.push(viewport_started_at.elapsed());
+
+            let frame_started_at = std::time::Instant::now();
+            terminal
+                .draw(|frame| model.render(frame))
+                .expect("hot path frame render should succeed");
+            timings.frame_times.push(frame_started_at.elapsed());
+
+            timings.tick_times.push(tick_started_at.elapsed());
+        }
+
+        timings
+    }
+
+    fn measure_selection_drag_hot_path(
+        model: &mut Model,
+        terminal: &mut Terminal<TestBackend>,
+        height: u16,
+        steps: usize,
+    ) -> HotPathTimings {
+        let mut timings = HotPathTimings {
+            scroll_times: Vec::with_capacity(steps),
+            viewport_times: Vec::with_capacity(steps),
+            frame_times: Vec::with_capacity(steps),
+            tick_times: Vec::with_capacity(steps),
+        };
+
+        for _ in 0..steps {
+            let tick_started_at = std::time::Instant::now();
+
+            let scroll_started_at = std::time::Instant::now();
+            model.scroll_document_by(Model::document_mouse_wheel_delta());
+            timings.scroll_times.push(scroll_started_at.elapsed());
+
+            let viewport_started_at = std::time::Instant::now();
+            let layout = model.build_document_layout();
+            if let Some(point) =
+                model.selection_point_for_mouse_with_layout(12, height - 1, &layout)
+            {
+                model.update_selection_focus(point);
+            }
+            let viewport = model.build_document_viewport(&layout);
+            assert_eq!(viewport.lines.len(), usize::from(height));
+            timings.viewport_times.push(viewport_started_at.elapsed());
+
+            let frame_started_at = std::time::Instant::now();
+            terminal
+                .draw(|frame| model.render(frame))
+                .expect("selection drag hot path frame render should succeed");
+            timings.frame_times.push(frame_started_at.elapsed());
+
+            timings.tick_times.push(tick_started_at.elapsed());
+        }
+
+        timings
+    }
+
+    fn print_hot_path_profile(label: &str, metadata: String, timings: &HotPathTimings) {
+        let slow_ticks_over_8ms = timings
+            .tick_times
+            .iter()
+            .filter(|duration| duration.as_millis() >= 8)
+            .count();
+        let slow_ticks_over_16ms = timings
+            .tick_times
+            .iter()
+            .filter(|duration| duration.as_millis() >= 16)
+            .count();
+        eprintln!(
+            "{label} {metadata} scroll_ms={} viewport_ms={} frame_ms={} tick_ms={} slow_ticks={{over_8ms:{slow_ticks_over_8ms},over_16ms:{slow_ticks_over_16ms}}}",
+            format_duration_distribution(&timings.scroll_times),
+            format_duration_distribution(&timings.viewport_times),
+            format_duration_distribution(&timings.frame_times),
+            format_duration_distribution(&timings.tick_times),
+        );
+    }
+
+    fn huge_user_message_for_hot_path() -> String {
+        "这是一条单条 100k 级别用户消息，用于验证超长 item 在高频滚动下不会退化到全文路径。mixed English text with emoji 👨‍👩‍👧 and wrapping pressure. "
+            .repeat(900)
+    }
+
+    fn huge_assistant_markdown_for_hot_path() -> String {
+        let mut content = String::from("# Huge Assistant Markdown\n\n");
+        for index in 0..220 {
+            let _ = writeln!(
+                content,
+                "## Section {index}\n\n- viewport rendering should stay local\n- markdown keeps lists and prose active\n\n```rust\nfn section_{index}() -> &'static str {{\n    \"{}\"\n}}\n```\n\n{}",
+                "large markdown code content ".repeat(10),
+                "Follow-up prose wraps through the document viewport without forcing full-frame work. ".repeat(4),
+            );
+        }
+        content
+    }
+
+    #[test]
+    #[ignore = "targeted single 100k user-message scroll profile"]
+    fn single_100k_user_message_scroll_profile() {
+        let width = 100;
+        let height = 30;
+        let scroll_steps = 600;
+        let mut terminal = Terminal::new(TestBackend::new(width, height))
+            .expect("single 100k user-message profile backend should initialize");
+        let mut model = new_hot_path_profile_model(width, height);
+        model.transcript_mut().append_message_with_style_mode(
+            Sender::User,
+            "short prelude",
+            StyleMode::Cx,
+        );
+        let long_user_message = huge_user_message_for_hot_path();
+        model.transcript_mut().append_message_with_style_mode(
+            Sender::User,
+            long_user_message.clone(),
+            StyleMode::Cx,
+        );
+        model.transcript_mut().append_message_with_style_mode(
+            Sender::Assistant,
+            "short tail",
+            StyleMode::Cx,
+        );
+        prepare_hot_path_profile_model(&mut model, width, height);
+
+        let sync_profile = model.sync_transcript_render_profile();
+        model.sync_command_panel_navigation();
+        model.sync_composer_height();
+        let layout = model.build_document_layout();
+        let document_lines = layout.line_count();
+        let transcript_lines = layout.transcript_line_count;
+        model.apply_document_viewport_position(&layout, 0, 0, false, true);
+        drop(layout);
+        warm_hot_path_frame(&mut model, &mut terminal, height);
+
+        let timings = measure_scroll_hot_path(&mut model, &mut terminal, height, scroll_steps);
+        print_hot_path_profile(
+            "single_100k_user_scroll",
+            format!(
+                "message_bytes={} document_lines={document_lines} transcript_lines={transcript_lines} estimate_ms={:.3} visible_exact_ms={:.3}",
+                long_user_message.len(),
+                duration_ms(sync_profile.estimate_time),
+                duration_ms(sync_profile.visible_exact_time),
+            ),
+            &timings,
+        );
+        assert_release_hot_path_budget(
+            "single_100k_user_message_scroll_profile",
+            &timings.viewport_times,
+            &timings.frame_times,
+            &timings.tick_times,
+        );
+    }
+
+    #[test]
+    #[ignore = "targeted huge assistant-markdown scroll profile"]
+    fn huge_assistant_markdown_scroll_profile() {
+        let width = 100;
+        let height = 30;
+        let scroll_steps = 600;
+        let mut terminal = Terminal::new(TestBackend::new(width, height))
+            .expect("huge assistant markdown profile backend should initialize");
+        let mut model = new_hot_path_profile_model(width, height);
+        model.transcript_mut().append_message_with_style_mode(
+            Sender::User,
+            "short prelude",
+            StyleMode::Cx,
+        );
+        let markdown = huge_assistant_markdown_for_hot_path();
+        model.transcript_mut().append_message_with_style_mode(
+            Sender::Assistant,
+            markdown.clone(),
+            StyleMode::Cx,
+        );
+        model.transcript_mut().append_message_with_style_mode(
+            Sender::User,
+            "short tail",
+            StyleMode::Cx,
+        );
+        prepare_hot_path_profile_model(&mut model, width, height);
+
+        let sync_profile = model.sync_transcript_render_profile();
+        model.sync_command_panel_navigation();
+        model.sync_composer_height();
+        let layout = model.build_document_layout();
+        let document_lines = layout.line_count();
+        let transcript_lines = layout.transcript_line_count;
+        model.apply_document_viewport_position(&layout, 0, 0, false, true);
+        drop(layout);
+        warm_hot_path_frame(&mut model, &mut terminal, height);
+
+        let timings = measure_scroll_hot_path(&mut model, &mut terminal, height, scroll_steps);
+        print_hot_path_profile(
+            "huge_assistant_markdown_scroll",
+            format!(
+                "message_bytes={} document_lines={document_lines} transcript_lines={transcript_lines} estimate_ms={:.3} visible_exact_ms={:.3}",
+                markdown.len(),
+                duration_ms(sync_profile.estimate_time),
+                duration_ms(sync_profile.visible_exact_time),
+            ),
+            &timings,
+        );
+        assert_release_hot_path_budget(
+            "huge_assistant_markdown_scroll_profile",
+            &timings.viewport_times,
+            &timings.frame_times,
+            &timings.tick_times,
+        );
+    }
+
+    #[test]
+    #[ignore = "targeted selection-drag mixed long-history profile"]
+    fn selection_drag_mixed_long_history_profile() {
+        let width = 100;
+        let height = 30;
+        let item_count = 3_000;
+        let drag_steps = 600;
+        let mut terminal = Terminal::new(TestBackend::new(width, height))
+            .expect("selection drag profile backend should initialize");
+        let mut model = new_hot_path_profile_model(width, height);
+        let mut raw_text_bytes = 0usize;
+        let mut long_item_count = 0usize;
+        for index in 0..item_count {
+            let (sender, content, is_long) = mixed_scroll_profile_message(index);
+            raw_text_bytes += content.len();
+            long_item_count += usize::from(is_long);
+            model
+                .transcript_mut()
+                .append_message_with_style_mode(sender, content, StyleMode::Cx);
+        }
+        prepare_hot_path_profile_model(&mut model, width, height);
+        let sync_profile = model.sync_transcript_render_profile();
+        model.sync_command_panel_navigation();
+        model.sync_composer_height();
+        let layout = model.build_document_layout();
+        let document_lines = layout.line_count();
+        let transcript_lines = layout.transcript_line_count;
+        model.apply_document_viewport_position(&layout, 0, 0, false, true);
+        if let Some(point) = model.selection_point_for_mouse_with_layout(4, 0, &layout) {
+            model.start_selection(point);
+        }
+        drop(layout);
+        warm_hot_path_frame(&mut model, &mut terminal, height);
+
+        let timings =
+            measure_selection_drag_hot_path(&mut model, &mut terminal, height, drag_steps);
+        print_hot_path_profile(
+            "selection_drag_mixed_long_scroll",
+            format!(
+                "items={item_count} long_items={long_item_count} raw_bytes={raw_text_bytes} document_lines={document_lines} transcript_lines={transcript_lines} estimate_ms={:.3} visible_exact_ms={:.3}",
+                duration_ms(sync_profile.estimate_time),
+                duration_ms(sync_profile.visible_exact_time),
+            ),
+            &timings,
+        );
+        assert_release_hot_path_budget(
+            "selection_drag_mixed_long_history_profile",
+            &timings.viewport_times,
+            &timings.frame_times,
+            &timings.tick_times,
+        );
     }
 
     #[test]
@@ -1399,6 +1802,13 @@ mod tests {
             format_duration_distribution(&viewport_times),
             format_duration_distribution(&frame_times),
             format_duration_distribution(&tick_times),
+        );
+
+        assert_release_hot_path_budget(
+            "mixed_long_history_high_frequency_scroll_profile",
+            &viewport_times,
+            &frame_times,
+            &tick_times,
         );
     }
 

@@ -516,6 +516,69 @@ fn transcript_plain_text_len_for_range_avoids_plain_line_and_anchor_materializat
 }
 
 #[test]
+fn rendered_transcript_anchor_resolve_uses_direct_line_when_item_shape_is_stable() {
+    const TRACKED_BLOCK_KEY: u64 = 0xD0C0_0002;
+    const LINE_COUNT: usize = 2_000;
+    const TARGET_LINE: usize = 1_234;
+
+    let lines = (0..LINE_COUNT)
+        .map(|index| Line::raw(format!("line {index:04}")))
+        .collect::<Vec<_>>();
+    let plain_line_byte_lens = lines
+        .iter()
+        .map(|line| line.spans.iter().map(|span| span.content.len()).sum())
+        .collect::<Vec<_>>();
+    let block = Rc::new(CachedRenderBlock {
+        cache_key: TRACKED_BLOCK_KEY,
+        width: 32,
+        palette: default_palette(),
+        lines: Rc::new(lines),
+        projected_user: None,
+        line_count: LINE_COUNT,
+        plain_line_byte_lens: Rc::new(plain_line_byte_lens),
+        anchors: CachedLineAnchors::GeneratedRenderedLines,
+        plain_text_char_len: LINE_COUNT * "line 0000".len(),
+    });
+    let render = new_render_result(vec![RenderItemSummary {
+        item_index: 0,
+        start_line: 0,
+        gap_before: 0,
+        content_line_count: LINE_COUNT,
+        total_line_count: LINE_COUNT,
+        gap_owner_item_index: None,
+        block: Rc::clone(&block),
+    }]);
+    let snapshot = Rc::new(DocumentTranscriptSnapshot {
+        index: render.index.clone(),
+        width: 32,
+        palette: default_palette(),
+        items: Rc::new(Vec::new()),
+        warmed_item_block_cache: Rc::new(RefCell::new(HashMap::new())),
+        item_block_cache: Rc::new(RefCell::new(HashMap::from([(0, Rc::clone(&block))]))),
+        item_text_lines_cache: Rc::new(RefCell::new(HashMap::new())),
+        selectable_cache: Rc::new(RefCell::new(HashMap::new())),
+    });
+    let layout = compose_document_layout(DocumentLayoutInput {
+        transcript: snapshot,
+        tail: Rc::new(DocumentTailLayout::default()),
+    });
+    let state = ViewportState::capture(&layout, &[TARGET_LINE], TARGET_LINE, false, true, 10, 32);
+
+    reset_tracked_cached_render_block_access(TRACKED_BLOCK_KEY);
+    assert_eq!(state.resolve_offset(&layout, 10), TARGET_LINE);
+
+    let access = tracked_cached_render_block_access(TRACKED_BLOCK_KEY);
+    assert_eq!(
+        access.plain_line_reads, 0,
+        "stable rendered-line anchors should resolve by line number instead of scanning long item text"
+    );
+    assert_eq!(
+        access.anchor_reads, 0,
+        "stable rendered-line anchors should not scan anchors across the whole long item"
+    );
+}
+
+#[test]
 fn transcript_line_access_resolves_without_full_render_result() {
     let mut model = ready_document_model(20, 4);
     model.transcript_mut().clear();

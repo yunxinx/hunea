@@ -186,12 +186,19 @@ fn find_document_offset_for_rendered_transcript_anchor(
     anchor: &DocumentViewportAnchor,
 ) -> Option<usize> {
     let item_index = anchor.line_anchor.transcript.item_index;
+    let target_rendered_line = anchor.line_anchor.transcript.item_anchor.rendered_line;
+    let item_lines = layout.transcript_item_lines(item_index)?;
+    if anchor.transcript_item_line_count == item_lines.content_line_count
+        && target_rendered_line < item_lines.content_line_count
+    {
+        return Some(item_lines.content_start_line + target_rendered_line);
+    }
+
     let item_offsets = transcript_content_line_offsets_for_item(layout, item_index);
     if item_offsets.is_empty() {
         return None;
     }
 
-    let target_rendered_line = anchor.line_anchor.transcript.item_anchor.rendered_line;
     let exact = find_rendered_transcript_text_match(
         layout,
         &item_offsets,

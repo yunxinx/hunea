@@ -99,6 +99,7 @@ enabled = true
 kind = "openai_compatible"
 display_name = "Local"
 base_url = "http://127.0.0.1:1234/v1"
+api_key_env = "DEEPSEEK_API_KEY"
 models = ["qwen3"]
 "#,
     )
@@ -113,6 +114,12 @@ models = ["qwen3"]
         loaded.selected_model,
         Some(ModelSelection::new("local", "qwen3"))
     );
+
+    let provider = loaded
+        .catalog
+        .enabled_provider_at(0)
+        .expect("enabled provider should be visible");
+    assert_eq!(provider.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
 }
 
 #[test]

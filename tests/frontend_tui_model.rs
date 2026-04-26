@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lumos::{
     frontend::tui::{
-        AppEvent, HeroOptions, Model, ModelOptions,
+        AppEffect, AppEvent, HeroOptions, Model, ModelOptions,
         theme::{palette_from_background, terminal_default_palette},
     },
     runtime::models::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
@@ -74,6 +74,67 @@ fn enter_with_required_selected_model_sends_message() {
             .iter()
             .any(|item| item.contains("hello"))
     );
+}
+
+#[test]
+fn enter_with_selected_native_model_returns_openai_compatible_prompt_effect() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+
+    for character in "hello".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    let Some(AppEffect::SendNativeChat { request }) = effect else {
+        panic!("expected native chat effect, got {effect:?}");
+    };
+    assert_eq!(request.provider_id, "local");
+    assert_eq!(request.model_id, "qwen3");
+    assert_eq!(request.base_url, "http://127.0.0.1:1234/v1");
+    assert_eq!(request.messages.len(), 1);
+    assert_eq!(request.messages[0].role, "user");
+    assert_eq!(request.messages[0].content, "hello");
+}
+
+#[test]
+fn clear_command_removes_previous_native_chat_context() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+
+    for character in "old context".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    for character in "/clear".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    for character in "fresh question".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    let Some(AppEffect::SendNativeChat { request }) = effect else {
+        panic!("expected native chat effect, got {effect:?}");
+    };
+    assert_eq!(request.messages.len(), 1);
+    assert_eq!(request.messages[0].role, "user");
+    assert_eq!(request.messages[0].content, "fresh question");
 }
 
 fn single_model_catalog() -> ModelCatalog {

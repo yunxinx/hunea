@@ -2,7 +2,10 @@ use std::{path::PathBuf, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 
-use crate::runtime::models::ModelSelection;
+use crate::runtime::{
+    models::ModelSelection,
+    openai_compatible::{ChatCompletionMessage, NativeChatRequest},
+};
 
 use super::{
     ExternalEditorLaunch, Model, Sender,
@@ -17,6 +20,7 @@ pub const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 pub enum AppEffect {
     LaunchExternalEditor(ExternalEditorLaunch),
     CopySelection(String),
+    ResetRuntimeSession,
     StartAcpSession {
         agent_id: String,
     },
@@ -27,6 +31,9 @@ pub enum AppEffect {
     RespondAcpPermission {
         request_id: String,
         option_id: Option<String>,
+    },
+    SendNativeChat {
+        request: NativeChatRequest,
     },
     PersistSelectedModel {
         selection: ModelSelection,
@@ -383,12 +390,16 @@ impl Model {
         self.sync_composer_height();
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-        self.selected_acp_agent
-            .clone()
-            .map(|agent_id| AppEffect::SendAcpPrompt {
+        if let Some(agent_id) = self.selected_acp_agent.clone() {
+            return Some(AppEffect::SendAcpPrompt {
                 agent_id,
                 prompt: content,
-            })
+            });
+        }
+
+        let selection = self.selected_model.clone()?;
+        self.native_chat_request_for_selection(&selection)
+            .map(|request| AppEffect::SendNativeChat { request })
     }
 
     fn handle_resize(&mut self, width: u16, height: u16) {
@@ -408,6 +419,48 @@ impl Model {
         self.sync_external_editor_helper_after_resize(previous_width);
         self.sync_command_panel_navigation();
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+    }
+}
+
+impl Model {
+    fn native_chat_request_for_selection(
+        &mut self,
+        selection: &ModelSelection,
+    ) -> Option<NativeChatRequest> {
+        let Some(provider) = self
+            .model_catalog
+            .enabled_provider_by_id(&selection.provider_id)
+        else {
+            self.show_transient_status_notice("Selected provider is not available");
+            return None;
+        };
+        let Some(base_url) = provider
+            .base_url
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            self.show_transient_status_notice("Selected provider has no base_url");
+            return None;
+        };
+
+        Some(NativeChatRequest::new(
+            selection.provider_id.clone(),
+            selection.model_id.clone(),
+            base_url.clone(),
+            provider.api_key_env.clone(),
+            self.chat_completion_messages_from_transcript(),
+        ))
+    }
+
+    fn chat_completion_messages_from_transcript(&self) -> Vec<ChatCompletionMessage> {
+        self.transcript
+            .source_messages()
+            .into_iter()
+            .map(|(sender, content)| match sender {
+                Sender::User => ChatCompletionMessage::user(content),
+                Sender::Assistant => ChatCompletionMessage::assistant(content),
+            })
+            .collect()
     }
 }
 

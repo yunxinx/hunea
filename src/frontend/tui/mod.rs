@@ -28,6 +28,7 @@ mod sender;
 mod status_line;
 mod style_mode;
 mod styled_text;
+mod system_message;
 mod transcript;
 mod update;
 mod view;

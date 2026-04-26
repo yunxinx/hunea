@@ -2,9 +2,12 @@ use std::{
     io,
     path::PathBuf,
     process::Command,
+    sync::mpsc::{self, Receiver},
+    thread,
     time::{Duration, Instant},
 };
 
+use crate::runtime::openai_compatible::{NativeChatRequest, send_chat_completion};
 use crate::runtime::session::{
     AcpInitializeOutcome, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
 };
@@ -63,6 +66,7 @@ pub fn run_with_runtime_options(
 ) -> Result<Model> {
     let mut model = Model::new_with_options(hero_options, options);
     let mut acp_runtime = AcpRuntimeState::default();
+    let mut native_chat_runtime = NativeChatRuntimeState::default();
 
     if let Some(detection) = theme::try_detect_palette() {
         let _ = model.update(AppEvent::DetectedPalette {
@@ -82,6 +86,7 @@ pub fn run_with_runtime_options(
 
     loop {
         drain_acp_runtime_events(&mut model, &mut acp_runtime);
+        drain_native_chat_runtime_events(&mut model, &mut native_chat_runtime);
         terminal.draw(|frame| model.render(frame))?;
 
         if model.is_quitting() {
@@ -96,6 +101,7 @@ pub fn run_with_runtime_options(
                 &mut model,
                 &runtime_options,
                 &mut acp_runtime,
+                &mut native_chat_runtime,
                 effect,
             )?;
             continue;
@@ -108,6 +114,7 @@ pub fn run_with_runtime_options(
                 &mut model,
                 &runtime_options,
                 &mut acp_runtime,
+                &mut native_chat_runtime,
                 effect,
             )?;
             continue;
@@ -123,6 +130,7 @@ pub fn run_with_runtime_options(
                     &mut model,
                     &runtime_options,
                     &mut acp_runtime,
+                    &mut native_chat_runtime,
                     effect,
                 )?;
             } else if let Some(timeout_event) = model.timeout_event(Instant::now()) {
@@ -132,6 +140,7 @@ pub fn run_with_runtime_options(
                     &mut model,
                     &runtime_options,
                     &mut acp_runtime,
+                    &mut native_chat_runtime,
                     effect,
                 )?;
             }
@@ -148,6 +157,7 @@ pub fn run_with_runtime_options(
                         &mut model,
                         &runtime_options,
                         &mut acp_runtime,
+                        &mut native_chat_runtime,
                         effect,
                     )?;
                 }
@@ -350,6 +360,7 @@ fn apply_effect_if_needed(
     model: &mut Model,
     runtime_options: &RuntimeOptions,
     acp_runtime: &mut AcpRuntimeState,
+    native_chat_runtime: &mut NativeChatRuntimeState,
     effect: Option<AppEffect>,
 ) -> Result<()> {
     let Some(effect) = effect else {
@@ -361,6 +372,10 @@ fn apply_effect_if_needed(
             run_external_editor_effect(terminal, model, launch)
         }
         AppEffect::CopySelection(text) => run_copy_selection_effect(terminal, model, &text),
+        AppEffect::ResetRuntimeSession => {
+            reset_runtime_session_after_clear(acp_runtime, native_chat_runtime);
+            Ok(())
+        }
         AppEffect::StartAcpSession { agent_id } => {
             run_start_acp_session_effect(model, runtime_options, acp_runtime, &agent_id)
         }
@@ -379,6 +394,10 @@ fn apply_effect_if_needed(
             run_persist_selected_model_effect(model, runtime_options, &selection);
             Ok(())
         }
+        AppEffect::SendNativeChat { request } => {
+            run_send_native_chat_effect(model, native_chat_runtime, request);
+            Ok(())
+        }
     }
 }
 
@@ -394,15 +413,115 @@ fn run_persist_selected_model_effect(
     }
 }
 
+fn reset_runtime_session_after_clear(
+    acp_runtime: &mut AcpRuntimeState,
+    native_chat_runtime: &mut NativeChatRuntimeState,
+) {
+    acp_runtime.reset_after_clear();
+    native_chat_runtime.reset_after_clear();
+}
+
+#[derive(Default)]
+struct NativeChatRuntimeState {
+    receiver: Option<Receiver<NativeChatEvent>>,
+}
+
+impl NativeChatRuntimeState {
+    fn start(&mut self, request: NativeChatRequest) {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let event = match send_chat_completion(&request) {
+                Ok(content) => NativeChatEvent::Finished { content },
+                Err(error) => NativeChatEvent::Failed {
+                    message: error.to_string(),
+                },
+            };
+            let _ = sender.send(event);
+        });
+        self.receiver = Some(receiver);
+    }
+
+    fn is_running(&self) -> bool {
+        self.receiver.is_some()
+    }
+
+    fn reset_after_clear(&mut self) {
+        self.receiver = None;
+    }
+
+    fn try_recv_event(&mut self) -> Option<NativeChatEvent> {
+        let receiver = self.receiver.as_ref()?;
+        match receiver.try_recv() {
+            Ok(event) => {
+                self.receiver = None;
+                Some(event)
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.receiver = None;
+                Some(NativeChatEvent::Failed {
+                    message: "chat request stopped before completion".to_string(),
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NativeChatEvent {
+    Finished { content: String },
+    Failed { message: String },
+}
+
+fn drain_native_chat_runtime_events(
+    model: &mut Model,
+    native_chat_runtime: &mut NativeChatRuntimeState,
+) {
+    while let Some(event) = native_chat_runtime.try_recv_event() {
+        apply_native_chat_event(model, event);
+    }
+}
+
+fn apply_native_chat_event(model: &mut Model, event: NativeChatEvent) {
+    model.clear_acp_activity();
+    match event {
+        NativeChatEvent::Finished { content } => {
+            model.append_assistant_message_from_runtime(content);
+        }
+        NativeChatEvent::Failed { message } => {
+            model.append_system_message_from_runtime(format!("Chat failed: {message}"));
+        }
+    }
+}
+
+fn run_send_native_chat_effect(
+    model: &mut Model,
+    native_chat_runtime: &mut NativeChatRuntimeState,
+    request: NativeChatRequest,
+) {
+    if native_chat_runtime.is_running() {
+        model.show_transient_status_notice("Chat request is already running");
+        return;
+    }
+
+    let activity_label = request.model_id.clone();
+    native_chat_runtime.start(request);
+    model.show_acp_activity(activity_label);
+}
+
 #[derive(Default)]
 struct AcpRuntimeState {
     worker: Option<AcpSessionWorker>,
     response_buffer: String,
+    prompt_in_flight: bool,
+    discard_in_flight_prompt: bool,
 }
 
 impl AcpRuntimeState {
     fn start(&mut self, command: AcpSessionCommand) {
         self.response_buffer.clear();
+        self.prompt_in_flight = false;
+        self.discard_in_flight_prompt = false;
         self.worker = Some(AcpSessionWorker::start(command));
     }
 
@@ -420,6 +539,31 @@ impl AcpRuntimeState {
         }
 
         Some(std::mem::take(&mut self.response_buffer))
+    }
+
+    fn mark_prompt_submitted(&mut self) {
+        self.prompt_in_flight = true;
+    }
+
+    fn mark_prompt_started(&mut self) {
+        self.prompt_in_flight = true;
+    }
+
+    fn mark_prompt_finished(&mut self) {
+        self.prompt_in_flight = false;
+        self.discard_in_flight_prompt = false;
+        self.response_buffer.clear();
+    }
+
+    fn should_discard_prompt_output(&self) -> bool {
+        self.discard_in_flight_prompt
+    }
+
+    fn reset_after_clear(&mut self) {
+        self.response_buffer.clear();
+        if self.prompt_in_flight {
+            self.discard_in_flight_prompt = true;
+        }
     }
 
     fn send_prompt(&self, agent_id: &str, prompt: String) -> Result<(), String> {
@@ -482,9 +626,16 @@ fn apply_acp_session_event(
         }
         AcpSessionEvent::PromptStarted { agent_id } => {
             acp_runtime.reset_response_buffer();
+            acp_runtime.mark_prompt_started();
+            if acp_runtime.should_discard_prompt_output() {
+                return;
+            }
             model.show_acp_activity(agent_id);
         }
         AcpSessionEvent::AgentMessageChunk { content, .. } => {
+            if acp_runtime.should_discard_prompt_output() {
+                return;
+            }
             acp_runtime.push_response_chunk(&content);
         }
         AcpSessionEvent::PromptResponse {
@@ -492,21 +643,38 @@ fn apply_acp_session_event(
             stop_reason,
             ..
         } => {
+            if acp_runtime.should_discard_prompt_output() {
+                acp_runtime.mark_prompt_finished();
+                model.clear_acp_activity();
+                return;
+            }
             if !content.is_empty() {
                 acp_runtime.push_response_chunk(&content);
             }
             flush_acp_response_buffer(model, acp_runtime);
+            acp_runtime.mark_prompt_finished();
             model.clear_acp_activity();
             if stop_reason != "EndTurn" {
                 model.show_transient_status_notice(&format!("ACP prompt finished: {stop_reason}"));
             }
         }
         AcpSessionEvent::PromptFailed { message, .. } => {
+            if acp_runtime.should_discard_prompt_output() {
+                acp_runtime.mark_prompt_finished();
+                model.clear_acp_activity();
+                return;
+            }
             flush_acp_response_buffer(model, acp_runtime);
+            acp_runtime.mark_prompt_finished();
             model.clear_acp_activity();
             model.show_transient_status_notice(&format!("ACP prompt failed: {message}"));
         }
         AcpSessionEvent::PermissionRequested { request, .. } => {
+            if acp_runtime.should_discard_prompt_output() {
+                let (_, reject_option_id) = acp_permission_option_ids(&request);
+                let _ = acp_runtime.respond_permission(&request.request_id, reject_option_id);
+                return;
+            }
             flush_acp_response_buffer(model, acp_runtime);
             let (allow_option_id, reject_option_id) = acp_permission_option_ids(&request);
             model.update(AppEvent::AcpPermissionRequested {
@@ -517,9 +685,17 @@ fn apply_acp_session_event(
             });
         }
         AcpSessionEvent::PermissionRequestCancelled { .. } => {
+            if acp_runtime.should_discard_prompt_output() {
+                return;
+            }
             model.show_transient_status_notice("ACP permission request cancelled");
         }
         AcpSessionEvent::Stopped { message, .. } => {
+            if acp_runtime.should_discard_prompt_output() {
+                acp_runtime.mark_prompt_finished();
+                model.clear_acp_activity();
+                return;
+            }
             flush_acp_response_buffer(model, acp_runtime);
             model.clear_acp_activity();
             if let Some(message) = message {
@@ -555,12 +731,14 @@ fn run_start_acp_session_effect(
 
 fn run_send_acp_prompt_effect(
     model: &mut Model,
-    acp_runtime: &AcpRuntimeState,
+    acp_runtime: &mut AcpRuntimeState,
     agent_id: &str,
     prompt: String,
 ) {
     if let Err(message) = acp_runtime.send_prompt(agent_id, prompt) {
         model.show_transient_status_notice(&message);
+    } else {
+        acp_runtime.mark_prompt_submitted();
     }
 }
 
@@ -820,6 +998,202 @@ mod tests {
             vec!["需要先确认".to_string(), "确认后继续".to_string()]
         );
     }
+
+    #[test]
+    fn clear_runtime_discards_stale_native_chat_event() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.show_acp_activity("qwen3");
+        let mut acp_runtime = AcpRuntimeState::default();
+        let mut native_chat_runtime = NativeChatRuntimeState::default();
+        let (sender, receiver) = mpsc::channel();
+        native_chat_runtime.receiver = Some(receiver);
+
+        sender
+            .send(NativeChatEvent::Finished {
+                content: "stale response".to_string(),
+            })
+            .expect("stale native event should still be produced by worker");
+        model.reset_to_initial_tui_state();
+        reset_runtime_session_after_clear(&mut acp_runtime, &mut native_chat_runtime);
+        drain_native_chat_runtime_events(&mut model, &mut native_chat_runtime);
+
+        assert!(
+            model
+                .transcript_plain_items()
+                .iter()
+                .all(|item| !item.contains("stale response"))
+        );
+        assert!(!model.current_acp_activity_render_result().has_content);
+    }
+
+    #[test]
+    fn clear_runtime_discards_stale_acp_prompt_output_without_exiting_acp_mode() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+        let mut acp_runtime = AcpRuntimeState::default();
+        let mut native_chat_runtime = NativeChatRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptStarted {
+                agent_id: "Kimi Code CLI".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentMessageChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: "old partial".to_string(),
+            },
+        );
+
+        model.reset_to_initial_tui_state();
+        reset_runtime_session_after_clear(&mut acp_runtime, &mut native_chat_runtime);
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentMessageChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: " stale response".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptResponse {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: " tail".to_string(),
+                stop_reason: "EndTurn".to_string(),
+            },
+        );
+
+        assert_eq!(model.selected_acp_agent(), Some("Kimi Code CLI"));
+        assert!(
+            model
+                .transcript_plain_items()
+                .iter()
+                .all(|item| !item.contains("old partial") && !item.contains("stale response"))
+        );
+        assert!(!model.current_acp_activity_render_result().has_content);
+    }
+
+    #[test]
+    fn clear_runtime_discards_stale_acp_prompt_start_activity() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+        let mut acp_runtime = AcpRuntimeState::default();
+        let mut native_chat_runtime = NativeChatRuntimeState::default();
+
+        acp_runtime.mark_prompt_submitted();
+        model.reset_to_initial_tui_state();
+        reset_runtime_session_after_clear(&mut acp_runtime, &mut native_chat_runtime);
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptStarted {
+                agent_id: "Kimi Code CLI".to_string(),
+            },
+        );
+
+        assert_eq!(model.selected_acp_agent(), Some("Kimi Code CLI"));
+        assert!(!model.current_acp_activity_render_result().has_content);
+    }
+
+    #[test]
+    fn clear_runtime_discards_stale_acp_permission_request() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+        let mut acp_runtime = AcpRuntimeState::default();
+        let mut native_chat_runtime = NativeChatRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptStarted {
+                agent_id: "Kimi Code CLI".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentMessageChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: "旧请求需要权限".to_string(),
+            },
+        );
+
+        model.reset_to_initial_tui_state();
+        reset_runtime_session_after_clear(&mut acp_runtime, &mut native_chat_runtime);
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PermissionRequested {
+                agent_id: "Kimi Code CLI".to_string(),
+                request: crate::runtime::session::AcpPermissionRequest {
+                    request_id: "stale-permission".to_string(),
+                    title: Some("旧请求写文件".to_string()),
+                    options: Vec::new(),
+                },
+            },
+        );
+
+        assert_eq!(model.selected_acp_agent(), Some("Kimi Code CLI"));
+        assert!(model.current_status_notice_text().is_empty());
+        assert!(
+            model
+                .transcript_plain_items()
+                .iter()
+                .all(|item| !item.contains("旧请求"))
+        );
+    }
+
+    #[test]
+    fn native_chat_completion_appends_assistant_message_after_request_finishes() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.show_acp_activity("qwen3");
+
+        apply_native_chat_event(
+            &mut model,
+            NativeChatEvent::Finished {
+                content: "你好，我是本地模型".to_string(),
+            },
+        );
+
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec!["你好，我是本地模型".to_string()]
+        );
+        assert!(!model.current_acp_activity_render_result().has_content);
+    }
+
+    #[test]
+    fn native_chat_failure_appends_system_message_in_transcript() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.show_acp_activity("qwen3");
+
+        apply_native_chat_event(
+            &mut model,
+            NativeChatEvent::Failed {
+                message: "request /v1/chat/completions: connection refused".to_string(),
+            },
+        );
+
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec!["■ Chat failed: request /v1/chat/completions: connection refused".to_string()]
+        );
+        assert!(model.current_status_notice_text().is_empty());
+        assert!(!model.current_acp_activity_render_result().has_content);
+    }
+
     #[test]
     fn ready_input_batch_coalesces_wheel_burst_before_key() {
         let events = (0..128)

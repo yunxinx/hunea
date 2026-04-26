@@ -70,6 +70,16 @@ fn command_panel_tab_completes_alias_to_exit() {
 }
 
 #[test]
+fn command_panel_tab_completes_new_alias_to_clear() {
+    let mut model = ready_model(48, 12, ModelOptions::default());
+    type_text(&mut model, "/ne");
+
+    model.update(AppEvent::Key(KeyCode::Tab.into()));
+
+    assert_eq!(model.composer_text(), "/clear");
+}
+
+#[test]
 fn command_panel_enter_executes_exit_command() {
     let mut model = ready_model(48, 12, ModelOptions::default());
     type_text(&mut model, "/quit");
@@ -77,6 +87,40 @@ fn command_panel_enter_executes_exit_command() {
     model.update(AppEvent::Key(KeyCode::Enter.into()));
 
     assert!(model.is_quitting());
+}
+
+#[test]
+fn command_panel_enter_executes_new_alias_as_clear() {
+    let mut model = ready_model(64, 12, ModelOptions::default());
+    type_text(&mut model, "hello");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    assert!(
+        model
+            .transcript_plain_items()
+            .iter()
+            .any(|item| item.contains("hello")),
+        "sanity check: message should be in transcript before /clear"
+    );
+
+    type_text(&mut model, "/new");
+    let effect = model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    assert_eq!(effect, Some(AppEffect::ResetRuntimeSession));
+    assert_eq!(model.composer_text(), "");
+    assert!(!model.is_quitting());
+    assert!(
+        render_trimmed_rows(&mut model, 64, 12)
+            .iter()
+            .any(|row| row.contains("Lumos")),
+        "clear should restore the startup hero"
+    );
+    assert!(
+        model
+            .transcript_plain_items()
+            .iter()
+            .all(|item| !item.contains("hello")),
+        "clear should remove previous conversation context"
+    );
 }
 
 #[test]

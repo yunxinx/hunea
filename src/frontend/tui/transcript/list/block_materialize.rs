@@ -128,6 +128,9 @@ impl TranscriptItem {
             Self::Message(item) => {
                 item.estimate_render_metrics_fast(width, palette, previous_metrics)
             }
+            Self::System(item) => {
+                item.estimate_render_metrics_fast(width, palette, previous_metrics)
+            }
         }
     }
 
@@ -139,6 +142,7 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.measure_render_metrics(width, palette),
             Self::Message(item) => item.measure_render_metrics(width, palette),
+            Self::System(item) => item.measure_render_metrics(width, palette),
         }
     }
 
@@ -146,6 +150,7 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.render_lines(width, palette),
             Self::Message(item) => item.render_lines(width, palette),
+            Self::System(item) => item.render_lines(width, palette),
         }
     }
 
@@ -158,6 +163,7 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.render_for_terminal_replay(width, palette, preserve_ansi),
             Self::Message(item) => item.render_for_terminal_replay(width, palette, preserve_ansi),
+            Self::System(item) => item.render_for_terminal_replay(width, palette, preserve_ansi),
         }
     }
 
@@ -165,6 +171,7 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.render_plain_text(width, palette),
             Self::Message(item) => item.render_plain_text(width, palette),
+            Self::System(item) => item.render_plain_text(width, palette),
         }
     }
 
@@ -183,6 +190,7 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.render_line_anchors(width, palette),
             Self::Message(item) => item.render_line_anchors(width, palette),
+            Self::System(item) => item.render_line_anchors(width, palette),
         }
     }
 
@@ -195,6 +203,7 @@ impl TranscriptItem {
         let ranges = match self {
             Self::Hero(_) => Vec::new(),
             Self::Message(item) => item.render_selectable_line_ranges(width, palette),
+            Self::System(_) => Vec::new(),
         };
         if ranges.len() == plain_lines.len() {
             return ranges;
@@ -216,6 +225,7 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.render_cache_key(),
             Self::Message(item) => item.render_cache_key(),
+            Self::System(item) => item.render_cache_key(),
         }
     }
 
@@ -223,6 +233,7 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.source_text_byte_len(),
             Self::Message(item) => item.source_text_byte_len(),
+            Self::System(item) => item.source_text_byte_len(),
         }
     }
 }

@@ -58,6 +58,9 @@ impl Transcript {
                                 estimate_breakdown.non_assistant_item_count += 1;
                                 estimate_breakdown.hero_estimate_time += estimate_time;
                             }
+                            TranscriptItem::System(_) => {
+                                estimate_breakdown.non_assistant_item_count += 1;
+                            }
                             TranscriptItem::Message(_) => match estimated.kind {
                                 TranscriptEstimateKind::Assistant => {
                                     estimate_breakdown.assistant_item_count += 1;

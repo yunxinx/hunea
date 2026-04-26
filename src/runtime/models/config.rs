@@ -349,18 +349,22 @@ fn provider_from_config(
     };
 
     let mut model_provider =
-        ModelProvider::new(provider_id, display_name, base_url, source, models);
+        ModelProvider::new(provider_id, display_name, base_url, source, models)
+            .with_api_key_env(provider.api_key_env.clone());
     model_provider.sync_error = sync_error;
     if enabled {
         model_provider
     } else {
-        ModelProvider::disabled(
+        let mut disabled_provider = ModelProvider::disabled(
             model_provider.id,
             model_provider.display_name,
             model_provider.base_url,
             model_provider.source,
             model_provider.models,
-        )
+        );
+        disabled_provider.api_key_env = model_provider.api_key_env;
+        disabled_provider.sync_error = model_provider.sync_error;
+        disabled_provider
     }
 }
 

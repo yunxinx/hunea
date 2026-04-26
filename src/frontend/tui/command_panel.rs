@@ -19,6 +19,7 @@ const COMMAND_PANEL_DESCRIPTION_GAP: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CommandPanelAction {
+    Clear,
     Exit,
     OpenAcpPicker,
     OpenModelPanel,
@@ -347,6 +348,10 @@ impl Model {
 
     fn execute_command_panel_item(&mut self, item: CommandPanelItem) -> Option<AppEffect> {
         match item.action {
+            CommandPanelAction::Clear => {
+                self.reset_to_initial_tui_state();
+                Some(AppEffect::ResetRuntimeSession)
+            }
             CommandPanelAction::Exit => {
                 self.mark_quitting();
                 None
@@ -434,6 +439,12 @@ fn filter_base_command_panel_items(
         aliases: Vec::new(),
         description: "Select model for this session".to_string(),
         action: CommandPanelAction::OpenModelPanel,
+    });
+    items.push(CommandPanelItem {
+        name: "/clear".to_string(),
+        aliases: vec!["/new".to_string()],
+        description: "Clear conversation context".to_string(),
+        action: CommandPanelAction::Clear,
     });
 
     if query.is_empty() {

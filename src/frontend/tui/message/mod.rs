@@ -130,6 +130,14 @@ impl MessageItem {
         self.sender == Sender::Assistant
     }
 
+    pub(crate) fn sender(&self) -> Sender {
+        self.sender
+    }
+
+    pub(crate) fn source_content(&self) -> &str {
+        &self.content
+    }
+
     pub(crate) fn render_cache_key(&self) -> u64 {
         self.render_cache_key
     }

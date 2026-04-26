@@ -4,6 +4,9 @@ use super::*;
 use crate::frontend::tui::{
     AppEffect, AppEvent, Sender, StyleMode, document::DocumentAnchorRegion,
 };
+use crate::runtime::models::{
+    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
+};
 
 fn progressive_exactization_fixture() -> Model {
     let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
@@ -86,6 +89,105 @@ fn transcript_plain_items_use_assistant_markdown_render_path() {
     assert_eq!(
         model.transcript_plain_items(),
         vec!["# Overview of the API"]
+    );
+}
+
+#[test]
+fn native_chat_request_includes_full_transcript_history() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                "local",
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            )]),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model
+        .transcript_mut()
+        .append_message(Sender::User, "first question");
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "first answer");
+
+    for character in "follow up".chars() {
+        model.update(AppEvent::Key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Char(character),
+        )));
+    }
+    let effect = model.update(AppEvent::Key(crossterm::event::KeyEvent::from(
+        crossterm::event::KeyCode::Enter,
+    )));
+
+    let Some(AppEffect::SendNativeChat { request }) = effect else {
+        panic!("expected native chat effect, got {effect:?}");
+    };
+    let roles_and_content = request
+        .messages
+        .iter()
+        .map(|message| (message.role.as_str(), message.content.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roles_and_content,
+        vec![
+            ("user", "first question"),
+            ("assistant", "first answer"),
+            ("user", "follow up"),
+        ]
+    );
+}
+
+#[test]
+fn native_chat_request_excludes_runtime_system_messages() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                "local",
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            )]),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.append_system_message_from_runtime("Chat failed: connection refused");
+
+    for character in "hello".chars() {
+        model.update(AppEvent::Key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Char(character),
+        )));
+    }
+    let effect = model.update(AppEvent::Key(crossterm::event::KeyEvent::from(
+        crossterm::event::KeyCode::Enter,
+    )));
+
+    let Some(AppEffect::SendNativeChat { request }) = effect else {
+        panic!("expected native chat effect, got {effect:?}");
+    };
+    let roles_and_content = request
+        .messages
+        .iter()
+        .map(|message| (message.role.as_str(), message.content.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(roles_and_content, vec![("user", "hello")]);
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec![
+            "■ Chat failed: connection refused".to_string(),
+            "› hello".to_string()
+        ]
     );
 }
 

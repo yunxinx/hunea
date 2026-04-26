@@ -32,6 +32,12 @@ impl ModelCatalog {
         self.enabled_providers().nth(index)
     }
 
+    /// `enabled_provider_by_id` 返回指定 id 的启用 provider。
+    pub fn enabled_provider_by_id(&self, provider_id: &str) -> Option<&ModelProvider> {
+        self.enabled_providers()
+            .find(|provider| provider.id == provider_id)
+    }
+
     /// `contains_selection` 判断目录是否包含指定模型。
     pub fn contains_selection(&self, selection: &ModelSelection) -> bool {
         self.enabled_providers().any(|provider| {
@@ -56,6 +62,7 @@ pub struct ModelProvider {
     pub id: String,
     pub display_name: String,
     pub base_url: Option<String>,
+    pub api_key_env: Option<String>,
     pub source: ModelSource,
     pub models: Vec<ModelEntry>,
     pub enabled: bool,
@@ -75,6 +82,7 @@ impl ModelProvider {
             id: id.into(),
             display_name: display_name.into(),
             base_url,
+            api_key_env: None,
             source,
             models,
             enabled: true,
@@ -85,6 +93,12 @@ impl ModelProvider {
     /// `with_sync_error` 附加模型同步失败原因。
     pub fn with_sync_error(mut self, error: impl Into<String>) -> Self {
         self.sync_error = Some(error.into());
+        self
+    }
+
+    /// `with_api_key_env` 附加用于读取 Bearer token 的环境变量名。
+    pub fn with_api_key_env(mut self, api_key_env: Option<String>) -> Self {
+        self.api_key_env = api_key_env;
         self
     }
 

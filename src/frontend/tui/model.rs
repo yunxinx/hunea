@@ -30,6 +30,7 @@ use super::{
 /// `Model` 表示交互式 TUI 应用的状态。
 #[derive(Debug, Clone)]
 pub struct Model {
+    pub(super) hero_options: HeroOptions,
     pub(super) style_mode: StyleMode,
     pub(super) status_line_items: Vec<StatusLineItem>,
     pub(super) external_editor: Vec<String>,
@@ -190,7 +191,7 @@ impl Model {
         let palette = default_palette();
         let mut transcript = Transcript::new(palette);
         transcript.set_gap(1);
-        transcript.append_hero(hero_options);
+        transcript.append_hero(hero_options.clone());
         let transcript_render = Rc::new(index_only_render_result(
             transcript.progressive_item_metrics_index(),
         ));
@@ -201,6 +202,7 @@ impl Model {
             .filter(|selection| options.model_catalog.contains_selection(selection));
 
         Self {
+            hero_options,
             style_mode,
             status_line_items: status_line_items.clone(),
             external_editor: options.external_editor,
@@ -349,6 +351,34 @@ impl Model {
         &mut self.transcript
     }
 
+    pub(crate) fn reset_to_initial_tui_state(&mut self) {
+        let mut transcript = Transcript::new(self.palette);
+        transcript.set_gap(1);
+        if self.has_window {
+            transcript.set_width(self.width);
+        }
+        transcript.append_hero(self.hero_options.clone());
+        self.transcript = transcript;
+        self.composer.clear();
+        self.acp_panel = AcpPanelState::default();
+        self.model_panel = ModelPanelState::default();
+        self.pending_acp_permission = None;
+        self.acp_activity = None;
+        self.command_panel_selected = 0;
+        self.command_panel_scroll = 0;
+        self.selection_runtime = SelectionRuntimeState::default();
+        self.pending_composer_cursor_click = PendingComposerCursorClick::default();
+        self.document_runtime = DocumentRuntimeState {
+            follow_bottom: true,
+            ..DocumentRuntimeState::default()
+        };
+        self.notice_state = NoticeState::default();
+        self.bump_status_line_revision();
+        self.sync_transcript_render();
+        self.sync_composer_height();
+        self.sync_document_viewport_to_bottom();
+    }
+
     pub(crate) fn mark_quitting(&mut self) {
         self.quitting = true;
     }
@@ -406,6 +436,20 @@ impl Model {
             content,
             style_mode,
         );
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+    }
+
+    pub(crate) fn append_system_message_from_runtime(&mut self, content: impl Into<String>) {
+        let content = content.into();
+        if content.is_empty() {
+            return;
+        }
+
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        self.transcript_mut().append_system_message(content);
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
         self.document_runtime.follow_bottom = true;

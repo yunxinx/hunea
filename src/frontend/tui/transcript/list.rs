@@ -22,6 +22,7 @@ use crate::frontend::tui::{
     hero_item::HeroItem,
     message::MessageItem,
     selection::{SelectableLineRange, normalize_transcript_selectable_range},
+    system_message::SystemMessageItem,
     theme::TerminalPalette,
 };
 
@@ -36,6 +37,7 @@ pub(crate) use block_materialize::materialize_transcript_item_render_block;
 pub(crate) enum TranscriptItem {
     Hero(HeroItem),
     Message(MessageItem),
+    System(SystemMessageItem),
 }
 
 /// `Transcript` 管理 document-flow 顺序、宽度与逐项渲染缓存。
@@ -134,6 +136,11 @@ impl Transcript {
         )));
     }
 
+    /// `append_system_message` 追加一条只用于 TUI 展示的 system message。
+    pub(crate) fn append_system_message(&mut self, content: impl Into<String>) {
+        self.push_item(TranscriptItem::System(SystemMessageItem::new(content)));
+    }
+
     /// `len` 返回 transcript 项数量。
     #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
@@ -174,6 +181,19 @@ impl Transcript {
             .iter()
             .map(|item| item.render_plain_text(width, self.palette))
             .filter(|item| !item.is_empty())
+            .collect()
+    }
+
+    /// `source_messages` 返回 transcript 中可发送给模型的原始对话消息。
+    pub(crate) fn source_messages(&self) -> Vec<(Sender, String)> {
+        self.items
+            .iter()
+            .filter_map(|item| match item.as_ref() {
+                TranscriptItem::Message(message) => {
+                    Some((message.sender(), message.source_content().to_string()))
+                }
+                TranscriptItem::Hero(_) | TranscriptItem::System(_) => None,
+            })
             .collect()
     }
 

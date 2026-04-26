@@ -72,7 +72,7 @@ fn command_panel_rows_are_inserted_into_document_before_status_notice() {
 fn rendered_command_panel_line_respects_available_width() {
     let model = Model::new(HeroOptions::default());
 
-    let item = filter_base_command_panel_items("exit")
+    let item = base_command_panel_items_for_query("exit")
         .into_iter()
         .next()
         .expect("exit item should exist");

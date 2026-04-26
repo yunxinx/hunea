@@ -7,6 +7,7 @@ mod benchmark;
 pub mod benchmark;
 
 mod acp_activity;
+mod acp_panel;
 mod acp_permission;
 mod command_panel;
 mod composer;
@@ -17,8 +18,10 @@ mod external_editor;
 mod hero;
 mod hero_item;
 mod history_scroll_indicator;
+mod inline_panel;
 mod message;
 mod model;
+mod model_panel;
 mod runner;
 mod selection;
 mod sender;

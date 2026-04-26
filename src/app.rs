@@ -8,7 +8,10 @@ use crate::{
     frontend::tui::{
         self, HeroOptions, Model, ModelOptions, RuntimeOptions, StatusLineItem, StyleMode,
     },
-    runtime::session::AcpSessionCatalog,
+    runtime::{
+        models::{self, LoadedModelCatalog},
+        session::AcpSessionCatalog,
+    },
 };
 
 /// `run` 负责组装并启动交互式 TUI 应用。
@@ -26,9 +29,14 @@ pub fn run_with_writer<W: Write>(
     preserve_ansi: bool,
     tui_config: &TuiConfig,
 ) -> Result<()> {
-    let model = tui::run_with_options(
+    let loaded_models = models::load().wrap_err("failed to load model config")?;
+    let model = tui::run_with_runtime_options(
         HeroOptions::default(),
-        model_options_from_config(tui_config),
+        model_options_from_config_and_models(tui_config, &loaded_models),
+        RuntimeOptions {
+            model_config_path: loaded_models.source_path.clone(),
+            ..RuntimeOptions::default()
+        },
     )
     .wrap_err("failed to run tui application")?;
     write_terminal_replay_on_exit(writer, &model, preserve_ansi, tui_config)
@@ -40,10 +48,11 @@ pub fn run_with_config_writer<W: Write>(
     preserve_ansi: bool,
     config: &Config,
 ) -> Result<()> {
+    let loaded_models = models::load().wrap_err("failed to load model config")?;
     let model = tui::run_with_runtime_options(
         HeroOptions::default(),
-        model_options_from_app_config(config),
-        runtime_options_from_app_config(config),
+        model_options_from_app_config_and_models(config, &loaded_models),
+        runtime_options_from_app_config_and_models(config, &loaded_models),
     )
     .wrap_err("failed to run tui application")?;
     write_terminal_replay_on_exit(writer, &model, preserve_ansi, &config.tui)
@@ -110,23 +119,49 @@ fn style_mode_from_config(style: UserInputStyle) -> StyleMode {
     }
 }
 
+#[cfg(test)]
 fn model_options_from_config(tui_config: &TuiConfig) -> ModelOptions {
-    model_options_from_configs(tui_config, None)
+    model_options_from_config_and_models(tui_config, &LoadedModelCatalog::default())
 }
 
+#[cfg(test)]
 fn model_options_from_app_config(config: &Config) -> ModelOptions {
-    model_options_from_configs(&config.tui, Some(&config.runtime))
+    model_options_from_app_config_and_models(config, &LoadedModelCatalog::default())
 }
 
+#[cfg(test)]
 fn runtime_options_from_app_config(config: &Config) -> RuntimeOptions {
+    runtime_options_from_app_config_and_models(config, &LoadedModelCatalog::default())
+}
+
+fn model_options_from_config_and_models(
+    tui_config: &TuiConfig,
+    loaded_models: &LoadedModelCatalog,
+) -> ModelOptions {
+    model_options_from_configs(tui_config, None, loaded_models)
+}
+
+fn model_options_from_app_config_and_models(
+    config: &Config,
+    loaded_models: &LoadedModelCatalog,
+) -> ModelOptions {
+    model_options_from_configs(&config.tui, Some(&config.runtime), loaded_models)
+}
+
+fn runtime_options_from_app_config_and_models(
+    config: &Config,
+    loaded_models: &LoadedModelCatalog,
+) -> RuntimeOptions {
     RuntimeOptions {
         acp_sessions: AcpSessionCatalog::from_runtime_config(&config.runtime),
+        model_config_path: loaded_models.source_path.clone(),
     }
 }
 
 fn model_options_from_configs(
     tui_config: &TuiConfig,
     runtime_config: Option<&RuntimeConfig>,
+    loaded_models: &LoadedModelCatalog,
 ) -> ModelOptions {
     ModelOptions {
         style_mode: style_mode_from_config(tui_config.user_input_style),
@@ -138,6 +173,9 @@ fn model_options_from_configs(
         swap_enter_and_send: tui_config.swap_enter_and_send,
         ctrl_c_clears_input: tui_config.ctrl_c_clears_input,
         acp_agent_servers: acp_agent_servers_from_config(runtime_config),
+        model_catalog: loaded_models.catalog.clone(),
+        selected_model: loaded_models.selected_model.clone(),
+        requires_model_selection: loaded_models.requires_model_selection,
     }
 }
 

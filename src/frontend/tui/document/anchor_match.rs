@@ -123,7 +123,9 @@ fn score_document_anchor_match(
                 target.composer.visible_start_char,
             ))
         }
-        DocumentAnchorRegion::CommandPanel => {
+        DocumentAnchorRegion::CommandPanel
+        | DocumentAnchorRegion::AcpPanel
+        | DocumentAnchorRegion::ModelPanel => {
             (candidate.gap_index == target.gap_index).then_some(0)
         }
         DocumentAnchorRegion::Transcript => {

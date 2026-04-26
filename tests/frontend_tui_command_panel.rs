@@ -10,7 +10,12 @@ use lumos::frontend::tui::{
     AppEffect, AppEvent, HeroOptions, Model, ModelOptions, StatusLineItem, StyleMode,
     theme::default_palette,
 };
-use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
+use ratatui::{
+    Terminal,
+    backend::TestBackend,
+    buffer::Buffer,
+    style::{Color, Modifier},
+};
 
 #[test]
 fn inline_command_panel_renders_below_composer_and_hides_regular_status_line() {
@@ -43,7 +48,7 @@ fn inline_command_panel_renders_below_composer_and_hides_regular_status_line() {
     let rows = render_trimmed_rows(&mut model, 48, 12);
     assert!(
         rows.iter()
-            .any(|row| row.contains("/exit    Exit the application")),
+            .any(|row| row.contains("/exit") && row.contains("Exit the application")),
         "expected inline command panel rows, got: {rows:?}"
     );
     assert!(
@@ -139,7 +144,7 @@ fn command_panel_descriptions_align_for_all_root_commands() {
 }
 
 #[test]
-fn command_panel_always_lists_acp_command() {
+fn command_panel_lists_acp_command_before_acp_session_starts() {
     let mut model = ready_model(64, 12, ModelOptions::default());
     type_text(&mut model, "/");
 
@@ -153,62 +158,62 @@ fn command_panel_always_lists_acp_command() {
 }
 
 #[test]
-fn command_panel_shows_empty_acp_message_without_configured_agents() {
-    let mut model = ready_model(64, 12, ModelOptions::default());
-    type_text(&mut model, "/acp");
-
-    let rows = render_trimmed_rows(&mut model, 64, 12);
-
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("No ACP agents configured")),
-        "expected empty ACP configuration message, got: {rows:?}"
-    );
-    assert!(
-        rows.iter()
-            .all(|row| !row.contains("Create acp.toml to enable ACP")),
-        "empty ACP menu should not suggest config creation inline: {rows:?}"
-    );
-
-    model.update(AppEvent::Key(KeyCode::Enter.into()));
-
-    assert_eq!(model.composer_text(), "");
-    let rows = render_trimmed_rows(&mut model, 64, 12);
-    assert!(
-        rows.iter()
-            .all(|row| !row.contains("No ACP agents configured")),
-        "empty ACP action should not render a transient status notice: {rows:?}"
-    );
-}
-
-#[test]
-fn command_panel_lists_configured_acp_agents_after_acp_command() {
+fn command_panel_hides_acp_command_after_acp_session_starts() {
     let mut model = ready_model(
         64,
         12,
         ModelOptions {
-            acp_agent_servers: vec!["kimi".to_string(), "codex-acp".to_string()],
+            acp_agent_servers: vec!["codex-acp".to_string()],
             ..ModelOptions::default()
         },
     );
     type_text(&mut model, "/acp");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    type_text(&mut model, "/");
 
     let rows = render_trimmed_rows(&mut model, 64, 12);
 
+    assert_eq!(model.selected_acp_agent(), Some("codex-acp"));
     assert!(
-        rows.iter()
-            .any(|row| row.contains("kimi") && row.contains("ACP")),
-        "expected kimi ACP choice, got: {rows:?}"
+        rows.iter().all(|row| !row.contains("/acp")),
+        "/acp should disappear once an ACP session has been started: {rows:?}"
     );
     assert!(
-        rows.iter()
-            .any(|row| row.contains("codex-acp") && row.contains("ACP")),
-        "expected codex-acp ACP choice, got: {rows:?}"
+        rows.iter().any(|row| row.contains("/exit")),
+        "other slash commands should remain available: {rows:?}"
     );
 }
 
 #[test]
-fn command_panel_enter_on_acp_command_opens_acp_picker() {
+fn command_panel_selected_item_uses_accent_without_coloring_description_blue() {
+    let palette = default_palette();
+    assert_eq!(
+        palette.command_accent,
+        Color::Cyan,
+        "selected slash commands should use the same bright cyan foreground as codex-rs"
+    );
+
+    let mut model = ready_model(64, 12, ModelOptions::default());
+    type_text(&mut model, "/");
+
+    let buffer = render_buffer(&mut model, 64, 12);
+
+    assert_text_cells_use_color(&buffer, "/exit", palette.command_accent);
+    assert_text_cells_do_not_use_color(&buffer, "/exit", palette.accent);
+    assert_text_cells_are_bold(&buffer, "/exit");
+    assert_text_cells_use_color(&buffer, "Exit the application", palette.main);
+    assert_text_cells_do_not_use_color(&buffer, "Exit the application", palette.command_accent);
+    assert_text_cells_use_color(&buffer, "/acp", palette.secondary);
+    assert_text_cells_use_color(
+        &buffer,
+        "Select ACP agent for this session",
+        palette.secondary,
+    );
+}
+
+#[test]
+fn command_panel_enter_on_acp_command_opens_acp_panel() {
     let mut model = ready_model(
         64,
         12,
@@ -222,38 +227,16 @@ fn command_panel_enter_on_acp_command_opens_acp_picker() {
 
     model.update(AppEvent::Key(KeyCode::Enter.into()));
 
-    assert_eq!(model.composer_text(), "/acp");
+    assert_eq!(model.composer_text(), "");
     assert_eq!(model.selected_acp_agent(), None);
     let rows = render_trimmed_rows(&mut model, 64, 12);
     assert!(
-        rows.iter()
-            .any(|row| row.contains("kimi") && row.contains("ACP")),
-        "expected ACP picker after /acp command, got: {rows:?}"
+        rows.iter().any(|row| row.contains("ACP Agents:")),
+        "expected ACP panel after /acp command, got: {rows:?}"
     );
-}
-
-#[test]
-fn command_panel_enter_selects_acp_agent_for_current_session() {
-    let mut model = ready_model(
-        64,
-        12,
-        ModelOptions {
-            acp_agent_servers: vec!["kimi".to_string(), "codex-acp".to_string()],
-            ..ModelOptions::default()
-        },
-    );
-    type_text(&mut model, "/acp");
-    model.update(AppEvent::Key(KeyCode::Down.into()));
-
-    let effect = model.update(AppEvent::Key(KeyCode::Enter.into()));
-
-    assert_eq!(model.selected_acp_agent(), Some("codex-acp"));
-    assert_eq!(model.composer_text(), "");
-    assert_eq!(
-        effect,
-        Some(AppEffect::StartAcpSession {
-            agent_id: "codex-acp".to_string(),
-        })
+    assert!(
+        rows.iter().all(|row| !row.contains("[Session]")),
+        "ACP panel should not render a fake tab/provider label: {rows:?}"
     );
 }
 
@@ -403,6 +386,63 @@ fn render_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
         .expect("model should render on test backend");
 
     terminal.backend().buffer().clone()
+}
+
+fn assert_text_cells_use_color(buffer: &Buffer, text: &str, expected: Color) {
+    let (row, column) = find_cell_containing_buffer(buffer, text);
+    for offset in 0..text.chars().count() {
+        assert_eq!(
+            buffer[(column + offset as u16, row)].fg,
+            expected,
+            "expected {text:?} to use {expected:?} at offset {offset}"
+        );
+    }
+}
+
+fn assert_text_cells_do_not_use_color(buffer: &Buffer, text: &str, rejected: Color) {
+    let (row, column) = find_cell_containing_buffer(buffer, text);
+    for offset in 0..text.chars().count() {
+        assert_ne!(
+            buffer[(column + offset as u16, row)].fg,
+            rejected,
+            "expected {text:?} not to use {rejected:?} at offset {offset}"
+        );
+    }
+}
+
+fn assert_text_cells_are_bold(buffer: &Buffer, text: &str) {
+    let (row, column) = find_cell_containing_buffer(buffer, text);
+    for offset in 0..text.chars().count() {
+        assert!(
+            buffer[(column + offset as u16, row)]
+                .modifier
+                .contains(Modifier::BOLD),
+            "expected {text:?} to be bold at offset {offset}"
+        );
+    }
+}
+
+fn find_cell_containing_buffer(buffer: &Buffer, needle: &str) -> (u16, u16) {
+    let needle_symbols = needle
+        .chars()
+        .map(|character| character.to_string())
+        .collect::<Vec<_>>();
+
+    for row in 0..buffer.area.height {
+        let symbols = (0..buffer.area.width)
+            .map(|column| buffer[(column, row)].symbol().to_string())
+            .collect::<Vec<_>>();
+        for column in 0..=symbols.len().saturating_sub(needle_symbols.len()) {
+            if symbols[column..column + needle_symbols.len()] == needle_symbols {
+                return (row, column as u16);
+            }
+        }
+    }
+
+    panic!(
+        "could not find {needle:?} in rendered rows: {:?}",
+        trim_rows(buffer)
+    )
 }
 
 fn test_environment_lock() -> &'static Mutex<()> {

@@ -4,10 +4,12 @@ use std::time::{Duration, Instant};
 use ratatui::Frame;
 
 use crate::envinfo;
+use crate::runtime::models::{ModelCatalog, ModelSelection};
 
 use super::{
     HeroOptions, Sender,
     acp_activity::AcpActivityState,
+    acp_panel::AcpPanelState,
     acp_permission::PendingAcpPermission,
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
@@ -16,6 +18,7 @@ use super::{
         offset_viewport_line_indices,
     },
     external_editor::ExternalEditorLaunch,
+    model_panel::ModelPanelState,
     selection::{AutoScrollDirection, MousePosition, SelectionClickState, SelectionState},
     status_line::{StatusLineItem, StatusLineRenderResult},
     style_mode::StyleMode,
@@ -34,6 +37,11 @@ pub struct Model {
     pub(super) external_editor_helper_enabled: bool,
     pub(super) acp_agent_servers: Vec<String>,
     pub(super) selected_acp_agent: Option<String>,
+    pub(super) acp_panel: AcpPanelState,
+    pub(super) model_catalog: ModelCatalog,
+    pub(super) selected_model: Option<ModelSelection>,
+    pub(super) requires_model_selection: bool,
+    pub(super) model_panel: ModelPanelState,
     pub(super) pending_acp_permission: Option<PendingAcpPermission>,
     pub(super) acp_activity: Option<AcpActivityState>,
     pub(super) command_panel_selected: usize,
@@ -128,6 +136,9 @@ pub struct ModelOptions {
     pub swap_enter_and_send: bool,
     pub ctrl_c_clears_input: bool,
     pub acp_agent_servers: Vec<String>,
+    pub model_catalog: ModelCatalog,
+    pub selected_model: Option<ModelSelection>,
+    pub requires_model_selection: bool,
 }
 
 impl Default for ModelOptions {
@@ -142,6 +153,9 @@ impl Default for ModelOptions {
             swap_enter_and_send: false,
             ctrl_c_clears_input: true,
             acp_agent_servers: Vec::new(),
+            model_catalog: ModelCatalog::default(),
+            selected_model: None,
+            requires_model_selection: false,
         }
     }
 }
@@ -182,6 +196,9 @@ impl Model {
         ));
         let style_mode = options.style_mode.normalized();
         let status_line_items = options.status_line_items;
+        let selected_model = options
+            .selected_model
+            .filter(|selection| options.model_catalog.contains_selection(selection));
 
         Self {
             style_mode,
@@ -191,6 +208,11 @@ impl Model {
             external_editor_helper_enabled: options.show_external_editor_helper,
             acp_agent_servers: options.acp_agent_servers,
             selected_acp_agent: None,
+            acp_panel: AcpPanelState::default(),
+            model_catalog: options.model_catalog,
+            selected_model,
+            requires_model_selection: options.requires_model_selection,
+            model_panel: ModelPanelState::default(),
             pending_acp_permission: None,
             acp_activity: None,
             command_panel_selected: 0,
@@ -400,10 +422,20 @@ impl Model {
 
         let status_line = self.current_status_line_render_result();
         let command_panel = self.current_inline_command_panel_render_result();
-        if status_line.has_content || command_panel.has_content {
+        let model_panel = self.current_inline_model_panel_render_result();
+        let acp_panel = self.current_inline_acp_panel_render_result();
+        if status_line.has_content
+            || command_panel.has_content
+            || model_panel.has_content
+            || acp_panel.has_content
+        {
             if self.document_runtime.follow_bottom && !self.document_runtime.manual_scroll {
-                let visible_height =
-                    self.bottom_follow_composer_content_line_count(&status_line, &command_panel);
+                let visible_height = self.bottom_follow_composer_content_line_count(
+                    &status_line,
+                    &command_panel,
+                    &model_panel,
+                    &acp_panel,
+                );
                 viewport_height =
                     viewport_height.min(u16::try_from(visible_height).unwrap_or(u16::MAX));
             } else {
@@ -527,10 +559,13 @@ impl Model {
         &self,
         status_line: &StatusLineRenderResult,
         command_panel: &super::command_panel::CommandPanelRenderResult,
+        model_panel: &super::model_panel::ModelPanelRenderResult,
+        acp_panel: &super::acp_panel::AcpPanelRenderResult,
     ) -> usize {
         let viewport_height = usize::from(self.height.max(1));
         let acp_activity = self.current_acp_activity_render_result();
-        let mut tail_rows = command_panel.lines.len();
+        let mut tail_rows =
+            command_panel.lines.len() + model_panel.lines.len() + acp_panel.lines.len();
         if acp_activity.has_content {
             tail_rows += 1;
         }

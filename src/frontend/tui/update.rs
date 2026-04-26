@@ -2,6 +2,8 @@ use std::{path::PathBuf, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 
+use crate::runtime::models::ModelSelection;
+
 use super::{
     ExternalEditorLaunch, Model, Sender,
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},
@@ -25,6 +27,9 @@ pub enum AppEffect {
     RespondAcpPermission {
         request_id: String,
         option_id: Option<String>,
+    },
+    PersistSelectedModel {
+        selection: ModelSelection,
     },
 }
 
@@ -224,6 +229,14 @@ impl Model {
             return None;
         }
 
+        if let Some(effect) = self.handle_model_panel_key(key) {
+            return effect;
+        }
+
+        if let Some(effect) = self.handle_acp_panel_key(key) {
+            return effect;
+        }
+
         if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return self
                 .maybe_prepare_external_editor_launch()
@@ -345,6 +358,13 @@ impl Model {
     fn handle_composer_send(&mut self) -> Option<AppEffect> {
         let content = self.composer_text().to_string();
         if content.trim().is_empty() {
+            return None;
+        }
+        if self.requires_model_selection
+            && self.selected_model.is_none()
+            && self.selected_acp_agent.is_none()
+        {
+            self.show_transient_status_notice("Select a model before sending");
             return None;
         }
 

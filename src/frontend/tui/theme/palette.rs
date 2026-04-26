@@ -12,6 +12,8 @@ const DARK_BACKGROUND_TERTIARY: Color = Color::Rgb(154, 154, 154);
 const LIGHT_BACKGROUND_TERTIARY: Color = Color::Rgb(122, 122, 122);
 const DARK_BACKGROUND_SURFACE: Color = Color::Rgb(46, 46, 46);
 const LIGHT_BACKGROUND_SURFACE: Color = Color::Rgb(236, 236, 236);
+const PANEL_ACCENT: Color = Color::Blue;
+const COMMAND_ACCENT: Color = Color::Cyan;
 
 /// `PaletteDetection` 描述一次可确认的终端背景探测结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,13 +24,16 @@ pub struct PaletteDetection {
 
 /// `TerminalPalette` 定义当前终端下的一组基础语义颜色。
 /// `main` 用于主体信息，`muted` 用于输入正文，`secondary` 用于辅助信息，
-/// `tertiary` 用于更弱的状态信息，`surface` 用于弱化背景块。
+/// `tertiary` 用于更弱的状态信息，`accent` 用于面板强调线，
+/// `command_accent` 用于斜杠菜单当前命令，`surface` 用于弱化背景块。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalPalette {
     pub main: Color,
     pub muted: Color,
     pub secondary: Color,
     pub tertiary: Color,
+    pub accent: Color,
+    pub command_accent: Color,
     pub surface: Option<Color>,
     mode: PaletteMode,
 }
@@ -58,6 +63,8 @@ pub fn terminal_default_palette() -> TerminalPalette {
         muted: Color::Reset,
         secondary: Color::Reset,
         tertiary: Color::Reset,
+        accent: PANEL_ACCENT,
+        command_accent: COMMAND_ACCENT,
         surface: None,
         mode: PaletteMode::TerminalDefault,
     }
@@ -126,6 +133,8 @@ pub fn palette_from_background(
         } else {
             LIGHT_BACKGROUND_TERTIARY
         },
+        accent: PANEL_ACCENT,
+        command_accent: COMMAND_ACCENT,
         surface: Some(surface_color(has_dark_background, background)),
         mode: PaletteMode::Explicit,
     }

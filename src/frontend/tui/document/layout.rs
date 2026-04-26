@@ -134,6 +134,18 @@ impl Model {
             composer_width: self.composer.content_width(),
             command_panel_selected: self.command_panel_selected,
             command_panel_scroll: self.command_panel_scroll,
+            acp_panel_active: self.acp_panel_active(),
+            acp_panel_selected: self.acp_panel.selected,
+            acp_panel_scroll: self.acp_panel.scroll,
+            selected_acp_agent: self.selected_acp_agent.clone(),
+            model_panel_active: self.model_panel_active(),
+            model_panel_provider_index: self.model_panel.provider_index,
+            model_panel_model_index: self.model_panel.model_index,
+            model_panel_scroll: self.model_panel.scroll,
+            selected_model: self
+                .selected_model
+                .as_ref()
+                .map(|model| model.display_name()),
             status_line_config: self.status_line_config_bits(),
             status_line_revision: self.status_line_revision(),
         }

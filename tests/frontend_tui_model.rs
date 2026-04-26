@@ -1,9 +1,90 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lumos::frontend::tui::{
-    AppEvent, HeroOptions, Model,
-    theme::{palette_from_background, terminal_default_palette},
+use lumos::{
+    frontend::tui::{
+        AppEvent, HeroOptions, Model, ModelOptions,
+        theme::{palette_from_background, terminal_default_palette},
+    },
+    runtime::models::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
+
+#[test]
+fn model_does_not_auto_select_first_catalog_model_without_default() {
+    let model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            model_catalog: single_model_catalog(),
+            ..ModelOptions::default()
+        },
+    );
+
+    assert_eq!(model.selected_model(), None);
+}
+
+#[test]
+fn enter_with_required_empty_model_shows_notice_without_sending() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            model_catalog: single_model_catalog(),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.update(AppEvent::Resized {
+        width: 80,
+        height: 24,
+    });
+    model.update(AppEvent::DetectedPalette {
+        palette: terminal_default_palette(),
+        has_dark_background: true,
+    });
+
+    for character in "hello".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(model.composer_text(), "hello");
+    assert_eq!(model.transcript_plain_items().len(), 1);
+    assert!(rendered_model_text(&mut model).contains("Select a model before sending"));
+}
+
+#[test]
+fn enter_with_required_selected_model_sends_message() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+
+    for character in "hello".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(model.composer_text(), "");
+    assert!(
+        model
+            .transcript_plain_items()
+            .iter()
+            .any(|item| item.contains("hello"))
+    );
+}
+
+fn single_model_catalog() -> ModelCatalog {
+    ModelCatalog::new(vec![ModelProvider::new(
+        "local",
+        "Local",
+        Some("http://127.0.0.1:1234/v1".to_string()),
+        ModelSource::Configured,
+        vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+    )])
+}
 
 #[test]
 fn foreground_fallback_uses_light_palette_when_foreground_is_dark() {
@@ -121,4 +202,13 @@ fn buffer_text(buffer: &Buffer) -> String {
     }
 
     rendered
+}
+
+fn rendered_model_text(model: &mut Model) -> String {
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render on test backend");
+    buffer_text(terminal.backend().buffer())
 }

@@ -8,7 +8,9 @@ use super::{
     AppEffect, Model,
     selection::SelectableLineRange,
     status_line::truncate_display_width_with_ellipsis,
-    theme::{primary_text_style, secondary_text_style, tertiary_text_style},
+    theme::{
+        command_accent_text_style, primary_text_style, secondary_text_style, tertiary_text_style,
+    },
 };
 
 const COMMAND_PANEL_VISIBLE_ROWS: usize = 7;
@@ -19,8 +21,7 @@ const COMMAND_PANEL_DESCRIPTION_GAP: usize = 4;
 enum CommandPanelAction {
     Exit,
     OpenAcpPicker,
-    ShowAcpMissingConfig,
-    SelectAcp { agent_id: String },
+    OpenModelPanel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,7 +306,12 @@ impl Model {
         plain_line.push_str(&" ".repeat(padding));
 
         let name_style = if selected {
-            primary_text_style(self.palette).bold()
+            command_accent_text_style(self.palette).bold()
+        } else {
+            secondary_text_style(self.palette)
+        };
+        let description_style = if selected {
+            primary_text_style(self.palette)
         } else {
             secondary_text_style(self.palette)
         };
@@ -314,12 +320,9 @@ impl Model {
             Line::from(vec![
                 Span::raw(" ".repeat(inset_width)),
                 Span::styled(command_text.clone(), name_style),
-                Span::raw(format!(
-                    "{}{}{}",
-                    gap_text,
-                    description_text,
-                    " ".repeat(padding)
-                )),
+                Span::raw(gap_text),
+                Span::styled(description_text, description_style),
+                Span::raw(" ".repeat(padding)),
             ]),
             plain_line.clone(),
             command_panel_selectable_range(&plain_line, width),
@@ -349,75 +352,19 @@ impl Model {
                 None
             }
             CommandPanelAction::OpenAcpPicker => {
-                self.open_acp_picker();
+                self.open_acp_panel();
                 None
             }
-            CommandPanelAction::ShowAcpMissingConfig => {
-                self.show_acp_missing_config();
+            CommandPanelAction::OpenModelPanel => {
+                self.open_model_panel();
                 None
             }
-            CommandPanelAction::SelectAcp { agent_id } => Some(self.select_acp_agent(agent_id)),
         }
-    }
-
-    fn open_acp_picker(&mut self) {
-        self.complete_command_panel_selection("/acp");
-    }
-
-    fn show_acp_missing_config(&mut self) {
-        let old_value = self.composer_text().to_string();
-        let old_line = self.composer.line();
-        let old_column = self.composer.column();
-        self.composer.replace_text_and_move_to_end(String::new());
-        self.sync_command_panel_navigation();
-        self.sync_external_editor_helper_after_draft_change(&old_value);
-        self.sync_composer_height();
-        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
-    }
-
-    fn select_acp_agent(&mut self, agent_id: String) -> AppEffect {
-        let old_value = self.composer_text().to_string();
-        let old_line = self.composer.line();
-        let old_column = self.composer.column();
-        self.selected_acp_agent = Some(agent_id.clone());
-        self.composer.replace_text_and_move_to_end(String::new());
-        self.sync_command_panel_navigation();
-        self.sync_external_editor_helper_after_draft_change(&old_value);
-        self.sync_composer_height();
-        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
-        self.show_transient_status_notice(&format!("ACP agent selected: {agent_id}"));
-        AppEffect::StartAcpSession { agent_id }
     }
 
     fn filter_command_panel_items(&self, query: &str) -> Vec<CommandPanelItem> {
-        if query == "acp" {
-            return self.acp_picker_items();
-        }
-
-        filter_base_command_panel_items(query)
-    }
-
-    fn acp_picker_items(&self) -> Vec<CommandPanelItem> {
-        if self.acp_agent_servers.is_empty() {
-            return vec![CommandPanelItem {
-                name: "No ACP agents configured".to_string(),
-                aliases: Vec::new(),
-                description: String::new(),
-                action: CommandPanelAction::ShowAcpMissingConfig,
-            }];
-        }
-
-        self.acp_agent_servers
-            .iter()
-            .map(|agent_id| CommandPanelItem {
-                name: agent_id.clone(),
-                aliases: Vec::new(),
-                description: "Start ACP for this session".to_string(),
-                action: CommandPanelAction::SelectAcp {
-                    agent_id: agent_id.clone(),
-                },
-            })
-            .collect()
+        let is_acp_session_active = self.selected_acp_agent.is_some();
+        filter_base_command_panel_items(query, is_acp_session_active)
     }
 }
 
@@ -428,7 +375,7 @@ fn command_panel_query(value: &str) -> Option<String> {
     }
 
     let query = raw_command_panel_query(value)?;
-    if !filter_base_command_panel_items(&query).is_empty() || query.chars().count() == 1 {
+    if !filter_base_command_panel_items(&query, false).is_empty() || query.chars().count() == 1 {
         return Some(query);
     }
 
@@ -462,21 +409,32 @@ fn raw_command_panel_query(value: &str) -> Option<String> {
     Some(raw_query.to_lowercase())
 }
 
-fn filter_base_command_panel_items(query: &str) -> Vec<CommandPanelItem> {
-    let items = vec![
-        CommandPanelItem {
-            name: "/exit".to_string(),
-            aliases: vec!["/quit".to_string()],
-            description: "Exit the application".to_string(),
-            action: CommandPanelAction::Exit,
-        },
-        CommandPanelItem {
+fn filter_base_command_panel_items(
+    query: &str,
+    is_acp_session_active: bool,
+) -> Vec<CommandPanelItem> {
+    let mut items = vec![CommandPanelItem {
+        name: "/exit".to_string(),
+        aliases: vec!["/quit".to_string()],
+        description: "Exit the application".to_string(),
+        action: CommandPanelAction::Exit,
+    }];
+
+    if !is_acp_session_active {
+        items.push(CommandPanelItem {
             name: "/acp".to_string(),
             aliases: Vec::new(),
             description: "Select ACP agent for this session".to_string(),
             action: CommandPanelAction::OpenAcpPicker,
-        },
-    ];
+        });
+    }
+
+    items.push(CommandPanelItem {
+        name: "/models".to_string(),
+        aliases: Vec::new(),
+        description: "Select model for this session".to_string(),
+        action: CommandPanelAction::OpenModelPanel,
+    });
 
     if query.is_empty() {
         return items;
@@ -486,6 +444,11 @@ fn filter_base_command_panel_items(query: &str) -> Vec<CommandPanelItem> {
         .into_iter()
         .filter(|item| command_panel_item_matches_query(item, query))
         .collect()
+}
+
+#[cfg(test)]
+fn base_command_panel_items_for_query(query: &str) -> Vec<CommandPanelItem> {
+    filter_base_command_panel_items(query, false)
 }
 
 fn command_panel_item_matches_query(item: &CommandPanelItem, query: &str) -> bool {

@@ -4,8 +4,10 @@ use ratatui::text::Line;
 
 use crate::frontend::tui::{
     Model,
+    acp_panel::AcpPanelRenderResult,
     command_panel::CommandPanelRenderResult,
     composer,
+    model_panel::ModelPanelRenderResult,
     selection::{SelectableLineRange, selectable_range_for_plain_line},
     status_line::StatusLineRenderResult,
     style_mode::StyleMode,
@@ -27,6 +29,15 @@ pub(crate) struct DocumentTailLayoutKey {
     pub(crate) composer_width: usize,
     pub(crate) command_panel_selected: usize,
     pub(crate) command_panel_scroll: usize,
+    pub(crate) acp_panel_active: bool,
+    pub(crate) acp_panel_selected: usize,
+    pub(crate) acp_panel_scroll: usize,
+    pub(crate) selected_acp_agent: Option<String>,
+    pub(crate) model_panel_active: bool,
+    pub(crate) model_panel_provider_index: usize,
+    pub(crate) model_panel_model_index: usize,
+    pub(crate) model_panel_scroll: usize,
+    pub(crate) selected_model: Option<String>,
     pub(crate) status_line_config: u8,
     pub(crate) status_line_revision: usize,
     pub(crate) acp_activity_frame: usize,
@@ -66,6 +77,8 @@ pub(crate) struct DocumentTailLayoutInput {
     pub(crate) composer_cursor_y: usize,
     pub(crate) acp_activity: StatusLineRenderResult,
     pub(crate) command_panel: CommandPanelRenderResult,
+    pub(crate) acp_panel: AcpPanelRenderResult,
+    pub(crate) model_panel: ModelPanelRenderResult,
     pub(crate) status_line: StatusLineRenderResult,
 }
 
@@ -102,6 +115,18 @@ impl Model {
             composer_width: self.composer.content_width(),
             command_panel_selected: self.command_panel_selected,
             command_panel_scroll: self.command_panel_scroll,
+            acp_panel_active: self.acp_panel_active(),
+            acp_panel_selected: self.acp_panel.selected,
+            acp_panel_scroll: self.acp_panel.scroll,
+            selected_acp_agent: self.selected_acp_agent.clone(),
+            model_panel_active: self.model_panel_active(),
+            model_panel_provider_index: self.model_panel.provider_index,
+            model_panel_model_index: self.model_panel.model_index,
+            model_panel_scroll: self.model_panel.scroll,
+            selected_model: self
+                .selected_model
+                .as_ref()
+                .map(|model| model.display_name()),
             status_line_config: self.status_line_config_bits(),
             status_line_revision: self.status_line_revision(),
             acp_activity_frame: self.acp_activity_frame_key(std::time::Instant::now()),
@@ -159,6 +184,8 @@ impl Model {
             composer_cursor_y: composer_document.cursor_y,
             acp_activity: self.current_acp_activity_render_result(),
             command_panel: self.current_inline_command_panel_render_result(),
+            acp_panel: self.current_inline_acp_panel_render_result(),
+            model_panel: self.current_inline_model_panel_render_result(),
             status_line: self.current_status_line_render_result(),
         }
     }
@@ -174,6 +201,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.composer_lines.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
+            + input.acp_panel.lines.len()
+            + input.model_panel.lines.len()
             + input.status_line.gap_before
             + usize::from(input.status_line.has_content),
     );
@@ -183,6 +212,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.composer_text_lines.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.plain_lines.len()
+            + input.acp_panel.plain_lines.len()
+            + input.model_panel.plain_lines.len()
             + input.status_line.gap_before
             + usize::from(input.status_line.has_content),
     );
@@ -192,6 +223,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.composer_anchors.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
+            + input.acp_panel.lines.len()
+            + input.model_panel.lines.len()
             + input.status_line.gap_before
             + usize::from(input.status_line.has_content),
     );
@@ -201,6 +234,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.composer_selectable.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
+            + input.acp_panel.lines.len()
+            + input.model_panel.lines.len()
             + input.status_line.gap_before
             + usize::from(input.status_line.has_content),
     );
@@ -219,6 +254,62 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             ..DocumentLineAnchor::default()
         });
         selectable.push(input.acp_activity.selectable);
+    }
+
+    if input.model_panel.has_content {
+        append_model_panel(
+            &input.model_panel,
+            &mut lines,
+            &mut text_lines,
+            &mut anchors,
+            &mut selectable,
+        );
+
+        if lines.is_empty() {
+            lines.push(Line::raw(""));
+            text_lines.push(String::new());
+            anchors.push(DocumentLineAnchor::default());
+            selectable.push(SelectableLineRange::default());
+        }
+
+        let cursor_y = lines.len().saturating_add(1);
+        return DocumentTailLayout {
+            lines,
+            text_lines,
+            anchors,
+            selectable,
+            composer_slot: SlotFrame::new(0, false, 0),
+            cursor_x: 0,
+            cursor_y,
+        };
+    }
+
+    if input.acp_panel.has_content {
+        append_acp_panel(
+            &input.acp_panel,
+            &mut lines,
+            &mut text_lines,
+            &mut anchors,
+            &mut selectable,
+        );
+
+        if lines.is_empty() {
+            lines.push(Line::raw(""));
+            text_lines.push(String::new());
+            anchors.push(DocumentLineAnchor::default());
+            selectable.push(SelectableLineRange::default());
+        }
+
+        let cursor_y = lines.len().saturating_add(1);
+        return DocumentTailLayout {
+            lines,
+            text_lines,
+            anchors,
+            selectable,
+            composer_slot: SlotFrame::new(0, false, 0),
+            cursor_x: 0,
+            cursor_y,
+        };
     }
 
     let composer_slot = SlotFrame::new(
@@ -378,6 +469,62 @@ fn append_transcript_gap(
             ..DocumentLineAnchor::default()
         });
         selectable.push(SelectableLineRange::default());
+    }
+}
+
+fn append_model_panel(
+    model_panel: &ModelPanelRenderResult,
+    lines: &mut Vec<Line<'static>>,
+    text_lines: &mut Vec<String>,
+    anchors: &mut Vec<DocumentLineAnchor>,
+    selectable: &mut Vec<SelectableLineRange>,
+) {
+    for index in 0..model_panel.lines.len() {
+        lines.push(model_panel.lines[index].clone());
+        text_lines.push(
+            model_panel
+                .plain_lines
+                .get(index)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        anchors.push(DocumentLineAnchor {
+            region: DocumentAnchorRegion::ModelPanel,
+            gap_index: index,
+            ..DocumentLineAnchor::default()
+        });
+        selectable.push(
+            model_panel
+                .selectable
+                .get(index)
+                .copied()
+                .unwrap_or_default(),
+        );
+    }
+}
+
+fn append_acp_panel(
+    acp_panel: &AcpPanelRenderResult,
+    lines: &mut Vec<Line<'static>>,
+    text_lines: &mut Vec<String>,
+    anchors: &mut Vec<DocumentLineAnchor>,
+    selectable: &mut Vec<SelectableLineRange>,
+) {
+    for index in 0..acp_panel.lines.len() {
+        lines.push(acp_panel.lines[index].clone());
+        text_lines.push(
+            acp_panel
+                .plain_lines
+                .get(index)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        anchors.push(DocumentLineAnchor {
+            region: DocumentAnchorRegion::AcpPanel,
+            gap_index: index,
+            ..DocumentLineAnchor::default()
+        });
+        selectable.push(acp_panel.selectable.get(index).copied().unwrap_or_default());
     }
 }
 

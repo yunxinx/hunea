@@ -1,5 +1,6 @@
 use std::{
     io,
+    path::PathBuf,
     process::Command,
     time::{Duration, Instant},
 };
@@ -7,6 +8,7 @@ use std::{
 use crate::runtime::session::{
     AcpInitializeOutcome, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
 };
+use crate::runtime::{models, models::ModelSelection};
 use arboard::Clipboard;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use color_eyre::eyre::Result;
@@ -29,6 +31,7 @@ use super::{
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeOptions {
     pub acp_sessions: AcpSessionCatalog,
+    pub model_config_path: Option<PathBuf>,
 }
 
 /// `run` 启动交互式 TUI，并在退出后返回最终模型。
@@ -372,6 +375,22 @@ fn apply_effect_if_needed(
             run_respond_acp_permission_effect(model, acp_runtime, &request_id, option_id);
             Ok(())
         }
+        AppEffect::PersistSelectedModel { selection } => {
+            run_persist_selected_model_effect(model, runtime_options, &selection);
+            Ok(())
+        }
+    }
+}
+
+fn run_persist_selected_model_effect(
+    model: &mut Model,
+    runtime_options: &RuntimeOptions,
+    selection: &ModelSelection,
+) {
+    if let Err(error) =
+        models::write_default_model(runtime_options.model_config_path.as_deref(), selection)
+    {
+        model.show_transient_status_notice(&format!("Failed to save default model: {error}"));
     }
 }
 

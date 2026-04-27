@@ -56,7 +56,88 @@ fn drag_selection_highlights_text_and_copies_on_release_when_enabled() {
 
     assert_eq!(
         effect,
-        Some(AppEffect::CopySelection("lpha\n› be".to_string()))
+        Some(AppEffect::CopySelection("lpha\nbe".to_string()))
+    );
+}
+
+#[test]
+fn user_message_selection_starts_at_content_not_prompt() {
+    let mut model = ready_selection_model(true);
+    submit_message(&mut model, "alpha");
+    submit_message(&mut model, "beta");
+
+    let (alpha_row, alpha_column) = find_cell_containing(&mut model, 24, 6, "alpha");
+    let (beta_row, beta_column) = find_cell_containing(&mut model, 24, 6, "beta");
+
+    assert!(
+        model
+            .update(AppEvent::MouseDown {
+                button: MouseButton::Left,
+                column: u16::try_from(alpha_column).unwrap(),
+                row: u16::try_from(alpha_row).unwrap(),
+            })
+            .is_none()
+    );
+    assert!(
+        model
+            .update(AppEvent::MouseDrag {
+                button: MouseButton::Left,
+                column: u16::try_from(beta_column + 4).unwrap(),
+                row: u16::try_from(beta_row).unwrap(),
+            })
+            .is_none()
+    );
+
+    let effect = model.update(AppEvent::MouseUp {
+        button: MouseButton::Left,
+        column: u16::try_from(beta_column + 4).unwrap(),
+        row: u16::try_from(beta_row).unwrap(),
+    });
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::CopySelection("alpha\nbeta".to_string()))
+    );
+}
+
+#[test]
+fn user_message_selection_can_start_from_prompt_area_without_copying_it() {
+    let mut model = ready_selection_model(true);
+    submit_message(&mut model, "alpha");
+    submit_message(&mut model, "beta");
+
+    let (alpha_row, alpha_column) = find_cell_containing(&mut model, 24, 6, "alpha");
+    let (beta_row, beta_column) = find_cell_containing(&mut model, 24, 6, "beta");
+    let prompt_column = alpha_column.saturating_sub(2);
+
+    assert!(
+        model
+            .update(AppEvent::MouseDown {
+                button: MouseButton::Left,
+                column: u16::try_from(prompt_column).unwrap(),
+                row: u16::try_from(alpha_row).unwrap(),
+            })
+            .is_none()
+    );
+    assert!(
+        model
+            .update(AppEvent::MouseDrag {
+                button: MouseButton::Left,
+                column: u16::try_from(beta_column + 4).unwrap(),
+                row: u16::try_from(beta_row).unwrap(),
+            })
+            .is_none()
+    );
+
+    let effect = model.update(AppEvent::MouseUp {
+        button: MouseButton::Left,
+        column: u16::try_from(beta_column + 4).unwrap(),
+        row: u16::try_from(beta_row).unwrap(),
+    });
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::CopySelection("alpha\nbeta".to_string()))
     );
 }
 

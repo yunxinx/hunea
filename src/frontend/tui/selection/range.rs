@@ -28,6 +28,24 @@ impl SelectableLineRange {
         }
     }
 
+    pub(crate) fn with_anchor(
+        start_column: usize,
+        end_column: usize,
+        anchor_start_column: usize,
+        anchor_end_column: usize,
+    ) -> Self {
+        if end_column <= start_column || anchor_end_column <= anchor_start_column {
+            return Self::default();
+        }
+
+        Self {
+            start_column,
+            end_column,
+            anchor_start_column,
+            anchor_end_column,
+        }
+    }
+
     pub(crate) fn blank_anchor(anchor_start_column: usize, anchor_end_column: usize) -> Self {
         if anchor_end_column <= anchor_start_column {
             return Self::default();

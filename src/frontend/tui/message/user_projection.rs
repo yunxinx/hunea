@@ -320,7 +320,7 @@ pub(super) fn render_user_message_selectable_line_ranges(
         ranges.push(SelectableLineRange::default());
     }
 
-    for (index, line) in snapshot.lines.iter().enumerate() {
+    for line in &snapshot.lines {
         let line_width = measure_width(&line.text);
         if line_width == 0 {
             let anchor_end = if snapshot.layout.frame_width > 0 {
@@ -332,17 +332,12 @@ pub(super) fn render_user_message_selectable_line_ranges(
             continue;
         }
 
-        if index == 0 {
-            ranges.push(SelectableLineRange::new(
-                0,
-                snapshot.layout.line_prefix_width + line_width,
-            ));
-        } else {
-            ranges.push(SelectableLineRange::new(
-                snapshot.layout.line_prefix_width,
-                snapshot.layout.line_prefix_width + line_width,
-            ));
-        }
+        ranges.push(SelectableLineRange::with_anchor(
+            snapshot.layout.line_prefix_width,
+            snapshot.layout.line_prefix_width + line_width,
+            0,
+            snapshot.layout.line_prefix_width + line_width,
+        ));
     }
 
     if snapshot.has_frame {

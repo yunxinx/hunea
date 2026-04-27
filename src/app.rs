@@ -191,6 +191,8 @@ fn model_options_from_configs(
         copy_on_mouse_selection_release: tui_config.copy_on_mouse_selection_release,
         swap_enter_and_send: tui_config.swap_enter_and_send,
         ctrl_c_clears_input: tui_config.ctrl_c_clears_input,
+        esc_interrupt_presses: tui_config.esc_interrupt_presses,
+        show_esc_interrupt_hint: tui_config.show_esc_interrupt_hint,
         acp_agent_servers: acp_agent_servers_from_config(runtime_config),
         model_catalog: loaded_models.catalog.clone(),
         selected_model: loaded_models.selected_model.clone(),
@@ -241,6 +243,8 @@ mod tests {
             copy_on_mouse_selection_release: true,
             swap_enter_and_send: false,
             ctrl_c_clears_input: true,
+            esc_interrupt_presses: 2,
+            show_esc_interrupt_hint: true,
             print_transcript_on_exit: false,
         });
 
@@ -257,6 +261,8 @@ mod tests {
             copy_on_mouse_selection_release: false,
             swap_enter_and_send: true,
             ctrl_c_clears_input: true,
+            esc_interrupt_presses: 2,
+            show_esc_interrupt_hint: true,
             print_transcript_on_exit: false,
         });
 
@@ -273,10 +279,48 @@ mod tests {
             copy_on_mouse_selection_release: false,
             swap_enter_and_send: false,
             ctrl_c_clears_input: false,
+            esc_interrupt_presses: 2,
+            show_esc_interrupt_hint: true,
             print_transcript_on_exit: false,
         });
 
         assert!(!options.ctrl_c_clears_input);
+    }
+
+    #[test]
+    fn model_options_from_config_carries_esc_interrupt_presses() {
+        let options = model_options_from_config(&TuiConfig {
+            user_input_style: UserInputStyle::Cx,
+            status_line: Vec::new(),
+            external_editor: Vec::new(),
+            show_external_editor_helper: true,
+            copy_on_mouse_selection_release: false,
+            swap_enter_and_send: false,
+            ctrl_c_clears_input: true,
+            esc_interrupt_presses: 3,
+            show_esc_interrupt_hint: true,
+            print_transcript_on_exit: false,
+        });
+
+        assert_eq!(options.esc_interrupt_presses, 3);
+    }
+
+    #[test]
+    fn model_options_from_config_carries_show_esc_interrupt_hint_flag() {
+        let options = model_options_from_config(&TuiConfig {
+            user_input_style: UserInputStyle::Cx,
+            status_line: Vec::new(),
+            external_editor: Vec::new(),
+            show_external_editor_helper: true,
+            copy_on_mouse_selection_release: false,
+            swap_enter_and_send: false,
+            ctrl_c_clears_input: true,
+            esc_interrupt_presses: 2,
+            show_esc_interrupt_hint: false,
+            print_transcript_on_exit: false,
+        });
+
+        assert!(!options.show_esc_interrupt_hint);
     }
 
     #[test]
@@ -361,6 +405,8 @@ mod tests {
             copy_on_mouse_selection_release: false,
             swap_enter_and_send: false,
             ctrl_c_clears_input: true,
+            esc_interrupt_presses: 2,
+            show_esc_interrupt_hint: true,
             print_transcript_on_exit: false,
         };
 
@@ -379,6 +425,8 @@ mod tests {
             copy_on_mouse_selection_release: false,
             swap_enter_and_send: false,
             ctrl_c_clears_input: true,
+            esc_interrupt_presses: 2,
+            show_esc_interrupt_hint: true,
             print_transcript_on_exit: true,
         };
         let mut output = Vec::new();
@@ -398,6 +446,8 @@ mod tests {
             copy_on_mouse_selection_release: false,
             swap_enter_and_send: false,
             ctrl_c_clears_input: true,
+            esc_interrupt_presses: 2,
+            show_esc_interrupt_hint: true,
             print_transcript_on_exit: false,
         }
     }

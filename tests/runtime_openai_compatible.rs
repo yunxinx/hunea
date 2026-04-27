@@ -1,7 +1,8 @@
 use std::io::Cursor;
 
 use lumos::runtime::openai_compatible::{
-    ChatCompletionMessage, ChatCompletionRequestBody, collect_chat_completion_stream,
+    CancellationToken, ChatCompletionMessage, ChatCompletionRequestBody,
+    collect_chat_completion_stream, collect_chat_completion_stream_with_cancellation,
 };
 
 #[test]
@@ -25,6 +26,18 @@ fn chat_completion_stream_reports_invalid_json_without_raw_payload_dump() {
         .expect_err("invalid stream JSON should fail");
 
     assert_eq!(error.to_string(), "invalid chat completion stream event");
+}
+
+#[test]
+fn chat_completion_stream_honors_cancellation_before_collecting_content() {
+    let token = CancellationToken::default();
+    token.cancel();
+    let stream = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n";
+
+    let error = collect_chat_completion_stream_with_cancellation(Cursor::new(stream), &token)
+        .expect_err("cancelled stream should stop before collecting content");
+
+    assert_eq!(error.to_string(), "chat completion cancelled");
 }
 
 #[test]

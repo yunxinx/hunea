@@ -1,16 +1,31 @@
-use std::{env, time::Duration};
+use std::{env, io, time::Duration};
 
-use reqwest::blocking::Client;
+use futures_util::StreamExt as _;
+use reqwest::Client;
 
 use super::{
-    ChatCompletionRequestBody, NativeChatRequest, OpenAiCompatibleError,
-    collect_chat_completion_stream,
+    CancellationToken, ChatCompletionRequestBody, NativeChatRequest, OpenAiCompatibleError,
+    stream::collect_chat_completion_stream_chunks_with_cancellation,
 };
 
 const CHAT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `send_chat_completion` 调用 OpenAI-compatible `/chat/completions` 并聚合流式响应。
-pub fn send_chat_completion(request: &NativeChatRequest) -> Result<String, OpenAiCompatibleError> {
+pub async fn send_chat_completion(
+    request: &NativeChatRequest,
+) -> Result<String, OpenAiCompatibleError> {
+    send_chat_completion_with_cancellation(request, &CancellationToken::default()).await
+}
+
+/// `send_chat_completion_with_cancellation` 支持中断 HTTP 请求与流式聚合。
+pub async fn send_chat_completion_with_cancellation(
+    request: &NativeChatRequest,
+    cancellation: &CancellationToken,
+) -> Result<String, OpenAiCompatibleError> {
+    if cancellation.is_cancelled() {
+        return Err(OpenAiCompatibleError::Cancelled);
+    }
+
     let client = Client::builder()
         .timeout(CHAT_COMPLETION_TIMEOUT)
         .build()
@@ -30,13 +45,20 @@ pub fn send_chat_completion(request: &NativeChatRequest) -> Result<String, OpenA
         builder = builder.bearer_auth(api_key);
     }
 
-    let response = builder.send().map_err(|_| OpenAiCompatibleError::Request {
-        endpoint: endpoint.clone(),
-    })?;
+    let response = tokio::select! {
+        _ = cancellation.cancelled() => return Err(OpenAiCompatibleError::Cancelled),
+        response = builder.send() => response.map_err(|_| OpenAiCompatibleError::Request {
+            endpoint: endpoint.clone(),
+        })?,
+    };
     let status = response.status();
     if !status.is_success() {
         return Err(OpenAiCompatibleError::Http { endpoint, status });
     }
 
-    collect_chat_completion_stream(response)
+    let chunks = response
+        .bytes_stream()
+        .map(|chunk| chunk.map(|bytes| bytes.to_vec()).map_err(io::Error::other));
+
+    collect_chat_completion_stream_chunks_with_cancellation(chunks, cancellation).await
 }

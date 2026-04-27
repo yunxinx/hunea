@@ -25,6 +25,7 @@ const ACP_ACTIVITY_GLYPH: &str = "•";
 pub(super) struct AcpActivityState {
     started_at: Instant,
     header: String,
+    interrupt_hint: Option<String>,
 }
 
 impl Model {
@@ -47,12 +48,25 @@ impl Model {
         self.acp_activity = Some(AcpActivityState {
             started_at: Instant::now(),
             header,
+            interrupt_hint: self.current_acp_activity_interrupt_hint(),
         });
+        self.reset_chat_interrupt_esc_count();
         self.bump_status_line_revision();
         self.sync_composer_height();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
         }
+    }
+
+    fn current_acp_activity_interrupt_hint(&self) -> Option<String> {
+        if !self.show_esc_interrupt_hint {
+            return None;
+        }
+
+        Some(match self.esc_interrupt_presses {
+            1 => "esc to interrupt".to_string(),
+            presses => format!("esc {presses}x to interrupt"),
+        })
     }
 
     pub(crate) fn clear_acp_activity(&mut self) {
@@ -61,6 +75,7 @@ impl Model {
         }
 
         self.acp_activity = None;
+        self.reset_chat_interrupt_esc_count();
         self.bump_status_line_revision();
         self.sync_composer_height();
         if self.document_runtime.follow_bottom {
@@ -131,6 +146,14 @@ impl AcpActivityState {
         format_elapsed_compact(self.elapsed_at(now).as_secs())
     }
 
+    fn elapsed_segment_at(&self, now: Instant) -> String {
+        let elapsed = self.elapsed_text_at(now);
+        match self.interrupt_hint.as_deref() {
+            Some(hint) => format!("({elapsed} • {hint})"),
+            None => format!("({elapsed})"),
+        }
+    }
+
     fn frame_index_at(&self, now: Instant) -> usize {
         let interval_ms = ACP_ACTIVITY_FRAME_INTERVAL.as_millis().max(1);
         let tick = self.elapsed_at(now).as_millis() / interval_ms;
@@ -144,7 +167,7 @@ fn render_activity_content(
     now: Instant,
     content_width: usize,
 ) -> (String, Vec<Span<'static>>) {
-    let elapsed_text = format!("({})", activity.elapsed_text_at(now));
+    let elapsed_text = activity.elapsed_segment_at(now);
     let text = format!(
         "{ACP_ACTIVITY_GLYPH} {} {elapsed_text}",
         activity.header.as_str()
@@ -286,7 +309,7 @@ mod tests {
         let first_line = first.line.expect("activity line should render");
         let second_line = second.line.expect("activity line should render");
 
-        assert_eq!(first.plain_line, "  • Working (0s)");
+        assert_eq!(first.plain_line, "  • Working (0s • esc 2x to interrupt)");
         assert_eq!(second.plain_line, first.plain_line);
         assert!(
             first_line.spans.len() > 8,
@@ -329,13 +352,16 @@ mod tests {
         model.show_acp_activity_with_header("Working");
 
         let initial = model.build_document_layout();
-        assert!(initial.tail.text_lines[0].contains("Working (0s)"));
+        assert!(
+            initial.tail.text_lines[0].contains("Working (0s"),
+            "activity should include the current elapsed segment"
+        );
 
         model.acp_activity.as_mut().unwrap().started_at -= std::time::Duration::from_secs(2);
         let updated = model.build_document_layout();
 
         assert!(
-            updated.tail.text_lines[0].contains("Working (2s)"),
+            updated.tail.text_lines[0].contains("Working (2s"),
             "outer document layout cache must not hide updated activity text"
         );
     }

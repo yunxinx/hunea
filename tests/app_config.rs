@@ -141,6 +141,28 @@ fn load_defaults_ctrl_c_clears_input_to_true() {
 }
 
 #[test]
+fn load_defaults_esc_interrupt_presses_to_two() {
+    let working_dir = temp_test_dir("load-default-esc-interrupt-working");
+    let user_config_dir = temp_test_dir("load-default-esc-interrupt-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep esc interrupt presses at two");
+
+    assert_eq!(config.tui.esc_interrupt_presses, 2);
+}
+
+#[test]
+fn load_defaults_show_esc_interrupt_hint_to_true() {
+    let working_dir = temp_test_dir("load-default-show-esc-hint-working");
+    let user_config_dir = temp_test_dir("load-default-show-esc-hint-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep esc interrupt hint enabled");
+
+    assert!(config.tui.show_esc_interrupt_hint);
+}
+
+#[test]
 fn load_defaults_print_transcript_on_exit_to_false() {
     let working_dir = temp_test_dir("load-default-print-transcript-working");
     let user_config_dir = temp_test_dir("load-default-print-transcript-config");
@@ -191,6 +213,48 @@ fn load_accepts_disabling_ctrl_c_clears_input() {
         .expect("ctrl_c_clears_input should accept false");
 
     assert!(!config.tui.ctrl_c_clears_input);
+}
+
+#[test]
+fn load_accepts_configured_esc_interrupt_presses() {
+    let working_dir = temp_test_dir("load-esc-interrupt-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nesc_interrupt_presses = 3\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("esc_interrupt_presses should accept 3");
+
+    assert_eq!(config.tui.esc_interrupt_presses, 3);
+}
+
+#[test]
+fn load_accepts_disabling_show_esc_interrupt_hint() {
+    let working_dir = temp_test_dir("load-disable-show-esc-hint-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nshow_esc_interrupt_hint = false\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("show_esc_interrupt_hint should accept false");
+
+    assert!(!config.tui.show_esc_interrupt_hint);
+}
+
+#[test]
+fn load_rejects_invalid_esc_interrupt_presses() {
+    let working_dir = temp_test_dir("load-invalid-esc-interrupt-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nesc_interrupt_presses = 4\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("esc_interrupt_presses should only accept 1, 2, or 3");
+
+    assert!(error.to_string().contains("tui.esc_interrupt_presses"));
 }
 
 #[test]

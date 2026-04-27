@@ -34,6 +34,8 @@ pub struct TuiConfig {
     pub copy_on_mouse_selection_release: bool,
     pub swap_enter_and_send: bool,
     pub ctrl_c_clears_input: bool,
+    pub esc_interrupt_presses: u8,
+    pub show_esc_interrupt_hint: bool,
     pub print_transcript_on_exit: bool,
 }
 
@@ -139,6 +141,10 @@ pub enum AppConfigError {
         path: Option<PathBuf>,
         value: String,
     },
+    InvalidEscInterruptPresses {
+        path: Option<PathBuf>,
+        value: u8,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -158,6 +164,8 @@ struct FileTuiConfig {
     copy_on_mouse_selection_release: Option<bool>,
     swap_enter_and_send: Option<bool>,
     ctrl_c_clears_input: Option<bool>,
+    esc_interrupt_presses: Option<u8>,
+    show_esc_interrupt_hint: Option<bool>,
     print_transcript_on_exit: Option<bool>,
 }
 
@@ -198,6 +206,8 @@ impl Config {
                 copy_on_mouse_selection_release: false,
                 swap_enter_and_send: false,
                 ctrl_c_clears_input: true,
+                esc_interrupt_presses: 2,
+                show_esc_interrupt_hint: true,
                 print_transcript_on_exit: false,
             },
             runtime: RuntimeConfig {
@@ -391,6 +401,19 @@ impl fmt::Display for AppConfigError {
                     value
                 )
             }
+            Self::InvalidEscInterruptPresses {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: tui.esc_interrupt_presses must be 1, 2, or 3, got {}",
+                path.display(),
+                value
+            ),
+            Self::InvalidEscInterruptPresses { path: None, value } => write!(
+                f,
+                "tui.esc_interrupt_presses must be 1, 2, or 3, got {value}"
+            ),
         }
     }
 }
@@ -408,7 +431,8 @@ impl std::error::Error for AppConfigError {
             | Self::ExternalEditorMustWait { .. }
             | Self::InvalidAgentServerType { .. }
             | Self::InvalidRuntimeInstallRoot { .. }
-            | Self::InvalidRuntimeDistribution { .. } => None,
+            | Self::InvalidRuntimeDistribution { .. }
+            | Self::InvalidEscInterruptPresses { .. } => None,
         }
     }
 }
@@ -575,6 +599,20 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
 
     if let Some(ctrl_c_clears_input) = file_config.tui.ctrl_c_clears_input {
         config.tui.ctrl_c_clears_input = ctrl_c_clears_input;
+    }
+
+    if let Some(esc_interrupt_presses) = file_config.tui.esc_interrupt_presses {
+        if !(1..=3).contains(&esc_interrupt_presses) {
+            return Err(AppConfigError::InvalidEscInterruptPresses {
+                path: Some(path.to_path_buf()),
+                value: esc_interrupt_presses,
+            });
+        }
+        config.tui.esc_interrupt_presses = esc_interrupt_presses;
+    }
+
+    if let Some(show_esc_interrupt_hint) = file_config.tui.show_esc_interrupt_hint {
+        config.tui.show_esc_interrupt_hint = show_esc_interrupt_hint;
     }
 
     if let Some(print_transcript_on_exit) = file_config.tui.print_transcript_on_exit {

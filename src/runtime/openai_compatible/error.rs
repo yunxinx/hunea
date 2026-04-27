@@ -13,6 +13,7 @@ pub enum OpenAiCompatibleError {
     },
     ReadStream(io::Error),
     InvalidStreamEvent,
+    Cancelled,
 }
 
 impl fmt::Display for OpenAiCompatibleError {
@@ -23,6 +24,7 @@ impl fmt::Display for OpenAiCompatibleError {
             Self::Http { endpoint, status } => write!(f, "HTTP {status} from {endpoint}"),
             Self::ReadStream(_) => write!(f, "read chat completion stream"),
             Self::InvalidStreamEvent => write!(f, "invalid chat completion stream event"),
+            Self::Cancelled => write!(f, "chat completion cancelled"),
         }
     }
 }
@@ -32,7 +34,10 @@ impl std::error::Error for OpenAiCompatibleError {
         match self {
             Self::BuildClient(source) => Some(source),
             Self::ReadStream(source) => Some(source),
-            Self::Request { .. } | Self::Http { .. } | Self::InvalidStreamEvent => None,
+            Self::Request { .. }
+            | Self::Http { .. }
+            | Self::InvalidStreamEvent
+            | Self::Cancelled => None,
         }
     }
 }

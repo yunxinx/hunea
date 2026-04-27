@@ -259,11 +259,13 @@ async fn acp_worker_transport_creates_session_and_reads_prompt_response() {
     });
 
     let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel();
     let worker = tokio::task::spawn(super::run_agent_transport_worker(
         "fake".to_string(),
         client_transport,
         command_rx,
+        cancel_rx,
         event_tx,
         Arc::new(AtomicBool::new(false)),
         super::AcpPermissionRegistry::default(),
@@ -311,6 +313,124 @@ async fn acp_worker_transport_creates_session_and_reads_prompt_response() {
         stopped,
         super::AcpSessionEvent::Stopped { message: None, .. }
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_worker_cancel_prompt_sends_session_cancel_notification() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+
+    use acp::schema::{
+        CancelNotification, Implementation, InitializeRequest, InitializeResponse,
+        NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, StopReason,
+    };
+    use agent_client_protocol as acp;
+
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    let cancel_seen = Arc::new(AtomicBool::new(false));
+    let agent_cancel_seen = Arc::clone(&cancel_seen);
+    tokio::task::spawn(async move {
+        acp::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _connection| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_info(Implementation::new("fake-agent", "0.1.0")),
+                    )
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _connection| {
+                    responder.respond(NewSessionResponse::new("test-session"))
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_notification(
+                {
+                    let cancel_seen = Arc::clone(&agent_cancel_seen);
+                    async move |_notification: CancelNotification, _connection| {
+                        cancel_seen.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+                acp::on_receive_notification!(),
+            )
+            .on_receive_request(
+                async move |_request: PromptRequest, responder, _connection| {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    responder.respond(PromptResponse::new(StopReason::Cancelled))
+                },
+                acp::on_receive_request!(),
+            )
+            .connect_to(agent_transport)
+            .await
+    });
+
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let worker = tokio::task::spawn(super::run_agent_transport_worker(
+        "fake".to_string(),
+        client_transport,
+        command_rx,
+        cancel_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+        super::AcpPermissionRegistry::default(),
+    ));
+
+    let started = recv_worker_event(&event_rx, "worker should report session start").await;
+    assert!(matches!(
+        started,
+        super::AcpSessionEvent::Started { ref session_id, .. } if session_id == "test-session"
+    ));
+
+    command_tx
+        .send(super::AcpWorkerCommand::Prompt("ping".to_string()))
+        .expect("prompt command should send");
+
+    let prompt_started = recv_worker_event(&event_rx, "worker should report prompt start").await;
+    assert!(matches!(
+        prompt_started,
+        super::AcpSessionEvent::PromptStarted { .. }
+    ));
+
+    cancel_tx.send(()).expect("cancel command should send");
+
+    let interrupted = recv_worker_event(&event_rx, "worker should report interruption").await;
+    assert!(matches!(
+        interrupted,
+        super::AcpSessionEvent::PromptInterrupted { .. }
+    ));
+    wait_until(
+        || cancel_seen.load(Ordering::SeqCst),
+        "agent should receive session/cancel",
+    )
+    .await;
+
+    command_tx
+        .send(super::AcpWorkerCommand::Shutdown)
+        .expect("shutdown command should send");
+    worker
+        .await
+        .expect("worker task should join")
+        .expect("worker should stop cleanly");
+}
+
+async fn wait_until(condition: impl Fn() -> bool, context: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        if condition() {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{context}");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 async fn recv_worker_event(
@@ -410,12 +530,14 @@ async fn acp_worker_round_trips_permission_selection() {
     });
 
     let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel();
     let permissions = super::AcpPermissionRegistry::default();
     let worker = tokio::task::spawn(super::run_agent_transport_worker(
         "fake".to_string(),
         client_transport,
         command_rx,
+        cancel_rx,
         event_tx,
         Arc::new(AtomicBool::new(false)),
         permissions.clone(),

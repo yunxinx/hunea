@@ -68,6 +68,9 @@ pub enum AcpSessionEvent {
         agent_id: String,
         message: String,
     },
+    PromptInterrupted {
+        agent_id: String,
+    },
     PermissionRequested {
         agent_id: String,
         request: AcpPermissionRequest,
@@ -87,11 +90,17 @@ enum AcpWorkerCommand {
     Shutdown,
 }
 
+enum AcpPromptReadOutcome {
+    Completed(String),
+    Interrupted,
+}
+
 /// `AcpSessionWorker` 在独立线程中持有 ACP agent 进程与会话。
 #[derive(Debug)]
 pub struct AcpSessionWorker {
     agent_id: String,
     commands: tokio::sync::mpsc::UnboundedSender<AcpWorkerCommand>,
+    cancels: tokio::sync::mpsc::UnboundedSender<()>,
     events: mpsc::Receiver<AcpSessionEvent>,
     thread_handle: Option<thread::JoinHandle<()>>,
     permissions: AcpPermissionRegistry,
@@ -102,6 +111,7 @@ impl AcpSessionWorker {
     pub fn start(command: AcpSessionCommand) -> Self {
         let agent_id = command.agent_id.clone();
         let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::channel();
         let permissions = AcpPermissionRegistry::default();
         let thread_agent_id = agent_id.clone();
@@ -111,6 +121,7 @@ impl AcpSessionWorker {
                 thread_agent_id,
                 command,
                 command_rx,
+                cancel_rx,
                 event_tx,
                 thread_permissions,
             );
@@ -119,6 +130,7 @@ impl AcpSessionWorker {
         Self {
             agent_id,
             commands: command_tx,
+            cancels: cancel_tx,
             events: event_rx,
             thread_handle: Some(thread_handle),
             permissions,
@@ -134,6 +146,13 @@ impl AcpSessionWorker {
     pub fn send_prompt(&self, prompt: String) -> Result<(), AcpWorkerSendError> {
         self.commands
             .send(AcpWorkerCommand::Prompt(prompt))
+            .map_err(|_| AcpWorkerSendError::Closed)
+    }
+
+    /// `cancel_prompt` 请求 ACP agent 取消当前正在运行的一轮 prompt。
+    pub fn cancel_prompt(&self) -> Result<(), AcpWorkerSendError> {
+        self.cancels
+            .send(())
             .map_err(|_| AcpWorkerSendError::Closed)
     }
 
@@ -153,6 +172,7 @@ impl AcpSessionWorker {
 
     /// `shutdown` 请求 worker 停止当前 ACP session。
     pub fn shutdown(&mut self) {
+        let _ = self.cancels.send(());
         let _ = self.commands.send(AcpWorkerCommand::Shutdown);
         let _ = self.thread_handle.take();
     }
@@ -312,6 +332,7 @@ fn run_worker_thread(
     agent_id: String,
     command: AcpSessionCommand,
     command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
+    cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
     permissions: AcpPermissionRegistry,
 ) {
@@ -334,6 +355,7 @@ fn run_worker_thread(
     let result = runtime.block_on(run_agent_command_worker(
         command,
         command_rx,
+        cancel_rx,
         event_tx.clone(),
         Arc::clone(&started),
         permissions,
@@ -355,6 +377,7 @@ fn run_worker_thread(
 async fn run_agent_command_worker(
     command: AcpSessionCommand,
     command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
+    cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
     started: Arc<AtomicBool>,
     permissions: AcpPermissionRegistry,
@@ -385,6 +408,7 @@ async fn run_agent_command_worker(
         command.agent_id.clone(),
         transport,
         command_rx,
+        cancel_rx,
         event_tx,
         started,
         permissions,
@@ -399,6 +423,7 @@ async fn run_agent_transport_worker<T>(
     agent_id: String,
     transport: T,
     command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
+    cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
     started: Arc<AtomicBool>,
     permissions: AcpPermissionRegistry,
@@ -439,6 +464,7 @@ where
                 agent_id.clone(),
                 &mut session,
                 command_rx,
+                cancel_rx,
                 event_tx.clone(),
                 permissions,
             )
@@ -491,6 +517,7 @@ async fn run_agent_prompt_loop(
     agent_id: String,
     session: &mut agent_client_protocol::ActiveSession<'static, agent_client_protocol::Agent>,
     mut command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
+    mut cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
     permissions: AcpPermissionRegistry,
 ) {
@@ -508,12 +535,25 @@ async fn run_agent_prompt_loop(
                     continue;
                 }
 
-                match read_prompt_response(session, &agent_id, &event_tx, &permissions).await {
-                    Ok(stop_reason) => {
+                match read_prompt_response(
+                    session,
+                    &agent_id,
+                    &event_tx,
+                    &permissions,
+                    &mut cancel_rx,
+                )
+                .await
+                {
+                    Ok(AcpPromptReadOutcome::Completed(stop_reason)) => {
                         let _ = event_tx.send(AcpSessionEvent::PromptResponse {
                             agent_id: agent_id.clone(),
                             content: String::new(),
                             stop_reason,
+                        });
+                    }
+                    Ok(AcpPromptReadOutcome::Interrupted) => {
+                        let _ = event_tx.send(AcpSessionEvent::PromptInterrupted {
+                            agent_id: agent_id.clone(),
                         });
                     }
                     Err(error) => {
@@ -534,7 +574,8 @@ async fn read_prompt_response(
     agent_id: &str,
     event_tx: &mpsc::Sender<AcpSessionEvent>,
     permissions: &AcpPermissionRegistry,
-) -> Result<String, String> {
+    cancel_rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+) -> Result<AcpPromptReadOutcome, String> {
     use acp::schema::{
         ContentBlock, ContentChunk, RequestPermissionOutcome, RequestPermissionRequest,
         RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
@@ -542,11 +583,21 @@ async fn read_prompt_response(
     use agent_client_protocol as acp;
     use agent_client_protocol::{SessionMessage, util::MatchDispatch};
 
+    let mut is_interrupted = false;
+    let mut is_cancel_rx_closed = false;
     loop {
-        let update = session
-            .read_update()
-            .await
-            .map_err(|error| error.to_string())?;
+        let update = tokio::select! {
+            cancel = cancel_rx.recv(), if !is_cancel_rx_closed => {
+                if cancel.is_some() {
+                    send_acp_cancel_notification(session)?;
+                    is_interrupted = true;
+                } else {
+                    is_cancel_rx_closed = true;
+                }
+                continue;
+            }
+            update = session.read_update() => update.map_err(|error| error.to_string())?,
+        };
         match update {
             SessionMessage::SessionMessage(dispatch) => {
                 let permission_agent_id = agent_id.to_string();
@@ -589,11 +640,25 @@ async fn read_prompt_response(
                     .map_err(|error| error.to_string())?;
             }
             SessionMessage::StopReason(stop_reason) => {
-                return Ok(format!("{stop_reason:?}"));
+                if is_interrupted {
+                    return Ok(AcpPromptReadOutcome::Interrupted);
+                }
+                return Ok(AcpPromptReadOutcome::Completed(format!("{stop_reason:?}")));
             }
             _ => {}
         }
     }
+}
+
+fn send_acp_cancel_notification(
+    session: &agent_client_protocol::ActiveSession<'static, agent_client_protocol::Agent>,
+) -> Result<(), String> {
+    use agent_client_protocol::{Agent, schema::CancelNotification};
+
+    session
+        .connection()
+        .send_notification_to(Agent, CancelNotification::new(session.session_id().clone()))
+        .map_err(|error| error.to_string())
 }
 
 /// `initialize_agent_command` 启动本地 ACP agent，并通过 stdio 执行 initialize 握手。

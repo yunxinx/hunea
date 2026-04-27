@@ -7,7 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::runtime::openai_compatible::{NativeChatRequest, send_chat_completion};
+use crate::runtime::openai_compatible::{
+    CancellationToken, NativeChatRequest, OpenAiCompatibleError,
+    send_chat_completion_with_cancellation,
+};
 use crate::runtime::session::{
     AcpInitializeOutcome, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
 };
@@ -398,6 +401,10 @@ fn apply_effect_if_needed(
             run_send_native_chat_effect(model, native_chat_runtime, request);
             Ok(())
         }
+        AppEffect::InterruptCurrentTurn => {
+            run_interrupt_current_turn_effect(model, acp_runtime, native_chat_runtime);
+            Ok(())
+        }
     }
 }
 
@@ -424,6 +431,7 @@ fn reset_runtime_session_after_clear(
 #[derive(Default)]
 struct NativeChatRuntimeState {
     receiver: Option<Receiver<NativeChatEvent>>,
+    cancellation: Option<CancellationToken>,
 }
 
 const NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS: usize = 3;
@@ -432,32 +440,25 @@ const NATIVE_CHAT_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(500);
 impl NativeChatRuntimeState {
     fn start(&mut self, request: NativeChatRequest) {
         let (sender, receiver) = mpsc::channel();
+        let cancellation = CancellationToken::default();
+        let thread_cancellation = cancellation.clone();
         thread::spawn(move || {
-            for attempt in 0..=NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS {
-                match send_chat_completion(&request) {
-                    Ok(content) => {
-                        let _ = sender.send(NativeChatEvent::Finished { content });
-                        return;
-                    }
-                    Err(_error) if attempt < NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS => {
-                        let retry = attempt + 1;
-                        let _ = sender.send(NativeChatEvent::Retrying {
-                            message: format!(
-                                "Reconnecting... {retry}/{NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS}"
-                            ),
-                        });
-                        thread::sleep(reconnect_delay(retry));
-                    }
-                    Err(error) => {
-                        let _ = sender.send(NativeChatEvent::Failed {
-                            message: error.to_string(),
-                        });
-                        return;
-                    }
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            match runtime {
+                Ok(runtime) => {
+                    runtime.block_on(run_native_chat_worker(request, thread_cancellation, sender));
+                }
+                Err(error) => {
+                    let _ = sender.send(NativeChatEvent::Failed {
+                        message: format!("start chat runtime: {error}"),
+                    });
                 }
             }
         });
         self.receiver = Some(receiver);
+        self.cancellation = Some(cancellation);
     }
 
     fn is_running(&self) -> bool {
@@ -465,7 +466,21 @@ impl NativeChatRuntimeState {
     }
 
     fn reset_after_clear(&mut self) {
+        if let Some(cancellation) = self.cancellation.take() {
+            cancellation.cancel();
+        }
         self.receiver = None;
+    }
+
+    fn interrupt(&mut self) -> bool {
+        if !self.is_running() {
+            return false;
+        }
+        if let Some(cancellation) = self.cancellation.take() {
+            cancellation.cancel();
+        }
+        self.receiver = None;
+        true
     }
 
     fn try_recv_event(&mut self) -> Option<NativeChatEvent> {
@@ -474,12 +489,14 @@ impl NativeChatRuntimeState {
             Ok(event) => {
                 if event.is_terminal() {
                     self.receiver = None;
+                    self.cancellation = None;
                 }
                 Some(event)
             }
             Err(mpsc::TryRecvError::Empty) => None,
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.receiver = None;
+                self.cancellation = None;
                 Some(NativeChatEvent::Failed {
                     message: "chat request stopped before completion".to_string(),
                 })
@@ -493,16 +510,60 @@ enum NativeChatEvent {
     Retrying { message: String },
     Finished { content: String },
     Failed { message: String },
+    Interrupted,
 }
 
 impl NativeChatEvent {
     fn is_terminal(&self) -> bool {
-        matches!(self, Self::Finished { .. } | Self::Failed { .. })
+        matches!(
+            self,
+            Self::Finished { .. } | Self::Failed { .. } | Self::Interrupted
+        )
     }
 }
 
 fn reconnect_delay(retry: usize) -> Duration {
     NATIVE_CHAT_RECONNECT_BASE_DELAY.saturating_mul(retry as u32)
+}
+
+async fn run_native_chat_worker(
+    request: NativeChatRequest,
+    cancellation: CancellationToken,
+    sender: mpsc::Sender<NativeChatEvent>,
+) {
+    for attempt in 0..=NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS {
+        match send_chat_completion_with_cancellation(&request, &cancellation).await {
+            Ok(content) => {
+                let _ = sender.send(NativeChatEvent::Finished { content });
+                return;
+            }
+            Err(OpenAiCompatibleError::Cancelled) => {
+                let _ = sender.send(NativeChatEvent::Interrupted);
+                return;
+            }
+            Err(_error) if attempt < NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS => {
+                let retry = attempt + 1;
+                let _ = sender.send(NativeChatEvent::Retrying {
+                    message: format!(
+                        "Reconnecting... {retry}/{NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS}"
+                    ),
+                });
+                tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        let _ = sender.send(NativeChatEvent::Interrupted);
+                        return;
+                    }
+                    _ = tokio::time::sleep(reconnect_delay(retry)) => {}
+                }
+            }
+            Err(error) => {
+                let _ = sender.send(NativeChatEvent::Failed {
+                    message: error.to_string(),
+                });
+                return;
+            }
+        }
+    }
 }
 
 fn drain_native_chat_runtime_events(
@@ -527,6 +588,10 @@ fn apply_native_chat_event(model: &mut Model, event: NativeChatEvent) {
             model.clear_acp_activity();
             model.append_system_message_from_runtime(format!("Chat failed: {message}"));
         }
+        NativeChatEvent::Interrupted => {
+            model.clear_acp_activity();
+            model.append_system_message_from_runtime("Chat interrupted");
+        }
     }
 }
 
@@ -543,6 +608,43 @@ fn run_send_native_chat_effect(
     let activity_label = request.model_id.clone();
     native_chat_runtime.start(request);
     model.show_acp_activity(activity_label);
+}
+
+fn run_interrupt_native_chat_effect(
+    model: &mut Model,
+    native_chat_runtime: &mut NativeChatRuntimeState,
+) -> bool {
+    if native_chat_runtime.interrupt() {
+        model.clear_acp_activity();
+        model.append_system_message_from_runtime("Chat interrupted");
+        return true;
+    }
+    false
+}
+
+fn run_interrupt_current_turn_effect(
+    model: &mut Model,
+    acp_runtime: &mut AcpRuntimeState,
+    native_chat_runtime: &mut NativeChatRuntimeState,
+) {
+    if run_interrupt_native_chat_effect(model, native_chat_runtime) {
+        return;
+    }
+
+    run_interrupt_acp_prompt_effect(model, acp_runtime);
+}
+
+fn run_interrupt_acp_prompt_effect(model: &mut Model, acp_runtime: &mut AcpRuntimeState) {
+    if !acp_runtime.interrupt_prompt() {
+        return;
+    }
+
+    if let Some(pending) = model.pending_acp_permission.take() {
+        let _ = acp_runtime.respond_permission(&pending.request_id, pending.reject_option_id);
+        model.clear_status_notice();
+    }
+    model.clear_acp_activity();
+    model.append_system_message_from_runtime("Chat interrupted");
 }
 
 #[derive(Default)]
@@ -593,6 +695,18 @@ impl AcpRuntimeState {
 
     fn should_discard_prompt_output(&self) -> bool {
         self.discard_in_flight_prompt
+    }
+
+    fn interrupt_prompt(&mut self) -> bool {
+        if !self.prompt_in_flight {
+            return false;
+        }
+        self.response_buffer.clear();
+        self.discard_in_flight_prompt = true;
+        if let Some(worker) = self.worker.as_ref() {
+            let _ = worker.cancel_prompt();
+        }
+        true
     }
 
     fn reset_after_clear(&mut self) {
@@ -704,6 +818,10 @@ fn apply_acp_session_event(
             acp_runtime.mark_prompt_finished();
             model.clear_acp_activity();
             model.show_transient_status_notice(&format!("ACP prompt failed: {message}"));
+        }
+        AcpSessionEvent::PromptInterrupted { .. } => {
+            acp_runtime.mark_prompt_finished();
+            model.clear_acp_activity();
         }
         AcpSessionEvent::PermissionRequested { request, .. } => {
             if acp_runtime.should_discard_prompt_output() {
@@ -1253,6 +1371,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let mut runtime = NativeChatRuntimeState {
             receiver: Some(receiver),
+            cancellation: Some(CancellationToken::default()),
         };
 
         sender
@@ -1285,6 +1404,82 @@ mod tests {
     }
 
     #[test]
+    fn interrupt_native_chat_clears_runtime_and_appends_system_message() {
+        let (_sender, receiver) = mpsc::channel();
+        let mut runtime = NativeChatRuntimeState {
+            receiver: Some(receiver),
+            cancellation: Some(CancellationToken::default()),
+        };
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.show_acp_activity("qwen3");
+
+        apply_effect_if_needed_for_test(
+            &mut model,
+            &mut runtime,
+            Some(AppEffect::InterruptCurrentTurn),
+        );
+
+        assert!(!runtime.is_running());
+        assert!(!model.current_acp_activity_render_result().has_content);
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec!["■ Chat interrupted".to_string()]
+        );
+    }
+
+    #[test]
+    fn interrupt_acp_prompt_discards_stale_output_and_keeps_session_selected() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+        let mut acp_runtime = AcpRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptStarted {
+                agent_id: "Kimi Code CLI".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentMessageChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: "partial before interrupt".to_string(),
+            },
+        );
+
+        run_interrupt_acp_prompt_effect(&mut model, &mut acp_runtime);
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentMessageChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: " stale response".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptResponse {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: " tail".to_string(),
+                stop_reason: "EndTurn".to_string(),
+            },
+        );
+
+        assert_eq!(model.selected_acp_agent(), Some("Kimi Code CLI"));
+        assert!(!model.current_acp_activity_render_result().has_content);
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec!["■ Chat interrupted".to_string()]
+        );
+    }
+
+    #[test]
     fn ready_input_batch_coalesces_wheel_burst_before_key() {
         let events = (0..128)
             .map(|_| {
@@ -1313,5 +1508,19 @@ mod tests {
             actions[1],
             TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Char('x'))))
         );
+    }
+
+    fn apply_effect_if_needed_for_test(
+        model: &mut Model,
+        native_chat_runtime: &mut NativeChatRuntimeState,
+        effect: Option<AppEffect>,
+    ) {
+        if let Some(AppEffect::InterruptCurrentTurn) = effect {
+            run_interrupt_current_turn_effect(
+                model,
+                &mut AcpRuntimeState::default(),
+                native_chat_runtime,
+            );
+        }
     }
 }

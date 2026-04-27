@@ -35,6 +35,7 @@ pub enum AppEffect {
     SendNativeChat {
         request: NativeChatRequest,
     },
+    InterruptCurrentTurn,
     PersistSelectedModel {
         selection: ModelSelection,
     },
@@ -164,6 +165,7 @@ impl Model {
             }
             AppEvent::StatusNoticeTimeout { token } => {
                 self.dismiss_status_notice(token);
+                self.reset_chat_interrupt_esc_count();
                 None
             }
             AppEvent::HistoryScrollIndicatorTimeout { token } => {
@@ -234,6 +236,15 @@ impl Model {
                 self.show_exit_confirmation();
             }
             return None;
+        }
+
+        if key.code == KeyCode::Esc
+            && key.modifiers.is_empty()
+            && let Some(effect) = self.handle_chat_interrupt_key()
+        {
+            return Some(effect);
+        } else if key.code != KeyCode::Esc {
+            self.reset_chat_interrupt_esc_count();
         }
 
         if let Some(effect) = self.handle_model_panel_key(key) {
@@ -320,6 +331,39 @@ impl Model {
         None
     }
 
+    fn handle_chat_interrupt_key(&mut self) -> Option<AppEffect> {
+        if !self.chat_turn_interruptible() {
+            self.reset_chat_interrupt_esc_count();
+            return None;
+        }
+
+        self.chat_interrupt_esc_count = self.chat_interrupt_esc_count.saturating_add(1);
+        if self.chat_interrupt_esc_count >= self.esc_interrupt_presses {
+            self.reset_chat_interrupt_esc_count();
+            return Some(AppEffect::InterruptCurrentTurn);
+        }
+
+        let remaining = self
+            .esc_interrupt_presses
+            .saturating_sub(self.chat_interrupt_esc_count);
+        if remaining == 1 {
+            self.show_transient_status_notice("Press Esc again to interrupt");
+        } else {
+            self.show_transient_status_notice(&format!(
+                "Press Esc {remaining} more times to interrupt"
+            ));
+        }
+        None
+    }
+
+    fn chat_turn_interruptible(&self) -> bool {
+        self.acp_activity.is_some()
+    }
+
+    pub(crate) fn reset_chat_interrupt_esc_count(&mut self) {
+        self.chat_interrupt_esc_count = 0;
+    }
+
     fn handle_composer_insert_newline(&mut self) -> Option<AppEffect> {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
@@ -372,6 +416,10 @@ impl Model {
             && self.selected_acp_agent.is_none()
         {
             self.show_transient_status_notice("Select a model before sending");
+            return None;
+        }
+        if self.acp_activity.is_some() && self.selected_acp_agent.is_none() {
+            self.show_transient_status_notice("Chat request is already running");
             return None;
         }
 

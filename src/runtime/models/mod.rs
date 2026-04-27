@@ -1,5 +1,6 @@
 mod config;
 
+pub use crate::runtime::llm::ProviderKind;
 pub use config::{
     LoadedModelCatalog, ModelsConfigError, ProviderSyncRequest, load, load_from_paths,
     load_from_paths_with_sync, write_default_model,
@@ -60,6 +61,7 @@ impl ModelCatalog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelProvider {
     pub id: String,
+    pub kind: ProviderKind,
     pub display_name: String,
     pub base_url: Option<String>,
     pub api_key_env: Option<String>,
@@ -73,6 +75,7 @@ impl ModelProvider {
     /// `new` 创建启用状态的 provider。
     pub fn new(
         id: impl Into<String>,
+        kind: ProviderKind,
         display_name: impl Into<String>,
         base_url: Option<String>,
         source: ModelSource,
@@ -80,6 +83,7 @@ impl ModelProvider {
     ) -> Self {
         Self {
             id: id.into(),
+            kind,
             display_name: display_name.into(),
             base_url,
             api_key_env: None,
@@ -105,6 +109,7 @@ impl ModelProvider {
     /// `disabled` 创建禁用 provider，保留配置但不参与展示。
     pub fn disabled(
         id: impl Into<String>,
+        kind: ProviderKind,
         display_name: impl Into<String>,
         base_url: Option<String>,
         source: ModelSource,
@@ -112,7 +117,7 @@ impl ModelProvider {
     ) -> Self {
         Self {
             enabled: false,
-            ..Self::new(id, display_name, base_url, source, models)
+            ..Self::new(id, kind, display_name, base_url, source, models)
         }
     }
 }
@@ -177,13 +182,16 @@ impl ModelSource {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource};
+    use super::{
+        ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
+    };
 
     #[test]
     fn catalog_filters_disabled_providers() {
         let catalog = ModelCatalog::new(vec![
             ModelProvider::disabled(
                 "disabled",
+                ProviderKind::OpenAiCompatible,
                 "Disabled",
                 None,
                 ModelSource::Configured,
@@ -191,6 +199,7 @@ mod tests {
             ),
             ModelProvider::new(
                 "enabled",
+                ProviderKind::OpenAiCompatible,
                 "Enabled",
                 None,
                 ModelSource::Configured,

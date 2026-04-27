@@ -6,11 +6,15 @@ use std::{
 };
 
 use directories::ProjectDirs;
+use genai::{
+    Client as GenAiClient, ModelIden,
+    resolver::{AuthData, AuthResolver},
+};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
-use super::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource};
+use super::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind};
 
 const MODELS_FILE_NAME: &str = "models.toml";
 const MODEL_SYNC_TIMEOUT: Duration = Duration::from_secs(3);
@@ -25,12 +29,13 @@ pub struct LoadedModelCatalog {
     pub requires_model_selection: bool,
 }
 
-/// `ProviderSyncRequest` 描述一次 OpenAI-compatible `/models` 同步请求。
+/// `ProviderSyncRequest` 描述一次 provider 模型列表同步请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderSyncRequest {
     pub provider_id: String,
+    pub kind: ProviderKind,
     pub display_name: String,
-    pub base_url: String,
+    pub base_url: Option<String>,
     pub api_key_env: Option<String>,
 }
 
@@ -143,12 +148,12 @@ pub fn load() -> Result<LoadedModelCatalog, ModelsConfigError> {
     load_from_paths(working_dir.as_deref(), user_config_directory().as_deref())
 }
 
-/// `load_from_paths` 从指定目录加载模型配置，真实同步 OpenAI-compatible `/models`。
+/// `load_from_paths` 从指定目录加载模型配置，真实同步 provider 模型列表。
 pub fn load_from_paths(
     working_dir: Option<&Path>,
     user_config_dir: Option<&Path>,
 ) -> Result<LoadedModelCatalog, ModelsConfigError> {
-    load_from_paths_with_sync(working_dir, user_config_dir, sync_openai_compatible_models)
+    load_from_paths_with_sync(working_dir, user_config_dir, sync_provider_models)
 }
 
 /// `load_from_paths_with_sync` 使用注入的同步函数加载模型配置，便于测试。
@@ -284,20 +289,16 @@ fn validate_provider_kind(
     provider: &FileModelProviderConfig,
     source_path: Option<&Path>,
 ) -> Result<(), ModelsConfigError> {
-    let Some(kind) = provider.kind.as_deref() else {
-        return Ok(());
-    };
-    if kind == "openai_compatible" {
-        return Ok(());
-    }
-
-    Err(ModelsConfigError::InvalidProviderKind {
-        path: source_path
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from(MODELS_FILE_NAME)),
-        provider: provider_id.to_string(),
-        value: kind.to_string(),
-    })
+    let kind = provider.kind.as_deref().unwrap_or("openai_compatible");
+    ProviderKind::from_config_value(kind)
+        .map(|_| ())
+        .ok_or_else(|| ModelsConfigError::InvalidProviderKind {
+            path: source_path
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from(MODELS_FILE_NAME)),
+            provider: provider_id.to_string(),
+            value: kind.to_string(),
+        })
 }
 
 fn provider_from_config(
@@ -305,6 +306,11 @@ fn provider_from_config(
     provider: &FileModelProviderConfig,
     sync_models: &mut impl FnMut(&ProviderSyncRequest) -> ModelSyncResult,
 ) -> ModelProvider {
+    let kind = provider
+        .kind
+        .as_deref()
+        .and_then(ProviderKind::from_config_value)
+        .unwrap_or_default();
     let display_name = provider
         .display_name
         .clone()
@@ -321,17 +327,13 @@ fn provider_from_config(
             None,
         ),
         None if enabled => {
-            let sync_result = base_url
-                .as_ref()
-                .map(|base_url| {
-                    sync_models(&ProviderSyncRequest {
-                        provider_id: provider_id.to_string(),
-                        display_name: display_name.clone(),
-                        base_url: base_url.clone(),
-                        api_key_env: provider.api_key_env.clone(),
-                    })
-                })
-                .unwrap_or_else(|| Err("base_url is not configured".to_string()));
+            let sync_result = sync_models(&ProviderSyncRequest {
+                provider_id: provider_id.to_string(),
+                kind,
+                display_name: display_name.clone(),
+                base_url: base_url.clone(),
+                api_key_env: provider.api_key_env.clone(),
+            });
             let (synced, sync_error) = match sync_result {
                 Ok(models) => (models, None),
                 Err(error) => (Vec::new(), Some(error)),
@@ -349,7 +351,7 @@ fn provider_from_config(
     };
 
     let mut model_provider =
-        ModelProvider::new(provider_id, display_name, base_url, source, models)
+        ModelProvider::new(provider_id, kind, display_name, base_url, source, models)
             .with_api_key_env(provider.api_key_env.clone());
     model_provider.sync_error = sync_error;
     if enabled {
@@ -357,6 +359,7 @@ fn provider_from_config(
     } else {
         let mut disabled_provider = ModelProvider::disabled(
             model_provider.id,
+            model_provider.kind,
             model_provider.display_name,
             model_provider.base_url,
             model_provider.source,
@@ -386,12 +389,77 @@ fn selection_from_default(default: Option<&str>, catalog: &ModelCatalog) -> Opti
     catalog.contains_selection(&selection).then_some(selection)
 }
 
+fn sync_provider_models(request: &ProviderSyncRequest) -> ModelSyncResult {
+    if request.kind.uses_openai_compatible_endpoint() {
+        return sync_openai_compatible_models(request);
+    }
+
+    if request
+        .base_url
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err(format!(
+            "model sync for custom {} base_url is not supported; configure models = [...]",
+            request.kind
+        ));
+    }
+
+    sync_genai_models(request)
+}
+
+fn sync_genai_models(request: &ProviderSyncRequest) -> ModelSyncResult {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| format!("start model sync runtime: {source}"))?;
+
+    runtime.block_on(async {
+        tokio::time::timeout(MODEL_SYNC_TIMEOUT, async {
+            let client = genai_client_for_sync(request);
+            client
+                .all_model_names(request.kind.adapter_kind())
+                .await
+                .map_err(|source| source.to_string())
+        })
+        .await
+        .map_err(|_| "model sync timed out".to_string())?
+    })
+}
+
+fn genai_client_for_sync(request: &ProviderSyncRequest) -> GenAiClient {
+    let Some(api_key_env) = request
+        .api_key_env
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+    else {
+        return GenAiClient::default();
+    };
+
+    let auth_resolver = AuthResolver::from_resolver_fn(
+        move |_model_iden: ModelIden| -> Result<Option<AuthData>, genai::resolver::Error> {
+            Ok(Some(AuthData::from_env(api_key_env.clone())))
+        },
+    );
+    GenAiClient::builder()
+        .with_auth_resolver(auth_resolver)
+        .build()
+}
+
 fn sync_openai_compatible_models(request: &ProviderSyncRequest) -> ModelSyncResult {
+    let Some(base_url) = request
+        .base_url
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Err("base_url is not configured".to_string());
+    };
     let client = Client::builder()
         .timeout(MODEL_SYNC_TIMEOUT)
         .build()
         .map_err(|source| format!("create HTTP client: {source}"))?;
-    let endpoint = format!("{}/models", request.base_url.trim_end_matches('/'));
+    let endpoint = format!("{}/models", base_url.trim_end_matches('/'));
     let mut builder = client.get(&endpoint);
     if let Some(api_key) = request
         .api_key_env
@@ -418,4 +486,28 @@ fn sync_openai_compatible_models(request: &ProviderSyncRequest) -> ModelSyncResu
 
 fn user_config_directory() -> Option<PathBuf> {
     ProjectDirs::from("", "", "lumos").map(|dirs| dirs.config_dir().to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_provider_custom_base_url_requires_configured_model_allowlist_for_sync() {
+        let request = ProviderSyncRequest {
+            provider_id: "anthropic_proxy".to_string(),
+            kind: ProviderKind::Anthropic,
+            display_name: "Anthropic Proxy".to_string(),
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
+        };
+
+        let error = sync_provider_models(&request)
+            .expect_err("native custom endpoint model sync should be explicit");
+
+        assert_eq!(
+            error,
+            "model sync for custom anthropic base_url is not supported; configure models = [...]"
+        );
+    }
 }

@@ -4,7 +4,10 @@ use lumos::{
         AppEffect, AppEvent, HeroOptions, Model, ModelOptions,
         theme::{palette_from_background, terminal_default_palette},
     },
-    runtime::models::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
+    runtime::llm::ChatRole,
+    runtime::models::{
+        ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
+    },
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -77,7 +80,7 @@ fn enter_with_required_selected_model_sends_message() {
 }
 
 #[test]
-fn enter_with_selected_native_model_returns_openai_compatible_prompt_effect() {
+fn enter_with_selected_native_model_returns_native_chat_effect() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -97,11 +100,53 @@ fn enter_with_selected_native_model_returns_openai_compatible_prompt_effect() {
         panic!("expected native chat effect, got {effect:?}");
     };
     assert_eq!(request.provider_id, "local");
+    assert_eq!(request.provider_kind, ProviderKind::OpenAiCompatible);
     assert_eq!(request.model_id, "qwen3");
-    assert_eq!(request.base_url, "http://127.0.0.1:1234/v1");
+    assert_eq!(
+        request.base_url.as_deref(),
+        Some("http://127.0.0.1:1234/v1")
+    );
     assert_eq!(request.messages.len(), 1);
-    assert_eq!(request.messages[0].role, "user");
+    assert_eq!(request.messages[0].role, ChatRole::User);
     assert_eq!(request.messages[0].content, "hello");
+}
+
+#[test]
+fn enter_with_openai_compatible_provider_without_base_url_keeps_draft_unsent() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                None,
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            )]),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.update(AppEvent::Resized {
+        width: 80,
+        height: 24,
+    });
+    model.update(AppEvent::DetectedPalette {
+        palette: terminal_default_palette(),
+        has_dark_background: true,
+    });
+
+    for character in "hello".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert!(effect.is_none());
+    assert_eq!(model.composer_text(), "hello");
+    assert_eq!(model.transcript_plain_items().len(), 1);
+    assert!(rendered_model_text(&mut model).contains("Selected provider has no base_url"));
 }
 
 #[test]
@@ -133,13 +178,14 @@ fn clear_command_removes_previous_native_chat_context() {
         panic!("expected native chat effect, got {effect:?}");
     };
     assert_eq!(request.messages.len(), 1);
-    assert_eq!(request.messages[0].role, "user");
+    assert_eq!(request.messages[0].role, ChatRole::User);
     assert_eq!(request.messages[0].content, "fresh question");
 }
 
 fn single_model_catalog() -> ModelCatalog {
     ModelCatalog::new(vec![ModelProvider::new(
         "local",
+        ProviderKind::OpenAiCompatible,
         "Local",
         Some("http://127.0.0.1:1234/v1".to_string()),
         ModelSource::Configured,

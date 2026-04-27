@@ -1,7 +1,7 @@
 use std::fs;
 
 use lumos::runtime::models::{
-    ModelSelection, ModelSource, ProviderSyncRequest, load_from_paths_with_sync,
+    ModelSelection, ModelSource, ProviderKind, ProviderSyncRequest, load_from_paths_with_sync,
     write_default_model,
 };
 
@@ -27,8 +27,9 @@ base_url = "http://192.168.1.71:1234/v1"
             request,
             &ProviderSyncRequest {
                 provider_id: "local".to_string(),
+                kind: ProviderKind::OpenAiCompatible,
                 display_name: "LM Studio".to_string(),
-                base_url: "http://192.168.1.71:1234/v1".to_string(),
+                base_url: Some("http://192.168.1.71:1234/v1".to_string()),
                 api_key_env: None,
             }
         );
@@ -53,6 +54,62 @@ base_url = "http://192.168.1.71:1234/v1"
             .map(|model| model.id.as_str())
             .collect::<Vec<_>>(),
         vec!["qwen3", "deepseek-chat"]
+    );
+}
+
+#[test]
+fn models_config_accepts_native_genai_provider_kinds() {
+    let working_dir = temp_test_dir("native-genai-provider-kinds");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+default = "anthropic/claude-sonnet-4-5"
+
+[providers.openai]
+enabled = true
+kind = "openai"
+display_name = "OpenAI"
+api_key_env = "OPENAI_API_KEY"
+models = ["gpt-4.1"]
+
+[providers.anthropic]
+enabled = true
+kind = "anthropic"
+display_name = "Anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+models = ["claude-sonnet-4-5"]
+
+[providers.gemini]
+enabled = true
+kind = "gemini"
+display_name = "Gemini"
+api_key_env = "GEMINI_API_KEY"
+models = ["gemini-2.5-pro"]
+"#,
+    )
+    .expect("models config should be written");
+
+    let loaded = load_from_paths_with_sync(Some(&working_dir), None, |_| {
+        panic!("configured model allowlists should not sync")
+    })
+    .expect("native provider kinds should load");
+
+    assert_eq!(
+        loaded.selected_model,
+        Some(ModelSelection::new("anthropic", "claude-sonnet-4-5"))
+    );
+    let kinds = loaded
+        .catalog
+        .enabled_providers()
+        .map(|provider| (provider.id.as_str(), provider.kind))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            ("anthropic", ProviderKind::Anthropic),
+            ("gemini", ProviderKind::Gemini),
+            ("openai", ProviderKind::OpenAi),
+        ]
     );
 }
 

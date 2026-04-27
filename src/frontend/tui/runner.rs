@@ -7,9 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::runtime::openai_compatible::{
-    CancellationToken, NativeChatRequest, OpenAiCompatibleError,
-    send_chat_completion_with_cancellation_and_token_progress,
+use crate::runtime::llm::{
+    CancellationToken, LlmError, NativeChatRequest, send_chat_with_cancellation_and_token_progress,
 };
 use crate::runtime::session::{
     AcpInitializeOutcome, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
@@ -535,7 +534,7 @@ async fn run_native_chat_worker(
 ) {
     for attempt in 0..=NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS {
         let progress_sender = sender.clone();
-        match send_chat_completion_with_cancellation_and_token_progress(
+        match send_chat_with_cancellation_and_token_progress(
             &request,
             &cancellation,
             move |total_tokens| {
@@ -548,7 +547,7 @@ async fn run_native_chat_worker(
                 let _ = sender.send(NativeChatEvent::Finished { content });
                 return;
             }
-            Err(OpenAiCompatibleError::Cancelled) => {
+            Err(LlmError::Cancelled) => {
                 let _ = sender.send(NativeChatEvent::Interrupted);
                 return;
             }

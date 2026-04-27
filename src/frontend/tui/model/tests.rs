@@ -5,7 +5,7 @@ use crate::frontend::tui::{
     AppEffect, AppEvent, Sender, StyleMode, document::DocumentAnchorRegion,
 };
 use crate::runtime::models::{
-    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
+    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
 };
 use crate::runtime::phrases::StatusPhraseOrder;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -101,6 +101,7 @@ fn native_chat_request_includes_full_transcript_history() {
         ModelOptions {
             model_catalog: ModelCatalog::new(vec![ModelProvider::new(
                 "local",
+                ProviderKind::OpenAiCompatible,
                 "Local",
                 Some("http://127.0.0.1:1234/v1".to_string()),
                 ModelSource::Configured,
@@ -153,6 +154,7 @@ fn native_chat_request_excludes_runtime_system_messages() {
         ModelOptions {
             model_catalog: ModelCatalog::new(vec![ModelProvider::new(
                 "local",
+                ProviderKind::OpenAiCompatible,
                 "Local",
                 Some("http://127.0.0.1:1234/v1".to_string()),
                 ModelSource::Configured,
@@ -1111,6 +1113,7 @@ fn enter_during_native_chat_activity_does_not_append_unsent_message() {
             selected_model: Some(ModelSelection::new("local", "qwen3")),
             model_catalog: ModelCatalog::new(vec![ModelProvider::new(
                 "local",
+                ProviderKind::OpenAiCompatible,
                 "Local",
                 Some("http://127.0.0.1:1234/v1".to_string()),
                 ModelSource::Configured,

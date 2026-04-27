@@ -3,7 +3,9 @@ use lumos::{
     frontend::tui::{
         AppEffect, AppEvent, HeroOptions, Model, ModelOptions, theme::default_palette,
     },
-    runtime::models::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
+    runtime::models::{
+        ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
+    },
 };
 use ratatui::{
     Terminal,
@@ -161,6 +163,7 @@ fn model_panel_shows_sync_error_for_auto_synced_provider() {
             model_catalog: ModelCatalog::new(vec![
                 ModelProvider::new(
                     "local",
+                    ProviderKind::OpenAiCompatible,
                     "Local",
                     Some("http://127.0.0.1:1234/v1".to_string()),
                     ModelSource::Synced,
@@ -194,6 +197,7 @@ fn model_options_with_catalog() -> ModelOptions {
         model_catalog: ModelCatalog::new(vec![
             ModelProvider::new(
                 "local",
+                ProviderKind::OpenAiCompatible,
                 "Local",
                 Some("http://127.0.0.1:1234/v1".to_string()),
                 ModelSource::Configured,
@@ -212,6 +216,7 @@ fn model_options_with_catalog() -> ModelOptions {
             ),
             ModelProvider::new(
                 "deepseek",
+                ProviderKind::OpenAiCompatible,
                 "DeepSeek",
                 Some("https://api.deepseek.com/v1".to_string()),
                 ModelSource::Configured,
@@ -333,6 +338,7 @@ fn model_panel_footer_hint_is_italic() {
         ModelOptions {
             model_catalog: ModelCatalog::new(vec![ModelProvider::new(
                 "local",
+                ProviderKind::OpenAiCompatible,
                 "Local",
                 None,
                 ModelSource::Configured,

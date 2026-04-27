@@ -3,8 +3,8 @@ use std::{path::PathBuf, time::Duration};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 
 use crate::runtime::{
+    llm::{ChatMessage, NativeChatRequest},
     models::ModelSelection,
-    openai_compatible::{ChatCompletionMessage, NativeChatRequest},
 };
 
 use super::{
@@ -422,6 +422,12 @@ impl Model {
             self.show_transient_status_notice("Chat request is already running");
             return None;
         }
+        if self.selected_acp_agent.is_none()
+            && let Some(selection) = self.selected_model.clone()
+            && !self.validate_native_chat_selection(&selection)
+        {
+            return None;
+        }
 
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let style_mode = self.style_mode;
@@ -482,31 +488,45 @@ impl Model {
             self.show_transient_status_notice("Selected provider is not available");
             return None;
         };
-        let Some(base_url) = provider
-            .base_url
-            .as_ref()
-            .filter(|value| !value.trim().is_empty())
-        else {
-            self.show_transient_status_notice("Selected provider has no base_url");
-            return None;
-        };
-
         Some(NativeChatRequest::new(
             selection.provider_id.clone(),
+            provider.kind,
             selection.model_id.clone(),
-            base_url.clone(),
+            provider.base_url.clone(),
             provider.api_key_env.clone(),
-            self.chat_completion_messages_from_transcript(),
+            self.chat_messages_from_transcript(),
         ))
     }
 
-    fn chat_completion_messages_from_transcript(&self) -> Vec<ChatCompletionMessage> {
+    fn validate_native_chat_selection(&mut self, selection: &ModelSelection) -> bool {
+        let Some(provider) = self
+            .model_catalog
+            .enabled_provider_by_id(&selection.provider_id)
+        else {
+            self.show_transient_status_notice("Selected provider is not available");
+            return false;
+        };
+
+        if provider.kind.uses_openai_compatible_endpoint()
+            && provider
+                .base_url
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            self.show_transient_status_notice("Selected provider has no base_url");
+            return false;
+        }
+
+        true
+    }
+
+    fn chat_messages_from_transcript(&self) -> Vec<ChatMessage> {
         self.transcript
             .source_messages()
             .into_iter()
             .map(|(sender, content)| match sender {
-                Sender::User => ChatCompletionMessage::user(content),
-                Sender::Assistant => ChatCompletionMessage::assistant(content),
+                Sender::User => ChatMessage::user(content),
+                Sender::Assistant => ChatMessage::assistant(content),
             })
             .collect()
     }

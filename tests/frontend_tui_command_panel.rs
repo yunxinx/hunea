@@ -285,6 +285,125 @@ fn command_panel_enter_on_acp_command_opens_acp_panel() {
 }
 
 #[test]
+fn debug_tool_command_is_hidden_by_default() {
+    let mut model = ready_model(80, 16, ModelOptions::default());
+    type_text(&mut model, "/");
+
+    let rows = render_trimmed_rows(&mut model, 80, 16);
+
+    assert!(
+        rows.iter().all(|row| !row.contains("/tool-debug")),
+        "debug command should be hidden unless debug mode is enabled: {rows:?}"
+    );
+}
+
+#[test]
+fn debug_tool_command_opens_tool_approval_preview_panel() {
+    let mut model = ready_model(
+        80,
+        16,
+        ModelOptions {
+            debug_commands_enabled: true,
+            ..ModelOptions::default()
+        },
+    );
+    type_text(&mut model, "/tool-debug");
+
+    let effect = model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "");
+    let rows = render_trimmed_rows(&mut model, 80, 16);
+    assert!(
+        rows.iter().any(|row| row.contains("Tool Approval:")),
+        "expected /tool-debug preview panel, got: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("Preview")),
+        "preview marker should not be rendered inside the approval panel: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("Preview tool request")),
+        "preview panel should not render a synthetic preview request title: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("Tool   :")),
+        "tool label row should not be rendered: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("Shell command")),
+        "tool name should not be rendered as a separate row: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("Request:")),
+        "request label row should not be rendered: {rows:?}"
+    );
+    assert_ordered_rows(&rows, &["Tool Approval:", "sed -n", "Actions:"]);
+    assert_ordered_rows(
+        &rows,
+        &["Allow", "Allow in session", "Deny", "Deny  in session"],
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("Reason")),
+        "preview panel should not synthesize a reason row: {rows:?}"
+    );
+    assert_blank_row_after(&rows, "Tool Approval:");
+    assert_gap_between_rows(&rows, "sed -n", "Actions:", 1);
+    assert!(
+        rows.iter().any(|row| {
+            row.contains("Press Enter to choose · Y allow · ESC/N deny · ↑↓←→ to navigate")
+        }),
+        "approval footer should use concise key hint copy: {rows:?}"
+    );
+    let buffer = render_buffer(&mut model, 80, 16);
+    assert_text_cells_are_bold(&buffer, "sed -n '1,80p' src/main.rs");
+    assert_text_cells_use_multiple_colors(&buffer, "sed -n '1,80p' src/main.rs");
+    assert!(
+        rows.iter().all(|row| !row.contains('›')),
+        "composer prompt should be hidden while preview panel is open: {rows:?}"
+    );
+}
+
+fn assert_blank_row_after(rows: &[String], needle: &str) {
+    let index = row_index(rows, needle);
+    assert_eq!(
+        rows.get(index + 1).map(String::as_str),
+        Some(""),
+        "expected a blank row after {needle:?}, got: {rows:?}"
+    );
+}
+
+fn assert_gap_between_rows(rows: &[String], upper: &str, lower: &str, gap: usize) {
+    let upper_index = row_index(rows, upper);
+    let lower_index = row_index(rows, lower);
+    assert_eq!(
+        lower_index.saturating_sub(upper_index + 1),
+        gap,
+        "expected {gap} blank rows between {upper:?} and {lower:?}, got: {rows:?}"
+    );
+}
+
+fn assert_ordered_rows(rows: &[String], needles: &[&str]) {
+    let mut last_index = None;
+    for needle in needles {
+        let index = row_index(rows, needle);
+        if let Some(last_index) = last_index {
+            assert!(
+                index >= last_index,
+                "expected {needle:?} to appear after previous item, got: {rows:?}"
+            );
+        }
+        last_index = Some(index);
+    }
+}
+
+fn row_index(rows: &[String], needle: &str) -> usize {
+    rows.iter()
+        .position(|row| row.contains(needle))
+        .unwrap_or_else(|| panic!("expected row containing {needle:?}, got: {rows:?}"))
+}
+
+#[test]
 fn command_panel_tab_completion_can_restore_external_editor_helper_after_panel_exits() {
     let mut model = ready_model(
         12,
@@ -464,6 +583,21 @@ fn assert_text_cells_are_bold(buffer: &Buffer, text: &str) {
             "expected {text:?} to be bold at offset {offset}"
         );
     }
+}
+
+fn assert_text_cells_use_multiple_colors(buffer: &Buffer, text: &str) {
+    let (row, column) = find_cell_containing_buffer(buffer, text);
+    let mut colors = Vec::new();
+    for offset in 0..text.chars().count() {
+        let color = buffer[(column + offset as u16, row)].fg;
+        if !colors.contains(&color) {
+            colors.push(color);
+        }
+    }
+    assert!(
+        colors.len() > 1,
+        "expected {text:?} to use syntax-highlighted colors, got {colors:?}"
+    );
 }
 
 fn find_cell_containing_buffer(buffer: &Buffer, needle: &str) -> (u16, u16) {

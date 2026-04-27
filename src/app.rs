@@ -3,7 +3,7 @@ use std::io::{self, IsTerminal, Write};
 use color_eyre::eyre::{Result, WrapErr};
 
 use crate::{
-    appconfig::{self, AcpConfig, Config, TuiConfig, UserInputStyle},
+    appconfig::{self, AcpConfig, Config, DebugConfig, TuiConfig, UserInputStyle},
     envinfo,
     frontend::tui::{
         self, HeroOptions, Model, ModelOptions, RuntimeOptions, StatusLineItem, StyleMode,
@@ -150,7 +150,7 @@ fn model_options_from_config_and_models(
     loaded_models: &LoadedModelCatalog,
     loaded_phrases: &LoadedStatusPhrases,
 ) -> ModelOptions {
-    model_options_from_configs(tui_config, None, loaded_models, loaded_phrases)
+    model_options_from_configs(tui_config, None, None, loaded_models, loaded_phrases)
 }
 
 fn model_options_from_app_config_and_models(
@@ -160,6 +160,7 @@ fn model_options_from_app_config_and_models(
 ) -> ModelOptions {
     model_options_from_configs(
         &config.tui,
+        Some(&config.debug),
         Some(&config.acp),
         loaded_models,
         loaded_phrases,
@@ -178,6 +179,7 @@ fn runtime_options_from_app_config_and_models(
 
 fn model_options_from_configs(
     tui_config: &TuiConfig,
+    debug_config: Option<&DebugConfig>,
     acp_config: Option<&AcpConfig>,
     loaded_models: &LoadedModelCatalog,
     loaded_phrases: &LoadedStatusPhrases,
@@ -193,6 +195,7 @@ fn model_options_from_configs(
         ctrl_c_clears_input: tui_config.ctrl_c_clears_input,
         esc_interrupt_presses: tui_config.esc_interrupt_presses,
         show_esc_interrupt_hint: tui_config.show_esc_interrupt_hint,
+        debug_commands_enabled: debug_config.is_some_and(|config| config.enabled),
         acp_agent_servers: acp_agent_servers_from_config(acp_config),
         model_catalog: loaded_models.catalog.clone(),
         selected_model: loaded_models.selected_model.clone(),
@@ -322,6 +325,25 @@ mod tests {
     }
 
     #[test]
+    fn model_options_from_config_carries_debug_command_flag() {
+        let options = model_options_from_app_config(&Config {
+            tui: default_tui_config(),
+            debug: DebugConfig { enabled: true },
+            acp: AcpConfig {
+                enabled: false,
+                registry_url: String::new(),
+                install_root: AcpInstallRoot::Config,
+                custom_install_dir: std::path::PathBuf::new(),
+                distribution_preference: vec![AcpDistribution::Binary],
+                auto_update_check: true,
+                agent_servers: std::collections::BTreeMap::new(),
+            },
+        });
+
+        assert!(options.debug_commands_enabled);
+    }
+
+    #[test]
     fn acp_options_from_app_config_exposes_direct_acp_commands() {
         let mut agent_servers = std::collections::BTreeMap::new();
         agent_servers.insert(
@@ -338,6 +360,7 @@ mod tests {
         );
         let config = Config {
             tui: default_tui_config(),
+            debug: DebugConfig { enabled: false },
             acp: AcpConfig {
                 enabled: true,
                 registry_url: "https://example.test/registry.json".to_string(),
@@ -376,6 +399,7 @@ mod tests {
         );
         let config = Config {
             tui: default_tui_config(),
+            debug: DebugConfig { enabled: false },
             acp: AcpConfig {
                 enabled: true,
                 registry_url: "https://example.test/registry.json".to_string(),

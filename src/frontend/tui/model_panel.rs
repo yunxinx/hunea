@@ -44,6 +44,11 @@ impl Model {
 
         self.composer.replace_text_and_move_to_end(String::new());
         self.acp_panel.is_open = false;
+        if self.tool_approval_panel.is_open {
+            self.tool_approval_panel = Default::default();
+            self.pending_acp_permission = None;
+            self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
+        }
         self.model_panel.is_open = true;
         self.sync_model_panel_to_selection();
         self.sync_command_panel_navigation();

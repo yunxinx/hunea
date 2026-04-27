@@ -67,6 +67,7 @@ mod tests {
             DocumentAnchorRegion::CommandPanel,
             DocumentAnchorRegion::ModelPanel,
             DocumentAnchorRegion::AcpPanel,
+            DocumentAnchorRegion::ToolApprovalPanel,
             DocumentAnchorRegion::ComposerPadding,
             DocumentAnchorRegion::TranscriptComposerGap,
         ] {

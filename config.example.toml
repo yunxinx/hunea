@@ -76,3 +76,8 @@ show_esc_interrupt_hint = true
 # `print_transcript_on_exit` 控制退出 TUI 后，是否把当前对话内容
 # 回放打印到终端 scrollback。
 print_transcript_on_exit = false
+
+[debug]
+# `enabled` 控制是否显示仅用于本地调试 TUI 效果的斜杠命令。
+# 默认关闭；开启后会显示 `/tool-debug` 等临时调试入口。
+enabled = false

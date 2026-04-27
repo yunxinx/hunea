@@ -15,12 +15,12 @@ static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct HighlightChunk {
-    pub text: String,
-    pub style: Style,
+pub(crate) struct HighlightChunk {
+    pub(crate) text: String,
+    pub(crate) style: Style,
 }
 
-pub(super) fn highlight_code_chunks(
+pub(crate) fn highlight_code_chunks(
     code: &str,
     lang: &str,
     base_style: Style,

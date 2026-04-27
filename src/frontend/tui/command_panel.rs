@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::{
-    AppEffect, Model,
+    AppEffect, Model, debug,
     selection::SelectableLineRange,
     status_line::truncate_display_width_with_ellipsis,
     theme::{
@@ -18,19 +18,20 @@ const COMMAND_PANEL_INSET_WIDTH: usize = 2;
 const COMMAND_PANEL_DESCRIPTION_GAP: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CommandPanelAction {
+pub(super) enum CommandPanelAction {
     Clear,
     Exit,
     OpenAcpPicker,
     OpenModelPanel,
+    OpenToolApprovalDebug,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CommandPanelItem {
-    name: String,
-    aliases: Vec<String>,
-    description: String,
-    action: CommandPanelAction,
+pub(super) struct CommandPanelItem {
+    pub(super) name: String,
+    pub(super) aliases: Vec<String>,
+    pub(super) description: String,
+    pub(super) action: CommandPanelAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +52,10 @@ pub(crate) struct CommandPanelRenderResult {
 
 impl Model {
     pub(crate) fn command_panel_active(&self) -> bool {
+        if self.tool_approval_panel_active() {
+            return false;
+        }
+
         let Some(query) = raw_command_panel_query(self.composer_text()) else {
             return false;
         };
@@ -145,6 +150,10 @@ impl Model {
     }
 
     fn current_command_panel_state(&self) -> Option<CommandPanelState> {
+        if self.tool_approval_panel_active() {
+            return None;
+        }
+
         let query = raw_command_panel_query(self.composer_text())?;
         let items = self.filter_command_panel_items(&query);
         if items.is_empty() && query.chars().count() > 1 {
@@ -364,12 +373,16 @@ impl Model {
                 self.open_model_panel();
                 None
             }
+            CommandPanelAction::OpenToolApprovalDebug => {
+                self.open_tool_approval_debug_preview_panel();
+                None
+            }
         }
     }
 
     fn filter_command_panel_items(&self, query: &str) -> Vec<CommandPanelItem> {
         let is_acp_session_active = self.selected_acp_agent.is_some();
-        filter_base_command_panel_items(query, is_acp_session_active)
+        filter_base_command_panel_items(query, is_acp_session_active, self.debug_commands_enabled)
     }
 }
 
@@ -380,7 +393,9 @@ fn command_panel_query(value: &str) -> Option<String> {
     }
 
     let query = raw_command_panel_query(value)?;
-    if !filter_base_command_panel_items(&query, false).is_empty() || query.chars().count() == 1 {
+    if !filter_base_command_panel_items(&query, false, false).is_empty()
+        || query.chars().count() == 1
+    {
         return Some(query);
     }
 
@@ -417,6 +432,7 @@ fn raw_command_panel_query(value: &str) -> Option<String> {
 fn filter_base_command_panel_items(
     query: &str,
     is_acp_session_active: bool,
+    debug_commands_enabled: bool,
 ) -> Vec<CommandPanelItem> {
     let mut items = vec![CommandPanelItem {
         name: "/exit".to_string(),
@@ -440,6 +456,9 @@ fn filter_base_command_panel_items(
         description: "Select model for this session".to_string(),
         action: CommandPanelAction::OpenModelPanel,
     });
+    if debug_commands_enabled {
+        items.extend(debug::command_panel_items());
+    }
     items.push(CommandPanelItem {
         name: "/clear".to_string(),
         aliases: vec!["/new".to_string()],
@@ -459,7 +478,7 @@ fn filter_base_command_panel_items(
 
 #[cfg(test)]
 fn base_command_panel_items_for_query(query: &str) -> Vec<CommandPanelItem> {
-    filter_base_command_panel_items(query, false)
+    filter_base_command_panel_items(query, false, false)
 }
 
 fn command_panel_item_matches_query(item: &CommandPanelItem, query: &str) -> bool {

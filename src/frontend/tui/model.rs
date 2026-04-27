@@ -23,6 +23,7 @@ use super::{
     status_phrases::{StatusPhraseSelector, default_status_phrases},
     style_mode::StyleMode,
     theme::{TerminalPalette, default_palette},
+    tool_approval_panel::ToolApprovalPanelState,
     transcript::{RenderResult, Transcript, TranscriptEstimateBreakdown, index_only_render_result},
     view,
 };
@@ -43,6 +44,8 @@ pub struct Model {
     pub(super) selected_model: Option<ModelSelection>,
     pub(super) requires_model_selection: bool,
     pub(super) model_panel: ModelPanelState,
+    pub(super) tool_approval_panel: ToolApprovalPanelState,
+    pub(super) tool_approval_panel_revision: usize,
     pub(super) pending_acp_permission: Option<PendingAcpPermission>,
     pub(super) acp_activity: Option<AcpActivityState>,
     pub(super) status_phrase_selector: StatusPhraseSelector,
@@ -53,6 +56,7 @@ pub struct Model {
     pub(super) ctrl_c_clears_input: bool,
     pub(super) esc_interrupt_presses: u8,
     pub(super) show_esc_interrupt_hint: bool,
+    pub(super) debug_commands_enabled: bool,
     pub(super) chat_interrupt_esc_count: u8,
     pub(super) selection_runtime: SelectionRuntimeState,
     pub(super) pending_composer_cursor_click: PendingComposerCursorClick,
@@ -142,6 +146,7 @@ pub struct ModelOptions {
     pub ctrl_c_clears_input: bool,
     pub esc_interrupt_presses: u8,
     pub show_esc_interrupt_hint: bool,
+    pub debug_commands_enabled: bool,
     pub acp_agent_servers: Vec<String>,
     pub model_catalog: ModelCatalog,
     pub selected_model: Option<ModelSelection>,
@@ -163,6 +168,7 @@ impl Default for ModelOptions {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
+            debug_commands_enabled: false,
             acp_agent_servers: Vec::new(),
             model_catalog: ModelCatalog::default(),
             selected_model: None,
@@ -227,6 +233,8 @@ impl Model {
             selected_model,
             requires_model_selection: options.requires_model_selection,
             model_panel: ModelPanelState::default(),
+            tool_approval_panel: ToolApprovalPanelState::default(),
+            tool_approval_panel_revision: 1,
             pending_acp_permission: None,
             acp_activity: None,
             status_phrase_selector: StatusPhraseSelector::new(
@@ -240,6 +248,7 @@ impl Model {
             ctrl_c_clears_input: options.ctrl_c_clears_input,
             esc_interrupt_presses: options.esc_interrupt_presses.clamp(1, 3),
             show_esc_interrupt_hint: options.show_esc_interrupt_hint,
+            debug_commands_enabled: options.debug_commands_enabled,
             chat_interrupt_esc_count: 0,
             selection_runtime: SelectionRuntimeState::default(),
             pending_composer_cursor_click: PendingComposerCursorClick::default(),
@@ -381,6 +390,8 @@ impl Model {
         self.composer.clear();
         self.acp_panel = AcpPanelState::default();
         self.model_panel = ModelPanelState::default();
+        self.tool_approval_panel = ToolApprovalPanelState::default();
+        self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.pending_acp_permission = None;
         self.acp_activity = None;
         self.command_panel_selected = 0;
@@ -487,10 +498,12 @@ impl Model {
         let command_panel = self.current_inline_command_panel_render_result();
         let model_panel = self.current_inline_model_panel_render_result();
         let acp_panel = self.current_inline_acp_panel_render_result();
+        let tool_approval_panel = self.current_inline_tool_approval_panel_render_result();
         if status_line.has_content
             || command_panel.has_content
             || model_panel.has_content
             || acp_panel.has_content
+            || tool_approval_panel.has_content
         {
             if self.document_runtime.follow_bottom && !self.document_runtime.manual_scroll {
                 let visible_height = self.bottom_follow_composer_content_line_count(
@@ -498,6 +511,7 @@ impl Model {
                     &command_panel,
                     &model_panel,
                     &acp_panel,
+                    &tool_approval_panel,
                 );
                 viewport_height =
                     viewport_height.min(u16::try_from(visible_height).unwrap_or(u16::MAX));
@@ -624,11 +638,14 @@ impl Model {
         command_panel: &super::command_panel::CommandPanelRenderResult,
         model_panel: &super::model_panel::ModelPanelRenderResult,
         acp_panel: &super::acp::AcpPanelRenderResult,
+        tool_approval_panel: &super::tool_approval_panel::ToolApprovalPanelRenderResult,
     ) -> usize {
         let viewport_height = usize::from(self.height.max(1));
         let acp_activity = self.current_acp_activity_render_result();
-        let mut tail_rows =
-            command_panel.lines.len() + model_panel.lines.len() + acp_panel.lines.len();
+        let mut tail_rows = command_panel.lines.len()
+            + model_panel.lines.len()
+            + acp_panel.lines.len()
+            + tool_approval_panel.lines.len();
         if acp_activity.has_content {
             tail_rows += 1;
         }

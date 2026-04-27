@@ -57,12 +57,6 @@ impl Model {
         self.show_status_notice(text);
     }
 
-    pub(crate) fn show_persistent_status_notice(&mut self, text: &str) {
-        self.notice_state.exit_confirmation_deadline = None;
-        self.notice_state.status_deadline = None;
-        self.set_status_notice_text(text.to_string());
-    }
-
     pub(crate) fn current_status_notice_render_result(
         &self,
     ) -> super::status_line::StatusLineRenderResult {

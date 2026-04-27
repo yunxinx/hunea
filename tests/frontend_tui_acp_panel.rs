@@ -132,6 +132,133 @@ fn acp_panel_esc_closes_without_changing_selection() {
     );
 }
 
+#[test]
+fn acp_permission_request_replaces_composer_with_tool_approval_panel() {
+    let mut model = ready_model(72, 18, ModelOptions::default());
+
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-1".to_string(),
+        title: Some("Write file".to_string()),
+        allow_option_id: Some("allow-once".to_string()),
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: Some("reject-once".to_string()),
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    let buffer = render_buffer(&mut model, 72, 18);
+    let line_row = find_row_containing(&buffer, "━")
+        .expect("tool approval panel should render a blue separator line");
+    assert_blue_bold_row(&buffer, line_row);
+
+    let rows = trim_rows(&buffer);
+    assert!(
+        rows.iter().any(|row| row.contains("Tool Approval:")),
+        "expected tool approval header, got: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("Tool   :")),
+        "tool label row should not be rendered: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("ACP agent")),
+        "ACP tool name should not be rendered as a separate row: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("Request:")),
+        "request label row should not be rendered: {rows:?}"
+    );
+    assert_ordered_rows(&rows, &["Tool Approval:", "Write file", "Actions:"]);
+    assert_ordered_rows(
+        &rows,
+        &["Allow", "Allow in session", "Deny", "Deny  in session"],
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("Reason")),
+        "ACP permission panel should not synthesize a reason row: {rows:?}"
+    );
+    assert_blank_row_after(&rows, "Tool Approval:");
+    assert_gap_between_rows(&rows, "Write file", "Actions:", 1);
+    assert!(
+        rows.iter().all(|row| !row.contains("ACP permission:")),
+        "permission requests should not be rendered as status notices: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("Write file")),
+        "expected permission title in approval panel, got: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains('›')),
+        "composer prompt should be hidden while tool approval panel replaces the input area: {rows:?}"
+    );
+}
+
+fn assert_blank_row_after(rows: &[String], needle: &str) {
+    let index = row_index(rows, needle);
+    assert_eq!(
+        rows.get(index + 1).map(String::as_str),
+        Some(""),
+        "expected a blank row after {needle:?}, got: {rows:?}"
+    );
+}
+
+fn assert_gap_between_rows(rows: &[String], upper: &str, lower: &str, gap: usize) {
+    let upper_index = row_index(rows, upper);
+    let lower_index = row_index(rows, lower);
+    assert_eq!(
+        lower_index.saturating_sub(upper_index + 1),
+        gap,
+        "expected {gap} blank rows between {upper:?} and {lower:?}, got: {rows:?}"
+    );
+}
+
+fn assert_ordered_rows(rows: &[String], needles: &[&str]) {
+    let mut last_index = None;
+    for needle in needles {
+        let index = row_index(rows, needle);
+        if let Some(last_index) = last_index {
+            assert!(
+                index >= last_index,
+                "expected {needle:?} to appear after previous item, got: {rows:?}"
+            );
+        }
+        last_index = Some(index);
+    }
+}
+
+fn row_index(rows: &[String], needle: &str) -> usize {
+    rows.iter()
+        .position(|row| row.contains(needle))
+        .unwrap_or_else(|| panic!("expected row containing {needle:?}, got: {rows:?}"))
+}
+
+#[test]
+fn acp_permission_enter_responds_with_selected_tool_approval_option() {
+    let mut model = ready_model(72, 18, ModelOptions::default());
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-2".to_string(),
+        title: Some("Run command".to_string()),
+        allow_option_id: Some("allow-once".to_string()),
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: Some("reject-once".to_string()),
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    let effect = model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-2".to_string(),
+            option_id: Some("allow-once".to_string()),
+        })
+    );
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter().all(|row| !row.contains("Tool Approval:")),
+        "panel should close after responding: {rows:?}"
+    );
+}
+
 fn ready_model(width: u16, height: u16, options: ModelOptions) -> Model {
     let mut model = Model::new_with_options(HeroOptions::default(), options);
     model.update(AppEvent::Resized { width, height });

@@ -13,6 +13,7 @@ use crate::envinfo;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub tui: TuiConfig,
+    pub debug: DebugConfig,
     pub acp: AcpConfig,
 }
 
@@ -37,6 +38,12 @@ pub struct TuiConfig {
     pub esc_interrupt_presses: u8,
     pub show_esc_interrupt_hint: bool,
     pub print_transcript_on_exit: bool,
+}
+
+/// `DebugConfig` 表示仅用于本地调试与界面预览的配置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugConfig {
+    pub enabled: bool,
 }
 
 /// `UserInputStyle` 表示用户输入区与用户消息的展示模式。
@@ -152,6 +159,8 @@ pub enum AppConfigError {
 struct FileConfig {
     #[serde(default)]
     tui: FileTuiConfig,
+    #[serde(default)]
+    debug: FileDebugConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -167,6 +176,12 @@ struct FileTuiConfig {
     esc_interrupt_presses: Option<u8>,
     show_esc_interrupt_hint: Option<bool>,
     print_transcript_on_exit: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileDebugConfig {
+    enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -210,6 +225,7 @@ impl Config {
                 show_esc_interrupt_hint: true,
                 print_transcript_on_exit: false,
             },
+            debug: DebugConfig { enabled: false },
             acp: AcpConfig {
                 enabled: false,
                 registry_url:
@@ -613,6 +629,10 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
 
     if let Some(print_transcript_on_exit) = file_config.tui.print_transcript_on_exit {
         config.tui.print_transcript_on_exit = print_transcript_on_exit;
+    }
+
+    if let Some(enabled) = file_config.debug.enabled {
+        config.debug.enabled = enabled;
     }
 
     Ok(config)

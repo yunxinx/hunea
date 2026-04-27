@@ -57,7 +57,11 @@ impl Model {
         if !self.current_status_notice_text().is_empty() {
             return self.current_status_notice_render_result();
         }
-        if self.command_panel_active() || self.model_panel_active() || self.acp_panel_active() {
+        if self.command_panel_active()
+            || self.model_panel_active()
+            || self.acp_panel_active()
+            || self.tool_approval_panel_active()
+        {
             return StatusLineRenderResult::default();
         }
 

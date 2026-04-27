@@ -941,10 +941,13 @@ fn acp_permission_accept_key_returns_selected_option() {
         request_id: "permission-1".to_string(),
         title: Some("Write file".to_string()),
         allow_option_id: Some("allow-once".to_string()),
+        allow_always_option_id: Some("allow-always".to_string()),
         reject_option_id: Some("reject-once".to_string()),
+        reject_always_option_id: Some("reject-always".to_string()),
     });
 
-    assert!(model.current_status_notice_text().contains("Write file"));
+    assert!(model.current_status_notice_text().is_empty());
+    assert!(model.tool_approval_panel_active());
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('y'))));
 
@@ -956,6 +959,7 @@ fn acp_permission_accept_key_returns_selected_option() {
         })
     );
     assert!(model.current_status_notice_text().is_empty());
+    assert!(!model.tool_approval_panel_active());
 }
 
 #[test]
@@ -967,7 +971,9 @@ fn acp_permission_reject_key_returns_reject_option() {
         request_id: "permission-2".to_string(),
         title: None,
         allow_option_id: Some("allow-once".to_string()),
+        allow_always_option_id: Some("allow-always".to_string()),
         reject_option_id: Some("reject-once".to_string()),
+        reject_always_option_id: Some("reject-always".to_string()),
     });
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
@@ -977,6 +983,104 @@ fn acp_permission_reject_key_returns_reject_option() {
         Some(AppEffect::RespondAcpPermission {
             request_id: "permission-2".to_string(),
             option_id: Some("reject-once".to_string()),
+        })
+    );
+    assert!(!model.tool_approval_panel_active());
+}
+
+#[test]
+fn acp_permission_enter_on_session_allow_returns_allow_always_option() {
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    let mut model = Model::new(HeroOptions::default());
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-3".to_string(),
+        title: Some("Run command".to_string()),
+        allow_option_id: Some("allow-once".to_string()),
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: Some("reject-once".to_string()),
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-3".to_string(),
+            option_id: Some("allow-always".to_string()),
+        })
+    );
+    assert!(!model.tool_approval_panel_active());
+}
+
+#[test]
+fn acp_permission_enter_on_session_deny_returns_reject_always_option() {
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    let mut model = Model::new(HeroOptions::default());
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-4".to_string(),
+        title: Some("Run command".to_string()),
+        allow_option_id: Some("allow-once".to_string()),
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: Some("reject-once".to_string()),
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-4".to_string(),
+            option_id: Some("reject-always".to_string()),
+        })
+    );
+    assert!(!model.tool_approval_panel_active());
+}
+
+#[test]
+fn acp_permission_shortcuts_use_session_options_when_once_options_are_absent() {
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    let mut model = Model::new(HeroOptions::default());
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-5".to_string(),
+        title: Some("Run command".to_string()),
+        allow_option_id: None,
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: None,
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('y'))));
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-5".to_string(),
+            option_id: Some("allow-always".to_string()),
+        })
+    );
+
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-6".to_string(),
+        title: Some("Run command".to_string()),
+        allow_option_id: None,
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: None,
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-6".to_string(),
+            option_id: Some("reject-always".to_string()),
         })
     );
 }

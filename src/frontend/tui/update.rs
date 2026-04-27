@@ -93,7 +93,9 @@ pub enum AppEvent {
         request_id: String,
         title: Option<String>,
         allow_option_id: Option<String>,
+        allow_always_option_id: Option<String>,
         reject_option_id: Option<String>,
+        reject_always_option_id: Option<String>,
     },
     SelectionAutoScrollTick {
         token: usize,
@@ -188,13 +190,17 @@ impl Model {
                 request_id,
                 title,
                 allow_option_id,
+                allow_always_option_id,
                 reject_option_id,
+                reject_always_option_id,
             } => {
                 self.show_acp_permission_request(
                     request_id,
                     title,
                     allow_option_id,
+                    allow_always_option_id,
                     reject_option_id,
+                    reject_always_option_id,
                 );
                 None
             }
@@ -238,6 +244,10 @@ impl Model {
             return None;
         }
 
+        if let Some(effect) = self.handle_tool_approval_panel_key(key) {
+            return effect;
+        }
+
         if key.code == KeyCode::Esc
             && key.modifiers.is_empty()
             && let Some(effect) = self.handle_chat_interrupt_key()
@@ -259,10 +269,6 @@ impl Model {
             return self
                 .maybe_prepare_external_editor_launch()
                 .map(AppEffect::LaunchExternalEditor);
-        }
-
-        if let Some(effect) = self.handle_acp_permission_key(key) {
-            return effect;
         }
 
         if let Some(effect) = self.handle_command_panel_key(key) {

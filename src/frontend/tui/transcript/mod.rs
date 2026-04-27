@@ -2,7 +2,7 @@ mod cache;
 mod item_index;
 mod list;
 mod markdown;
-mod markdown_highlight;
+pub(crate) mod markdown_highlight;
 mod markdown_links;
 mod markdown_render;
 mod markdown_table;

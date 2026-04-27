@@ -16,6 +16,7 @@ fn load_defaults_to_cx_when_no_config_exists() {
 
     assert_eq!(config.tui.user_input_style, UserInputStyle::Cx);
     assert!(config.tui.status_line.is_empty());
+    assert!(!config.debug.enabled);
 }
 
 #[test]
@@ -241,6 +242,20 @@ fn load_accepts_disabling_show_esc_interrupt_hint() {
         .expect("show_esc_interrupt_hint should accept false");
 
     assert!(!config.tui.show_esc_interrupt_hint);
+}
+
+#[test]
+fn load_accepts_enabling_debug_commands() {
+    let working_dir = temp_test_dir("load-enable-debug-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[debug]\nenabled = true\n",
+    );
+
+    let config =
+        load_from_paths(Some(working_dir.as_path()), None).expect("debug should accept true");
+
+    assert!(config.debug.enabled);
 }
 
 #[test]

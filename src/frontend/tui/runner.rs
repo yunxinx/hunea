@@ -654,7 +654,7 @@ fn run_interrupt_acp_prompt_effect(model: &mut Model, acp_runtime: &mut AcpRunti
 
     if let Some(pending) = model.pending_acp_permission.take() {
         let _ = acp_runtime.respond_permission(&pending.request_id, pending.reject_option_id);
-        model.clear_status_notice();
+        model.close_tool_approval_panel();
     }
     model.clear_acp_activity();
     model.append_system_message_from_runtime("Chat interrupted");
@@ -872,26 +872,30 @@ fn apply_acp_session_event(
         }
         AcpSessionEvent::PermissionRequested { request, .. } => {
             if acp_runtime.should_discard_prompt_output() {
-                let (_, reject_option_id) = acp_permission_option_ids(&request);
-                let _ = acp_runtime.respond_permission(&request.request_id, reject_option_id);
+                let options = acp_permission_option_ids(&request);
+                let _ = acp_runtime
+                    .respond_permission(&request.request_id, options.reject_for_cancel());
                 return;
             }
             if let Some(total_tokens) = acp_runtime.flush_output_tokens() {
                 model.set_acp_activity_output_tokens(total_tokens);
             }
             flush_acp_response_buffer(model, acp_runtime);
-            let (allow_option_id, reject_option_id) = acp_permission_option_ids(&request);
+            let options = acp_permission_option_ids(&request);
             model.update(AppEvent::AcpPermissionRequested {
                 request_id: request.request_id,
                 title: request.title,
-                allow_option_id,
-                reject_option_id,
+                allow_option_id: options.allow_once,
+                allow_always_option_id: options.allow_always,
+                reject_option_id: options.reject,
+                reject_always_option_id: options.reject_always,
             });
         }
         AcpSessionEvent::PermissionRequestCancelled { .. } => {
             if acp_runtime.should_discard_prompt_output() {
                 return;
             }
+            model.close_tool_approval_panel();
             model.show_transient_status_notice("ACP permission request cancelled");
         }
         AcpSessionEvent::Stopped { message, .. } => {
@@ -957,44 +961,54 @@ fn run_respond_acp_permission_effect(
     }
 }
 
+struct AcpPermissionOptionIds {
+    allow_once: Option<String>,
+    allow_always: Option<String>,
+    reject: Option<String>,
+    reject_always: Option<String>,
+}
+
+impl AcpPermissionOptionIds {
+    fn reject_for_cancel(&self) -> Option<String> {
+        self.reject.clone().or_else(|| self.reject_always.clone())
+    }
+}
+
 fn acp_permission_option_ids(
     request: &crate::runtime::acp::AcpPermissionRequest,
-) -> (Option<String>, Option<String>) {
+) -> AcpPermissionOptionIds {
     use crate::runtime::acp::AcpPermissionOptionKind;
 
-    let allow = request
+    let allow_once = request
         .options
         .iter()
         .find(|option| option.kind == AcpPermissionOptionKind::AllowOnce)
-        .or_else(|| {
-            request
-                .options
-                .iter()
-                .find(|option| option.kind == AcpPermissionOptionKind::AllowAlways)
-        })
-        .or_else(|| {
-            request.options.iter().find(|option| {
-                matches!(
-                    option.kind,
-                    AcpPermissionOptionKind::AllowOnce | AcpPermissionOptionKind::AllowAlways
-                )
-            })
-        })
+        .map(|option| option.option_id.clone());
+
+    let allow_always = request
+        .options
+        .iter()
+        .find(|option| option.kind == AcpPermissionOptionKind::AllowAlways)
         .map(|option| option.option_id.clone());
 
     let reject = request
         .options
         .iter()
         .find(|option| option.kind == AcpPermissionOptionKind::RejectOnce)
-        .or_else(|| {
-            request
-                .options
-                .iter()
-                .find(|option| option.kind == AcpPermissionOptionKind::RejectAlways)
-        })
         .map(|option| option.option_id.clone());
 
-    (allow, reject)
+    let reject_always = request
+        .options
+        .iter()
+        .find(|option| option.kind == AcpPermissionOptionKind::RejectAlways)
+        .map(|option| option.option_id.clone());
+
+    AcpPermissionOptionIds {
+        allow_once,
+        allow_always,
+        reject,
+        reject_always,
+    }
 }
 
 fn acp_agent_display_name(outcome: &AcpInitializeOutcome) -> String {
@@ -1177,7 +1191,8 @@ mod tests {
             model.transcript_plain_items(),
             vec!["需要先确认".to_string()]
         );
-        assert!(model.current_status_notice_text().contains("Write file"));
+        assert!(model.current_status_notice_text().is_empty());
+        assert!(model.tool_approval_panel_active());
 
         apply_acp_session_event(
             &mut model,
@@ -1387,6 +1402,28 @@ mod tests {
                 .transcript_plain_items()
                 .iter()
                 .all(|item| !item.contains("旧请求"))
+        );
+    }
+
+    #[test]
+    fn acp_permission_cancel_reject_fallback_uses_reject_always() {
+        use crate::runtime::acp::{
+            AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
+        };
+
+        let options = acp_permission_option_ids(&AcpPermissionRequest {
+            request_id: "permission-session-only".to_string(),
+            title: Some("Run command".to_string()),
+            options: vec![AcpPermissionOption {
+                option_id: "reject-always".to_string(),
+                name: "Deny in session".to_string(),
+                kind: AcpPermissionOptionKind::RejectAlways,
+            }],
+        });
+
+        assert_eq!(
+            options.reject_for_cancel(),
+            Some("reject-always".to_string())
         );
     }
 

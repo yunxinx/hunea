@@ -485,7 +485,7 @@ fn pad_display_width_right(text: &str, width: usize) -> String {
 fn command_panel_selectable_range(plain_line: &str, width: usize) -> SelectableLineRange {
     let end_column = plain_line.trim_end().width();
     if end_column <= COMMAND_PANEL_INSET_WIDTH {
-        return SelectableLineRange::blank_anchor(0, width);
+        return SelectableLineRange::blank_hit_range(0, width);
     }
 
     SelectableLineRange::new(COMMAND_PANEL_INSET_WIDTH, end_column)

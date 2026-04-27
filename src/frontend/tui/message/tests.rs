@@ -187,8 +187,8 @@ fn user_message_selectable_ranges_skip_prompt_only_leading_blank_line() {
 
     assert_eq!(ranges.len(), 4);
     assert_eq!(ranges[0], SelectableLineRange::default());
-    assert_eq!(ranges[1], SelectableLineRange::blank_anchor(0, 20));
-    assert_eq!(ranges[2], SelectableLineRange::with_anchor(2, 5, 0, 5));
+    assert_eq!(ranges[1], SelectableLineRange::blank_hit_range(0, 20));
+    assert_eq!(ranges[2], SelectableLineRange::with_hit_range(2, 5, 0, 5));
     assert_eq!(ranges[3], SelectableLineRange::default());
 }
 
@@ -199,7 +199,7 @@ fn user_message_selectable_ranges_ignore_trailing_fill() {
     let ranges = item.render_selectable_line_ranges(10, default_palette());
 
     assert_eq!(ranges.len(), 3);
-    assert_eq!(ranges[1], SelectableLineRange::with_anchor(2, 4, 0, 4));
+    assert_eq!(ranges[1], SelectableLineRange::with_hit_range(2, 4, 0, 4));
 }
 
 #[test]

@@ -120,6 +120,33 @@ mod tests {
     }
 
     #[test]
+    fn selection_render_patches_line_and_span_styles_before_reversing() {
+        let mut line = Line::from(vec![
+            ratatui::text::Span::styled("a", Style::default().bg(Color::Red)),
+            ratatui::text::Span::raw("b"),
+        ]);
+        line.style = Style::default().fg(Color::Blue);
+
+        let rendered = apply_selection_to_line(&line, 0, 1);
+
+        assert_eq!(rendered.spans[0].style.fg, Some(Color::Blue));
+        assert_eq!(rendered.spans[0].style.bg, Some(Color::Red));
+        assert!(
+            rendered.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert_eq!(rendered.spans[1].style.fg, Some(Color::Blue));
+        assert!(
+            !rendered.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
     fn selection_render_uses_display_width_for_wide_graphemes() {
         let line = Line::raw("中a");
         let rendered = apply_selection_to_line(&line, 0, 2);

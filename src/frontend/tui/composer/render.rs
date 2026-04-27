@@ -264,17 +264,17 @@ fn selectable_ranges_for_visual_lines(
             };
             let line_width = measure_width(&line_text);
             if line_width == 0 {
-                let anchor_end = if frame_fill_width > 0 {
+                let hit_end = if frame_fill_width > 0 {
                     frame_fill_width
                 } else {
                     prompt_width.max(1)
                 };
-                return SelectableLineRange::blank_anchor(0, anchor_end);
+                return SelectableLineRange::blank_hit_range(0, hit_end);
             }
 
             let shows_prompt = !(line.is_continuation || prompt_first_line_only && index > 0);
             if shows_prompt {
-                SelectableLineRange::with_anchor(
+                SelectableLineRange::with_hit_range(
                     prompt_width,
                     prompt_width + line_width,
                     0,
@@ -567,12 +567,12 @@ mod tests {
     }
 
     #[test]
-    fn selectable_range_uses_prompt_as_anchor_not_content() {
+    fn selectable_range_uses_prompt_as_hit_range_not_content() {
         let composer = composer_with_cursor("alpha", 12, 0, 0);
         let result = render_document(&composer, default_palette());
 
         assert_eq!(result.selectable_ranges[0].content_columns(), Some((2, 7)));
-        assert_eq!(result.selectable_ranges[0].anchor_columns(), Some((0, 7)));
+        assert_eq!(result.selectable_ranges[0].hit_columns(), Some((0, 7)));
     }
 
     fn assert_render_document_invariants(

@@ -323,16 +323,16 @@ pub(super) fn render_user_message_selectable_line_ranges(
     for line in &snapshot.lines {
         let line_width = measure_width(&line.text);
         if line_width == 0 {
-            let anchor_end = if snapshot.layout.frame_width > 0 {
+            let hit_end = if snapshot.layout.frame_width > 0 {
                 snapshot.layout.frame_width
             } else {
                 snapshot.layout.line_prefix_width.max(1)
             };
-            ranges.push(SelectableLineRange::blank_anchor(0, anchor_end));
+            ranges.push(SelectableLineRange::blank_hit_range(0, hit_end));
             continue;
         }
 
-        ranges.push(SelectableLineRange::with_anchor(
+        ranges.push(SelectableLineRange::with_hit_range(
             snapshot.layout.line_prefix_width,
             snapshot.layout.line_prefix_width + line_width,
             0,

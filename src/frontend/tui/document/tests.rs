@@ -195,6 +195,12 @@ fn status_line_selectable_range_skips_leading_inset() {
             .and_then(|line| line.selectable.content_columns().map(|(start, _)| start)),
         Some(2)
     );
+    assert_eq!(
+        layout
+            .line_at(status_line)
+            .and_then(|line| line.selectable.anchor_columns().map(|(start, _)| start)),
+        Some(0)
+    );
 }
 
 #[test]

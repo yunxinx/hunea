@@ -182,8 +182,10 @@ pub(crate) fn compose_status_line_text(parts: &[String], width: usize) -> String
 }
 
 fn status_line_selectable_range(text: &str) -> SelectableLineRange {
-    SelectableLineRange::new(
+    SelectableLineRange::with_anchor(
         STATUS_LINE_INSET_WIDTH,
+        STATUS_LINE_INSET_WIDTH + text.width(),
+        0,
         STATUS_LINE_INSET_WIDTH + text.width(),
     )
 }

@@ -18,8 +18,8 @@ use crate::frontend::tui::{
     selection::SelectableLineRange,
     style_mode::StyleMode,
     theme::{
-        TerminalPalette, muted_text_style, secondary_text_style, surface_text_style,
-        tertiary_text_style,
+        TerminalPalette, muted_text_style, primary_text_style, secondary_text_style,
+        surface_text_style, tertiary_text_style,
     },
 };
 
@@ -116,7 +116,11 @@ pub(crate) fn render_document(
     let frame_width = usize::from(composer.width.max(1));
     let frame_mode = frame_decoration_mode(composer.style_mode());
     let prompt_first_line_only = matches!(composer.style_mode(), StyleMode::Cx | StyleMode::Cc);
-    let mut prompt_style = secondary_text_style(palette);
+    let mut prompt_style = if matches!(composer.style_mode(), StyleMode::Cx) {
+        primary_text_style(palette)
+    } else {
+        secondary_text_style(palette)
+    };
     let mut text_style = muted_text_style(palette);
     let mut placeholder_style = secondary_text_style(palette);
     let mut fill_style = Style::default();
@@ -270,7 +274,12 @@ fn selectable_ranges_for_visual_lines(
 
             let shows_prompt = !(line.is_continuation || prompt_first_line_only && index > 0);
             if shows_prompt {
-                SelectableLineRange::new(0, prompt_width + line_width)
+                SelectableLineRange::with_anchor(
+                    prompt_width,
+                    prompt_width + line_width,
+                    0,
+                    prompt_width + line_width,
+                )
             } else {
                 SelectableLineRange::new(prompt_width, prompt_width + line_width)
             }
@@ -542,6 +551,28 @@ mod tests {
             Some(expected),
             "rule decoration should use the tertiary style"
         );
+    }
+
+    #[test]
+    fn cx_prompt_uses_primary_text_style() {
+        let palette = default_palette();
+        let composer = composer_with_cursor("alpha", 12, 0, 0);
+        let result = render_document(&composer, palette);
+
+        assert_eq!(
+            result.lines[0].spans[0].style.fg,
+            Some(palette.main),
+            "live cx composer prompt should use the normal text color"
+        );
+    }
+
+    #[test]
+    fn selectable_range_uses_prompt_as_anchor_not_content() {
+        let composer = composer_with_cursor("alpha", 12, 0, 0);
+        let result = render_document(&composer, default_palette());
+
+        assert_eq!(result.selectable_ranges[0].content_columns(), Some((2, 7)));
+        assert_eq!(result.selectable_ranges[0].anchor_columns(), Some((0, 7)));
     }
 
     fn assert_render_document_invariants(

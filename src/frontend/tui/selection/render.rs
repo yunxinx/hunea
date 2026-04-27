@@ -17,6 +17,7 @@ pub(crate) fn apply_selection_to_line(
     let mut spans = Vec::new();
     let mut column = 0;
     for span in &line.spans {
+        let base_style = line.style.patch(span.style);
         for grapheme in span.content.as_ref().graphemes(true) {
             let width = grapheme.width();
             let cluster_start = column;
@@ -27,15 +28,17 @@ pub(crate) fn apply_selection_to_line(
 
             let selected = width > 0 && cluster_start < end_column && cluster_end > start_column;
             let style = if selected {
-                span.style.add_modifier(Modifier::REVERSED)
+                base_style.add_modifier(Modifier::REVERSED)
             } else {
-                span.style
+                base_style
             };
             push_span(&mut spans, style, grapheme);
         }
     }
 
-    Line::from(spans)
+    let mut selected_line = Line::from(spans);
+    selected_line.alignment = line.alignment;
+    selected_line
 }
 
 fn push_span(spans: &mut Vec<Span<'static>>, style: ratatui::style::Style, text: &str) {
@@ -83,6 +86,27 @@ mod tests {
         );
         assert!(
             rendered.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(
+            !rendered.spans[2]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn selection_render_preserves_line_level_style_for_unselected_clusters() {
+        let line = Line::styled("hello", Style::default().fg(Color::Blue));
+        let rendered = apply_selection_to_line(&line, 1, 2);
+
+        assert_eq!(rendered.spans[0].style.fg, Some(Color::Blue));
+        assert_eq!(rendered.spans[2].style.fg, Some(Color::Blue));
+        assert!(
+            !rendered.spans[0]
                 .style
                 .add_modifier
                 .contains(Modifier::REVERSED)

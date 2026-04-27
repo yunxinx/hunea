@@ -125,6 +125,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assistant_message_wraps_before_visual_inset_clips_content() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.set_window(20, 8);
+        model.set_palette(default_palette(), true);
+        model.append_assistant_message_from_runtime("abcdefghijklmnopqrstuvwxyz");
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        terminal.draw(|frame| model.render(frame)).unwrap();
+
+        let rows = rendered_rows(terminal.backend().buffer());
+
+        assert!(
+            rows.iter().any(|row| row == "  abcdefghijklmnop  "),
+            "first assistant visual row should fit the inset content width: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row == "  qrstuvwxyz        "),
+            "overflow should wrap to the next assistant row instead of being clipped: {rows:?}"
+        );
+    }
+
     fn rendered_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
         (0..buffer.area.height)
             .map(|row| {

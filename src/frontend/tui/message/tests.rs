@@ -86,12 +86,41 @@ fn assistant_render_keeps_inset_out_of_plain_message_lines() {
     let item = MessageItem::new(Sender::Assistant, "hello world");
 
     let lines = item
-        .render_lines(12, default_palette())
+        .render_lines(20, default_palette())
         .into_iter()
         .map(plain_line)
         .collect::<Vec<_>>();
 
     assert_eq!(lines, vec!["hello world"]);
+}
+
+#[test]
+fn assistant_render_wraps_to_visual_content_width() {
+    let item = MessageItem::new(Sender::Assistant, "abcdefghijklmnopqrstuvwxyz");
+
+    let lines = item
+        .render_lines(20, default_palette())
+        .into_iter()
+        .map(plain_line)
+        .collect::<Vec<_>>();
+
+    assert_eq!(lines, vec!["abcdefghijklmnop", "qrstuvwxyz"]);
+}
+
+#[test]
+fn assistant_markdown_table_uses_visual_content_width() {
+    let item = MessageItem::new(
+        Sender::Assistant,
+        "| Name | Status |\n| --- | --- |\n| alpha beta gamma | delta epsilon zeta |",
+    );
+
+    let lines = item.render_lines(28, default_palette());
+
+    assert!(
+        lines.iter().all(|line| line.width() <= 24),
+        "table rows should fit the inset content width: {:?}",
+        lines.into_iter().map(plain_line).collect::<Vec<_>>()
+    );
 }
 
 #[test]

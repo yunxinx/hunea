@@ -17,7 +17,7 @@ pub(super) fn render_assistant_message(
     width: u16,
     palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
-    let width = assistant_message_width(width);
+    let width = assistant_message_content_width(width);
     let rendered = render_markdown_lines(content, width, palette);
     if rendered.is_empty() {
         return wrap_assistant_text(content, width, 0)
@@ -34,7 +34,7 @@ pub(super) fn render_assistant_message_metrics(
     width: u16,
     palette: TerminalPalette,
 ) -> (usize, usize) {
-    let width = assistant_message_width(width);
+    let width = assistant_message_content_width(width);
     let metrics = render_markdown_metrics(content, width, palette);
     if metrics.0 > 0 {
         return metrics;
@@ -50,7 +50,7 @@ pub(super) fn estimate_assistant_message_metrics_fast(
     palette: TerminalPalette,
     previous_metrics: Option<TranscriptItemMetrics>,
 ) -> TranscriptFastEstimate {
-    let width = assistant_message_width(width);
+    let width = assistant_message_content_width(width);
     let uses_tab_exact_estimate = content.contains('\t');
     let (content_line_count, estimated_char_len) = if uses_tab_exact_estimate {
         let metrics = estimate_markdown_metrics_for_tabs(content, width, palette);
@@ -94,6 +94,13 @@ pub(crate) fn assistant_message_visual_inset(width: u16) -> u16 {
     }
 
     u16::try_from(ASSISTANT_MESSAGE_INSET_WIDTH).unwrap_or(u16::MAX)
+}
+
+fn assistant_message_content_width(width: u16) -> usize {
+    let full_width = assistant_message_width(width);
+    let inset = usize::from(assistant_message_visual_inset(width));
+
+    full_width.saturating_sub(inset.saturating_mul(2)).max(1)
 }
 
 fn assistant_message_width(width: u16) -> usize {

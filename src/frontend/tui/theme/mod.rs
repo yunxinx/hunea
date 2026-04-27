@@ -7,6 +7,6 @@ pub use palette::{
 };
 pub use styles::{
     accent_text_style, command_accent_text_style, muted_text_style, panel_block,
-    primary_text_style, secondary_text_style, surface_emphasis_style, surface_text_style,
-    system_error_text_style, tertiary_text_style,
+    primary_text_style, quote_text_style, secondary_text_style, surface_emphasis_style,
+    surface_text_style, system_error_text_style, tertiary_text_style,
 };

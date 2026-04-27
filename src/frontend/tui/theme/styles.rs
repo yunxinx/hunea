@@ -40,6 +40,11 @@ pub fn system_error_text_style(palette: TerminalPalette) -> Style {
     apply_foreground(Style::new(), palette.system_error)
 }
 
+/// `quote_text_style` 返回 Markdown 引用块的文字样式。
+pub fn quote_text_style(palette: TerminalPalette) -> Style {
+    apply_foreground(Style::new().italic(), palette.quote)
+}
+
 /// `surface_text_style` 返回带弱化背景的正文样式。
 pub fn surface_text_style(palette: TerminalPalette) -> Style {
     apply_surface(Style::new(), palette)
@@ -86,8 +91,8 @@ mod tests {
 
     use super::{
         accent_text_style, command_accent_text_style, muted_text_style, panel_block,
-        primary_text_style, secondary_text_style, surface_emphasis_style, surface_text_style,
-        system_error_text_style, tertiary_text_style,
+        primary_text_style, quote_text_style, secondary_text_style, surface_emphasis_style,
+        surface_text_style, system_error_text_style, tertiary_text_style,
     };
     use crate::frontend::tui::theme::{default_palette, terminal_default_palette};
 
@@ -107,6 +112,12 @@ mod tests {
         assert_eq!(
             system_error_text_style(palette).fg,
             Some(palette.system_error)
+        );
+        assert_eq!(quote_text_style(palette).fg, Some(palette.quote));
+        assert!(
+            quote_text_style(palette)
+                .add_modifier
+                .contains(ratatui::style::Modifier::ITALIC)
         );
         assert_eq!(surface_text_style(palette).fg, Some(palette.main));
         assert_eq!(surface_text_style(palette).bg, palette.surface);

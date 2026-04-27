@@ -12,7 +12,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::frontend::tui::theme::TerminalPalette;
+use crate::frontend::tui::theme::{TerminalPalette, quote_text_style};
 use crate::frontend::tui::transcript::markdown_highlight::highlight_code_chunks;
 use crate::frontend::tui::transcript::markdown_links::render_local_link_target;
 use crate::frontend::tui::transcript::markdown_table::{
@@ -657,12 +657,12 @@ impl MarkdownRenderer {
             push_chunk(
                 &mut first,
                 String::from("> "),
-                self.secondary_style().add_modifier(Modifier::BOLD),
+                self.quote_style().add_modifier(Modifier::BOLD),
             );
             push_chunk(
                 &mut continuation,
                 String::from("> "),
-                self.secondary_style().add_modifier(Modifier::BOLD),
+                self.quote_style().add_modifier(Modifier::BOLD),
             );
         }
 
@@ -976,6 +976,10 @@ impl MarkdownRenderer {
     }
 
     fn base_text_style(&self) -> Style {
+        if self.blockquote_depth > 0 {
+            return self.quote_style();
+        }
+
         if self.palette.uses_terminal_default_colors() {
             Style::new()
         } else {
@@ -989,6 +993,10 @@ impl MarkdownRenderer {
         } else {
             Style::new().fg(self.palette.secondary)
         }
+    }
+
+    fn quote_style(&self) -> Style {
+        quote_text_style(self.palette)
     }
 
     fn code_style(&self) -> Style {
@@ -1172,6 +1180,7 @@ fn consume_prose_line(cursor: &mut VecDeque<StyledSegment>, width: usize) -> Vec
                 if overflow.width > 0 {
                     cursor.push_front(overflow);
                 }
+                break;
             }
             continue;
         }
@@ -1428,6 +1437,28 @@ mod tests {
                 .contains(Modifier::CROSSED_OUT),
             "删除线文本应使用 Ratatui 的 CROSSED_OUT 样式: {strike_span:?}"
         );
+    }
+
+    #[test]
+    fn render_markdown_blockquote_uses_quote_style() {
+        let palette = default_palette();
+        let lines = render_markdown_lines("> quoted text", 80, palette);
+
+        assert_eq!(lines_to_plain_text(&lines), "> quoted text");
+        for span in &lines[0].spans {
+            if span.content.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                span.style.fg,
+                Some(palette.quote),
+                "引用块前缀和正文都应使用 quote 颜色: {span:?}"
+            );
+            assert!(
+                span.style.add_modifier.contains(Modifier::ITALIC),
+                "引用块前缀和正文都应使用 italic 样式: {span:?}"
+            );
+        }
     }
 
     #[test]

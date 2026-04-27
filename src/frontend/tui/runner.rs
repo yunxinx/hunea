@@ -9,11 +9,12 @@ use std::{
 
 use crate::runtime::openai_compatible::{
     CancellationToken, NativeChatRequest, OpenAiCompatibleError,
-    send_chat_completion_with_cancellation,
+    send_chat_completion_with_cancellation_and_token_progress,
 };
 use crate::runtime::session::{
     AcpInitializeOutcome, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
 };
+use crate::runtime::token_count::StreamingTokenProgress;
 use crate::runtime::{models, models::ModelSelection};
 use arboard::Clipboard;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -508,6 +509,7 @@ impl NativeChatRuntimeState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NativeChatEvent {
     Retrying { message: String },
+    OutputTokenEstimate { total_tokens: usize },
     Finished { content: String },
     Failed { message: String },
     Interrupted,
@@ -532,7 +534,16 @@ async fn run_native_chat_worker(
     sender: mpsc::Sender<NativeChatEvent>,
 ) {
     for attempt in 0..=NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS {
-        match send_chat_completion_with_cancellation(&request, &cancellation).await {
+        let progress_sender = sender.clone();
+        match send_chat_completion_with_cancellation_and_token_progress(
+            &request,
+            &cancellation,
+            move |total_tokens| {
+                let _ = progress_sender.send(NativeChatEvent::OutputTokenEstimate { total_tokens });
+            },
+        )
+        .await
+        {
             Ok(content) => {
                 let _ = sender.send(NativeChatEvent::Finished { content });
                 return;
@@ -579,6 +590,9 @@ fn apply_native_chat_event(model: &mut Model, event: NativeChatEvent) {
     match event {
         NativeChatEvent::Retrying { message } => {
             model.show_acp_activity_with_header(message);
+        }
+        NativeChatEvent::OutputTokenEstimate { total_tokens } => {
+            model.set_acp_activity_output_tokens(total_tokens);
         }
         NativeChatEvent::Finished { content } => {
             model.clear_acp_activity();
@@ -653,6 +667,7 @@ struct AcpRuntimeState {
     response_buffer: String,
     prompt_in_flight: bool,
     discard_in_flight_prompt: bool,
+    token_progress: Option<StreamingTokenProgress>,
 }
 
 impl AcpRuntimeState {
@@ -660,6 +675,7 @@ impl AcpRuntimeState {
         self.response_buffer.clear();
         self.prompt_in_flight = false;
         self.discard_in_flight_prompt = false;
+        self.token_progress = None;
         self.worker = Some(AcpSessionWorker::start(command));
     }
 
@@ -687,10 +703,27 @@ impl AcpRuntimeState {
         self.prompt_in_flight = true;
     }
 
+    fn start_token_progress(&mut self, model_id: impl Into<String>) {
+        self.token_progress = Some(StreamingTokenProgress::new(model_id));
+    }
+
+    fn observe_output_tokens(&mut self, content: &str) -> Option<usize> {
+        self.token_progress
+            .as_mut()
+            .and_then(|progress| progress.observe_delta(content, Instant::now()))
+    }
+
+    fn flush_output_tokens(&mut self) -> Option<usize> {
+        self.token_progress
+            .as_mut()
+            .and_then(|progress| progress.flush(Instant::now()))
+    }
+
     fn mark_prompt_finished(&mut self) {
         self.prompt_in_flight = false;
         self.discard_in_flight_prompt = false;
         self.response_buffer.clear();
+        self.token_progress = None;
     }
 
     fn should_discard_prompt_output(&self) -> bool {
@@ -702,6 +735,7 @@ impl AcpRuntimeState {
             return false;
         }
         self.response_buffer.clear();
+        self.token_progress = None;
         self.discard_in_flight_prompt = true;
         if let Some(worker) = self.worker.as_ref() {
             let _ = worker.cancel_prompt();
@@ -711,6 +745,7 @@ impl AcpRuntimeState {
 
     fn reset_after_clear(&mut self) {
         self.response_buffer.clear();
+        self.token_progress = None;
         if self.prompt_in_flight {
             self.discard_in_flight_prompt = true;
         }
@@ -780,6 +815,7 @@ fn apply_acp_session_event(
             if acp_runtime.should_discard_prompt_output() {
                 return;
             }
+            acp_runtime.start_token_progress(agent_id.as_str());
             model.show_acp_activity(agent_id);
         }
         AcpSessionEvent::AgentMessageChunk { content, .. } => {
@@ -787,6 +823,9 @@ fn apply_acp_session_event(
                 return;
             }
             acp_runtime.push_response_chunk(&content);
+            if let Some(total_tokens) = acp_runtime.observe_output_tokens(&content) {
+                model.set_acp_activity_output_tokens(total_tokens);
+            }
         }
         AcpSessionEvent::PromptResponse {
             content,
@@ -800,6 +839,12 @@ fn apply_acp_session_event(
             }
             if !content.is_empty() {
                 acp_runtime.push_response_chunk(&content);
+                if let Some(total_tokens) = acp_runtime.observe_output_tokens(&content) {
+                    model.set_acp_activity_output_tokens(total_tokens);
+                }
+            }
+            if let Some(total_tokens) = acp_runtime.flush_output_tokens() {
+                model.set_acp_activity_output_tokens(total_tokens);
             }
             flush_acp_response_buffer(model, acp_runtime);
             acp_runtime.mark_prompt_finished();
@@ -813,6 +858,9 @@ fn apply_acp_session_event(
                 acp_runtime.mark_prompt_finished();
                 model.clear_acp_activity();
                 return;
+            }
+            if let Some(total_tokens) = acp_runtime.flush_output_tokens() {
+                model.set_acp_activity_output_tokens(total_tokens);
             }
             flush_acp_response_buffer(model, acp_runtime);
             acp_runtime.mark_prompt_finished();
@@ -828,6 +876,9 @@ fn apply_acp_session_event(
                 let (_, reject_option_id) = acp_permission_option_ids(&request);
                 let _ = acp_runtime.respond_permission(&request.request_id, reject_option_id);
                 return;
+            }
+            if let Some(total_tokens) = acp_runtime.flush_output_tokens() {
+                model.set_acp_activity_output_tokens(total_tokens);
             }
             flush_acp_response_buffer(model, acp_runtime);
             let (allow_option_id, reject_option_id) = acp_permission_option_ids(&request);
@@ -1154,6 +1205,39 @@ mod tests {
     }
 
     #[test]
+    fn acp_agent_chunks_update_token_activity_without_flushing_transcript() {
+        let mut model = Model::new(HeroOptions::default());
+        model.set_window(80, 6);
+        model.transcript_mut().clear();
+        let mut acp_runtime = AcpRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptStarted {
+                agent_id: "Kimi Code CLI".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentMessageChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: "hello from acp".to_string(),
+            },
+        );
+
+        let activity = model
+            .current_acp_activity_render_result_at(
+                std::time::Instant::now() + std::time::Duration::from_millis(120),
+            )
+            .plain_line;
+        assert!(activity.contains("↓"));
+        assert!(activity.contains("tokens"));
+        assert!(model.transcript_plain_items().is_empty());
+    }
+
+    #[test]
     fn clear_runtime_discards_stale_native_chat_event() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
@@ -1367,6 +1451,28 @@ mod tests {
     }
 
     #[test]
+    fn native_chat_token_estimate_updates_activity_without_finishing_request() {
+        let mut model = Model::new(HeroOptions::default());
+        model.set_window(70, 6);
+        model.transcript_mut().clear();
+        model.show_acp_activity("qwen3");
+
+        apply_native_chat_event(
+            &mut model,
+            NativeChatEvent::OutputTokenEstimate { total_tokens: 32 },
+        );
+
+        let activity = model
+            .current_acp_activity_render_result_at(
+                std::time::Instant::now() + std::time::Duration::from_millis(120),
+            )
+            .plain_line;
+        assert!(activity.contains("↓ 32 tokens"));
+        assert!(model.current_acp_activity_render_result().has_content);
+        assert!(model.transcript_plain_items().is_empty());
+    }
+
+    #[test]
     fn native_chat_runtime_keeps_receiver_after_retry_event() {
         let (sender, receiver) = mpsc::channel();
         let mut runtime = NativeChatRuntimeState {
@@ -1401,6 +1507,25 @@ mod tests {
             })
         );
         assert!(!runtime.is_running());
+    }
+
+    #[test]
+    fn native_chat_runtime_keeps_receiver_after_token_estimate_event() {
+        let (sender, receiver) = mpsc::channel();
+        let mut runtime = NativeChatRuntimeState {
+            receiver: Some(receiver),
+            cancellation: Some(CancellationToken::default()),
+        };
+
+        sender
+            .send(NativeChatEvent::OutputTokenEstimate { total_tokens: 12 })
+            .expect("token estimate event should be queued");
+
+        assert_eq!(
+            runtime.try_recv_event(),
+            Some(NativeChatEvent::OutputTokenEstimate { total_tokens: 12 })
+        );
+        assert!(runtime.is_running());
     }
 
     #[test]

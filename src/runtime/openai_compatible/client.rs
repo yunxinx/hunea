@@ -1,12 +1,16 @@
-use std::{env, io, time::Duration};
+use std::{
+    env, io,
+    time::{Duration, Instant},
+};
 
 use futures_util::StreamExt as _;
 use reqwest::Client;
 
 use super::{
     CancellationToken, ChatCompletionRequestBody, NativeChatRequest, OpenAiCompatibleError,
-    stream::collect_chat_completion_stream_chunks_with_cancellation,
+    stream::collect_chat_completion_stream_chunks_with_delta_handler,
 };
+use crate::runtime::token_count::StreamingTokenProgress;
 
 const CHAT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -22,6 +26,17 @@ pub async fn send_chat_completion_with_cancellation(
     request: &NativeChatRequest,
     cancellation: &CancellationToken,
 ) -> Result<String, OpenAiCompatibleError> {
+    send_chat_completion_with_cancellation_and_token_progress(request, cancellation, |_| {}).await
+}
+
+pub(crate) async fn send_chat_completion_with_cancellation_and_token_progress<F>(
+    request: &NativeChatRequest,
+    cancellation: &CancellationToken,
+    mut on_output_tokens: F,
+) -> Result<String, OpenAiCompatibleError>
+where
+    F: FnMut(usize),
+{
     if cancellation.is_cancelled() {
         return Err(OpenAiCompatibleError::Cancelled);
     }
@@ -60,5 +75,19 @@ pub async fn send_chat_completion_with_cancellation(
         .bytes_stream()
         .map(|chunk| chunk.map(|bytes| bytes.to_vec()).map_err(io::Error::other));
 
-    collect_chat_completion_stream_chunks_with_cancellation(chunks, cancellation).await
+    let mut progress = StreamingTokenProgress::new(request.model_id.clone());
+    let result =
+        collect_chat_completion_stream_chunks_with_delta_handler(chunks, cancellation, |delta| {
+            if let Some(total_tokens) = progress.observe_delta(delta, Instant::now()) {
+                on_output_tokens(total_tokens);
+            }
+        })
+        .await;
+    if result.is_ok()
+        && let Some(total_tokens) = progress.flush(Instant::now())
+    {
+        on_output_tokens(total_tokens);
+    }
+
+    result
 }

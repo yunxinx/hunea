@@ -18,7 +18,10 @@ use super::{
 };
 
 const ACP_ACTIVITY_FRAME_INTERVAL: Duration = Duration::from_millis(80);
+const ACP_ACTIVITY_TOKEN_TICK_INTERVAL: Duration = Duration::from_millis(33);
 const ACP_ACTIVITY_GLYPH: &str = "•";
+const TOKEN_TWEEN_DURATION: Duration = Duration::from_millis(120);
+const TOKEN_STALE_THRESHOLD: Duration = Duration::from_millis(360);
 
 /// `AcpActivityState` 保存 ACP turn 正在运行时显示在输入框上方的状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +29,25 @@ pub(super) struct AcpActivityState {
     started_at: Instant,
     header: String,
     interrupt_hint: Option<String>,
+    output_tokens: Option<ActivityTokenProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActivityTokenProgress {
+    previous_display: usize,
+    target: usize,
+    output_total: usize,
+    input_total: usize,
+    direction: ActivityTokenDirection,
+    updated_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivityTokenDirection {
+    Down,
+    // 当前 OpenAI-compatible 流只会上报下行输出；工具结果回传接入后会使用上行方向。
+    #[allow(dead_code)]
+    Up,
 }
 
 impl Model {
@@ -49,6 +71,7 @@ impl Model {
             started_at: Instant::now(),
             header,
             interrupt_hint: self.current_acp_activity_interrupt_hint(),
+            output_tokens: None,
         });
         self.reset_chat_interrupt_esc_count();
         self.bump_status_line_revision();
@@ -78,6 +101,37 @@ impl Model {
         self.reset_chat_interrupt_esc_count();
         self.bump_status_line_revision();
         self.sync_composer_height();
+        if self.document_runtime.follow_bottom {
+            self.sync_document_viewport_to_bottom();
+        }
+    }
+
+    pub(crate) fn set_acp_activity_output_tokens(&mut self, total_tokens: usize) {
+        self.set_acp_activity_output_tokens_at(total_tokens, Instant::now());
+    }
+
+    pub(crate) fn set_acp_activity_output_tokens_at(&mut self, total_tokens: usize, now: Instant) {
+        self.record_acp_activity_output_tokens_at(total_tokens, now);
+    }
+
+    fn record_acp_activity_output_tokens_at(&mut self, total_tokens: usize, now: Instant) {
+        let Some(activity) = self.acp_activity.as_mut() else {
+            return;
+        };
+        activity.record_output_tokens(total_tokens, now);
+        self.bump_status_line_revision();
+        if self.document_runtime.follow_bottom {
+            self.sync_document_viewport_to_bottom();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn add_acp_activity_input_tokens_at(&mut self, token_delta: usize, now: Instant) {
+        let Some(activity) = self.acp_activity.as_mut() else {
+            return;
+        };
+        activity.record_input_tokens(token_delta, now);
+        self.bump_status_line_revision();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
         }
@@ -131,9 +185,13 @@ impl Model {
     }
 
     pub(crate) fn acp_activity_frame_interval(&self) -> Option<Duration> {
+        self.acp_activity_frame_interval_at(Instant::now())
+    }
+
+    pub(crate) fn acp_activity_frame_interval_at(&self, now: Instant) -> Option<Duration> {
         self.acp_activity
-            .is_some()
-            .then_some(ACP_ACTIVITY_FRAME_INTERVAL)
+            .as_ref()
+            .map(|activity| activity.frame_interval_at(now))
     }
 }
 
@@ -148,16 +206,154 @@ impl AcpActivityState {
 
     fn elapsed_segment_at(&self, now: Instant) -> String {
         let elapsed = self.elapsed_text_at(now);
-        match self.interrupt_hint.as_deref() {
-            Some(hint) => format!("({elapsed} • {hint})"),
-            None => format!("({elapsed})"),
+        let token_text = self.token_segment_at(now);
+        let mut segments = vec![elapsed];
+        if let Some(token_text) = token_text {
+            segments.push(token_text);
         }
+        if let Some(hint) = self.interrupt_hint.as_deref() {
+            segments.push(hint.to_string());
+        }
+        format!("({})", segments.join(" • "))
     }
 
     fn frame_index_at(&self, now: Instant) -> usize {
-        let interval_ms = ACP_ACTIVITY_FRAME_INTERVAL.as_millis().max(1);
+        let interval_ms = self.frame_interval_at(now).as_millis().max(1);
         let tick = self.elapsed_at(now).as_millis() / interval_ms;
-        tick as usize
+        let token_display = self.output_tokens_display_at(now);
+        (tick as usize)
+            .saturating_mul(1_000_003)
+            .saturating_add(token_display)
+    }
+
+    fn output_tokens_display_at(&self, now: Instant) -> usize {
+        self.output_tokens
+            .as_ref()
+            .map(|progress| progress.display_at(now))
+            .unwrap_or(0)
+    }
+
+    fn token_segment_at(&self, now: Instant) -> Option<String> {
+        let progress = self.output_tokens.as_ref()?;
+        let display = progress.display_at(now);
+        (display > 0).then(|| {
+            format!(
+                "{} {} tokens",
+                progress.direction.glyph(),
+                format_token_count(display)
+            )
+        })
+    }
+
+    fn frame_interval_at(&self, now: Instant) -> Duration {
+        if self
+            .output_tokens
+            .as_ref()
+            .is_some_and(|progress| progress.needs_fast_tick_at(now))
+        {
+            return ACP_ACTIVITY_TOKEN_TICK_INTERVAL;
+        }
+        ACP_ACTIVITY_FRAME_INTERVAL
+    }
+
+    fn record_output_tokens(&mut self, total_tokens: usize, now: Instant) {
+        let (input_total, target) = self
+            .output_tokens
+            .as_ref()
+            .map(|progress| (progress.input_total, progress.target))
+            .unwrap_or((0, 0));
+        let output_total = self
+            .output_tokens
+            .as_ref()
+            .map(|progress| progress.output_total.max(total_tokens))
+            .unwrap_or(total_tokens);
+        let target = target.max(output_total.saturating_add(input_total));
+        self.replace_token_progress(
+            output_total,
+            input_total,
+            target,
+            ActivityTokenDirection::Down,
+            now,
+        );
+    }
+
+    #[allow(dead_code)]
+    fn record_input_tokens(&mut self, token_delta: usize, now: Instant) {
+        if token_delta == 0 {
+            return;
+        }
+        let (output_total, input_total, target) = self
+            .output_tokens
+            .as_ref()
+            .map(|progress| (progress.output_total, progress.input_total, progress.target))
+            .unwrap_or((0, 0, 0));
+        let input_total = input_total.saturating_add(token_delta);
+        let target = target.max(output_total.saturating_add(input_total));
+        self.replace_token_progress(
+            output_total,
+            input_total,
+            target,
+            ActivityTokenDirection::Up,
+            now,
+        );
+    }
+
+    fn replace_token_progress(
+        &mut self,
+        output_total: usize,
+        input_total: usize,
+        target: usize,
+        direction: ActivityTokenDirection,
+        now: Instant,
+    ) {
+        let current_display = self.output_tokens_display_at(now);
+        let target = target.max(current_display);
+        self.output_tokens = Some(ActivityTokenProgress {
+            previous_display: current_display,
+            target,
+            output_total,
+            input_total,
+            direction,
+            updated_at: now,
+        });
+    }
+}
+
+impl ActivityTokenProgress {
+    fn display_at(&self, now: Instant) -> usize {
+        if self.target <= self.previous_display {
+            return self.target;
+        }
+
+        let elapsed = now.saturating_duration_since(self.updated_at);
+        if elapsed >= TOKEN_TWEEN_DURATION {
+            return self.target;
+        }
+
+        let total_ms = TOKEN_TWEEN_DURATION.as_millis().max(1);
+        let elapsed_ms = elapsed.as_millis().max(1);
+        let remaining = self.target.saturating_sub(self.previous_display);
+        let progressed = (remaining as u128)
+            .saturating_mul(elapsed_ms)
+            .saturating_add(total_ms - 1)
+            / total_ms;
+        self.previous_display
+            .saturating_add(progressed as usize)
+            .min(self.target)
+    }
+
+    fn needs_fast_tick_at(&self, now: Instant) -> bool {
+        self.display_at(now) < self.target
+            && now.saturating_duration_since(self.updated_at) <= TOKEN_STALE_THRESHOLD
+    }
+}
+
+impl ActivityTokenDirection {
+    fn glyph(self) -> &'static str {
+        match self {
+            Self::Down => "↓",
+            Self::Up => "↑",
+        }
     }
 }
 
@@ -269,6 +465,21 @@ fn format_elapsed_compact(elapsed_secs: u64) -> String {
     format!("{hours}h {minutes:02}m {seconds:02}s")
 }
 
+fn format_token_count(tokens: usize) -> String {
+    if tokens < 1_000 {
+        return tokens.to_string();
+    }
+
+    let tenths = (tokens.saturating_mul(10).saturating_add(500)) / 1_000;
+    let whole = tenths / 10;
+    let fraction = tenths % 10;
+    if fraction == 0 {
+        format!("{whole}k")
+    } else {
+        format!("{whole}.{fraction}k")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::style::Modifier;
@@ -339,6 +550,113 @@ mod tests {
                 .map(|span| span.style)
                 .collect::<Vec<_>>(),
             "shimmer styles should advance while the visible text stays stable"
+        );
+    }
+
+    #[test]
+    fn acp_activity_line_tweens_output_token_estimate_to_target() {
+        let mut model = Model::new(HeroOptions::default());
+        model.set_window(70, 6);
+        model.set_palette(default_palette(), true);
+        model.show_acp_activity_with_header("Working");
+
+        let started_at = model.acp_activity.as_ref().unwrap().started_at;
+        model.set_acp_activity_output_tokens_at(24, started_at);
+
+        let early = model
+            .current_acp_activity_render_result_at(
+                started_at + std::time::Duration::from_millis(80),
+            )
+            .plain_line;
+        let settled = model
+            .current_acp_activity_render_result_at(
+                started_at + std::time::Duration::from_millis(120),
+            )
+            .plain_line;
+
+        assert!(
+            early.contains("tokens"),
+            "activity should expose streaming token feedback before settling"
+        );
+        assert!(
+            !early.contains("24 tokens"),
+            "token feedback should tween instead of jumping to the target"
+        );
+        assert!(
+            settled.contains("24 tokens"),
+            "token feedback should eventually reach the latest target"
+        );
+    }
+
+    #[test]
+    fn acp_activity_token_indicator_uses_single_directional_total() {
+        let mut model = Model::new(HeroOptions::default());
+        model.set_window(80, 6);
+        model.set_palette(default_palette(), true);
+        model.show_acp_activity_with_header("Working");
+
+        let started_at = model.acp_activity.as_ref().unwrap().started_at;
+        model.set_acp_activity_output_tokens_at(200, started_at);
+        let output_line = model
+            .current_acp_activity_render_result_at(started_at + Duration::from_millis(120))
+            .plain_line;
+        assert!(output_line.contains("↓ 200 tokens"));
+
+        model.add_acp_activity_input_tokens_at(100, started_at + Duration::from_millis(140));
+        let input_line = model
+            .current_acp_activity_render_result_at(started_at + Duration::from_millis(260))
+            .plain_line;
+        assert!(input_line.contains("↑ 300 tokens"));
+        assert!(!input_line.contains("↓ 200 tokens"));
+    }
+
+    #[test]
+    fn acp_activity_token_indicator_compacts_thousands_to_k_unit() {
+        let mut model = Model::new(HeroOptions::default());
+        model.set_window(80, 6);
+        model.set_palette(default_palette(), true);
+        model.show_acp_activity_with_header("Working");
+
+        let started_at = model.acp_activity.as_ref().unwrap().started_at;
+        model.set_acp_activity_output_tokens_at(999, started_at);
+        let under_k_line = model
+            .current_acp_activity_render_result_at(started_at + Duration::from_millis(120))
+            .plain_line;
+        assert!(under_k_line.contains("↓ 999 tokens"));
+
+        model.set_acp_activity_output_tokens_at(1_200, started_at + Duration::from_millis(140));
+        let k_line = model
+            .current_acp_activity_render_result_at(started_at + Duration::from_millis(260))
+            .plain_line;
+        assert!(k_line.contains("↓ 1.2k tokens"));
+        assert!(!k_line.contains("1200 tokens"));
+    }
+
+    #[test]
+    fn acp_activity_token_indicator_uses_fast_tick_until_target_or_stale() {
+        let mut model = Model::new(HeroOptions::default());
+        model.set_window(80, 6);
+        model.set_palette(default_palette(), true);
+        model.show_acp_activity_with_header("Working");
+
+        let started_at = model.acp_activity.as_ref().unwrap().started_at;
+        model.set_acp_activity_output_tokens_at(36, started_at);
+
+        assert_eq!(
+            model.acp_activity_frame_interval_at(started_at + Duration::from_millis(33)),
+            Some(Duration::from_millis(33))
+        );
+        assert_eq!(
+            model.acp_activity_frame_interval_at(started_at + Duration::from_millis(130)),
+            Some(Duration::from_millis(80)),
+            "token tick should stop once the displayed value catches the target"
+        );
+
+        model.set_acp_activity_output_tokens_at(72, started_at + Duration::from_millis(200));
+        assert_eq!(
+            model.acp_activity_frame_interval_at(started_at + Duration::from_millis(600)),
+            Some(Duration::from_millis(80)),
+            "stale token snapshots should not keep the fast tick alive"
         );
     }
 

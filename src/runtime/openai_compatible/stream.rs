@@ -63,12 +63,25 @@ pub fn collect_chat_completion_stream_with_cancellation(
 }
 
 /// `collect_chat_completion_stream_chunks_with_cancellation` 从 async SSE chunk 中聚合内容。
+#[cfg(test)]
 pub(crate) async fn collect_chat_completion_stream_chunks_with_cancellation<S>(
     chunks: S,
     cancellation: &CancellationToken,
 ) -> Result<String, OpenAiCompatibleError>
 where
     S: Stream<Item = Result<Vec<u8>, io::Error>>,
+{
+    collect_chat_completion_stream_chunks_with_delta_handler(chunks, cancellation, |_| {}).await
+}
+
+pub(crate) async fn collect_chat_completion_stream_chunks_with_delta_handler<S, F>(
+    chunks: S,
+    cancellation: &CancellationToken,
+    mut on_delta: F,
+) -> Result<String, OpenAiCompatibleError>
+where
+    S: Stream<Item = Result<Vec<u8>, io::Error>>,
+    F: FnMut(&str),
 {
     let mut content = String::new();
     let mut pending = Vec::new();
@@ -99,7 +112,7 @@ where
             }
             let line =
                 str::from_utf8(&line).map_err(|_| OpenAiCompatibleError::InvalidStreamEvent)?;
-            if parse_chat_completion_stream_line(line, &mut content)? {
+            if parse_chat_completion_stream_line_with_delta(line, &mut content, &mut on_delta)? {
                 return Ok(content);
             }
         }
@@ -108,7 +121,11 @@ where
     if !pending.is_empty() {
         let line =
             str::from_utf8(&pending).map_err(|_| OpenAiCompatibleError::InvalidStreamEvent)?;
-        let _ = parse_chat_completion_stream_line(line.trim_end_matches('\r'), &mut content)?;
+        let _ = parse_chat_completion_stream_line_with_delta(
+            line.trim_end_matches('\r'),
+            &mut content,
+            &mut on_delta,
+        )?;
     }
 
     Ok(content)
@@ -118,6 +135,17 @@ fn parse_chat_completion_stream_line(
     line: &str,
     content: &mut String,
 ) -> Result<bool, OpenAiCompatibleError> {
+    parse_chat_completion_stream_line_with_delta(line, content, &mut |_| {})
+}
+
+fn parse_chat_completion_stream_line_with_delta<F>(
+    line: &str,
+    content: &mut String,
+    on_delta: &mut F,
+) -> Result<bool, OpenAiCompatibleError>
+where
+    F: FnMut(&str),
+{
     let Some(payload) = line.strip_prefix("data:").map(str::trim) else {
         return Ok(false);
     };
@@ -133,6 +161,7 @@ fn parse_chat_completion_stream_line(
     for choice in event.choices {
         if let Some(delta) = choice.delta.content {
             content.push_str(&delta);
+            on_delta(&delta);
         }
     }
 
@@ -174,5 +203,30 @@ mod tests {
             .expect_err("cancelled stream should not wait for another chunk");
 
         assert_eq!(error.to_string(), "chat completion cancelled");
+    }
+
+    #[tokio::test]
+    async fn async_stream_reports_content_deltas_without_changing_final_content() {
+        let token = CancellationToken::default();
+        let chunks = futures_util::stream::iter([Ok::<_, io::Error>(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
+                "data: [DONE]\n\n",
+            )
+            .as_bytes()
+            .to_vec(),
+        )]);
+        let mut deltas = Vec::new();
+
+        let content =
+            collect_chat_completion_stream_chunks_with_delta_handler(chunks, &token, |delta| {
+                deltas.push(delta.to_string())
+            })
+            .await
+            .expect("stream should be collected");
+
+        assert_eq!(content, "Hello world");
+        assert_eq!(deltas, ["Hello", " world"]);
     }
 }

@@ -4,7 +4,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use super::{
+use super::super::{
     AppEffect, Model,
     inline_panel::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
@@ -18,10 +18,10 @@ const ACP_PANEL_VISIBLE_ROWS: usize = 12;
 
 /// `AcpPanelState` 保存 ACP agent 面板的导航状态。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(super) struct AcpPanelState {
-    pub(super) is_open: bool,
-    pub(super) selected: usize,
-    pub(super) scroll: usize,
+pub(in crate::frontend::tui) struct AcpPanelState {
+    pub(in crate::frontend::tui) is_open: bool,
+    pub(in crate::frontend::tui) selected: usize,
+    pub(in crate::frontend::tui) scroll: usize,
 }
 
 pub(crate) type AcpPanelRenderResult = InlinePanelRenderResult;

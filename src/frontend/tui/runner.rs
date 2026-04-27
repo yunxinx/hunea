@@ -7,11 +7,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::runtime::acp::{
+    AcpInitializeOutcome, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
+};
 use crate::runtime::llm::{
     CancellationToken, LlmError, NativeChatRequest, send_chat_with_cancellation_and_token_progress,
-};
-use crate::runtime::session::{
-    AcpInitializeOutcome, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
 };
 use crate::runtime::token_count::StreamingTokenProgress;
 use crate::runtime::{models, models::ModelSelection};
@@ -958,9 +958,9 @@ fn run_respond_acp_permission_effect(
 }
 
 fn acp_permission_option_ids(
-    request: &crate::runtime::session::AcpPermissionRequest,
+    request: &crate::runtime::acp::AcpPermissionRequest,
 ) -> (Option<String>, Option<String>) {
-    use crate::runtime::session::AcpPermissionOptionKind;
+    use crate::runtime::acp::AcpPermissionOptionKind;
 
     let allow = request
         .options
@@ -1165,7 +1165,7 @@ mod tests {
             &mut acp_runtime,
             AcpSessionEvent::PermissionRequested {
                 agent_id: "Kimi Code CLI".to_string(),
-                request: crate::runtime::session::AcpPermissionRequest {
+                request: crate::runtime::acp::AcpPermissionRequest {
                     request_id: "permission-1".to_string(),
                     title: Some("Write file".to_string()),
                     options: Vec::new(),
@@ -1372,7 +1372,7 @@ mod tests {
             &mut acp_runtime,
             AcpSessionEvent::PermissionRequested {
                 agent_id: "Kimi Code CLI".to_string(),
-                request: crate::runtime::session::AcpPermissionRequest {
+                request: crate::runtime::acp::AcpPermissionRequest {
                     request_id: "stale-permission".to_string(),
                     title: Some("旧请求写文件".to_string()),
                     options: Vec::new(),

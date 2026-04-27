@@ -1,14 +1,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::{AppEffect, Model};
+use super::super::{AppEffect, Model};
 
 /// `PendingAcpPermission` 保存当前等待用户确认的 ACP 权限请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PendingAcpPermission {
-    pub(super) request_id: String,
-    pub(super) title: Option<String>,
-    pub(super) allow_option_id: Option<String>,
-    pub(super) reject_option_id: Option<String>,
+pub(in crate::frontend::tui) struct PendingAcpPermission {
+    pub(in crate::frontend::tui) request_id: String,
+    pub(in crate::frontend::tui) title: Option<String>,
+    pub(in crate::frontend::tui) allow_option_id: Option<String>,
+    pub(in crate::frontend::tui) reject_option_id: Option<String>,
 }
 
 impl Model {

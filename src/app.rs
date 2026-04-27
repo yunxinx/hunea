@@ -3,15 +3,15 @@ use std::io::{self, IsTerminal, Write};
 use color_eyre::eyre::{Result, WrapErr};
 
 use crate::{
-    appconfig::{self, Config, RuntimeConfig, TuiConfig, UserInputStyle},
+    appconfig::{self, AcpConfig, Config, TuiConfig, UserInputStyle},
     envinfo,
     frontend::tui::{
         self, HeroOptions, Model, ModelOptions, RuntimeOptions, StatusLineItem, StyleMode,
     },
     runtime::{
+        acp::AcpSessionCatalog,
         models::{self, LoadedModelCatalog},
         phrases::{self, LoadedStatusPhrases},
-        session::AcpSessionCatalog,
     },
 };
 
@@ -160,7 +160,7 @@ fn model_options_from_app_config_and_models(
 ) -> ModelOptions {
     model_options_from_configs(
         &config.tui,
-        Some(&config.runtime),
+        Some(&config.acp),
         loaded_models,
         loaded_phrases,
     )
@@ -171,14 +171,14 @@ fn runtime_options_from_app_config_and_models(
     loaded_models: &LoadedModelCatalog,
 ) -> RuntimeOptions {
     RuntimeOptions {
-        acp_sessions: AcpSessionCatalog::from_runtime_config(&config.runtime),
+        acp_sessions: AcpSessionCatalog::from_acp_config(&config.acp),
         model_config_path: loaded_models.source_path.clone(),
     }
 }
 
 fn model_options_from_configs(
     tui_config: &TuiConfig,
-    runtime_config: Option<&RuntimeConfig>,
+    acp_config: Option<&AcpConfig>,
     loaded_models: &LoadedModelCatalog,
     loaded_phrases: &LoadedStatusPhrases,
 ) -> ModelOptions {
@@ -193,7 +193,7 @@ fn model_options_from_configs(
         ctrl_c_clears_input: tui_config.ctrl_c_clears_input,
         esc_interrupt_presses: tui_config.esc_interrupt_presses,
         show_esc_interrupt_hint: tui_config.show_esc_interrupt_hint,
-        acp_agent_servers: acp_agent_servers_from_config(runtime_config),
+        acp_agent_servers: acp_agent_servers_from_config(acp_config),
         model_catalog: loaded_models.catalog.clone(),
         selected_model: loaded_models.selected_model.clone(),
         requires_model_selection: loaded_models.requires_model_selection,
@@ -202,15 +202,15 @@ fn model_options_from_configs(
     }
 }
 
-fn acp_agent_servers_from_config(runtime_config: Option<&RuntimeConfig>) -> Vec<String> {
-    let Some(runtime_config) = runtime_config else {
+fn acp_agent_servers_from_config(acp_config: Option<&AcpConfig>) -> Vec<String> {
+    let Some(acp_config) = acp_config else {
         return Vec::new();
     };
-    if !runtime_config.enabled {
+    if !acp_config.enabled {
         return Vec::new();
     }
 
-    runtime_config.agent_servers.keys().cloned().collect()
+    acp_config.agent_servers.keys().cloned().collect()
 }
 
 fn status_line_items_from_config(items: &[String]) -> Vec<StatusLineItem> {
@@ -229,9 +229,7 @@ fn external_editor_hint_from_config(configured: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::appconfig::{
-        AgentServerConfig, AgentServerType, RuntimeDistribution, RuntimeInstallRoot,
-    };
+    use crate::appconfig::{AcpDistribution, AcpInstallRoot, AgentServerConfig, AgentServerType};
 
     #[test]
     fn model_options_from_config_carries_mouse_selection_copy_flag() {
@@ -324,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_options_from_app_config_exposes_direct_acp_commands() {
+    fn acp_options_from_app_config_exposes_direct_acp_commands() {
         let mut agent_servers = std::collections::BTreeMap::new();
         agent_servers.insert(
             "local-kimi".to_string(),
@@ -340,12 +338,12 @@ mod tests {
         );
         let config = Config {
             tui: default_tui_config(),
-            runtime: RuntimeConfig {
+            acp: AcpConfig {
                 enabled: true,
                 registry_url: "https://example.test/registry.json".to_string(),
-                install_root: RuntimeInstallRoot::Config,
+                install_root: AcpInstallRoot::Config,
                 custom_install_dir: std::path::PathBuf::new(),
-                distribution_preference: vec![RuntimeDistribution::Binary],
+                distribution_preference: vec![AcpDistribution::Binary],
                 auto_update_check: true,
                 agent_servers,
             },
@@ -378,12 +376,12 @@ mod tests {
         );
         let config = Config {
             tui: default_tui_config(),
-            runtime: RuntimeConfig {
+            acp: AcpConfig {
                 enabled: true,
                 registry_url: "https://example.test/registry.json".to_string(),
-                install_root: RuntimeInstallRoot::Config,
+                install_root: AcpInstallRoot::Config,
                 custom_install_dir: std::path::PathBuf::new(),
-                distribution_preference: vec![RuntimeDistribution::Binary],
+                distribution_preference: vec![AcpDistribution::Binary],
                 auto_update_check: true,
                 agent_servers,
             },

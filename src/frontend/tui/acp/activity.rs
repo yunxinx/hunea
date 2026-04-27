@@ -6,7 +6,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{
+use super::super::{
     Model,
     selection::SelectableLineRange,
     shimmer::shimmer_spans_at,
@@ -25,7 +25,7 @@ const TOKEN_STALE_THRESHOLD: Duration = Duration::from_millis(360);
 
 /// `AcpActivityState` 保存 ACP turn 正在运行时显示在输入框上方的状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AcpActivityState {
+pub(in crate::frontend::tui) struct AcpActivityState {
     started_at: Instant,
     header: String,
     interrupt_hint: Option<String>,

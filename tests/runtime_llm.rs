@@ -20,3 +20,8 @@ fn native_chat_request_carries_provider_kind_and_messages() {
     assert_eq!(request.base_url, None);
     assert_eq!(request.messages.len(), 2);
 }
+
+#[test]
+fn runtime_exposes_acp_as_named_boundary() {
+    let _catalog = lumos::runtime::acp::AcpSessionCatalog::default();
+}

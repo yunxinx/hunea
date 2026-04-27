@@ -13,14 +13,14 @@ use crate::envinfo;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub tui: TuiConfig,
-    pub runtime: RuntimeConfig,
+    pub acp: AcpConfig,
 }
 
-/// `LoadedConfig` 保留配置内容以及 ACP runtime 字段来自哪个配置文件。
+/// `LoadedConfig` 保留配置内容以及 ACP 字段来自哪个配置文件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedConfig {
     pub config: Config,
-    pub runtime_source: Option<PathBuf>,
+    pub acp_source: Option<PathBuf>,
     pub user_acp_path: Option<PathBuf>,
 }
 
@@ -47,14 +47,14 @@ pub enum UserInputStyle {
     Ms,
 }
 
-/// `RuntimeConfig` 表示 ACP runtime 层的启动配置。
+/// `AcpConfig` 表示 ACP 层的启动配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeConfig {
+pub struct AcpConfig {
     pub enabled: bool,
     pub registry_url: String,
-    pub install_root: RuntimeInstallRoot,
+    pub install_root: AcpInstallRoot,
     pub custom_install_dir: PathBuf,
-    pub distribution_preference: Vec<RuntimeDistribution>,
+    pub distribution_preference: Vec<AcpDistribution>,
     pub auto_update_check: bool,
     pub agent_servers: BTreeMap<String, AgentServerConfig>,
 }
@@ -78,9 +78,9 @@ pub enum AgentServerType {
     Custom,
 }
 
-/// `RuntimeInstallRoot` 表示 ACP runtime 包安装位置策略。
+/// `AcpInstallRoot` 表示 ACP 包安装位置策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeInstallRoot {
+pub enum AcpInstallRoot {
     Config,
     Data,
     Cache,
@@ -88,9 +88,9 @@ pub enum RuntimeInstallRoot {
     Custom,
 }
 
-/// `RuntimeDistribution` 表示 registry 分发类型偏好。
+/// `AcpDistribution` 表示 registry 分发类型偏好。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeDistribution {
+pub enum AcpDistribution {
     Binary,
 }
 
@@ -133,11 +133,11 @@ pub enum AppConfigError {
         server: String,
         value: String,
     },
-    InvalidRuntimeInstallRoot {
+    InvalidAcpInstallRoot {
         path: Option<PathBuf>,
         value: String,
     },
-    InvalidRuntimeDistribution {
+    InvalidAcpDistribution {
         path: Option<PathBuf>,
         value: String,
     },
@@ -171,7 +171,7 @@ struct FileTuiConfig {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FileRuntimeConfig {
+struct FileAcpConfig {
     enabled: Option<bool>,
     registry_url: Option<String>,
     install_root: Option<String>,
@@ -210,14 +210,14 @@ impl Config {
                 show_esc_interrupt_hint: true,
                 print_transcript_on_exit: false,
             },
-            runtime: RuntimeConfig {
+            acp: AcpConfig {
                 enabled: false,
                 registry_url:
                     "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
                         .to_string(),
-                install_root: RuntimeInstallRoot::Config,
+                install_root: AcpInstallRoot::Config,
                 custom_install_dir: PathBuf::new(),
-                distribution_preference: vec![RuntimeDistribution::Binary],
+                distribution_preference: vec![AcpDistribution::Binary],
                 auto_update_check: true,
                 agent_servers: BTreeMap::new(),
             },
@@ -267,7 +267,7 @@ impl AgentServerType {
     }
 }
 
-impl RuntimeInstallRoot {
+impl AcpInstallRoot {
     fn parse(value: &str) -> Result<Self, AppConfigError> {
         match value {
             "config" => Ok(Self::Config),
@@ -275,7 +275,7 @@ impl RuntimeInstallRoot {
             "cache" => Ok(Self::Cache),
             "project" => Ok(Self::Project),
             "custom" => Ok(Self::Custom),
-            other => Err(AppConfigError::InvalidRuntimeInstallRoot {
+            other => Err(AppConfigError::InvalidAcpInstallRoot {
                 path: None,
                 value: other.to_string(),
             }),
@@ -283,11 +283,11 @@ impl RuntimeInstallRoot {
     }
 }
 
-impl RuntimeDistribution {
+impl AcpDistribution {
     fn parse(value: &str) -> Result<Self, AppConfigError> {
         match value {
             "binary" => Ok(Self::Binary),
-            other => Err(AppConfigError::InvalidRuntimeDistribution {
+            other => Err(AppConfigError::InvalidAcpDistribution {
                 path: None,
                 value: other.to_string(),
             }),
@@ -373,33 +373,29 @@ impl fmt::Display for AppConfigError {
                 server,
                 value,
             } => write!(f, "unknown agent_servers.{}.type {:?}", server, value),
-            Self::InvalidRuntimeInstallRoot {
+            Self::InvalidAcpInstallRoot {
                 path: Some(path),
                 value,
             } => write!(
                 f,
-                "validate config file {}: unknown runtime.install_root {:?}",
+                "validate config file {}: unknown acp.install_root {:?}",
                 path.display(),
                 value
             ),
-            Self::InvalidRuntimeInstallRoot { path: None, value } => {
-                write!(f, "unknown runtime.install_root {:?}", value)
+            Self::InvalidAcpInstallRoot { path: None, value } => {
+                write!(f, "unknown acp.install_root {:?}", value)
             }
-            Self::InvalidRuntimeDistribution {
+            Self::InvalidAcpDistribution {
                 path: Some(path),
                 value,
             } => write!(
                 f,
-                "validate config file {}: unknown runtime.distribution_preference item {:?}",
+                "validate config file {}: unknown acp.distribution_preference item {:?}",
                 path.display(),
                 value
             ),
-            Self::InvalidRuntimeDistribution { path: None, value } => {
-                write!(
-                    f,
-                    "unknown runtime.distribution_preference item {:?}",
-                    value
-                )
+            Self::InvalidAcpDistribution { path: None, value } => {
+                write!(f, "unknown acp.distribution_preference item {:?}", value)
             }
             Self::InvalidEscInterruptPresses {
                 path: Some(path),
@@ -430,8 +426,8 @@ impl std::error::Error for AppConfigError {
             | Self::InvalidExternalEditorCommand { .. }
             | Self::ExternalEditorMustWait { .. }
             | Self::InvalidAgentServerType { .. }
-            | Self::InvalidRuntimeInstallRoot { .. }
-            | Self::InvalidRuntimeDistribution { .. }
+            | Self::InvalidAcpInstallRoot { .. }
+            | Self::InvalidAcpDistribution { .. }
             | Self::InvalidEscInterruptPresses { .. } => None,
         }
     }
@@ -455,7 +451,7 @@ pub fn load_from_paths(
     .map(|loaded| loaded.config)
 }
 
-/// `load_with_sources_from_paths` 加载配置并保留 runtime 来源文件，便于后续写回。
+/// `load_with_sources_from_paths` 加载配置并保留 acp 来源文件，便于后续写回。
 pub fn load_with_sources_from_paths(
     working_dir: Option<&Path>,
     user_config_dir: Option<&Path>,
@@ -501,24 +497,24 @@ fn load_from_base_config(
         config = merge_config_file(config, &path)?;
     }
 
-    let mut runtime_source = None;
+    let mut acp_source = None;
     if let Some(path) = user_acp_path.clone() {
-        let merge_result = merge_runtime_config_file(&mut config.runtime, &path)?;
-        if merge_result.has_runtime {
-            runtime_source = Some(path);
+        let merge_result = merge_acp_config_file(&mut config.acp, &path)?;
+        if merge_result.has_acp {
+            acp_source = Some(path);
         }
     }
     if let Some(path) = working_dir.as_ref() {
         let path = path.join(".lumos").join("acp.toml");
-        let merge_result = merge_runtime_config_file(&mut config.runtime, &path)?;
-        if merge_result.has_runtime {
-            runtime_source = Some(path);
+        let merge_result = merge_acp_config_file(&mut config.acp, &path)?;
+        if merge_result.has_acp {
+            acp_source = Some(path);
         }
     }
 
     Ok(LoadedConfig {
         config,
-        runtime_source,
+        acp_source,
         user_acp_path,
     })
 }
@@ -622,18 +618,18 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
     Ok(config)
 }
 
-struct RuntimeConfigMergeResult {
-    has_runtime: bool,
+struct AcpConfigMergeResult {
+    has_acp: bool,
 }
 
-fn merge_runtime_config_file(
-    config: &mut RuntimeConfig,
+fn merge_acp_config_file(
+    config: &mut AcpConfig,
     path: &Path,
-) -> Result<RuntimeConfigMergeResult, AppConfigError> {
+) -> Result<AcpConfigMergeResult, AppConfigError> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(RuntimeConfigMergeResult { has_runtime: false });
+            return Ok(AcpConfigMergeResult { has_acp: false });
         }
         Err(source) => {
             return Err(AppConfigError::Read {
@@ -643,19 +639,19 @@ fn merge_runtime_config_file(
         }
     };
 
-    let file_config: FileRuntimeConfig =
+    let file_config: FileAcpConfig =
         toml::from_str(&content).map_err(|source| AppConfigError::Decode {
             path: path.to_path_buf(),
             source,
         })?;
-    merge_runtime_config(config, file_config, path)?;
+    merge_acp_config(config, file_config, path)?;
 
-    Ok(RuntimeConfigMergeResult { has_runtime: true })
+    Ok(AcpConfigMergeResult { has_acp: true })
 }
 
-fn merge_runtime_config(
-    config: &mut RuntimeConfig,
-    file_config: FileRuntimeConfig,
+fn merge_acp_config(
+    config: &mut AcpConfig,
+    file_config: FileAcpConfig,
     path: &Path,
 ) -> Result<(), AppConfigError> {
     if let Some(enabled) = file_config.enabled {
@@ -668,9 +664,9 @@ fn merge_runtime_config(
 
     if let Some(install_root) = file_config.install_root {
         config.install_root =
-            RuntimeInstallRoot::parse(&install_root).map_err(|error| match error {
-                AppConfigError::InvalidRuntimeInstallRoot { value, .. } => {
-                    AppConfigError::InvalidRuntimeInstallRoot {
+            AcpInstallRoot::parse(&install_root).map_err(|error| match error {
+                AppConfigError::InvalidAcpInstallRoot { value, .. } => {
+                    AppConfigError::InvalidAcpInstallRoot {
                         path: Some(path.to_path_buf()),
                         value,
                     }
@@ -686,17 +682,15 @@ fn merge_runtime_config(
     if let Some(preference) = file_config.distribution_preference {
         let mut parsed = Vec::with_capacity(preference.len());
         for item in preference {
-            parsed.push(
-                RuntimeDistribution::parse(&item).map_err(|error| match error {
-                    AppConfigError::InvalidRuntimeDistribution { value, .. } => {
-                        AppConfigError::InvalidRuntimeDistribution {
-                            path: Some(path.to_path_buf()),
-                            value,
-                        }
+            parsed.push(AcpDistribution::parse(&item).map_err(|error| match error {
+                AppConfigError::InvalidAcpDistribution { value, .. } => {
+                    AppConfigError::InvalidAcpDistribution {
+                        path: Some(path.to_path_buf()),
+                        value,
                     }
-                    other => other,
-                })?,
-            );
+                }
+                other => other,
+            })?);
         }
         config.distribution_preference = parsed;
     }
@@ -713,7 +707,7 @@ fn merge_runtime_config(
 }
 
 fn merge_agent_server_config(
-    config: &mut RuntimeConfig,
+    config: &mut AcpConfig,
     server_id: String,
     file_server: FileAgentServerConfig,
     path: &Path,
@@ -772,29 +766,26 @@ fn user_config_directory() -> Option<PathBuf> {
     ProjectDirs::from("", "", "lumos").map(|dirs| dirs.config_dir().to_path_buf())
 }
 
-/// `write_runtime_enabled` 将 runtime enabled 开关写回来源配置。
-pub fn write_runtime_enabled(
+/// `write_acp_enabled` 将 acp enabled 开关写回来源配置。
+pub fn write_acp_enabled(source: &LoadedConfig, enabled: bool) -> Result<PathBuf, AppConfigError> {
+    write_acp_bool(source, "enabled", enabled)
+}
+
+/// `write_acp_auto_update_check` 将自动更新检查开关写回来源配置。
+pub fn write_acp_auto_update_check(
     source: &LoadedConfig,
     enabled: bool,
 ) -> Result<PathBuf, AppConfigError> {
-    write_runtime_bool(source, "enabled", enabled)
+    write_acp_bool(source, "auto_update_check", enabled)
 }
 
-/// `write_runtime_auto_update_check` 将自动更新检查开关写回来源配置。
-pub fn write_runtime_auto_update_check(
-    source: &LoadedConfig,
-    enabled: bool,
-) -> Result<PathBuf, AppConfigError> {
-    write_runtime_bool(source, "auto_update_check", enabled)
-}
-
-fn write_runtime_bool(
+fn write_acp_bool(
     source: &LoadedConfig,
     key: &str,
     enabled: bool,
 ) -> Result<PathBuf, AppConfigError> {
     let path = source
-        .runtime_source
+        .acp_source
         .clone()
         .or_else(|| source.user_acp_path.clone())
         .or_else(default_user_config_path)
@@ -872,9 +863,8 @@ fn validate_external_editor(command: &[String]) -> Result<(), AppConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RuntimeDistribution, RuntimeInstallRoot, UserInputStyle, load_from_paths,
-        load_with_lookups, load_with_sources_from_paths, write_runtime_auto_update_check,
-        write_runtime_enabled,
+        AcpDistribution, AcpInstallRoot, UserInputStyle, load_from_paths, load_with_lookups,
+        load_with_sources_from_paths, write_acp_auto_update_check, write_acp_enabled,
     };
     use std::{
         fs, io,
@@ -893,22 +883,22 @@ mod tests {
     }
 
     #[test]
-    fn load_defaults_to_disabled_runtime() {
-        let working_dir = temp_test_dir("load-runtime-default-working");
-        let user_config_dir = temp_test_dir("load-runtime-default-config");
+    fn load_defaults_to_disabled_acp() {
+        let working_dir = temp_test_dir("load-acp-default-working");
+        let user_config_dir = temp_test_dir("load-acp-default-config");
 
         let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
             .expect("missing config files should fall back to defaults");
 
-        assert!(!config.runtime.enabled);
-        assert_eq!(config.runtime.install_root, RuntimeInstallRoot::Config);
+        assert!(!config.acp.enabled);
+        assert_eq!(config.acp.install_root, AcpInstallRoot::Config);
         assert_eq!(
-            config.runtime.distribution_preference,
-            vec![RuntimeDistribution::Binary]
+            config.acp.distribution_preference,
+            vec![AcpDistribution::Binary]
         );
-        assert!(config.runtime.auto_update_check);
+        assert!(config.acp.auto_update_check);
         assert_eq!(
-            config.runtime.registry_url,
+            config.acp.registry_url,
             "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
         );
     }
@@ -933,8 +923,8 @@ mod tests {
     }
 
     #[test]
-    fn load_runtime_config_from_project_acp_config() {
-        let working_dir = temp_test_dir("load-runtime-project-working");
+    fn load_acp_config_from_project_acp_config() {
+        let working_dir = temp_test_dir("load-acp-project-working");
         write_config(
             &working_dir.join(".lumos").join("acp.toml"),
             r#"
@@ -954,19 +944,19 @@ env = { LUMOS_TEST = "1" }
         );
 
         let config = load_from_paths(Some(working_dir.as_path()), None)
-            .expect("runtime config should be loaded");
+            .expect("acp config should be loaded");
 
         let server = config
-            .runtime
+            .acp
             .agent_servers
             .get("kimi")
             .expect("kimi server should be configured");
 
-        assert!(config.runtime.enabled);
-        assert_eq!(config.runtime.install_root, RuntimeInstallRoot::Project);
-        assert!(!config.runtime.auto_update_check);
+        assert!(config.acp.enabled);
+        assert_eq!(config.acp.install_root, AcpInstallRoot::Project);
+        assert!(!config.acp.auto_update_check);
         assert_eq!(
-            config.runtime.registry_url,
+            config.acp.registry_url,
             "https://example.test/registry.json"
         );
         assert_eq!(server.agent, "kimi");
@@ -976,26 +966,26 @@ env = { LUMOS_TEST = "1" }
     }
 
     #[test]
-    fn load_rejects_runtime_table_in_main_config() {
-        let working_dir = temp_test_dir("load-runtime-main-config-ignored");
+    fn load_rejects_acp_table_in_main_config() {
+        let working_dir = temp_test_dir("load-acp-main-config-ignored");
         write_config(
             &working_dir.join(".lumos").join("config.toml"),
-            "[runtime]\nenabled = true\nagent = \"kimi\"\n",
+            "[acp]\nenabled = true\nagent = \"kimi\"\n",
         );
 
         let error = load_from_paths(Some(working_dir.as_path()), None)
-            .expect_err("runtime table in main config should be rejected");
+            .expect_err("acp table in main config should be rejected");
 
         assert!(
-            error.to_string().contains("unknown field `runtime`"),
+            error.to_string().contains("unknown field `acp`"),
             "unexpected error: {error}"
         );
     }
 
     #[test]
-    fn load_tracks_runtime_source() {
-        let working_dir = temp_test_dir("load-runtime-source-working");
-        let user_config_dir = temp_test_dir("load-runtime-source-config");
+    fn load_tracks_acp_source() {
+        let working_dir = temp_test_dir("load-acp-source-working");
+        let user_config_dir = temp_test_dir("load-acp-source-config");
         let user_config = user_config_dir.join("acp.toml");
         let project_config = working_dir.join(".lumos").join("acp.toml");
         write_config(&user_config, "[agent_servers.kimi]\ntype = \"registry\"\n");
@@ -1010,20 +1000,14 @@ env = { LUMOS_TEST = "1" }
         )
         .expect("config should load with source metadata");
 
-        assert_eq!(loaded.runtime_source, Some(project_config));
+        assert_eq!(loaded.acp_source, Some(project_config));
         assert_eq!(loaded.user_acp_path, Some(user_config));
-        assert!(
-            loaded
-                .config
-                .runtime
-                .agent_servers
-                .contains_key("codex-acp")
-        );
+        assert!(loaded.config.acp.agent_servers.contains_key("codex-acp"));
     }
 
     #[test]
-    fn write_runtime_enabled_preserves_existing_toml() {
-        let working_dir = temp_test_dir("write-runtime-enabled-working");
+    fn write_acp_enabled_preserves_existing_toml() {
+        let working_dir = temp_test_dir("write-acp-enabled-working");
         let project_config = working_dir.join(".lumos").join("acp.toml");
         write_config(
             &project_config,
@@ -1033,7 +1017,7 @@ env = { LUMOS_TEST = "1" }
             .expect("config should load");
 
         let written_path =
-            write_runtime_enabled(&loaded, false).expect("runtime enabled should be written back");
+            write_acp_enabled(&loaded, false).expect("acp enabled should be written back");
 
         assert_eq!(written_path, project_config);
         let content = fs::read_to_string(written_path).expect("config should be readable");
@@ -1043,9 +1027,9 @@ env = { LUMOS_TEST = "1" }
     }
 
     #[test]
-    fn write_runtime_auto_update_check_uses_runtime_source() {
-        let working_dir = temp_test_dir("write-runtime-update-working");
-        let user_config_dir = temp_test_dir("write-runtime-update-config");
+    fn write_acp_auto_update_check_uses_acp_source() {
+        let working_dir = temp_test_dir("write-acp-update-working");
+        let user_config_dir = temp_test_dir("write-acp-update-config");
         let user_config = user_config_dir.join("acp.toml");
         write_config(&user_config, "auto_update_check = true\n");
         let loaded = load_with_sources_from_paths(
@@ -1054,8 +1038,8 @@ env = { LUMOS_TEST = "1" }
         )
         .expect("config should load");
 
-        let written_path = write_runtime_auto_update_check(&loaded, false)
-            .expect("runtime auto update should be written back");
+        let written_path = write_acp_auto_update_check(&loaded, false)
+            .expect("acp auto update should be written back");
 
         assert_eq!(written_path, user_config);
         let content = fs::read_to_string(written_path).expect("config should be readable");

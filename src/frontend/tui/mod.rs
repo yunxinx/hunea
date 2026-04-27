@@ -6,9 +6,7 @@ mod benchmark;
 #[doc(hidden)]
 pub mod benchmark;
 
-mod acp_activity;
-mod acp_panel;
-mod acp_permission;
+mod acp;
 mod command_panel;
 mod composer;
 mod composer_mouse;

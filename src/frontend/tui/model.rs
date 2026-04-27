@@ -9,9 +9,7 @@ use crate::runtime::phrases::StatusPhraseOrder;
 
 use super::{
     HeroOptions, Sender,
-    acp_activity::AcpActivityState,
-    acp_panel::AcpPanelState,
-    acp_permission::PendingAcpPermission,
+    acp::{AcpActivityState, AcpPanelState, PendingAcpPermission},
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
     document::{
@@ -625,7 +623,7 @@ impl Model {
         status_line: &StatusLineRenderResult,
         command_panel: &super::command_panel::CommandPanelRenderResult,
         model_panel: &super::model_panel::ModelPanelRenderResult,
-        acp_panel: &super::acp_panel::AcpPanelRenderResult,
+        acp_panel: &super::acp::AcpPanelRenderResult,
     ) -> usize {
         let viewport_height = usize::from(self.height.max(1));
         let acp_activity = self.current_acp_activity_render_result();

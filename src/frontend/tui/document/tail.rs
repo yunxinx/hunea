@@ -4,7 +4,7 @@ use ratatui::text::Line;
 
 use crate::frontend::tui::{
     Model,
-    acp_panel::AcpPanelRenderResult,
+    acp::AcpPanelRenderResult,
     command_panel::CommandPanelRenderResult,
     composer,
     model_panel::ModelPanelRenderResult,

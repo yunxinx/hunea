@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     appconfig::{AgentServerConfig, AgentServerType},
-    runtime::registry::{
+    runtime::acp::registry::{
         model::RegistryDocument,
         resolve::{
             current_platform_target, resolve_binary_command, resolve_binary_command_for_server,

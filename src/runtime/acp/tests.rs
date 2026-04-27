@@ -1,17 +1,15 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    appconfig::{
-        AgentServerConfig, AgentServerType, RuntimeConfig, RuntimeDistribution, RuntimeInstallRoot,
-    },
-    runtime::session::{AcpSessionResolveError, resolve_session_command},
+    appconfig::{AcpConfig, AcpDistribution, AcpInstallRoot, AgentServerConfig, AgentServerType},
+    runtime::acp::{AcpSessionResolveError, resolve_session_command},
 };
 
 #[test]
 fn resolve_custom_agent_session_command() {
     let mut env = BTreeMap::new();
     env.insert("KIMI_AUTH".to_string(), "1".to_string());
-    let config = runtime_config_with_server(
+    let config = acp_config_with_server(
         "local-kimi",
         AgentServerConfig {
             server_type: AgentServerType::Custom,
@@ -37,7 +35,7 @@ fn resolve_custom_agent_session_command() {
 
 #[test]
 fn resolve_registry_agent_with_command_override_as_local_launch() {
-    let config = runtime_config_with_server(
+    let config = acp_config_with_server(
         "kimi",
         AgentServerConfig {
             server_type: AgentServerType::Registry,
@@ -59,7 +57,7 @@ fn resolve_registry_agent_with_command_override_as_local_launch() {
 
 #[test]
 fn resolve_registry_agent_without_installed_binary_requires_install() {
-    let config = runtime_config_with_server(
+    let config = acp_config_with_server(
         "kimi",
         AgentServerConfig {
             server_type: AgentServerType::Registry,
@@ -85,7 +83,7 @@ fn resolve_registry_agent_without_installed_binary_requires_install() {
 
 #[test]
 fn resolve_rejects_disabled_runtime() {
-    let mut config = runtime_config_with_server(
+    let mut config = acp_config_with_server(
         "local-kimi",
         AgentServerConfig {
             server_type: AgentServerType::Custom,
@@ -100,20 +98,20 @@ fn resolve_rejects_disabled_runtime() {
     config.enabled = false;
 
     let error = resolve_session_command(&config, "local-kimi")
-        .expect_err("disabled ACP runtime should not resolve commands");
+        .expect_err("disabled ACP should not resolve commands");
 
-    assert_eq!(error, AcpSessionResolveError::RuntimeDisabled);
+    assert_eq!(error, AcpSessionResolveError::AcpDisabled);
 }
 
-fn runtime_config_with_server(server_id: &str, server: AgentServerConfig) -> RuntimeConfig {
+fn acp_config_with_server(server_id: &str, server: AgentServerConfig) -> AcpConfig {
     let mut agent_servers = BTreeMap::new();
     agent_servers.insert(server_id.to_string(), server);
-    RuntimeConfig {
+    AcpConfig {
         enabled: true,
         registry_url: "https://example.test/registry.json".to_string(),
-        install_root: RuntimeInstallRoot::Config,
+        install_root: AcpInstallRoot::Config,
         custom_install_dir: std::path::PathBuf::new(),
-        distribution_preference: vec![RuntimeDistribution::Binary],
+        distribution_preference: vec![AcpDistribution::Binary],
         auto_update_check: true,
         agent_servers,
     }
@@ -146,17 +144,17 @@ fn catalog_keeps_directly_launchable_agents_only() {
             default_mode: None,
         },
     );
-    let config = RuntimeConfig {
+    let config = AcpConfig {
         enabled: true,
         registry_url: "https://example.test/registry.json".to_string(),
-        install_root: RuntimeInstallRoot::Config,
+        install_root: AcpInstallRoot::Config,
         custom_install_dir: std::path::PathBuf::new(),
-        distribution_preference: vec![RuntimeDistribution::Binary],
+        distribution_preference: vec![AcpDistribution::Binary],
         auto_update_check: true,
         agent_servers,
     };
 
-    let catalog = crate::runtime::session::AcpSessionCatalog::from_runtime_config(&config);
+    let catalog = crate::runtime::acp::AcpSessionCatalog::from_acp_config(&config);
 
     assert!(catalog.command("local-kimi").is_some());
     assert!(catalog.command("registry-kimi").is_none());
@@ -185,7 +183,7 @@ async fn initialize_agent_over_acp_transport_returns_agent_info() {
             .await
     });
 
-    let outcome = crate::runtime::session::initialize_agent_transport(client_transport)
+    let outcome = crate::runtime::acp::initialize_agent_transport(client_transport)
         .await
         .expect("initialize should succeed");
 
@@ -196,7 +194,7 @@ async fn initialize_agent_over_acp_transport_returns_agent_info() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn initialize_agent_command_reports_spawn_failure() {
-    let command = crate::runtime::session::AcpSessionCommand {
+    let command = crate::runtime::acp::AcpSessionCommand {
         agent_id: "missing".to_string(),
         command: "lumos-definitely-missing-acp-agent".to_string(),
         args: Vec::new(),
@@ -205,7 +203,7 @@ async fn initialize_agent_command_reports_spawn_failure() {
         default_mode: None,
     };
 
-    let error = crate::runtime::session::initialize_agent_command(&command)
+    let error = crate::runtime::acp::initialize_agent_command(&command)
         .await
         .expect_err("missing command should fail before protocol handshake");
 

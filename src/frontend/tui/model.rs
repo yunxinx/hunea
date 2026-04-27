@@ -5,6 +5,7 @@ use ratatui::Frame;
 
 use crate::envinfo;
 use crate::runtime::models::{ModelCatalog, ModelSelection};
+use crate::runtime::phrases::StatusPhraseOrder;
 
 use super::{
     HeroOptions, Sender,
@@ -21,6 +22,7 @@ use super::{
     model_panel::ModelPanelState,
     selection::{AutoScrollDirection, MousePosition, SelectionClickState, SelectionState},
     status_line::{StatusLineItem, StatusLineRenderResult},
+    status_phrases::{StatusPhraseSelector, default_status_phrases},
     style_mode::StyleMode,
     theme::{TerminalPalette, default_palette},
     transcript::{RenderResult, Transcript, TranscriptEstimateBreakdown, index_only_render_result},
@@ -45,6 +47,7 @@ pub struct Model {
     pub(super) model_panel: ModelPanelState,
     pub(super) pending_acp_permission: Option<PendingAcpPermission>,
     pub(super) acp_activity: Option<AcpActivityState>,
+    pub(super) status_phrase_selector: StatusPhraseSelector,
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
     pub(super) copy_on_mouse_selection_release: bool,
@@ -140,6 +143,8 @@ pub struct ModelOptions {
     pub model_catalog: ModelCatalog,
     pub selected_model: Option<ModelSelection>,
     pub requires_model_selection: bool,
+    pub status_phrases: Vec<String>,
+    pub status_phrase_order: StatusPhraseOrder,
 }
 
 impl Default for ModelOptions {
@@ -157,6 +162,8 @@ impl Default for ModelOptions {
             model_catalog: ModelCatalog::default(),
             selected_model: None,
             requires_model_selection: false,
+            status_phrases: default_status_phrases(),
+            status_phrase_order: StatusPhraseOrder::Random,
         }
     }
 }
@@ -217,6 +224,10 @@ impl Model {
             model_panel: ModelPanelState::default(),
             pending_acp_permission: None,
             acp_activity: None,
+            status_phrase_selector: StatusPhraseSelector::new(
+                options.status_phrases,
+                options.status_phrase_order,
+            ),
             command_panel_selected: 0,
             command_panel_scroll: 0,
             copy_on_mouse_selection_release: options.copy_on_mouse_selection_release,

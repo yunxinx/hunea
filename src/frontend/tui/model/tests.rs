@@ -7,6 +7,7 @@ use crate::frontend::tui::{
 use crate::runtime::models::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
+use crate::runtime::phrases::StatusPhraseOrder;
 
 fn progressive_exactization_fixture() -> Model {
     let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
@@ -979,7 +980,14 @@ fn acp_permission_reject_key_returns_reject_option() {
 
 #[test]
 fn acp_activity_line_uses_dynamic_codex_style_indicator() {
-    let mut model = Model::new(HeroOptions::default());
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_phrases: vec!["Cooking".to_string()],
+            status_phrase_order: StatusPhraseOrder::Cycle,
+            ..ModelOptions::default()
+        },
+    );
     model.set_window(50, 6);
     model.set_palette(default_palette(), true);
     model.show_acp_activity("Kimi Code CLI");
@@ -993,16 +1001,46 @@ fn acp_activity_line_uses_dynamic_codex_style_indicator() {
         )
         .plain_line;
 
-    assert!(first.contains("Working (0s)"));
-    assert!(first.starts_with("  • Working (0s)"));
+    assert!(first.contains("Cooking (0s)"));
+    assert!(first.starts_with("  • Cooking (0s)"));
     assert!(!first.contains("Kimi Code CLI"));
     assert!(!first.contains('⠋'));
-    assert_ne!(first, second);
+    assert_eq!(first, second);
+}
+
+#[test]
+fn acp_activity_line_cycles_configured_fallback_phrases() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_phrases: vec!["Cooking".to_string(), "Crafting".to_string()],
+            status_phrase_order: StatusPhraseOrder::Cycle,
+            ..ModelOptions::default()
+        },
+    );
+    model.set_window(50, 6);
+    model.set_palette(default_palette(), true);
+
+    model.show_acp_activity("qwen3");
+    let first = model.current_acp_activity_render_result().plain_line;
+    model.clear_acp_activity();
+    model.show_acp_activity("qwen3");
+    let second = model.current_acp_activity_render_result().plain_line;
+
+    assert!(first.contains("Cooking (0s)"));
+    assert!(second.contains("Crafting (0s)"));
 }
 
 #[test]
 fn acp_activity_line_renders_above_composer() {
-    let mut model = Model::new(HeroOptions::default());
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_phrases: vec!["Cooking".to_string()],
+            status_phrase_order: StatusPhraseOrder::Cycle,
+            ..ModelOptions::default()
+        },
+    );
     model.transcript_mut().clear();
     model.set_window(40, 6);
     model.set_palette(default_palette(), true);
@@ -1016,7 +1054,13 @@ fn acp_activity_line_renders_above_composer() {
         .first()
         .map(|line| line.trim())
         .unwrap_or_default();
-    assert!(activity_line.contains("Working"));
+    assert!(activity_line.contains("Cooking"));
     assert!(!activity_line.contains("Kimi Code CLI"));
-    assert!(layout.composer_slot.content_start_line > 0);
+    assert_eq!(
+        layout.tail.text_lines.get(1).map(String::as_str),
+        Some(""),
+        "activity indicator should breathe before the composer"
+    );
+    assert_eq!(layout.composer_slot.frame_start_line, 2);
+    assert!(layout.composer_slot.content_start_line > layout.composer_slot.frame_start_line);
 }

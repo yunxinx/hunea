@@ -426,17 +426,36 @@ struct NativeChatRuntimeState {
     receiver: Option<Receiver<NativeChatEvent>>,
 }
 
+const NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS: usize = 3;
+const NATIVE_CHAT_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(500);
+
 impl NativeChatRuntimeState {
     fn start(&mut self, request: NativeChatRequest) {
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let event = match send_chat_completion(&request) {
-                Ok(content) => NativeChatEvent::Finished { content },
-                Err(error) => NativeChatEvent::Failed {
-                    message: error.to_string(),
-                },
-            };
-            let _ = sender.send(event);
+            for attempt in 0..=NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS {
+                match send_chat_completion(&request) {
+                    Ok(content) => {
+                        let _ = sender.send(NativeChatEvent::Finished { content });
+                        return;
+                    }
+                    Err(_error) if attempt < NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS => {
+                        let retry = attempt + 1;
+                        let _ = sender.send(NativeChatEvent::Retrying {
+                            message: format!(
+                                "Reconnecting... {retry}/{NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS}"
+                            ),
+                        });
+                        thread::sleep(reconnect_delay(retry));
+                    }
+                    Err(error) => {
+                        let _ = sender.send(NativeChatEvent::Failed {
+                            message: error.to_string(),
+                        });
+                        return;
+                    }
+                }
+            }
         });
         self.receiver = Some(receiver);
     }
@@ -453,7 +472,9 @@ impl NativeChatRuntimeState {
         let receiver = self.receiver.as_ref()?;
         match receiver.try_recv() {
             Ok(event) => {
-                self.receiver = None;
+                if event.is_terminal() {
+                    self.receiver = None;
+                }
                 Some(event)
             }
             Err(mpsc::TryRecvError::Empty) => None,
@@ -469,8 +490,19 @@ impl NativeChatRuntimeState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NativeChatEvent {
+    Retrying { message: String },
     Finished { content: String },
     Failed { message: String },
+}
+
+impl NativeChatEvent {
+    fn is_terminal(&self) -> bool {
+        matches!(self, Self::Finished { .. } | Self::Failed { .. })
+    }
+}
+
+fn reconnect_delay(retry: usize) -> Duration {
+    NATIVE_CHAT_RECONNECT_BASE_DELAY.saturating_mul(retry as u32)
 }
 
 fn drain_native_chat_runtime_events(
@@ -483,12 +515,16 @@ fn drain_native_chat_runtime_events(
 }
 
 fn apply_native_chat_event(model: &mut Model, event: NativeChatEvent) {
-    model.clear_acp_activity();
     match event {
+        NativeChatEvent::Retrying { message } => {
+            model.show_acp_activity_with_header(message);
+        }
         NativeChatEvent::Finished { content } => {
+            model.clear_acp_activity();
             model.append_assistant_message_from_runtime(content);
         }
         NativeChatEvent::Failed { message } => {
+            model.clear_acp_activity();
             model.append_system_message_from_runtime(format!("Chat failed: {message}"));
         }
     }
@@ -1192,6 +1228,60 @@ mod tests {
         );
         assert!(model.current_status_notice_text().is_empty());
         assert!(!model.current_acp_activity_render_result().has_content);
+    }
+
+    #[test]
+    fn native_chat_retry_event_shows_reconnecting_activity() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.show_acp_activity("qwen3");
+
+        apply_native_chat_event(
+            &mut model,
+            NativeChatEvent::Retrying {
+                message: "Reconnecting... 1/3".to_string(),
+            },
+        );
+
+        let activity = model.current_acp_activity_render_result().plain_line;
+        assert!(activity.contains("Reconnecting... 1/3"));
+        assert!(model.transcript_plain_items().is_empty());
+    }
+
+    #[test]
+    fn native_chat_runtime_keeps_receiver_after_retry_event() {
+        let (sender, receiver) = mpsc::channel();
+        let mut runtime = NativeChatRuntimeState {
+            receiver: Some(receiver),
+        };
+
+        sender
+            .send(NativeChatEvent::Retrying {
+                message: "Reconnecting... 1/3".to_string(),
+            })
+            .expect("retry event should be queued");
+
+        assert_eq!(
+            runtime.try_recv_event(),
+            Some(NativeChatEvent::Retrying {
+                message: "Reconnecting... 1/3".to_string(),
+            })
+        );
+        assert!(runtime.is_running());
+
+        sender
+            .send(NativeChatEvent::Finished {
+                content: "完成".to_string(),
+            })
+            .expect("finish event should be queued");
+
+        assert_eq!(
+            runtime.try_recv_event(),
+            Some(NativeChatEvent::Finished {
+                content: "完成".to_string(),
+            })
+        );
+        assert!(!runtime.is_running());
     }
 
     #[test]

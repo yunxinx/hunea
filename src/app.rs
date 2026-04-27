@@ -10,6 +10,7 @@ use crate::{
     },
     runtime::{
         models::{self, LoadedModelCatalog},
+        phrases::{self, LoadedStatusPhrases},
         session::AcpSessionCatalog,
     },
 };
@@ -30,9 +31,10 @@ pub fn run_with_writer<W: Write>(
     tui_config: &TuiConfig,
 ) -> Result<()> {
     let loaded_models = models::load().wrap_err("failed to load model config")?;
+    let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
     let model = tui::run_with_runtime_options(
         HeroOptions::default(),
-        model_options_from_config_and_models(tui_config, &loaded_models),
+        model_options_from_config_and_models(tui_config, &loaded_models, &loaded_phrases),
         RuntimeOptions {
             model_config_path: loaded_models.source_path.clone(),
             ..RuntimeOptions::default()
@@ -49,9 +51,10 @@ pub fn run_with_config_writer<W: Write>(
     config: &Config,
 ) -> Result<()> {
     let loaded_models = models::load().wrap_err("failed to load model config")?;
+    let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
     let model = tui::run_with_runtime_options(
         HeroOptions::default(),
-        model_options_from_app_config_and_models(config, &loaded_models),
+        model_options_from_app_config_and_models(config, &loaded_models, &loaded_phrases),
         runtime_options_from_app_config_and_models(config, &loaded_models),
     )
     .wrap_err("failed to run tui application")?;
@@ -121,12 +124,20 @@ fn style_mode_from_config(style: UserInputStyle) -> StyleMode {
 
 #[cfg(test)]
 fn model_options_from_config(tui_config: &TuiConfig) -> ModelOptions {
-    model_options_from_config_and_models(tui_config, &LoadedModelCatalog::default())
+    model_options_from_config_and_models(
+        tui_config,
+        &LoadedModelCatalog::default(),
+        &LoadedStatusPhrases::default(),
+    )
 }
 
 #[cfg(test)]
 fn model_options_from_app_config(config: &Config) -> ModelOptions {
-    model_options_from_app_config_and_models(config, &LoadedModelCatalog::default())
+    model_options_from_app_config_and_models(
+        config,
+        &LoadedModelCatalog::default(),
+        &LoadedStatusPhrases::default(),
+    )
 }
 
 #[cfg(test)]
@@ -137,15 +148,22 @@ fn runtime_options_from_app_config(config: &Config) -> RuntimeOptions {
 fn model_options_from_config_and_models(
     tui_config: &TuiConfig,
     loaded_models: &LoadedModelCatalog,
+    loaded_phrases: &LoadedStatusPhrases,
 ) -> ModelOptions {
-    model_options_from_configs(tui_config, None, loaded_models)
+    model_options_from_configs(tui_config, None, loaded_models, loaded_phrases)
 }
 
 fn model_options_from_app_config_and_models(
     config: &Config,
     loaded_models: &LoadedModelCatalog,
+    loaded_phrases: &LoadedStatusPhrases,
 ) -> ModelOptions {
-    model_options_from_configs(&config.tui, Some(&config.runtime), loaded_models)
+    model_options_from_configs(
+        &config.tui,
+        Some(&config.runtime),
+        loaded_models,
+        loaded_phrases,
+    )
 }
 
 fn runtime_options_from_app_config_and_models(
@@ -162,6 +180,7 @@ fn model_options_from_configs(
     tui_config: &TuiConfig,
     runtime_config: Option<&RuntimeConfig>,
     loaded_models: &LoadedModelCatalog,
+    loaded_phrases: &LoadedStatusPhrases,
 ) -> ModelOptions {
     ModelOptions {
         style_mode: style_mode_from_config(tui_config.user_input_style),
@@ -176,6 +195,8 @@ fn model_options_from_configs(
         model_catalog: loaded_models.catalog.clone(),
         selected_model: loaded_models.selected_model.clone(),
         requires_model_selection: loaded_models.requires_model_selection,
+        status_phrases: loaded_phrases.phrases.clone(),
+        status_phrase_order: loaded_phrases.order,
     }
 }
 

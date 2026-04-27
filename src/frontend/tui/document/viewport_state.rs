@@ -262,6 +262,7 @@ fn view_anchor_priority(anchor: DocumentLineAnchor) -> usize {
         | DocumentAnchorRegion::ModelPanel
         | DocumentAnchorRegion::StatusLine => 2,
         DocumentAnchorRegion::TranscriptComposerGap
+        | DocumentAnchorRegion::AcpActivityComposerGap
         | DocumentAnchorRegion::ComposerStatusGap
         | DocumentAnchorRegion::ComposerPadding => 3,
         DocumentAnchorRegion::Transcript => 4,

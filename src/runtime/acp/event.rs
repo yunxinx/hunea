@@ -1,5 +1,21 @@
 use super::AcpPermissionRequest;
 
+/// `AcpModelOption` 表示 ACP agent 暴露的一个模型配置选项。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpModelOption {
+    pub value: String,
+    pub name: String,
+}
+
+/// `AcpModelConfig` 表示 ACP session 当前的模型选择器状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpModelConfig {
+    pub config_id: String,
+    pub current_value: String,
+    pub current_name: String,
+    pub options: Vec<AcpModelOption>,
+}
+
 /// `AcpInitializeOutcome` 表示 ACP initialize 握手后的 agent 基本信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpInitializeOutcome {
@@ -28,6 +44,18 @@ pub enum AcpSessionEvent {
     AgentMessageChunk {
         agent_id: String,
         content: String,
+    },
+    AgentThoughtChunk {
+        agent_id: String,
+        content: String,
+    },
+    ModelConfigChanged {
+        agent_id: String,
+        config: AcpModelConfig,
+    },
+    ConfigChangeFailed {
+        agent_id: String,
+        message: String,
     },
     PromptResponse {
         agent_id: String,

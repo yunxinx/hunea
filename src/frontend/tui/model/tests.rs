@@ -1244,6 +1244,64 @@ fn enter_during_native_chat_activity_does_not_append_unsent_message() {
 }
 
 #[test]
+fn enter_acp_prompt_starts_activity_before_worker_ack() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_phrases: vec!["Submitted".to_string()],
+            status_phrase_order: StatusPhraseOrder::Cycle,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    model.composer_mut().insert_text("hello acp");
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::SendAcpPrompt {
+            agent_id: "Kimi Code CLI".to_string(),
+            prompt: "hello acp".to_string(),
+        })
+    );
+    assert!(
+        model
+            .current_acp_activity_render_result()
+            .plain_line
+            .contains("Submitted (0s")
+    );
+}
+
+#[test]
+fn current_model_status_line_falls_back_to_selected_acp_agent() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            )]),
+            ..ModelOptions::default()
+        },
+    );
+
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+
+    assert_eq!(
+        model.current_status_line_parts(),
+        vec!["Kimi Code CLI".to_string()]
+    );
+}
+
+#[test]
 fn acp_activity_line_shows_interrupt_hint() {
     let mut model = Model::new(HeroOptions::default());
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());

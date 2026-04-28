@@ -195,6 +195,7 @@ impl ModelSelection {
 pub enum ModelSource {
     Configured,
     Synced,
+    Acp,
 }
 
 impl ModelSource {
@@ -203,6 +204,7 @@ impl ModelSource {
         match self {
             Self::Configured => "configured",
             Self::Synced => "synced from /v1/models",
+            Self::Acp => "provided by ACP agent",
         }
     }
 }

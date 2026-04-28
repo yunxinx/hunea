@@ -12,6 +12,7 @@ use super::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, inline_panel_visible_rows, wrap_inline_text,
     },
+    model::acp_model_provider_id,
     theme::{
         command_accent_text_style, primary_text_style, secondary_text_style, surface_text_style,
         tertiary_text_style,
@@ -128,7 +129,7 @@ impl Model {
         inline_panel_visible_rows(self, MODEL_PANEL_VISIBLE_ROWS)
     }
 
-    fn sync_model_panel_to_selection(&mut self) {
+    pub(crate) fn sync_model_panel_to_selection(&mut self) {
         let provider_count = self.model_catalog.enabled_provider_count();
         if provider_count == 0 {
             self.model_panel.provider_index = 0;
@@ -249,10 +250,30 @@ impl Model {
     fn select_current_model_panel_model(&mut self) -> Option<AppEffect> {
         let provider = self.active_model_panel_provider()?;
         let model = provider.models.get(self.model_panel.model_index)?;
+        let provider_id = provider.id.clone();
+        let model_id = model.id.clone();
+        let model_label = model
+            .description
+            .clone()
+            .unwrap_or_else(|| model_id.clone());
 
-        let selection = ModelSelection::new(provider.id.clone(), model.id.clone());
+        let selection = ModelSelection::new(provider_id.clone(), model_id.clone());
         self.selected_model = Some(selection.clone());
         self.bump_status_line_revision();
+        if self
+            .selected_acp_agent
+            .as_ref()
+            .is_some_and(|agent_id| provider_id == acp_model_provider_id(agent_id))
+        {
+            let config_id = self.acp_model_config_id.clone()?;
+            self.set_acp_current_model(Some(model_label.clone()));
+            self.show_transient_status_notice(&format!("ACP model selected: {model_label}"));
+            self.close_model_panel();
+            return Some(AppEffect::SetAcpModel {
+                config_id,
+                value: model_id,
+            });
+        }
         self.show_transient_status_notice(&format!("Model selected: {}", selection.display_name()));
         self.close_model_panel();
         Some(AppEffect::PersistSelectedModel { selection })
@@ -261,6 +282,10 @@ impl Model {
     fn refresh_current_model_panel_provider(&mut self) -> Option<AppEffect> {
         let (request, display_name) = {
             let provider = self.active_model_panel_provider()?;
+            if provider.source == ModelSource::Acp {
+                self.show_transient_status_notice("ACP models are managed by the agent");
+                return None;
+            }
             (provider.sync_request(), provider.display_name.clone())
         };
         self.show_transient_status_notice(&format!("Refreshing models: {display_name}"));
@@ -568,6 +593,7 @@ fn wrapping_index(current: usize, len: usize, delta: isize) -> usize {
 mod tests {
     use super::*;
     use crate::frontend::tui::{HeroOptions, ModelOptions};
+    use crate::runtime::acp::{AcpModelConfig, AcpModelOption};
     use crate::runtime::models::{ModelCatalog, ModelProvider, ModelSource, ProviderKind};
 
     #[test]
@@ -597,6 +623,61 @@ mod tests {
         assert_eq!(model.selected_model, None);
         assert_eq!(model.model_panel.model_index, 0);
         assert_eq!(model.model_panel.scroll, 0);
+    }
+
+    #[test]
+    fn acp_model_panel_selects_agent_model_without_persisting_native_default() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                    "local",
+                    ProviderKind::OpenAiCompatible,
+                    "Local",
+                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    ModelSource::Configured,
+                    vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+                )]),
+                selected_model: Some(ModelSelection::new("local", "qwen3")),
+                ..ModelOptions::default()
+            },
+        );
+        model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+        model.apply_acp_model_config(
+            "Kimi Code CLI",
+            AcpModelConfig {
+                config_id: "model".to_string(),
+                current_value: "kimi-k2".to_string(),
+                current_name: "Kimi K2".to_string(),
+                options: vec![
+                    AcpModelOption {
+                        value: "kimi-k2".to_string(),
+                        name: "Kimi K2".to_string(),
+                    },
+                    AcpModelOption {
+                        value: "kimi-k1.5".to_string(),
+                        name: "Kimi K1.5".to_string(),
+                    },
+                ],
+            },
+        );
+        model.open_model_panel();
+        model.move_model_panel_model(1);
+
+        let effect = model.select_current_model_panel_model();
+
+        assert_eq!(
+            effect,
+            Some(AppEffect::SetAcpModel {
+                config_id: "model".to_string(),
+                value: "kimi-k1.5".to_string(),
+            })
+        );
+        assert_eq!(
+            model.selected_model,
+            Some(ModelSelection::new("acp:Kimi Code CLI", "kimi-k1.5"))
+        );
+        assert_eq!(model.acp_current_model.as_deref(), Some("Kimi K1.5"));
     }
 
     #[test]

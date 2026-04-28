@@ -5,8 +5,11 @@ use ratatui::Frame;
 
 use crate::envinfo;
 use crate::runtime::llm::NativeChatResponse;
-use crate::runtime::models::{ModelCatalog, ModelSelection};
 use crate::runtime::phrases::StatusPhraseOrder;
+use crate::runtime::{
+    acp::AcpModelConfig,
+    models::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind},
+};
 
 use super::{
     HeroOptions, ReasoningDisplayMode, Sender,
@@ -40,6 +43,8 @@ pub struct Model {
     pub(super) external_editor_helper_enabled: bool,
     pub(super) acp_agent_servers: Vec<String>,
     pub(super) selected_acp_agent: Option<String>,
+    pub(super) acp_current_model: Option<String>,
+    pub(super) acp_model_config_id: Option<String>,
     pub(super) acp_panel: AcpPanelState,
     pub(super) model_catalog: ModelCatalog,
     pub(super) selected_model: Option<ModelSelection>,
@@ -195,6 +200,10 @@ impl Default for ModelOptions {
     }
 }
 
+pub(crate) fn acp_model_provider_id(agent_id: &str) -> String {
+    format!("acp:{agent_id}")
+}
+
 /// `TranscriptSyncProfile` 记录一次 transcript sync 在首帧前的关键耗时拆分。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct TranscriptSyncProfile {
@@ -244,6 +253,8 @@ impl Model {
             external_editor_helper_enabled: options.show_external_editor_helper,
             acp_agent_servers: options.acp_agent_servers,
             selected_acp_agent: None,
+            acp_current_model: None,
+            acp_model_config_id: None,
             acp_panel: AcpPanelState::default(),
             model_catalog: options.model_catalog,
             selected_model,
@@ -490,6 +501,84 @@ impl Model {
         self.sync_transcript_render();
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+    }
+
+    pub(crate) fn append_acp_response_from_runtime(
+        &mut self,
+        content: impl Into<String>,
+        reasoning_content: Option<String>,
+        reasoning_duration: Option<std::time::Duration>,
+    ) {
+        let content = content.into();
+        let reasoning_content = reasoning_content
+            .filter(|content| !content.trim().is_empty())
+            .unwrap_or_default();
+
+        if self.show_reasoning_content && !reasoning_content.is_empty() {
+            self.append_assistant_message_with_reasoning_from_runtime(
+                content,
+                reasoning_content,
+                reasoning_duration,
+            );
+            return;
+        }
+
+        self.append_assistant_message_from_runtime(content);
+    }
+
+    pub(crate) fn activate_acp_model_scope(&mut self, agent_id: &str) {
+        let provider_id = acp_model_provider_id(agent_id);
+        self.model_catalog = ModelCatalog::new(vec![ModelProvider::new(
+            provider_id,
+            ProviderKind::OpenAiCompatible,
+            format!("ACP: {agent_id}"),
+            None,
+            ModelSource::Acp,
+            Vec::new(),
+        )]);
+        self.selected_model = None;
+        self.acp_current_model = None;
+        self.acp_model_config_id = None;
+        self.bump_status_line_revision();
+        self.sync_model_panel_to_selection();
+    }
+
+    pub(crate) fn apply_acp_model_config(&mut self, agent_id: &str, config: AcpModelConfig) {
+        let provider_id = acp_model_provider_id(agent_id);
+        let display_name = format!("ACP: {agent_id}");
+        let mut entries = config
+            .options
+            .into_iter()
+            .filter_map(|option| {
+                let value = option.value.trim().to_string();
+                if value.is_empty() {
+                    return None;
+                }
+                let description = (option.name.trim() != value).then_some(option.name);
+                Some(ModelEntry::new(value, description, ModelSource::Acp))
+            })
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            entries.push(ModelEntry::new(
+                config.current_value.clone(),
+                (config.current_name.trim() != config.current_value)
+                    .then_some(config.current_name.clone()),
+                ModelSource::Acp,
+            ));
+        }
+
+        self.model_catalog = ModelCatalog::new(vec![ModelProvider::new(
+            provider_id.clone(),
+            ProviderKind::OpenAiCompatible,
+            display_name,
+            None,
+            ModelSource::Acp,
+            entries,
+        )]);
+        self.selected_model = Some(ModelSelection::new(provider_id, config.current_value));
+        self.set_acp_current_model(Some(config.current_name));
+        self.acp_model_config_id = Some(config.config_id);
+        self.sync_model_panel_to_selection();
     }
 
     pub(crate) fn append_native_chat_response_from_runtime(

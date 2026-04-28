@@ -7,8 +7,12 @@ use std::{
     },
 };
 
+use agent_client_protocol::schema::{
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions,
+};
+
 use super::{
-    AcpSessionCommand, AcpSessionEvent,
+    AcpModelConfig, AcpModelOption, AcpSessionCommand, AcpSessionEvent,
     handshake::initialize_outcome_from_response,
     permission::{AcpPermissionRegistry, acp_permission_request_from_sdk},
     worker::AcpWorkerCommand,
@@ -122,7 +126,7 @@ pub(crate) async fn run_agent_transport_worker<T>(
 where
     T: agent_client_protocol::ConnectTo<agent_client_protocol::Client> + 'static,
 {
-    use acp::schema::{Implementation, InitializeRequest, ProtocolVersion};
+    use acp::schema::{Implementation, InitializeRequest, NewSessionRequest, ProtocolVersion};
     use agent_client_protocol as acp;
 
     acp::Client
@@ -136,11 +140,16 @@ where
                 .block_task()
                 .await?;
             let outcome = initialize_outcome_from_response(response);
-            let mut session = connection
-                .build_session_cwd()?
+            let cwd = std::env::current_dir().map_err(|error| {
+                acp::Error::internal_error().data(format!("cannot get current directory: {error}"))
+            })?;
+            let session_response = connection
+                .send_request_to(acp::Agent, NewSessionRequest::new(cwd))
                 .block_task()
-                .start_session()
                 .await?;
+            let initial_model_config =
+                acp_model_config_from_config_options(session_response.config_options.as_deref());
+            let mut session = connection.attach_session(session_response, Vec::new())?;
             let session_id = session.session_id().to_string();
             started.store(true, Ordering::SeqCst);
             event_tx
@@ -150,6 +159,14 @@ where
                     outcome,
                 })
                 .map_err(|_| acp::Error::internal_error())?;
+            if let Some(config) = initial_model_config {
+                event_tx
+                    .send(AcpSessionEvent::ModelConfigChanged {
+                        agent_id: agent_id.clone(),
+                        config,
+                    })
+                    .map_err(|_| acp::Error::internal_error())?;
+            }
 
             run_agent_prompt_loop(
                 agent_id.clone(),
@@ -222,6 +239,26 @@ async fn run_agent_prompt_loop(
                     }
                 }
             }
+            AcpWorkerCommand::SetConfigOption { config_id, value } => {
+                match set_session_config_option(session, &config_id, &value).await {
+                    Ok(config_options) => {
+                        if let Some(config) =
+                            acp_model_config_from_config_options(Some(&config_options))
+                        {
+                            let _ = event_tx.send(AcpSessionEvent::ModelConfigChanged {
+                                agent_id: agent_id.clone(),
+                                config,
+                            });
+                        }
+                    }
+                    Err(message) => {
+                        let _ = event_tx.send(AcpSessionEvent::ConfigChangeFailed {
+                            agent_id: agent_id.clone(),
+                            message,
+                        });
+                    }
+                }
+            }
             AcpWorkerCommand::Shutdown => break,
         }
     }
@@ -235,8 +272,9 @@ async fn read_prompt_response(
     cancel_rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
 ) -> Result<AcpPromptReadOutcome, String> {
     use acp::schema::{
-        ContentBlock, ContentChunk, RequestPermissionOutcome, RequestPermissionRequest,
-        RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
+        ConfigOptionUpdate, ContentBlock, ContentChunk, RequestPermissionOutcome,
+        RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+        SessionNotification, SessionUpdate,
     };
     use agent_client_protocol as acp;
     use agent_client_protocol::{SessionMessage, util::MatchDispatch};
@@ -263,15 +301,39 @@ async fn read_prompt_response(
                 let permission_registry = permissions.clone();
                 MatchDispatch::new(dispatch)
                     .if_notification(async |notification: SessionNotification| {
-                        if let SessionUpdate::AgentMessageChunk(ContentChunk {
-                            content: ContentBlock::Text(text),
-                            ..
-                        }) = notification.update
-                        {
-                            let _ = event_tx.send(AcpSessionEvent::AgentMessageChunk {
-                                agent_id: agent_id.to_string(),
-                                content: text.text,
-                            });
+                        match notification.update {
+                            SessionUpdate::AgentMessageChunk(ContentChunk {
+                                content: ContentBlock::Text(text),
+                                ..
+                            }) => {
+                                let _ = event_tx.send(AcpSessionEvent::AgentMessageChunk {
+                                    agent_id: agent_id.to_string(),
+                                    content: text.text,
+                                });
+                            }
+                            SessionUpdate::AgentThoughtChunk(ContentChunk {
+                                content: ContentBlock::Text(text),
+                                ..
+                            }) => {
+                                let _ = event_tx.send(AcpSessionEvent::AgentThoughtChunk {
+                                    agent_id: agent_id.to_string(),
+                                    content: text.text,
+                                });
+                            }
+                            SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate {
+                                config_options,
+                                ..
+                            }) => {
+                                if let Some(config) =
+                                    acp_model_config_from_config_options(Some(&config_options))
+                                {
+                                    let _ = event_tx.send(AcpSessionEvent::ModelConfigChanged {
+                                        agent_id: agent_id.to_string(),
+                                        config,
+                                    });
+                                }
+                            }
+                            _ => {}
                         }
                         Ok(())
                     })
@@ -305,6 +367,83 @@ async fn read_prompt_response(
             }
             _ => {}
         }
+    }
+}
+
+async fn set_session_config_option(
+    session: &mut agent_client_protocol::ActiveSession<'static, agent_client_protocol::Agent>,
+    config_id: &str,
+    value: &str,
+) -> Result<Vec<SessionConfigOption>, String> {
+    use acp::schema::SetSessionConfigOptionRequest;
+    use agent_client_protocol as acp;
+
+    let response = session
+        .connection()
+        .send_request_to(
+            acp::Agent,
+            SetSessionConfigOptionRequest::new(
+                session.session_id().clone(),
+                config_id.to_string(),
+                value.to_string(),
+            ),
+        )
+        .block_task()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(response.config_options)
+}
+
+fn acp_model_config_from_config_options(
+    options: Option<&[SessionConfigOption]>,
+) -> Option<AcpModelConfig> {
+    let option = options?
+        .iter()
+        .filter(|option| {
+            matches!(option.category, Some(SessionConfigOptionCategory::Model))
+                || option.id.to_string() == "model"
+        })
+        .find(|option| matches!(option.kind, SessionConfigKind::Select(_)))?;
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    let current_value = select.current_value.to_string();
+    let current_value = current_value.trim().to_string();
+    if current_value.is_empty() {
+        return None;
+    }
+    let options = model_options_from_select_options(&select.options);
+    let current_name = options
+        .iter()
+        .find(|option| option.value == current_value)
+        .map(|option| option.name.clone())
+        .unwrap_or_else(|| current_value.clone());
+    Some(AcpModelConfig {
+        config_id: option.id.to_string(),
+        current_value,
+        current_name,
+        options,
+    })
+}
+
+fn model_options_from_select_options(options: &SessionConfigSelectOptions) -> Vec<AcpModelOption> {
+    match options {
+        SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .map(|option| AcpModelOption {
+                value: option.value.to_string(),
+                name: option.name.clone(),
+            })
+            .collect(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .map(|option| AcpModelOption {
+                value: option.value.to_string(),
+                name: option.name.clone(),
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 

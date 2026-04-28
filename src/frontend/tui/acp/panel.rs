@@ -172,6 +172,7 @@ impl Model {
     fn select_current_acp_panel_agent(&mut self) -> Option<AppEffect> {
         let agent_id = self.acp_agent_servers.get(self.acp_panel.selected)?.clone();
         self.selected_acp_agent = Some(agent_id.clone());
+        self.activate_acp_model_scope(&agent_id);
         self.show_transient_status_notice(&format!("ACP agent selected: {agent_id}"));
         self.close_acp_panel();
         Some(AppEffect::StartAcpSession { agent_id })

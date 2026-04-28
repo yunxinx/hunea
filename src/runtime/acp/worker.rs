@@ -8,6 +8,7 @@ use super::{
 #[derive(Debug)]
 pub(crate) enum AcpWorkerCommand {
     Prompt(String),
+    SetConfigOption { config_id: String, value: String },
     Shutdown,
 }
 
@@ -69,6 +70,17 @@ impl AcpSessionWorker {
     pub fn cancel_prompt(&self) -> Result<(), AcpWorkerSendError> {
         self.cancels
             .send(())
+            .map_err(|_| AcpWorkerSendError::Closed)
+    }
+
+    /// `set_config_option` 请求 ACP agent 更新 session 配置项。
+    pub fn set_config_option(
+        &self,
+        config_id: String,
+        value: String,
+    ) -> Result<(), AcpWorkerSendError> {
+        self.commands
+            .send(AcpWorkerCommand::SetConfigOption { config_id, value })
             .map_err(|_| AcpWorkerSendError::Closed)
     }
 

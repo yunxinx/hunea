@@ -2,6 +2,9 @@ use crossterm::event::{KeyCode, KeyEvent};
 use lumos::frontend::tui::{
     AppEffect, AppEvent, HeroOptions, Model, ModelOptions, theme::default_palette,
 };
+use lumos::runtime::models::{
+    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
+};
 use ratatui::{
     Terminal,
     backend::TestBackend,
@@ -105,6 +108,50 @@ fn acp_panel_enter_selects_agent_and_restores_composer() {
     assert!(
         rows.iter().all(|row| !row.contains("ACP Agents:")),
         "panel should close after selecting an ACP agent: {rows:?}"
+    );
+}
+
+#[test]
+fn acp_panel_selection_makes_models_panel_independent_from_native_catalog() {
+    let mut model = ready_model(
+        72,
+        18,
+        ModelOptions {
+            acp_agent_servers: vec!["codex-acp".to_string()],
+            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            )]),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            ..ModelOptions::default()
+        },
+    );
+    type_text(&mut model, "/acp");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    type_text(&mut model, "/models");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Providers:") && row.contains("[ACP: codex-acp]")),
+        "expected ACP model provider, got: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("No models available for this provider")),
+        "expected ACP empty model state, got: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("Local") && !row.contains("qwen3")),
+        "native model catalog should be hidden in ACP mode, got: {rows:?}"
     );
 }
 

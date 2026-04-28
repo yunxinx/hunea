@@ -453,6 +453,10 @@ fn apply_effect_if_needed(
             run_respond_acp_permission_effect(model, acp_runtime, &request_id, option_id);
             Ok(())
         }
+        AppEffect::SetAcpModel { config_id, value } => {
+            run_set_acp_model_effect(model, acp_runtime, config_id, value);
+            Ok(())
+        }
         AppEffect::PersistSelectedModel { selection } => {
             run_persist_selected_model_effect(model, runtime_options, &selection);
             Ok(())
@@ -866,7 +870,7 @@ fn run_interrupt_acp_prompt_effect(model: &mut Model, acp_runtime: &mut AcpRunti
     }
 
     if let Some(pending) = model.pending_acp_permission.take() {
-        let _ = acp_runtime.respond_permission(&pending.request_id, pending.reject_option_id);
+        let _ = acp_runtime.respond_permission(&pending.request_id, None);
         model.close_tool_approval_panel();
     }
     model.clear_acp_activity();
@@ -877,6 +881,8 @@ fn run_interrupt_acp_prompt_effect(model: &mut Model, acp_runtime: &mut AcpRunti
 struct AcpRuntimeState {
     worker: Option<AcpSessionWorker>,
     response_buffer: String,
+    reasoning_buffer: String,
+    reasoning_started_at: Option<Instant>,
     prompt_in_flight: bool,
     discard_in_flight_prompt: bool,
     token_progress: Option<StreamingTokenProgress>,
@@ -885,6 +891,8 @@ struct AcpRuntimeState {
 impl AcpRuntimeState {
     fn start(&mut self, command: AcpSessionCommand) {
         self.response_buffer.clear();
+        self.reasoning_buffer.clear();
+        self.reasoning_started_at = None;
         self.prompt_in_flight = false;
         self.discard_in_flight_prompt = false;
         self.token_progress = None;
@@ -893,10 +901,22 @@ impl AcpRuntimeState {
 
     fn reset_response_buffer(&mut self) {
         self.response_buffer.clear();
+        self.reasoning_buffer.clear();
+        self.reasoning_started_at = None;
     }
 
     fn push_response_chunk(&mut self, content: &str) {
         self.response_buffer.push_str(content);
+    }
+
+    fn push_reasoning_chunk(&mut self, content: &str) {
+        if content.is_empty() {
+            return;
+        }
+        if self.reasoning_started_at.is_none() {
+            self.reasoning_started_at = Some(Instant::now());
+        }
+        self.reasoning_buffer.push_str(content);
     }
 
     fn take_response_buffer(&mut self) -> Option<String> {
@@ -905,6 +925,19 @@ impl AcpRuntimeState {
         }
 
         Some(std::mem::take(&mut self.response_buffer))
+    }
+
+    fn take_reasoning_buffer(&mut self) -> (Option<String>, Option<Duration>) {
+        if self.reasoning_buffer.is_empty() {
+            self.reasoning_started_at = None;
+            return (None, None);
+        }
+
+        let duration = self
+            .reasoning_started_at
+            .take()
+            .map(|started_at| Instant::now().saturating_duration_since(started_at));
+        (Some(std::mem::take(&mut self.reasoning_buffer)), duration)
     }
 
     fn mark_prompt_submitted(&mut self) {
@@ -935,6 +968,8 @@ impl AcpRuntimeState {
         self.prompt_in_flight = false;
         self.discard_in_flight_prompt = false;
         self.response_buffer.clear();
+        self.reasoning_buffer.clear();
+        self.reasoning_started_at = None;
         self.token_progress = None;
     }
 
@@ -947,6 +982,8 @@ impl AcpRuntimeState {
             return false;
         }
         self.response_buffer.clear();
+        self.reasoning_buffer.clear();
+        self.reasoning_started_at = None;
         self.token_progress = None;
         self.discard_in_flight_prompt = true;
         if let Some(worker) = self.worker.as_ref() {
@@ -957,6 +994,8 @@ impl AcpRuntimeState {
 
     fn reset_after_clear(&mut self) {
         self.response_buffer.clear();
+        self.reasoning_buffer.clear();
+        self.reasoning_started_at = None;
         self.token_progress = None;
         if self.prompt_in_flight {
             self.discard_in_flight_prompt = true;
@@ -987,6 +1026,16 @@ impl AcpRuntimeState {
 
         worker
             .respond_permission(request_id, option_id)
+            .map_err(|error| error.to_string())
+    }
+
+    fn set_config_option(&self, config_id: String, value: String) -> Result<(), String> {
+        let Some(worker) = self.worker.as_ref() else {
+            return Err("ACP session is not ready".to_string());
+        };
+
+        worker
+            .set_config_option(config_id, value)
             .map_err(|error| error.to_string())
     }
 }
@@ -1027,17 +1076,41 @@ fn apply_acp_session_event(
             if acp_runtime.should_discard_prompt_output() {
                 return;
             }
-            acp_runtime.start_token_progress(agent_id.as_str());
-            model.show_acp_activity(agent_id);
+            acp_runtime.start_token_progress(
+                model
+                    .acp_current_model
+                    .clone()
+                    .unwrap_or_else(|| agent_id.clone()),
+            );
+            if model.acp_activity.is_none() {
+                model.show_acp_activity(agent_id);
+            }
+        }
+        AcpSessionEvent::AgentThoughtChunk { content, .. } => {
+            if acp_runtime.should_discard_prompt_output() {
+                return;
+            }
+            acp_runtime.push_reasoning_chunk(&content);
+            model.set_acp_activity_thinking(true);
+            if let Some(total_tokens) = acp_runtime.observe_output_tokens(&content) {
+                model.set_acp_activity_output_tokens(total_tokens);
+            }
         }
         AcpSessionEvent::AgentMessageChunk { content, .. } => {
             if acp_runtime.should_discard_prompt_output() {
                 return;
             }
+            model.set_acp_activity_thinking(false);
             acp_runtime.push_response_chunk(&content);
             if let Some(total_tokens) = acp_runtime.observe_output_tokens(&content) {
                 model.set_acp_activity_output_tokens(total_tokens);
             }
+        }
+        AcpSessionEvent::ModelConfigChanged { agent_id, config } => {
+            model.apply_acp_model_config(&agent_id, config);
+        }
+        AcpSessionEvent::ConfigChangeFailed { message, .. } => {
+            model.show_transient_status_notice(&format!("ACP config change failed: {message}"));
         }
         AcpSessionEvent::PromptResponse {
             content,
@@ -1058,6 +1131,7 @@ fn apply_acp_session_event(
             if let Some(total_tokens) = acp_runtime.flush_output_tokens() {
                 model.set_acp_activity_output_tokens(total_tokens);
             }
+            model.set_acp_activity_thinking(false);
             flush_acp_response_buffer(model, acp_runtime);
             acp_runtime.mark_prompt_finished();
             model.clear_acp_activity();
@@ -1074,6 +1148,7 @@ fn apply_acp_session_event(
             if let Some(total_tokens) = acp_runtime.flush_output_tokens() {
                 model.set_acp_activity_output_tokens(total_tokens);
             }
+            model.set_acp_activity_thinking(false);
             flush_acp_response_buffer(model, acp_runtime);
             acp_runtime.mark_prompt_finished();
             model.clear_acp_activity();
@@ -1093,6 +1168,7 @@ fn apply_acp_session_event(
             if let Some(total_tokens) = acp_runtime.flush_output_tokens() {
                 model.set_acp_activity_output_tokens(total_tokens);
             }
+            model.set_acp_activity_thinking(false);
             flush_acp_response_buffer(model, acp_runtime);
             let options = acp_permission_option_ids(&request);
             model.update(AppEvent::AcpPermissionRequested {
@@ -1127,8 +1203,14 @@ fn apply_acp_session_event(
 }
 
 fn flush_acp_response_buffer(model: &mut Model, acp_runtime: &mut AcpRuntimeState) {
-    if let Some(content) = acp_runtime.take_response_buffer() {
-        model.append_assistant_message_from_runtime(content);
+    let content = acp_runtime.take_response_buffer();
+    let (reasoning_content, reasoning_duration) = acp_runtime.take_reasoning_buffer();
+    if content.is_some() || reasoning_content.is_some() {
+        model.append_acp_response_from_runtime(
+            content.unwrap_or_default(),
+            reasoning_content,
+            reasoning_duration,
+        );
     }
 }
 
@@ -1146,6 +1228,7 @@ fn run_start_acp_session_effect(
     };
 
     acp_runtime.start(command.clone());
+    model.set_acp_current_model(command.default_model.clone());
     model.show_transient_status_notice(&format!("Starting ACP agent: {agent_id}"));
     Ok(())
 }
@@ -1157,6 +1240,7 @@ fn run_send_acp_prompt_effect(
     prompt: String,
 ) {
     if let Err(message) = acp_runtime.send_prompt(agent_id, prompt) {
+        model.clear_acp_activity();
         model.show_transient_status_notice(&message);
     } else {
         acp_runtime.mark_prompt_submitted();
@@ -1170,6 +1254,17 @@ fn run_respond_acp_permission_effect(
     option_id: Option<String>,
 ) {
     if let Err(message) = acp_runtime.respond_permission(request_id, option_id) {
+        model.show_transient_status_notice(&message);
+    }
+}
+
+fn run_set_acp_model_effect(
+    model: &mut Model,
+    acp_runtime: &AcpRuntimeState,
+    config_id: String,
+    value: String,
+) {
+    if let Err(message) = acp_runtime.set_config_option(config_id, value) {
         model.show_transient_status_notice(&message);
     }
 }
@@ -1314,7 +1409,9 @@ fn copy_selection_to_terminal_clipboard(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::tui::{ReasoningDisplayMode, Sender};
+    use crate::frontend::tui::{ReasoningDisplayMode, Sender, StatusLineItem};
+    use crate::runtime::models::ModelSelection;
+    use crate::runtime::phrases::StatusPhraseOrder;
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -1465,6 +1562,179 @@ mod tests {
         assert!(activity.contains("↓"));
         assert!(activity.contains("tokens"));
         assert!(model.transcript_plain_items().is_empty());
+    }
+
+    #[test]
+    fn acp_prompt_started_keeps_submitted_activity_status_line() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                status_phrases: vec!["Submitted".to_string(), "Started".to_string()],
+                status_phrase_order: StatusPhraseOrder::Cycle,
+                ..ModelOptions::default()
+            },
+        );
+        model.set_window(80, 6);
+        model.show_acp_activity("Kimi Code CLI");
+        let before = model.current_acp_activity_render_result().plain_line;
+        let mut acp_runtime = AcpRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptStarted {
+                agent_id: "Kimi Code CLI".to_string(),
+            },
+        );
+
+        let after = model.current_acp_activity_render_result().plain_line;
+        assert!(before.contains("Submitted (0s"));
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn acp_thought_chunks_append_reasoning_and_toggle_activity() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                show_reasoning_content: true,
+                reasoning_display_mode: ReasoningDisplayMode::Expanded,
+                ..ModelOptions::default()
+            },
+        );
+        model.set_window(80, 8);
+        model.transcript_mut().clear();
+        let mut acp_runtime = AcpRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptStarted {
+                agent_id: "Kimi Code CLI".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentThoughtChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: "先分析".to_string(),
+            },
+        );
+
+        assert!(
+            model
+                .current_acp_activity_render_result()
+                .plain_line
+                .contains("thinking")
+        );
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentMessageChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: "结论".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptResponse {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: String::new(),
+                stop_reason: "EndTurn".to_string(),
+            },
+        );
+
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec![
+                "[Hide reasoning · thoughts <1s]\n先分析".to_string(),
+                "结论".to_string()
+            ]
+        );
+        assert_eq!(
+            model.transcript_mut().source_messages(),
+            vec![(Sender::Assistant, "结论".to_string())]
+        );
+    }
+
+    #[test]
+    fn acp_thought_chunks_update_token_activity_like_native_reasoning() {
+        let mut model = Model::new(HeroOptions::default());
+        model.set_window(80, 8);
+        model.transcript_mut().clear();
+        let mut acp_runtime = AcpRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptStarted {
+                agent_id: "Kimi Code CLI".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentThoughtChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: "先分析这个问题的约束和实现路径。".to_string(),
+            },
+        );
+
+        let activity = model
+            .current_acp_activity_render_result_at(
+                std::time::Instant::now() + std::time::Duration::from_millis(120),
+            )
+            .plain_line;
+        assert!(activity.contains("thinking"));
+        assert!(activity.contains("↓"));
+        assert!(activity.contains("tokens"));
+    }
+
+    #[test]
+    fn acp_model_config_changed_updates_current_model_status_line_and_models_panel() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                status_line_items: vec![StatusLineItem::CurrentModel],
+                ..ModelOptions::default()
+            },
+        );
+        model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+        let mut acp_runtime = AcpRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::ModelConfigChanged {
+                agent_id: "Kimi Code CLI".to_string(),
+                config: crate::runtime::acp::AcpModelConfig {
+                    config_id: "model".to_string(),
+                    current_value: "kimi-k2".to_string(),
+                    current_name: "Kimi K2".to_string(),
+                    options: vec![crate::runtime::acp::AcpModelOption {
+                        value: "kimi-k2".to_string(),
+                        name: "Kimi K2".to_string(),
+                    }],
+                },
+            },
+        );
+
+        assert_eq!(
+            model.current_status_line_parts(),
+            vec!["Kimi K2".to_string()]
+        );
+        let provider = model
+            .model_catalog
+            .enabled_provider_by_id("acp:Kimi Code CLI")
+            .expect("ACP provider should replace model catalog");
+        assert_eq!(provider.models[0].id, "kimi-k2");
+        assert_eq!(
+            model.selected_model,
+            Some(ModelSelection::new("acp:Kimi Code CLI", "kimi-k2"))
+        );
     }
 
     #[test]

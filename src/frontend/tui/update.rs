@@ -32,6 +32,10 @@ pub enum AppEffect {
         request_id: String,
         option_id: Option<String>,
     },
+    SetAcpModel {
+        config_id: String,
+        value: String,
+    },
     SendNativeChat {
         request: NativeChatRequest,
     },
@@ -454,6 +458,11 @@ impl Model {
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         if let Some(agent_id) = self.selected_acp_agent.clone() {
+            self.show_acp_activity(
+                self.acp_current_model
+                    .clone()
+                    .unwrap_or_else(|| agent_id.clone()),
+            );
             return Some(AppEffect::SendAcpPrompt {
                 agent_id,
                 prompt: content,

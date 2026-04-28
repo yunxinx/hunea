@@ -10,7 +10,7 @@ mod worker;
 pub use command::{
     AcpSessionCatalog, AcpSessionCommand, AcpSessionResolveError, resolve_session_command,
 };
-pub use event::{AcpInitializeOutcome, AcpSessionEvent};
+pub use event::{AcpInitializeOutcome, AcpModelConfig, AcpModelOption, AcpSessionEvent};
 pub use handshake::{
     AcpHandshakeError, initialize_agent_command, initialize_agent_command_blocking,
     initialize_agent_transport,

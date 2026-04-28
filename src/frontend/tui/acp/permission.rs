@@ -4,7 +4,6 @@ use super::super::{Model, tool_approval_panel::ToolApprovalSource};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::frontend::tui) struct PendingAcpPermission {
     pub(in crate::frontend::tui) request_id: String,
-    pub(in crate::frontend::tui) reject_option_id: Option<String>,
 }
 
 impl Model {
@@ -19,9 +18,6 @@ impl Model {
     ) {
         self.pending_acp_permission = Some(PendingAcpPermission {
             request_id: request_id.clone(),
-            reject_option_id: reject_option_id
-                .clone()
-                .or_else(|| reject_always_option_id.clone()),
         });
         let title = title.as_deref().unwrap_or("");
         self.clear_status_notice();

@@ -89,6 +89,23 @@ show_reasoning_content = false
 # 可选值：`collapsed`、`expanded`。
 reasoning_content_display = "collapsed"
 
+[runtime]
+# `request_retry_attempts` 控制 runtime 请求失败后最多重试几次。
+# 当前 native chat 会使用该策略；后续 ACP 等 runtime 请求也可以复用。
+# 可选值为 1..10；默认 3。
+request_retry_attempts = 3
+
+# `request_retry_delays` 控制每次重试前等待的秒数。
+# 每个值范围为 1..1800。
+# 例如 [1, 3, 5] 表示第 1 次重试前等待 1s，第 2 次等待 3s，
+# 第 3 次等待 5s。列表短于 request_retry_attempts 时，会复用最后一个值补齐。
+request_retry_delays = [1, 2, 3]
+
+# `request_timeout_seconds` 控制每次 runtime 请求 attempt 的最长持续时间。
+# 超时后会进入上面的重试流程；每次重试都会重新拥有完整 timeout。
+# 可选值为 1..7200；默认 120。
+request_timeout_seconds = 120
+
 [debug]
 # `enabled` 控制是否显示仅用于本地调试 TUI 效果的斜杠命令。
 # 默认关闭；开启后会显示 `/tool-debug` 等临时调试入口。

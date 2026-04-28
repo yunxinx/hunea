@@ -13,6 +13,7 @@ use crate::envinfo;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub tui: TuiConfig,
+    pub runtime: RuntimeConfig,
     pub debug: DebugConfig,
     pub acp: AcpConfig,
 }
@@ -61,6 +62,14 @@ pub enum UserInputStyle {
 pub enum ReasoningContentDisplay {
     Collapsed,
     Expanded,
+}
+
+/// `RuntimeConfig` 表示可被多个 runtime 复用的执行策略。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeConfig {
+    pub request_retry_attempts: usize,
+    pub request_retry_delays: Vec<u64>,
+    pub request_timeout_seconds: u64,
 }
 
 /// `AcpConfig` 表示 ACP 层的启动配置。
@@ -165,6 +174,10 @@ pub enum AppConfigError {
         path: Option<PathBuf>,
         value: String,
     },
+    InvalidRuntimeRequestPolicy {
+        path: Option<PathBuf>,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -172,6 +185,8 @@ pub enum AppConfigError {
 struct FileConfig {
     #[serde(default)]
     tui: FileTuiConfig,
+    #[serde(default)]
+    runtime: FileRuntimeConfig,
     #[serde(default)]
     debug: FileDebugConfig,
 }
@@ -191,6 +206,14 @@ struct FileTuiConfig {
     print_transcript_on_exit: Option<bool>,
     show_reasoning_content: Option<bool>,
     reasoning_content_display: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileRuntimeConfig {
+    request_retry_attempts: Option<usize>,
+    request_retry_delays: Option<Vec<u64>>,
+    request_timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -241,6 +264,11 @@ impl Config {
                 print_transcript_on_exit: false,
                 show_reasoning_content: false,
                 reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            },
+            runtime: RuntimeConfig {
+                request_retry_attempts: 3,
+                request_retry_delays: vec![1, 2, 3],
+                request_timeout_seconds: 120,
             },
             debug: DebugConfig { enabled: false },
             acp: AcpConfig {
@@ -468,6 +496,18 @@ impl fmt::Display for AppConfigError {
             Self::InvalidReasoningContentDisplay { path: None, value } => {
                 write!(f, "unknown tui.reasoning_content_display {:?}", value)
             }
+            Self::InvalidRuntimeRequestPolicy {
+                path: Some(path),
+                reason,
+            } => write!(
+                f,
+                "validate config file {}: invalid runtime.request policy: {}",
+                path.display(),
+                reason
+            ),
+            Self::InvalidRuntimeRequestPolicy { path: None, reason } => {
+                write!(f, "invalid runtime.request policy: {reason}")
+            }
         }
     }
 }
@@ -487,7 +527,8 @@ impl std::error::Error for AppConfigError {
             | Self::InvalidAcpInstallRoot { .. }
             | Self::InvalidAcpDistribution { .. }
             | Self::InvalidEscInterruptPresses { .. }
-            | Self::InvalidReasoningContentDisplay { .. } => None,
+            | Self::InvalidReasoningContentDisplay { .. }
+            | Self::InvalidRuntimeRequestPolicy { .. } => None,
         }
     }
 }
@@ -693,11 +734,123 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
         })?;
     }
 
+    merge_runtime_config(&mut config.runtime, file_config.runtime, path)?;
+
     if let Some(enabled) = file_config.debug.enabled {
         config.debug.enabled = enabled;
     }
 
     Ok(config)
+}
+
+fn merge_runtime_config(
+    config: &mut RuntimeConfig,
+    file_config: FileRuntimeConfig,
+    path: &Path,
+) -> Result<(), AppConfigError> {
+    if file_config.request_retry_attempts.is_none()
+        && file_config.request_retry_delays.is_none()
+        && file_config.request_timeout_seconds.is_none()
+    {
+        return Ok(());
+    }
+
+    let has_explicit_delays = file_config.request_retry_delays.is_some();
+    let attempts = match file_config.request_retry_attempts {
+        Some(attempts) => attempts,
+        None => file_config
+            .request_retry_delays
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(config.request_retry_attempts),
+    };
+    validate_request_retry_attempts(attempts, path)?;
+
+    let mut delays = file_config
+        .request_retry_delays
+        .unwrap_or_else(|| config.request_retry_delays.clone());
+    normalize_request_retry_delays(&mut delays, attempts, has_explicit_delays, path)?;
+
+    let timeout_seconds = file_config
+        .request_timeout_seconds
+        .unwrap_or(config.request_timeout_seconds);
+    validate_request_timeout_seconds(timeout_seconds, path)?;
+
+    config.request_retry_attempts = attempts;
+    config.request_retry_delays = delays;
+    config.request_timeout_seconds = timeout_seconds;
+    Ok(())
+}
+
+fn validate_request_retry_attempts(attempts: usize, path: &Path) -> Result<(), AppConfigError> {
+    if (1..=10).contains(&attempts) {
+        return Ok(());
+    }
+
+    Err(AppConfigError::InvalidRuntimeRequestPolicy {
+        path: Some(path.to_path_buf()),
+        reason: format!("runtime.request_retry_attempts must be between 1 and 10, got {attempts}"),
+    })
+}
+
+fn validate_request_timeout_seconds(
+    timeout_seconds: u64,
+    path: &Path,
+) -> Result<(), AppConfigError> {
+    if (1..=7200).contains(&timeout_seconds) {
+        return Ok(());
+    }
+
+    Err(AppConfigError::InvalidRuntimeRequestPolicy {
+        path: Some(path.to_path_buf()),
+        reason: format!(
+            "runtime.request_timeout_seconds must be between 1 and 7200, got {timeout_seconds}"
+        ),
+    })
+}
+
+fn normalize_request_retry_delays(
+    delays: &mut Vec<u64>,
+    attempts: usize,
+    has_explicit_delays: bool,
+    path: &Path,
+) -> Result<(), AppConfigError> {
+    if delays.is_empty() {
+        return Err(AppConfigError::InvalidRuntimeRequestPolicy {
+            path: Some(path.to_path_buf()),
+            reason: "runtime.request_retry_delays must not be empty".to_string(),
+        });
+    }
+
+    if let Some(delay) = delays.iter().find(|delay| !(1..=1800).contains(*delay)) {
+        return Err(AppConfigError::InvalidRuntimeRequestPolicy {
+            path: Some(path.to_path_buf()),
+            reason: format!(
+                "runtime.request_retry_delays items must be between 1 and 1800 seconds, got {delay}"
+            ),
+        });
+    }
+
+    if delays.len() > attempts && has_explicit_delays {
+        return Err(AppConfigError::InvalidRuntimeRequestPolicy {
+            path: Some(path.to_path_buf()),
+            reason: format!(
+                "runtime.request_retry_delays has {} items but runtime.request_retry_attempts is {attempts}",
+                delays.len()
+            ),
+        });
+    }
+
+    delays.truncate(attempts);
+
+    if delays.len() < attempts {
+        let last_delay = *delays
+            .last()
+            .expect("empty retry delay list is rejected before extension");
+        delays.resize(attempts, last_delay);
+    }
+
+    Ok(())
 }
 
 struct AcpConfigMergeResult {

@@ -48,7 +48,8 @@ pub use hero::{
 pub use model::{Model, ModelOptions};
 pub use reasoning_message::ReasoningDisplayMode;
 pub use runner::{
-    RuntimeOptions, run, run_with_options, run_with_runtime_options, run_with_style_mode,
+    RuntimeOptions, RuntimeRequestPolicy, run, run_with_options, run_with_runtime_options,
+    run_with_style_mode,
 };
 pub use sender::Sender;
 pub use status_line::StatusLineItem;

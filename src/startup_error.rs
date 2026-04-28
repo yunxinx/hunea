@@ -173,6 +173,17 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
             "Unknown reasoning content display mode",
             "collapsed, expanded",
         ),
+        AppConfigError::InvalidRuntimeRequestPolicy { path, reason } => rows_with_optional_file(
+            path,
+            vec![
+                ("Setting", "runtime.request".to_string()),
+                ("Reason", reason.clone()),
+                (
+                    "Expected",
+                    "request_retry_attempts: 1..10; request_retry_delays: 1..1800 seconds; request_timeout_seconds: 1..7200".to_string(),
+                ),
+            ],
+        ),
     }
 }
 

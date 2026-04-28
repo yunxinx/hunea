@@ -335,6 +335,120 @@ fn load_accepts_configured_esc_interrupt_presses() {
 }
 
 #[test]
+fn load_defaults_runtime_request_policy() {
+    let working_dir = temp_test_dir("load-default-runtime-retry-working");
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("default runtime retry policy should load");
+
+    assert_eq!(config.runtime.request_retry_attempts, 3);
+    assert_eq!(config.runtime.request_retry_delays, vec![1, 2, 3]);
+    assert_eq!(config.runtime.request_timeout_seconds, 120);
+}
+
+#[test]
+fn load_accepts_configured_runtime_request_policy() {
+    let working_dir = temp_test_dir("load-runtime-retry-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_retry_attempts = 5\nrequest_retry_delays = [1, 3]\nrequest_timeout_seconds = 240\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("runtime request policy should accept configured values");
+
+    assert_eq!(config.runtime.request_retry_attempts, 5);
+    assert_eq!(config.runtime.request_retry_delays, vec![1, 3, 3, 3, 3]);
+    assert_eq!(config.runtime.request_timeout_seconds, 240);
+}
+
+#[test]
+fn load_uses_runtime_request_retry_delay_count_when_attempts_are_omitted() {
+    let working_dir = temp_test_dir("load-runtime-retry-delays-only-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_retry_delays = [1, 3, 5]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("runtime request retry delays should imply retry attempts");
+
+    assert_eq!(config.runtime.request_retry_attempts, 3);
+    assert_eq!(config.runtime.request_retry_delays, vec![1, 3, 5]);
+}
+
+#[test]
+fn load_truncates_default_runtime_request_retry_delays_when_only_attempts_are_configured() {
+    let working_dir = temp_test_dir("load-runtime-retry-attempts-only-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_retry_attempts = 2\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("runtime request retry attempts should truncate default delays");
+
+    assert_eq!(config.runtime.request_retry_attempts, 2);
+    assert_eq!(config.runtime.request_retry_delays, vec![1, 2]);
+}
+
+#[test]
+fn load_rejects_invalid_runtime_request_retry_policy_shape() {
+    let working_dir = temp_test_dir("load-invalid-runtime-retry-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_retry_attempts = 3\nrequest_retry_delays = [1, 3, 5, 8]\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("runtime retry delays longer than attempts should be rejected");
+
+    assert!(error.to_string().contains("runtime.request_retry"));
+}
+
+#[test]
+fn load_rejects_out_of_range_runtime_request_retry_values() {
+    let attempts_dir = temp_test_dir("load-invalid-runtime-retry-attempts-working");
+    write_config(
+        &attempts_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_retry_attempts = 11\n",
+    );
+    let attempts_error = load_from_paths(Some(attempts_dir.as_path()), None)
+        .expect_err("request_retry_attempts should reject values above 10");
+    assert!(attempts_error.to_string().contains("between 1 and 10"));
+
+    let delays_dir = temp_test_dir("load-invalid-runtime-retry-delays-working");
+    write_config(
+        &delays_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_retry_delays = [1, 1801]\n",
+    );
+    let delays_error = load_from_paths(Some(delays_dir.as_path()), None)
+        .expect_err("request_retry_delays should reject values above 1800 seconds");
+    assert!(delays_error.to_string().contains("between 1 and 1800"));
+}
+
+#[test]
+fn load_rejects_out_of_range_runtime_request_timeout_values() {
+    let zero_dir = temp_test_dir("load-invalid-runtime-timeout-zero-working");
+    write_config(
+        &zero_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_timeout_seconds = 0\n",
+    );
+    let zero_error = load_from_paths(Some(zero_dir.as_path()), None)
+        .expect_err("request_timeout_seconds should reject zero");
+    assert!(zero_error.to_string().contains("between 1 and 7200"));
+
+    let too_large_dir = temp_test_dir("load-invalid-runtime-timeout-large-working");
+    write_config(
+        &too_large_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_timeout_seconds = 7201\n",
+    );
+    let too_large_error = load_from_paths(Some(too_large_dir.as_path()), None)
+        .expect_err("request_timeout_seconds should reject values above 7200 seconds");
+    assert!(too_large_error.to_string().contains("between 1 and 7200"));
+}
+
+#[test]
 fn load_accepts_disabling_show_esc_interrupt_hint() {
     let working_dir = temp_test_dir("load-disable-show-esc-hint-working");
     write_config(

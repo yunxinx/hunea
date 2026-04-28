@@ -4,6 +4,7 @@ use std::{
 };
 
 use ratatui::text::Line;
+use unicode_width::UnicodeWidthStr;
 
 use super::{
     styled_text::{lines_to_ansi_text, lines_to_plain_text},
@@ -15,6 +16,13 @@ use super::{
 };
 
 const SYSTEM_MESSAGE_PREFIX: &str = "■ ";
+const SYSTEM_MESSAGE_CONTINUATION_PREFIX: &str = "  ";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemMessageDisplayLine {
+    prefix: &'static str,
+    text: String,
+}
 
 /// `SystemMessageItem` 表示只属于 TUI 的运行时提示，不参与模型上下文。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,12 +130,74 @@ impl SystemMessageItem {
     }
 
     fn wrapped_lines(&self, width: u16) -> Vec<super::transcript::PromptVisualLine> {
-        wrap_prompt_visual_lines(&self.prefixed_content(), usize::from(width.max(1)), 0)
+        let width = usize::from(width.max(1));
+        self.display_lines()
+            .into_iter()
+            .enumerate()
+            .flat_map(|(logical_line, display_line)| {
+                let prefix_width = UnicodeWidthStr::width(display_line.prefix);
+                let content_width = width.saturating_sub(prefix_width).max(1);
+                wrap_prompt_visual_lines(&display_line.text, content_width, 0)
+                    .into_iter()
+                    .map(move |mut line| {
+                        line.text = format!("{}{}", display_line.prefix, line.text);
+                        line.logical_line = logical_line;
+                        line
+                    })
+            })
+            .collect()
     }
 
-    fn prefixed_content(&self) -> String {
-        format!("{SYSTEM_MESSAGE_PREFIX}{}", self.content)
+    fn display_lines(&self) -> Vec<SystemMessageDisplayLine> {
+        let content_lines = self.content.split('\n').collect::<Vec<_>>();
+        if content_lines.is_empty() {
+            return vec![SystemMessageDisplayLine {
+                prefix: SYSTEM_MESSAGE_PREFIX,
+                text: String::new(),
+            }];
+        }
+
+        let mut lines = Vec::with_capacity(content_lines.len());
+        for (index, content_line) in content_lines.iter().enumerate() {
+            let prefix = if index == 0 {
+                SYSTEM_MESSAGE_PREFIX
+            } else {
+                SYSTEM_MESSAGE_CONTINUATION_PREFIX
+            };
+
+            if index + 1 == content_lines.len()
+                && let Some(json_lines) = formatted_json_body_lines(content_line)
+            {
+                lines.push(SystemMessageDisplayLine {
+                    prefix,
+                    text: "Body:".to_string(),
+                });
+                lines.extend(json_lines.into_iter().map(|line| SystemMessageDisplayLine {
+                    prefix: SYSTEM_MESSAGE_CONTINUATION_PREFIX,
+                    text: line,
+                }));
+                continue;
+            }
+
+            lines.push(SystemMessageDisplayLine {
+                prefix,
+                text: (*content_line).to_string(),
+            });
+        }
+
+        lines
     }
+}
+
+fn formatted_json_body_lines(line: &str) -> Option<Vec<String>> {
+    let body = line.trim_start().strip_prefix("Body:")?.trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    let formatted = serde_json::to_string_pretty(&value).ok()?;
+    Some(formatted.lines().map(str::to_string).collect())
 }
 
 fn system_message_render_cache_key(content: &str) -> u64 {
@@ -156,5 +226,48 @@ mod tests {
             vec!["■ Chat failed: connection refused".to_string()]
         );
         assert_eq!(lines[0].style, system_error_text_style(palette));
+    }
+
+    #[test]
+    fn system_message_indents_multiline_details_under_prefix() {
+        let palette = default_palette();
+        let item = SystemMessageItem::new(
+            "Chat failed: HTTP error.\nCause: bad request\nStatus: 400 Bad Request",
+        );
+        let lines = item.render_lines(80, palette);
+
+        assert_eq!(
+            lines.iter().map(line_to_plain_text).collect::<Vec<_>>(),
+            vec![
+                "■ Chat failed: HTTP error.".to_string(),
+                "  Cause: bad request".to_string(),
+                "  Status: 400 Bad Request".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn system_message_formats_json_body_as_indented_block() {
+        let palette = default_palette();
+        let item = SystemMessageItem::new(
+            "Chat failed: Web stream error.\nCause: HTTP error.\nStatus: 400 Bad Request\nBody: {\"error\":{\"code\":\"400\",\"message\":\"Param Incorrect\"}}",
+        );
+        let lines = item.render_lines(120, palette);
+
+        assert_eq!(
+            lines.iter().map(line_to_plain_text).collect::<Vec<_>>(),
+            vec![
+                "■ Chat failed: Web stream error.".to_string(),
+                "  Cause: HTTP error.".to_string(),
+                "  Status: 400 Bad Request".to_string(),
+                "  Body:".to_string(),
+                "  {".to_string(),
+                "    \"error\": {".to_string(),
+                "      \"code\": \"400\",".to_string(),
+                "      \"message\": \"Param Incorrect\"".to_string(),
+                "    }".to_string(),
+                "  }".to_string(),
+            ]
+        );
     }
 }

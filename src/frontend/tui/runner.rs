@@ -42,6 +42,50 @@ use super::{
 pub struct RuntimeOptions {
     pub acp_sessions: AcpSessionCatalog,
     pub model_config_path: Option<PathBuf>,
+    pub runtime_request_policy: RuntimeRequestPolicy,
+}
+
+/// `RuntimeRequestPolicy` 描述交互式 runtime 请求的超时与重试策略。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRequestPolicy {
+    attempts: usize,
+    delays: Vec<Duration>,
+    timeout: Duration,
+}
+
+impl RuntimeRequestPolicy {
+    pub fn new(attempts: usize, delays_seconds: Vec<u64>, timeout_seconds: u64) -> Self {
+        Self {
+            attempts,
+            delays: delays_seconds
+                .into_iter()
+                .map(Duration::from_secs)
+                .collect(),
+            timeout: Duration::from_secs(timeout_seconds),
+        }
+    }
+
+    pub(crate) fn attempts(&self) -> usize {
+        self.attempts
+    }
+
+    pub(crate) fn delay_for_retry(&self, retry: usize) -> Duration {
+        self.delays
+            .get(retry.saturating_sub(1))
+            .copied()
+            .or_else(|| self.delays.last().copied())
+            .unwrap_or_else(|| Duration::from_secs(1))
+    }
+
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+impl Default for RuntimeRequestPolicy {
+    fn default() -> Self {
+        Self::new(3, vec![1, 2, 3], 120)
+    }
 }
 
 /// `run` 启动交互式 TUI，并在退出后返回最终模型。
@@ -418,7 +462,12 @@ fn apply_effect_if_needed(
             Ok(())
         }
         AppEffect::SendNativeChat { request } => {
-            run_send_native_chat_effect(model, native_chat_runtime, request);
+            run_send_native_chat_effect(
+                model,
+                native_chat_runtime,
+                request,
+                runtime_options.runtime_request_policy.clone(),
+            );
             Ok(())
         }
         AppEffect::InterruptCurrentTurn => {
@@ -555,11 +604,8 @@ struct NativeChatRuntimeState {
     cancellation: Option<CancellationToken>,
 }
 
-const NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS: usize = 3;
-const NATIVE_CHAT_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(500);
-
 impl NativeChatRuntimeState {
-    fn start(&mut self, request: NativeChatRequest) {
+    fn start(&mut self, request: NativeChatRequest, request_policy: RuntimeRequestPolicy) {
         let (sender, receiver) = mpsc::channel();
         let cancellation = CancellationToken::default();
         let thread_cancellation = cancellation.clone();
@@ -569,7 +615,12 @@ impl NativeChatRuntimeState {
                 .build();
             match runtime {
                 Ok(runtime) => {
-                    runtime.block_on(run_native_chat_worker(request, thread_cancellation, sender));
+                    runtime.block_on(run_native_chat_worker(
+                        request,
+                        request_policy,
+                        thread_cancellation,
+                        sender,
+                    ));
                 }
                 Err(error) => {
                     let _ = sender.send(NativeChatEvent::Failed {
@@ -645,58 +696,67 @@ impl NativeChatEvent {
     }
 }
 
-fn reconnect_delay(retry: usize) -> Duration {
-    NATIVE_CHAT_RECONNECT_BASE_DELAY.saturating_mul(retry as u32)
-}
-
 async fn run_native_chat_worker(
     request: NativeChatRequest,
+    request_policy: RuntimeRequestPolicy,
     cancellation: CancellationToken,
     sender: mpsc::Sender<NativeChatEvent>,
 ) {
-    for attempt in 0..=NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS {
+    for attempt in 0..=request_policy.attempts() {
         let progress_sender = sender.clone();
-        match send_chat_with_cancellation_and_token_progress(
-            &request,
-            &cancellation,
-            move |progress| {
-                let event = match progress {
-                    NativeChatProgress::OutputTokens { total_tokens } => {
-                        NativeChatEvent::OutputTokenEstimate { total_tokens }
-                    }
-                    NativeChatProgress::Thinking { is_thinking } => {
-                        NativeChatEvent::Thinking { is_thinking }
-                    }
-                };
-                let _ = progress_sender.send(event);
-            },
+        let attempt_result = tokio::time::timeout(
+            request_policy.timeout(),
+            send_chat_with_cancellation_and_token_progress(
+                &request,
+                &cancellation,
+                move |progress| {
+                    let event = match progress {
+                        NativeChatProgress::OutputTokens { total_tokens } => {
+                            NativeChatEvent::OutputTokenEstimate { total_tokens }
+                        }
+                        NativeChatProgress::Thinking { is_thinking } => {
+                            NativeChatEvent::Thinking { is_thinking }
+                        }
+                    };
+                    let _ = progress_sender.send(event);
+                },
+            ),
         )
-        .await
-        {
-            Ok(response) => {
+        .await;
+
+        match attempt_result {
+            Err(_elapsed) if attempt < request_policy.attempts() => {
+                if retry_native_chat_after_attempt(attempt, &request_policy, &cancellation, &sender)
+                    .await
+                {
+                    return;
+                }
+            }
+            Err(_elapsed) => {
+                let _ = sender.send(NativeChatEvent::Failed {
+                    message: format!(
+                        "Chat request timed out after {}s",
+                        request_policy.timeout().as_secs()
+                    ),
+                });
+                return;
+            }
+            Ok(Ok(response)) => {
                 let _ = sender.send(NativeChatEvent::Finished { response });
                 return;
             }
-            Err(LlmError::Cancelled) => {
+            Ok(Err(LlmError::Cancelled)) => {
                 let _ = sender.send(NativeChatEvent::Interrupted);
                 return;
             }
-            Err(_error) if attempt < NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS => {
-                let retry = attempt + 1;
-                let _ = sender.send(NativeChatEvent::Retrying {
-                    message: format!(
-                        "Reconnecting... {retry}/{NATIVE_CHAT_MAX_RECONNECT_ATTEMPTS}"
-                    ),
-                });
-                tokio::select! {
-                    _ = cancellation.cancelled() => {
-                        let _ = sender.send(NativeChatEvent::Interrupted);
-                        return;
-                    }
-                    _ = tokio::time::sleep(reconnect_delay(retry)) => {}
+            Ok(Err(_error)) if attempt < request_policy.attempts() => {
+                if retry_native_chat_after_attempt(attempt, &request_policy, &cancellation, &sender)
+                    .await
+                {
+                    return;
                 }
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 let _ = sender.send(NativeChatEvent::Failed {
                     message: error.to_string(),
                 });
@@ -741,10 +801,30 @@ fn apply_native_chat_event(model: &mut Model, event: NativeChatEvent) {
     }
 }
 
+async fn retry_native_chat_after_attempt(
+    attempt: usize,
+    request_policy: &RuntimeRequestPolicy,
+    cancellation: &CancellationToken,
+    sender: &mpsc::Sender<NativeChatEvent>,
+) -> bool {
+    let retry = attempt + 1;
+    let _ = sender.send(NativeChatEvent::Retrying {
+        message: format!("Reconnecting... {retry}/{}", request_policy.attempts()),
+    });
+    tokio::select! {
+        _ = cancellation.cancelled() => {
+            let _ = sender.send(NativeChatEvent::Interrupted);
+            true
+        }
+        _ = tokio::time::sleep(request_policy.delay_for_retry(retry)) => false,
+    }
+}
+
 fn run_send_native_chat_effect(
     model: &mut Model,
     native_chat_runtime: &mut NativeChatRuntimeState,
     request: NativeChatRequest,
+    request_policy: RuntimeRequestPolicy,
 ) {
     if native_chat_runtime.is_running() {
         model.show_transient_status_notice("Chat request is already running");
@@ -752,7 +832,7 @@ fn run_send_native_chat_effect(
     }
 
     let activity_label = request.model_id.clone();
-    native_chat_runtime.start(request);
+    native_chat_runtime.start(request, request_policy);
     model.show_acp_activity(activity_label);
 }
 
@@ -1936,6 +2016,18 @@ mod tests {
         let activity = model.current_acp_activity_render_result().plain_line;
         assert!(activity.contains("Reconnecting... 1/3"));
         assert!(model.transcript_plain_items().is_empty());
+    }
+
+    #[test]
+    fn runtime_request_policy_uses_configured_delay_and_timeout() {
+        let policy = RuntimeRequestPolicy::new(5, vec![1, 3, 5, 5, 5], 120);
+
+        assert_eq!(policy.attempts(), 5);
+        assert_eq!(policy.delay_for_retry(1), Duration::from_secs(1));
+        assert_eq!(policy.delay_for_retry(2), Duration::from_secs(3));
+        assert_eq!(policy.delay_for_retry(3), Duration::from_secs(5));
+        assert_eq!(policy.delay_for_retry(5), Duration::from_secs(5));
+        assert_eq!(policy.timeout(), Duration::from_secs(120));
     }
 
     #[test]

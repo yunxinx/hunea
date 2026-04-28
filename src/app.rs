@@ -4,12 +4,13 @@ use color_eyre::eyre::{Result, WrapErr};
 
 use crate::{
     appconfig::{
-        self, AcpConfig, Config, DebugConfig, ReasoningContentDisplay, TuiConfig, UserInputStyle,
+        self, AcpConfig, Config, DebugConfig, ReasoningContentDisplay, RuntimeConfig, TuiConfig,
+        UserInputStyle,
     },
     envinfo,
     frontend::tui::{
         self, HeroOptions, Model, ModelOptions, ReasoningDisplayMode, RuntimeOptions,
-        StatusLineItem, StyleMode,
+        RuntimeRequestPolicy, StatusLineItem, StyleMode,
     },
     runtime::{
         acp::AcpSessionCatalog,
@@ -201,7 +202,16 @@ fn runtime_options_from_app_config_and_models(
     RuntimeOptions {
         acp_sessions: AcpSessionCatalog::from_acp_config(&config.acp),
         model_config_path: loaded_models.source_path.clone(),
+        runtime_request_policy: runtime_request_policy_from_config(&config.runtime),
     }
+}
+
+fn runtime_request_policy_from_config(config: &RuntimeConfig) -> RuntimeRequestPolicy {
+    RuntimeRequestPolicy::new(
+        config.request_retry_attempts,
+        config.request_retry_delays.clone(),
+        config.request_timeout_seconds,
+    )
 }
 
 fn model_options_from_configs(
@@ -425,6 +435,7 @@ mod tests {
     fn model_options_from_config_carries_debug_command_flag() {
         let options = model_options_from_app_config(&Config {
             tui: default_tui_config(),
+            runtime: default_runtime_config(),
             debug: DebugConfig { enabled: true },
             acp: AcpConfig {
                 enabled: false,
@@ -457,6 +468,7 @@ mod tests {
         );
         let config = Config {
             tui: default_tui_config(),
+            runtime: default_runtime_config(),
             debug: DebugConfig { enabled: false },
             acp: AcpConfig {
                 enabled: true,
@@ -496,6 +508,7 @@ mod tests {
         );
         let config = Config {
             tui: default_tui_config(),
+            runtime: default_runtime_config(),
             debug: DebugConfig { enabled: false },
             acp: AcpConfig {
                 enabled: true,
@@ -511,6 +524,40 @@ mod tests {
         let options = model_options_from_app_config(&config);
 
         assert_eq!(options.acp_agent_servers, vec!["kimi"]);
+    }
+
+    #[test]
+    fn runtime_options_from_app_config_carries_runtime_request_policy() {
+        let config = Config {
+            tui: default_tui_config(),
+            runtime: RuntimeConfig {
+                request_retry_attempts: 4,
+                request_retry_delays: vec![1, 3, 3, 3],
+                request_timeout_seconds: 240,
+            },
+            debug: DebugConfig { enabled: false },
+            acp: AcpConfig {
+                enabled: false,
+                registry_url: String::new(),
+                install_root: AcpInstallRoot::Config,
+                custom_install_dir: std::path::PathBuf::new(),
+                distribution_preference: vec![AcpDistribution::Binary],
+                auto_update_check: true,
+                agent_servers: std::collections::BTreeMap::new(),
+            },
+        };
+
+        let options = runtime_options_from_app_config(&config);
+
+        assert_eq!(options.runtime_request_policy.attempts(), 4);
+        assert_eq!(
+            options.runtime_request_policy.delay_for_retry(2),
+            std::time::Duration::from_secs(3)
+        );
+        assert_eq!(
+            options.runtime_request_policy.timeout(),
+            std::time::Duration::from_secs(240)
+        );
     }
 
     #[test]
@@ -574,6 +621,14 @@ mod tests {
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+        }
+    }
+
+    fn default_runtime_config() -> RuntimeConfig {
+        RuntimeConfig {
+            request_retry_attempts: 3,
+            request_retry_delays: vec![1, 2, 3],
+            request_timeout_seconds: 120,
         }
     }
 

@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use lumos::appconfig::{UserInputStyle, load_from_paths};
+use lumos::appconfig::{AppConfigError, ReasoningContentDisplay, UserInputStyle, load_from_paths};
 
 #[test]
 fn load_defaults_to_cx_when_no_config_exists() {
@@ -172,6 +172,79 @@ fn load_defaults_print_transcript_on_exit_to_false() {
         .expect("missing config files should keep terminal replay disabled");
 
     assert!(!config.tui.print_transcript_on_exit);
+}
+
+#[test]
+fn load_defaults_show_reasoning_content_to_false() {
+    let working_dir = temp_test_dir("load-default-show-reasoning-working");
+    let user_config_dir = temp_test_dir("load-default-show-reasoning-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep reasoning content hidden");
+
+    assert!(!config.tui.show_reasoning_content);
+}
+
+#[test]
+fn load_defaults_reasoning_content_display_to_collapsed() {
+    let working_dir = temp_test_dir("load-default-reasoning-display-working");
+    let user_config_dir = temp_test_dir("load-default-reasoning-display-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep reasoning display collapsed");
+
+    assert_eq!(
+        config.tui.reasoning_content_display,
+        ReasoningContentDisplay::Collapsed
+    );
+}
+
+#[test]
+fn load_accepts_enabling_show_reasoning_content() {
+    let working_dir = temp_test_dir("load-enable-show-reasoning-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nshow_reasoning_content = true\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("show_reasoning_content should accept true");
+
+    assert!(config.tui.show_reasoning_content);
+}
+
+#[test]
+fn load_accepts_expanded_reasoning_content_display() {
+    let working_dir = temp_test_dir("load-expanded-reasoning-display-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nreasoning_content_display = \"expanded\"\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("reasoning_content_display should accept expanded");
+
+    assert_eq!(
+        config.tui.reasoning_content_display,
+        ReasoningContentDisplay::Expanded
+    );
+}
+
+#[test]
+fn load_rejects_unknown_reasoning_content_display() {
+    let working_dir = temp_test_dir("load-invalid-reasoning-display-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nreasoning_content_display = \"always\"\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("unknown reasoning_content_display should be rejected");
+
+    assert!(matches!(
+        error,
+        AppConfigError::InvalidReasoningContentDisplay { .. }
+    ));
 }
 
 #[test]

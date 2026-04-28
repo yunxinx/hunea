@@ -4,11 +4,12 @@ use std::time::{Duration, Instant};
 use ratatui::Frame;
 
 use crate::envinfo;
+use crate::runtime::llm::NativeChatResponse;
 use crate::runtime::models::{ModelCatalog, ModelSelection};
 use crate::runtime::phrases::StatusPhraseOrder;
 
 use super::{
-    HeroOptions, Sender,
+    HeroOptions, ReasoningDisplayMode, Sender,
     acp::{AcpActivityState, AcpPanelState, PendingAcpPermission},
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
@@ -56,10 +57,13 @@ pub struct Model {
     pub(super) ctrl_c_clears_input: bool,
     pub(super) esc_interrupt_presses: u8,
     pub(super) show_esc_interrupt_hint: bool,
+    pub(super) show_reasoning_content: bool,
+    pub(super) reasoning_display_mode: ReasoningDisplayMode,
     pub(super) debug_commands_enabled: bool,
     pub(super) chat_interrupt_esc_count: u8,
     pub(super) selection_runtime: SelectionRuntimeState,
     pub(super) pending_composer_cursor_click: PendingComposerCursorClick,
+    pub(super) pending_reasoning_toggle_click: PendingReasoningToggleClick,
     pub(super) git_branch: String,
     pub(super) current_dir: String,
     pub(super) palette: TerminalPalette,
@@ -105,6 +109,14 @@ impl Default for SelectionRuntimeState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct PendingReasoningToggleClick {
+    pub(super) item_index: usize,
+    pub(super) column: u16,
+    pub(super) row: u16,
+    pub(super) active: bool,
+}
+
 /// `DocumentRuntimeState` 收口统一文档 viewport、cache 与手动滚动状态。
 #[derive(Debug, Clone, Default)]
 pub(super) struct DocumentRuntimeState {
@@ -146,6 +158,8 @@ pub struct ModelOptions {
     pub ctrl_c_clears_input: bool,
     pub esc_interrupt_presses: u8,
     pub show_esc_interrupt_hint: bool,
+    pub show_reasoning_content: bool,
+    pub reasoning_display_mode: ReasoningDisplayMode,
     pub debug_commands_enabled: bool,
     pub acp_agent_servers: Vec<String>,
     pub model_catalog: ModelCatalog,
@@ -168,6 +182,8 @@ impl Default for ModelOptions {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
+            show_reasoning_content: false,
+            reasoning_display_mode: ReasoningDisplayMode::Collapsed,
             debug_commands_enabled: false,
             acp_agent_servers: Vec::new(),
             model_catalog: ModelCatalog::default(),
@@ -248,10 +264,13 @@ impl Model {
             ctrl_c_clears_input: options.ctrl_c_clears_input,
             esc_interrupt_presses: options.esc_interrupt_presses.clamp(1, 3),
             show_esc_interrupt_hint: options.show_esc_interrupt_hint,
+            show_reasoning_content: options.show_reasoning_content,
+            reasoning_display_mode: options.reasoning_display_mode,
             debug_commands_enabled: options.debug_commands_enabled,
             chat_interrupt_esc_count: 0,
             selection_runtime: SelectionRuntimeState::default(),
             pending_composer_cursor_click: PendingComposerCursorClick::default(),
+            pending_reasoning_toggle_click: PendingReasoningToggleClick::default(),
             git_branch: resolve_initial_git_branch(&status_line_items),
             current_dir: resolve_initial_current_dir(&status_line_items),
             palette,
@@ -398,6 +417,7 @@ impl Model {
         self.command_panel_scroll = 0;
         self.selection_runtime = SelectionRuntimeState::default();
         self.pending_composer_cursor_click = PendingComposerCursorClick::default();
+        self.pending_reasoning_toggle_click = PendingReasoningToggleClick::default();
         self.document_runtime = DocumentRuntimeState {
             follow_bottom: true,
             ..DocumentRuntimeState::default()
@@ -470,6 +490,70 @@ impl Model {
         self.sync_transcript_render();
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+    }
+
+    pub(crate) fn append_native_chat_response_from_runtime(
+        &mut self,
+        response: NativeChatResponse,
+    ) {
+        if response.content.is_empty() && response.reasoning_content.is_none() {
+            return;
+        }
+
+        if self.show_reasoning_content
+            && let Some(reasoning_content) = response
+                .reasoning_content
+                .filter(|content| !content.trim().is_empty())
+        {
+            self.append_assistant_message_with_reasoning_from_runtime(
+                response.content,
+                reasoning_content,
+                response.reasoning_duration,
+            );
+            return;
+        }
+
+        self.append_assistant_message_from_runtime(response.content);
+    }
+
+    fn append_assistant_message_with_reasoning_from_runtime(
+        &mut self,
+        content: impl Into<String>,
+        reasoning_content: impl Into<String>,
+        reasoning_duration: Option<std::time::Duration>,
+    ) {
+        let content = content.into();
+        let reasoning_content = reasoning_content.into();
+        if content.is_empty() && reasoning_content.is_empty() {
+            return;
+        }
+
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        let style_mode = self.style_mode;
+        let reasoning_display_mode = self.reasoning_display_mode;
+        self.transcript_mut()
+            .append_assistant_message_with_reasoning(
+                content,
+                reasoning_content,
+                reasoning_display_mode,
+                reasoning_duration,
+                style_mode,
+            );
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+    }
+
+    pub(crate) fn toggle_reasoning_item(&mut self, item_index: usize) -> bool {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        if !self.transcript_mut().toggle_reasoning_item(item_index) {
+            return false;
+        }
+
+        self.sync_transcript_render();
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        true
     }
 
     pub(crate) fn append_system_message_from_runtime(&mut self, content: impl Into<String>) {

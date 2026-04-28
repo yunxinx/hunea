@@ -77,6 +77,17 @@ show_esc_interrupt_hint = true
 # 回放打印到终端 scrollback。
 print_transcript_on_exit = false
 
+# `show_reasoning_content` 控制思考模型返回 reasoning / thinking 内容时，
+# 是否在助手消息正文前显示这段内容。
+# 默认关闭；关闭时仍会把 reasoning 输出计入等待行 tokens，并在 reasoning 流式输出期间
+# 显示临时 `thinking` 状态。
+show_reasoning_content = false
+
+# `reasoning_content_display` 控制 show_reasoning_content = true 时，
+# 思维链内容进入 transcript 后的默认展示状态。
+# 可选值：`collapsed`、`expanded`。
+reasoning_content_display = "collapsed"
+
 [debug]
 # `enabled` 控制是否显示仅用于本地调试 TUI 效果的斜杠命令。
 # 默认关闭；开启后会显示 `/tool-debug` 等临时调试入口。

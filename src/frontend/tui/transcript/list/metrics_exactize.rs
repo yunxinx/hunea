@@ -61,25 +61,29 @@ impl Transcript {
                             TranscriptItem::System(_) => {
                                 estimate_breakdown.non_assistant_item_count += 1;
                             }
-                            TranscriptItem::Message(_) => match estimated.kind {
-                                TranscriptEstimateKind::Assistant => {
-                                    estimate_breakdown.assistant_item_count += 1;
-                                    estimate_breakdown.assistant_estimate_time += estimate_time;
-                                    if estimated.source == TranscriptEstimateSource::ReusedOnResize
-                                    {
-                                        estimate_breakdown.assistant_resize_reuse_count += 1;
+                            TranscriptItem::Reasoning(_) | TranscriptItem::Message(_) => {
+                                match estimated.kind {
+                                    TranscriptEstimateKind::Assistant => {
+                                        estimate_breakdown.assistant_item_count += 1;
+                                        estimate_breakdown.assistant_estimate_time += estimate_time;
+                                        if estimated.source
+                                            == TranscriptEstimateSource::ReusedOnResize
+                                        {
+                                            estimate_breakdown.assistant_resize_reuse_count += 1;
+                                        }
+                                    }
+                                    TranscriptEstimateKind::NonAssistant => {
+                                        estimate_breakdown.user_item_count += 1;
+                                        estimate_breakdown.non_assistant_item_count += 1;
+                                        estimate_breakdown.user_estimate_time += estimate_time;
+                                        if estimated.source
+                                            == TranscriptEstimateSource::ReusedOnResize
+                                        {
+                                            estimate_breakdown.user_resize_reuse_count += 1;
+                                        }
                                     }
                                 }
-                                TranscriptEstimateKind::NonAssistant => {
-                                    estimate_breakdown.user_item_count += 1;
-                                    estimate_breakdown.non_assistant_item_count += 1;
-                                    estimate_breakdown.user_estimate_time += estimate_time;
-                                    if estimated.source == TranscriptEstimateSource::ReusedOnResize
-                                    {
-                                        estimate_breakdown.user_resize_reuse_count += 1;
-                                    }
-                                }
-                            },
+                            }
                         }
                     }
                     TranscriptItemMetrics {

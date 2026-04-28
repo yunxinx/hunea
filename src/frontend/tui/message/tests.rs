@@ -1,4 +1,5 @@
 use super::*;
+
 use crate::frontend::tui::{
     selection::SelectableLineRange,
     theme::{default_palette, secondary_text_style, surface_text_style},

@@ -249,7 +249,6 @@ fn message_item_render_cache_key(sender: Sender, content: &str, style_mode: Styl
     MESSAGE_ITEM_RENDER_CACHE_KEY_CALL_COUNT.with(|count| count.set(count.get() + 1));
 
     let mut hasher = DefaultHasher::new();
-    (sender as u8).hash(&mut hasher);
     if sender == Sender::User {
         style_mode.hash(&mut hasher);
     }

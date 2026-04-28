@@ -30,6 +30,7 @@ pub(in crate::frontend::tui) struct AcpActivityState {
     header: String,
     interrupt_hint: Option<String>,
     output_tokens: Option<ActivityTokenProgress>,
+    is_thinking: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +73,7 @@ impl Model {
             header,
             interrupt_hint: self.current_acp_activity_interrupt_hint(),
             output_tokens: None,
+            is_thinking: false,
         });
         self.reset_chat_interrupt_esc_count();
         self.bump_status_line_revision();
@@ -112,6 +114,20 @@ impl Model {
 
     pub(crate) fn set_acp_activity_output_tokens_at(&mut self, total_tokens: usize, now: Instant) {
         self.record_acp_activity_output_tokens_at(total_tokens, now);
+    }
+
+    pub(crate) fn set_acp_activity_thinking(&mut self, is_thinking: bool) {
+        let Some(activity) = self.acp_activity.as_mut() else {
+            return;
+        };
+        if activity.is_thinking == is_thinking {
+            return;
+        }
+        activity.is_thinking = is_thinking;
+        self.bump_status_line_revision();
+        if self.document_runtime.follow_bottom {
+            self.sync_document_viewport_to_bottom();
+        }
     }
 
     fn record_acp_activity_output_tokens_at(&mut self, total_tokens: usize, now: Instant) {
@@ -208,6 +224,9 @@ impl AcpActivityState {
         let elapsed = self.elapsed_text_at(now);
         let token_text = self.token_segment_at(now);
         let mut segments = vec![elapsed];
+        if self.is_thinking {
+            segments.push("thinking".to_string());
+        }
         if let Some(token_text) = token_text {
             segments.push(token_text);
         }
@@ -608,6 +627,30 @@ mod tests {
             .plain_line;
         assert!(input_line.contains("↑ 300 tokens"));
         assert!(!input_line.contains("↓ 200 tokens"));
+    }
+
+    #[test]
+    fn acp_activity_thinking_segment_renders_between_timer_and_tokens() {
+        let mut model = Model::new(HeroOptions::default());
+        model.set_window(80, 6);
+        model.set_palette(default_palette(), true);
+        model.show_acp_activity_with_header("Working");
+
+        let started_at = model.acp_activity.as_ref().unwrap().started_at;
+        model.set_acp_activity_thinking(true);
+        model.set_acp_activity_output_tokens_at(12, started_at);
+
+        let thinking_line = model
+            .current_acp_activity_render_result_at(started_at + Duration::from_millis(120))
+            .plain_line;
+        assert!(thinking_line.contains("(0s • thinking • ↓ 12 tokens"));
+
+        model.set_acp_activity_thinking(false);
+        let content_line = model
+            .current_acp_activity_render_result_at(started_at + Duration::from_millis(140))
+            .plain_line;
+        assert!(!content_line.contains("thinking"));
+        assert!(content_line.contains("(0s • ↓ 12 tokens"));
     }
 
     #[test]

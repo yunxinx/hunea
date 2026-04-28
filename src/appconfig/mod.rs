@@ -38,6 +38,8 @@ pub struct TuiConfig {
     pub esc_interrupt_presses: u8,
     pub show_esc_interrupt_hint: bool,
     pub print_transcript_on_exit: bool,
+    pub show_reasoning_content: bool,
+    pub reasoning_content_display: ReasoningContentDisplay,
 }
 
 /// `DebugConfig` 表示仅用于本地调试与界面预览的配置。
@@ -52,6 +54,13 @@ pub enum UserInputStyle {
     Cx,
     Cc,
     Ms,
+}
+
+/// `ReasoningContentDisplay` 表示思维链内容的默认展示方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningContentDisplay {
+    Collapsed,
+    Expanded,
 }
 
 /// `AcpConfig` 表示 ACP 层的启动配置。
@@ -152,6 +161,10 @@ pub enum AppConfigError {
         path: Option<PathBuf>,
         value: u8,
     },
+    InvalidReasoningContentDisplay {
+        path: Option<PathBuf>,
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -176,6 +189,8 @@ struct FileTuiConfig {
     esc_interrupt_presses: Option<u8>,
     show_esc_interrupt_hint: Option<bool>,
     print_transcript_on_exit: Option<bool>,
+    show_reasoning_content: Option<bool>,
+    reasoning_content_display: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -224,6 +239,8 @@ impl Config {
                 esc_interrupt_presses: 2,
                 show_esc_interrupt_hint: true,
                 print_transcript_on_exit: false,
+                show_reasoning_content: false,
+                reasoning_content_display: ReasoningContentDisplay::Collapsed,
             },
             debug: DebugConfig { enabled: false },
             acp: AcpConfig {
@@ -237,6 +254,19 @@ impl Config {
                 auto_update_check: true,
                 agent_servers: BTreeMap::new(),
             },
+        }
+    }
+}
+
+impl ReasoningContentDisplay {
+    fn parse(value: &str) -> Result<Self, AppConfigError> {
+        match value {
+            "collapsed" => Ok(Self::Collapsed),
+            "expanded" => Ok(Self::Expanded),
+            other => Err(AppConfigError::InvalidReasoningContentDisplay {
+                path: None,
+                value: other.to_string(),
+            }),
         }
     }
 }
@@ -426,6 +456,18 @@ impl fmt::Display for AppConfigError {
                 f,
                 "tui.esc_interrupt_presses must be 1, 2, or 3, got {value}"
             ),
+            Self::InvalidReasoningContentDisplay {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: unknown tui.reasoning_content_display {:?}",
+                path.display(),
+                value
+            ),
+            Self::InvalidReasoningContentDisplay { path: None, value } => {
+                write!(f, "unknown tui.reasoning_content_display {:?}", value)
+            }
         }
     }
 }
@@ -444,7 +486,8 @@ impl std::error::Error for AppConfigError {
             | Self::InvalidAgentServerType { .. }
             | Self::InvalidAcpInstallRoot { .. }
             | Self::InvalidAcpDistribution { .. }
-            | Self::InvalidEscInterruptPresses { .. } => None,
+            | Self::InvalidEscInterruptPresses { .. }
+            | Self::InvalidReasoningContentDisplay { .. } => None,
         }
     }
 }
@@ -629,6 +672,25 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
 
     if let Some(print_transcript_on_exit) = file_config.tui.print_transcript_on_exit {
         config.tui.print_transcript_on_exit = print_transcript_on_exit;
+    }
+
+    if let Some(show_reasoning_content) = file_config.tui.show_reasoning_content {
+        config.tui.show_reasoning_content = show_reasoning_content;
+    }
+
+    if let Some(reasoning_content_display) = file_config.tui.reasoning_content_display {
+        config.tui.reasoning_content_display = ReasoningContentDisplay::parse(
+            &reasoning_content_display,
+        )
+        .map_err(|error| match error {
+            AppConfigError::InvalidReasoningContentDisplay { value, .. } => {
+                AppConfigError::InvalidReasoningContentDisplay {
+                    path: Some(path.to_path_buf()),
+                    value,
+                }
+            }
+            other => other,
+        })?;
     }
 
     if let Some(enabled) = file_config.debug.enabled {

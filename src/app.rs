@@ -3,10 +3,13 @@ use std::io::{self, IsTerminal, Write};
 use color_eyre::eyre::{Result, WrapErr};
 
 use crate::{
-    appconfig::{self, AcpConfig, Config, DebugConfig, TuiConfig, UserInputStyle},
+    appconfig::{
+        self, AcpConfig, Config, DebugConfig, ReasoningContentDisplay, TuiConfig, UserInputStyle,
+    },
     envinfo,
     frontend::tui::{
-        self, HeroOptions, Model, ModelOptions, RuntimeOptions, StatusLineItem, StyleMode,
+        self, HeroOptions, Model, ModelOptions, ReasoningDisplayMode, RuntimeOptions,
+        StatusLineItem, StyleMode,
     },
     runtime::{
         acp::AcpSessionCatalog,
@@ -122,6 +125,13 @@ fn style_mode_from_config(style: UserInputStyle) -> StyleMode {
     }
 }
 
+fn reasoning_display_mode_from_config(display: ReasoningContentDisplay) -> ReasoningDisplayMode {
+    match display {
+        ReasoningContentDisplay::Collapsed => ReasoningDisplayMode::Collapsed,
+        ReasoningContentDisplay::Expanded => ReasoningDisplayMode::Expanded,
+    }
+}
+
 #[cfg(test)]
 fn model_options_from_config(tui_config: &TuiConfig) -> ModelOptions {
     model_options_from_config_and_models(
@@ -195,6 +205,10 @@ fn model_options_from_configs(
         ctrl_c_clears_input: tui_config.ctrl_c_clears_input,
         esc_interrupt_presses: tui_config.esc_interrupt_presses,
         show_esc_interrupt_hint: tui_config.show_esc_interrupt_hint,
+        show_reasoning_content: tui_config.show_reasoning_content,
+        reasoning_display_mode: reasoning_display_mode_from_config(
+            tui_config.reasoning_content_display,
+        ),
         debug_commands_enabled: debug_config.is_some_and(|config| config.enabled),
         acp_agent_servers: acp_agent_servers_from_config(acp_config),
         model_catalog: loaded_models.catalog.clone(),
@@ -247,6 +261,8 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             print_transcript_on_exit: false,
+            show_reasoning_content: false,
+            reasoning_content_display: ReasoningContentDisplay::Collapsed,
         });
 
         assert!(options.copy_on_mouse_selection_release);
@@ -265,6 +281,8 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             print_transcript_on_exit: false,
+            show_reasoning_content: false,
+            reasoning_content_display: ReasoningContentDisplay::Collapsed,
         });
 
         assert!(options.swap_enter_and_send);
@@ -283,6 +301,8 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             print_transcript_on_exit: false,
+            show_reasoning_content: false,
+            reasoning_content_display: ReasoningContentDisplay::Collapsed,
         });
 
         assert!(!options.ctrl_c_clears_input);
@@ -301,6 +321,8 @@ mod tests {
             esc_interrupt_presses: 3,
             show_esc_interrupt_hint: true,
             print_transcript_on_exit: false,
+            show_reasoning_content: false,
+            reasoning_content_display: ReasoningContentDisplay::Collapsed,
         });
 
         assert_eq!(options.esc_interrupt_presses, 3);
@@ -319,9 +341,54 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: false,
             print_transcript_on_exit: false,
+            show_reasoning_content: false,
+            reasoning_content_display: ReasoningContentDisplay::Collapsed,
         });
 
         assert!(!options.show_esc_interrupt_hint);
+    }
+
+    #[test]
+    fn model_options_from_config_carries_show_reasoning_content_flag() {
+        let options = model_options_from_config(&TuiConfig {
+            user_input_style: UserInputStyle::Cx,
+            status_line: Vec::new(),
+            external_editor: Vec::new(),
+            show_external_editor_helper: true,
+            copy_on_mouse_selection_release: false,
+            swap_enter_and_send: false,
+            ctrl_c_clears_input: true,
+            esc_interrupt_presses: 2,
+            show_esc_interrupt_hint: true,
+            print_transcript_on_exit: false,
+            show_reasoning_content: true,
+            reasoning_content_display: ReasoningContentDisplay::Collapsed,
+        });
+
+        assert!(options.show_reasoning_content);
+    }
+
+    #[test]
+    fn model_options_from_config_carries_reasoning_display_mode() {
+        let options = model_options_from_config(&TuiConfig {
+            user_input_style: UserInputStyle::Cx,
+            status_line: Vec::new(),
+            external_editor: Vec::new(),
+            show_external_editor_helper: true,
+            copy_on_mouse_selection_release: false,
+            swap_enter_and_send: false,
+            ctrl_c_clears_input: true,
+            esc_interrupt_presses: 2,
+            show_esc_interrupt_hint: true,
+            print_transcript_on_exit: false,
+            show_reasoning_content: true,
+            reasoning_content_display: ReasoningContentDisplay::Expanded,
+        });
+
+        assert_eq!(
+            options.reasoning_display_mode,
+            ReasoningDisplayMode::Expanded
+        );
     }
 
     #[test]
@@ -430,6 +497,8 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             print_transcript_on_exit: false,
+            show_reasoning_content: false,
+            reasoning_content_display: ReasoningContentDisplay::Collapsed,
         };
 
         write_terminal_replay_on_exit(&mut FailingWriter, &model, false, &config)
@@ -450,6 +519,8 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             print_transcript_on_exit: true,
+            show_reasoning_content: false,
+            reasoning_content_display: ReasoningContentDisplay::Collapsed,
         };
         let mut output = Vec::new();
 
@@ -471,6 +542,8 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             print_transcript_on_exit: false,
+            show_reasoning_content: false,
+            reasoning_content_display: ReasoningContentDisplay::Collapsed,
         }
     }
 

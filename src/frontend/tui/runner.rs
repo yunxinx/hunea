@@ -11,7 +11,8 @@ use crate::runtime::acp::{
     AcpInitializeOutcome, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
 };
 use crate::runtime::llm::{
-    CancellationToken, LlmError, NativeChatRequest, send_chat_with_cancellation_and_token_progress,
+    CancellationToken, LlmError, NativeChatProgress, NativeChatRequest, NativeChatResponse,
+    send_chat_with_cancellation_and_token_progress,
 };
 use crate::runtime::token_count::StreamingTokenProgress;
 use crate::runtime::{models, models::ModelSelection};
@@ -509,7 +510,8 @@ impl NativeChatRuntimeState {
 enum NativeChatEvent {
     Retrying { message: String },
     OutputTokenEstimate { total_tokens: usize },
-    Finished { content: String },
+    Thinking { is_thinking: bool },
+    Finished { response: NativeChatResponse },
     Failed { message: String },
     Interrupted,
 }
@@ -537,14 +539,22 @@ async fn run_native_chat_worker(
         match send_chat_with_cancellation_and_token_progress(
             &request,
             &cancellation,
-            move |total_tokens| {
-                let _ = progress_sender.send(NativeChatEvent::OutputTokenEstimate { total_tokens });
+            move |progress| {
+                let event = match progress {
+                    NativeChatProgress::OutputTokens { total_tokens } => {
+                        NativeChatEvent::OutputTokenEstimate { total_tokens }
+                    }
+                    NativeChatProgress::Thinking { is_thinking } => {
+                        NativeChatEvent::Thinking { is_thinking }
+                    }
+                };
+                let _ = progress_sender.send(event);
             },
         )
         .await
         {
-            Ok(content) => {
-                let _ = sender.send(NativeChatEvent::Finished { content });
+            Ok(response) => {
+                let _ = sender.send(NativeChatEvent::Finished { response });
                 return;
             }
             Err(LlmError::Cancelled) => {
@@ -593,9 +603,12 @@ fn apply_native_chat_event(model: &mut Model, event: NativeChatEvent) {
         NativeChatEvent::OutputTokenEstimate { total_tokens } => {
             model.set_acp_activity_output_tokens(total_tokens);
         }
-        NativeChatEvent::Finished { content } => {
+        NativeChatEvent::Thinking { is_thinking } => {
+            model.set_acp_activity_thinking(is_thinking);
+        }
+        NativeChatEvent::Finished { response } => {
             model.clear_acp_activity();
-            model.append_assistant_message_from_runtime(content);
+            model.append_native_chat_response_from_runtime(response);
         }
         NativeChatEvent::Failed { message } => {
             model.clear_acp_activity();
@@ -1101,7 +1114,10 @@ fn copy_selection_to_terminal_clipboard(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use crate::frontend::tui::{ReasoningDisplayMode, Sender};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
 
     #[test]
     fn acp_chunks_buffer_until_prompt_response() {
@@ -1263,7 +1279,11 @@ mod tests {
 
         sender
             .send(NativeChatEvent::Finished {
-                content: "stale response".to_string(),
+                response: NativeChatResponse {
+                    content: "stale response".to_string(),
+                    reasoning_content: None,
+                    reasoning_duration: None,
+                },
             })
             .expect("stale native event should still be produced by worker");
         model.reset_to_initial_tui_state();
@@ -1436,7 +1456,11 @@ mod tests {
         apply_native_chat_event(
             &mut model,
             NativeChatEvent::Finished {
-                content: "你好，我是本地模型".to_string(),
+                response: NativeChatResponse {
+                    content: "你好，我是本地模型".to_string(),
+                    reasoning_content: None,
+                    reasoning_duration: None,
+                },
             },
         );
 
@@ -1445,6 +1469,298 @@ mod tests {
             vec!["你好，我是本地模型".to_string()]
         );
         assert!(!model.current_acp_activity_render_result().has_content);
+    }
+
+    #[test]
+    fn native_chat_completion_collapses_reasoning_by_default() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                show_reasoning_content: true,
+                ..ModelOptions::default()
+            },
+        );
+        model.transcript_mut().clear();
+        model.show_acp_activity("qwen3");
+
+        apply_native_chat_event(
+            &mut model,
+            NativeChatEvent::Finished {
+                response: NativeChatResponse {
+                    content: "结论".to_string(),
+                    reasoning_content: Some("先分析".to_string()),
+                    reasoning_duration: Some(std::time::Duration::from_secs(3)),
+                },
+            },
+        );
+
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec![
+                "[Show reasoning · thoughts 3s]".to_string(),
+                "结论".to_string()
+            ]
+        );
+        assert_eq!(
+            model.transcript_mut().source_messages(),
+            vec![(Sender::Assistant, "结论".to_string())]
+        );
+    }
+
+    #[test]
+    fn native_chat_completion_keeps_reasoning_body_gap_to_one_line() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                show_reasoning_content: true,
+                reasoning_display_mode: ReasoningDisplayMode::Expanded,
+                ..ModelOptions::default()
+            },
+        );
+        model.transcript_mut().clear();
+        model.transcript_mut().set_width(40);
+        model.show_acp_activity("qwen3");
+
+        apply_native_chat_event(
+            &mut model,
+            NativeChatEvent::Finished {
+                response: NativeChatResponse {
+                    content: "结论".to_string(),
+                    reasoning_content: Some("先分析".to_string()),
+                    reasoning_duration: Some(std::time::Duration::from_secs(3)),
+                },
+            },
+        );
+
+        let render = model.transcript_mut().render();
+
+        assert_eq!(
+            render.all_plain_lines(),
+            vec!["[Hide reasoning · thoughts 3s]", "先分析", "", "结论"]
+        );
+    }
+
+    #[test]
+    fn native_chat_reasoning_header_click_toggles_visibility_without_changing_source_messages() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                show_reasoning_content: true,
+                ..ModelOptions::default()
+            },
+        );
+        model.set_palette(crate::frontend::tui::theme::default_palette(), true);
+        model.set_window(40, 8);
+        model.transcript_mut().clear();
+
+        apply_native_chat_event(
+            &mut model,
+            NativeChatEvent::Finished {
+                response: NativeChatResponse {
+                    content: "结论".to_string(),
+                    reasoning_content: Some("先分析".to_string()),
+                    reasoning_duration: Some(std::time::Duration::from_secs(3)),
+                },
+            },
+        );
+
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec![
+                "[Show reasoning · thoughts 3s]".to_string(),
+                "结论".to_string()
+            ]
+        );
+
+        assert!(
+            model
+                .update(AppEvent::MouseDown {
+                    button: MouseButton::Left,
+                    column: 2,
+                    row: 0,
+                })
+                .is_none()
+        );
+        assert!(
+            model
+                .update(AppEvent::MouseUp {
+                    button: MouseButton::Left,
+                    column: 2,
+                    row: 0,
+                })
+                .is_none()
+        );
+
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec![
+                "[Hide reasoning · thoughts 3s]\n先分析".to_string(),
+                "结论".to_string()
+            ]
+        );
+        assert_eq!(
+            model.transcript_mut().source_messages(),
+            vec![(Sender::Assistant, "结论".to_string())]
+        );
+    }
+
+    #[test]
+    fn native_chat_reasoning_header_drag_does_not_toggle() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                show_reasoning_content: true,
+                ..ModelOptions::default()
+            },
+        );
+        model.set_palette(crate::frontend::tui::theme::default_palette(), true);
+        model.set_window(40, 8);
+        model.transcript_mut().clear();
+
+        apply_native_chat_event(
+            &mut model,
+            NativeChatEvent::Finished {
+                response: NativeChatResponse {
+                    content: "结论".to_string(),
+                    reasoning_content: Some("先分析".to_string()),
+                    reasoning_duration: Some(std::time::Duration::from_secs(3)),
+                },
+            },
+        );
+
+        assert!(
+            model
+                .update(AppEvent::MouseDown {
+                    button: MouseButton::Left,
+                    column: 2,
+                    row: 0,
+                })
+                .is_none()
+        );
+        assert!(
+            model
+                .update(AppEvent::MouseDrag {
+                    button: MouseButton::Left,
+                    column: 8,
+                    row: 0,
+                })
+                .is_none()
+        );
+        assert!(
+            model
+                .update(AppEvent::MouseUp {
+                    button: MouseButton::Left,
+                    column: 8,
+                    row: 0,
+                })
+                .is_none()
+        );
+
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec![
+                "[Show reasoning · thoughts 3s]".to_string(),
+                "结论".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn native_chat_reasoning_header_click_outside_label_does_not_toggle() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                show_reasoning_content: true,
+                ..ModelOptions::default()
+            },
+        );
+        model.set_palette(crate::frontend::tui::theme::default_palette(), true);
+        model.set_window(40, 8);
+        model.transcript_mut().clear();
+
+        apply_native_chat_event(
+            &mut model,
+            NativeChatEvent::Finished {
+                response: NativeChatResponse {
+                    content: "结论".to_string(),
+                    reasoning_content: Some("先分析".to_string()),
+                    reasoning_duration: Some(std::time::Duration::from_secs(3)),
+                },
+            },
+        );
+
+        assert!(
+            model
+                .update(AppEvent::MouseDown {
+                    button: MouseButton::Left,
+                    column: 38,
+                    row: 0,
+                })
+                .is_none()
+        );
+        assert!(
+            model
+                .update(AppEvent::MouseUp {
+                    button: MouseButton::Left,
+                    column: 38,
+                    row: 0,
+                })
+                .is_none()
+        );
+
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec![
+                "[Show reasoning · thoughts 3s]".to_string(),
+                "结论".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn native_chat_completion_hides_reasoning_when_configured_off() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.show_acp_activity("qwen3");
+
+        apply_native_chat_event(
+            &mut model,
+            NativeChatEvent::Finished {
+                response: NativeChatResponse {
+                    content: "结论".to_string(),
+                    reasoning_content: Some("先分析".to_string()),
+                    reasoning_duration: Some(std::time::Duration::from_secs(3)),
+                },
+            },
+        );
+
+        assert_eq!(model.transcript_plain_items(), vec!["结论".to_string()]);
+    }
+
+    #[test]
+    fn native_chat_thinking_event_toggles_activity_segment() {
+        let mut model = Model::new(HeroOptions::default());
+        model.set_window(80, 6);
+        model.transcript_mut().clear();
+        model.show_acp_activity("qwen3");
+
+        apply_native_chat_event(&mut model, NativeChatEvent::Thinking { is_thinking: true });
+
+        assert!(
+            model
+                .current_acp_activity_render_result()
+                .plain_line
+                .contains("thinking")
+        );
+
+        apply_native_chat_event(&mut model, NativeChatEvent::Thinking { is_thinking: false });
+
+        assert!(
+            !model
+                .current_acp_activity_render_result()
+                .plain_line
+                .contains("thinking")
+        );
     }
 
     #[test]
@@ -1532,14 +1848,22 @@ mod tests {
 
         sender
             .send(NativeChatEvent::Finished {
-                content: "完成".to_string(),
+                response: NativeChatResponse {
+                    content: "完成".to_string(),
+                    reasoning_content: None,
+                    reasoning_duration: None,
+                },
             })
             .expect("finish event should be queued");
 
         assert_eq!(
             runtime.try_recv_event(),
             Some(NativeChatEvent::Finished {
-                content: "完成".to_string(),
+                response: NativeChatResponse {
+                    content: "完成".to_string(),
+                    reasoning_content: None,
+                    reasoning_duration: None,
+                },
             })
         );
         assert!(!runtime.is_running());

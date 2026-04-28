@@ -2,7 +2,13 @@ use std::time::Instant;
 
 use crossterm::event::MouseButton;
 
-use crate::frontend::tui::{AppEffect, Model, composer_mouse::ComposerMouseOutcome};
+use crate::frontend::tui::{
+    AppEffect, Model,
+    composer_mouse::ComposerMouseOutcome,
+    document::{DocumentAnchorRegion, DocumentLayout},
+    message::assistant_message_visual_inset,
+    transcript::LineAnchorKind,
+};
 
 use super::{AutoScrollDirection, MousePosition};
 
@@ -29,6 +35,7 @@ impl Model {
             MouseButton::Left => {
                 self.stop_selection_auto_scroll();
                 let layout = self.build_document_layout();
+                self.prepare_reasoning_toggle_click(column, row, &layout);
                 match self.handle_composer_selection_mouse_down(
                     column,
                     row,
@@ -73,6 +80,9 @@ impl Model {
         self.cancel_exit_confirmation();
 
         if button == MouseButton::Left {
+            if self.finish_pending_reasoning_toggle_click(column, row) {
+                return None;
+            }
             match self.handle_pending_composer_mouse_up(column, row) {
                 ComposerMouseOutcome::Handled(effect) => return effect,
                 ComposerMouseOutcome::Ignored => {}
@@ -125,6 +135,7 @@ impl Model {
             ComposerMouseOutcome::Handled(effect) => return effect,
             ComposerMouseOutcome::Ignored => {}
         }
+        self.clear_pending_reasoning_toggle_click();
 
         if !self.selection_runtime.selection.is_dragging() {
             return None;
@@ -164,5 +175,79 @@ impl Model {
             self.update_selection_focus(point);
         }
         self.arm_selection_auto_scroll();
+    }
+
+    fn prepare_reasoning_toggle_click(&mut self, column: u16, row: u16, layout: &DocumentLayout) {
+        self.clear_pending_reasoning_toggle_click();
+        let Some(item_index) = self.reasoning_header_item_at(column, row, layout) else {
+            return;
+        };
+
+        self.pending_reasoning_toggle_click = super::super::model::PendingReasoningToggleClick {
+            item_index,
+            column,
+            row,
+            active: true,
+        };
+    }
+
+    fn finish_pending_reasoning_toggle_click(&mut self, column: u16, row: u16) -> bool {
+        let pending = self.pending_reasoning_toggle_click;
+        if !pending.active {
+            return false;
+        }
+        self.clear_pending_reasoning_toggle_click();
+        if pending.column != column || pending.row != row {
+            return false;
+        }
+
+        let layout = self.build_document_layout();
+        let Some(item_index) = self.reasoning_header_item_at(column, row, &layout) else {
+            return false;
+        };
+        if item_index != pending.item_index {
+            return false;
+        }
+
+        self.stop_selection_auto_scroll();
+        self.clear_selection();
+        self.toggle_reasoning_item(item_index)
+    }
+
+    fn clear_pending_reasoning_toggle_click(&mut self) {
+        self.pending_reasoning_toggle_click =
+            super::super::model::PendingReasoningToggleClick::default();
+    }
+
+    fn reasoning_header_item_at(
+        &self,
+        column: u16,
+        row: u16,
+        layout: &DocumentLayout,
+    ) -> Option<usize> {
+        let line = *self
+            .document_viewport_line_indices(layout)
+            .get(usize::from(row))?;
+        let anchor = layout.line_anchor_at(line)?;
+        if anchor.region != DocumentAnchorRegion::Transcript
+            || matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap)
+        {
+            return None;
+        }
+
+        let inset = usize::from(assistant_message_visual_inset(self.width));
+        let column = usize::from(column);
+        if column < inset {
+            return None;
+        }
+
+        let item_index = anchor.transcript.item_index;
+        self.transcript
+            .is_reasoning_header_hit(
+                item_index,
+                anchor.transcript.item_anchor.rendered_line,
+                column - inset,
+            )
+            .then_some(item_index)
     }
 }

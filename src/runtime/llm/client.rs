@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
 use genai::{
@@ -10,26 +10,43 @@ use genai::{
 use super::{LlmError, NativeChatRequest};
 use crate::runtime::token_count::StreamingTokenProgress;
 
+/// `NativeChatResponse` 保存原生 runtime 的正文与可选 reasoning 内容。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeChatResponse {
+    pub content: String,
+    pub reasoning_content: Option<String>,
+    pub reasoning_duration: Option<Duration>,
+}
+
+/// `NativeChatProgress` 描述原生 runtime 流式输出期间可用于 UI 的进度事件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeChatProgress {
+    OutputTokens { total_tokens: usize },
+    Thinking { is_thinking: bool },
+}
+
 /// `send_chat` 通过 genai 发起流式请求，并在完成后返回聚合文本。
 pub async fn send_chat(request: &NativeChatRequest) -> Result<String, LlmError> {
-    send_chat_with_cancellation(request, &tokio_util::sync::CancellationToken::default()).await
+    send_chat_with_cancellation(request, &tokio_util::sync::CancellationToken::default())
+        .await
+        .map(|response| response.content)
 }
 
 /// `send_chat_with_cancellation` 支持中断请求与流式聚合。
 pub async fn send_chat_with_cancellation(
     request: &NativeChatRequest,
     cancellation: &tokio_util::sync::CancellationToken,
-) -> Result<String, LlmError> {
+) -> Result<NativeChatResponse, LlmError> {
     send_chat_with_cancellation_and_token_progress(request, cancellation, |_| {}).await
 }
 
 pub(crate) async fn send_chat_with_cancellation_and_token_progress<F>(
     request: &NativeChatRequest,
     cancellation: &tokio_util::sync::CancellationToken,
-    mut on_output_tokens: F,
-) -> Result<String, LlmError>
+    mut on_progress: F,
+) -> Result<NativeChatResponse, LlmError>
 where
-    F: FnMut(usize),
+    F: FnMut(NativeChatProgress),
 {
     if cancellation.is_cancelled() {
         return Err(LlmError::Cancelled);
@@ -47,6 +64,7 @@ where
     let model = model_spec_for_request(request)?;
     let options = ChatOptions::default()
         .with_capture_content(true)
+        .with_capture_reasoning_content(true)
         .with_capture_usage(true);
 
     let stream_response = tokio::select! {
@@ -55,8 +73,7 @@ where
     };
 
     let mut stream = stream_response.stream;
-    let mut content = String::new();
-    let mut progress = StreamingTokenProgress::new(request.model_id.clone());
+    let mut output = NativeChatAccumulator::new(request.model_id.clone());
 
     loop {
         let event = tokio::select! {
@@ -70,31 +87,142 @@ where
         match event? {
             ChatStreamEvent::Start => {}
             ChatStreamEvent::Chunk(chunk) => {
-                content.push_str(&chunk.content);
-                if let Some(total_tokens) = progress.observe_delta(&chunk.content, Instant::now()) {
-                    on_output_tokens(total_tokens);
-                }
+                output.observe_content_chunk(&chunk.content, Instant::now(), &mut on_progress);
             }
-            ChatStreamEvent::ReasoningChunk(_)
-            | ChatStreamEvent::ThoughtSignatureChunk(_)
-            | ChatStreamEvent::ToolCallChunk(_) => {}
+            ChatStreamEvent::ReasoningChunk(chunk) => {
+                output.observe_reasoning_chunk(&chunk.content, Instant::now(), &mut on_progress);
+            }
+            ChatStreamEvent::ThoughtSignatureChunk(_) | ChatStreamEvent::ToolCallChunk(_) => {}
             ChatStreamEvent::End(end) => {
-                if content.is_empty()
+                if output.content.is_empty()
                     && let Some(captured) = end.captured_content
                     && let Some(captured_text) = captured.joined_texts()
                 {
-                    content = captured_text;
+                    output.content = captured_text;
+                }
+                if output.reasoning_content.is_empty()
+                    && let Some(captured_reasoning) = end.captured_reasoning_content
+                {
+                    output.reasoning_content = captured_reasoning;
                 }
                 break;
             }
         }
     }
 
-    if let Some(total_tokens) = progress.flush(Instant::now()) {
-        on_output_tokens(total_tokens);
+    if let Some(total_tokens) = output.progress.flush(Instant::now()) {
+        on_progress(NativeChatProgress::OutputTokens { total_tokens });
     }
 
-    Ok(content)
+    Ok(output.finish())
+}
+
+struct NativeChatAccumulator {
+    content: String,
+    reasoning_content: String,
+    progress: StreamingTokenProgress,
+    is_thinking: bool,
+    reasoning_started_at: Option<Instant>,
+    reasoning_finished_at: Option<Instant>,
+}
+
+impl NativeChatAccumulator {
+    fn new(model_id: String) -> Self {
+        Self {
+            content: String::new(),
+            reasoning_content: String::new(),
+            progress: StreamingTokenProgress::new(model_id),
+            is_thinking: false,
+            reasoning_started_at: None,
+            reasoning_finished_at: None,
+        }
+    }
+
+    fn observe_content_chunk(
+        &mut self,
+        content: &str,
+        now: Instant,
+        on_progress: &mut impl FnMut(NativeChatProgress),
+    ) {
+        if content.is_empty() {
+            return;
+        }
+        if self.is_thinking {
+            self.is_thinking = false;
+            self.reasoning_finished_at = Some(now);
+            on_progress(NativeChatProgress::Thinking { is_thinking: false });
+        }
+        self.content.push_str(content);
+        self.observe_token_delta(content, now, on_progress);
+    }
+
+    fn observe_reasoning_chunk(
+        &mut self,
+        content: &str,
+        now: Instant,
+        on_progress: &mut impl FnMut(NativeChatProgress),
+    ) {
+        if content.is_empty() {
+            return;
+        }
+        if !self.is_thinking {
+            self.is_thinking = true;
+            self.reasoning_started_at.get_or_insert(now);
+            on_progress(NativeChatProgress::Thinking { is_thinking: true });
+        }
+        self.reasoning_finished_at = Some(now);
+        self.reasoning_content.push_str(content);
+        self.observe_token_delta(content, now, on_progress);
+    }
+
+    fn observe_token_delta(
+        &mut self,
+        content: &str,
+        now: Instant,
+        on_progress: &mut impl FnMut(NativeChatProgress),
+    ) {
+        if let Some(total_tokens) = self.progress.observe_delta(content, now) {
+            on_progress(NativeChatProgress::OutputTokens { total_tokens });
+        }
+    }
+
+    fn finish(self) -> NativeChatResponse {
+        let reasoning_content = trim_outer_blank_lines(&self.reasoning_content);
+        let reasoning_duration = self.reasoning_duration();
+        let content = if reasoning_content.is_empty() {
+            self.content
+        } else {
+            trim_outer_blank_lines(&self.content)
+        };
+        NativeChatResponse {
+            content,
+            reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
+            reasoning_duration,
+        }
+    }
+
+    fn reasoning_duration(&self) -> Option<Duration> {
+        if self.reasoning_content.trim().is_empty() {
+            return None;
+        }
+
+        let started_at = self.reasoning_started_at?;
+        let finished_at = self.reasoning_finished_at.unwrap_or(started_at);
+        Some(finished_at.saturating_duration_since(started_at))
+    }
+}
+
+fn trim_outer_blank_lines(content: &str) -> String {
+    let lines = content.lines().collect::<Vec<_>>();
+    let Some(start) = lines.iter().position(|line| !line.trim().is_empty()) else {
+        return String::new();
+    };
+    let end = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .expect("start exists when at least one non-blank line exists");
+
+    lines[start..=end].join("\n")
 }
 
 fn client_for_request(request: &NativeChatRequest) -> Client {
@@ -223,5 +351,69 @@ mod tests {
             genai::adapter::AdapterKind::Anthropic
         );
         assert_eq!(target.model.model_name.to_string(), "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn native_chat_accumulator_tracks_reasoning_tokens_and_body_separately() {
+        let started_at = Instant::now();
+        let mut accumulator = NativeChatAccumulator::new("qwen/qwen3-4b-thinking-2507".to_string());
+        let mut progress = Vec::new();
+
+        accumulator.observe_reasoning_chunk("先分析问题。", started_at, &mut |event| {
+            progress.push(event)
+        });
+        accumulator.observe_reasoning_chunk(
+            "再给出答案。",
+            started_at + std::time::Duration::from_millis(120),
+            &mut |event| progress.push(event),
+        );
+        accumulator.observe_content_chunk(
+            "最终答案",
+            started_at + std::time::Duration::from_millis(240),
+            &mut |event| progress.push(event),
+        );
+
+        let response = accumulator.finish();
+
+        assert_eq!(response.content, "最终答案");
+        assert_eq!(
+            response.reasoning_content,
+            Some("先分析问题。再给出答案。".to_string())
+        );
+        assert_eq!(
+            response.reasoning_duration,
+            Some(std::time::Duration::from_millis(240))
+        );
+        assert_eq!(
+            progress.first(),
+            Some(&NativeChatProgress::Thinking { is_thinking: true })
+        );
+        assert!(progress.iter().any(|event| {
+            matches!(event, NativeChatProgress::OutputTokens { total_tokens } if *total_tokens > 0)
+        }));
+        assert!(progress.contains(&NativeChatProgress::Thinking { is_thinking: false }));
+    }
+
+    #[test]
+    fn native_chat_accumulator_hides_empty_reasoning() {
+        let accumulator = NativeChatAccumulator::new("qwen3".to_string());
+
+        let response = accumulator.finish();
+
+        assert_eq!(response.reasoning_content, None);
+    }
+
+    #[test]
+    fn native_chat_accumulator_trims_reasoning_boundary_blank_lines() {
+        let mut accumulator = NativeChatAccumulator::new("qwen3".to_string());
+        let started_at = Instant::now();
+
+        accumulator.observe_reasoning_chunk("先分析\n\n", started_at, &mut |_| {});
+        accumulator.observe_content_chunk("\n\n结论", started_at, &mut |_| {});
+
+        let response = accumulator.finish();
+
+        assert_eq!(response.reasoning_content, Some("先分析".to_string()));
+        assert_eq!(response.content, "结论");
     }
 }

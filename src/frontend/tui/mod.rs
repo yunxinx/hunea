@@ -21,6 +21,7 @@ mod inline_panel;
 mod message;
 mod model;
 mod model_panel;
+mod reasoning_message;
 mod runner;
 mod selection;
 mod sender;
@@ -44,6 +45,7 @@ pub use hero::{
     write_hero_to,
 };
 pub use model::{Model, ModelOptions};
+pub use reasoning_message::ReasoningDisplayMode;
 pub use runner::{
     RuntimeOptions, run, run_with_options, run_with_runtime_options, run_with_style_mode,
 };

@@ -18,13 +18,30 @@ use crate::{
     },
 };
 
+/// `AppRunError` 区分用户配置错误与运行期错误，便于 CLI 使用不同输出策略。
+#[derive(Debug)]
+pub enum AppRunError {
+    Config(appconfig::AppConfigError),
+    Runtime(color_eyre::Report),
+}
+
 /// `run` 负责组装并启动交互式 TUI 应用。
 pub fn run() -> Result<()> {
+    let config = appconfig::load().wrap_err("failed to load app config")?;
+    run_loaded_config(&config)
+}
+
+/// `run_for_cli` 为二进制入口保留配置错误的类型信息。
+pub fn run_for_cli() -> std::result::Result<(), AppRunError> {
+    let config = appconfig::load().map_err(AppRunError::Config)?;
+    run_loaded_config(&config).map_err(AppRunError::Runtime)
+}
+
+fn run_loaded_config(config: &Config) -> Result<()> {
     let stdout = io::stdout();
     let preserve_ansi = stdout.is_terminal();
     let mut handle = stdout.lock();
-    let config = appconfig::load().wrap_err("failed to load app config")?;
-    run_with_config_writer(&mut handle, preserve_ansi, &config)
+    run_with_config_writer(&mut handle, preserve_ansi, config)
 }
 
 /// `run_with_writer` 允许调用方注入退出 AltScreen 后的 terminal replay 输出目标。

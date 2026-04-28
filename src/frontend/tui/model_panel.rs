@@ -1,10 +1,10 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     style::Modifier,
     text::{Line, Span},
 };
 
-use crate::runtime::models::{ModelEntry, ModelProvider, ModelSelection};
+use crate::runtime::models::{ModelEntry, ModelProvider, ModelSelection, ModelSource};
 
 use super::{
     AppEffect, Model,
@@ -18,8 +18,8 @@ use super::{
     },
 };
 
-const MODEL_LIST_VISIBLE_ROWS: usize = 8;
-const MODEL_PANEL_VISIBLE_ROWS: usize = 14;
+const MODEL_LIST_MAX_VISIBLE_ROWS: usize = 7;
+const MODEL_PANEL_VISIBLE_ROWS: usize = 19;
 
 /// `ModelPanelState` 保存沉浸式模型面板的导航状态。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -96,6 +96,9 @@ impl Model {
                 self.move_model_panel_model(1);
                 Some(None)
             }
+            KeyCode::Char('u' | 'U') if is_model_refresh_key(key) => {
+                Some(self.refresh_current_model_panel_provider())
+            }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 Some(self.select_current_model_panel_model())
             }
@@ -114,7 +117,7 @@ impl Model {
 
         let visible_rows = self.model_panel_visible_rows();
         let width = usize::from(self.width.max(1));
-        let mut lines = build_panel_lines(self, width);
+        let mut lines = build_panel_lines(self, width, visible_rows);
         if lines.len() > visible_rows {
             lines.truncate(visible_rows);
         }
@@ -220,16 +223,27 @@ impl Model {
         }
 
         let selected = self.model_panel.model_index.min(model_count - 1);
-        let max_scroll = model_count.saturating_sub(MODEL_LIST_VISIBLE_ROWS);
+        let visible_model_rows = self.model_panel_visible_model_rows();
+        let max_scroll = model_count.saturating_sub(visible_model_rows);
         let mut scroll = self.model_panel.scroll.min(max_scroll);
         if selected < scroll {
             scroll = selected;
         }
-        if selected >= scroll + MODEL_LIST_VISIBLE_ROWS {
-            scroll = selected + 1 - MODEL_LIST_VISIBLE_ROWS;
+        if selected >= scroll + visible_model_rows {
+            scroll = selected + 1 - visible_model_rows;
         }
         self.model_panel.model_index = selected;
         self.model_panel.scroll = scroll;
+    }
+
+    fn model_panel_visible_model_rows(&self) -> usize {
+        let visible_rows = self.model_panel_visible_rows();
+        let width = usize::from(self.width.max(1));
+        let reserved_rows =
+            build_panel_header_lines(self, width).len() + model_panel_footer_lines(self).len();
+        visible_rows
+            .saturating_sub(reserved_rows)
+            .clamp(1, MODEL_LIST_MAX_VISIBLE_ROWS)
     }
 
     fn select_current_model_panel_model(&mut self) -> Option<AppEffect> {
@@ -242,10 +256,88 @@ impl Model {
         self.close_model_panel();
         Some(AppEffect::PersistSelectedModel { selection })
     }
+
+    fn refresh_current_model_panel_provider(&mut self) -> Option<AppEffect> {
+        let (request, display_name) = {
+            let provider = self.active_model_panel_provider()?;
+            (provider.sync_request(), provider.display_name.clone())
+        };
+        self.show_transient_status_notice(&format!("Refreshing models: {display_name}"));
+        Some(AppEffect::RefreshModelProvider { request })
+    }
+
+    pub(crate) fn apply_model_provider_refresh_success(
+        &mut self,
+        provider_id: &str,
+        model_ids: Vec<String>,
+    ) {
+        let Some(provider) = self.model_catalog.provider_by_id_mut(provider_id) else {
+            self.show_transient_status_notice("Refreshed provider is no longer available");
+            return;
+        };
+        let display_name = provider.display_name.clone();
+        provider.models = model_ids
+            .into_iter()
+            .map(|model_id| ModelEntry::new(model_id, None, ModelSource::Synced))
+            .collect();
+        provider.source = ModelSource::Synced;
+        provider.sync_error = None;
+
+        if self
+            .selected_model
+            .as_ref()
+            .is_some_and(|selection| !self.model_catalog.contains_selection(selection))
+        {
+            self.selected_model = None;
+        }
+        self.sync_model_panel_to_selection();
+        self.show_transient_status_notice(&format!("Models refreshed: {display_name}"));
+    }
+
+    pub(crate) fn apply_model_provider_refresh_failure(
+        &mut self,
+        provider_id: &str,
+        message: impl Into<String>,
+    ) {
+        let message = message.into();
+        let display_name = self
+            .model_catalog
+            .provider_by_id_mut(provider_id)
+            .map(|provider| {
+                provider.sync_error = Some(message.clone());
+                provider.display_name.clone()
+            });
+
+        match display_name {
+            Some(display_name) => self.show_transient_status_notice(&format!(
+                "Failed to refresh models for {display_name}: {message}"
+            )),
+            None => {
+                self.show_transient_status_notice(&format!("Failed to refresh models: {message}"))
+            }
+        }
+    }
 }
 
-fn build_panel_lines(model: &Model, width: usize) -> Vec<Line<'static>> {
+fn is_model_refresh_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('u' | 'U'))
+        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+}
+
+fn build_panel_lines(model: &Model, width: usize, visible_rows: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
+    let mut lines = build_panel_header_lines(model, width);
+    let footer_lines = model_panel_footer_lines(model);
+    let visible_model_rows = visible_rows
+        .saturating_sub(lines.len() + footer_lines.len())
+        .clamp(1, MODEL_LIST_MAX_VISIBLE_ROWS);
+    append_model_lines(model, width, visible_model_rows, &mut lines);
+    lines.extend(footer_lines);
+
+    lines
+}
+
+fn build_panel_header_lines(model: &Model, width: usize) -> Vec<Line<'static>> {
     let mut lines = vec![
         inline_panel_rule_line(width, model.palette),
         provider_tabs_line(model),
@@ -260,14 +352,18 @@ fn build_panel_lines(model: &Model, width: usize) -> Vec<Line<'static>> {
         "  Available Models:",
         secondary_text_style(model.palette).bold(),
     ));
-    append_model_lines(model, width, &mut lines);
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "  Press Enter to select · Esc to exit · Tab to cycle providers · ↑↓ to navigate",
-        tertiary_text_style(model.palette).add_modifier(Modifier::ITALIC),
-    ));
 
     lines
+}
+
+fn model_panel_footer_lines(model: &Model) -> [Line<'static>; 2] {
+    [
+        Line::raw(""),
+        Line::styled(
+            "  Enter select · U refresh · Esc exit · Tab providers · ↑↓ navigate",
+            tertiary_text_style(model.palette).add_modifier(Modifier::ITALIC),
+        ),
+    ]
 }
 
 fn provider_tabs_line(model: &Model) -> Line<'static> {
@@ -366,7 +462,12 @@ fn append_provider_details_lines(model: &Model, width: usize, lines: &mut Vec<Li
     );
 }
 
-fn append_model_lines(model: &Model, width: usize, lines: &mut Vec<Line<'static>>) {
+fn append_model_lines(
+    model: &Model,
+    width: usize,
+    visible_rows: usize,
+    lines: &mut Vec<Line<'static>>,
+) {
     let Some(provider) = model.active_model_panel_provider() else {
         lines.push(Line::styled(
             "  No enabled models",
@@ -395,7 +496,7 @@ fn append_model_lines(model: &Model, width: usize, lines: &mut Vec<Line<'static>
     }
 
     let start = model.model_panel.scroll;
-    let end = (start + MODEL_LIST_VISIBLE_ROWS).min(provider.models.len());
+    let end = (start + visible_rows).min(provider.models.len());
     for (offset, entry) in provider.models[start..end].iter().enumerate() {
         let index = start + offset;
         append_model_entry_lines(
@@ -458,5 +559,86 @@ fn wrapping_index(current: usize, len: usize, delta: isize) -> usize {
         (current + len - (delta.unsigned_abs() % len)) % len
     } else {
         (current + delta as usize) % len
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frontend::tui::{HeroOptions, ModelOptions};
+    use crate::runtime::models::{ModelCatalog, ModelProvider, ModelSource, ProviderKind};
+
+    #[test]
+    fn provider_refresh_success_replaces_models_and_drops_stale_selection() {
+        let mut model = model_with_single_provider();
+        model.open_model_panel();
+
+        model.apply_model_provider_refresh_success(
+            "local",
+            vec!["fresh-a".to_string(), "fresh-b".to_string()],
+        );
+
+        let provider = model
+            .model_catalog
+            .enabled_provider_by_id("local")
+            .expect("refreshed provider should remain enabled");
+        assert_eq!(provider.source, ModelSource::Synced);
+        assert_eq!(provider.sync_error, None);
+        assert_eq!(
+            provider
+                .models
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fresh-a", "fresh-b"]
+        );
+        assert_eq!(model.selected_model, None);
+        assert_eq!(model.model_panel.model_index, 0);
+        assert_eq!(model.model_panel.scroll, 0);
+    }
+
+    #[test]
+    fn provider_refresh_failure_keeps_existing_models_and_records_error() {
+        let mut model = model_with_single_provider();
+        model.open_model_panel();
+
+        model.apply_model_provider_refresh_failure("local", "connection refused");
+
+        let provider = model
+            .model_catalog
+            .enabled_provider_by_id("local")
+            .expect("provider should remain visible after failed refresh");
+        assert_eq!(provider.source, ModelSource::Configured);
+        assert_eq!(provider.sync_error.as_deref(), Some("connection refused"));
+        assert_eq!(
+            provider
+                .models
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["qwen3"]
+        );
+        assert_eq!(
+            model.selected_model,
+            Some(ModelSelection::new("local", "qwen3"))
+        );
+    }
+
+    fn model_with_single_provider() -> Model {
+        Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                    "local",
+                    ProviderKind::OpenAiCompatible,
+                    "Local",
+                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    ModelSource::Configured,
+                    vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+                )]),
+                selected_model: Some(ModelSelection::new("local", "qwen3")),
+                ..ModelOptions::default()
+            },
+        )
     }
 }

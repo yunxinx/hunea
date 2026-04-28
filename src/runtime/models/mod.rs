@@ -3,7 +3,7 @@ mod config;
 pub use crate::runtime::llm::{ProviderApiKey, ProviderKind};
 pub use config::{
     LoadedModelCatalog, ModelsConfigError, ProviderSyncRequest, load, load_from_paths,
-    load_from_paths_with_sync, write_default_model,
+    load_from_paths_with_sync, sync_provider_models_once, write_default_model,
 };
 
 /// `ModelCatalog` 保存 TUI 可展示与可选择的模型目录。
@@ -36,6 +36,13 @@ impl ModelCatalog {
     /// `enabled_provider_by_id` 返回指定 id 的启用 provider。
     pub fn enabled_provider_by_id(&self, provider_id: &str) -> Option<&ModelProvider> {
         self.enabled_providers()
+            .find(|provider| provider.id == provider_id)
+    }
+
+    /// `provider_by_id_mut` 返回指定 id 的 provider 可变引用。
+    pub fn provider_by_id_mut(&mut self, provider_id: &str) -> Option<&mut ModelProvider> {
+        self.providers
+            .iter_mut()
             .find(|provider| provider.id == provider_id)
     }
 
@@ -112,6 +119,18 @@ impl ModelProvider {
     pub fn with_api_key(mut self, api_key: Option<ProviderApiKey>) -> Self {
         self.api_key = api_key;
         self
+    }
+
+    /// `sync_request` 创建用于刷新当前 provider 模型列表的请求。
+    pub fn sync_request(&self) -> ProviderSyncRequest {
+        ProviderSyncRequest {
+            provider_id: self.id.clone(),
+            kind: self.kind,
+            display_name: self.display_name.clone(),
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            api_key_env: self.api_key_env.clone(),
+        }
     }
 
     /// `disabled` 创建禁用 provider，保留配置但不参与展示。

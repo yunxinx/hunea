@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 
 use crate::runtime::{
     llm::{ChatMessage, NativeChatRequest},
-    models::ModelSelection,
+    models::{ModelSelection, ProviderSyncRequest},
 };
 
 use super::{
@@ -38,6 +38,9 @@ pub enum AppEffect {
     InterruptCurrentTurn,
     PersistSelectedModel {
         selection: ModelSelection,
+    },
+    RefreshModelProvider {
+        request: ProviderSyncRequest,
     },
 }
 

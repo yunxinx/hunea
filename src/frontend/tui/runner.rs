@@ -15,7 +15,10 @@ use crate::runtime::llm::{
     send_chat_with_cancellation_and_token_progress,
 };
 use crate::runtime::token_count::StreamingTokenProgress;
-use crate::runtime::{models, models::ModelSelection};
+use crate::runtime::{
+    models,
+    models::{ModelSelection, ProviderSyncRequest},
+};
 use arboard::Clipboard;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use color_eyre::eyre::Result;
@@ -71,6 +74,7 @@ pub fn run_with_runtime_options(
     let mut model = Model::new_with_options(hero_options, options);
     let mut acp_runtime = AcpRuntimeState::default();
     let mut native_chat_runtime = NativeChatRuntimeState::default();
+    let mut model_refresh_runtime = ModelProviderRefreshRuntimeState::default();
 
     if let Some(detection) = theme::try_detect_palette() {
         let _ = model.update(AppEvent::DetectedPalette {
@@ -91,6 +95,7 @@ pub fn run_with_runtime_options(
     loop {
         drain_acp_runtime_events(&mut model, &mut acp_runtime);
         drain_native_chat_runtime_events(&mut model, &mut native_chat_runtime);
+        drain_model_refresh_runtime_events(&mut model, &mut model_refresh_runtime);
         terminal.draw(|frame| model.render(frame))?;
 
         if model.is_quitting() {
@@ -106,6 +111,7 @@ pub fn run_with_runtime_options(
                 &runtime_options,
                 &mut acp_runtime,
                 &mut native_chat_runtime,
+                &mut model_refresh_runtime,
                 effect,
             )?;
             continue;
@@ -119,6 +125,7 @@ pub fn run_with_runtime_options(
                 &runtime_options,
                 &mut acp_runtime,
                 &mut native_chat_runtime,
+                &mut model_refresh_runtime,
                 effect,
             )?;
             continue;
@@ -135,6 +142,7 @@ pub fn run_with_runtime_options(
                     &runtime_options,
                     &mut acp_runtime,
                     &mut native_chat_runtime,
+                    &mut model_refresh_runtime,
                     effect,
                 )?;
             } else if let Some(timeout_event) = model.timeout_event(Instant::now()) {
@@ -145,6 +153,7 @@ pub fn run_with_runtime_options(
                     &runtime_options,
                     &mut acp_runtime,
                     &mut native_chat_runtime,
+                    &mut model_refresh_runtime,
                     effect,
                 )?;
             }
@@ -162,6 +171,7 @@ pub fn run_with_runtime_options(
                         &runtime_options,
                         &mut acp_runtime,
                         &mut native_chat_runtime,
+                        &mut model_refresh_runtime,
                         effect,
                     )?;
                 }
@@ -365,6 +375,7 @@ fn apply_effect_if_needed(
     runtime_options: &RuntimeOptions,
     acp_runtime: &mut AcpRuntimeState,
     native_chat_runtime: &mut NativeChatRuntimeState,
+    model_refresh_runtime: &mut ModelProviderRefreshRuntimeState,
     effect: Option<AppEffect>,
 ) -> Result<()> {
     let Some(effect) = effect else {
@@ -377,7 +388,11 @@ fn apply_effect_if_needed(
         }
         AppEffect::CopySelection(text) => run_copy_selection_effect(terminal, model, &text),
         AppEffect::ResetRuntimeSession => {
-            reset_runtime_session_after_clear(acp_runtime, native_chat_runtime);
+            reset_runtime_session_after_clear(
+                acp_runtime,
+                native_chat_runtime,
+                model_refresh_runtime,
+            );
             Ok(())
         }
         AppEffect::StartAcpSession { agent_id } => {
@@ -396,6 +411,10 @@ fn apply_effect_if_needed(
         }
         AppEffect::PersistSelectedModel { selection } => {
             run_persist_selected_model_effect(model, runtime_options, &selection);
+            Ok(())
+        }
+        AppEffect::RefreshModelProvider { request } => {
+            run_refresh_model_provider_effect(model, model_refresh_runtime, request);
             Ok(())
         }
         AppEffect::SendNativeChat { request } => {
@@ -424,9 +443,110 @@ fn run_persist_selected_model_effect(
 fn reset_runtime_session_after_clear(
     acp_runtime: &mut AcpRuntimeState,
     native_chat_runtime: &mut NativeChatRuntimeState,
+    model_refresh_runtime: &mut ModelProviderRefreshRuntimeState,
 ) {
     acp_runtime.reset_after_clear();
     native_chat_runtime.reset_after_clear();
+    model_refresh_runtime.reset_after_clear();
+}
+
+#[derive(Default)]
+struct ModelProviderRefreshRuntimeState {
+    receiver: Option<Receiver<ModelProviderRefreshEvent>>,
+}
+
+impl ModelProviderRefreshRuntimeState {
+    fn start(&mut self, request: ProviderSyncRequest) {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let provider_id = request.provider_id.clone();
+            let event = match models::sync_provider_models_once(&request) {
+                Ok(model_ids) => ModelProviderRefreshEvent::Finished {
+                    provider_id,
+                    model_ids,
+                },
+                Err(message) => ModelProviderRefreshEvent::Failed {
+                    provider_id,
+                    message,
+                },
+            };
+            let _ = sender.send(event);
+        });
+        self.receiver = Some(receiver);
+    }
+
+    fn is_running(&self) -> bool {
+        self.receiver.is_some()
+    }
+
+    fn reset_after_clear(&mut self) {
+        self.receiver = None;
+    }
+
+    fn try_recv_event(&mut self) -> Option<ModelProviderRefreshEvent> {
+        let receiver = self.receiver.as_ref()?;
+        match receiver.try_recv() {
+            Ok(event) => {
+                self.receiver = None;
+                Some(event)
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.receiver = None;
+                Some(ModelProviderRefreshEvent::Failed {
+                    provider_id: String::new(),
+                    message: "model refresh stopped before completion".to_string(),
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelProviderRefreshEvent {
+    Finished {
+        provider_id: String,
+        model_ids: Vec<String>,
+    },
+    Failed {
+        provider_id: String,
+        message: String,
+    },
+}
+
+fn drain_model_refresh_runtime_events(
+    model: &mut Model,
+    model_refresh_runtime: &mut ModelProviderRefreshRuntimeState,
+) {
+    while let Some(event) = model_refresh_runtime.try_recv_event() {
+        apply_model_provider_refresh_event(model, event);
+    }
+}
+
+fn apply_model_provider_refresh_event(model: &mut Model, event: ModelProviderRefreshEvent) {
+    match event {
+        ModelProviderRefreshEvent::Finished {
+            provider_id,
+            model_ids,
+        } => model.apply_model_provider_refresh_success(&provider_id, model_ids),
+        ModelProviderRefreshEvent::Failed {
+            provider_id,
+            message,
+        } => model.apply_model_provider_refresh_failure(&provider_id, message),
+    }
+}
+
+fn run_refresh_model_provider_effect(
+    model: &mut Model,
+    model_refresh_runtime: &mut ModelProviderRefreshRuntimeState,
+    request: ProviderSyncRequest,
+) {
+    if model_refresh_runtime.is_running() {
+        model.show_transient_status_notice("Model refresh is already running");
+        return;
+    }
+
+    model_refresh_runtime.start(request);
 }
 
 #[derive(Default)]
@@ -1287,7 +1407,11 @@ mod tests {
             })
             .expect("stale native event should still be produced by worker");
         model.reset_to_initial_tui_state();
-        reset_runtime_session_after_clear(&mut acp_runtime, &mut native_chat_runtime);
+        reset_runtime_session_after_clear(
+            &mut acp_runtime,
+            &mut native_chat_runtime,
+            &mut ModelProviderRefreshRuntimeState::default(),
+        );
         drain_native_chat_runtime_events(&mut model, &mut native_chat_runtime);
 
         assert!(
@@ -1324,7 +1448,11 @@ mod tests {
         );
 
         model.reset_to_initial_tui_state();
-        reset_runtime_session_after_clear(&mut acp_runtime, &mut native_chat_runtime);
+        reset_runtime_session_after_clear(
+            &mut acp_runtime,
+            &mut native_chat_runtime,
+            &mut ModelProviderRefreshRuntimeState::default(),
+        );
         apply_acp_session_event(
             &mut model,
             &mut acp_runtime,
@@ -1363,7 +1491,11 @@ mod tests {
 
         acp_runtime.mark_prompt_submitted();
         model.reset_to_initial_tui_state();
-        reset_runtime_session_after_clear(&mut acp_runtime, &mut native_chat_runtime);
+        reset_runtime_session_after_clear(
+            &mut acp_runtime,
+            &mut native_chat_runtime,
+            &mut ModelProviderRefreshRuntimeState::default(),
+        );
         apply_acp_session_event(
             &mut model,
             &mut acp_runtime,
@@ -1401,7 +1533,11 @@ mod tests {
         );
 
         model.reset_to_initial_tui_state();
-        reset_runtime_session_after_clear(&mut acp_runtime, &mut native_chat_runtime);
+        reset_runtime_session_after_clear(
+            &mut acp_runtime,
+            &mut native_chat_runtime,
+            &mut ModelProviderRefreshRuntimeState::default(),
+        );
         apply_acp_session_event(
             &mut model,
             &mut acp_runtime,

@@ -234,6 +234,11 @@ pub fn write_default_model(
     Ok(path)
 }
 
+/// `sync_provider_models_once` 立即刷新指定 provider 的模型列表。
+pub fn sync_provider_models_once(request: &ProviderSyncRequest) -> Result<Vec<String>, String> {
+    sync_provider_models(request)
+}
+
 fn model_config_paths(working_dir: Option<&Path>, user_config_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut paths = Vec::with_capacity(3);
     if let Some(path) = user_config_dir {
@@ -399,7 +404,13 @@ fn selection_from_default(default: Option<&str>, catalog: &ModelCatalog) -> Opti
 }
 
 fn sync_provider_models(request: &ProviderSyncRequest) -> ModelSyncResult {
-    if request.kind.uses_openai_compatible_endpoint() {
+    if request.kind.uses_openai_compatible_endpoint()
+        || request.kind == ProviderKind::OpenAi
+            && request
+                .base_url
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty())
+    {
         return sync_openai_compatible_models(request);
     }
 
@@ -532,5 +543,22 @@ mod tests {
             error,
             "model sync for custom anthropic base_url is not supported; configure models = [...]"
         );
+    }
+
+    #[test]
+    fn openai_custom_base_url_syncs_through_models_endpoint() {
+        let request = ProviderSyncRequest {
+            provider_id: "openai_proxy".to_string(),
+            kind: ProviderKind::OpenAi,
+            display_name: "OpenAI Proxy".to_string(),
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            api_key: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+        };
+
+        let error = sync_provider_models(&request)
+            .expect_err("unreachable endpoint should fail after choosing /models sync");
+
+        assert_eq!(error, "cannot reach http://127.0.0.1:9/v1/models");
     }
 }

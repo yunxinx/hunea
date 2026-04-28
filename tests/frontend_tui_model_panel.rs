@@ -5,6 +5,7 @@ use lumos::{
     },
     runtime::models::{
         ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
+        ProviderSyncRequest,
     },
 };
 use ratatui::{
@@ -13,6 +14,9 @@ use ratatui::{
     buffer::Buffer,
     style::{Color, Modifier},
 };
+
+const MODEL_PANEL_FOOTER_HINT: &str =
+    "Enter select · U refresh · Esc exit · Tab providers · ↑↓ navigate";
 
 #[test]
 fn models_command_replaces_composer_with_model_panel() {
@@ -106,6 +110,34 @@ fn model_panel_enter_selects_model_and_restores_composer() {
     assert!(
         rows.iter().all(|row| !row.contains("Available Models")),
         "panel should close after selecting a model: {rows:?}"
+    );
+}
+
+#[test]
+fn model_panel_u_requests_refresh_for_current_provider() {
+    let mut model = ready_model(72, 18, model_options_with_catalog());
+    type_text(&mut model, "/models");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    let effect = model.update(AppEvent::Key(KeyCode::Char('u').into()));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RefreshModelProvider {
+            request: ProviderSyncRequest {
+                provider_id: "local".to_string(),
+                kind: ProviderKind::OpenAiCompatible,
+                display_name: "Local".to_string(),
+                base_url: Some("http://127.0.0.1:1234/v1".to_string()),
+                api_key: None,
+                api_key_env: None,
+            }
+        })
+    );
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter().any(|row| row.contains("Available Models")),
+        "refresh should keep the model panel open, got: {rows:?}"
     );
 }
 
@@ -353,10 +385,7 @@ fn model_panel_footer_hint_is_italic() {
 
     let buffer = render_buffer(&mut model, 96, 24);
 
-    assert_text_cells_are_italic(
-        &buffer,
-        "Press Enter to select · Esc to exit · Tab to cycle providers · ↑↓ to navigate",
-    );
+    assert_text_cells_are_italic(&buffer, MODEL_PANEL_FOOTER_HINT);
 }
 
 #[test]
@@ -459,6 +488,112 @@ fn model_panel_model_list_uses_focus_and_current_model_styles_without_current_su
     assert_text_cells_are_not_bold_after(&buffer, "qwen3", "Available Models");
     assert_text_cells_use_color_after(&buffer, "qwen2", "Available Models", palette.main);
     assert_text_cells_are_bold_after(&buffer, "qwen2", "Available Models");
+}
+
+#[test]
+fn model_panel_scrolls_long_model_list_without_hiding_footer_hint() {
+    let mut model = ready_model(96, 24, model_options_with_many_models(10));
+    type_text(&mut model, "/models");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    let rows = render_trimmed_rows(&mut model, 96, 24);
+    assert_eq!(
+        visible_many_model_rows(&rows),
+        vec![
+            "many-model-01",
+            "many-model-02",
+            "many-model-03",
+            "many-model-04",
+            "many-model-05",
+            "many-model-06",
+            "many-model-07",
+        ],
+        "model panel should show at most seven model rows before scrolling, got: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains(MODEL_PANEL_FOOTER_HINT)),
+        "model panel footer hint should stay visible, got: {rows:?}"
+    );
+
+    for _ in 0..7 {
+        model.update(AppEvent::Key(KeyCode::Down.into()));
+    }
+
+    let rows = render_trimmed_rows(&mut model, 96, 24);
+    assert_eq!(
+        visible_many_model_rows(&rows),
+        vec![
+            "many-model-02",
+            "many-model-03",
+            "many-model-04",
+            "many-model-05",
+            "many-model-06",
+            "many-model-07",
+            "many-model-08",
+        ],
+        "model panel should scroll internally to keep the focused model visible, got: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains(MODEL_PANEL_FOOTER_HINT)),
+        "model panel footer hint should remain visible after scrolling, got: {rows:?}"
+    );
+}
+
+fn model_options_with_many_models(count: usize) -> ModelOptions {
+    let models = (1..=count)
+        .map(|index| {
+            ModelEntry::new(
+                format!("many-model-{index:02}"),
+                None,
+                ModelSource::Configured,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    ModelOptions {
+        model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+            "many",
+            ProviderKind::OpenAiCompatible,
+            "Many",
+            Some("https://api.example.com/v1".to_string()),
+            ModelSource::Configured,
+            models,
+        )]),
+        selected_model: Some(ModelSelection::new("many", "many-model-01")),
+        ..ModelOptions::default()
+    }
+}
+
+fn visible_many_model_rows(rows: &[String]) -> Vec<&'static str> {
+    const MODEL_IDS: [&str; 10] = [
+        "many-model-01",
+        "many-model-02",
+        "many-model-03",
+        "many-model-04",
+        "many-model-05",
+        "many-model-06",
+        "many-model-07",
+        "many-model-08",
+        "many-model-09",
+        "many-model-10",
+    ];
+
+    let start = rows
+        .iter()
+        .position(|row| row.contains("Available Models"))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let end = rows
+        .iter()
+        .position(|row| row.contains("Enter select"))
+        .unwrap_or(rows.len());
+    let model_rows = &rows[start..end];
+
+    MODEL_IDS
+        .iter()
+        .filter(|model_id| model_rows.iter().any(|row| row.contains(*model_id)))
+        .copied()
+        .collect()
 }
 
 fn assert_text_cells_use_color(buffer: &Buffer, text: &str, expected: Color) {

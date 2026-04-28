@@ -1,8 +1,8 @@
 use std::fs;
 
 use lumos::runtime::models::{
-    ModelSelection, ModelSource, ProviderKind, ProviderSyncRequest, load_from_paths_with_sync,
-    write_default_model,
+    ModelSelection, ModelSource, ProviderApiKey, ProviderKind, ProviderSyncRequest,
+    load_from_paths_with_sync, write_default_model,
 };
 
 #[test]
@@ -30,6 +30,7 @@ base_url = "http://192.168.1.71:1234/v1"
                 kind: ProviderKind::OpenAiCompatible,
                 display_name: "LM Studio".to_string(),
                 base_url: Some("http://192.168.1.71:1234/v1".to_string()),
+                api_key: None,
                 api_key_env: None,
             }
         );
@@ -55,6 +56,51 @@ base_url = "http://192.168.1.71:1234/v1"
             .collect::<Vec<_>>(),
         vec!["qwen3", "deepseek-chat"]
     );
+}
+
+#[test]
+fn models_config_accepts_direct_provider_api_key() {
+    let working_dir = temp_test_dir("direct-provider-api-key");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+default = "remote/qwen3"
+
+[providers.remote]
+enabled = true
+kind = "openai_compatible"
+display_name = "Remote"
+base_url = "https://api.example.com/v1"
+api_key = "sk-test-direct"
+"#,
+    )
+    .expect("models config should be written");
+
+    let loaded = load_from_paths_with_sync(Some(&working_dir), None, |request| {
+        assert_eq!(
+            request,
+            &ProviderSyncRequest {
+                provider_id: "remote".to_string(),
+                kind: ProviderKind::OpenAiCompatible,
+                display_name: "Remote".to_string(),
+                base_url: Some("https://api.example.com/v1".to_string()),
+                api_key: Some(ProviderApiKey::new("sk-test-direct")),
+                api_key_env: None,
+            }
+        );
+        Ok(vec!["qwen3".to_string()])
+    })
+    .expect("models config should load");
+
+    let provider = loaded
+        .catalog
+        .enabled_provider_by_id("remote")
+        .expect("enabled provider should be visible");
+    assert_eq!(
+        provider.api_key.as_ref().map(ProviderApiKey::as_str),
+        Some("sk-test-direct")
+    );
+    assert_eq!(provider.api_key_env, None);
 }
 
 #[test]

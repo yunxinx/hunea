@@ -112,6 +112,47 @@ fn enter_with_selected_native_model_returns_native_chat_effect() {
 }
 
 #[test]
+fn enter_with_provider_api_key_returns_native_chat_effect_with_direct_key() {
+    let mut provider = ModelProvider::new(
+        "remote",
+        ProviderKind::OpenAiCompatible,
+        "Remote",
+        Some("https://api.example.com/v1".to_string()),
+        ModelSource::Configured,
+        vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+    );
+    provider.api_key = Some(lumos::runtime::models::ProviderApiKey::new(
+        "sk-test-direct",
+    ));
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            model_catalog: ModelCatalog::new(vec![provider]),
+            selected_model: Some(ModelSelection::new("remote", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+
+    for character in "hello".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    let Some(AppEffect::SendNativeChat { request }) = effect else {
+        panic!("expected native chat effect, got {effect:?}");
+    };
+    assert_eq!(
+        request
+            .api_key
+            .as_ref()
+            .map(lumos::runtime::models::ProviderApiKey::as_str),
+        Some("sk-test-direct")
+    );
+    assert_eq!(request.api_key_env, None);
+}
+
+#[test]
 fn enter_with_openai_compatible_provider_without_base_url_keeps_draft_unsent() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),

@@ -14,7 +14,10 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
-use super::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind};
+use super::{
+    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderApiKey,
+    ProviderKind,
+};
 
 const MODELS_FILE_NAME: &str = "models.toml";
 const MODEL_SYNC_TIMEOUT: Duration = Duration::from_secs(3);
@@ -36,6 +39,7 @@ pub struct ProviderSyncRequest {
     pub kind: ProviderKind,
     pub display_name: String,
     pub base_url: Option<String>,
+    pub api_key: Option<ProviderApiKey>,
     pub api_key_env: Option<String>,
 }
 
@@ -80,6 +84,7 @@ struct FileModelProviderConfig {
     kind: Option<String>,
     display_name: Option<String>,
     base_url: Option<String>,
+    api_key: Option<String>,
     api_key_env: Option<String>,
     models: Option<Vec<String>>,
 }
@@ -316,6 +321,7 @@ fn provider_from_config(
         .clone()
         .unwrap_or_else(|| provider_id.to_string());
     let base_url = provider.base_url.clone();
+    let api_key = ProviderApiKey::from_optional_config(provider.api_key.clone());
     let enabled = provider.enabled.unwrap_or(true);
     let (source, models, sync_error) = match provider.models.as_ref() {
         Some(models) => (
@@ -332,6 +338,7 @@ fn provider_from_config(
                 kind,
                 display_name: display_name.clone(),
                 base_url: base_url.clone(),
+                api_key: api_key.clone(),
                 api_key_env: provider.api_key_env.clone(),
             });
             let (synced, sync_error) = match sync_result {
@@ -352,6 +359,7 @@ fn provider_from_config(
 
     let mut model_provider =
         ModelProvider::new(provider_id, kind, display_name, base_url, source, models)
+            .with_api_key(api_key.clone())
             .with_api_key_env(provider.api_key_env.clone());
     model_provider.sync_error = sync_error;
     if enabled {
@@ -365,6 +373,7 @@ fn provider_from_config(
             model_provider.source,
             model_provider.models,
         );
+        disabled_provider.api_key = model_provider.api_key;
         disabled_provider.api_key_env = model_provider.api_key_env;
         disabled_provider.sync_error = model_provider.sync_error;
         disabled_provider
@@ -428,23 +437,29 @@ fn sync_genai_models(request: &ProviderSyncRequest) -> ModelSyncResult {
 }
 
 fn genai_client_for_sync(request: &ProviderSyncRequest) -> GenAiClient {
-    let Some(api_key_env) = request
-        .api_key_env
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-    else {
+    let Some(auth_data) = sync_auth_data(request) else {
         return GenAiClient::default();
     };
 
     let auth_resolver = AuthResolver::from_resolver_fn(
         move |_model_iden: ModelIden| -> Result<Option<AuthData>, genai::resolver::Error> {
-            Ok(Some(AuthData::from_env(api_key_env.clone())))
+            Ok(Some(auth_data.clone()))
         },
     );
     GenAiClient::builder()
         .with_auth_resolver(auth_resolver)
         .build()
+}
+
+fn sync_auth_data(request: &ProviderSyncRequest) -> Option<AuthData> {
+    if let Some(api_key) = request.api_key.as_ref() {
+        return Some(AuthData::from_single(api_key.as_str().to_string()));
+    }
+    request
+        .api_key_env
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|api_key_env| AuthData::from_env(api_key_env.clone()))
 }
 
 fn sync_openai_compatible_models(request: &ProviderSyncRequest) -> ModelSyncResult {
@@ -461,12 +476,7 @@ fn sync_openai_compatible_models(request: &ProviderSyncRequest) -> ModelSyncResu
         .map_err(|source| format!("create HTTP client: {source}"))?;
     let endpoint = format!("{}/models", base_url.trim_end_matches('/'));
     let mut builder = client.get(&endpoint);
-    if let Some(api_key) = request
-        .api_key_env
-        .as_deref()
-        .and_then(|name| env::var(name).ok())
-        .filter(|value| !value.trim().is_empty())
-    {
+    if let Some(api_key) = sync_bearer_token(request) {
         builder = builder.bearer_auth(api_key);
     }
 
@@ -484,6 +494,18 @@ fn sync_openai_compatible_models(request: &ProviderSyncRequest) -> ModelSyncResu
     Ok(body.data.into_iter().map(|model| model.id).collect())
 }
 
+fn sync_bearer_token(request: &ProviderSyncRequest) -> Option<String> {
+    if let Some(api_key) = request.api_key.as_ref() {
+        return Some(api_key.as_str().to_string());
+    }
+    request
+        .api_key_env
+        .as_deref()
+        .and_then(|name| env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn user_config_directory() -> Option<PathBuf> {
     ProjectDirs::from("", "", "lumos").map(|dirs| dirs.config_dir().to_path_buf())
 }
@@ -499,6 +521,7 @@ mod tests {
             kind: ProviderKind::Anthropic,
             display_name: "Anthropic Proxy".to_string(),
             base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            api_key: None,
             api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
         };
 

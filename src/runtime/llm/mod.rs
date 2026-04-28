@@ -7,5 +7,5 @@ pub(crate) use client::{NativeChatProgress, send_chat_with_cancellation_and_toke
 pub use client::{NativeChatResponse, send_chat, send_chat_with_cancellation};
 pub use error::LlmError;
 pub use provider_kind::ProviderKind;
-pub use request::{ChatMessage, ChatRole, NativeChatRequest};
+pub use request::{ChatMessage, ChatRole, NativeChatRequest, ProviderApiKey};
 pub use tokio_util::sync::CancellationToken;

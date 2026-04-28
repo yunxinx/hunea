@@ -1,6 +1,6 @@
 mod config;
 
-pub use crate::runtime::llm::ProviderKind;
+pub use crate::runtime::llm::{ProviderApiKey, ProviderKind};
 pub use config::{
     LoadedModelCatalog, ModelsConfigError, ProviderSyncRequest, load, load_from_paths,
     load_from_paths_with_sync, write_default_model,
@@ -64,6 +64,7 @@ pub struct ModelProvider {
     pub kind: ProviderKind,
     pub display_name: String,
     pub base_url: Option<String>,
+    pub api_key: Option<ProviderApiKey>,
     pub api_key_env: Option<String>,
     pub source: ModelSource,
     pub models: Vec<ModelEntry>,
@@ -86,6 +87,7 @@ impl ModelProvider {
             kind,
             display_name: display_name.into(),
             base_url,
+            api_key: None,
             api_key_env: None,
             source,
             models,
@@ -103,6 +105,12 @@ impl ModelProvider {
     /// `with_api_key_env` 附加用于读取 Bearer token 的环境变量名。
     pub fn with_api_key_env(mut self, api_key_env: Option<String>) -> Self {
         self.api_key_env = api_key_env;
+        self
+    }
+
+    /// `with_api_key` 附加配置文件中直接提供的 Bearer token。
+    pub fn with_api_key(mut self, api_key: Option<ProviderApiKey>) -> Self {
+        self.api_key = api_key;
         self
     }
 

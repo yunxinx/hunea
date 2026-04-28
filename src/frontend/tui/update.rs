@@ -499,6 +499,7 @@ impl Model {
             provider.kind,
             selection.model_id.clone(),
             provider.base_url.clone(),
+            provider.api_key.clone(),
             provider.api_key_env.clone(),
             self.chat_messages_from_transcript(),
         ))

@@ -7,6 +7,7 @@ fn native_chat_request_carries_provider_kind_and_messages() {
         ProviderKind::Anthropic,
         "claude-sonnet-4-5",
         None,
+        None,
         Some("ANTHROPIC_API_KEY".to_string()),
         vec![
             ChatMessage::user("hello".to_string()),

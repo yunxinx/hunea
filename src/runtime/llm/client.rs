@@ -226,21 +226,27 @@ fn trim_outer_blank_lines(content: &str) -> String {
 }
 
 fn client_for_request(request: &NativeChatRequest) -> Client {
-    let Some(api_key_env) = request
-        .api_key_env
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-    else {
+    let Some(auth_data) = request_auth_data(request) else {
         return Client::default();
     };
 
     let auth_resolver = AuthResolver::from_resolver_fn(
         move |_model_iden: ModelIden| -> Result<Option<AuthData>, genai::resolver::Error> {
-            Ok(Some(AuthData::from_env(api_key_env.clone())))
+            Ok(Some(auth_data.clone()))
         },
     );
     Client::builder().with_auth_resolver(auth_resolver).build()
+}
+
+fn request_auth_data(request: &NativeChatRequest) -> Option<AuthData> {
+    if let Some(api_key) = request.api_key.as_ref() {
+        return Some(AuthData::from_single(api_key.as_str().to_string()));
+    }
+    request
+        .api_key_env
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|api_key_env| AuthData::from_env(api_key_env.clone()))
 }
 
 fn model_spec_for_request(request: &NativeChatRequest) -> Result<ModelSpec, LlmError> {
@@ -252,12 +258,8 @@ fn model_spec_for_request(request: &NativeChatRequest) -> Result<ModelSpec, LlmE
     {
         let endpoint = Endpoint::from_owned(normalize_base_url(base_url));
         let model = ModelIden::new(adapter_kind, request.model_id.clone());
-        let auth = match request
-            .api_key_env
-            .as_ref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            Some(env_name) => AuthData::from_env(env_name.clone()),
+        let auth = match request_auth_data(request) {
+            Some(auth_data) => auth_data,
             None if request.provider_kind.uses_openai_compatible_endpoint() => {
                 AuthData::RequestOverride {
                     url: chat_completions_url(&request.provider_id, base_url)?,
@@ -306,7 +308,7 @@ fn chat_completions_url(provider_id: &str, base_url: &str) -> Result<String, Llm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::llm::{ChatMessage, ProviderKind};
+    use crate::runtime::llm::{ChatMessage, ProviderApiKey, ProviderKind};
 
     #[test]
     fn openai_compatible_without_api_key_uses_request_override_for_local_servers() {
@@ -315,6 +317,7 @@ mod tests {
             ProviderKind::OpenAiCompatible,
             "qwen3",
             Some("http://127.0.0.1:1234/v1".to_string()),
+            None,
             None,
             vec![ChatMessage::user("hello".to_string())],
         );
@@ -328,12 +331,35 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_with_direct_api_key_uses_single_key_auth() {
+        let request = NativeChatRequest::new(
+            "remote",
+            ProviderKind::OpenAiCompatible,
+            "qwen3",
+            Some("https://api.example.com/v1".to_string()),
+            Some(ProviderApiKey::new("sk-test-direct")),
+            None,
+            vec![ChatMessage::user("hello".to_string())],
+        );
+
+        let spec = model_spec_for_request(&request).expect("model spec should build");
+        let ModelSpec::Target(target) = spec else {
+            panic!("openai-compatible base_url should build a complete target");
+        };
+        assert_eq!(
+            target.auth.single_key_value().expect("auth should resolve"),
+            "sk-test-direct"
+        );
+    }
+
+    #[test]
     fn native_provider_custom_base_url_uses_provider_adapter_target() {
         let request = NativeChatRequest::new(
             "anthropic_proxy",
             ProviderKind::Anthropic,
             "claude-sonnet-4-5",
             Some("https://proxy.example.com/anthropic/v1".to_string()),
+            None,
             Some("ANTHROPIC_API_KEY".to_string()),
             vec![ChatMessage::user("hello".to_string())],
         );

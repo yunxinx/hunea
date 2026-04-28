@@ -81,6 +81,37 @@ fn load_accepts_current_dir_status_line() {
 }
 
 #[test]
+fn load_accepts_current_model_status_line() {
+    let working_dir = temp_test_dir("load-accepts-current-model-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line = [\"current-model\"]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("current-model should be accepted as a valid status line item");
+
+    assert_eq!(config.tui.status_line, vec!["current-model"]);
+}
+
+#[test]
+fn load_rejects_underscore_current_model_status_line() {
+    let working_dir = temp_test_dir("load-rejects-underscore-current-model-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line = [\"current_model\"]\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("current_model should not be accepted as a status line item");
+
+    assert!(
+        error.to_string().contains("unknown tui.status_line item"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn load_accepts_external_editor_command() {
     let working_dir = temp_test_dir("load-accepts-external-editor-working");
     write_config(

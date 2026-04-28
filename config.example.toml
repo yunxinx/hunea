@@ -21,6 +21,7 @@ user_input_style = "cx"
 # 当前支持的值：
 # - "git-branch"：当前工作目录所在 Git 仓库的分支名
 # - "current-dir"：当前工作目录的短路径，home 前缀会缩写为 ~
+# - "current-model"：当前选择的模型，格式为 provider/model
 #
 # 未配置时不显示状态行；如果配置了但当前所有项都拿不到内容，
 # 状态行也会保持隐藏。

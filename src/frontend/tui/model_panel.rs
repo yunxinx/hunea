@@ -252,6 +252,7 @@ impl Model {
 
         let selection = ModelSelection::new(provider.id.clone(), model.id.clone());
         self.selected_model = Some(selection.clone());
+        self.bump_status_line_revision();
         self.show_transient_status_notice(&format!("Model selected: {}", selection.display_name()));
         self.close_model_panel();
         Some(AppEffect::PersistSelectedModel { selection })
@@ -289,6 +290,7 @@ impl Model {
             .is_some_and(|selection| !self.model_catalog.contains_selection(selection))
         {
             self.selected_model = None;
+            self.bump_status_line_revision();
         }
         self.sync_model_panel_to_selection();
         self.show_transient_status_notice(&format!("Models refreshed: {display_name}"));

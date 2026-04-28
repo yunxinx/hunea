@@ -15,6 +15,7 @@ use crate::{
 pub enum StatusLineItem {
     GitBranch,
     CurrentDir,
+    CurrentModel,
 }
 
 impl StatusLineItem {
@@ -23,6 +24,7 @@ impl StatusLineItem {
         match value {
             "git-branch" => Some(Self::GitBranch),
             "current-dir" => Some(Self::CurrentDir),
+            "current-model" => Some(Self::CurrentModel),
             _ => None,
         }
     }
@@ -49,6 +51,9 @@ impl Model {
         }
         if self.uses_status_line_item(StatusLineItem::CurrentDir) {
             bits |= 1 << 1;
+        }
+        if self.uses_status_line_item(StatusLineItem::CurrentModel) {
+            bits |= 1 << 2;
         }
         bits
     }
@@ -102,6 +107,11 @@ impl Model {
                 }
                 StatusLineItem::CurrentDir if !self.current_dir.is_empty() => {
                     parts.push(sanitize_status_line_part(&self.current_dir));
+                }
+                StatusLineItem::CurrentModel => {
+                    if let Some(selection) = &self.selected_model {
+                        parts.push(sanitize_status_line_part(&selection.display_name()));
+                    }
                 }
                 _ => {}
             }

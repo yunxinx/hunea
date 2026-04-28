@@ -9,6 +9,9 @@ use crossterm::event::{KeyCode, KeyEvent};
 use lumos::frontend::tui::{
     AppEvent, HeroOptions, Model, ModelOptions, StatusLineItem, StyleMode, theme::default_palette,
 };
+use lumos::runtime::models::{
+    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
+};
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 #[test]
@@ -59,6 +62,71 @@ fn status_line_renders_current_dir_and_preserves_configured_order() {
 
     env::set_current_dir(original_dir).expect("should restore original directory");
     restore_env_var("HOME", original_home);
+}
+
+#[test]
+fn status_line_renders_current_model_when_selected() {
+    let mut model = ready_model_with_options(
+        48,
+        4,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            ..ModelOptions::default()
+        },
+    );
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 48, 4),
+        vec!["", "› Enter to send Prompt", "", "  local/qwen3"]
+    );
+}
+
+#[test]
+fn status_line_omits_current_model_when_unselected() {
+    let mut model = ready_model_with_options(
+        48,
+        4,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            model_catalog: single_model_catalog(),
+            ..ModelOptions::default()
+        },
+    );
+
+    let rows = render_trimmed_rows(&mut model, 48, 4);
+    assert_eq!(rows, vec!["", "", "› Enter to send Prompt"]);
+    assert!(
+        rows.iter().all(|row| !row.contains("local/qwen3")),
+        "current-model should not render without a selected model, got: {rows:?}"
+    );
+}
+
+#[test]
+fn status_line_updates_current_model_after_model_panel_selection() {
+    let mut model = ready_model_with_options(
+        72,
+        18,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            model_catalog: single_model_catalog(),
+            ..ModelOptions::default()
+        },
+    );
+
+    type_text(&mut model, "/models");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter().any(|row| row.contains("local/qwen3")),
+        "current-model should reflect the selected model after panel selection, got: {rows:?}"
+    );
 }
 
 #[test]
@@ -162,20 +230,42 @@ fn ready_model(
     style_mode: StyleMode,
     status_line_items: Vec<StatusLineItem>,
 ) -> Model {
-    let mut model = Model::new_with_options(
-        HeroOptions::default(),
+    ready_model_with_options(
+        width,
+        height,
         ModelOptions {
             style_mode,
             status_line_items,
             ..ModelOptions::default()
         },
-    );
+    )
+}
+
+fn ready_model_with_options(width: u16, height: u16, options: ModelOptions) -> Model {
+    let mut model = Model::new_with_options(HeroOptions::default(), options);
     model.update(AppEvent::Resized { width, height });
     model.update(AppEvent::DetectedPalette {
         palette: default_palette(),
         has_dark_background: true,
     });
     model
+}
+
+fn single_model_catalog() -> ModelCatalog {
+    ModelCatalog::new(vec![ModelProvider::new(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "Local",
+        Some("http://127.0.0.1:1234/v1".to_string()),
+        ModelSource::Configured,
+        vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+    )])
+}
+
+fn type_text(model: &mut Model, text: &str) {
+    for character in text.chars() {
+        model.update(AppEvent::Key(KeyCode::Char(character).into()));
+    }
 }
 
 fn render_trimmed_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {

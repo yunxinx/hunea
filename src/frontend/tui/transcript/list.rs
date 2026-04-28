@@ -27,6 +27,7 @@ use crate::frontend::tui::{
     selection::{SelectableLineRange, normalize_transcript_selectable_range},
     system_message::SystemMessageItem,
     theme::TerminalPalette,
+    tool_result::{ToolResultItem, ToolResultKind},
 };
 
 mod block_materialize;
@@ -42,6 +43,7 @@ pub(crate) enum TranscriptItem {
     Message(MessageItem),
     Reasoning(ReasoningMessageItem),
     System(SystemMessageItem),
+    ToolResult(ToolResultItem),
 }
 
 /// `Transcript` 管理 document-flow 顺序、宽度与逐项渲染缓存。
@@ -192,6 +194,7 @@ impl Transcript {
                 }
                 TranscriptItem::Hero(_)
                 | TranscriptItem::Message(_)
+                | TranscriptItem::ToolResult(_)
                 | TranscriptItem::System(_) => false,
             })
     }
@@ -216,6 +219,13 @@ impl Transcript {
     /// `append_system_message` 追加一条只用于 TUI 展示的 system message。
     pub(crate) fn append_system_message(&mut self, content: impl Into<String>) {
         self.push_item(TranscriptItem::System(SystemMessageItem::new(content)));
+    }
+
+    /// `append_tool_result` 追加一条只用于 TUI 展示的工具审批结果。
+    pub(crate) fn append_tool_result(&mut self, content: impl Into<String>, kind: ToolResultKind) {
+        self.push_item(TranscriptItem::ToolResult(ToolResultItem::new(
+            content, kind,
+        )));
     }
 
     /// `len` 返回 transcript 项数量。
@@ -269,7 +279,8 @@ impl Transcript {
                 }
                 TranscriptItem::Hero(_)
                 | TranscriptItem::Reasoning(_)
-                | TranscriptItem::System(_) => None,
+                | TranscriptItem::System(_)
+                | TranscriptItem::ToolResult(_) => None,
             })
             .collect()
     }

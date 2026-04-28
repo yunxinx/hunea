@@ -15,6 +15,7 @@ use super::{
     theme::{
         command_accent_text_style, primary_text_style, secondary_text_style, tertiary_text_style,
     },
+    tool_result::ToolResultKind,
     transcript::markdown_highlight::{HighlightChunk, highlight_code_chunks},
 };
 
@@ -214,6 +215,7 @@ impl Model {
 
     fn resolve_tool_approval_choice(&mut self, choice: ToolApprovalChoice) -> Option<AppEffect> {
         let source = self.tool_approval_panel.source.clone()?;
+        let title = self.tool_approval_panel.title.clone();
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.pending_acp_permission = None;
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
@@ -234,13 +236,43 @@ impl Model {
                     ToolApprovalChoice::Deny => reject_option_id,
                     ToolApprovalChoice::DenyInSession => reject_always_option_id,
                 };
+                self.append_tool_result_from_runtime(
+                    approval_result_content(choice, &title),
+                    approval_result_kind(choice),
+                );
                 Some(AppEffect::RespondAcpPermission {
                     request_id,
                     option_id,
                 })
             }
-            ToolApprovalSource::Preview => None,
+            ToolApprovalSource::Preview => {
+                self.append_tool_result_from_runtime(
+                    approval_result_content(choice, &title),
+                    approval_result_kind(choice),
+                );
+                None
+            }
         }
+    }
+}
+
+fn approval_result_kind(choice: ToolApprovalChoice) -> ToolResultKind {
+    match choice {
+        ToolApprovalChoice::Allow | ToolApprovalChoice::AllowInSession => ToolResultKind::Ran,
+        ToolApprovalChoice::Deny | ToolApprovalChoice::DenyInSession => ToolResultKind::Rejected,
+    }
+}
+
+fn approval_result_content(choice: ToolApprovalChoice, title: &str) -> String {
+    let verb = match approval_result_kind(choice) {
+        ToolResultKind::Ran => "Ran",
+        ToolResultKind::Rejected => "Reject",
+    };
+    let title = title.trim();
+    if title.is_empty() {
+        verb.to_string()
+    } else {
+        format!("{verb} {title}")
     }
 }
 
@@ -553,7 +585,7 @@ fn append_wrapped_highlight_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::tui::{HeroOptions, theme::default_palette};
+    use crate::frontend::tui::{HeroOptions, Sender, theme::default_palette};
 
     #[test]
     fn preview_layout_omits_labels_and_places_wrapped_command_before_actions() {
@@ -802,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_choice_closes_without_status_notice() {
+    fn preview_choice_closes_without_status_notice_and_appends_result() {
         let mut model = Model::new(HeroOptions::default());
         model.palette = default_palette();
         open_preview_panel(&mut model);
@@ -816,6 +848,56 @@ mod tests {
         assert!(
             model.current_status_notice_text().is_empty(),
             "preview approval should close silently instead of showing a status notice"
+        );
+        assert!(
+            model
+                .transcript_mut()
+                .plain_items()
+                .iter()
+                .any(|item| item == "• Ran sed -n '1,80p' src/main.rs"),
+            "preview approval should append a testable tool result to transcript"
+        );
+    }
+
+    #[test]
+    fn acp_allow_choice_appends_ran_result_without_source_message() {
+        let mut model = Model::new(HeroOptions::default());
+        model.palette = default_palette();
+        model.open_tool_approval_panel(
+            ToolApprovalSource::AcpPermission {
+                request_id: "permission-ran".to_string(),
+                allow_option_id: Some("allow-once".to_string()),
+                allow_always_option_id: None,
+                reject_option_id: Some("reject-once".to_string()),
+                reject_always_option_id: None,
+            },
+            "cargo test tool_approval".to_string(),
+            Vec::new(),
+        );
+
+        let effect = model
+            .handle_tool_approval_panel_key(KeyCode::Enter.into())
+            .expect("tool approval panel should handle Enter");
+
+        assert_eq!(
+            effect,
+            Some(AppEffect::RespondAcpPermission {
+                request_id: "permission-ran".to_string(),
+                option_id: Some("allow-once".to_string()),
+            })
+        );
+        assert!(
+            model
+                .transcript_mut()
+                .plain_items()
+                .iter()
+                .any(|item| item == "• Ran cargo test tool_approval"),
+            "approval result should be appended to transcript"
+        );
+        assert_eq!(
+            model.transcript_mut().source_messages(),
+            Vec::<(Sender, String)>::new(),
+            "tool approval results should not be sent back to the model"
         );
     }
 

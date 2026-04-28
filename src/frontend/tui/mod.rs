@@ -33,6 +33,7 @@ mod style_mode;
 mod styled_text;
 mod system_message;
 mod tool_approval_panel;
+mod tool_result;
 mod transcript;
 mod update;
 mod view;

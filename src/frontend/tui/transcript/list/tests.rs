@@ -124,6 +124,20 @@ fn item_metrics_index_matches_materialized_block_metrics_for_mixed_item_types() 
 }
 
 #[test]
+fn tool_result_is_display_only_and_not_assistant_message() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.append_tool_result("Ran cargo test", ToolResultKind::Ran);
+
+    assert_eq!(transcript.source_messages(), Vec::<(Sender, String)>::new());
+    let item = transcript.item(0).expect("tool result item should exist");
+    assert!(!item.is_assistant_message());
+    assert_eq!(
+        item.render_plain_lines(80, default_palette()),
+        vec!["• Ran cargo test".to_string()]
+    );
+}
+
+#[test]
 fn item_metrics_index_tracks_invalidation_boundaries() {
     let mut transcript = Transcript::new(default_palette());
     transcript.items = Rc::new(vec![

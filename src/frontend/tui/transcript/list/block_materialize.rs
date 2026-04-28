@@ -134,6 +134,9 @@ impl TranscriptItem {
             Self::System(item) => {
                 item.estimate_render_metrics_fast(width, palette, previous_metrics)
             }
+            Self::ToolResult(item) => {
+                item.estimate_render_metrics_fast(width, palette, previous_metrics)
+            }
         }
     }
 
@@ -147,6 +150,7 @@ impl TranscriptItem {
             Self::Message(item) => item.measure_render_metrics(width, palette),
             Self::Reasoning(item) => item.measure_render_metrics(width, palette),
             Self::System(item) => item.measure_render_metrics(width, palette),
+            Self::ToolResult(item) => item.measure_render_metrics(width, palette),
         }
     }
 
@@ -156,6 +160,7 @@ impl TranscriptItem {
             Self::Message(item) => item.render_lines(width, palette),
             Self::Reasoning(item) => item.render_lines(width, palette),
             Self::System(item) => item.render_lines(width, palette),
+            Self::ToolResult(item) => item.render_lines(width, palette),
         }
     }
 
@@ -170,6 +175,9 @@ impl TranscriptItem {
             Self::Message(item) => item.render_for_terminal_replay(width, palette, preserve_ansi),
             Self::Reasoning(item) => item.render_for_terminal_replay(width, palette, preserve_ansi),
             Self::System(item) => item.render_for_terminal_replay(width, palette, preserve_ansi),
+            Self::ToolResult(item) => {
+                item.render_for_terminal_replay(width, palette, preserve_ansi)
+            }
         }
     }
 
@@ -179,6 +187,7 @@ impl TranscriptItem {
             Self::Message(item) => item.render_plain_text(width, palette),
             Self::Reasoning(item) => item.render_plain_text(width, palette),
             Self::System(item) => item.render_plain_text(width, palette),
+            Self::ToolResult(item) => item.render_plain_text(width, palette),
         }
     }
 
@@ -199,6 +208,7 @@ impl TranscriptItem {
             Self::Message(item) => item.render_line_anchors(width, palette),
             Self::Reasoning(item) => item.render_line_anchors(width, palette),
             Self::System(item) => item.render_line_anchors(width, palette),
+            Self::ToolResult(item) => item.render_line_anchors(width, palette),
         }
     }
 
@@ -213,6 +223,7 @@ impl TranscriptItem {
             Self::Message(item) => item.render_selectable_line_ranges(width, palette),
             Self::Reasoning(_) => Vec::new(),
             Self::System(_) => Vec::new(),
+            Self::ToolResult(_) => Vec::new(),
         };
         if ranges.len() == plain_lines.len() {
             return ranges;
@@ -237,6 +248,7 @@ impl TranscriptItem {
             Self::Message(item) => item.render_cache_key(),
             Self::Reasoning(item) => item.render_cache_key(),
             Self::System(item) => item.render_cache_key(),
+            Self::ToolResult(item) => item.render_cache_key(),
         }
     }
 
@@ -246,6 +258,7 @@ impl TranscriptItem {
             Self::Message(item) => item.source_text_byte_len(),
             Self::Reasoning(item) => item.source_text_byte_len(),
             Self::System(item) => item.source_text_byte_len(),
+            Self::ToolResult(item) => item.source_text_byte_len(),
         }
     }
 }

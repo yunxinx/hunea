@@ -659,6 +659,24 @@ impl Model {
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
     }
 
+    pub(crate) fn append_tool_result_from_runtime(
+        &mut self,
+        content: impl Into<String>,
+        kind: super::tool_result::ToolResultKind,
+    ) {
+        let content = content.into();
+        if content.is_empty() {
+            return;
+        }
+
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        self.transcript_mut().append_tool_result(content, kind);
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+    }
+
     pub(crate) fn sync_composer_height(&mut self) {
         let full_height = self.composer.full_height().max(1);
         let mut viewport_height = if !self.has_window || self.height == 0 {

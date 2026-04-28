@@ -306,6 +306,41 @@ fn acp_permission_enter_responds_with_selected_tool_approval_option() {
     );
 }
 
+#[test]
+fn acp_permission_deny_appends_red_reject_result_to_transcript() {
+    let mut model = ready_model(72, 18, ModelOptions::default());
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-3".to_string(),
+        title: Some("Run destructive command".to_string()),
+        allow_option_id: Some("allow-once".to_string()),
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: Some("reject-once".to_string()),
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    let effect = model.update(AppEvent::Key(KeyCode::Char('n').into()));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-3".to_string(),
+            option_id: Some("reject-once".to_string()),
+        })
+    );
+    let buffer = render_buffer(&mut model, 72, 18);
+    let rows = trim_rows(&buffer);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("• Reject Run destructive command")),
+        "reject result should be appended to transcript, got: {rows:?}"
+    );
+    assert_text_cells_use_color(
+        &buffer,
+        "• Reject Run destructive command",
+        default_palette().system_error,
+    );
+}
+
 fn ready_model(width: u16, height: u16, options: ModelOptions) -> Model {
     let mut model = Model::new_with_options(HeroOptions::default(), options);
     model.update(AppEvent::Resized { width, height });

@@ -32,8 +32,6 @@ pub(super) struct DocumentTranscriptViewportSnapshot {
     pub(super) lines: Vec<Line<'static>>,
     pub(super) plain_text_len: usize,
     pub(super) resolved_offset: usize,
-    #[allow(dead_code)]
-    pub(super) item_range: Option<(usize, usize)>,
     #[cfg(test)]
     pub(super) plain_lines: Vec<String>,
 }
@@ -42,7 +40,6 @@ pub(super) struct DocumentTranscriptViewportSnapshot {
 struct DocumentTranscriptViewportLine {
     line: Line<'static>,
     plain_line_len: usize,
-    item_index: usize,
     #[cfg(test)]
     plain_line: String,
 }
@@ -192,7 +189,6 @@ impl DocumentTranscriptSnapshot {
             return Some(DocumentTranscriptViewportLine {
                 line: Line::raw(""),
                 plain_line_len: 0,
-                item_index: position.gap_owner_item_index.unwrap_or(position.item_index),
                 #[cfg(test)]
                 plain_line: String::new(),
             });
@@ -203,7 +199,6 @@ impl DocumentTranscriptSnapshot {
         Some(DocumentTranscriptViewportLine {
             line: block.line_at(block_index)?,
             plain_line_len: block.plain_line_len(block_index)?,
-            item_index: position.item_index,
             #[cfg(test)]
             plain_line: if include_test_plain_lines {
                 block.plain_line_at(block_index)?
@@ -246,7 +241,6 @@ impl DocumentTranscriptSnapshot {
         let end = (start + count).min(self.line_count());
         let mut lines = Vec::with_capacity(end - start);
         let mut plain_text_len = 0;
-        let mut item_range = None;
         #[cfg(test)]
         let mut plain_lines = Vec::with_capacity(end - start);
 
@@ -258,10 +252,6 @@ impl DocumentTranscriptSnapshot {
                 plain_text_len += 1;
             }
             plain_text_len += line.plain_line_len;
-            item_range = Some(match item_range {
-                Some((start_item, _)) => (start_item, line.item_index),
-                None => (line.item_index, line.item_index),
-            });
             #[cfg(test)]
             if include_test_plain_lines {
                 plain_lines.push(line.plain_line.clone());
@@ -273,7 +263,6 @@ impl DocumentTranscriptSnapshot {
             lines,
             plain_text_len,
             resolved_offset: start,
-            item_range,
             #[cfg(test)]
             plain_lines,
         }

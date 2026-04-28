@@ -35,10 +35,12 @@ pub(crate) use prompt_wrap::{PromptVisualLine, wrap_prompt_visual_lines};
 #[cfg(test)]
 pub(crate) use render_state::RenderItemSummary;
 #[cfg(test)]
+pub(crate) use render_state::ViewportRenderResult;
+#[cfg(test)]
 pub(crate) use render_state::new_render_result;
 pub(crate) use render_state::{
-    ItemLineAnchor, LineAnchor, LineAnchorKind, RenderResult, ViewportRenderResult,
-    index_only_render_result, new_render_result_with_append_start,
+    ItemLineAnchor, LineAnchor, LineAnchorKind, RenderResult, index_only_render_result,
+    new_render_result_with_append_start,
 };
 pub(crate) use wrap::{
     DEFAULT_RENDER_WIDTH, display_tab_width, wrap_assistant_text, wrap_prompt_text,

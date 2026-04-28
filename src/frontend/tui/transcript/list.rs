@@ -6,7 +6,7 @@ use super::{
     DEFAULT_RENDER_WIDTH, ItemLineAnchor, RenderResult, TranscriptEstimateBreakdown,
     TranscriptEstimateKind, TranscriptEstimateSource, TranscriptFastEstimate,
     TranscriptItemMetrics, TranscriptItemMetricsCache, TranscriptItemMetricsIndex,
-    TranscriptItemMetricsQuality, TranscriptItemPosition, ViewportRenderResult,
+    TranscriptItemMetricsQuality, TranscriptItemPosition,
     cache::{CachedLineAnchors, CachedRenderBlock, MAX_RECENT_RENDER_BLOCKS, ScreenRenderCache},
     new_render_result_with_append_start,
     render_state::RenderItemSummary,
@@ -15,6 +15,8 @@ use super::{
 
 #[cfg(test)]
 use super::LineAnchorKind;
+#[cfg(test)]
+use super::ViewportRenderResult;
 #[cfg(test)]
 use crate::frontend::tui::styled_text::line_to_plain_text;
 use crate::frontend::tui::{
@@ -217,13 +219,11 @@ impl Transcript {
     }
 
     /// `len` 返回 transcript 项数量。
-    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.items.len()
     }
 
     /// `clear` 清空 transcript。
-    #[allow(dead_code)]
     pub(crate) fn clear(&mut self) {
         Rc::make_mut(&mut self.items).clear();
         self.items_version = self.items_version.saturating_add(1);
@@ -232,7 +232,7 @@ impl Transcript {
     }
 
     /// `item` 返回指定索引的 transcript 项。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn item(&self, index: usize) -> Option<&TranscriptItem> {
         self.items.get(index).map(Rc::as_ref)
     }

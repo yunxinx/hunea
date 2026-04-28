@@ -82,7 +82,7 @@ impl Composer {
     }
 
     /// `visible_height` 返回当前 viewport 的可视高度。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn visible_height(&self) -> u16 {
         self.height.max(1)
     }

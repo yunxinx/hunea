@@ -47,7 +47,7 @@ struct ActivityTokenProgress {
 enum ActivityTokenDirection {
     Down,
     // 当前 OpenAI-compatible 流只会上报下行输出；工具结果回传接入后会使用上行方向。
-    #[allow(dead_code)]
+    #[cfg(test)]
     Up,
 }
 
@@ -141,7 +141,7 @@ impl Model {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn add_acp_activity_input_tokens_at(&mut self, token_delta: usize, now: Instant) {
         let Some(activity) = self.acp_activity.as_mut() else {
             return;
@@ -296,7 +296,7 @@ impl AcpActivityState {
         );
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn record_input_tokens(&mut self, token_delta: usize, now: Instant) {
         if token_delta == 0 {
             return;
@@ -371,6 +371,7 @@ impl ActivityTokenDirection {
     fn glyph(self) -> &'static str {
         match self {
             Self::Down => "↓",
+            #[cfg(test)]
             Self::Up => "↑",
         }
     }

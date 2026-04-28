@@ -1,5 +1,6 @@
 #[cfg(not(feature = "bench-support"))]
 #[doc(hidden)]
+// 默认构建仍编译 benchmark helper 以校验性能路径；其公开入口只在 bench-support 下使用。
 #[allow(dead_code)]
 mod benchmark;
 #[cfg(feature = "bench-support")]

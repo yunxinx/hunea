@@ -1,10 +1,11 @@
+#[cfg(test)]
 use ratatui::text::Line;
 
 use super::*;
 
 impl Transcript {
     /// `render_viewport` 返回 transcript 的可视切片。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn render_viewport(&mut self, offset: usize, height: usize) -> ViewportRenderResult {
         self.begin_recent_render_block_batch();
         let index = self.item_metrics_index();
@@ -29,20 +30,7 @@ impl Transcript {
         self.finish_recent_render_block_batch(warmed_item_count);
 
         ViewportRenderResult {
-            lines: slice.lines,
-            plain_lines: {
-                #[cfg(test)]
-                {
-                    slice.plain_lines
-                }
-                #[cfg(not(test))]
-                {
-                    Vec::new()
-                }
-            },
-            line_count: slice.line_count,
-            total_line_count: index.line_count,
-            resolved_offset,
+            plain_lines: slice.plain_lines,
         }
     }
 
@@ -82,6 +70,7 @@ impl Transcript {
         warmed_item_count
     }
 
+    #[cfg(test)]
     fn materialize_viewport_slice(
         &mut self,
         index: &TranscriptItemMetricsIndex,
@@ -95,8 +84,6 @@ impl Transcript {
         let mut remaining = count.min(index.line_count - start);
         let mut slice = crate::frontend::tui::transcript::render_state::RenderRangeSlice {
             lines: Vec::with_capacity(remaining),
-            line_count: remaining,
-            plain_char_len: 0,
             #[cfg(test)]
             plain_lines: Vec::with_capacity(remaining),
         };
@@ -132,9 +119,6 @@ impl Transcript {
             if block_start < block_end {
                 let block = self.render_screen_block(position.item_index, width);
                 block.extend_lines(&mut slice.lines, block_start, block_end);
-                slice.plain_char_len += (block_start..block_end)
-                    .filter_map(|block_index| block.plain_line_len(block_index))
-                    .sum::<usize>();
                 #[cfg(test)]
                 for block_index in block_start..block_end {
                     if let Some(plain_line) = block.plain_line_at(block_index) {

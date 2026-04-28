@@ -1,7 +1,5 @@
 const EXPECTED_MAX_RECENT_RENDER_BLOCKS: usize = 48;
 
-use ratatui::text::Span;
-
 use super::*;
 use crate::frontend::tui::transcript::{
     render_markdown_metrics_call_count, reset_render_markdown_metrics_call_count,
@@ -915,11 +913,6 @@ fn palette_change_invalidates_item_metrics_when_render_shape_changes() {
 
 fn static_message(content: &str) -> MessageItem {
     MessageItem::new(Sender::Assistant, content)
-}
-
-#[allow(dead_code)]
-fn styled_line(text: &str) -> Line<'static> {
-    Line::from(Span::raw(text.to_string()))
 }
 
 fn retained_block_memory_summary_for_render(

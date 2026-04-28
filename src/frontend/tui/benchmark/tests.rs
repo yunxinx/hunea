@@ -394,6 +394,56 @@ fn assert_release_hot_path_budget(
     );
 }
 
+fn assert_release_large_history_240hz_budget(
+    label: &str,
+    viewport_times: &[std::time::Duration],
+    frame_times: &[std::time::Duration],
+    tick_times: &[std::time::Duration],
+) {
+    if cfg!(debug_assertions) {
+        return;
+    }
+
+    const FRAME_240HZ_MS: f64 = 1000.0 / 240.0;
+
+    let viewport = duration_distribution(viewport_times);
+    let frame = duration_distribution(frame_times);
+    let tick = duration_distribution(tick_times);
+    let slow_ticks_over_8ms = tick_times
+        .iter()
+        .filter(|duration| duration.as_millis() >= 8)
+        .count();
+    let slow_ticks_over_16ms = tick_times
+        .iter()
+        .filter(|duration| duration.as_millis() >= 16)
+        .count();
+
+    assert!(
+        tick.p95_ms < FRAME_240HZ_MS,
+        "{label} tick p95 should stay under 240Hz frame budget, got {tick:?}"
+    );
+    assert!(
+        tick.max_ms < 8.0,
+        "{label} tick max should stay under 120fps frame budget, got {tick:?}"
+    );
+    assert_eq!(
+        slow_ticks_over_8ms, 0,
+        "{label} should not produce ticks over 8ms, tick={tick:?}"
+    );
+    assert_eq!(
+        slow_ticks_over_16ms, 0,
+        "{label} should not produce ticks over 16ms, tick={tick:?}"
+    );
+    assert!(
+        frame.p95_ms < 1.0,
+        "{label} frame p95 should stay under 1ms, got {frame:?}"
+    );
+    assert!(
+        viewport.p95_ms < FRAME_240HZ_MS,
+        "{label} viewport p95 should stay under 240Hz frame budget, got {viewport:?}"
+    );
+}
+
 #[derive(Debug, Default)]
 struct HotPathTimings {
     scroll_times: Vec<std::time::Duration>,
@@ -879,6 +929,71 @@ fn mixed_markdown_code_message(index: usize) -> String {
         "markdown code content ".repeat(8),
         "Follow-up prose keeps wrapping across several terminal columns. ".repeat(3),
     )
+}
+
+#[test]
+#[ignore = "targeted 100000-item high-frequency scroll profile"]
+fn document_pipeline_scroll_profile_for_100000_items() {
+    let width = 80;
+    let height = 24;
+    let item_count = 100_000;
+    let scroll_steps = 900;
+    let mut terminal = Terminal::new(TestBackend::new(width, height))
+        .expect("100000-item scroll profile backend should initialize");
+    let mut model = new_hot_path_profile_model(width, height);
+    let raw_text_bytes = append_standard_benchmark_history(&mut model, item_count);
+    prepare_hot_path_profile_model(&mut model, width, height);
+
+    let sync_started_at = std::time::Instant::now();
+    let sync_profile = model.sync_transcript_render_profile();
+    let sync_time = sync_started_at.elapsed();
+    model.sync_command_panel_navigation();
+    model.sync_composer_height();
+
+    let layout = model.build_document_layout();
+    let document_lines = layout.line_count();
+    let transcript_lines = layout.transcript_line_count;
+    model.apply_document_viewport_position(&layout, 0, 0, false, true);
+    drop(layout);
+    warm_hot_path_frame(&mut model, &mut terminal, height);
+
+    let timings = measure_scroll_hot_path(&mut model, &mut terminal, height, scroll_steps);
+    print_hot_path_profile(
+        "document_100000_scroll",
+        format!(
+            "items={item_count} raw_bytes={raw_text_bytes} size={width}x{height} document_lines={document_lines} transcript_lines={transcript_lines} sync_ms={:.3} estimate_ms={:.3} visible_exact_ms={:.3}",
+            duration_ms(sync_time),
+            duration_ms(sync_profile.estimate_time),
+            duration_ms(sync_profile.visible_exact_time),
+        ),
+        &timings,
+    );
+    assert_release_large_history_240hz_budget(
+        "document_pipeline_scroll_profile_for_100000_items",
+        &timings.viewport_times,
+        &timings.frame_times,
+        &timings.tick_times,
+    );
+}
+
+fn append_standard_benchmark_history(model: &mut Model, item_count: usize) -> usize {
+    let mut raw_text_bytes = 0usize;
+    for index in 0..item_count {
+        let (sender, content) = standard_benchmark_message(index);
+        raw_text_bytes += content.len();
+        model
+            .transcript_mut()
+            .append_message_with_style_mode(sender, content, StyleMode::Cx);
+    }
+    raw_text_bytes
+}
+
+fn standard_benchmark_message(index: usize) -> (Sender, String) {
+    if index.is_multiple_of(3) {
+        return (Sender::User, benchmark_user_message(index));
+    }
+
+    (Sender::Assistant, benchmark_assistant_markdown(index))
 }
 
 #[test]

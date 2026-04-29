@@ -81,7 +81,43 @@ fn status_line_renders_current_model_when_selected() {
 
     assert_eq!(
         render_trimmed_rows(&mut model, 48, 4),
-        vec!["", "› Enter to send Prompt", "", "  local/qwen3"]
+        vec!["", "› Enter to send Prompt", "", "  [Local] qwen3"]
+    );
+}
+
+#[test]
+fn status_line_uses_provider_display_name_for_current_model() {
+    let mut model = ready_model_with_options(
+        72,
+        4,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "LM Studio",
+                Some("http://localhost:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new(
+                    "qwen/qwen3-4b-2507",
+                    None,
+                    ModelSource::Configured,
+                )],
+            )]),
+            selected_model: Some(ModelSelection::new("local", "qwen/qwen3-4b-2507")),
+            ..ModelOptions::default()
+        },
+    );
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 72, 4),
+        vec![
+            "",
+            "› Enter to send Prompt",
+            "",
+            "  [LM Studio] qwen/qwen3-4b-2507"
+        ]
     );
 }
 
@@ -122,10 +158,11 @@ fn status_line_updates_current_model_after_model_panel_selection() {
     type_text(&mut model, "/models");
     model.update(AppEvent::Key(KeyCode::Enter.into()));
     model.update(AppEvent::Key(KeyCode::Enter.into()));
+    model.update(AppEvent::StatusNoticeTimeout { token: 1 });
 
     let rows = render_trimmed_rows(&mut model, 72, 18);
     assert!(
-        rows.iter().any(|row| row.contains("local/qwen3")),
+        rows.iter().any(|row| row.contains("[Local] qwen3")),
         "current-model should reflect the selected model after panel selection, got: {rows:?}"
     );
 }
@@ -197,7 +234,7 @@ fn status_line_preserves_request_metrics_order_with_other_items() {
             "",
             "› Enter to send Prompt",
             "",
-            "  local/qwen3 · 0.01s · 0tps"
+            "  [Local] qwen3 · 0.01s · 0tps"
         ]
     );
 }

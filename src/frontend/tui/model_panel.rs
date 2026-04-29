@@ -274,7 +274,13 @@ impl Model {
                 value: model_id,
             });
         }
-        self.show_transient_status_notice(&format!("Model selected: {}", selection.display_name()));
+        self.show_transient_status_notice(&format!(
+            "Model selected: {}",
+            self.model_selection_display_name(
+                selection.provider_id.as_str(),
+                selection.model_id.as_str()
+            )
+        ));
         self.close_model_panel();
         Some(AppEffect::PersistSelectedModel { selection })
     }

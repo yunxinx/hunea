@@ -153,7 +153,12 @@ impl Model {
                     if let Some(agent_model) = self.current_acp_model_status_part() {
                         parts.push(sanitize_status_line_part(&agent_model));
                     } else if let Some(selection) = &self.selected_model {
-                        parts.push(sanitize_status_line_part(&selection.display_name()));
+                        parts.push(sanitize_status_line_part(
+                            &self.model_selection_display_name(
+                                selection.provider_id.as_str(),
+                                selection.model_id.as_str(),
+                            ),
+                        ));
                     }
                 }
                 StatusLineItem::Throughput => {

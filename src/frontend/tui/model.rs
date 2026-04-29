@@ -365,6 +365,15 @@ impl Model {
         self.selected_acp_agent.as_deref()
     }
 
+    pub(super) fn model_selection_display_name(&self, provider_id: &str, model_id: &str) -> String {
+        let provider_name = self
+            .model_catalog
+            .enabled_provider_by_id(provider_id)
+            .map(|provider| provider.display_name.as_str())
+            .unwrap_or(provider_id);
+        format!("[{provider_name}] {model_id}")
+    }
+
     /// `last_request_metrics` 返回最近一次成功完成请求的状态行指标。
     pub fn last_request_metrics(&self) -> Option<RequestMetrics> {
         self.last_request_metrics

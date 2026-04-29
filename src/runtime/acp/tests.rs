@@ -314,6 +314,59 @@ async fn acp_worker_transport_creates_session_and_reads_prompt_response() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn acp_worker_reports_protocol_warning_even_when_new_session_fails() {
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+
+    use acp::schema::{InitializeRequest, InitializeResponse, NewSessionRequest, ProtocolVersion};
+    use agent_client_protocol as acp;
+
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    tokio::task::spawn(async move {
+        acp::Agent
+            .builder()
+            .on_receive_request(
+                async |_request: InitializeRequest, responder, _connection| {
+                    responder.respond(InitializeResponse::new(ProtocolVersion::V0))
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _connection| {
+                    responder.respond_with_error(acp::Error::internal_error())
+                },
+                acp::on_receive_request!(),
+            )
+            .connect_to(agent_transport)
+            .await
+    });
+
+    let (_command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let result = super::run_agent_transport_worker(
+        "Kimi Code CLI".to_string(),
+        client_transport,
+        command_rx,
+        cancel_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+        super::AcpPermissionRegistry::default(),
+    )
+    .await;
+
+    assert!(result.is_err());
+    let warning = recv_worker_event(&event_rx, "worker should report protocol warning").await;
+    assert!(matches!(
+        warning,
+        super::AcpSessionEvent::SystemMessage {
+            ref agent_id,
+            ref message,
+        } if agent_id == "Kimi Code CLI"
+            && message.contains("ACP protocol version mismatch")
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn acp_worker_transport_forwards_thought_chunks_and_model_config() {
     use std::sync::{Arc, atomic::AtomicBool, mpsc};
 

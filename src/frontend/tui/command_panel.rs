@@ -23,6 +23,7 @@ const COMMAND_PANEL_DESCRIPTION_GAP: usize = 4;
 pub(super) enum CommandPanelAction {
     Clear,
     Exit,
+    OpenAcpDebug,
     OpenAcpPicker,
     OpenModelPanel,
     OpenToolApprovalDebug,
@@ -368,6 +369,10 @@ impl Model {
             }
             CommandPanelAction::Exit => {
                 self.mark_quitting();
+                None
+            }
+            CommandPanelAction::OpenAcpDebug => {
+                self.open_acp_debug_panel();
                 None
             }
             CommandPanelAction::OpenAcpPicker => {

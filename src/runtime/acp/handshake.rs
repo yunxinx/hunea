@@ -1,6 +1,9 @@
 use std::{fmt, process::Stdio, time::Duration};
 
-use super::{AcpInitializeOutcome, AcpSessionCommand};
+use super::{
+    AcpInitializeOutcome, AcpSessionCommand,
+    initialize::{build_initialize_request, initialize_outcome_from_response},
+};
 
 /// `AcpHandshakeError` 描述 ACP 协议握手失败。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,7 +115,6 @@ pub async fn initialize_agent_transport<T>(
 where
     T: agent_client_protocol::ConnectTo<agent_client_protocol::Client> + 'static,
 {
-    use acp::schema::{Implementation, InitializeRequest, ProtocolVersion};
     use agent_client_protocol as acp;
 
     let response = acp::Client
@@ -120,9 +122,7 @@ where
         .name("lumos")
         .connect_with(transport, async |connection| {
             connection
-                .send_request(InitializeRequest::new(ProtocolVersion::LATEST).client_info(
-                    Implementation::new("lumos", env!("CARGO_PKG_VERSION")).title("Lumos"),
-                ))
+                .send_request(build_initialize_request())
                 .block_task()
                 .await
         })
@@ -132,17 +132,4 @@ where
         })?;
 
     Ok(initialize_outcome_from_response(response))
-}
-
-pub(crate) fn initialize_outcome_from_response(
-    response: agent_client_protocol::schema::InitializeResponse,
-) -> AcpInitializeOutcome {
-    let agent_info = response.agent_info;
-    AcpInitializeOutcome {
-        protocol_version: response.protocol_version,
-        agent_name: agent_info.as_ref().map(|info| info.name.clone()),
-        agent_title: agent_info.as_ref().and_then(|info| info.title.clone()),
-        agent_version: agent_info.as_ref().map(|info| info.version.clone()),
-        auth_method_count: response.auth_methods.len(),
-    }
 }

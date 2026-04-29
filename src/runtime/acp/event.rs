@@ -38,6 +38,10 @@ pub enum AcpSessionEvent {
         agent_id: String,
         message: String,
     },
+    SystemMessage {
+        agent_id: String,
+        message: String,
+    },
     PromptStarted {
         agent_id: String,
     },

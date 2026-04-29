@@ -245,7 +245,7 @@ impl Model {
             .as_ref()
             .filter(|model| !model.trim().is_empty())
             .cloned()
-            .or_else(|| Some(selected_agent.clone()))
+            .or_else(|| Some(self.acp_agent_display_label(selected_agent)))
     }
 }
 

@@ -1,5 +1,5 @@
-use std::rc::Rc;
 use std::time::{Duration, Instant};
+use std::{collections::BTreeMap, rc::Rc};
 
 use ratatui::Frame;
 
@@ -7,13 +7,13 @@ use crate::envinfo;
 use crate::runtime::llm::NativeChatResponse;
 use crate::runtime::phrases::StatusPhraseOrder;
 use crate::runtime::{
-    acp::AcpModelConfig,
+    acp::{AcpAgentIdentity, AcpModelConfig},
     models::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind},
 };
 
 use super::{
     HeroOptions, ReasoningDisplayMode, Sender,
-    acp::{AcpActivityState, AcpPanelState, PendingAcpPermission},
+    acp::{AcpActivityState, AcpDebugPanelState, AcpPanelState, PendingAcpPermission},
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
     document::{
@@ -45,10 +45,12 @@ pub struct Model {
     pub(super) external_editor_hint: String,
     pub(super) external_editor_helper_enabled: bool,
     pub(super) acp_agent_servers: Vec<String>,
+    pub(super) acp_agent_identities: BTreeMap<String, AcpAgentIdentity>,
     pub(super) selected_acp_agent: Option<String>,
     pub(super) acp_current_model: Option<String>,
     pub(super) acp_model_config_id: Option<String>,
     pub(super) acp_panel: AcpPanelState,
+    pub(super) acp_debug_panel: AcpDebugPanelState,
     pub(super) model_catalog: ModelCatalog,
     pub(super) selected_model: Option<ModelSelection>,
     pub(super) requires_model_selection: bool,
@@ -281,10 +283,12 @@ impl Model {
             external_editor_hint: options.external_editor_hint,
             external_editor_helper_enabled: options.show_external_editor_helper,
             acp_agent_servers: options.acp_agent_servers,
+            acp_agent_identities: BTreeMap::new(),
             selected_acp_agent: None,
             acp_current_model: None,
             acp_model_config_id: None,
             acp_panel: AcpPanelState::default(),
+            acp_debug_panel: AcpDebugPanelState::default(),
             model_catalog: options.model_catalog,
             selected_model,
             requires_model_selection: options.requires_model_selection,
@@ -363,6 +367,31 @@ impl Model {
     /// `selected_acp_agent` 返回本次 TUI 会话中用户选择的 ACP Agent。
     pub fn selected_acp_agent(&self) -> Option<&str> {
         self.selected_acp_agent.as_deref()
+    }
+
+    /// `apply_acp_agent_identity` 记录 ACP agent 初始化后上报的展示信息。
+    pub(crate) fn apply_acp_agent_identity(
+        &mut self,
+        agent_id: impl Into<String>,
+        identity: AcpAgentIdentity,
+    ) {
+        let agent_id = agent_id.into();
+        if identity.has_agent_info() {
+            self.acp_agent_identities.insert(agent_id, identity);
+        } else {
+            self.acp_agent_identities.remove(&agent_id);
+        }
+        self.bump_status_line_revision();
+        if self.document_runtime.follow_bottom {
+            self.sync_document_viewport_to_bottom();
+        }
+    }
+
+    pub(crate) fn acp_agent_display_label(&self, agent_id: &str) -> String {
+        self.acp_agent_identities
+            .get(agent_id)
+            .map(AcpAgentIdentity::display_label)
+            .unwrap_or_else(|| agent_id.to_string())
     }
 
     pub(super) fn model_selection_display_name(&self, provider_id: &str, model_id: &str) -> String {
@@ -476,6 +505,7 @@ impl Model {
         self.transcript = transcript;
         self.composer.clear();
         self.acp_panel = AcpPanelState::default();
+        self.acp_debug_panel = AcpDebugPanelState::default();
         self.model_panel = ModelPanelState::default();
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);

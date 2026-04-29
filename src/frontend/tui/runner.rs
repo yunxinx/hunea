@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::runtime::acp::{
-    AcpInitializeOutcome, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
+    AcpAgentIdentity, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
 };
 use crate::runtime::llm::{
     CancellationToken, ChatPerformanceMetrics, LlmError, NativeChatProgress, NativeChatRequest,
@@ -1126,14 +1126,23 @@ fn apply_acp_session_event(
     event: AcpSessionEvent,
 ) {
     match event {
-        AcpSessionEvent::Started { outcome, .. } => {
+        AcpSessionEvent::Started {
+            agent_id, outcome, ..
+        } => {
+            model.apply_acp_agent_identity(
+                agent_id,
+                AcpAgentIdentity::from_initialize_outcome(&outcome),
+            );
             model.show_transient_status_notice(&format!(
                 "ACP session ready: {}",
-                acp_agent_display_name(&outcome)
+                crate::runtime::acp::agent_display_name(&outcome)
             ));
         }
         AcpSessionEvent::StartFailed { message, .. } => {
             model.show_transient_status_notice(&format!("ACP start failed: {message}"));
+        }
+        AcpSessionEvent::SystemMessage { message, .. } => {
+            model.append_system_message_from_runtime(message);
         }
         AcpSessionEvent::PromptStarted { agent_id } => {
             acp_runtime.reset_response_buffer();
@@ -1388,15 +1397,6 @@ fn acp_permission_option_ids(
     }
 }
 
-fn acp_agent_display_name(outcome: &AcpInitializeOutcome) -> String {
-    outcome
-        .agent_title
-        .as_deref()
-        .or(outcome.agent_name.as_deref())
-        .unwrap_or("unknown agent")
-        .to_string()
-}
-
 fn run_external_editor_effect(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     model: &mut Model,
@@ -1479,8 +1479,10 @@ fn copy_selection_to_terminal_clipboard(
 mod tests {
     use super::*;
     use crate::frontend::tui::{ReasoningDisplayMode, Sender, StatusLineItem};
+    use crate::runtime::acp::AcpInitializeOutcome;
     use crate::runtime::models::ModelSelection;
     use crate::runtime::phrases::StatusPhraseOrder;
+    use agent_client_protocol::schema::ProtocolVersion;
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -1533,6 +1535,99 @@ mod tests {
             vec!["你好！我是 Kimi Code CLI".to_string()]
         );
         assert!(!model.current_acp_activity_render_result().has_content);
+    }
+
+    #[test]
+    fn acp_system_message_event_appends_runtime_system_message() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        let mut acp_runtime = AcpRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::SystemMessage {
+                agent_id: "kimi".to_string(),
+                message: crate::runtime::acp::debug_protocol_version_system_message(),
+            },
+        );
+
+        let items = model.transcript_plain_items();
+        assert!(
+            items
+                .iter()
+                .any(|item| item.contains("ACP protocol version mismatch")),
+            "expected protocol mismatch system message, got: {items:?}"
+        );
+    }
+
+    #[test]
+    fn acp_started_uses_agent_title_and_version_in_current_model_status_line() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                status_line_items: vec![StatusLineItem::CurrentModel],
+                ..ModelOptions::default()
+            },
+        );
+        model.selected_acp_agent = Some("kimi".to_string());
+        let mut acp_runtime = AcpRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::Started {
+                agent_id: "kimi".to_string(),
+                session_id: "test-session".to_string(),
+                outcome: AcpInitializeOutcome {
+                    protocol_version: ProtocolVersion::V1,
+                    agent_name: Some("kimi".to_string()),
+                    agent_title: Some("Kimi Code CLI".to_string()),
+                    agent_version: Some("1.39.0".to_string()),
+                    auth_method_count: 0,
+                },
+            },
+        );
+
+        let status = model.current_status_line_parts().join(" ");
+        assert!(
+            status.contains("Kimi Code CLI (1.39.0)"),
+            "expected ACP identity with version in current-model status line, got: {status:?}"
+        );
+    }
+
+    #[test]
+    fn acp_started_without_agent_info_keeps_configured_agent_label_in_status_line() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                status_line_items: vec![StatusLineItem::CurrentModel],
+                ..ModelOptions::default()
+            },
+        );
+        model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+        let mut acp_runtime = AcpRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::Started {
+                agent_id: "Kimi Code CLI".to_string(),
+                session_id: "test-session".to_string(),
+                outcome: AcpInitializeOutcome {
+                    protocol_version: ProtocolVersion::V1,
+                    agent_name: None,
+                    agent_title: None,
+                    agent_version: None,
+                    auth_method_count: 0,
+                },
+            },
+        );
+
+        assert_eq!(
+            model.current_status_line_parts(),
+            vec!["Kimi Code CLI".to_string()]
+        );
     }
 
     #[test]

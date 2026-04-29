@@ -364,6 +364,44 @@ fn debug_tool_command_opens_tool_approval_preview_panel() {
     );
 }
 
+#[test]
+fn acp_debug_command_opens_protocol_version_system_message_panel_item() {
+    let mut model = ready_model(
+        80,
+        16,
+        ModelOptions {
+            debug_commands_enabled: true,
+            ..ModelOptions::default()
+        },
+    );
+    type_text(&mut model, "/acp-debug");
+
+    let effect = model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "");
+    let rows = render_trimmed_rows(&mut model, 80, 16);
+    assert!(
+        rows.iter().any(|row| row.contains("ACP Debug:")),
+        "expected /acp-debug panel, got: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("protocolVersion-system-msg")),
+        "expected protocolVersion debug item, got: {rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    let items = model.transcript_plain_items();
+    assert!(
+        items
+            .iter()
+            .any(|item| item.contains("ACP protocol version mismatch")),
+        "expected protocolVersion system message, got: {items:?}"
+    );
+}
+
 fn assert_blank_row_after(rows: &[String], needle: &str) {
     let index = row_index(rows, needle);
     assert_eq!(

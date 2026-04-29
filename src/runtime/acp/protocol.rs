@@ -13,7 +13,9 @@ use agent_client_protocol::schema::{
 
 use super::{
     AcpModelConfig, AcpModelOption, AcpSessionCommand, AcpSessionEvent,
-    handshake::initialize_outcome_from_response,
+    initialize::{
+        build_initialize_request, initialize_outcome_from_response, protocol_version_warning,
+    },
     permission::{AcpPermissionRegistry, acp_permission_request_from_sdk},
     worker::AcpWorkerCommand,
 };
@@ -126,7 +128,7 @@ pub(crate) async fn run_agent_transport_worker<T>(
 where
     T: agent_client_protocol::ConnectTo<agent_client_protocol::Client> + 'static,
 {
-    use acp::schema::{Implementation, InitializeRequest, NewSessionRequest, ProtocolVersion};
+    use acp::schema::NewSessionRequest;
     use agent_client_protocol as acp;
 
     acp::Client
@@ -134,12 +136,18 @@ where
         .name("lumos")
         .connect_with(transport, async move |connection| {
             let response = connection
-                .send_request(InitializeRequest::new(ProtocolVersion::LATEST).client_info(
-                    Implementation::new("lumos", env!("CARGO_PKG_VERSION")).title("Lumos"),
-                ))
+                .send_request(build_initialize_request())
                 .block_task()
                 .await?;
             let outcome = initialize_outcome_from_response(response);
+            if let Some(message) = protocol_version_warning(&outcome) {
+                event_tx
+                    .send(AcpSessionEvent::SystemMessage {
+                        agent_id: agent_id.clone(),
+                        message,
+                    })
+                    .map_err(|_| acp::Error::internal_error())?;
+            }
             let cwd = std::env::current_dir().map_err(|error| {
                 acp::Error::internal_error().data(format!("cannot get current directory: {error}"))
             })?;

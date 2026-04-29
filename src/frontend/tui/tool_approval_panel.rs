@@ -1,9 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
-    style::{Modifier, Style},
+    style::Modifier,
     text::{Line, Span},
 };
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
@@ -16,7 +15,7 @@ use super::{
         command_accent_text_style, primary_text_style, secondary_text_style, tertiary_text_style,
     },
     tool_result::ToolResultKind,
-    transcript::markdown_highlight::{HighlightChunk, highlight_code_chunks},
+    transcript::markdown_highlight::{highlight_code_chunks, wrap_highlight_chunks},
 };
 
 const ACTION_COLUMN_GAP: usize = 4;
@@ -67,16 +66,13 @@ impl ToolApprovalChoice {
         match self {
             Self::Allow => "Allow",
             Self::AllowInSession => "Allow in session",
-            Self::Deny => "Deny",
-            Self::DenyInSession => "Deny in session",
+            Self::Deny => "Reject",
+            Self::DenyInSession => "Reject in session",
         }
     }
 
     fn display_label(self) -> &'static str {
-        match self {
-            Self::DenyInSession => "Deny  in session",
-            _ => self.label(),
-        }
+        self.label()
     }
 
     fn position(self) -> ToolApprovalChoicePosition {
@@ -298,7 +294,7 @@ fn build_panel_lines(model: &Model, width: usize) -> Vec<Line<'static>> {
     append_choice_lines(model, width, &mut lines);
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "  Press Enter to choose · Y allow · ESC/N deny · ↑↓←→ to navigate",
+        "  Press Enter to choose · Y allow · ESC/N reject · ↑↓←→ to navigate",
         tertiary_text_style(model.palette).add_modifier(Modifier::ITALIC),
     ));
 
@@ -534,54 +530,6 @@ fn preferred_tool_approval_choice(
         .find(|preferred_choice| choices.contains(preferred_choice))
 }
 
-fn wrap_highlight_chunks(
-    highlighted_lines: &[Vec<HighlightChunk>],
-    width: usize,
-) -> Vec<Vec<Span<'static>>> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
-
-    for highlighted_line in highlighted_lines {
-        let mut current_spans = Vec::new();
-        let mut current_width = 0usize;
-
-        for chunk in highlighted_line {
-            append_wrapped_highlight_chunk(
-                &mut lines,
-                &mut current_spans,
-                &mut current_width,
-                &chunk.text,
-                chunk.style,
-                width,
-            );
-        }
-
-        lines.push(current_spans);
-    }
-
-    lines
-}
-
-fn append_wrapped_highlight_chunk(
-    lines: &mut Vec<Vec<Span<'static>>>,
-    current_spans: &mut Vec<Span<'static>>,
-    current_width: &mut usize,
-    text: &str,
-    style: Style,
-    width: usize,
-) {
-    for grapheme in UnicodeSegmentation::graphemes(text, true) {
-        let grapheme_width = grapheme.width();
-        if *current_width > 0 && *current_width + grapheme_width > width {
-            lines.push(std::mem::take(current_spans));
-            *current_width = 0;
-        }
-
-        current_spans.push(Span::styled(grapheme.to_string(), style));
-        *current_width += grapheme_width;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,12 +598,12 @@ mod tests {
             "preview should expose the session allow option for design checks: {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("Deny  in session")),
-            "preview should expose the session deny option for design checks: {lines:?}"
+            lines.iter().any(|line| line.contains("Reject in session")),
+            "preview should expose the session reject option for design checks: {lines:?}"
         );
         assert!(
             lines.iter().any(|line| {
-                line.contains("Press Enter to choose · Y allow · ESC/N deny · ↑↓←→ to navigate")
+                line.contains("Press Enter to choose · Y allow · ESC/N reject · ↑↓←→ to navigate")
             }),
             "footer hint should use the concise approval copy: {lines:?}"
         );
@@ -785,7 +733,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_ordered_plain_lines(
             &with_session,
-            &["Allow", "Allow in session", "Deny", "Deny  in session"],
+            &["Allow", "Allow in session", "Reject", "Reject in session"],
         );
     }
 
@@ -811,25 +759,27 @@ mod tests {
             .expect("allow choices should share one display row");
         let deny_row = lines
             .iter()
-            .find(|line| line.contains("Deny") && line.contains("Deny  in session"))
-            .expect("deny choices should share one display row");
+            .find(|line| line.contains("Reject") && line.contains("Reject in session"))
+            .expect("reject choices should share one display row");
 
         let allow_gap = allow_row
             .find("Allow in session")
             .expect("session allow should render")
             .saturating_sub(allow_row.find("Allow").expect("allow should render") + "Allow".len());
         let deny_gap = deny_row
-            .find("Deny  in session")
-            .expect("session deny should render")
-            .saturating_sub(deny_row.find("Deny").expect("deny should render") + "Deny".len());
+            .find("Reject in session")
+            .expect("session reject should render")
+            .saturating_sub(
+                deny_row.find("Reject").expect("reject should render") + "Reject".len(),
+            );
 
         assert!(
             allow_gap >= 4 && deny_gap >= 4,
             "session choices should sit to the right with a visible gap: {lines:?}"
         );
         assert!(
-            deny_row.contains("Deny  in session"),
-            "deny session label should pad Deny to the same width as Allow: {lines:?}"
+            deny_row.contains("Reject in session"),
+            "reject session label should render with consistent spacing: {lines:?}"
         );
     }
 
@@ -854,7 +804,7 @@ mod tests {
                 .transcript_mut()
                 .plain_items()
                 .iter()
-                .any(|item| item == "• Ran sed -n '1,80p' src/main.rs"),
+                .any(|item| item == "● Ran sed -n '1,80p' src/main.rs"),
             "preview approval should append a testable tool result to transcript"
         );
     }
@@ -891,7 +841,7 @@ mod tests {
                 .transcript_mut()
                 .plain_items()
                 .iter()
-                .any(|item| item == "• Ran cargo test tool_approval"),
+                .any(|item| item == "● Ran cargo test tool_approval"),
             "approval result should be appended to transcript"
         );
         assert_eq!(

@@ -133,7 +133,7 @@ fn tool_result_is_display_only_and_not_assistant_message() {
     assert!(!item.is_assistant_message());
     assert_eq!(
         item.render_plain_lines(80, default_palette()),
-        vec!["• Ran cargo test".to_string()]
+        vec!["● Ran cargo test".to_string()]
     );
 }
 

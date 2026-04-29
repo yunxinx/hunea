@@ -341,7 +341,7 @@ fn debug_tool_command_opens_tool_approval_preview_panel() {
     assert_ordered_rows(&rows, &["Tool Approval:", "sed -n", "Actions:"]);
     assert_ordered_rows(
         &rows,
-        &["Allow", "Allow in session", "Deny", "Deny  in session"],
+        &["Allow", "Allow in session", "Reject", "Reject in session"],
     );
     assert!(
         rows.iter().all(|row| !row.contains("Reason")),
@@ -351,7 +351,7 @@ fn debug_tool_command_opens_tool_approval_preview_panel() {
     assert_gap_between_rows(&rows, "sed -n", "Actions:", 1);
     assert!(
         rows.iter().any(|row| {
-            row.contains("Press Enter to choose · Y allow · ESC/N deny · ↑↓←→ to navigate")
+            row.contains("Press Enter to choose · Y allow · ESC/N reject · ↑↓←→ to navigate")
         }),
         "approval footer should use concise key hint copy: {rows:?}"
     );

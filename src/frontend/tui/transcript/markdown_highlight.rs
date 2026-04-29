@@ -1,12 +1,17 @@
-use std::sync::OnceLock;
+use std::{borrow::Cow, sync::OnceLock};
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::Span,
+};
 use syntect::{
     easy::HighlightLines,
     highlighting::{FontStyle, Style as SyntectStyle, Theme, ThemeSet},
     parsing::{SyntaxReference, SyntaxSet},
     util::LinesWithEndings,
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
 const MAX_HIGHLIGHT_LINES: usize = 10_000;
@@ -62,6 +67,68 @@ pub(crate) fn highlight_code_chunks(
     }
 
     Some(lines)
+}
+
+/// `wrap_highlight_chunks` 按终端宽度折行已高亮的文本片段。
+pub(crate) fn wrap_highlight_chunks(
+    highlighted_lines: &[Vec<HighlightChunk>],
+    width: usize,
+) -> Vec<Vec<Span<'static>>> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+
+    for highlighted_line in highlighted_lines {
+        let mut current_spans = Vec::new();
+        let mut current_width = 0usize;
+
+        for chunk in highlighted_line {
+            append_wrapped_highlight_chunk(
+                &mut lines,
+                &mut current_spans,
+                &mut current_width,
+                &chunk.text,
+                chunk.style,
+                width,
+            );
+        }
+
+        lines.push(current_spans);
+    }
+
+    lines
+}
+
+fn append_wrapped_highlight_chunk(
+    lines: &mut Vec<Vec<Span<'static>>>,
+    current_spans: &mut Vec<Span<'static>>,
+    current_width: &mut usize,
+    text: &str,
+    style: Style,
+    width: usize,
+) {
+    for grapheme in UnicodeSegmentation::graphemes(text, true) {
+        let grapheme_width = grapheme.width();
+        if *current_width > 0 && *current_width + grapheme_width > width {
+            lines.push(std::mem::take(current_spans));
+            *current_width = 0;
+        }
+
+        push_highlight_span(current_spans, grapheme, style);
+        *current_width += grapheme_width;
+    }
+}
+
+fn push_highlight_span(spans: &mut Vec<Span<'static>>, text: &str, style: Style) {
+    if let Some(last) = spans.last_mut()
+        && last.style == style
+    {
+        let mut content = last.content.to_string();
+        content.push_str(text);
+        last.content = Cow::Owned(content);
+        return;
+    }
+
+    spans.push(Span::styled(text.to_string(), style));
 }
 
 fn syntax_set() -> &'static SyntaxSet {

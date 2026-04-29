@@ -217,7 +217,7 @@ fn acp_permission_request_replaces_composer_with_tool_approval_panel() {
     assert_ordered_rows(&rows, &["Tool Approval:", "Write file", "Actions:"]);
     assert_ordered_rows(
         &rows,
-        &["Allow", "Allow in session", "Deny", "Deny  in session"],
+        &["Allow", "Allow in session", "Reject", "Reject in session"],
     );
     assert!(
         rows.iter().all(|row| !row.contains("Reason")),
@@ -307,7 +307,7 @@ fn acp_permission_enter_responds_with_selected_tool_approval_option() {
 }
 
 #[test]
-fn acp_permission_deny_appends_red_reject_result_to_transcript() {
+fn acp_permission_deny_appends_reject_result_to_transcript() {
     let mut model = ready_model(72, 18, ModelOptions::default());
     model.update(AppEvent::AcpPermissionRequested {
         request_id: "permission-3".to_string(),
@@ -331,14 +331,10 @@ fn acp_permission_deny_appends_red_reject_result_to_transcript() {
     let rows = trim_rows(&buffer);
     assert!(
         rows.iter()
-            .any(|row| row.contains("• Reject Run destructive command")),
+            .any(|row| row.contains("● Reject destructive command")),
         "reject result should be appended to transcript, got: {rows:?}"
     );
-    assert_text_cells_use_color(
-        &buffer,
-        "• Reject Run destructive command",
-        default_palette().system_error,
-    );
+    assert_text_cells_use_color(&buffer, "● ", default_palette().approval_rejected);
 }
 
 fn ready_model(width: u16, height: u16, options: ModelOptions) -> Model {

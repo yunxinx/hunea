@@ -2034,7 +2034,7 @@ mod tests {
             title: Some("Run command".to_string()),
             options: vec![AcpPermissionOption {
                 option_id: "reject-always".to_string(),
-                name: "Deny in session".to_string(),
+                name: "Reject in session".to_string(),
                 kind: AcpPermissionOptionKind::RejectAlways,
             }],
         });

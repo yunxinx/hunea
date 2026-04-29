@@ -16,6 +16,8 @@ pub enum StatusLineItem {
     GitBranch,
     CurrentDir,
     CurrentModel,
+    Throughput,
+    Latency,
 }
 
 impl StatusLineItem {
@@ -25,6 +27,8 @@ impl StatusLineItem {
             "git-branch" => Some(Self::GitBranch),
             "current-dir" => Some(Self::CurrentDir),
             "current-model" => Some(Self::CurrentModel),
+            "throughput" => Some(Self::Throughput),
+            "latency" => Some(Self::Latency),
             _ => None,
         }
     }
@@ -54,6 +58,12 @@ impl Model {
         }
         if self.uses_status_line_item(StatusLineItem::CurrentModel) {
             bits |= 1 << 2;
+        }
+        if self.uses_status_line_item(StatusLineItem::Throughput) {
+            bits |= 1 << 3;
+        }
+        if self.uses_status_line_item(StatusLineItem::Latency) {
+            bits |= 1 << 4;
         }
         bits
     }
@@ -115,6 +125,19 @@ impl Model {
                         parts.push(sanitize_status_line_part(&selection.display_name()));
                     }
                 }
+                StatusLineItem::Throughput => {
+                    if let Some(metrics) = self.last_request_metrics() {
+                        parts.push(format_request_throughput(
+                            metrics.output_tokens,
+                            metrics.duration,
+                        ));
+                    }
+                }
+                StatusLineItem::Latency => {
+                    if let Some(metrics) = self.last_request_metrics() {
+                        parts.push(format_request_latency(metrics.latency));
+                    }
+                }
                 _ => {}
             }
         }
@@ -171,6 +194,19 @@ impl Model {
             .cloned()
             .or_else(|| Some(selected_agent.clone()))
     }
+}
+
+fn format_request_throughput(output_tokens: usize, duration: std::time::Duration) -> String {
+    let throughput = if duration.is_zero() {
+        0
+    } else {
+        (output_tokens as f64 / duration.as_secs_f64()) as usize
+    };
+    format!("{throughput}tps")
+}
+
+fn format_request_latency(latency: std::time::Duration) -> String {
+    format!("{:.2}s", latency.as_secs_f64())
 }
 
 pub(crate) fn status_line_gap_before(style_mode: StyleMode) -> usize {

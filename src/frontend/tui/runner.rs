@@ -11,8 +11,8 @@ use crate::runtime::acp::{
     AcpInitializeOutcome, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
 };
 use crate::runtime::llm::{
-    CancellationToken, LlmError, NativeChatProgress, NativeChatRequest, NativeChatResponse,
-    send_chat_with_cancellation_and_token_progress,
+    CancellationToken, ChatPerformanceMetrics, LlmError, NativeChatProgress, NativeChatRequest,
+    NativeChatResponse, send_chat_with_cancellation_and_token_progress,
 };
 use crate::runtime::token_count::StreamingTokenProgress;
 use crate::runtime::{
@@ -34,7 +34,8 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use super::{
-    AppEffect, AppEvent, HeroOptions, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StyleMode, theme,
+    AppEffect, AppEvent, HeroOptions, Model, ModelOptions, RequestMetrics, STARTUP_PROBE_TIMEOUT,
+    StyleMode, theme,
 };
 
 mod event_pipeline;
@@ -684,11 +685,22 @@ impl NativeChatRuntimeState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NativeChatEvent {
-    Retrying { message: String },
-    OutputTokenEstimate { total_tokens: usize },
-    Thinking { is_thinking: bool },
-    Finished { response: NativeChatResponse },
-    Failed { message: String },
+    Retrying {
+        message: String,
+    },
+    OutputTokenEstimate {
+        total_tokens: usize,
+    },
+    Thinking {
+        is_thinking: bool,
+    },
+    Finished {
+        response: NativeChatResponse,
+        metrics: Option<ChatPerformanceMetrics>,
+    },
+    Failed {
+        message: String,
+    },
     Interrupted,
 }
 
@@ -746,8 +758,11 @@ async fn run_native_chat_worker(
                 });
                 return;
             }
-            Ok(Ok(response)) => {
-                let _ = sender.send(NativeChatEvent::Finished { response });
+            Ok(Ok(completion)) => {
+                let _ = sender.send(NativeChatEvent::Finished {
+                    response: completion.response,
+                    metrics: completion.metrics,
+                });
                 return;
             }
             Ok(Err(LlmError::Cancelled)) => {
@@ -794,7 +809,14 @@ fn apply_native_chat_event(model: &mut Model, event: NativeChatEvent) {
         NativeChatEvent::Thinking { is_thinking } => {
             model.set_acp_activity_thinking(is_thinking);
         }
-        NativeChatEvent::Finished { response } => {
+        NativeChatEvent::Finished { response, metrics } => {
+            if let Some(metrics) = metrics {
+                model.set_last_request_metrics(Some(RequestMetrics::new(
+                    metrics.latency,
+                    metrics.output_tokens,
+                    metrics.duration,
+                )));
+            }
             model.clear_acp_activity();
             model.append_native_chat_response_from_runtime(response);
         }
@@ -890,6 +912,8 @@ struct AcpRuntimeState {
     prompt_in_flight: bool,
     discard_in_flight_prompt: bool,
     token_progress: Option<StreamingTokenProgress>,
+    prompt_started_at: Option<Instant>,
+    first_token_at: Option<Instant>,
 }
 
 impl AcpRuntimeState {
@@ -904,6 +928,8 @@ impl AcpRuntimeState {
         self.prompt_in_flight = false;
         self.discard_in_flight_prompt = false;
         self.token_progress = None;
+        self.prompt_started_at = None;
+        self.first_token_at = None;
         self.worker = Some(AcpSessionWorker::start(command));
     }
 
@@ -914,6 +940,9 @@ impl AcpRuntimeState {
     }
 
     fn push_response_chunk(&mut self, content: &str) {
+        if !content.is_empty() {
+            self.first_token_at.get_or_insert_with(Instant::now);
+        }
         self.response_buffer.push_str(content);
     }
 
@@ -921,6 +950,7 @@ impl AcpRuntimeState {
         if content.is_empty() {
             return;
         }
+        self.first_token_at.get_or_insert_with(Instant::now);
         if self.reasoning_started_at.is_none() {
             self.reasoning_started_at = Some(Instant::now());
         }
@@ -954,6 +984,8 @@ impl AcpRuntimeState {
 
     fn mark_prompt_started(&mut self) {
         self.prompt_in_flight = true;
+        self.prompt_started_at = Some(Instant::now());
+        self.first_token_at = None;
     }
 
     fn start_token_progress(&mut self, model_id: impl Into<String>) {
@@ -972,6 +1004,23 @@ impl AcpRuntimeState {
             .and_then(|progress| progress.flush(Instant::now()))
     }
 
+    fn total_output_tokens(&self) -> usize {
+        self.token_progress
+            .as_ref()
+            .map(StreamingTokenProgress::total_tokens)
+            .unwrap_or(0)
+    }
+
+    fn request_metrics(&self, finished_at: Instant) -> Option<RequestMetrics> {
+        let prompt_started_at = self.prompt_started_at?;
+        let first_token_at = self.first_token_at?;
+        Some(RequestMetrics::new(
+            first_token_at.saturating_duration_since(prompt_started_at),
+            self.total_output_tokens(),
+            finished_at.saturating_duration_since(prompt_started_at),
+        ))
+    }
+
     fn mark_prompt_finished(&mut self) {
         self.prompt_in_flight = false;
         self.discard_in_flight_prompt = false;
@@ -979,6 +1028,8 @@ impl AcpRuntimeState {
         self.reasoning_buffer.clear();
         self.reasoning_started_at = None;
         self.token_progress = None;
+        self.prompt_started_at = None;
+        self.first_token_at = None;
     }
 
     fn should_discard_prompt_output(&self) -> bool {
@@ -993,6 +1044,8 @@ impl AcpRuntimeState {
         self.reasoning_buffer.clear();
         self.reasoning_started_at = None;
         self.token_progress = None;
+        self.prompt_started_at = None;
+        self.first_token_at = None;
         self.discard_in_flight_prompt = true;
         if let Some(worker) = self.worker.as_ref() {
             let _ = worker.cancel_prompt();
@@ -1005,6 +1058,8 @@ impl AcpRuntimeState {
         self.reasoning_buffer.clear();
         self.reasoning_started_at = None;
         self.token_progress = None;
+        self.prompt_started_at = None;
+        self.first_token_at = None;
         if self.prompt_in_flight {
             self.discard_in_flight_prompt = true;
         }
@@ -1141,8 +1196,12 @@ fn apply_acp_session_event(
             if let Some(total_tokens) = acp_runtime.flush_output_tokens() {
                 model.set_acp_activity_output_tokens(total_tokens);
             }
+            let metrics = acp_runtime.request_metrics(Instant::now());
             model.set_acp_activity_thinking(false);
             flush_acp_response_buffer(model, acp_runtime);
+            if let Some(metrics) = metrics {
+                model.set_last_request_metrics(Some(metrics));
+            }
             acp_runtime.mark_prompt_finished();
             model.clear_acp_activity();
             if stop_reason != "EndTurn" {
@@ -1603,6 +1662,48 @@ mod tests {
     }
 
     #[test]
+    fn acp_prompt_response_updates_last_request_metrics() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                status_line_items: vec![StatusLineItem::Throughput, StatusLineItem::Latency],
+                ..ModelOptions::default()
+            },
+        );
+        let mut acp_runtime = AcpRuntimeState::default();
+
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptStarted {
+                agent_id: "Kimi Code CLI".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::AgentMessageChunk {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: "hello".to_string(),
+            },
+        );
+        apply_acp_session_event(
+            &mut model,
+            &mut acp_runtime,
+            AcpSessionEvent::PromptResponse {
+                agent_id: "Kimi Code CLI".to_string(),
+                content: String::new(),
+                stop_reason: "EndTurn".to_string(),
+            },
+        );
+
+        let parts = model.current_status_line_parts();
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].ends_with("tps"));
+        assert!(parts[1].ends_with('s'));
+    }
+
+    #[test]
     fn acp_thought_chunks_append_reasoning_and_toggle_activity() {
         let mut model = Model::new_with_options(
             HeroOptions::default(),
@@ -1764,6 +1865,7 @@ mod tests {
                     reasoning_content: None,
                     reasoning_duration: None,
                 },
+                metrics: None,
             })
             .expect("stale native event should still be produced by worker");
         model.reset_to_initial_tui_state();
@@ -1957,6 +2059,7 @@ mod tests {
                     reasoning_content: None,
                     reasoning_duration: None,
                 },
+                metrics: None,
             },
         );
 
@@ -1965,6 +2068,38 @@ mod tests {
             vec!["你好，我是本地模型".to_string()]
         );
         assert!(!model.current_acp_activity_render_result().has_content);
+    }
+
+    #[test]
+    fn native_chat_completion_updates_last_request_metrics() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                status_line_items: vec![StatusLineItem::Throughput, StatusLineItem::Latency],
+                ..ModelOptions::default()
+            },
+        );
+
+        apply_native_chat_event(
+            &mut model,
+            NativeChatEvent::Finished {
+                response: NativeChatResponse {
+                    content: "完成".to_string(),
+                    reasoning_content: None,
+                    reasoning_duration: None,
+                },
+                metrics: Some(ChatPerformanceMetrics {
+                    latency: std::time::Duration::from_millis(250),
+                    output_tokens: 80,
+                    duration: std::time::Duration::from_secs(2),
+                }),
+            },
+        );
+
+        assert_eq!(
+            model.current_status_line_parts(),
+            vec!["40tps".to_string(), "0.25s".to_string()]
+        );
     }
 
     #[test]
@@ -1987,6 +2122,7 @@ mod tests {
                     reasoning_content: Some("先分析".to_string()),
                     reasoning_duration: Some(std::time::Duration::from_secs(3)),
                 },
+                metrics: None,
             },
         );
 
@@ -2025,6 +2161,7 @@ mod tests {
                     reasoning_content: Some("先分析".to_string()),
                     reasoning_duration: Some(std::time::Duration::from_secs(3)),
                 },
+                metrics: None,
             },
         );
 
@@ -2057,6 +2194,7 @@ mod tests {
                     reasoning_content: Some("先分析".to_string()),
                     reasoning_duration: Some(std::time::Duration::from_secs(3)),
                 },
+                metrics: None,
             },
         );
 
@@ -2121,6 +2259,7 @@ mod tests {
                     reasoning_content: Some("先分析".to_string()),
                     reasoning_duration: Some(std::time::Duration::from_secs(3)),
                 },
+                metrics: None,
             },
         );
 
@@ -2182,6 +2321,7 @@ mod tests {
                     reasoning_content: Some("先分析".to_string()),
                     reasoning_duration: Some(std::time::Duration::from_secs(3)),
                 },
+                metrics: None,
             },
         );
 
@@ -2227,6 +2367,7 @@ mod tests {
                     reasoning_content: Some("先分析".to_string()),
                     reasoning_duration: Some(std::time::Duration::from_secs(3)),
                 },
+                metrics: None,
             },
         );
 
@@ -2361,6 +2502,7 @@ mod tests {
                     reasoning_content: None,
                     reasoning_duration: None,
                 },
+                metrics: None,
             })
             .expect("finish event should be queued");
 
@@ -2372,6 +2514,7 @@ mod tests {
                     reasoning_content: None,
                     reasoning_duration: None,
                 },
+                metrics: None,
             })
         );
         assert!(!runtime.is_running());

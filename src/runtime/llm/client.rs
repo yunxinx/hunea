@@ -25,6 +25,20 @@ pub enum NativeChatProgress {
     Thinking { is_thinking: bool },
 }
 
+/// `ChatPerformanceMetrics` 记录一次成功请求的输出性能指标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChatPerformanceMetrics {
+    pub(crate) latency: Duration,
+    pub(crate) output_tokens: usize,
+    pub(crate) duration: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeChatCompletion {
+    pub(crate) response: NativeChatResponse,
+    pub(crate) metrics: Option<ChatPerformanceMetrics>,
+}
+
 /// `send_chat` 通过 genai 发起流式请求，并在完成后返回聚合文本。
 pub async fn send_chat(request: &NativeChatRequest) -> Result<String, LlmError> {
     send_chat_with_cancellation(request, &tokio_util::sync::CancellationToken::default())
@@ -37,14 +51,16 @@ pub async fn send_chat_with_cancellation(
     request: &NativeChatRequest,
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<NativeChatResponse, LlmError> {
-    send_chat_with_cancellation_and_token_progress(request, cancellation, |_| {}).await
+    send_chat_with_cancellation_and_token_progress(request, cancellation, |_| {})
+        .await
+        .map(|completion| completion.response)
 }
 
 pub(crate) async fn send_chat_with_cancellation_and_token_progress<F>(
     request: &NativeChatRequest,
     cancellation: &tokio_util::sync::CancellationToken,
     mut on_progress: F,
-) -> Result<NativeChatResponse, LlmError>
+) -> Result<NativeChatCompletion, LlmError>
 where
     F: FnMut(NativeChatProgress),
 {
@@ -85,7 +101,9 @@ where
         };
 
         match event? {
-            ChatStreamEvent::Start => {}
+            ChatStreamEvent::Start => {
+                output.mark_request_started(Instant::now());
+            }
             ChatStreamEvent::Chunk(chunk) => {
                 output.observe_content_chunk(&chunk.content, Instant::now(), &mut on_progress);
             }
@@ -114,7 +132,7 @@ where
         on_progress(NativeChatProgress::OutputTokens { total_tokens });
     }
 
-    Ok(output.finish())
+    Ok(output.finish_at(Instant::now(), None))
 }
 
 struct NativeChatAccumulator {
@@ -124,6 +142,8 @@ struct NativeChatAccumulator {
     is_thinking: bool,
     reasoning_started_at: Option<Instant>,
     reasoning_finished_at: Option<Instant>,
+    request_started_at: Option<Instant>,
+    first_token_at: Option<Instant>,
 }
 
 impl NativeChatAccumulator {
@@ -135,7 +155,13 @@ impl NativeChatAccumulator {
             is_thinking: false,
             reasoning_started_at: None,
             reasoning_finished_at: None,
+            request_started_at: None,
+            first_token_at: None,
         }
+    }
+
+    fn mark_request_started(&mut self, now: Instant) {
+        self.request_started_at = Some(now);
     }
 
     fn observe_content_chunk(
@@ -147,6 +173,7 @@ impl NativeChatAccumulator {
         if content.is_empty() {
             return;
         }
+        self.first_token_at.get_or_insert(now);
         if self.is_thinking {
             self.is_thinking = false;
             self.reasoning_finished_at = Some(now);
@@ -165,6 +192,7 @@ impl NativeChatAccumulator {
         if content.is_empty() {
             return;
         }
+        self.first_token_at.get_or_insert(now);
         if !self.is_thinking {
             self.is_thinking = true;
             self.reasoning_started_at.get_or_insert(now);
@@ -186,19 +214,42 @@ impl NativeChatAccumulator {
         }
     }
 
+    #[cfg(test)]
     fn finish(self) -> NativeChatResponse {
+        self.finish_at(Instant::now(), None).response
+    }
+
+    fn finish_at(self, finished_at: Instant, output_tokens: Option<usize>) -> NativeChatCompletion {
+        let metrics = self.performance_metrics(finished_at, output_tokens);
         let reasoning_content = trim_outer_blank_lines(&self.reasoning_content);
         let reasoning_duration = self.reasoning_duration();
         let content = if reasoning_content.is_empty() {
-            self.content
+            self.content.clone()
         } else {
             trim_outer_blank_lines(&self.content)
         };
-        NativeChatResponse {
-            content,
-            reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
-            reasoning_duration,
+        NativeChatCompletion {
+            response: NativeChatResponse {
+                content,
+                reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
+                reasoning_duration,
+            },
+            metrics,
         }
+    }
+
+    fn performance_metrics(
+        &self,
+        finished_at: Instant,
+        output_tokens: Option<usize>,
+    ) -> Option<ChatPerformanceMetrics> {
+        let request_started_at = self.request_started_at?;
+        let first_token_at = self.first_token_at?;
+        Some(ChatPerformanceMetrics {
+            latency: first_token_at.saturating_duration_since(request_started_at),
+            output_tokens: output_tokens.unwrap_or_else(|| self.progress.total_tokens()),
+            duration: finished_at.saturating_duration_since(request_started_at),
+        })
     }
 
     fn reasoning_duration(&self) -> Option<Duration> {
@@ -418,6 +469,33 @@ mod tests {
             matches!(event, NativeChatProgress::OutputTokens { total_tokens } if *total_tokens > 0)
         }));
         assert!(progress.contains(&NativeChatProgress::Thinking { is_thinking: false }));
+    }
+
+    #[test]
+    fn native_chat_accumulator_records_latency_and_throughput_inputs() {
+        let started_at = Instant::now();
+        let mut accumulator = NativeChatAccumulator::new("qwen3".to_string());
+
+        accumulator.mark_request_started(started_at);
+        accumulator.observe_content_chunk(
+            "hello world",
+            started_at + std::time::Duration::from_millis(500),
+            &mut |_| {},
+        );
+
+        let completion = accumulator.finish_at(
+            started_at + std::time::Duration::from_millis(1500),
+            Some(24),
+        );
+
+        assert_eq!(
+            completion.metrics,
+            Some(ChatPerformanceMetrics {
+                latency: std::time::Duration::from_millis(500),
+                output_tokens: 24,
+                duration: std::time::Duration::from_millis(1500),
+            })
+        );
     }
 
     #[test]

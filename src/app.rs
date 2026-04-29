@@ -310,6 +310,19 @@ mod tests {
     }
 
     #[test]
+    fn model_options_from_config_carries_request_metric_status_line_items() {
+        let options = model_options_from_config(&TuiConfig {
+            status_line: vec!["throughput".to_string(), "latency".to_string()],
+            ..default_tui_config()
+        });
+
+        assert_eq!(
+            options.status_line_items,
+            vec![StatusLineItem::Throughput, StatusLineItem::Latency]
+        );
+    }
+
+    #[test]
     fn model_options_from_config_carries_swap_enter_and_send_flag() {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,

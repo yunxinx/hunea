@@ -71,6 +71,7 @@ pub struct Model {
     pub(super) pending_reasoning_toggle_click: PendingReasoningToggleClick,
     pub(super) git_branch: String,
     pub(super) current_dir: String,
+    pub(super) last_request_metrics: Option<RequestMetrics>,
     pub(super) palette: TerminalPalette,
     pub(super) palette_version: usize,
     pub(super) transcript: Transcript,
@@ -86,6 +87,25 @@ pub struct Model {
     pub(super) notice_state: NoticeState,
     pub(super) status_line_revision: usize,
     quitting: bool,
+}
+
+/// `RequestMetrics` 保存最近一次成功完成请求的状态行指标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestMetrics {
+    pub latency: Duration,
+    pub output_tokens: usize,
+    pub duration: Duration,
+}
+
+impl RequestMetrics {
+    /// `new` 创建最近一次成功请求的性能指标。
+    pub fn new(latency: Duration, output_tokens: usize, duration: Duration) -> Self {
+        Self {
+            latency,
+            output_tokens,
+            duration,
+        }
+    }
 }
 
 /// `SelectionRuntimeState` 收口 selection 与拖拽自动滚动的运行态。
@@ -284,6 +304,7 @@ impl Model {
             pending_reasoning_toggle_click: PendingReasoningToggleClick::default(),
             git_branch: resolve_initial_git_branch(&status_line_items),
             current_dir: resolve_initial_current_dir(&status_line_items),
+            last_request_metrics: None,
             palette,
             palette_version: 1,
             transcript_render_version: 1,
@@ -333,6 +354,24 @@ impl Model {
     /// `selected_acp_agent` 返回本次 TUI 会话中用户选择的 ACP Agent。
     pub fn selected_acp_agent(&self) -> Option<&str> {
         self.selected_acp_agent.as_deref()
+    }
+
+    /// `last_request_metrics` 返回最近一次成功完成请求的状态行指标。
+    pub fn last_request_metrics(&self) -> Option<RequestMetrics> {
+        self.last_request_metrics
+    }
+
+    /// `set_last_request_metrics` 更新最近一次成功完成请求的状态行指标。
+    pub fn set_last_request_metrics(&mut self, metrics: Option<RequestMetrics>) {
+        if self.last_request_metrics == metrics {
+            return;
+        }
+
+        self.last_request_metrics = metrics;
+        self.bump_status_line_revision();
+        if self.document_runtime.follow_bottom {
+            self.sync_document_viewport_to_bottom();
+        }
     }
 
     /// `next_timeout_deadline` 返回当前最早需要处理的内部超时。
@@ -429,6 +468,7 @@ impl Model {
         self.selection_runtime = SelectionRuntimeState::default();
         self.pending_composer_cursor_click = PendingComposerCursorClick::default();
         self.pending_reasoning_toggle_click = PendingReasoningToggleClick::default();
+        self.set_last_request_metrics(None);
         self.document_runtime = DocumentRuntimeState {
             follow_bottom: true,
             ..DocumentRuntimeState::default()

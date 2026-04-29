@@ -2,12 +2,13 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crossterm::event::{KeyCode, KeyEvent};
 use lumos::frontend::tui::{
-    AppEvent, HeroOptions, Model, ModelOptions, StatusLineItem, StyleMode, theme::default_palette,
+    AppEvent, HeroOptions, Model, ModelOptions, RequestMetrics, StatusLineItem, StyleMode,
+    theme::default_palette,
 };
 use lumos::runtime::models::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
@@ -126,6 +127,78 @@ fn status_line_updates_current_model_after_model_panel_selection() {
     assert!(
         rows.iter().any(|row| row.contains("local/qwen3")),
         "current-model should reflect the selected model after panel selection, got: {rows:?}"
+    );
+}
+
+#[test]
+fn status_line_renders_request_metrics_in_configured_order() {
+    let mut model = ready_model(
+        48,
+        4,
+        StyleMode::Cx,
+        vec![StatusLineItem::Throughput, StatusLineItem::Latency],
+    );
+    model.set_last_request_metrics(Some(RequestMetrics::new(
+        Duration::from_millis(530),
+        139,
+        Duration::from_secs(1),
+    )));
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 48, 4),
+        vec!["", "› Enter to send Prompt", "", "  139tps · 0.53s"]
+    );
+}
+
+#[test]
+fn status_line_skips_request_metrics_before_successful_request() {
+    let mut model = ready_model(
+        48,
+        4,
+        StyleMode::Cx,
+        vec![StatusLineItem::Throughput, StatusLineItem::Latency],
+    );
+
+    let rows = render_trimmed_rows(&mut model, 48, 4);
+    assert_eq!(rows, vec!["", "", "› Enter to send Prompt"]);
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("tps") && !row.contains("0.00s")),
+        "request metrics should not render before a successful request, got: {rows:?}"
+    );
+}
+
+#[test]
+fn status_line_preserves_request_metrics_order_with_other_items() {
+    let mut model = ready_model_with_options(
+        72,
+        4,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![
+                StatusLineItem::CurrentModel,
+                StatusLineItem::Latency,
+                StatusLineItem::Throughput,
+            ],
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            ..ModelOptions::default()
+        },
+    );
+    model.set_last_request_metrics(Some(RequestMetrics::new(
+        Duration::from_millis(5),
+        0,
+        Duration::from_millis(250),
+    )));
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 72, 4),
+        vec![
+            "",
+            "› Enter to send Prompt",
+            "",
+            "  local/qwen3 · 0.01s · 0tps"
+        ]
     );
 }
 

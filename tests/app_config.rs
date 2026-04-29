@@ -95,6 +95,34 @@ fn load_accepts_current_model_status_line() {
 }
 
 #[test]
+fn load_accepts_throughput_status_line() {
+    let working_dir = temp_test_dir("load-accepts-throughput-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line = [\"throughput\"]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("throughput should be accepted as a valid status line item");
+
+    assert_eq!(config.tui.status_line, vec!["throughput"]);
+}
+
+#[test]
+fn load_accepts_latency_status_line() {
+    let working_dir = temp_test_dir("load-accepts-latency-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line = [\"latency\"]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("latency should be accepted as a valid status line item");
+
+    assert_eq!(config.tui.status_line, vec!["latency"]);
+}
+
+#[test]
 fn load_rejects_underscore_current_model_status_line() {
     let working_dir = temp_test_dir("load-rejects-underscore-current-model-working");
     write_config(

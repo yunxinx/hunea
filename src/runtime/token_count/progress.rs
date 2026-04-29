@@ -64,6 +64,10 @@ impl StreamingTokenProgress {
 
         Some(self.total_tokens)
     }
+
+    pub(crate) fn total_tokens(&self) -> usize {
+        self.total_tokens
+    }
 }
 
 fn approximate_tokens_from_bytes(bytes: usize) -> usize {

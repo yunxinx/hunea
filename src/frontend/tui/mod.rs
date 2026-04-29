@@ -46,7 +46,7 @@ pub use hero::{
     render_hero_lines_with_palette, render_hero_plain_lines_with_palette, render_hero_with_palette,
     write_hero_to,
 };
-pub use model::{Model, ModelOptions};
+pub use model::{Model, ModelOptions, RequestMetrics};
 pub use reasoning_message::ReasoningDisplayMode;
 pub use runner::{
     RuntimeOptions, RuntimeRequestPolicy, run, run_with_options, run_with_runtime_options,

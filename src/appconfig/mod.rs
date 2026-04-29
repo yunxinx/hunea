@@ -1075,7 +1075,7 @@ fn default_user_config_path() -> Option<PathBuf> {
 fn validate_status_line_items(items: &[String]) -> Result<(), AppConfigError> {
     for item in items {
         match item.as_str() {
-            "git-branch" | "current-dir" | "current-model" => {}
+            "git-branch" | "current-dir" | "current-model" | "throughput" | "latency" => {}
             other => {
                 return Err(AppConfigError::InvalidStatusLineItem {
                     path: None,

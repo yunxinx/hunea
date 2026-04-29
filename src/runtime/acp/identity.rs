@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::Implementation;
+use agent_client_protocol::schema::{AgentCapabilities, Implementation};
 
 use super::AcpInitializeOutcome;
 
@@ -11,6 +11,7 @@ pub struct AcpAgentIdentity {
     pub name: Option<String>,
     pub title: Option<String>,
     pub version: Option<String>,
+    pub agent_capabilities: AgentCapabilities,
 }
 
 impl AcpAgentIdentity {
@@ -20,6 +21,7 @@ impl AcpAgentIdentity {
             name: outcome.agent_name.clone(),
             title: outcome.agent_title.clone(),
             version: outcome.agent_version.clone(),
+            agent_capabilities: outcome.agent_capabilities.clone(),
         }
     }
 

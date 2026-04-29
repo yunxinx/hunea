@@ -1477,6 +1477,8 @@ fn copy_selection_to_terminal_clipboard(
 
 #[cfg(test)]
 mod tests {
+    use agent_client_protocol::schema::{AgentCapabilities, PromptCapabilities};
+
     use super::*;
     use crate::frontend::tui::{ReasoningDisplayMode, Sender, StatusLineItem};
     use crate::runtime::acp::AcpInitializeOutcome;
@@ -1584,10 +1586,20 @@ mod tests {
                     agent_name: Some("kimi".to_string()),
                     agent_title: Some("Kimi Code CLI".to_string()),
                     agent_version: Some("1.39.0".to_string()),
+                    agent_capabilities: AgentCapabilities::new()
+                        .load_session(true)
+                        .prompt_capabilities(PromptCapabilities::new().image(true)),
                     auth_method_count: 0,
                 },
             },
         );
+
+        let identity = model
+            .acp_agent_identities
+            .get("kimi")
+            .expect("started ACP agent identity should be saved");
+        assert!(identity.agent_capabilities.load_session);
+        assert!(identity.agent_capabilities.prompt_capabilities.image);
 
         let status = model.current_status_line_parts().join(" ");
         assert!(
@@ -1619,11 +1631,18 @@ mod tests {
                     agent_name: None,
                     agent_title: None,
                     agent_version: None,
+                    agent_capabilities: AgentCapabilities::new(),
                     auth_method_count: 0,
                 },
             },
         );
 
+        let identity = model
+            .acp_agent_identities
+            .get("Kimi Code CLI")
+            .expect("started ACP agent identity snapshot should be saved");
+        assert!(!identity.has_agent_info());
+        assert_eq!(identity.agent_capabilities, AgentCapabilities::new());
         assert_eq!(
             model.current_status_line_parts(),
             vec!["Kimi Code CLI".to_string()]

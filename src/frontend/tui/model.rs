@@ -376,11 +376,7 @@ impl Model {
         identity: AcpAgentIdentity,
     ) {
         let agent_id = agent_id.into();
-        if identity.has_agent_info() {
-            self.acp_agent_identities.insert(agent_id, identity);
-        } else {
-            self.acp_agent_identities.remove(&agent_id);
-        }
+        self.acp_agent_identities.insert(agent_id, identity);
         self.bump_status_line_revision();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
@@ -390,6 +386,7 @@ impl Model {
     pub(crate) fn acp_agent_display_label(&self, agent_id: &str) -> String {
         self.acp_agent_identities
             .get(agent_id)
+            .filter(|identity| identity.has_agent_info())
             .map(AcpAgentIdentity::display_label)
             .unwrap_or_else(|| agent_id.to_string())
     }

@@ -76,6 +76,8 @@ pub(crate) struct DocumentLayoutKey {
     pub(super) acp_panel_active: bool,
     pub(super) acp_panel_selected: usize,
     pub(super) acp_panel_scroll: usize,
+    pub(super) acp_debug_panel_selected: usize,
+    pub(super) acp_debug_panel_scroll: usize,
     pub(super) tool_approval_panel_active: bool,
     pub(super) tool_approval_panel_selected: usize,
     pub(super) tool_approval_panel_revision: usize,

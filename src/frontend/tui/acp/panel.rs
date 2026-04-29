@@ -12,24 +12,14 @@ use super::super::{
     },
     theme::{primary_text_style, secondary_text_style, tertiary_text_style},
 };
+use super::debug_panel::ACP_DEBUG_PANEL_VISIBLE_ROWS;
 
 const ACP_LIST_VISIBLE_ROWS: usize = 8;
 const ACP_PANEL_VISIBLE_ROWS: usize = 12;
-const ACP_DEBUG_LIST_VISIBLE_ROWS: usize = 8;
-const ACP_DEBUG_PANEL_VISIBLE_ROWS: usize = 12;
-const ACP_DEBUG_PROTOCOL_VERSION_SYSTEM_MSG: &str = "protocolVersion-system-msg";
 
 /// `AcpPanelState` 保存 ACP agent 面板的导航状态。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(in crate::frontend::tui) struct AcpPanelState {
-    pub(in crate::frontend::tui) is_open: bool,
-    pub(in crate::frontend::tui) selected: usize,
-    pub(in crate::frontend::tui) scroll: usize,
-}
-
-/// `AcpDebugPanelState` 保存 ACP debug 面板的导航状态。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(in crate::frontend::tui) struct AcpDebugPanelState {
     pub(in crate::frontend::tui) is_open: bool,
     pub(in crate::frontend::tui) selected: usize,
     pub(in crate::frontend::tui) scroll: usize,
@@ -224,87 +214,6 @@ impl Model {
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
     }
-
-    fn handle_acp_debug_panel_key(&mut self, key: KeyEvent) -> Option<Option<AppEffect>> {
-        match key.code {
-            KeyCode::Esc => {
-                self.close_acp_panel();
-                Some(None)
-            }
-            KeyCode::Up if key.modifiers.is_empty() => {
-                self.move_acp_debug_panel_selection(-1);
-                Some(None)
-            }
-            KeyCode::Down if key.modifiers.is_empty() => {
-                self.move_acp_debug_panel_selection(1);
-                Some(None)
-            }
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                self.select_current_acp_debug_panel_item();
-                Some(None)
-            }
-            _ => Some(None),
-        }
-    }
-
-    fn move_acp_debug_panel_selection(&mut self, delta: isize) {
-        let last_index = acp_debug_items().len().saturating_sub(1);
-        self.acp_debug_panel.selected = if delta.is_negative() {
-            self.acp_debug_panel
-                .selected
-                .saturating_sub(delta.unsigned_abs())
-        } else {
-            self.acp_debug_panel
-                .selected
-                .saturating_add(delta as usize)
-                .min(last_index)
-        };
-        self.sync_acp_debug_panel_scroll();
-    }
-
-    fn sync_acp_debug_panel_scroll(&mut self) {
-        let item_count = acp_debug_items().len();
-        if item_count == 0 {
-            self.acp_debug_panel.selected = 0;
-            self.acp_debug_panel.scroll = 0;
-            return;
-        }
-
-        let selected = self.acp_debug_panel.selected.min(item_count - 1);
-        let max_scroll = item_count.saturating_sub(ACP_DEBUG_LIST_VISIBLE_ROWS);
-        let mut scroll = self.acp_debug_panel.scroll.min(max_scroll);
-        if selected < scroll {
-            scroll = selected;
-        }
-        if selected >= scroll + ACP_DEBUG_LIST_VISIBLE_ROWS {
-            scroll = selected + 1 - ACP_DEBUG_LIST_VISIBLE_ROWS;
-        }
-        self.acp_debug_panel.selected = selected;
-        self.acp_debug_panel.scroll = scroll;
-    }
-
-    fn select_current_acp_debug_panel_item(&mut self) {
-        let Some(item) = acp_debug_items().get(self.acp_debug_panel.selected) else {
-            return;
-        };
-
-        if item.name == ACP_DEBUG_PROTOCOL_VERSION_SYSTEM_MSG {
-            self.close_acp_panel();
-            self.append_system_message_from_runtime(
-                crate::runtime::acp::debug_protocol_version_system_message(),
-            );
-        }
-    }
-
-    fn current_inline_acp_debug_panel_render_result(&self) -> AcpPanelRenderResult {
-        let visible_rows = self.acp_panel_visible_rows();
-        let width = usize::from(self.width.max(1));
-        let mut lines = build_debug_panel_lines(self, width);
-        if lines.len() > visible_rows {
-            lines.truncate(visible_rows);
-        }
-        inline_panel_render_result(lines)
-    }
 }
 
 fn build_panel_lines(model: &Model, width: usize) -> Vec<Line<'static>> {
@@ -382,90 +291,10 @@ fn append_agent_entry_lines(
     );
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AcpDebugItem {
-    name: &'static str,
-    description: &'static str,
-}
-
-fn acp_debug_items() -> &'static [AcpDebugItem] {
-    &[AcpDebugItem {
-        name: ACP_DEBUG_PROTOCOL_VERSION_SYSTEM_MSG,
-        description: "Append protocolVersion warning system message",
-    }]
-}
-
-fn build_debug_panel_lines(model: &Model, width: usize) -> Vec<Line<'static>> {
-    let width = width.max(1);
-    let mut lines = vec![
-        inline_panel_rule_line(width, model.palette),
-        acp_debug_header_line(model),
-        Line::raw(""),
-    ];
-    lines.push(Line::styled(
-        "  Test Items:",
-        secondary_text_style(model.palette).bold(),
-    ));
-    append_acp_debug_item_lines(model, width, &mut lines);
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "  Press Enter to run · Esc to exit · ↑↓ to navigate",
-        tertiary_text_style(model.palette).add_modifier(Modifier::ITALIC),
-    ));
-
-    lines
-}
-
-fn acp_debug_header_line(model: &Model) -> Line<'static> {
-    Line::from(vec![
-        Span::raw("  "),
-        Span::styled("ACP Debug:", primary_text_style(model.palette)),
-    ])
-}
-
-fn append_acp_debug_item_lines(model: &Model, width: usize, lines: &mut Vec<Line<'static>>) {
-    let items = acp_debug_items();
-    let start = model.acp_debug_panel.scroll;
-    let end = (start + ACP_DEBUG_LIST_VISIBLE_ROWS).min(items.len());
-    for (offset, item) in items[start..end].iter().enumerate() {
-        let index = start + offset;
-        append_acp_debug_item_entry_lines(
-            model,
-            item,
-            index == model.acp_debug_panel.selected,
-            width,
-            lines,
-        );
-    }
-}
-
-fn append_acp_debug_item_entry_lines(
-    model: &Model,
-    item: &AcpDebugItem,
-    selected: bool,
-    width: usize,
-    lines: &mut Vec<Line<'static>>,
-) {
-    let marker = if selected { "➜ " } else { "  " };
-    let style = if selected {
-        primary_text_style(model.palette).bold()
-    } else {
-        primary_text_style(model.palette)
-    };
-    let label = format!("{}  {}", item.name, item.description);
-
-    append_wrapped_inline_value(
-        lines,
-        width,
-        marker,
-        &label,
-        style,
-        secondary_text_style(model.palette),
-    );
-}
-
 #[cfg(test)]
 mod tests {
+    use agent_client_protocol::schema::AgentCapabilities;
+
     use crate::frontend::tui::{HeroOptions, ModelOptions, theme::default_palette};
     use crate::runtime::acp::AcpAgentIdentity;
 
@@ -520,6 +349,7 @@ mod tests {
                 name: Some("kimi".to_string()),
                 title: Some("Kimi Code CLI".to_string()),
                 version: Some("1.39.0".to_string()),
+                agent_capabilities: AgentCapabilities::new(),
             },
         );
         model.open_acp_panel();

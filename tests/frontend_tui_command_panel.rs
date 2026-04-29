@@ -402,6 +402,44 @@ fn acp_debug_command_opens_protocol_version_system_message_panel_item() {
     );
 }
 
+#[test]
+fn acp_debug_panel_down_enter_appends_agent_capabilities_system_message() {
+    let mut model = ready_model(
+        80,
+        16,
+        ModelOptions {
+            debug_commands_enabled: true,
+            acp_agent_servers: vec!["kimi".to_string()],
+            ..ModelOptions::default()
+        },
+    );
+    type_text(&mut model, "/acp");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    type_text(&mut model, "/acp-debug");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    model.update(AppEvent::Key(KeyCode::Down.into()));
+    let rows = render_trimmed_rows(&mut model, 80, 16);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("➜ agent-capabilities-system-msg")),
+        "Down should visibly select the capabilities debug item, got: {rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    let items = model.transcript_plain_items();
+    assert!(
+        items
+            .iter()
+            .any(|item| item
+                .contains("ACP agent capabilities: no initialize result recorded for kimi.")),
+        "expected selected capabilities system message after Down+Enter, got: {items:?}"
+    );
+}
+
 fn assert_blank_row_after(rows: &[String], needle: &str) {
     let index = row_index(rows, needle);
     assert_eq!(

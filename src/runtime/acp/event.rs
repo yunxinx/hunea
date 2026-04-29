@@ -1,4 +1,5 @@
 use super::AcpPermissionRequest;
+use agent_client_protocol::schema::{AgentCapabilities, ProtocolVersion};
 
 /// `AcpModelOption` 表示 ACP agent 暴露的一个模型配置选项。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,10 +20,11 @@ pub struct AcpModelConfig {
 /// `AcpInitializeOutcome` 表示 ACP initialize 握手后的 agent 基本信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpInitializeOutcome {
-    pub protocol_version: agent_client_protocol::schema::ProtocolVersion,
+    pub protocol_version: ProtocolVersion,
     pub agent_name: Option<String>,
     pub agent_title: Option<String>,
     pub agent_version: Option<String>,
+    pub agent_capabilities: AgentCapabilities,
     pub auth_method_count: usize,
 }
 

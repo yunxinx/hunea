@@ -24,6 +24,7 @@ pub(crate) fn initialize_outcome_from_response(
         agent_name: agent_info.as_ref().map(|info| info.name.clone()),
         agent_title: agent_info.as_ref().and_then(|info| info.title.clone()),
         agent_version: agent_info.as_ref().map(|info| info.version.clone()),
+        agent_capabilities: response.agent_capabilities,
         auth_method_count: response.auth_methods.len(),
     }
 }

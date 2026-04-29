@@ -137,6 +137,8 @@ impl Model {
             acp_panel_active: self.acp_panel_active(),
             acp_panel_selected: self.acp_panel.selected,
             acp_panel_scroll: self.acp_panel.scroll,
+            acp_debug_panel_selected: self.acp_debug_panel.selected,
+            acp_debug_panel_scroll: self.acp_debug_panel.scroll,
             tool_approval_panel_active: self.tool_approval_panel_active(),
             tool_approval_panel_selected: self.tool_approval_panel.selected,
             tool_approval_panel_revision: self.tool_approval_panel_revision,

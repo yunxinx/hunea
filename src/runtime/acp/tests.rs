@@ -162,7 +162,10 @@ fn catalog_keeps_directly_launchable_agents_only() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn initialize_agent_over_acp_transport_returns_agent_info() {
-    use acp::schema::{Implementation, InitializeRequest, InitializeResponse};
+    use acp::schema::{
+        AgentCapabilities, Implementation, InitializeRequest, InitializeResponse,
+        PromptCapabilities,
+    };
     use agent_client_protocol as acp;
 
     let (client_transport, agent_transport) = acp::Channel::duplex();
@@ -172,9 +175,17 @@ async fn initialize_agent_over_acp_transport_returns_agent_info() {
             .on_receive_request(
                 async |request: InitializeRequest, responder, _connection| {
                     responder.respond(
-                        InitializeResponse::new(request.protocol_version).agent_info(
-                            Implementation::new("fake-agent", "0.1.0").title("Fake Agent"),
-                        ),
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(
+                                AgentCapabilities::new()
+                                    .load_session(true)
+                                    .prompt_capabilities(
+                                        PromptCapabilities::new().image(true).audio(true),
+                                    ),
+                            )
+                            .agent_info(
+                                Implementation::new("fake-agent", "0.1.0").title("Fake Agent"),
+                            ),
                     )
                 },
                 acp::on_receive_request!(),
@@ -190,6 +201,9 @@ async fn initialize_agent_over_acp_transport_returns_agent_info() {
     assert_eq!(outcome.agent_name.as_deref(), Some("fake-agent"));
     assert_eq!(outcome.agent_title.as_deref(), Some("Fake Agent"));
     assert_eq!(outcome.agent_version.as_deref(), Some("0.1.0"));
+    assert!(outcome.agent_capabilities.load_session);
+    assert!(outcome.agent_capabilities.prompt_capabilities.image);
+    assert!(outcome.agent_capabilities.prompt_capabilities.audio);
 }
 
 #[tokio::test(flavor = "current_thread")]

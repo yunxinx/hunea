@@ -49,23 +49,11 @@ const STATUS_LINE_ELLIPSIS: &str = "...";
 
 impl Model {
     pub(crate) fn status_line_config_bits(&self) -> u8 {
-        let mut bits = 0u8;
-        if self.uses_status_line_item(StatusLineItem::GitBranch) {
-            bits |= 1 << 0;
-        }
-        if self.uses_status_line_item(StatusLineItem::CurrentDir) {
-            bits |= 1 << 1;
-        }
-        if self.uses_status_line_item(StatusLineItem::CurrentModel) {
-            bits |= 1 << 2;
-        }
-        if self.uses_status_line_item(StatusLineItem::Throughput) {
-            bits |= 1 << 3;
-        }
-        if self.uses_status_line_item(StatusLineItem::Latency) {
-            bits |= 1 << 4;
-        }
-        bits
+        status_line_config_bits_for_items(&self.status_line_items)
+    }
+
+    pub(crate) fn status_line_2_config_bits(&self) -> u8 {
+        status_line_config_bits_for_items(&self.status_line_2_items)
     }
 
     pub(crate) fn current_status_line_render_result(&self) -> StatusLineRenderResult {
@@ -80,7 +68,30 @@ impl Model {
             return StatusLineRenderResult::default();
         }
 
-        let parts = self.current_status_line_parts();
+        self.render_status_line_result(
+            self.current_status_line_parts(),
+            status_line_gap_before(self.style_mode),
+        )
+    }
+
+    pub(crate) fn current_status_line_2_render_result(&self) -> StatusLineRenderResult {
+        if !self.current_status_notice_text().is_empty()
+            || self.command_panel_active()
+            || self.model_panel_active()
+            || self.acp_panel_active()
+            || self.tool_approval_panel_active()
+        {
+            return StatusLineRenderResult::default();
+        }
+
+        self.render_status_line_result(self.current_status_line_2_parts(), 0)
+    }
+
+    fn render_status_line_result(
+        &self,
+        parts: Vec<String>,
+        gap_before: usize,
+    ) -> StatusLineRenderResult {
         if parts.is_empty() {
             return StatusLineRenderResult::default();
         }
@@ -104,13 +115,33 @@ impl Model {
             plain_line,
             selectable: status_line_selectable_range(&text),
             has_content: true,
-            gap_before: status_line_gap_before(self.style_mode),
+            gap_before,
         }
     }
 
     pub(crate) fn current_status_line_parts(&self) -> Vec<String> {
-        let mut parts = Vec::with_capacity(self.status_line_items.len() + 1);
-        for item in &self.status_line_items {
+        let mut parts = self.status_line_parts_for_items(&self.status_line_items);
+        let helper = self.current_external_editor_helper_text();
+        if !helper.is_empty() {
+            parts.push(sanitize_status_line_part(&helper));
+        }
+
+        parts
+    }
+
+    pub(crate) fn current_status_line_2_parts(&self) -> Vec<String> {
+        let items = self
+            .status_line_2_items
+            .iter()
+            .copied()
+            .filter(|item| !self.status_line_items.contains(item))
+            .collect::<Vec<_>>();
+        self.status_line_parts_for_items(&items)
+    }
+
+    fn status_line_parts_for_items(&self, items: &[StatusLineItem]) -> Vec<String> {
+        let mut parts = Vec::with_capacity(items.len());
+        for item in items {
             match item {
                 StatusLineItem::GitBranch if !self.git_branch.is_empty() => {
                     parts.push(sanitize_status_line_part(&self.git_branch));
@@ -141,18 +172,35 @@ impl Model {
                 _ => {}
             }
         }
-        let helper = self.current_external_editor_helper_text();
-        if !helper.is_empty() {
-            parts.push(sanitize_status_line_part(&helper));
-        }
-
         parts
     }
 
     pub(crate) fn uses_status_line_item(&self, target: StatusLineItem) -> bool {
-        self.status_line_items.contains(&target)
+        self.status_line_items.contains(&target) || self.status_line_2_items.contains(&target)
     }
+}
 
+fn status_line_config_bits_for_items(items: &[StatusLineItem]) -> u8 {
+    let mut bits = 0u8;
+    if items.contains(&StatusLineItem::GitBranch) {
+        bits |= 1 << 0;
+    }
+    if items.contains(&StatusLineItem::CurrentDir) {
+        bits |= 1 << 1;
+    }
+    if items.contains(&StatusLineItem::CurrentModel) {
+        bits |= 1 << 2;
+    }
+    if items.contains(&StatusLineItem::Throughput) {
+        bits |= 1 << 3;
+    }
+    if items.contains(&StatusLineItem::Latency) {
+        bits |= 1 << 4;
+    }
+    bits
+}
+
+impl Model {
     pub(crate) fn set_acp_current_model(&mut self, model: Option<String>) {
         let model = model.and_then(|model| {
             let model = model.trim().to_string();
@@ -215,6 +263,20 @@ pub(crate) fn status_line_gap_before(style_mode: StyleMode) -> usize {
     } else {
         0
     }
+}
+
+pub(crate) fn status_line_pair_height(
+    status_line: &StatusLineRenderResult,
+    status_line_2: &StatusLineRenderResult,
+    first_visible_gap_before: usize,
+) -> usize {
+    let visible_lines =
+        usize::from(status_line.has_content) + usize::from(status_line_2.has_content);
+    if visible_lines == 0 {
+        return 0;
+    }
+
+    first_visible_gap_before + visible_lines
 }
 
 pub(crate) fn compose_status_line_text(parts: &[String], width: usize) -> String {

@@ -86,6 +86,7 @@ pub(crate) struct DocumentLayoutKey {
     pub(super) model_panel_scroll: usize,
     pub(super) selected_model: Option<String>,
     pub(super) status_line_config: u8,
+    pub(super) status_line_2_config: u8,
     pub(super) status_line_revision: usize,
     pub(super) acp_activity_frame: usize,
 }

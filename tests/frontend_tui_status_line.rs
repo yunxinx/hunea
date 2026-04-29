@@ -203,6 +203,74 @@ fn status_line_preserves_request_metrics_order_with_other_items() {
 }
 
 #[test]
+fn second_status_line_renders_after_first_line_and_deduplicates_first_line_items() {
+    let _guard = lock_test_environment();
+    let original_dir = env::current_dir().expect("current directory should be available");
+    let original_home = env::var_os("HOME");
+
+    let home_dir = temp_test_dir("status-line-second-home");
+    let repo_dir = home_dir.join("repo");
+    fs::create_dir_all(&repo_dir).expect("repo directory should exist");
+    write_git_head(&repo_dir, "ref: refs/heads/main\n");
+    env::set_current_dir(&repo_dir).expect("should switch into repo directory");
+    unsafe {
+        env::set_var("HOME", &home_dir);
+    }
+
+    let mut model = ready_model_with_options(
+        48,
+        5,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![StatusLineItem::GitBranch],
+            status_line_2_items: vec![StatusLineItem::CurrentDir, StatusLineItem::GitBranch],
+            ..ModelOptions::default()
+        },
+    );
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 48, 5),
+        vec!["", "› Enter to send Prompt", "", "  main", "  ~/repo"]
+    );
+
+    env::set_current_dir(original_dir).expect("should restore original directory");
+    restore_env_var("HOME", original_home);
+}
+
+#[test]
+fn second_status_line_inherits_gap_when_first_line_is_empty() {
+    let _guard = lock_test_environment();
+    let original_dir = env::current_dir().expect("current directory should be available");
+    let original_home = env::var_os("HOME");
+
+    let home_dir = temp_test_dir("status-line-second-gap-home");
+    let repo_dir = home_dir.join("repo");
+    fs::create_dir_all(&repo_dir).expect("repo directory should exist");
+    env::set_current_dir(&repo_dir).expect("should switch into repo directory");
+    unsafe {
+        env::set_var("HOME", &home_dir);
+    }
+
+    let mut model = ready_model_with_options(
+        48,
+        4,
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            status_line_2_items: vec![StatusLineItem::CurrentDir],
+            ..ModelOptions::default()
+        },
+    );
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 48, 4),
+        vec!["", "┃ Enter to send Prompt", "", "  ~/repo"]
+    );
+
+    env::set_current_dir(original_dir).expect("should restore original directory");
+    restore_env_var("HOME", original_home);
+}
+
+#[test]
 fn status_line_truncates_without_wrapping_in_narrow_viewport() {
     let _guard = lock_test_environment();
     let original_dir = env::current_dir().expect("current directory should be available");

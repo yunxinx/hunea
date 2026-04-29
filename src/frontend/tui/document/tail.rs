@@ -10,7 +10,10 @@ use crate::frontend::tui::{
     inline_panel::InlinePanelRenderResult,
     model_panel::ModelPanelRenderResult,
     selection::{SelectableLineRange, selectable_range_for_plain_line},
-    status_line::StatusLineRenderResult,
+    status_line::{
+        StatusLineRenderResult, status_line_gap_before as configured_status_line_gap_before,
+        status_line_pair_height,
+    },
     style_mode::StyleMode,
     tool_approval_panel::ToolApprovalPanelRenderResult,
 };
@@ -44,6 +47,7 @@ pub(crate) struct DocumentTailLayoutKey {
     pub(crate) model_panel_scroll: usize,
     pub(crate) selected_model: Option<String>,
     pub(crate) status_line_config: u8,
+    pub(crate) status_line_2_config: u8,
     pub(crate) status_line_revision: usize,
     pub(crate) acp_activity_frame: usize,
 }
@@ -85,7 +89,9 @@ pub(crate) struct DocumentTailLayoutInput {
     pub(crate) acp_panel: AcpPanelRenderResult,
     pub(crate) tool_approval_panel: ToolApprovalPanelRenderResult,
     pub(crate) model_panel: ModelPanelRenderResult,
+    pub(crate) status_line_gap_before: usize,
     pub(crate) status_line: StatusLineRenderResult,
+    pub(crate) status_line_2: StatusLineRenderResult,
 }
 
 impl Model {
@@ -137,6 +143,7 @@ impl Model {
                 .as_ref()
                 .map(|model| model.display_name()),
             status_line_config: self.status_line_config_bits(),
+            status_line_2_config: self.status_line_2_config_bits(),
             status_line_revision: self.status_line_revision(),
             acp_activity_frame: self.acp_activity_frame_key(std::time::Instant::now()),
         }
@@ -196,7 +203,9 @@ impl Model {
             acp_panel: self.current_inline_acp_panel_render_result(),
             tool_approval_panel: self.current_inline_tool_approval_panel_render_result(),
             model_panel: self.current_inline_model_panel_render_result(),
+            status_line_gap_before: configured_status_line_gap_before(self.style_mode),
             status_line: self.current_status_line_render_result(),
+            status_line_2: self.current_status_line_2_render_result(),
         }
     }
 }
@@ -207,6 +216,11 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
     let acp_activity_gap =
         usize::from(input.acp_activity.has_content) * acp_activity_composer_gap_line_count();
     let has_composer_padding = input.composer_frame_decoration_line.is_some();
+    let status_line_rows = status_line_pair_height(
+        &input.status_line,
+        &input.status_line_2,
+        input.status_line_gap_before,
+    );
     let mut lines = Vec::with_capacity(
         extra_gap
             + usize::from(input.acp_activity.has_content)
@@ -217,8 +231,7 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.acp_panel.lines.len()
             + input.tool_approval_panel.lines.len()
             + input.model_panel.lines.len()
-            + input.status_line.gap_before
-            + usize::from(input.status_line.has_content),
+            + status_line_rows,
     );
     let mut text_lines = Vec::with_capacity(
         extra_gap
@@ -230,8 +243,7 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.acp_panel.plain_lines.len()
             + input.tool_approval_panel.plain_lines.len()
             + input.model_panel.plain_lines.len()
-            + input.status_line.gap_before
-            + usize::from(input.status_line.has_content),
+            + status_line_rows,
     );
     let mut anchors = Vec::with_capacity(
         extra_gap
@@ -243,8 +255,7 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.acp_panel.lines.len()
             + input.tool_approval_panel.lines.len()
             + input.model_panel.lines.len()
-            + input.status_line.gap_before
-            + usize::from(input.status_line.has_content),
+            + status_line_rows,
     );
     let mut selectable = Vec::with_capacity(
         extra_gap
@@ -256,8 +267,7 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.acp_panel.lines.len()
             + input.tool_approval_panel.lines.len()
             + input.model_panel.lines.len()
-            + input.status_line.gap_before
-            + usize::from(input.status_line.has_content),
+            + status_line_rows,
     );
 
     if input.transcript_has_content {
@@ -439,8 +449,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
         }
     }
 
-    if input.status_line.has_content {
-        for gap_index in 0..input.status_line.gap_before {
+    if input.status_line.has_content || input.status_line_2.has_content {
+        for gap_index in 0..input.status_line_gap_before {
             lines.push(Line::raw(""));
             text_lines.push(String::new());
             anchors.push(DocumentLineAnchor {
@@ -451,15 +461,22 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             selectable.push(SelectableLineRange::default());
         }
 
-        if let Some(line) = input.status_line.line {
-            lines.push(line);
-            text_lines.push(input.status_line.plain_line);
-            anchors.push(DocumentLineAnchor {
-                region: DocumentAnchorRegion::StatusLine,
-                ..DocumentLineAnchor::default()
-            });
-            selectable.push(input.status_line.selectable);
-        }
+        append_status_line(
+            input.status_line,
+            0,
+            &mut lines,
+            &mut text_lines,
+            &mut anchors,
+            &mut selectable,
+        );
+        append_status_line(
+            input.status_line_2,
+            1,
+            &mut lines,
+            &mut text_lines,
+            &mut anchors,
+            &mut selectable,
+        );
     }
 
     let composer_slot = if lines.is_empty() {
@@ -587,6 +604,30 @@ fn append_inline_panel(
             ..DocumentLineAnchor::default()
         });
         selectable.push(panel.selectable.get(index).copied().unwrap_or_default());
+    }
+}
+
+fn append_status_line(
+    status_line: StatusLineRenderResult,
+    status_line_index: usize,
+    lines: &mut Vec<Line<'static>>,
+    text_lines: &mut Vec<String>,
+    anchors: &mut Vec<DocumentLineAnchor>,
+    selectable: &mut Vec<SelectableLineRange>,
+) {
+    if !status_line.has_content {
+        return;
+    }
+
+    if let Some(line) = status_line.line {
+        lines.push(line);
+        text_lines.push(status_line.plain_line);
+        anchors.push(DocumentLineAnchor {
+            region: DocumentAnchorRegion::StatusLine,
+            gap_index: status_line_index,
+            ..DocumentLineAnchor::default()
+        });
+        selectable.push(status_line.selectable);
     }
 }
 

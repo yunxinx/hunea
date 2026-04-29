@@ -150,6 +150,7 @@ impl Model {
                 .as_ref()
                 .map(|model| model.display_name()),
             status_line_config: self.status_line_config_bits(),
+            status_line_2_config: self.status_line_2_config_bits(),
             status_line_revision: self.status_line_revision(),
             acp_activity_frame: self.acp_activity_frame_key(std::time::Instant::now()),
         }

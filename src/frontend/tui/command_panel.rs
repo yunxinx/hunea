@@ -7,7 +7,9 @@ use unicode_width::UnicodeWidthStr;
 use super::{
     AppEffect, Model, debug,
     selection::SelectableLineRange,
-    status_line::truncate_display_width_with_ellipsis,
+    status_line::{
+        status_line_gap_before, status_line_pair_height, truncate_display_width_with_ellipsis,
+    },
     theme::{
         command_accent_text_style, primary_text_style, secondary_text_style, tertiary_text_style,
     },
@@ -142,9 +144,12 @@ impl Model {
         }
 
         let status_line = self.current_status_line_render_result();
-        if status_line.has_content {
-            available_rows = available_rows.saturating_sub(status_line.gap_before + 1);
-        }
+        let status_line_2 = self.current_status_line_2_render_result();
+        available_rows = available_rows.saturating_sub(status_line_pair_height(
+            &status_line,
+            &status_line_2,
+            status_line_gap_before(self.style_mode),
+        ));
 
         COMMAND_PANEL_VISIBLE_ROWS.min(available_rows.max(1))
     }

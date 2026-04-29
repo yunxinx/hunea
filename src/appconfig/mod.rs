@@ -31,6 +31,7 @@ pub struct LoadedConfig {
 pub struct TuiConfig {
     pub user_input_style: UserInputStyle,
     pub status_line: Vec<String>,
+    pub status_line_2: Vec<String>,
     pub external_editor: Vec<String>,
     pub show_external_editor_helper: bool,
     pub copy_on_mouse_selection_release: bool,
@@ -197,6 +198,7 @@ struct FileConfig {
 struct FileTuiConfig {
     user_input_style: Option<String>,
     status_line: Option<Vec<String>>,
+    status_line_2: Option<Vec<String>>,
     external_editor: Option<Vec<String>>,
     show_external_editor_helper: Option<bool>,
     copy_on_mouse_selection_release: Option<bool>,
@@ -255,6 +257,7 @@ impl Config {
             tui: TuiConfig {
                 user_input_style: UserInputStyle::Cx,
                 status_line: Vec::new(),
+                status_line_2: Vec::new(),
                 external_editor: Vec::new(),
                 show_external_editor_helper: true,
                 copy_on_mouse_selection_release: false,
@@ -661,16 +664,13 @@ fn merge_config_file(
     }
 
     if let Some(items) = file_config.tui.status_line {
-        validate_status_line_items(&items).map_err(|error| match error {
-            AppConfigError::InvalidStatusLineItem { value, .. } => {
-                AppConfigError::InvalidStatusLineItem {
-                    path: Some(path.to_path_buf()),
-                    value,
-                }
-            }
-            other => other,
-        })?;
+        validate_status_line_items_for_path(&items, path)?;
         config.tui.status_line = items;
+    }
+
+    if let Some(items) = file_config.tui.status_line_2 {
+        validate_status_line_items_for_path(&items, path)?;
+        config.tui.status_line_2 = items;
     }
 
     if let Some(command) = file_config.tui.external_editor {
@@ -754,6 +754,21 @@ fn merge_config_file(
     }
 
     Ok(config)
+}
+
+fn validate_status_line_items_for_path(
+    items: &[String],
+    path: &Path,
+) -> Result<(), AppConfigError> {
+    validate_status_line_items(items).map_err(|error| match error {
+        AppConfigError::InvalidStatusLineItem { value, .. } => {
+            AppConfigError::InvalidStatusLineItem {
+                path: Some(path.to_path_buf()),
+                value,
+            }
+        }
+        other => other,
+    })
 }
 
 fn merge_runtime_config(

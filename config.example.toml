@@ -29,6 +29,11 @@ user_input_style = "cx"
 # 状态行也会保持隐藏。
 status_line = ["git-branch"]
 
+# `status_line_2` 使用与 `status_line` 相同的数组格式，用于配置第二行状态行。
+# 如果第二行与第一行配置了相同项目，第一行优先显示，第二行会自动跳过重复项。
+# 未配置或显式写成 [] 时，不显示第二行。
+status_line_2 = ["current-dir"]
+
 # `external_editor` 控制 Ctrl+G 打开的外部编辑器命令。
 # 使用 TOML 数组原生表达 argv，例如：
 # - ["code", "--wait"]

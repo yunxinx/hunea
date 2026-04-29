@@ -16,6 +16,7 @@ fn load_defaults_to_cx_when_no_config_exists() {
 
     assert_eq!(config.tui.user_input_style, UserInputStyle::Cx);
     assert!(config.tui.status_line.is_empty());
+    assert!(config.tui.status_line_2.is_empty());
     assert!(!config.debug.enabled);
 }
 
@@ -120,6 +121,56 @@ fn load_accepts_latency_status_line() {
         .expect("latency should be accepted as a valid status line item");
 
     assert_eq!(config.tui.status_line, vec!["latency"]);
+}
+
+#[test]
+fn load_accepts_second_status_line() {
+    let working_dir = temp_test_dir("load-accepts-second-status-line-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line_2 = [\"current-dir\", \"git-branch\"]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("status_line_2 should accept the same item format as status_line");
+
+    assert_eq!(config.tui.status_line_2, vec!["current-dir", "git-branch"]);
+}
+
+#[test]
+fn load_project_config_can_clear_user_second_status_line() {
+    let working_dir = temp_test_dir("load-clears-second-status-line-working");
+    let user_config_dir = temp_test_dir("load-clears-second-status-line-config");
+    write_config(
+        &user_config_dir.join("config.toml"),
+        "[tui]\nstatus_line_2 = [\"current-dir\"]\n",
+    );
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line_2 = []\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("project config should be able to clear user-level second status line items");
+
+    assert!(config.tui.status_line_2.is_empty());
+}
+
+#[test]
+fn load_rejects_unknown_second_status_line_item() {
+    let working_dir = temp_test_dir("load-rejects-second-status-line-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line_2 = [\"weird-item\"]\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("unknown second status line item should be rejected");
+
+    assert!(
+        error.to_string().contains("unknown tui.status_line item"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

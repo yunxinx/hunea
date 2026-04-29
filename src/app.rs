@@ -225,6 +225,7 @@ fn model_options_from_configs(
     ModelOptions {
         style_mode: style_mode_from_config(tui_config.user_input_style),
         status_line_items: status_line_items_from_config(&tui_config.status_line),
+        status_line_2_items: status_line_items_from_config(&tui_config.status_line_2),
         external_editor: tui_config.external_editor.clone(),
         external_editor_hint: external_editor_hint_from_config(&tui_config.external_editor),
         show_external_editor_helper: tui_config.show_external_editor_helper,
@@ -281,6 +282,7 @@ mod tests {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
             status_line: Vec::new(),
+            status_line_2: Vec::new(),
             external_editor: Vec::new(),
             show_external_editor_helper: true,
             copy_on_mouse_selection_release: true,
@@ -323,10 +325,24 @@ mod tests {
     }
 
     #[test]
+    fn model_options_from_config_carries_second_status_line_items() {
+        let options = model_options_from_config(&TuiConfig {
+            status_line_2: vec!["current-dir".to_string(), "git-branch".to_string()],
+            ..default_tui_config()
+        });
+
+        assert_eq!(
+            options.status_line_2_items,
+            vec![StatusLineItem::CurrentDir, StatusLineItem::GitBranch]
+        );
+    }
+
+    #[test]
     fn model_options_from_config_carries_swap_enter_and_send_flag() {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
             status_line: Vec::new(),
+            status_line_2: Vec::new(),
             external_editor: Vec::new(),
             show_external_editor_helper: true,
             copy_on_mouse_selection_release: false,
@@ -347,6 +363,7 @@ mod tests {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
             status_line: Vec::new(),
+            status_line_2: Vec::new(),
             external_editor: Vec::new(),
             show_external_editor_helper: true,
             copy_on_mouse_selection_release: false,
@@ -367,6 +384,7 @@ mod tests {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
             status_line: Vec::new(),
+            status_line_2: Vec::new(),
             external_editor: Vec::new(),
             show_external_editor_helper: true,
             copy_on_mouse_selection_release: false,
@@ -387,6 +405,7 @@ mod tests {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
             status_line: Vec::new(),
+            status_line_2: Vec::new(),
             external_editor: Vec::new(),
             show_external_editor_helper: true,
             copy_on_mouse_selection_release: false,
@@ -407,6 +426,7 @@ mod tests {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
             status_line: Vec::new(),
+            status_line_2: Vec::new(),
             external_editor: Vec::new(),
             show_external_editor_helper: true,
             copy_on_mouse_selection_release: false,
@@ -427,6 +447,7 @@ mod tests {
         let options = model_options_from_config(&TuiConfig {
             user_input_style: UserInputStyle::Cx,
             status_line: Vec::new(),
+            status_line_2: Vec::new(),
             external_editor: Vec::new(),
             show_external_editor_helper: true,
             copy_on_mouse_selection_release: false,
@@ -593,6 +614,7 @@ mod tests {
         let config = TuiConfig {
             user_input_style: UserInputStyle::Cx,
             status_line: Vec::new(),
+            status_line_2: Vec::new(),
             external_editor: Vec::new(),
             show_external_editor_helper: true,
             copy_on_mouse_selection_release: false,
@@ -615,6 +637,7 @@ mod tests {
         let config = TuiConfig {
             user_input_style: UserInputStyle::Cx,
             status_line: Vec::new(),
+            status_line_2: Vec::new(),
             external_editor: Vec::new(),
             show_external_editor_helper: true,
             copy_on_mouse_selection_release: false,
@@ -638,6 +661,7 @@ mod tests {
         TuiConfig {
             user_input_style: UserInputStyle::Cx,
             status_line: Vec::new(),
+            status_line_2: Vec::new(),
             external_editor: Vec::new(),
             show_external_editor_helper: true,
             copy_on_mouse_selection_release: false,

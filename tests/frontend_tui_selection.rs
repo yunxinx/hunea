@@ -1,6 +1,10 @@
+use std::time::Duration;
+
 use crossterm::event::{KeyCode, KeyEvent, MouseButton};
 use lumos::frontend::tui::theme::default_palette;
-use lumos::frontend::tui::{AppEffect, AppEvent, HeroOptions, Model, ModelOptions, StatusLineItem};
+use lumos::frontend::tui::{
+    AppEffect, AppEvent, HeroOptions, Model, ModelOptions, RequestMetrics, StatusLineItem,
+};
 use ratatui::{
     Terminal,
     backend::TestBackend,
@@ -212,6 +216,70 @@ fn status_line_selection_can_start_from_left_inset_without_copying_it() {
                 .then(|| (row, line.trim().to_string()))
         })
         .expect("status line should include current directory");
+
+    assert!(
+        model
+            .update(AppEvent::MouseDown {
+                button: MouseButton::Left,
+                column: 0,
+                row: u16::try_from(row).unwrap(),
+            })
+            .is_none()
+    );
+    assert!(
+        model
+            .update(AppEvent::MouseDrag {
+                button: MouseButton::Left,
+                column: 39,
+                row: u16::try_from(row).unwrap(),
+            })
+            .is_none()
+    );
+
+    let effect = model.update(AppEvent::MouseUp {
+        button: MouseButton::Left,
+        column: 39,
+        row: u16::try_from(row).unwrap(),
+    });
+
+    assert_eq!(effect, Some(AppEffect::CopySelection(status_text)));
+}
+
+#[test]
+fn second_status_line_selection_uses_its_own_anchor() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            copy_on_mouse_selection_release: true,
+            status_line_items: vec![StatusLineItem::Latency],
+            status_line_2_items: vec![StatusLineItem::CurrentDir],
+            ..ModelOptions::default()
+        },
+    );
+    model.set_last_request_metrics(Some(RequestMetrics::new(
+        Duration::from_millis(530),
+        139,
+        Duration::from_secs(1),
+    )));
+    model.update(AppEvent::Resized {
+        width: 40,
+        height: 7,
+    });
+    model.update(AppEvent::DetectedPalette {
+        palette: default_palette(),
+        has_dark_background: true,
+    });
+    model.update(AppEvent::StartupReadyTimeout);
+
+    let rows = render_rows(&mut model, 40, 7);
+    let (row, status_text) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| {
+            line.contains("lumos_rust")
+                .then(|| (row, line.trim().to_string()))
+        })
+        .expect("second status line should include current directory");
 
     assert!(
         model

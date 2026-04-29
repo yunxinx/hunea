@@ -23,7 +23,9 @@ use super::{
     external_editor::ExternalEditorLaunch,
     model_panel::ModelPanelState,
     selection::{AutoScrollDirection, MousePosition, SelectionClickState, SelectionState},
-    status_line::{StatusLineItem, StatusLineRenderResult},
+    status_line::{
+        StatusLineItem, StatusLineRenderResult, status_line_gap_before, status_line_pair_height,
+    },
     status_phrases::{StatusPhraseSelector, default_status_phrases},
     style_mode::StyleMode,
     theme::{TerminalPalette, default_palette},
@@ -38,6 +40,7 @@ pub struct Model {
     pub(super) hero_options: HeroOptions,
     pub(super) style_mode: StyleMode,
     pub(super) status_line_items: Vec<StatusLineItem>,
+    pub(super) status_line_2_items: Vec<StatusLineItem>,
     pub(super) external_editor: Vec<String>,
     pub(super) external_editor_hint: String,
     pub(super) external_editor_helper_enabled: bool,
@@ -175,6 +178,7 @@ pub(super) struct NoticeState {
 pub struct ModelOptions {
     pub style_mode: StyleMode,
     pub status_line_items: Vec<StatusLineItem>,
+    pub status_line_2_items: Vec<StatusLineItem>,
     pub external_editor: Vec<String>,
     pub external_editor_hint: String,
     pub show_external_editor_helper: bool,
@@ -199,6 +203,7 @@ impl Default for ModelOptions {
         Self {
             style_mode: StyleMode::default(),
             status_line_items: Vec::new(),
+            status_line_2_items: Vec::new(),
             external_editor: Vec::new(),
             external_editor_hint: String::new(),
             show_external_editor_helper: true,
@@ -260,14 +265,18 @@ impl Model {
         ));
         let style_mode = options.style_mode.normalized();
         let status_line_items = options.status_line_items;
+        let status_line_2_items = options.status_line_2_items;
         let selected_model = options
             .selected_model
             .filter(|selection| options.model_catalog.contains_selection(selection));
+        let git_branch = resolve_initial_git_branch(&status_line_items, &status_line_2_items);
+        let current_dir = resolve_initial_current_dir(&status_line_items, &status_line_2_items);
 
         Self {
             hero_options,
             style_mode,
             status_line_items: status_line_items.clone(),
+            status_line_2_items,
             external_editor: options.external_editor,
             external_editor_hint: options.external_editor_hint,
             external_editor_helper_enabled: options.show_external_editor_helper,
@@ -302,8 +311,8 @@ impl Model {
             selection_runtime: SelectionRuntimeState::default(),
             pending_composer_cursor_click: PendingComposerCursorClick::default(),
             pending_reasoning_toggle_click: PendingReasoningToggleClick::default(),
-            git_branch: resolve_initial_git_branch(&status_line_items),
-            current_dir: resolve_initial_current_dir(&status_line_items),
+            git_branch,
+            current_dir,
             last_request_metrics: None,
             palette,
             palette_version: 1,
@@ -726,11 +735,13 @@ impl Model {
         };
 
         let status_line = self.current_status_line_render_result();
+        let status_line_2 = self.current_status_line_2_render_result();
         let command_panel = self.current_inline_command_panel_render_result();
         let model_panel = self.current_inline_model_panel_render_result();
         let acp_panel = self.current_inline_acp_panel_render_result();
         let tool_approval_panel = self.current_inline_tool_approval_panel_render_result();
         if status_line.has_content
+            || status_line_2.has_content
             || command_panel.has_content
             || model_panel.has_content
             || acp_panel.has_content
@@ -739,6 +750,7 @@ impl Model {
             if self.document_runtime.follow_bottom && !self.document_runtime.manual_scroll {
                 let visible_height = self.bottom_follow_composer_content_line_count(
                     &status_line,
+                    &status_line_2,
                     &command_panel,
                     &model_panel,
                     &acp_panel,
@@ -866,6 +878,7 @@ impl Model {
     fn bottom_follow_composer_content_line_count(
         &self,
         status_line: &StatusLineRenderResult,
+        status_line_2: &StatusLineRenderResult,
         command_panel: &super::command_panel::CommandPanelRenderResult,
         model_panel: &super::model_panel::ModelPanelRenderResult,
         acp_panel: &super::acp::AcpPanelRenderResult,
@@ -880,9 +893,11 @@ impl Model {
         if acp_activity.has_content {
             tail_rows += 1;
         }
-        if status_line.has_content {
-            tail_rows += status_line.gap_before + 1;
-        }
+        tail_rows += status_line_pair_height(
+            status_line,
+            status_line_2,
+            status_line_gap_before(self.style_mode),
+        );
         if self.composer_uses_rendered_frame_padding() {
             tail_rows += 1;
         }
@@ -988,9 +1003,13 @@ impl Model {
     }
 }
 
-fn resolve_initial_git_branch(items: &[StatusLineItem]) -> String {
-    if items
+fn resolve_initial_git_branch(
+    status_line_items: &[StatusLineItem],
+    status_line_2_items: &[StatusLineItem],
+) -> String {
+    if status_line_items
         .iter()
+        .chain(status_line_2_items)
         .any(|item| matches!(item, StatusLineItem::GitBranch))
     {
         envinfo::git_branch()
@@ -999,9 +1018,13 @@ fn resolve_initial_git_branch(items: &[StatusLineItem]) -> String {
     }
 }
 
-fn resolve_initial_current_dir(items: &[StatusLineItem]) -> String {
-    if items
+fn resolve_initial_current_dir(
+    status_line_items: &[StatusLineItem],
+    status_line_2_items: &[StatusLineItem],
+) -> String {
+    if status_line_items
         .iter()
+        .chain(status_line_2_items)
         .any(|item| matches!(item, StatusLineItem::CurrentDir))
     {
         envinfo::short_work_dir()

@@ -37,6 +37,9 @@ use super::{
     AppEffect, AppEvent, HeroOptions, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StyleMode, theme,
 };
 
+mod event_pipeline;
+use event_pipeline::TerminalWaitPlan;
+
 /// `RuntimeOptions` 表示 TUI runner 可执行的外部 runtime 能力。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeOptions {
@@ -135,12 +138,17 @@ pub fn run_with_runtime_options(
     });
 
     let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;
+    let mut render_needed = true;
 
     loop {
-        drain_acp_runtime_events(&mut model, &mut acp_runtime);
-        drain_native_chat_runtime_events(&mut model, &mut native_chat_runtime);
-        drain_model_refresh_runtime_events(&mut model, &mut model_refresh_runtime);
-        terminal.draw(|frame| model.render(frame))?;
+        render_needed |= drain_acp_runtime_events(&mut model, &mut acp_runtime);
+        render_needed |= drain_native_chat_runtime_events(&mut model, &mut native_chat_runtime);
+        render_needed |= drain_model_refresh_runtime_events(&mut model, &mut model_refresh_runtime);
+
+        if render_needed {
+            terminal.draw(|frame| model.render(frame))?;
+            render_needed = false;
+        }
 
         if model.is_quitting() {
             break;
@@ -158,6 +166,7 @@ pub fn run_with_runtime_options(
                 &mut model_refresh_runtime,
                 effect,
             )?;
+            render_needed = true;
             continue;
         }
 
@@ -172,39 +181,28 @@ pub fn run_with_runtime_options(
                 &mut model_refresh_runtime,
                 effect,
             )?;
+            render_needed = true;
             continue;
         }
 
-        let wait_duration = next_wait_duration(&model, startup_deadline, now);
+        let wait_plan = event_pipeline::terminal_wait_plan(
+            &model,
+            startup_deadline,
+            now,
+            has_background_runtime(&acp_runtime, &native_chat_runtime, &model_refresh_runtime),
+        );
 
-        if !event::poll(wait_duration)? {
-            if !model.has_palette() {
-                let effect = model.update(AppEvent::StartupReadyTimeout);
-                apply_effect_if_needed(
-                    &mut terminal,
-                    &mut model,
-                    &runtime_options,
-                    &mut acp_runtime,
-                    &mut native_chat_runtime,
-                    &mut model_refresh_runtime,
-                    effect,
-                )?;
-            } else if let Some(timeout_event) = model.timeout_event(Instant::now()) {
-                let effect = model.update(timeout_event);
-                apply_effect_if_needed(
-                    &mut terminal,
-                    &mut model,
-                    &runtime_options,
-                    &mut acp_runtime,
-                    &mut native_chat_runtime,
-                    &mut model_refresh_runtime,
-                    effect,
-                )?;
+        let first_event = match wait_for_terminal_event(wait_plan)? {
+            Some(event) => event,
+            None => {
+                // timeout 到期或后台 runtime poll 到期。下一轮会先 drain runtime，
+                // activity frame 到期时需要重绘；后台 poll 到期则只检查事件。
+                render_needed = wait_plan.render_on_timeout();
+                continue;
             }
-            continue;
-        }
+        };
 
-        let terminal_events = read_ready_terminal_events(event::read()?)?;
+        let terminal_events = read_ready_terminal_events(first_event)?;
         for action in coalesced_input_actions(terminal_events) {
             match action {
                 TerminalInputAction::App(app_event) => {
@@ -218,8 +216,12 @@ pub fn run_with_runtime_options(
                         &mut model_refresh_runtime,
                         effect,
                     )?;
+                    render_needed = true;
                 }
-                TerminalInputAction::CancelExitConfirmation => model.cancel_exit_confirmation(),
+                TerminalInputAction::CancelExitConfirmation => {
+                    model.cancel_exit_confirmation();
+                    render_needed = true;
+                }
             }
 
             if model.is_quitting() {
@@ -229,6 +231,29 @@ pub fn run_with_runtime_options(
     }
 
     Ok(model)
+}
+
+fn wait_for_terminal_event(wait_plan: TerminalWaitPlan) -> io::Result<Option<Event>> {
+    match wait_plan {
+        TerminalWaitPlan::Block => event::read().map(Some),
+        TerminalWaitPlan::Poll { duration, .. } => {
+            if event::poll(duration)? {
+                event::read().map(Some)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+fn has_background_runtime(
+    acp_runtime: &AcpRuntimeState,
+    native_chat_runtime: &NativeChatRuntimeState,
+    model_refresh_runtime: &ModelProviderRefreshRuntimeState,
+) -> bool {
+    acp_runtime.should_poll_events()
+        || native_chat_runtime.is_running()
+        || model_refresh_runtime.is_running()
 }
 
 struct TerminalSession;
@@ -384,33 +409,6 @@ fn flush_pending_wheel_delta(actions: &mut Vec<TerminalInputAction>, delta: &mut
         delta_lines: *delta,
     }));
     *delta = 0;
-}
-
-fn next_wait_duration(model: &Model, startup_deadline: Instant, now: Instant) -> Duration {
-    let mut next_deadline = if model.has_palette() {
-        None
-    } else {
-        Some(startup_deadline)
-    };
-
-    if let Some(model_deadline) = model.next_timeout_deadline() {
-        next_deadline = Some(match next_deadline {
-            Some(deadline) => deadline.min(model_deadline),
-            None => model_deadline,
-        });
-    }
-
-    if let Some(activity_interval) = model.acp_activity_frame_interval() {
-        let activity_deadline = now + activity_interval;
-        next_deadline = Some(match next_deadline {
-            Some(deadline) => deadline.min(activity_deadline),
-            None => activity_deadline,
-        });
-    }
-
-    next_deadline
-        .map(|deadline| deadline.saturating_duration_since(now))
-        .unwrap_or_else(|| Duration::from_millis(250))
 }
 
 fn apply_effect_if_needed(
@@ -570,10 +568,13 @@ enum ModelProviderRefreshEvent {
 fn drain_model_refresh_runtime_events(
     model: &mut Model,
     model_refresh_runtime: &mut ModelProviderRefreshRuntimeState,
-) {
+) -> bool {
+    let mut changed = false;
     while let Some(event) = model_refresh_runtime.try_recv_event() {
         apply_model_provider_refresh_event(model, event);
+        changed = true;
     }
+    changed
 }
 
 fn apply_model_provider_refresh_event(model: &mut Model, event: ModelProviderRefreshEvent) {
@@ -773,10 +774,13 @@ async fn run_native_chat_worker(
 fn drain_native_chat_runtime_events(
     model: &mut Model,
     native_chat_runtime: &mut NativeChatRuntimeState,
-) {
+) -> bool {
+    let mut changed = false;
     while let Some(event) = native_chat_runtime.try_recv_event() {
         apply_native_chat_event(model, event);
+        changed = true;
     }
+    changed
 }
 
 fn apply_native_chat_event(model: &mut Model, event: NativeChatEvent) {
@@ -889,6 +893,10 @@ struct AcpRuntimeState {
 }
 
 impl AcpRuntimeState {
+    fn should_poll_events(&self) -> bool {
+        self.worker.is_some()
+    }
+
     fn start(&mut self, command: AcpSessionCommand) {
         self.response_buffer.clear();
         self.reasoning_buffer.clear();
@@ -1040,9 +1048,9 @@ impl AcpRuntimeState {
     }
 }
 
-fn drain_acp_runtime_events(model: &mut Model, acp_runtime: &mut AcpRuntimeState) {
+fn drain_acp_runtime_events(model: &mut Model, acp_runtime: &mut AcpRuntimeState) -> bool {
     let Some(worker) = acp_runtime.worker.as_ref() else {
-        return;
+        return false;
     };
 
     let mut events = Vec::new();
@@ -1050,9 +1058,11 @@ fn drain_acp_runtime_events(model: &mut Model, acp_runtime: &mut AcpRuntimeState
         events.push(event);
     }
 
+    let changed = !events.is_empty();
     for event in events {
         apply_acp_session_event(model, acp_runtime, event);
     }
+    changed
 }
 
 fn apply_acp_session_event(

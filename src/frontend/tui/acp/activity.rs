@@ -200,10 +200,6 @@ impl Model {
             .unwrap_or(0)
     }
 
-    pub(crate) fn acp_activity_frame_interval(&self) -> Option<Duration> {
-        self.acp_activity_frame_interval_at(Instant::now())
-    }
-
     pub(crate) fn acp_activity_frame_interval_at(&self, now: Instant) -> Option<Duration> {
         self.acp_activity
             .as_ref()

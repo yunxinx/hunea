@@ -78,10 +78,14 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
-    use crate::frontend::tui::{HeroOptions, theme::default_palette};
+    use crate::frontend::tui::{
+        HeroOptions, ReasoningDisplayMode, StyleMode, theme::default_palette,
+    };
 
     #[test]
     fn assistant_message_uses_two_column_visual_inset() {
@@ -122,6 +126,34 @@ mod tests {
                 .any(|line| line.as_str() == "hello world"),
             "assistant visual inset must not add spaces to viewport plain lines: {:?}",
             viewport.plain_lines
+        );
+    }
+
+    #[test]
+    fn snippet_reasoning_renders_without_assistant_visual_inset() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.set_window(20, 8);
+        model.set_palette(default_palette(), true);
+        model
+            .transcript_mut()
+            .append_assistant_message_with_reasoning(
+                "",
+                "hidden reasoning",
+                ReasoningDisplayMode::Snippet,
+                Some(Duration::from_secs(16)),
+                StyleMode::Cx,
+            );
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        terminal.draw(|frame| model.render(frame)).unwrap();
+
+        assert!(
+            rendered_rows(terminal.backend().buffer())
+                .iter()
+                .any(|row| row == "• thoughts 16s      "),
+            "snippet reasoning should start at column zero without assistant inset: {:?}",
+            rendered_rows(terminal.backend().buffer())
         );
     }
 

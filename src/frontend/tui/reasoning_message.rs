@@ -25,13 +25,14 @@ pub enum ReasoningDisplayMode {
     #[default]
     Collapsed,
     Expanded,
+    Snippet,
 }
 
 /// `ReasoningMessageItem` 表示只用于展示的模型思维链，不参与后续模型上下文。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReasoningMessageItem {
     content: String,
-    is_collapsed: bool,
+    display_mode: ReasoningDisplayMode,
     duration: Option<Duration>,
     render_cache_key: u64,
 }
@@ -43,13 +44,16 @@ impl ReasoningMessageItem {
         display_mode: ReasoningDisplayMode,
         duration: Option<Duration>,
     ) -> Self {
-        let content = content.into();
-        let is_collapsed = matches!(display_mode, ReasoningDisplayMode::Collapsed);
-        let render_cache_key = reasoning_message_render_cache_key(&content, is_collapsed, duration);
+        let content = if matches!(display_mode, ReasoningDisplayMode::Snippet) {
+            String::new()
+        } else {
+            content.into()
+        };
+        let render_cache_key = reasoning_message_render_cache_key(&content, display_mode, duration);
 
         Self {
             content,
-            is_collapsed,
+            display_mode,
             duration,
             render_cache_key,
         }
@@ -59,7 +63,10 @@ impl ReasoningMessageItem {
     pub fn render_lines(&self, width: u16, palette: TerminalPalette) -> Vec<Line<'static>> {
         let style = tertiary_text_style(palette).italic();
         let mut lines = vec![Line::from(Span::styled(self.header_label(), style))];
-        if self.is_collapsed {
+        if matches!(
+            self.display_mode,
+            ReasoningDisplayMode::Collapsed | ReasoningDisplayMode::Snippet
+        ) {
             return lines;
         }
 
@@ -72,7 +79,11 @@ impl ReasoningMessageItem {
     }
 
     pub(crate) fn is_header_line(&self, line_index: usize) -> bool {
-        line_index == 0
+        line_index == 0 && self.is_toggleable()
+    }
+
+    pub(crate) fn uses_assistant_visual_inset(&self) -> bool {
+        !matches!(self.display_mode, ReasoningDisplayMode::Snippet)
     }
 
     pub(crate) fn header_display_width(&self) -> usize {
@@ -80,9 +91,13 @@ impl ReasoningMessageItem {
     }
 
     pub(crate) fn toggle(&mut self) {
-        self.is_collapsed = !self.is_collapsed;
+        self.display_mode = match self.display_mode {
+            ReasoningDisplayMode::Collapsed => ReasoningDisplayMode::Expanded,
+            ReasoningDisplayMode::Expanded => ReasoningDisplayMode::Collapsed,
+            ReasoningDisplayMode::Snippet => return,
+        };
         self.render_cache_key =
-            reasoning_message_render_cache_key(&self.content, self.is_collapsed, self.duration);
+            reasoning_message_render_cache_key(&self.content, self.display_mode, self.duration);
     }
 
     /// `render_for_terminal_replay` 返回适合退出 AltScreen 后回放到终端的文本。
@@ -167,35 +182,54 @@ impl ReasoningMessageItem {
 
     fn plain_lines(&self, width: u16) -> Vec<String> {
         let mut lines = vec![self.header_label()];
-        if !self.is_collapsed {
+        if matches!(self.display_mode, ReasoningDisplayMode::Expanded) {
             lines.extend(self.wrapped_lines(width));
         }
         lines
     }
 
     fn header_label(&self) -> String {
-        let action = if self.is_collapsed {
-            REASONING_ACTION_SHOW
-        } else {
-            REASONING_ACTION_HIDE
-        };
-        let Some(duration) = self.duration.map(format_reasoning_duration) else {
-            return format!("[{action}]");
-        };
-        format!("[{action} · thoughts {duration}]")
+        match self.display_mode {
+            ReasoningDisplayMode::Collapsed | ReasoningDisplayMode::Expanded => {
+                let action = if matches!(self.display_mode, ReasoningDisplayMode::Collapsed) {
+                    REASONING_ACTION_SHOW
+                } else {
+                    REASONING_ACTION_HIDE
+                };
+                let Some(duration) = self.duration.map(format_reasoning_duration) else {
+                    return format!("[{action}]");
+                };
+                format!("[{action} · thoughts {duration}]")
+            }
+            ReasoningDisplayMode::Snippet => {
+                let Some(duration) = self.duration.map(format_reasoning_duration) else {
+                    return "• thoughts".to_string();
+                };
+                format!("• thoughts {duration}")
+            }
+        }
+    }
+
+    fn is_toggleable(&self) -> bool {
+        matches!(
+            self.display_mode,
+            ReasoningDisplayMode::Collapsed | ReasoningDisplayMode::Expanded
+        )
     }
 }
 
 fn reasoning_message_render_cache_key(
     content: &str,
-    is_collapsed: bool,
+    display_mode: ReasoningDisplayMode,
     duration: Option<Duration>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     "reasoning_message".hash(&mut hasher);
-    is_collapsed.hash(&mut hasher);
+    display_mode.hash(&mut hasher);
     duration.hash(&mut hasher);
-    content.hash(&mut hasher);
+    if !matches!(display_mode, ReasoningDisplayMode::Snippet) {
+        content.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -312,6 +346,69 @@ mod tests {
                 "[Hide reasoning · thoughts <1s]".to_string(),
                 "先分析".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn reasoning_message_snippet_renders_only_duration_hint() {
+        let item = ReasoningMessageItem::new(
+            "这段内容不能进入 transcript",
+            ReasoningDisplayMode::Snippet,
+            Some(Duration::from_secs(16)),
+        );
+
+        assert_eq!(
+            item.render_lines(80, default_palette())
+                .iter()
+                .map(line_to_plain_text)
+                .collect::<Vec<_>>(),
+            vec!["• thoughts 16s".to_string()]
+        );
+        assert_eq!(item.source_text_byte_len(), 0);
+        assert_eq!(item.header_display_width(), "• thoughts 16s".width());
+    }
+
+    #[test]
+    fn reasoning_message_snippet_uses_subsecond_duration_label() {
+        let item = ReasoningMessageItem::new(
+            "这段内容不能进入 transcript",
+            ReasoningDisplayMode::Snippet,
+            Some(Duration::from_millis(120)),
+        );
+
+        assert_eq!(
+            item.render_lines(80, default_palette())
+                .iter()
+                .map(line_to_plain_text)
+                .collect::<Vec<_>>(),
+            vec!["• thoughts <1s".to_string()]
+        );
+    }
+
+    #[test]
+    fn reasoning_message_snippet_does_not_toggle_or_hash_content() {
+        let mut item = ReasoningMessageItem::new(
+            "第一段思维链",
+            ReasoningDisplayMode::Snippet,
+            Some(Duration::from_secs(3)),
+        );
+        let same_hint_item = ReasoningMessageItem::new(
+            "第二段思维链",
+            ReasoningDisplayMode::Snippet,
+            Some(Duration::from_secs(3)),
+        );
+        let original_key = item.render_cache_key();
+
+        item.toggle();
+
+        assert_eq!(item.render_cache_key(), original_key);
+        assert_eq!(item.render_cache_key(), same_hint_item.render_cache_key());
+        assert_eq!(
+            item.render_lines(80, default_palette())
+                .iter()
+                .map(line_to_plain_text)
+                .collect::<Vec<_>>(),
+            vec!["• thoughts 3s".to_string()]
         );
     }
 }

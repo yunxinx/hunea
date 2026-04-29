@@ -147,6 +147,7 @@ fn reasoning_display_mode_from_config(display: ReasoningContentDisplay) -> Reaso
     match display {
         ReasoningContentDisplay::Collapsed => ReasoningDisplayMode::Collapsed,
         ReasoningContentDisplay::Expanded => ReasoningDisplayMode::Expanded,
+        ReasoningContentDisplay::Snippet => ReasoningDisplayMode::Snippet,
     }
 }
 
@@ -428,6 +429,19 @@ mod tests {
         assert_eq!(
             options.reasoning_display_mode,
             ReasoningDisplayMode::Expanded
+        );
+    }
+
+    #[test]
+    fn model_options_from_config_carries_snippet_reasoning_display_mode() {
+        let options = model_options_from_config(&TuiConfig {
+            reasoning_content_display: ReasoningContentDisplay::Snippet,
+            ..default_tui_config()
+        });
+
+        assert_eq!(
+            options.reasoning_display_mode,
+            ReasoningDisplayMode::Snippet
         );
     }
 

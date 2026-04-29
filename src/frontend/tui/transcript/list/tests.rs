@@ -138,6 +138,51 @@ fn tool_result_is_display_only_and_not_assistant_message() {
 }
 
 #[test]
+fn snippet_reasoning_is_display_only_and_not_clickable() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.append_assistant_message_with_reasoning(
+        "结论",
+        "这段内容不能保留",
+        ReasoningDisplayMode::Snippet,
+        Some(Duration::from_secs(16)),
+        StyleMode::Cx,
+    );
+
+    assert_eq!(
+        transcript.plain_items(),
+        vec!["• thoughts 16s".to_string(), "结论".to_string()]
+    );
+    assert_eq!(
+        transcript.source_messages(),
+        vec![(Sender::Assistant, "结论".to_string())]
+    );
+    assert!(!transcript.is_reasoning_header_hit(0, 0, 0));
+    assert!(!transcript.toggle_reasoning_item(0));
+    assert_eq!(
+        transcript.plain_items(),
+        vec!["• thoughts 16s".to_string(), "结论".to_string()]
+    );
+}
+
+#[test]
+fn snippet_reasoning_without_duration_is_not_appended() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.append_assistant_message_with_reasoning(
+        "结论",
+        "这段内容不能保留",
+        ReasoningDisplayMode::Snippet,
+        None,
+        StyleMode::Cx,
+    );
+
+    assert_eq!(transcript.plain_items(), vec!["结论".to_string()]);
+    assert_eq!(
+        transcript.source_messages(),
+        vec![(Sender::Assistant, "结论".to_string())]
+    );
+}
+
+#[test]
 fn item_metrics_index_tracks_invalidation_boundaries() {
     let mut transcript = Transcript::new(default_palette());
     transcript.items = Rc::new(vec![

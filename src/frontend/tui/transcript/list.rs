@@ -153,7 +153,9 @@ impl Transcript {
     ) {
         let content = content.into();
         let reasoning_content = reasoning_content.into();
-        if !reasoning_content.is_empty() {
+        if !reasoning_content.is_empty()
+            && should_append_reasoning_message(reasoning_display_mode, reasoning_duration)
+        {
             self.append_reasoning_message(
                 reasoning_content,
                 reasoning_display_mode,
@@ -172,6 +174,10 @@ impl Transcript {
         display_mode: ReasoningDisplayMode,
         duration: Option<Duration>,
     ) {
+        if !should_append_reasoning_message(display_mode, duration) {
+            return;
+        }
+
         self.push_item(TranscriptItem::Reasoning(ReasoningMessageItem::new(
             content,
             display_mode,
@@ -206,6 +212,9 @@ impl Transcript {
         let TranscriptItem::Reasoning(reasoning) = item.as_ref() else {
             return false;
         };
+        if !reasoning.is_header_line(0) {
+            return false;
+        }
 
         let mut reasoning = reasoning.clone();
         reasoning.toggle();
@@ -412,6 +421,13 @@ impl Transcript {
     pub(crate) fn item_positions_dirty_from_for_test(&self) -> usize {
         self.metrics_cache.positions_dirty_from
     }
+}
+
+fn should_append_reasoning_message(
+    display_mode: ReasoningDisplayMode,
+    duration: Option<Duration>,
+) -> bool {
+    !matches!(display_mode, ReasoningDisplayMode::Snippet) || duration.is_some()
 }
 
 #[cfg(test)]

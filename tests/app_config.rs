@@ -245,6 +245,40 @@ fn load_accepts_enabling_show_reasoning_content() {
 }
 
 #[test]
+fn load_defaults_reasoning_content_display_to_expanded_when_reasoning_content_is_enabled() {
+    let working_dir = temp_test_dir("load-show-reasoning-default-expanded-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nshow_reasoning_content = true\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("show_reasoning_content without display should default to expanded");
+
+    assert_eq!(
+        config.tui.reasoning_content_display,
+        ReasoningContentDisplay::Expanded
+    );
+}
+
+#[test]
+fn load_keeps_explicit_reasoning_content_display_when_reasoning_content_is_enabled() {
+    let working_dir = temp_test_dir("load-show-reasoning-keeps-explicit-display-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nshow_reasoning_content = true\nreasoning_content_display = \"collapsed\"\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("explicit reasoning_content_display should be preserved");
+
+    assert_eq!(
+        config.tui.reasoning_content_display,
+        ReasoningContentDisplay::Collapsed
+    );
+}
+
+#[test]
 fn load_accepts_expanded_reasoning_content_display() {
     let working_dir = temp_test_dir("load-expanded-reasoning-display-working");
     write_config(
@@ -258,6 +292,23 @@ fn load_accepts_expanded_reasoning_content_display() {
     assert_eq!(
         config.tui.reasoning_content_display,
         ReasoningContentDisplay::Expanded
+    );
+}
+
+#[test]
+fn load_accepts_snippet_reasoning_content_display() {
+    let working_dir = temp_test_dir("load-snippet-reasoning-display-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nreasoning_content_display = \"snippet\"\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("reasoning_content_display should accept snippet");
+
+    assert_eq!(
+        config.tui.reasoning_content_display,
+        ReasoningContentDisplay::Snippet
     );
 }
 

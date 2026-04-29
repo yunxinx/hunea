@@ -62,6 +62,7 @@ pub enum UserInputStyle {
 pub enum ReasoningContentDisplay {
     Collapsed,
     Expanded,
+    Snippet,
 }
 
 /// `RuntimeConfig` 表示可被多个 runtime 复用的执行策略。
@@ -291,6 +292,7 @@ impl ReasoningContentDisplay {
         match value {
             "collapsed" => Ok(Self::Collapsed),
             "expanded" => Ok(Self::Expanded),
+            "snippet" => Ok(Self::Snippet),
             other => Err(AppConfigError::InvalidReasoningContentDisplay {
                 path: None,
                 value: other.to_string(),
@@ -593,8 +595,9 @@ fn load_from_base_config(
         config_paths.push(path.join(".lumos").join("config.toml"));
     }
 
+    let mut reasoning_content_display_configured = false;
     for path in config_paths {
-        config = merge_config_file(config, &path)?;
+        config = merge_config_file(config, &path, &mut reasoning_content_display_configured)?;
     }
 
     let mut acp_source = None;
@@ -619,7 +622,11 @@ fn load_from_base_config(
     })
 }
 
-fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfigError> {
+fn merge_config_file(
+    mut config: Config,
+    path: &Path,
+    reasoning_content_display_configured: &mut bool,
+) -> Result<Config, AppConfigError> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(config),
@@ -636,6 +643,9 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
             path: path.to_path_buf(),
             source,
         })?;
+    let enables_reasoning_without_display =
+        matches!(file_config.tui.show_reasoning_content, Some(true))
+            && file_config.tui.reasoning_content_display.is_none();
 
     if let Some(style) = file_config.tui.user_input_style {
         config.tui.user_input_style =
@@ -732,6 +742,9 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
             }
             other => other,
         })?;
+        *reasoning_content_display_configured = true;
+    } else if enables_reasoning_without_display && !*reasoning_content_display_configured {
+        config.tui.reasoning_content_display = ReasoningContentDisplay::Expanded;
     }
 
     merge_runtime_config(&mut config.runtime, file_config.runtime, path)?;

@@ -86,7 +86,8 @@ show_reasoning_content = false
 
 # `reasoning_content_display` 控制 show_reasoning_content = true 时，
 # 思维链内容进入 transcript 后的默认展示状态。
-# 可选值：`collapsed`、`expanded`。
+# 未配置时，show_reasoning_content = true 会默认使用 `expanded`。
+# 可选值：`collapsed`、`expanded`、`snippet`。
 reasoning_content_display = "collapsed"
 
 [runtime]

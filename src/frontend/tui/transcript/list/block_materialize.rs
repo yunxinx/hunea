@@ -239,7 +239,7 @@ impl TranscriptItem {
 
     pub(crate) fn is_assistant_message(&self) -> bool {
         matches!(self, Self::Message(item) if item.is_assistant())
-            || matches!(self, Self::Reasoning(_))
+            || matches!(self, Self::Reasoning(item) if item.uses_assistant_visual_inset())
     }
 
     pub(crate) fn render_cache_key(&self) -> u64 {

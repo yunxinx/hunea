@@ -14,14 +14,18 @@ use crate::runtime::model_catalog::ModelSelection;
 use crate::runtime::native::models as native_models;
 use crate::runtime::native::models::ProviderSyncRequest;
 #[cfg(test)]
-use crate::runtime::native::{CancellationToken, ChatPerformanceMetrics, NativeChatResponse};
 use crate::runtime::native::{
-    ModelProviderRefreshEvent, ModelProviderRefreshRuntimeState, NativeChatEvent,
-    NativeChatRequest, NativeChatRuntimeState,
+    CancellationToken, NativeAgentEvent, NativeAgentRequest, NativeAgentResponse,
+    NativeLlmPerformanceMetrics,
+};
+use crate::runtime::native::{
+    ModelProviderRefreshEvent, ModelProviderRefreshRuntimeState, NativeAgentRuntimeState,
 };
 use crate::runtime::request_policy::RuntimeRequestPolicy;
-use crate::runtime::session::{RuntimeEvent, RuntimeRequestMetrics, RuntimeTarget};
+use crate::runtime::session::{RuntimeEvent, RuntimeTarget};
 use crate::runtime::token_count::StreamingTokenProgress;
+#[cfg(test)]
+use crate::runtime::tools::{RuntimeToolCall, RuntimeToolResult};
 use arboard::Clipboard;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use color_eyre::eyre::Result;
@@ -42,7 +46,16 @@ use super::{
 };
 
 mod event_pipeline;
+mod native_agent;
 use event_pipeline::TerminalWaitPlan;
+#[cfg(test)]
+use native_agent::apply_native_agent_event;
+#[cfg(test)]
+use native_agent::native_agent_workspace_tools;
+use native_agent::{
+    drain_native_agent_runtime_events, run_interrupt_native_agent_effect,
+    run_send_native_agent_effect,
+};
 
 /// `RuntimeOptions` 表示 TUI runner 可执行的外部 runtime 能力。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -81,7 +94,7 @@ pub fn run_with_runtime_options(
 ) -> Result<Model> {
     let mut model = Model::new_with_options(hero_options, options);
     let mut acp_runtime = AcpRuntimeState::default();
-    let mut native_chat_runtime = NativeChatRuntimeState::default();
+    let mut native_agent_runtime = NativeAgentRuntimeState::default();
     let mut model_refresh_runtime = ModelProviderRefreshRuntimeState::default();
 
     if let Some(detection) = theme::try_detect_palette() {
@@ -103,7 +116,7 @@ pub fn run_with_runtime_options(
 
     loop {
         render_needed |= drain_acp_runtime_events(&mut model, &mut acp_runtime);
-        render_needed |= drain_native_chat_runtime_events(&mut model, &mut native_chat_runtime);
+        render_needed |= drain_native_agent_runtime_events(&mut model, &mut native_agent_runtime);
         render_needed |= drain_model_refresh_runtime_events(&mut model, &mut model_refresh_runtime);
 
         if render_needed {
@@ -123,7 +136,7 @@ pub fn run_with_runtime_options(
                 &mut model,
                 &runtime_options,
                 &mut acp_runtime,
-                &mut native_chat_runtime,
+                &mut native_agent_runtime,
                 &mut model_refresh_runtime,
                 effect,
             )?;
@@ -138,7 +151,7 @@ pub fn run_with_runtime_options(
                 &mut model,
                 &runtime_options,
                 &mut acp_runtime,
-                &mut native_chat_runtime,
+                &mut native_agent_runtime,
                 &mut model_refresh_runtime,
                 effect,
             )?;
@@ -150,7 +163,7 @@ pub fn run_with_runtime_options(
             &model,
             startup_deadline,
             now,
-            has_background_runtime(&acp_runtime, &native_chat_runtime, &model_refresh_runtime),
+            has_background_runtime(&acp_runtime, &native_agent_runtime, &model_refresh_runtime),
         );
 
         let first_event = match wait_for_terminal_event(wait_plan)? {
@@ -173,7 +186,7 @@ pub fn run_with_runtime_options(
                         &mut model,
                         &runtime_options,
                         &mut acp_runtime,
-                        &mut native_chat_runtime,
+                        &mut native_agent_runtime,
                         &mut model_refresh_runtime,
                         effect,
                     )?;
@@ -209,11 +222,11 @@ fn wait_for_terminal_event(wait_plan: TerminalWaitPlan) -> io::Result<Option<Eve
 
 fn has_background_runtime(
     acp_runtime: &AcpRuntimeState,
-    native_chat_runtime: &NativeChatRuntimeState,
+    native_agent_runtime: &NativeAgentRuntimeState,
     model_refresh_runtime: &ModelProviderRefreshRuntimeState,
 ) -> bool {
     acp_runtime.should_poll_events()
-        || native_chat_runtime.is_running()
+        || native_agent_runtime.is_running()
         || model_refresh_runtime.is_running()
 }
 
@@ -377,7 +390,7 @@ fn apply_effect_if_needed(
     model: &mut Model,
     runtime_options: &RuntimeOptions,
     acp_runtime: &mut AcpRuntimeState,
-    native_chat_runtime: &mut NativeChatRuntimeState,
+    native_agent_runtime: &mut NativeAgentRuntimeState,
     model_refresh_runtime: &mut ModelProviderRefreshRuntimeState,
     effect: Option<AppEffect>,
 ) -> Result<()> {
@@ -393,7 +406,7 @@ fn apply_effect_if_needed(
         AppEffect::ResetRuntimeSession => {
             reset_runtime_session_after_clear(
                 acp_runtime,
-                native_chat_runtime,
+                native_agent_runtime,
                 model_refresh_runtime,
             );
             Ok(())
@@ -424,17 +437,17 @@ fn apply_effect_if_needed(
             run_refresh_model_provider_effect(model, model_refresh_runtime, request);
             Ok(())
         }
-        AppEffect::SendNativeChat { request } => {
-            run_send_native_chat_effect(
+        AppEffect::SendNativeAgent { request } => {
+            run_send_native_agent_effect(
                 model,
-                native_chat_runtime,
+                native_agent_runtime,
                 request,
                 runtime_options.runtime_request_policy.clone(),
             );
             Ok(())
         }
         AppEffect::InterruptCurrentTurn => {
-            run_interrupt_current_turn_effect(model, acp_runtime, native_chat_runtime);
+            run_interrupt_current_turn_effect(model, acp_runtime, native_agent_runtime);
             Ok(())
         }
     }
@@ -454,11 +467,11 @@ fn run_persist_selected_model_effect(
 
 fn reset_runtime_session_after_clear(
     acp_runtime: &mut AcpRuntimeState,
-    native_chat_runtime: &mut NativeChatRuntimeState,
+    native_agent_runtime: &mut NativeAgentRuntimeState,
     model_refresh_runtime: &mut ModelProviderRefreshRuntimeState,
 ) {
     acp_runtime.reset_after_clear();
-    native_chat_runtime.reset_after_clear();
+    native_agent_runtime.reset_after_clear();
     model_refresh_runtime.reset_after_clear();
 }
 
@@ -500,91 +513,12 @@ fn run_refresh_model_provider_effect(
     model_refresh_runtime.start(request);
 }
 
-fn drain_native_chat_runtime_events(
-    model: &mut Model,
-    native_chat_runtime: &mut NativeChatRuntimeState,
-) -> bool {
-    let mut changed = false;
-    loop {
-        let target = native_chat_runtime.current_target().cloned();
-        let Some(event) = native_chat_runtime.try_recv_event() else {
-            break;
-        };
-        apply_native_chat_event(model, target, event);
-        changed = true;
-    }
-    changed
-}
-
-fn apply_native_chat_event(
-    model: &mut Model,
-    target: Option<RuntimeTarget>,
-    event: NativeChatEvent,
-) {
-    let runtime_event = match event {
-        NativeChatEvent::Retrying { message } => {
-            model.show_acp_activity_with_header(message);
-            return;
-        }
-        NativeChatEvent::OutputTokenEstimate { total_tokens } => {
-            RuntimeEvent::OutputTokenEstimate {
-                target,
-                total_tokens,
-            }
-        }
-        NativeChatEvent::Thinking { is_thinking } => RuntimeEvent::Thinking {
-            target,
-            is_thinking,
-        },
-        NativeChatEvent::Finished { response, metrics } => RuntimeEvent::MessageFinished {
-            target,
-            content: response.content,
-            reasoning_content: response.reasoning_content,
-            reasoning_duration: response.reasoning_duration,
-            metrics: metrics.map(|metrics| {
-                RuntimeRequestMetrics::new(metrics.latency, metrics.output_tokens, metrics.duration)
-            }),
-        },
-        NativeChatEvent::Failed { message } => RuntimeEvent::Failed { target, message },
-        NativeChatEvent::Interrupted => RuntimeEvent::Interrupted { target },
-    };
-    model.apply_runtime_event(runtime_event);
-}
-
-fn run_send_native_chat_effect(
-    model: &mut Model,
-    native_chat_runtime: &mut NativeChatRuntimeState,
-    request: NativeChatRequest,
-    request_policy: RuntimeRequestPolicy,
-) {
-    if native_chat_runtime.is_running() {
-        model.show_transient_status_notice("Chat request is already running");
-        return;
-    }
-
-    let activity_label = request.model_id.clone();
-    native_chat_runtime.start(request, request_policy);
-    model.show_acp_activity(activity_label);
-}
-
-fn run_interrupt_native_chat_effect(
-    model: &mut Model,
-    native_chat_runtime: &mut NativeChatRuntimeState,
-) -> bool {
-    if native_chat_runtime.interrupt() {
-        model.clear_acp_activity();
-        model.append_system_message_from_runtime("Chat interrupted");
-        return true;
-    }
-    false
-}
-
 fn run_interrupt_current_turn_effect(
     model: &mut Model,
     acp_runtime: &mut AcpRuntimeState,
-    native_chat_runtime: &mut NativeChatRuntimeState,
+    native_agent_runtime: &mut NativeAgentRuntimeState,
 ) {
-    if run_interrupt_native_chat_effect(model, native_chat_runtime) {
+    if run_interrupt_native_agent_effect(model, native_agent_runtime) {
         return;
     }
 
@@ -1630,21 +1564,22 @@ mod tests {
     }
 
     #[test]
-    fn clear_runtime_discards_stale_native_chat_event() {
+    fn clear_runtime_discards_stale_native_agent_event() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
         model.show_acp_activity("qwen3");
         let mut acp_runtime = AcpRuntimeState::default();
-        let mut native_chat_runtime = NativeChatRuntimeState::default();
+        let mut native_agent_runtime = NativeAgentRuntimeState::default();
         let (sender, receiver) = mpsc::channel();
-        native_chat_runtime.receiver = Some(receiver);
+        native_agent_runtime.receiver = Some(receiver);
 
         sender
-            .send(NativeChatEvent::Finished {
-                response: NativeChatResponse {
+            .send(NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
                     content: "stale response".to_string(),
                     reasoning_content: None,
                     reasoning_duration: None,
+                    ..Default::default()
                 },
                 metrics: None,
             })
@@ -1652,10 +1587,10 @@ mod tests {
         model.reset_to_initial_tui_state();
         reset_runtime_session_after_clear(
             &mut acp_runtime,
-            &mut native_chat_runtime,
+            &mut native_agent_runtime,
             &mut ModelProviderRefreshRuntimeState::default(),
         );
-        drain_native_chat_runtime_events(&mut model, &mut native_chat_runtime);
+        drain_native_agent_runtime_events(&mut model, &mut native_agent_runtime);
 
         assert!(
             model
@@ -1672,7 +1607,7 @@ mod tests {
         model.transcript_mut().clear();
         model.selected_acp_agent = Some("Kimi Code CLI".to_string());
         let mut acp_runtime = AcpRuntimeState::default();
-        let mut native_chat_runtime = NativeChatRuntimeState::default();
+        let mut native_agent_runtime = NativeAgentRuntimeState::default();
 
         apply_acp_session_event(
             &mut model,
@@ -1693,7 +1628,7 @@ mod tests {
         model.reset_to_initial_tui_state();
         reset_runtime_session_after_clear(
             &mut acp_runtime,
-            &mut native_chat_runtime,
+            &mut native_agent_runtime,
             &mut ModelProviderRefreshRuntimeState::default(),
         );
         apply_acp_session_event(
@@ -1730,13 +1665,13 @@ mod tests {
         model.transcript_mut().clear();
         model.selected_acp_agent = Some("Kimi Code CLI".to_string());
         let mut acp_runtime = AcpRuntimeState::default();
-        let mut native_chat_runtime = NativeChatRuntimeState::default();
+        let mut native_agent_runtime = NativeAgentRuntimeState::default();
 
         acp_runtime.mark_prompt_submitted();
         model.reset_to_initial_tui_state();
         reset_runtime_session_after_clear(
             &mut acp_runtime,
-            &mut native_chat_runtime,
+            &mut native_agent_runtime,
             &mut ModelProviderRefreshRuntimeState::default(),
         );
         apply_acp_session_event(
@@ -1757,7 +1692,7 @@ mod tests {
         model.transcript_mut().clear();
         model.selected_acp_agent = Some("Kimi Code CLI".to_string());
         let mut acp_runtime = AcpRuntimeState::default();
-        let mut native_chat_runtime = NativeChatRuntimeState::default();
+        let mut native_agent_runtime = NativeAgentRuntimeState::default();
 
         apply_acp_session_event(
             &mut model,
@@ -1778,7 +1713,7 @@ mod tests {
         model.reset_to_initial_tui_state();
         reset_runtime_session_after_clear(
             &mut acp_runtime,
-            &mut native_chat_runtime,
+            &mut native_agent_runtime,
             &mut ModelProviderRefreshRuntimeState::default(),
         );
         apply_acp_session_event(
@@ -1824,19 +1759,20 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_completion_appends_assistant_message_after_request_finishes() {
+    fn native_agent_completion_appends_assistant_message_after_request_finishes() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
         model.show_acp_activity("qwen3");
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::Finished {
-                response: NativeChatResponse {
+            NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
                     content: "你好，我是本地模型".to_string(),
                     reasoning_content: None,
                     reasoning_duration: None,
+                    ..Default::default()
                 },
                 metrics: None,
             },
@@ -1850,7 +1786,7 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_completion_updates_last_request_metrics() {
+    fn native_agent_completion_updates_last_request_metrics() {
         let mut model = Model::new_with_options(
             HeroOptions::default(),
             ModelOptions {
@@ -1859,16 +1795,17 @@ mod tests {
             },
         );
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::Finished {
-                response: NativeChatResponse {
+            NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
                     content: "完成".to_string(),
                     reasoning_content: None,
                     reasoning_duration: None,
+                    ..Default::default()
                 },
-                metrics: Some(ChatPerformanceMetrics {
+                metrics: Some(NativeLlmPerformanceMetrics {
                     latency: std::time::Duration::from_millis(250),
                     output_tokens: 80,
                     duration: std::time::Duration::from_secs(2),
@@ -1883,7 +1820,7 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_completion_collapses_reasoning_by_default() {
+    fn native_agent_completion_collapses_reasoning_by_default() {
         let mut model = Model::new_with_options(
             HeroOptions::default(),
             ModelOptions {
@@ -1894,14 +1831,15 @@ mod tests {
         model.transcript_mut().clear();
         model.show_acp_activity("qwen3");
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::Finished {
-                response: NativeChatResponse {
+            NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
                     content: "结论".to_string(),
                     reasoning_content: Some("先分析".to_string()),
                     reasoning_duration: Some(std::time::Duration::from_secs(3)),
+                    ..Default::default()
                 },
                 metrics: None,
             },
@@ -1921,7 +1859,7 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_completion_keeps_reasoning_body_gap_to_one_line() {
+    fn native_agent_completion_keeps_reasoning_body_gap_to_one_line() {
         let mut model = Model::new_with_options(
             HeroOptions::default(),
             ModelOptions {
@@ -1934,14 +1872,15 @@ mod tests {
         model.transcript_mut().set_width(40);
         model.show_acp_activity("qwen3");
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::Finished {
-                response: NativeChatResponse {
+            NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
                     content: "结论".to_string(),
                     reasoning_content: Some("先分析".to_string()),
                     reasoning_duration: Some(std::time::Duration::from_secs(3)),
+                    ..Default::default()
                 },
                 metrics: None,
             },
@@ -1956,7 +1895,7 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_reasoning_header_click_toggles_visibility_without_changing_source_messages() {
+    fn native_agent_reasoning_header_click_toggles_visibility_without_changing_source_messages() {
         let mut model = Model::new_with_options(
             HeroOptions::default(),
             ModelOptions {
@@ -1968,14 +1907,15 @@ mod tests {
         model.set_window(40, 8);
         model.transcript_mut().clear();
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::Finished {
-                response: NativeChatResponse {
+            NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
                     content: "结论".to_string(),
                     reasoning_content: Some("先分析".to_string()),
                     reasoning_duration: Some(std::time::Duration::from_secs(3)),
+                    ..Default::default()
                 },
                 metrics: None,
             },
@@ -2022,7 +1962,7 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_reasoning_header_drag_does_not_toggle() {
+    fn native_agent_reasoning_header_drag_does_not_toggle() {
         let mut model = Model::new_with_options(
             HeroOptions::default(),
             ModelOptions {
@@ -2034,14 +1974,15 @@ mod tests {
         model.set_window(40, 8);
         model.transcript_mut().clear();
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::Finished {
-                response: NativeChatResponse {
+            NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
                     content: "结论".to_string(),
                     reasoning_content: Some("先分析".to_string()),
                     reasoning_duration: Some(std::time::Duration::from_secs(3)),
+                    ..Default::default()
                 },
                 metrics: None,
             },
@@ -2085,7 +2026,7 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_reasoning_header_click_outside_label_does_not_toggle() {
+    fn native_agent_reasoning_header_click_outside_label_does_not_toggle() {
         let mut model = Model::new_with_options(
             HeroOptions::default(),
             ModelOptions {
@@ -2097,14 +2038,15 @@ mod tests {
         model.set_window(40, 8);
         model.transcript_mut().clear();
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::Finished {
-                response: NativeChatResponse {
+            NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
                     content: "结论".to_string(),
                     reasoning_content: Some("先分析".to_string()),
                     reasoning_duration: Some(std::time::Duration::from_secs(3)),
+                    ..Default::default()
                 },
                 metrics: None,
             },
@@ -2139,19 +2081,20 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_completion_hides_reasoning_when_configured_off() {
+    fn native_agent_completion_hides_reasoning_when_configured_off() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
         model.show_acp_activity("qwen3");
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::Finished {
-                response: NativeChatResponse {
+            NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
                     content: "结论".to_string(),
                     reasoning_content: Some("先分析".to_string()),
                     reasoning_duration: Some(std::time::Duration::from_secs(3)),
+                    ..Default::default()
                 },
                 metrics: None,
             },
@@ -2161,16 +2104,16 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_thinking_event_toggles_activity_segment() {
+    fn native_agent_thinking_event_toggles_activity_segment() {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(80, 6);
         model.transcript_mut().clear();
         model.show_acp_activity("qwen3");
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::Thinking { is_thinking: true },
+            NativeAgentEvent::Thinking { is_thinking: true },
         );
 
         assert!(
@@ -2180,10 +2123,10 @@ mod tests {
                 .contains("thinking")
         );
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::Thinking { is_thinking: false },
+            NativeAgentEvent::Thinking { is_thinking: false },
         );
 
         assert!(
@@ -2195,15 +2138,15 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_failure_appends_system_message_in_transcript() {
+    fn native_agent_failure_appends_system_message_in_transcript() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
         model.show_acp_activity("qwen3");
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::Failed {
+            NativeAgentEvent::Failed {
                 message: "request /v1/chat/completions: connection refused".to_string(),
             },
         );
@@ -2217,15 +2160,15 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_retry_event_shows_reconnecting_activity() {
+    fn native_agent_retry_event_shows_reconnecting_activity() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
         model.show_acp_activity("qwen3");
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::Retrying {
+            NativeAgentEvent::Retrying {
                 message: "Reconnecting... 1/3".to_string(),
             },
         );
@@ -2248,16 +2191,16 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_token_estimate_updates_activity_without_finishing_request() {
+    fn native_agent_token_estimate_updates_activity_without_finishing_request() {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(70, 6);
         model.transcript_mut().clear();
         model.show_acp_activity("qwen3");
 
-        apply_native_chat_event(
+        apply_native_agent_event(
             &mut model,
             None,
-            NativeChatEvent::OutputTokenEstimate { total_tokens: 32 },
+            NativeAgentEvent::OutputTokenEstimate { total_tokens: 32 },
         );
 
         let activity = model
@@ -2271,34 +2214,134 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_runtime_keeps_receiver_after_retry_event() {
+    fn native_agent_tool_started_updates_activity_header() {
+        let mut model = Model::new(HeroOptions::default());
+        model.set_window(70, 6);
+        model.transcript_mut().clear();
+        model.show_acp_activity("qwen3");
+
+        apply_native_agent_event(
+            &mut model,
+            Some(RuntimeTarget::native_agent("local", "qwen3")),
+            NativeAgentEvent::ToolExecutionStarted {
+                call: RuntimeToolCall::new(
+                    "call-1",
+                    "file_read",
+                    serde_json::json!({ "path": "Cargo.toml" }),
+                ),
+            },
+        );
+
+        let activity = model.current_acp_activity_render_result().plain_line;
+        assert!(activity.contains("Running file_read Cargo.toml"));
+        assert!(model.transcript_plain_items().is_empty());
+    }
+
+    #[test]
+    fn native_agent_tool_finished_appends_transcript_only_result() {
+        let mut model = Model::new(HeroOptions::default());
+        model.set_window(70, 6);
+        model.transcript_mut().clear();
+        model.show_acp_activity("qwen3");
+
+        apply_native_agent_event(
+            &mut model,
+            Some(RuntimeTarget::native_agent("local", "qwen3")),
+            NativeAgentEvent::ToolExecutionFinished {
+                call: RuntimeToolCall::new(
+                    "call-1",
+                    "file_read",
+                    serde_json::json!({ "path": "Cargo.toml" }),
+                ),
+                result: RuntimeToolResult::success("call-1", "1\t[package]"),
+            },
+        );
+
+        let transcript = model.transcript_plain_items();
+        assert_eq!(transcript.len(), 1);
+        assert!(transcript[0].contains("file_read Cargo.toml"));
+        assert!(model.transcript_mut().source_messages().is_empty());
+    }
+
+    #[test]
+    fn native_agent_send_effect_starts_native_agent_target() {
+        let mut model = Model::new(HeroOptions::default());
+        let mut runtime = NativeAgentRuntimeState::default();
+        let request = NativeAgentRequest::new(
+            "local",
+            crate::runtime::native::ProviderKind::OpenAiCompatible,
+            "qwen3",
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        run_send_native_agent_effect(
+            &mut model,
+            &mut runtime,
+            request,
+            RuntimeRequestPolicy::default(),
+        );
+
+        assert_eq!(
+            runtime.current_target(),
+            Some(&RuntimeTarget::native_agent("local", "qwen3"))
+        );
+    }
+
+    #[test]
+    fn native_agent_request_attaches_workspace_tools() {
+        let tools = native_agent_workspace_tools();
+        let request = NativeAgentRequest::new(
+            "local",
+            crate::runtime::native::ProviderKind::OpenAiCompatible,
+            "qwen3",
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .with_tools(tools.definitions());
+
+        assert_eq!(
+            request.target(),
+            RuntimeTarget::native_agent("local", "qwen3")
+        );
+        assert!(request.tools().definition("file_read").is_some());
+        assert!(request.tools().definition("list_dir").is_some());
+    }
+
+    #[test]
+    fn native_agent_runtime_keeps_receiver_after_retry_event() {
         let (sender, receiver) = mpsc::channel();
-        let mut runtime = NativeChatRuntimeState {
+        let mut runtime = NativeAgentRuntimeState {
             receiver: Some(receiver),
             cancellation: Some(CancellationToken::default()),
-            target: Some(RuntimeTarget::native_chat("provider", "model")),
+            target: Some(RuntimeTarget::native_agent("provider", "model")),
         };
 
         sender
-            .send(NativeChatEvent::Retrying {
+            .send(NativeAgentEvent::Retrying {
                 message: "Reconnecting... 1/3".to_string(),
             })
             .expect("retry event should be queued");
 
         assert_eq!(
             runtime.try_recv_event(),
-            Some(NativeChatEvent::Retrying {
+            Some(NativeAgentEvent::Retrying {
                 message: "Reconnecting... 1/3".to_string(),
             })
         );
         assert!(runtime.is_running());
 
         sender
-            .send(NativeChatEvent::Finished {
-                response: NativeChatResponse {
+            .send(NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
                     content: "完成".to_string(),
                     reasoning_content: None,
                     reasoning_duration: None,
+                    ..Default::default()
                 },
                 metrics: None,
             })
@@ -2306,11 +2349,12 @@ mod tests {
 
         assert_eq!(
             runtime.try_recv_event(),
-            Some(NativeChatEvent::Finished {
-                response: NativeChatResponse {
+            Some(NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
                     content: "完成".to_string(),
                     reasoning_content: None,
                     reasoning_duration: None,
+                    ..Default::default()
                 },
                 metrics: None,
             })
@@ -2319,32 +2363,32 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_runtime_keeps_receiver_after_token_estimate_event() {
+    fn native_agent_runtime_keeps_receiver_after_token_estimate_event() {
         let (sender, receiver) = mpsc::channel();
-        let mut runtime = NativeChatRuntimeState {
+        let mut runtime = NativeAgentRuntimeState {
             receiver: Some(receiver),
             cancellation: Some(CancellationToken::default()),
-            target: Some(RuntimeTarget::native_chat("provider", "model")),
+            target: Some(RuntimeTarget::native_agent("provider", "model")),
         };
 
         sender
-            .send(NativeChatEvent::OutputTokenEstimate { total_tokens: 12 })
+            .send(NativeAgentEvent::OutputTokenEstimate { total_tokens: 12 })
             .expect("token estimate event should be queued");
 
         assert_eq!(
             runtime.try_recv_event(),
-            Some(NativeChatEvent::OutputTokenEstimate { total_tokens: 12 })
+            Some(NativeAgentEvent::OutputTokenEstimate { total_tokens: 12 })
         );
         assert!(runtime.is_running());
     }
 
     #[test]
-    fn interrupt_native_chat_clears_runtime_and_appends_system_message() {
+    fn interrupt_native_agent_clears_runtime_and_appends_system_message() {
         let (_sender, receiver) = mpsc::channel();
-        let mut runtime = NativeChatRuntimeState {
+        let mut runtime = NativeAgentRuntimeState {
             receiver: Some(receiver),
             cancellation: Some(CancellationToken::default()),
-            target: Some(RuntimeTarget::native_chat("provider", "model")),
+            target: Some(RuntimeTarget::native_agent("provider", "model")),
         };
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
@@ -2448,14 +2492,14 @@ mod tests {
 
     fn apply_effect_if_needed_for_test(
         model: &mut Model,
-        native_chat_runtime: &mut NativeChatRuntimeState,
+        native_agent_runtime: &mut NativeAgentRuntimeState,
         effect: Option<AppEffect>,
     ) {
         if let Some(AppEffect::InterruptCurrentTurn) = effect {
             run_interrupt_current_turn_effect(
                 model,
                 &mut AcpRuntimeState::default(),
-                native_chat_runtime,
+                native_agent_runtime,
             );
         }
     }

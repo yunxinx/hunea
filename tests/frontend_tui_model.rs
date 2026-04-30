@@ -80,7 +80,7 @@ fn enter_with_required_selected_model_sends_message() {
 }
 
 #[test]
-fn enter_with_selected_native_model_returns_native_chat_effect() {
+fn enter_with_selected_native_model_returns_native_agent_effect() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -96,23 +96,24 @@ fn enter_with_selected_native_model_returns_native_chat_effect() {
     }
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendNativeChat { request }) = effect else {
-        panic!("expected native chat effect, got {effect:?}");
+    let Some(AppEffect::SendNativeAgent { request }) = effect else {
+        panic!("expected native agent effect, got {effect:?}");
     };
-    assert_eq!(request.provider_id, "local");
-    assert_eq!(request.provider_kind, ProviderKind::OpenAiCompatible);
-    assert_eq!(request.model_id, "qwen3");
+    let llm_request = request.llm_request();
+    assert_eq!(llm_request.provider_id, "local");
+    assert_eq!(llm_request.provider_kind, ProviderKind::OpenAiCompatible);
+    assert_eq!(llm_request.model_id, "qwen3");
     assert_eq!(
-        request.base_url.as_deref(),
+        llm_request.base_url.as_deref(),
         Some("http://127.0.0.1:1234/v1")
     );
-    assert_eq!(request.messages.len(), 1);
-    assert_eq!(request.messages[0].role, ChatRole::User);
-    assert_eq!(request.messages[0].content, "hello");
+    assert_eq!(llm_request.messages.len(), 1);
+    assert_eq!(llm_request.messages[0].role, ChatRole::User);
+    assert_eq!(llm_request.messages[0].content, "hello");
 }
 
 #[test]
-fn enter_with_provider_api_key_returns_native_chat_effect_with_direct_key() {
+fn enter_with_provider_api_key_returns_native_agent_effect_with_direct_key() {
     let provider = ModelProvider::native(
         "remote",
         ProviderKind::OpenAiCompatible,
@@ -137,14 +138,15 @@ fn enter_with_provider_api_key_returns_native_chat_effect_with_direct_key() {
     }
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendNativeChat { request }) = effect else {
-        panic!("expected native chat effect, got {effect:?}");
+    let Some(AppEffect::SendNativeAgent { request }) = effect else {
+        panic!("expected native agent effect, got {effect:?}");
     };
+    let llm_request = request.llm_request();
     assert_eq!(
-        request.api_key.as_ref().map(ProviderApiKey::as_str),
+        llm_request.api_key.as_ref().map(ProviderApiKey::as_str),
         Some("sk-test-direct")
     );
-    assert_eq!(request.api_key_env, None);
+    assert_eq!(llm_request.api_key_env, None);
 }
 
 #[test]
@@ -186,7 +188,7 @@ fn enter_with_openai_compatible_provider_without_base_url_keeps_draft_unsent() {
 }
 
 #[test]
-fn clear_command_removes_previous_native_chat_context() {
+fn clear_command_removes_previous_native_agent_context() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -210,12 +212,13 @@ fn clear_command_removes_previous_native_chat_context() {
     }
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendNativeChat { request }) = effect else {
-        panic!("expected native chat effect, got {effect:?}");
+    let Some(AppEffect::SendNativeAgent { request }) = effect else {
+        panic!("expected native agent effect, got {effect:?}");
     };
-    assert_eq!(request.messages.len(), 1);
-    assert_eq!(request.messages[0].role, ChatRole::User);
-    assert_eq!(request.messages[0].content, "fresh question");
+    let llm_request = request.llm_request();
+    assert_eq!(llm_request.messages.len(), 1);
+    assert_eq!(llm_request.messages[0].role, ChatRole::User);
+    assert_eq!(llm_request.messages[0].content, "fresh question");
 }
 
 fn single_model_catalog() -> ModelCatalog {

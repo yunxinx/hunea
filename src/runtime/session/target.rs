@@ -2,7 +2,6 @@
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RuntimeTarget {
     AcpAgent { agent_id: String },
-    NativeChat(NativeRuntimeTarget),
     NativeAgent(NativeRuntimeTarget),
 }
 
@@ -14,11 +13,6 @@ impl RuntimeTarget {
         }
     }
 
-    /// `native_chat` 创建原生单次 chat runtime 目标。
-    pub fn native_chat(provider_id: impl Into<String>, model_id: impl Into<String>) -> Self {
-        Self::NativeChat(NativeRuntimeTarget::new(provider_id, model_id))
-    }
-
     /// `native_agent` 创建原生 agent runtime 目标。
     pub fn native_agent(provider_id: impl Into<String>, model_id: impl Into<String>) -> Self {
         Self::NativeAgent(NativeRuntimeTarget::new(provider_id, model_id))
@@ -28,7 +22,7 @@ impl RuntimeTarget {
     pub fn display_label(&self) -> &str {
         match self {
             Self::AcpAgent { agent_id } => agent_id,
-            Self::NativeChat(target) | Self::NativeAgent(target) => &target.model_id,
+            Self::NativeAgent(target) => &target.model_id,
         }
     }
 }

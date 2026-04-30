@@ -98,7 +98,7 @@ fn transcript_plain_items_use_assistant_markdown_render_path() {
 }
 
 #[test]
-fn native_chat_request_includes_full_transcript_history() {
+fn native_agent_request_includes_full_transcript_history() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -132,10 +132,11 @@ fn native_chat_request_includes_full_transcript_history() {
         crossterm::event::KeyCode::Enter,
     )));
 
-    let Some(AppEffect::SendNativeChat { request }) = effect else {
-        panic!("expected native chat effect, got {effect:?}");
+    let Some(AppEffect::SendNativeAgent { request }) = effect else {
+        panic!("expected native agent effect, got {effect:?}");
     };
     let roles_and_content = request
+        .llm_request()
         .messages
         .iter()
         .map(|message| (message.role.as_str(), message.content.as_str()))
@@ -151,7 +152,7 @@ fn native_chat_request_includes_full_transcript_history() {
 }
 
 #[test]
-fn native_chat_request_excludes_runtime_system_messages() {
+fn native_agent_request_excludes_runtime_system_messages() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -180,10 +181,11 @@ fn native_chat_request_excludes_runtime_system_messages() {
         crossterm::event::KeyCode::Enter,
     )));
 
-    let Some(AppEffect::SendNativeChat { request }) = effect else {
-        panic!("expected native chat effect, got {effect:?}");
+    let Some(AppEffect::SendNativeAgent { request }) = effect else {
+        panic!("expected native agent effect, got {effect:?}");
     };
     let roles_and_content = request
+        .llm_request()
         .messages
         .iter()
         .map(|message| (message.role.as_str(), message.content.as_str()))
@@ -1901,7 +1903,7 @@ fn acp_activity_line_renders_above_composer() {
 }
 
 #[test]
-fn esc_interrupts_native_chat_after_configured_press_count() {
+fn esc_interrupts_native_agent_after_configured_press_count() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -1921,7 +1923,7 @@ fn esc_interrupts_native_chat_after_configured_press_count() {
 }
 
 #[test]
-fn esc_interrupts_native_chat_immediately_when_configured_for_one_press() {
+fn esc_interrupts_native_agent_immediately_when_configured_for_one_press() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -1937,7 +1939,7 @@ fn esc_interrupts_native_chat_immediately_when_configured_for_one_press() {
 }
 
 #[test]
-fn enter_during_native_chat_activity_does_not_append_unsent_message() {
+fn enter_during_native_agent_activity_does_not_append_unsent_message() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {

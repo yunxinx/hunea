@@ -2,9 +2,9 @@ use genai::chat::{ChatMessage as GenAiChatMessage, ChatRole as GenAiChatRole};
 
 use crate::runtime::provider::{ProviderApiKey, ProviderKind};
 
-/// `NativeChatRequest` 是 TUI 向原生 LLM backend 发起的一次对话请求。
+/// `NativeLlmRequest` 保存 native agent 调用 LLM backend 所需的模型参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeChatRequest {
+pub struct NativeLlmRequest {
     pub provider_id: String,
     pub provider_kind: ProviderKind,
     pub model_id: String,
@@ -14,8 +14,8 @@ pub struct NativeChatRequest {
     pub messages: Vec<ChatMessage>,
 }
 
-impl NativeChatRequest {
-    /// `new` 创建一次原生 LLM 请求。
+impl NativeLlmRequest {
+    /// `new` 创建一次原生 LLM backend 请求参数。
     pub fn new(
         provider_id: impl Into<String>,
         provider_kind: ProviderKind,

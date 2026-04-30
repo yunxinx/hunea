@@ -1,3 +1,5 @@
-//! Lumos 原生工具的命名空间。
-//!
-//! 当前阶段只建立公共目录边界；具体工具实现会在 native agent 接入时逐项加入。
+//! Lumos 原生工具的公共命名空间。
+
+mod filesystem;
+
+pub use filesystem::workspace_readonly_tool_registry;

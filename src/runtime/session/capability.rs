@@ -7,20 +7,11 @@ pub struct RuntimeCapability {
 }
 
 impl RuntimeCapability {
-    /// `native_chat` 返回普通 native chat 的能力快照。
-    pub const fn native_chat() -> Self {
-        Self {
-            supports_tools: false,
-            supports_permissions: false,
-            supports_model_config: false,
-        }
-    }
-
-    /// `agent` 返回具备工具与权限通道的 agent runtime 能力快照。
+    /// `agent` 返回当前内置 agent runtime 能力快照。
     pub const fn agent() -> Self {
         Self {
             supports_tools: true,
-            supports_permissions: true,
+            supports_permissions: false,
             supports_model_config: false,
         }
     }

@@ -1,23 +1,25 @@
 use std::fmt;
 
-use crate::runtime::native::NativeChatError;
+use crate::runtime::native::NativeLlmError;
 
 /// `NativeAgentError` 描述内置 native agent 单轮执行失败。
 #[derive(Debug)]
 pub enum NativeAgentError {
-    ToolsRequireExecutor,
-    Chat(NativeChatError),
+    Llm(NativeLlmError),
     Cancelled,
+    MissingToolCallCapture,
+    ToolLoopLimitExceeded { max_tool_rounds: usize },
 }
 
 impl fmt::Display for NativeAgentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ToolsRequireExecutor => {
-                write!(f, "native agent tools require an executor")
-            }
-            Self::Chat(source) => write!(f, "{source}"),
+            Self::Llm(source) => write!(f, "{source}"),
             Self::Cancelled => write!(f, "agent turn cancelled"),
+            Self::MissingToolCallCapture => write!(f, "agent tool call capture missing"),
+            Self::ToolLoopLimitExceeded { max_tool_rounds } => {
+                write!(f, "agent exceeded maximum tool rounds ({max_tool_rounds})")
+            }
         }
     }
 }
@@ -25,17 +27,25 @@ impl fmt::Display for NativeAgentError {
 impl std::error::Error for NativeAgentError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Chat(source) => Some(source),
-            Self::ToolsRequireExecutor | Self::Cancelled => None,
+            Self::Llm(source) => Some(source),
+            Self::Cancelled | Self::MissingToolCallCapture | Self::ToolLoopLimitExceeded { .. } => {
+                None
+            }
         }
     }
 }
 
-impl From<NativeChatError> for NativeAgentError {
-    fn from(source: NativeChatError) -> Self {
+impl From<NativeLlmError> for NativeAgentError {
+    fn from(source: NativeLlmError) -> Self {
         match source {
-            NativeChatError::Cancelled => Self::Cancelled,
-            error => Self::Chat(error),
+            NativeLlmError::Cancelled => Self::Cancelled,
+            error => Self::Llm(error),
         }
+    }
+}
+
+impl From<genai::Error> for NativeAgentError {
+    fn from(source: genai::Error) -> Self {
+        Self::Llm(NativeLlmError::from(source))
     }
 }

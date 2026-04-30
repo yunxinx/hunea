@@ -1,15 +1,18 @@
 use lumos::runtime::{
     native::{
-        CancellationToken, ChatMessage, NativeAgentRequest, NativeChatError, NativeChatRequest,
-        ProviderKind, send_agent_turn_with_cancellation,
+        CancellationToken, ChatMessage, NativeAgentRequest, NativeLlmError, NativeLlmRequest,
+        ProviderKind, send_agent_loop_with_cancellation,
     },
     session::RuntimeTarget,
-    tools::{RuntimeToolDefinition, RuntimeToolRegistry, ToolPermissionPolicy},
+    tools::{
+        RuntimeToolDefinition, RuntimeToolExecutorRegistry, RuntimeToolRegistry,
+        ToolPermissionPolicy,
+    },
 };
 
 #[test]
-fn native_chat_request_carries_provider_kind_and_messages() {
-    let request = NativeChatRequest::new(
+fn native_llm_request_carries_provider_kind_and_messages() {
+    let request = NativeLlmRequest::new(
         "anthropic",
         ProviderKind::Anthropic,
         "claude-sonnet-4-5",
@@ -31,7 +34,10 @@ fn native_chat_request_carries_provider_kind_and_messages() {
 
 #[test]
 fn runtime_exposes_native_as_named_boundary() {
-    assert_eq!(NativeChatError::Cancelled.to_string(), "chat cancelled");
+    assert_eq!(
+        NativeLlmError::Cancelled.to_string(),
+        "native LLM request cancelled"
+    );
 }
 
 #[test]
@@ -66,8 +72,8 @@ fn native_agent_request_keeps_model_request_and_tools_separate() {
         request.target(),
         RuntimeTarget::native_agent("local", "qwen3")
     );
-    assert_eq!(request.chat_request().provider_id, "local");
-    assert_eq!(request.chat_request().messages.len(), 1);
+    assert_eq!(request.llm_request().provider_id, "local");
+    assert_eq!(request.llm_request().messages.len(), 1);
     assert_eq!(
         request
             .tools()
@@ -79,7 +85,7 @@ fn native_agent_request_keeps_model_request_and_tools_separate() {
 }
 
 #[tokio::test]
-async fn native_agent_turn_respects_pre_cancelled_token_before_network_request() {
+async fn native_agent_loop_respects_pre_cancelled_token_before_network_request() {
     let request = NativeAgentRequest::new(
         "local",
         ProviderKind::OpenAiCompatible,
@@ -92,7 +98,8 @@ async fn native_agent_turn_respects_pre_cancelled_token_before_network_request()
     let cancellation = CancellationToken::default();
     cancellation.cancel();
 
-    let error = send_agent_turn_with_cancellation(&request, &cancellation)
+    let executor = RuntimeToolExecutorRegistry::new();
+    let error = send_agent_loop_with_cancellation(&request, &executor, &cancellation)
         .await
         .expect_err("pre-cancelled request should stop before sending");
 
@@ -100,7 +107,7 @@ async fn native_agent_turn_respects_pre_cancelled_token_before_network_request()
 }
 
 #[tokio::test]
-async fn native_agent_turn_rejects_tools_until_executor_is_attached() {
+async fn native_agent_loop_respects_pre_cancelled_token_when_tools_are_registered() {
     let mut tools = RuntimeToolRegistry::new();
     tools.insert(RuntimeToolDefinition::new("read_file"));
     let request = NativeAgentRequest::new(
@@ -113,10 +120,13 @@ async fn native_agent_turn_rejects_tools_until_executor_is_attached() {
         vec![ChatMessage::user("read Cargo.toml".to_string())],
     )
     .with_tools(tools);
+    let cancellation = CancellationToken::default();
+    cancellation.cancel();
 
-    let error = send_agent_turn_with_cancellation(&request, &CancellationToken::default())
+    let executor = RuntimeToolExecutorRegistry::new();
+    let error = send_agent_loop_with_cancellation(&request, &executor, &cancellation)
         .await
-        .expect_err("tools must not be silently ignored");
+        .expect_err("pre-cancelled tool request should stop before sending");
 
-    assert_eq!(error.to_string(), "native agent tools require an executor");
+    assert_eq!(error.to_string(), "agent turn cancelled");
 }

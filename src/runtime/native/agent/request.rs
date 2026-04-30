@@ -1,5 +1,5 @@
 use crate::runtime::{
-    native::{ChatMessage, NativeChatRequest, ProviderApiKey, ProviderKind},
+    native::{ChatMessage, NativeLlmRequest, ProviderApiKey, ProviderKind},
     session::RuntimeTarget,
     tools::RuntimeToolRegistry,
 };
@@ -7,7 +7,7 @@ use crate::runtime::{
 /// `NativeAgentRequest` 描述一次内置 native agent turn。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeAgentRequest {
-    chat_request: NativeChatRequest,
+    llm_request: NativeLlmRequest,
     tools: RuntimeToolRegistry,
 }
 
@@ -23,7 +23,7 @@ impl NativeAgentRequest {
         messages: Vec<ChatMessage>,
     ) -> Self {
         Self {
-            chat_request: NativeChatRequest::new(
+            llm_request: NativeLlmRequest::new(
                 provider_id,
                 provider_kind,
                 model_id,
@@ -32,14 +32,6 @@ impl NativeAgentRequest {
                 api_key_env,
                 messages,
             ),
-            tools: RuntimeToolRegistry::new(),
-        }
-    }
-
-    /// `from_chat_request` 从现有 native chat 请求提升为 native agent 请求。
-    pub fn from_chat_request(chat_request: NativeChatRequest) -> Self {
-        Self {
-            chat_request,
             tools: RuntimeToolRegistry::new(),
         }
     }
@@ -53,22 +45,18 @@ impl NativeAgentRequest {
     /// `target` 返回该请求对应的统一 runtime 目标。
     pub fn target(&self) -> RuntimeTarget {
         RuntimeTarget::native_agent(
-            self.chat_request.provider_id.clone(),
-            self.chat_request.model_id.clone(),
+            self.llm_request.provider_id.clone(),
+            self.llm_request.model_id.clone(),
         )
     }
 
-    /// `chat_request` 返回底层模型请求参数。
-    pub fn chat_request(&self) -> &NativeChatRequest {
-        &self.chat_request
+    /// `llm_request` 返回底层模型请求参数。
+    pub fn llm_request(&self) -> &NativeLlmRequest {
+        &self.llm_request
     }
 
     /// `tools` 返回 agent 可见的工具定义。
     pub fn tools(&self) -> &RuntimeToolRegistry {
         &self.tools
-    }
-
-    pub(crate) fn has_tools(&self) -> bool {
-        !self.tools.is_empty()
     }
 }

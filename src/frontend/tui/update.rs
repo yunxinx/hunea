@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use crate::runtime::{
     model_catalog::ModelSelection,
     native::models::ProviderSyncRequest,
-    native::{ChatMessage, NativeChatRequest},
+    native::{ChatMessage, NativeAgentRequest},
 };
 
 use super::{
@@ -37,8 +37,8 @@ pub enum AppEffect {
         config_id: String,
         value: String,
     },
-    SendNativeChat {
-        request: NativeChatRequest,
+    SendNativeAgent {
+        request: NativeAgentRequest,
     },
     InterruptCurrentTurn,
     PersistSelectedModel {
@@ -464,7 +464,7 @@ impl Model {
         }
         if self.selected_acp_agent.is_none()
             && let Some(selection) = self.selected_model.clone()
-            && !self.validate_native_chat_selection(&selection)
+            && !self.validate_native_agent_selection(&selection)
         {
             return None;
         }
@@ -498,8 +498,8 @@ impl Model {
         }
 
         let selection = self.selected_model.clone()?;
-        self.native_chat_request_for_selection(&selection)
-            .map(|request| AppEffect::SendNativeChat { request })
+        self.native_agent_request_for_selection(&selection)
+            .map(|request| AppEffect::SendNativeAgent { request })
     }
 
     fn handle_resize(&mut self, width: u16, height: u16) {
@@ -525,10 +525,10 @@ impl Model {
 }
 
 impl Model {
-    fn native_chat_request_for_selection(
+    fn native_agent_request_for_selection(
         &mut self,
         selection: &ModelSelection,
-    ) -> Option<NativeChatRequest> {
+    ) -> Option<NativeAgentRequest> {
         let Some(provider) = self
             .model_catalog
             .enabled_provider_by_id(&selection.provider_id)
@@ -540,18 +540,18 @@ impl Model {
             self.show_transient_status_notice("Selected provider is not native");
             return None;
         };
-        Some(NativeChatRequest::new(
+        Some(NativeAgentRequest::new(
             selection.provider_id.clone(),
             native_runtime.kind,
             selection.model_id.clone(),
             native_runtime.base_url.clone(),
             native_runtime.api_key.clone(),
             native_runtime.api_key_env.clone(),
-            self.chat_messages_from_transcript(),
+            self.agent_messages_from_transcript(),
         ))
     }
 
-    fn validate_native_chat_selection(&mut self, selection: &ModelSelection) -> bool {
+    fn validate_native_agent_selection(&mut self, selection: &ModelSelection) -> bool {
         let Some(provider) = self
             .model_catalog
             .enabled_provider_by_id(&selection.provider_id)
@@ -578,7 +578,7 @@ impl Model {
         true
     }
 
-    fn chat_messages_from_transcript(&self) -> Vec<ChatMessage> {
+    fn agent_messages_from_transcript(&self) -> Vec<ChatMessage> {
         self.transcript
             .source_messages()
             .into_iter()

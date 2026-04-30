@@ -1,8 +1,8 @@
 use std::fmt;
 
-/// `NativeChatError` 描述原生 LLM backend 调用失败。
+/// `NativeLlmError` 描述原生 LLM backend 调用失败。
 #[derive(Debug)]
-pub enum NativeChatError {
+pub enum NativeLlmError {
     MissingBaseUrl {
         provider_id: String,
     },
@@ -14,7 +14,7 @@ pub enum NativeChatError {
     Cancelled,
 }
 
-impl fmt::Display for NativeChatError {
+impl fmt::Display for NativeLlmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingBaseUrl { provider_id } => {
@@ -28,12 +28,12 @@ impl fmt::Display for NativeChatError {
                 "provider {provider_id} has invalid base_url {base_url:?}"
             ),
             Self::GenAi(source) => write!(f, "{source}"),
-            Self::Cancelled => write!(f, "chat cancelled"),
+            Self::Cancelled => write!(f, "native LLM request cancelled"),
         }
     }
 }
 
-impl std::error::Error for NativeChatError {
+impl std::error::Error for NativeLlmError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::GenAi(source) => Some(source),
@@ -42,7 +42,7 @@ impl std::error::Error for NativeChatError {
     }
 }
 
-impl From<genai::Error> for NativeChatError {
+impl From<genai::Error> for NativeLlmError {
     fn from(source: genai::Error) -> Self {
         Self::GenAi(source)
     }

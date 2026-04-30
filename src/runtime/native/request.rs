@@ -1,35 +1,6 @@
 use genai::chat::{ChatMessage as GenAiChatMessage, ChatRole as GenAiChatRole};
 
-use super::ProviderKind;
-
-/// `ProviderApiKey` 保存配置文件中直接写入的 provider API key。
-#[derive(Clone, PartialEq, Eq)]
-pub struct ProviderApiKey(String);
-
-impl ProviderApiKey {
-    /// `new` 创建一个直接可用的 API key。
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub(crate) fn from_optional_config(value: Option<String>) -> Option<Self> {
-        value
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .map(Self)
-    }
-
-    /// `as_str` 返回 API key 原文。
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for ProviderApiKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ProviderApiKey(REDACTED)")
-    }
-}
+use crate::runtime::provider::{ProviderApiKey, ProviderKind};
 
 /// `NativeChatRequest` 是 TUI 向原生 LLM backend 发起的一次对话请求。
 #[derive(Debug, Clone, PartialEq, Eq)]

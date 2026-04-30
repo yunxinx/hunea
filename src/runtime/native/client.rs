@@ -7,7 +7,7 @@ use genai::{
     resolver::{AuthData, AuthResolver, Endpoint},
 };
 
-use super::{LlmError, NativeChatRequest};
+use super::{NativeChatError, NativeChatRequest};
 use crate::runtime::token_count::StreamingTokenProgress;
 
 /// `NativeChatResponse` 保存原生 runtime 的正文与可选 reasoning 内容。
@@ -40,7 +40,7 @@ pub(crate) struct NativeChatCompletion {
 }
 
 /// `send_chat` 通过 genai 发起流式请求，并在完成后返回聚合文本。
-pub async fn send_chat(request: &NativeChatRequest) -> Result<String, LlmError> {
+pub async fn send_chat(request: &NativeChatRequest) -> Result<String, NativeChatError> {
     send_chat_with_cancellation(request, &tokio_util::sync::CancellationToken::default())
         .await
         .map(|response| response.content)
@@ -50,7 +50,7 @@ pub async fn send_chat(request: &NativeChatRequest) -> Result<String, LlmError> 
 pub async fn send_chat_with_cancellation(
     request: &NativeChatRequest,
     cancellation: &tokio_util::sync::CancellationToken,
-) -> Result<NativeChatResponse, LlmError> {
+) -> Result<NativeChatResponse, NativeChatError> {
     send_chat_with_cancellation_and_token_progress(request, cancellation, |_| {})
         .await
         .map(|completion| completion.response)
@@ -60,12 +60,12 @@ pub(crate) async fn send_chat_with_cancellation_and_token_progress<F>(
     request: &NativeChatRequest,
     cancellation: &tokio_util::sync::CancellationToken,
     mut on_progress: F,
-) -> Result<NativeChatCompletion, LlmError>
+) -> Result<NativeChatCompletion, NativeChatError>
 where
     F: FnMut(NativeChatProgress),
 {
     if cancellation.is_cancelled() {
-        return Err(LlmError::Cancelled);
+        return Err(NativeChatError::Cancelled);
     }
 
     let client = client_for_request(request);
@@ -84,7 +84,7 @@ where
         .with_capture_usage(true);
 
     let stream_response = tokio::select! {
-        _ = cancellation.cancelled() => return Err(LlmError::Cancelled),
+        _ = cancellation.cancelled() => return Err(NativeChatError::Cancelled),
         response = client.exec_chat_stream(model, chat_request, Some(&options)) => response?,
     };
 
@@ -93,7 +93,7 @@ where
 
     loop {
         let event = tokio::select! {
-            _ = cancellation.cancelled() => return Err(LlmError::Cancelled),
+            _ = cancellation.cancelled() => return Err(NativeChatError::Cancelled),
             event = stream.next() => event,
         };
         let Some(event) = event else {
@@ -300,7 +300,7 @@ fn request_auth_data(request: &NativeChatRequest) -> Option<AuthData> {
         .map(|api_key_env| AuthData::from_env(api_key_env.clone()))
 }
 
-fn model_spec_for_request(request: &NativeChatRequest) -> Result<ModelSpec, LlmError> {
+fn model_spec_for_request(request: &NativeChatRequest) -> Result<ModelSpec, NativeChatError> {
     let adapter_kind = request.provider_kind.adapter_kind();
     if let Some(base_url) = request
         .base_url
@@ -329,7 +329,7 @@ fn model_spec_for_request(request: &NativeChatRequest) -> Result<ModelSpec, LlmE
     }
 
     if request.provider_kind.uses_openai_compatible_endpoint() {
-        return Err(LlmError::MissingBaseUrl {
+        return Err(NativeChatError::MissingBaseUrl {
             provider_id: request.provider_id.clone(),
         });
     }
@@ -345,11 +345,11 @@ fn normalize_base_url(base_url: &str) -> String {
     normalized
 }
 
-fn chat_completions_url(provider_id: &str, base_url: &str) -> Result<String, LlmError> {
+fn chat_completions_url(provider_id: &str, base_url: &str) -> Result<String, NativeChatError> {
     let normalized = normalize_base_url(base_url);
     let url = reqwest::Url::parse(&normalized)
         .and_then(|url| url.join("chat/completions"))
-        .map_err(|_| LlmError::InvalidBaseUrl {
+        .map_err(|_| NativeChatError::InvalidBaseUrl {
             provider_id: provider_id.to_string(),
             base_url: base_url.to_string(),
         })?;
@@ -359,7 +359,7 @@ fn chat_completions_url(provider_id: &str, base_url: &str) -> Result<String, Llm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::llm::{ChatMessage, ProviderApiKey, ProviderKind};
+    use crate::runtime::native::{ChatMessage, ProviderApiKey, ProviderKind};
 
     #[test]
     fn openai_compatible_without_api_key_uses_request_override_for_local_servers() {

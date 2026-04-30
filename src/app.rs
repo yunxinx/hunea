@@ -14,7 +14,7 @@ use crate::{
     },
     runtime::{
         acp::AcpSessionCatalog,
-        models::{self, LoadedModelCatalog},
+        native::models::{self as native_models, LoadedModelCatalog},
         phrases::{self, LoadedStatusPhrases},
     },
 };
@@ -51,7 +51,7 @@ pub fn run_with_writer<W: Write>(
     preserve_ansi: bool,
     tui_config: &TuiConfig,
 ) -> Result<()> {
-    let loaded_models = models::load().wrap_err("failed to load model config")?;
+    let loaded_models = native_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
     let model = tui::run_with_runtime_options(
         HeroOptions::default(),
@@ -71,7 +71,7 @@ pub fn run_with_config_writer<W: Write>(
     preserve_ansi: bool,
     config: &Config,
 ) -> Result<()> {
-    let loaded_models = models::load().wrap_err("failed to load model config")?;
+    let loaded_models = native_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
     let model = tui::run_with_runtime_options(
         HeroOptions::default(),

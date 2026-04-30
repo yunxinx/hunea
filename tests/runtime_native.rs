@@ -1,4 +1,4 @@
-use lumos::runtime::llm::{ChatMessage, NativeChatRequest, ProviderKind};
+use lumos::runtime::native::{ChatMessage, NativeChatError, NativeChatRequest, ProviderKind};
 
 #[test]
 fn native_chat_request_carries_provider_kind_and_messages() {
@@ -23,6 +23,6 @@ fn native_chat_request_carries_provider_kind_and_messages() {
 }
 
 #[test]
-fn runtime_exposes_acp_as_named_boundary() {
-    let _catalog = lumos::runtime::acp::AcpSessionCatalog::default();
+fn runtime_exposes_native_as_named_boundary() {
+    assert_eq!(NativeChatError::Cancelled.to_string(), "chat cancelled");
 }

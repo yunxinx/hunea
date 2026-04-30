@@ -3,8 +3,9 @@ use std::{path::PathBuf, time::Duration};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 
 use crate::runtime::{
-    llm::{ChatMessage, NativeChatRequest},
-    models::{ModelSelection, ProviderSyncRequest},
+    model_catalog::ModelSelection,
+    native::models::ProviderSyncRequest,
+    native::{ChatMessage, NativeChatRequest},
 };
 
 use super::{
@@ -535,13 +536,17 @@ impl Model {
             self.show_transient_status_notice("Selected provider is not available");
             return None;
         };
+        let Some(native_runtime) = provider.native_runtime() else {
+            self.show_transient_status_notice("Selected provider is not native");
+            return None;
+        };
         Some(NativeChatRequest::new(
             selection.provider_id.clone(),
-            provider.kind,
+            native_runtime.kind,
             selection.model_id.clone(),
-            provider.base_url.clone(),
-            provider.api_key.clone(),
-            provider.api_key_env.clone(),
+            native_runtime.base_url.clone(),
+            native_runtime.api_key.clone(),
+            native_runtime.api_key_env.clone(),
             self.chat_messages_from_transcript(),
         ))
     }
@@ -555,8 +560,13 @@ impl Model {
             return false;
         };
 
-        if provider.kind.uses_openai_compatible_endpoint()
-            && provider
+        let Some(native_runtime) = provider.native_runtime() else {
+            self.show_transient_status_notice("Selected provider is not native");
+            return false;
+        };
+
+        if native_runtime.kind.uses_openai_compatible_endpoint()
+            && native_runtime
                 .base_url
                 .as_ref()
                 .is_none_or(|value| value.trim().is_empty())

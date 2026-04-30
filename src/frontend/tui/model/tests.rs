@@ -4,9 +4,10 @@ use super::*;
 use crate::frontend::tui::{
     AppEffect, AppEvent, Sender, StyleMode, document::DocumentAnchorRegion,
 };
-use crate::runtime::models::{
-    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
+use crate::runtime::model_catalog::{
+    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
+use crate::runtime::native::ProviderKind;
 use crate::runtime::phrases::StatusPhraseOrder;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{Terminal, backend::TestBackend};
@@ -101,7 +102,7 @@ fn native_chat_request_includes_full_transcript_history() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
-            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
@@ -154,7 +155,7 @@ fn native_chat_request_excludes_runtime_system_messages() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
-            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
@@ -1941,7 +1942,7 @@ fn enter_during_native_chat_activity_does_not_append_unsent_message() {
         HeroOptions::default(),
         ModelOptions {
             selected_model: Some(ModelSelection::new("local", "qwen3")),
-            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
@@ -2007,7 +2008,7 @@ fn current_model_status_line_falls_back_to_selected_acp_agent() {
         ModelOptions {
             status_line_items: vec![StatusLineItem::CurrentModel],
             selected_model: Some(ModelSelection::new("local", "qwen3")),
-            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
@@ -2115,7 +2116,7 @@ fn file_picker_model(root: &Path) -> Model {
 }
 
 fn file_picker_test_model_catalog() -> ModelCatalog {
-    ModelCatalog::new(vec![ModelProvider::new(
+    ModelCatalog::new(vec![ModelProvider::native(
         "local",
         ProviderKind::OpenAiCompatible,
         "Local",

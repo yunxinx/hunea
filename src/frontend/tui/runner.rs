@@ -1,24 +1,26 @@
+#[cfg(test)]
+use std::sync::mpsc;
 use std::{
     io,
     path::PathBuf,
     process::Command,
-    sync::mpsc::{self, Receiver},
-    thread,
     time::{Duration, Instant},
 };
 
 use crate::runtime::acp::{
     AcpAgentIdentity, AcpSessionCatalog, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
 };
-use crate::runtime::llm::{
-    CancellationToken, ChatPerformanceMetrics, LlmError, NativeChatProgress, NativeChatRequest,
-    NativeChatResponse, send_chat_with_cancellation_and_token_progress,
+use crate::runtime::model_catalog::ModelSelection;
+use crate::runtime::native::models as native_models;
+use crate::runtime::native::models::ProviderSyncRequest;
+#[cfg(test)]
+use crate::runtime::native::{CancellationToken, ChatPerformanceMetrics, NativeChatResponse};
+use crate::runtime::native::{
+    ModelProviderRefreshEvent, ModelProviderRefreshRuntimeState, NativeChatEvent,
+    NativeChatRequest, NativeChatRuntimeState,
 };
+use crate::runtime::request_policy::RuntimeRequestPolicy;
 use crate::runtime::token_count::StreamingTokenProgress;
-use crate::runtime::{
-    models,
-    models::{ModelSelection, ProviderSyncRequest},
-};
 use arboard::Clipboard;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use color_eyre::eyre::Result;
@@ -47,49 +49,6 @@ pub struct RuntimeOptions {
     pub acp_sessions: AcpSessionCatalog,
     pub model_config_path: Option<PathBuf>,
     pub runtime_request_policy: RuntimeRequestPolicy,
-}
-
-/// `RuntimeRequestPolicy` 描述交互式 runtime 请求的超时与重试策略。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeRequestPolicy {
-    attempts: usize,
-    delays: Vec<Duration>,
-    timeout: Duration,
-}
-
-impl RuntimeRequestPolicy {
-    pub fn new(attempts: usize, delays_seconds: Vec<u64>, timeout_seconds: u64) -> Self {
-        Self {
-            attempts,
-            delays: delays_seconds
-                .into_iter()
-                .map(Duration::from_secs)
-                .collect(),
-            timeout: Duration::from_secs(timeout_seconds),
-        }
-    }
-
-    pub(crate) fn attempts(&self) -> usize {
-        self.attempts
-    }
-
-    pub(crate) fn delay_for_retry(&self, retry: usize) -> Duration {
-        self.delays
-            .get(retry.saturating_sub(1))
-            .copied()
-            .or_else(|| self.delays.last().copied())
-            .unwrap_or_else(|| Duration::from_secs(1))
-    }
-
-    pub(crate) fn timeout(&self) -> Duration {
-        self.timeout
-    }
-}
-
-impl Default for RuntimeRequestPolicy {
-    fn default() -> Self {
-        Self::new(3, vec![1, 2, 3], 120)
-    }
 }
 
 /// `run` 启动交互式 TUI，并在退出后返回最终模型。
@@ -486,7 +445,7 @@ fn run_persist_selected_model_effect(
     selection: &ModelSelection,
 ) {
     if let Err(error) =
-        models::write_default_model(runtime_options.model_config_path.as_deref(), selection)
+        native_models::write_default_model(runtime_options.model_config_path.as_deref(), selection)
     {
         model.show_transient_status_notice(&format!("Failed to save default model: {error}"));
     }
@@ -500,70 +459,6 @@ fn reset_runtime_session_after_clear(
     acp_runtime.reset_after_clear();
     native_chat_runtime.reset_after_clear();
     model_refresh_runtime.reset_after_clear();
-}
-
-#[derive(Default)]
-struct ModelProviderRefreshRuntimeState {
-    receiver: Option<Receiver<ModelProviderRefreshEvent>>,
-}
-
-impl ModelProviderRefreshRuntimeState {
-    fn start(&mut self, request: ProviderSyncRequest) {
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let provider_id = request.provider_id.clone();
-            let event = match models::sync_provider_models_once(&request) {
-                Ok(model_ids) => ModelProviderRefreshEvent::Finished {
-                    provider_id,
-                    model_ids,
-                },
-                Err(message) => ModelProviderRefreshEvent::Failed {
-                    provider_id,
-                    message,
-                },
-            };
-            let _ = sender.send(event);
-        });
-        self.receiver = Some(receiver);
-    }
-
-    fn is_running(&self) -> bool {
-        self.receiver.is_some()
-    }
-
-    fn reset_after_clear(&mut self) {
-        self.receiver = None;
-    }
-
-    fn try_recv_event(&mut self) -> Option<ModelProviderRefreshEvent> {
-        let receiver = self.receiver.as_ref()?;
-        match receiver.try_recv() {
-            Ok(event) => {
-                self.receiver = None;
-                Some(event)
-            }
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.receiver = None;
-                Some(ModelProviderRefreshEvent::Failed {
-                    provider_id: String::new(),
-                    message: "model refresh stopped before completion".to_string(),
-                })
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ModelProviderRefreshEvent {
-    Finished {
-        provider_id: String,
-        model_ids: Vec<String>,
-    },
-    Failed {
-        provider_id: String,
-        message: String,
-    },
 }
 
 fn drain_model_refresh_runtime_events(
@@ -602,188 +497,6 @@ fn run_refresh_model_provider_effect(
     }
 
     model_refresh_runtime.start(request);
-}
-
-#[derive(Default)]
-struct NativeChatRuntimeState {
-    receiver: Option<Receiver<NativeChatEvent>>,
-    cancellation: Option<CancellationToken>,
-}
-
-impl NativeChatRuntimeState {
-    fn start(&mut self, request: NativeChatRequest, request_policy: RuntimeRequestPolicy) {
-        let (sender, receiver) = mpsc::channel();
-        let cancellation = CancellationToken::default();
-        let thread_cancellation = cancellation.clone();
-        thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            match runtime {
-                Ok(runtime) => {
-                    runtime.block_on(run_native_chat_worker(
-                        request,
-                        request_policy,
-                        thread_cancellation,
-                        sender,
-                    ));
-                }
-                Err(error) => {
-                    let _ = sender.send(NativeChatEvent::Failed {
-                        message: format!("start chat runtime: {error}"),
-                    });
-                }
-            }
-        });
-        self.receiver = Some(receiver);
-        self.cancellation = Some(cancellation);
-    }
-
-    fn is_running(&self) -> bool {
-        self.receiver.is_some()
-    }
-
-    fn reset_after_clear(&mut self) {
-        if let Some(cancellation) = self.cancellation.take() {
-            cancellation.cancel();
-        }
-        self.receiver = None;
-    }
-
-    fn interrupt(&mut self) -> bool {
-        if !self.is_running() {
-            return false;
-        }
-        if let Some(cancellation) = self.cancellation.take() {
-            cancellation.cancel();
-        }
-        self.receiver = None;
-        true
-    }
-
-    fn try_recv_event(&mut self) -> Option<NativeChatEvent> {
-        let receiver = self.receiver.as_ref()?;
-        match receiver.try_recv() {
-            Ok(event) => {
-                if event.is_terminal() {
-                    self.receiver = None;
-                    self.cancellation = None;
-                }
-                Some(event)
-            }
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.receiver = None;
-                self.cancellation = None;
-                Some(NativeChatEvent::Failed {
-                    message: "chat request stopped before completion".to_string(),
-                })
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum NativeChatEvent {
-    Retrying {
-        message: String,
-    },
-    OutputTokenEstimate {
-        total_tokens: usize,
-    },
-    Thinking {
-        is_thinking: bool,
-    },
-    Finished {
-        response: NativeChatResponse,
-        metrics: Option<ChatPerformanceMetrics>,
-    },
-    Failed {
-        message: String,
-    },
-    Interrupted,
-}
-
-impl NativeChatEvent {
-    fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Finished { .. } | Self::Failed { .. } | Self::Interrupted
-        )
-    }
-}
-
-async fn run_native_chat_worker(
-    request: NativeChatRequest,
-    request_policy: RuntimeRequestPolicy,
-    cancellation: CancellationToken,
-    sender: mpsc::Sender<NativeChatEvent>,
-) {
-    for attempt in 0..=request_policy.attempts() {
-        let progress_sender = sender.clone();
-        let attempt_result = tokio::time::timeout(
-            request_policy.timeout(),
-            send_chat_with_cancellation_and_token_progress(
-                &request,
-                &cancellation,
-                move |progress| {
-                    let event = match progress {
-                        NativeChatProgress::OutputTokens { total_tokens } => {
-                            NativeChatEvent::OutputTokenEstimate { total_tokens }
-                        }
-                        NativeChatProgress::Thinking { is_thinking } => {
-                            NativeChatEvent::Thinking { is_thinking }
-                        }
-                    };
-                    let _ = progress_sender.send(event);
-                },
-            ),
-        )
-        .await;
-
-        match attempt_result {
-            Err(_elapsed) if attempt < request_policy.attempts() => {
-                if retry_native_chat_after_attempt(attempt, &request_policy, &cancellation, &sender)
-                    .await
-                {
-                    return;
-                }
-            }
-            Err(_elapsed) => {
-                let _ = sender.send(NativeChatEvent::Failed {
-                    message: format!(
-                        "Chat request timed out after {}s",
-                        request_policy.timeout().as_secs()
-                    ),
-                });
-                return;
-            }
-            Ok(Ok(completion)) => {
-                let _ = sender.send(NativeChatEvent::Finished {
-                    response: completion.response,
-                    metrics: completion.metrics,
-                });
-                return;
-            }
-            Ok(Err(LlmError::Cancelled)) => {
-                let _ = sender.send(NativeChatEvent::Interrupted);
-                return;
-            }
-            Ok(Err(_error)) if attempt < request_policy.attempts() => {
-                if retry_native_chat_after_attempt(attempt, &request_policy, &cancellation, &sender)
-                    .await
-                {
-                    return;
-                }
-            }
-            Ok(Err(error)) => {
-                let _ = sender.send(NativeChatEvent::Failed {
-                    message: error.to_string(),
-                });
-                return;
-            }
-        }
-    }
 }
 
 fn drain_native_chat_runtime_events(
@@ -828,25 +541,6 @@ fn apply_native_chat_event(model: &mut Model, event: NativeChatEvent) {
             model.clear_acp_activity();
             model.append_system_message_from_runtime("Chat interrupted");
         }
-    }
-}
-
-async fn retry_native_chat_after_attempt(
-    attempt: usize,
-    request_policy: &RuntimeRequestPolicy,
-    cancellation: &CancellationToken,
-    sender: &mpsc::Sender<NativeChatEvent>,
-) -> bool {
-    let retry = attempt + 1;
-    let _ = sender.send(NativeChatEvent::Retrying {
-        message: format!("Reconnecting... {retry}/{}", request_policy.attempts()),
-    });
-    tokio::select! {
-        _ = cancellation.cancelled() => {
-            let _ = sender.send(NativeChatEvent::Interrupted);
-            true
-        }
-        _ = tokio::time::sleep(request_policy.delay_for_retry(retry)) => false,
     }
 }
 
@@ -1482,7 +1176,7 @@ mod tests {
     use super::*;
     use crate::frontend::tui::{ReasoningDisplayMode, Sender, StatusLineItem};
     use crate::runtime::acp::AcpInitializeOutcome;
-    use crate::runtime::models::ModelSelection;
+    use crate::runtime::model_catalog::ModelSelection;
     use crate::runtime::phrases::StatusPhraseOrder;
     use agent_client_protocol::schema::ProtocolVersion;
     use crossterm::event::{

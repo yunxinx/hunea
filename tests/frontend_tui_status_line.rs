@@ -10,9 +10,10 @@ use lumos::frontend::tui::{
     AppEvent, HeroOptions, Model, ModelOptions, RequestMetrics, StatusLineItem, StyleMode,
     theme::default_palette,
 };
-use lumos::runtime::models::{
-    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
+use lumos::runtime::model_catalog::{
+    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
+use lumos::runtime::native::ProviderKind;
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 #[test]
@@ -93,7 +94,7 @@ fn status_line_uses_provider_display_name_for_current_model() {
         ModelOptions {
             style_mode: StyleMode::Cx,
             status_line_items: vec![StatusLineItem::CurrentModel],
-            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "LM Studio",
@@ -430,7 +431,7 @@ fn ready_model_with_options(width: u16, height: u16, options: ModelOptions) -> M
 }
 
 fn single_model_catalog() -> ModelCatalog {
-    ModelCatalog::new(vec![ModelProvider::new(
+    ModelCatalog::new(vec![ModelProvider::native(
         "local",
         ProviderKind::OpenAiCompatible,
         "Local",

@@ -3,10 +3,10 @@ use lumos::{
     frontend::tui::{
         AppEffect, AppEvent, HeroOptions, Model, ModelOptions, theme::default_palette,
     },
-    runtime::models::{
-        ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
-        ProviderSyncRequest,
+    runtime::model_catalog::{
+        ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
     },
+    runtime::native::{ProviderKind, models::ProviderSyncRequest},
 };
 use ratatui::{
     Terminal,
@@ -202,7 +202,7 @@ fn model_panel_shows_sync_error_for_auto_synced_provider() {
         18,
         ModelOptions {
             model_catalog: ModelCatalog::new(vec![
-                ModelProvider::new(
+                ModelProvider::native(
                     "local",
                     ProviderKind::OpenAiCompatible,
                     "Local",
@@ -236,7 +236,7 @@ fn model_panel_shows_sync_error_for_auto_synced_provider() {
 fn model_options_with_catalog() -> ModelOptions {
     ModelOptions {
         model_catalog: ModelCatalog::new(vec![
-            ModelProvider::new(
+            ModelProvider::native(
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
@@ -255,7 +255,7 @@ fn model_options_with_catalog() -> ModelOptions {
                     ),
                 ],
             ),
-            ModelProvider::new(
+            ModelProvider::native(
                 "deepseek",
                 ProviderKind::OpenAiCompatible,
                 "DeepSeek",
@@ -377,7 +377,7 @@ fn model_panel_footer_hint_is_italic() {
         96,
         24,
         ModelOptions {
-            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
@@ -560,7 +560,7 @@ fn model_options_with_many_models(count: usize) -> ModelOptions {
         .collect::<Vec<_>>();
 
     ModelOptions {
-        model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+        model_catalog: ModelCatalog::new(vec![ModelProvider::native(
             "many",
             ProviderKind::OpenAiCompatible,
             "Many",

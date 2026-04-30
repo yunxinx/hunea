@@ -4,7 +4,8 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::runtime::models::{ModelEntry, ModelProvider, ModelSelection, ModelSource};
+use crate::runtime::model_catalog::{ModelEntry, ModelProvider, ModelSelection, ModelSource};
+use crate::runtime::native::models::ProviderSyncRequest;
 
 use super::{
     AppEffect, Model,
@@ -289,11 +290,21 @@ impl Model {
     fn refresh_current_model_panel_provider(&mut self) -> Option<AppEffect> {
         let (request, display_name) = {
             let provider = self.active_model_panel_provider()?;
-            if provider.source == ModelSource::Acp {
+            let Some(native_runtime) = provider.native_runtime() else {
                 self.show_transient_status_notice("ACP models are managed by the agent");
                 return None;
-            }
-            (provider.sync_request(), provider.display_name.clone())
+            };
+            (
+                ProviderSyncRequest {
+                    provider_id: provider.id.clone(),
+                    kind: native_runtime.kind,
+                    display_name: provider.display_name.clone(),
+                    base_url: native_runtime.base_url.clone(),
+                    api_key: native_runtime.api_key.clone(),
+                    api_key_env: native_runtime.api_key_env.clone(),
+                },
+                provider.display_name.clone(),
+            )
         };
         self.show_transient_status_notice(&format!("Refreshing models: {display_name}"));
         Some(AppEffect::RefreshModelProvider { request })
@@ -490,7 +501,10 @@ fn append_provider_details_lines(model: &Model, width: usize, lines: &mut Vec<Li
         lines,
         width,
         "• Endpoint          : ",
-        provider.base_url.as_deref().unwrap_or("not configured"),
+        provider
+            .native_runtime()
+            .and_then(|runtime| runtime.base_url.as_deref())
+            .unwrap_or("not configured"),
         tertiary_text_style(model.palette),
         secondary_text_style(model.palette),
     );
@@ -601,7 +615,8 @@ mod tests {
     use super::*;
     use crate::frontend::tui::{HeroOptions, ModelOptions};
     use crate::runtime::acp::{AcpModelConfig, AcpModelOption};
-    use crate::runtime::models::{ModelCatalog, ModelProvider, ModelSource, ProviderKind};
+    use crate::runtime::model_catalog::{ModelCatalog, ModelProvider, ModelSource};
+    use crate::runtime::native::ProviderKind;
 
     #[test]
     fn provider_refresh_success_replaces_models_and_drops_stale_selection() {
@@ -637,7 +652,7 @@ mod tests {
         let mut model = Model::new_with_options(
             HeroOptions::default(),
             ModelOptions {
-                model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                model_catalog: ModelCatalog::new(vec![ModelProvider::native(
                     "local",
                     ProviderKind::OpenAiCompatible,
                     "Local",
@@ -667,6 +682,14 @@ mod tests {
                     },
                 ],
             },
+        );
+        assert!(
+            model
+                .model_catalog
+                .enabled_provider_by_id("acp:Kimi Code CLI")
+                .expect("ACP model provider should be visible")
+                .native_runtime()
+                .is_none()
         );
         model.open_model_panel();
         model.move_model_panel_model(1);
@@ -718,7 +741,7 @@ mod tests {
         Model::new_with_options(
             HeroOptions::default(),
             ModelOptions {
-                model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                model_catalog: ModelCatalog::new(vec![ModelProvider::native(
                     "local",
                     ProviderKind::OpenAiCompatible,
                     "Local",

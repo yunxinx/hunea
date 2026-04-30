@@ -1,8 +1,6 @@
 use std::fmt;
 
-use genai::adapter::AdapterKind;
-
-/// `ProviderKind` 描述 `models.toml` 中 provider 使用的上游协议。
+/// `ProviderKind` 描述 `models.toml` 中 native provider 使用的上游协议。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProviderKind {
     #[default]
@@ -79,29 +77,6 @@ impl ProviderKind {
         }
     }
 
-    pub(crate) fn adapter_kind(self) -> AdapterKind {
-        match self {
-            Self::OpenAiCompatible | Self::OpenAi => AdapterKind::OpenAI,
-            Self::Anthropic => AdapterKind::Anthropic,
-            Self::Gemini => AdapterKind::Gemini,
-            Self::DeepSeek => AdapterKind::DeepSeek,
-            Self::Together => AdapterKind::Together,
-            Self::Groq => AdapterKind::Groq,
-            Self::Fireworks => AdapterKind::Fireworks,
-            Self::Xai => AdapterKind::Xai,
-            Self::Ollama => AdapterKind::Ollama,
-            Self::OllamaCloud => AdapterKind::OllamaCloud,
-            Self::Cohere => AdapterKind::Cohere,
-            Self::Zai => AdapterKind::Zai,
-            Self::BigModel => AdapterKind::BigModel,
-            Self::Aliyun => AdapterKind::Aliyun,
-            Self::Mimo => AdapterKind::Mimo,
-            Self::Nebius => AdapterKind::Nebius,
-            Self::Vertex => AdapterKind::Vertex,
-            Self::GithubCopilot => AdapterKind::GithubCopilot,
-        }
-    }
-
     pub(crate) fn uses_openai_compatible_endpoint(self) -> bool {
         matches!(self, Self::OpenAiCompatible)
     }
@@ -110,5 +85,34 @@ impl ProviderKind {
 impl fmt::Display for ProviderKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_config_value())
+    }
+}
+
+/// `ProviderApiKey` 保存配置文件中直接写入的 provider API key。
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderApiKey(String);
+
+impl ProviderApiKey {
+    /// `new` 创建一个直接可用的 API key。
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub(crate) fn from_optional_config(value: Option<String>) -> Option<Self> {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(Self)
+    }
+
+    /// `as_str` 返回 API key 原文。
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ProviderApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ProviderApiKey(REDACTED)")
     }
 }

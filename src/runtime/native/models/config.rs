@@ -14,9 +14,9 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
-use super::{
-    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderApiKey,
-    ProviderKind,
+use crate::runtime::{
+    model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
+    provider::{ProviderApiKey, ProviderKind},
 };
 
 const MODELS_FILE_NAME: &str = "models.toml";
@@ -363,26 +363,12 @@ fn provider_from_config(
     };
 
     let mut model_provider =
-        ModelProvider::new(provider_id, kind, display_name, base_url, source, models)
+        ModelProvider::native(provider_id, kind, display_name, base_url, source, models)
             .with_api_key(api_key.clone())
             .with_api_key_env(provider.api_key_env.clone());
     model_provider.sync_error = sync_error;
-    if enabled {
-        model_provider
-    } else {
-        let mut disabled_provider = ModelProvider::disabled(
-            model_provider.id,
-            model_provider.kind,
-            model_provider.display_name,
-            model_provider.base_url,
-            model_provider.source,
-            model_provider.models,
-        );
-        disabled_provider.api_key = model_provider.api_key;
-        disabled_provider.api_key_env = model_provider.api_key_env;
-        disabled_provider.sync_error = model_provider.sync_error;
-        disabled_provider
-    }
+    model_provider.enabled = enabled;
+    model_provider
 }
 
 fn selection_from_default(default: Option<&str>, catalog: &ModelCatalog) -> Option<ModelSelection> {

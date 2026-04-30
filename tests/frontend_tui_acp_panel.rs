@@ -2,9 +2,10 @@ use crossterm::event::{KeyCode, KeyEvent};
 use lumos::frontend::tui::{
     AppEffect, AppEvent, HeroOptions, Model, ModelOptions, theme::default_palette,
 };
-use lumos::runtime::models::{
-    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
+use lumos::runtime::model_catalog::{
+    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
+use lumos::runtime::native::ProviderKind;
 use ratatui::{
     Terminal,
     backend::TestBackend,
@@ -118,7 +119,7 @@ fn acp_panel_selection_makes_models_panel_independent_from_native_catalog() {
         18,
         ModelOptions {
             acp_agent_servers: vec!["codex-acp".to_string()],
-            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",

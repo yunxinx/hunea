@@ -1,10 +1,4 @@
-mod config;
-
-pub use crate::runtime::llm::{ProviderApiKey, ProviderKind};
-pub use config::{
-    LoadedModelCatalog, ModelsConfigError, ProviderSyncRequest, load, load_from_paths,
-    load_from_paths_with_sync, sync_provider_models_once, write_default_model,
-};
+use crate::runtime::provider::{ProviderApiKey, ProviderKind};
 
 /// `ModelCatalog` 保存 TUI 可展示与可选择的模型目录。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -68,20 +62,33 @@ impl ModelCatalog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelProvider {
     pub id: String,
-    pub kind: ProviderKind,
     pub display_name: String,
-    pub base_url: Option<String>,
-    pub api_key: Option<ProviderApiKey>,
-    pub api_key_env: Option<String>,
+    pub runtime: ModelProviderRuntime,
     pub source: ModelSource,
     pub models: Vec<ModelEntry>,
     pub enabled: bool,
     pub sync_error: Option<String>,
 }
 
+/// `ModelProviderRuntime` 描述模型 provider 背后的 runtime 类型。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelProviderRuntime {
+    Native(NativeModelProviderRuntime),
+    Acp,
+}
+
+/// `NativeModelProviderRuntime` 保存 native provider 发起请求所需的连接配置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeModelProviderRuntime {
+    pub kind: ProviderKind,
+    pub base_url: Option<String>,
+    pub api_key: Option<ProviderApiKey>,
+    pub api_key_env: Option<String>,
+}
+
 impl ModelProvider {
-    /// `new` 创建启用状态的 provider。
-    pub fn new(
+    /// `native` 创建启用状态的 native provider。
+    pub fn native(
         id: impl Into<String>,
         kind: ProviderKind,
         display_name: impl Into<String>,
@@ -91,15 +98,50 @@ impl ModelProvider {
     ) -> Self {
         Self {
             id: id.into(),
-            kind,
             display_name: display_name.into(),
-            base_url,
-            api_key: None,
-            api_key_env: None,
+            runtime: ModelProviderRuntime::Native(NativeModelProviderRuntime {
+                kind,
+                base_url,
+                api_key: None,
+                api_key_env: None,
+            }),
             source,
             models,
             enabled: true,
             sync_error: None,
+        }
+    }
+
+    /// `acp` 创建由 ACP agent 管理的 provider。
+    pub fn acp(
+        id: impl Into<String>,
+        display_name: impl Into<String>,
+        models: Vec<ModelEntry>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            display_name: display_name.into(),
+            runtime: ModelProviderRuntime::Acp,
+            source: ModelSource::Acp,
+            models,
+            enabled: true,
+            sync_error: None,
+        }
+    }
+
+    /// `native_runtime` 返回 native provider 的连接配置。
+    pub fn native_runtime(&self) -> Option<&NativeModelProviderRuntime> {
+        match &self.runtime {
+            ModelProviderRuntime::Native(runtime) => Some(runtime),
+            ModelProviderRuntime::Acp => None,
+        }
+    }
+
+    /// `native_runtime_mut` 返回 native provider 的可变连接配置。
+    pub fn native_runtime_mut(&mut self) -> Option<&mut NativeModelProviderRuntime> {
+        match &mut self.runtime {
+            ModelProviderRuntime::Native(runtime) => Some(runtime),
+            ModelProviderRuntime::Acp => None,
         }
     }
 
@@ -111,30 +153,22 @@ impl ModelProvider {
 
     /// `with_api_key_env` 附加用于读取 Bearer token 的环境变量名。
     pub fn with_api_key_env(mut self, api_key_env: Option<String>) -> Self {
-        self.api_key_env = api_key_env;
+        if let Some(runtime) = self.native_runtime_mut() {
+            runtime.api_key_env = api_key_env;
+        }
         self
     }
 
     /// `with_api_key` 附加配置文件中直接提供的 Bearer token。
     pub fn with_api_key(mut self, api_key: Option<ProviderApiKey>) -> Self {
-        self.api_key = api_key;
+        if let Some(runtime) = self.native_runtime_mut() {
+            runtime.api_key = api_key;
+        }
         self
     }
 
-    /// `sync_request` 创建用于刷新当前 provider 模型列表的请求。
-    pub fn sync_request(&self) -> ProviderSyncRequest {
-        ProviderSyncRequest {
-            provider_id: self.id.clone(),
-            kind: self.kind,
-            display_name: self.display_name.clone(),
-            base_url: self.base_url.clone(),
-            api_key: self.api_key.clone(),
-            api_key_env: self.api_key_env.clone(),
-        }
-    }
-
-    /// `disabled` 创建禁用 provider，保留配置但不参与展示。
-    pub fn disabled(
+    /// `disabled_native` 创建禁用的 native provider，保留配置但不参与展示。
+    pub fn disabled_native(
         id: impl Into<String>,
         kind: ProviderKind,
         display_name: impl Into<String>,
@@ -144,7 +178,7 @@ impl ModelProvider {
     ) -> Self {
         Self {
             enabled: false,
-            ..Self::new(id, kind, display_name, base_url, source, models)
+            ..Self::native(id, kind, display_name, base_url, source, models)
         }
     }
 }
@@ -218,7 +252,7 @@ mod tests {
     #[test]
     fn catalog_filters_disabled_providers() {
         let catalog = ModelCatalog::new(vec![
-            ModelProvider::disabled(
+            ModelProvider::disabled_native(
                 "disabled",
                 ProviderKind::OpenAiCompatible,
                 "Disabled",
@@ -226,7 +260,7 @@ mod tests {
                 ModelSource::Configured,
                 vec![ModelEntry::new("hidden", None, ModelSource::Configured)],
             ),
-            ModelProvider::new(
+            ModelProvider::native(
                 "enabled",
                 ProviderKind::OpenAiCompatible,
                 "Enabled",

@@ -52,10 +52,11 @@ pub use hero::{
 pub use model::{Model, ModelOptions, RequestMetrics};
 pub use reasoning_message::ReasoningDisplayMode;
 pub use runner::{
-    RuntimeOptions, RuntimeRequestPolicy, run, run_with_options, run_with_runtime_options,
-    run_with_style_mode,
+    RuntimeOptions, run, run_with_options, run_with_runtime_options, run_with_style_mode,
 };
 pub use sender::Sender;
 pub use status_line::StatusLineItem;
 pub use style_mode::StyleMode;
 pub use update::{AppEffect, AppEvent, STARTUP_PROBE_TIMEOUT};
+
+pub use crate::runtime::request_policy::RuntimeRequestPolicy;

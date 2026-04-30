@@ -4,10 +4,10 @@ use lumos::{
         AppEffect, AppEvent, HeroOptions, Model, ModelOptions,
         theme::{palette_from_background, terminal_default_palette},
     },
-    runtime::llm::ChatRole,
-    runtime::models::{
-        ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind,
+    runtime::model_catalog::{
+        ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
     },
+    runtime::native::{ChatRole, ProviderApiKey, ProviderKind},
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -113,17 +113,15 @@ fn enter_with_selected_native_model_returns_native_chat_effect() {
 
 #[test]
 fn enter_with_provider_api_key_returns_native_chat_effect_with_direct_key() {
-    let mut provider = ModelProvider::new(
+    let provider = ModelProvider::native(
         "remote",
         ProviderKind::OpenAiCompatible,
         "Remote",
         Some("https://api.example.com/v1".to_string()),
         ModelSource::Configured,
         vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
-    );
-    provider.api_key = Some(lumos::runtime::models::ProviderApiKey::new(
-        "sk-test-direct",
-    ));
+    )
+    .with_api_key(Some(ProviderApiKey::new("sk-test-direct")));
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -143,10 +141,7 @@ fn enter_with_provider_api_key_returns_native_chat_effect_with_direct_key() {
         panic!("expected native chat effect, got {effect:?}");
     };
     assert_eq!(
-        request
-            .api_key
-            .as_ref()
-            .map(lumos::runtime::models::ProviderApiKey::as_str),
+        request.api_key.as_ref().map(ProviderApiKey::as_str),
         Some("sk-test-direct")
     );
     assert_eq!(request.api_key_env, None);
@@ -157,7 +152,7 @@ fn enter_with_openai_compatible_provider_without_base_url_keeps_draft_unsent() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
-            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
                 "local",
                 ProviderKind::OpenAiCompatible,
                 "Local",
@@ -224,7 +219,7 @@ fn clear_command_removes_previous_native_chat_context() {
 }
 
 fn single_model_catalog() -> ModelCatalog {
-    ModelCatalog::new(vec![ModelProvider::new(
+    ModelCatalog::new(vec![ModelProvider::native(
         "local",
         ProviderKind::OpenAiCompatible,
         "Local",

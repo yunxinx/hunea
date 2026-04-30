@@ -4,11 +4,11 @@ use std::{collections::BTreeMap, rc::Rc};
 use ratatui::Frame;
 
 use crate::envinfo;
-use crate::runtime::llm::NativeChatResponse;
+use crate::runtime::native::NativeChatResponse;
 use crate::runtime::phrases::StatusPhraseOrder;
 use crate::runtime::{
     acp::{AcpAgentIdentity, AcpModelConfig},
-    models::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderKind},
+    model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
 };
 
 use super::{
@@ -630,12 +630,9 @@ impl Model {
 
     pub(crate) fn activate_acp_model_scope(&mut self, agent_id: &str) {
         let provider_id = acp_model_provider_id(agent_id);
-        self.model_catalog = ModelCatalog::new(vec![ModelProvider::new(
+        self.model_catalog = ModelCatalog::new(vec![ModelProvider::acp(
             provider_id,
-            ProviderKind::OpenAiCompatible,
             format!("ACP: {agent_id}"),
-            None,
-            ModelSource::Acp,
             Vec::new(),
         )]);
         self.selected_model = None;
@@ -669,12 +666,9 @@ impl Model {
             ));
         }
 
-        self.model_catalog = ModelCatalog::new(vec![ModelProvider::new(
+        self.model_catalog = ModelCatalog::new(vec![ModelProvider::acp(
             provider_id.clone(),
-            ProviderKind::OpenAiCompatible,
             display_name,
-            None,
-            ModelSource::Acp,
             entries,
         )]);
         self.selected_model = Some(ModelSelection::new(provider_id, config.current_value));

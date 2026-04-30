@@ -1,8 +1,11 @@
 use std::fs;
 
-use lumos::runtime::models::{
-    ModelSelection, ModelSource, ProviderApiKey, ProviderKind, ProviderSyncRequest,
-    load_from_paths_with_sync, write_default_model,
+use lumos::runtime::{
+    model_catalog::{ModelSelection, ModelSource},
+    native::{
+        ProviderApiKey, ProviderKind,
+        models::{ProviderSyncRequest, load_from_paths_with_sync, write_default_model},
+    },
 };
 
 #[test]
@@ -96,11 +99,14 @@ api_key = "sk-test-direct"
         .catalog
         .enabled_provider_by_id("remote")
         .expect("enabled provider should be visible");
+    let native_runtime = provider
+        .native_runtime()
+        .expect("remote provider should be native");
     assert_eq!(
-        provider.api_key.as_ref().map(ProviderApiKey::as_str),
+        native_runtime.api_key.as_ref().map(ProviderApiKey::as_str),
         Some("sk-test-direct")
     );
-    assert_eq!(provider.api_key_env, None);
+    assert_eq!(native_runtime.api_key_env, None);
 }
 
 #[test]
@@ -147,7 +153,15 @@ models = ["gemini-2.5-pro"]
     let kinds = loaded
         .catalog
         .enabled_providers()
-        .map(|provider| (provider.id.as_str(), provider.kind))
+        .map(|provider| {
+            (
+                provider.id.as_str(),
+                provider
+                    .native_runtime()
+                    .expect("configured provider should be native")
+                    .kind,
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         kinds,
@@ -222,7 +236,14 @@ models = ["qwen3"]
         .catalog
         .enabled_provider_at(0)
         .expect("enabled provider should be visible");
-    assert_eq!(provider.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+    assert_eq!(
+        provider
+            .native_runtime()
+            .expect("local provider should be native")
+            .api_key_env
+            .as_deref(),
+        Some("DEEPSEEK_API_KEY")
+    );
 }
 
 #[test]

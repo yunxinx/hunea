@@ -4,6 +4,9 @@ pub mod models;
 mod provider_kind;
 
 pub use crate::runtime::provider::{ProviderApiKey, ProviderKind};
+pub use agent::{
+    NativeAgentError, NativeAgentRequest, NativeAgentResponse, send_agent_turn_with_cancellation,
+};
 #[cfg(test)]
 pub(crate) use chat::ChatPerformanceMetrics;
 pub use chat::{

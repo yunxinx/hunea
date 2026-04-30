@@ -28,4 +28,9 @@ impl RuntimeToolRegistry {
     pub fn definitions(&self) -> impl Iterator<Item = &RuntimeToolDefinition> {
         self.definitions.values()
     }
+
+    /// `is_empty` 返回当前是否没有任何工具定义。
+    pub fn is_empty(&self) -> bool {
+        self.definitions.is_empty()
+    }
 }

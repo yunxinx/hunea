@@ -7,6 +7,10 @@ use std::{
     },
 };
 
+use crate::runtime::session::{
+    RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,
+};
+
 /// `AcpPermissionRequest` 是传给 TUI 的 ACP 权限确认请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpPermissionRequest {
@@ -111,6 +115,38 @@ pub(crate) fn acp_permission_request_from_sdk(
                 kind: acp_permission_option_kind(option.kind),
             })
             .collect(),
+    }
+}
+
+impl From<AcpPermissionRequest> for RuntimePermissionRequest {
+    fn from(request: AcpPermissionRequest) -> Self {
+        RuntimePermissionRequest::new(
+            request.request_id,
+            request.title,
+            request
+                .options
+                .into_iter()
+                .map(RuntimePermissionOption::from)
+                .collect(),
+        )
+    }
+}
+
+impl From<AcpPermissionOption> for RuntimePermissionOption {
+    fn from(option: AcpPermissionOption) -> Self {
+        RuntimePermissionOption::new(option.option_id, option.name, option.kind.into())
+    }
+}
+
+impl From<AcpPermissionOptionKind> for RuntimePermissionOptionKind {
+    fn from(kind: AcpPermissionOptionKind) -> Self {
+        match kind {
+            AcpPermissionOptionKind::AllowOnce => Self::AllowOnce,
+            AcpPermissionOptionKind::AllowAlways => Self::AllowAlways,
+            AcpPermissionOptionKind::RejectOnce => Self::RejectOnce,
+            AcpPermissionOptionKind::RejectAlways => Self::RejectAlways,
+            AcpPermissionOptionKind::Unknown => Self::Unknown,
+        }
     }
 }
 

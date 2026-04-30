@@ -1,18 +1,15 @@
-mod chat_error;
-mod client;
-mod model_refresh;
+pub mod agent;
+pub mod chat;
 pub mod models;
 mod provider_kind;
-mod request;
-mod session;
 
 pub use crate::runtime::provider::{ProviderApiKey, ProviderKind};
-pub use chat_error::NativeChatError;
-pub(crate) use client::{
-    ChatPerformanceMetrics, NativeChatProgress, send_chat_with_cancellation_and_token_progress,
+#[cfg(test)]
+pub(crate) use chat::ChatPerformanceMetrics;
+pub use chat::{
+    ChatMessage, ChatRole, NativeChatError, NativeChatRequest, NativeChatResponse, send_chat,
+    send_chat_with_cancellation,
 };
-pub use client::{NativeChatResponse, send_chat, send_chat_with_cancellation};
-pub(crate) use model_refresh::{ModelProviderRefreshEvent, ModelProviderRefreshRuntimeState};
-pub use request::{ChatMessage, ChatRole, NativeChatRequest};
-pub(crate) use session::{NativeChatEvent, NativeChatRuntimeState};
+pub(crate) use chat::{NativeChatEvent, NativeChatRuntimeState};
+pub(crate) use models::{ModelProviderRefreshEvent, ModelProviderRefreshRuntimeState};
 pub use tokio_util::sync::CancellationToken;

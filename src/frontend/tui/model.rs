@@ -4,7 +4,6 @@ use std::{collections::BTreeMap, rc::Rc};
 use ratatui::Frame;
 
 use crate::envinfo;
-use crate::runtime::native::NativeChatResponse;
 use crate::runtime::phrases::StatusPhraseOrder;
 use crate::runtime::{
     acp::{AcpAgentIdentity, AcpModelConfig},
@@ -611,12 +610,25 @@ impl Model {
         reasoning_content: Option<String>,
         reasoning_duration: Option<std::time::Duration>,
     ) {
+        self.append_runtime_response_from_runtime(content, reasoning_content, reasoning_duration);
+    }
+
+    pub(crate) fn append_runtime_response_from_runtime(
+        &mut self,
+        content: impl Into<String>,
+        reasoning_content: Option<String>,
+        reasoning_duration: Option<std::time::Duration>,
+    ) {
         let content = content.into();
         let reasoning_content = reasoning_content
             .filter(|content| !content.trim().is_empty())
-            .unwrap_or_default();
+            .filter(|_| self.show_reasoning_content);
 
-        if self.show_reasoning_content && !reasoning_content.is_empty() {
+        if content.is_empty() && reasoning_content.is_none() {
+            return;
+        }
+
+        if let Some(reasoning_content) = reasoning_content {
             self.append_assistant_message_with_reasoning_from_runtime(
                 content,
                 reasoning_content,
@@ -675,30 +687,6 @@ impl Model {
         self.set_acp_current_model(Some(config.current_name));
         self.acp_model_config_id = Some(config.config_id);
         self.sync_model_panel_to_selection();
-    }
-
-    pub(crate) fn append_native_chat_response_from_runtime(
-        &mut self,
-        response: NativeChatResponse,
-    ) {
-        if response.content.is_empty() && response.reasoning_content.is_none() {
-            return;
-        }
-
-        if self.show_reasoning_content
-            && let Some(reasoning_content) = response
-                .reasoning_content
-                .filter(|content| !content.trim().is_empty())
-        {
-            self.append_assistant_message_with_reasoning_from_runtime(
-                response.content,
-                reasoning_content,
-                response.reasoning_duration,
-            );
-            return;
-        }
-
-        self.append_assistant_message_from_runtime(response.content);
     }
 
     fn append_assistant_message_with_reasoning_from_runtime(

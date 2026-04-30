@@ -3,7 +3,7 @@ use std::{
     thread,
 };
 
-use super::models::{ProviderSyncRequest, sync_provider_models_once};
+use super::{ProviderSyncRequest, sync_provider_models_once};
 
 /// `ModelProviderRefreshRuntimeState` 管理 native provider 模型列表刷新 worker。
 #[derive(Default)]

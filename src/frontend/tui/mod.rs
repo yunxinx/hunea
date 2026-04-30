@@ -27,6 +27,7 @@ mod model;
 mod model_panel;
 mod reasoning_message;
 mod runner;
+mod runtime;
 mod selection;
 mod sender;
 mod shimmer;

@@ -4,4 +4,6 @@ pub mod native;
 pub mod phrases;
 pub mod provider;
 pub mod request_policy;
+pub mod session;
 pub(crate) mod token_count;
+pub mod tools;

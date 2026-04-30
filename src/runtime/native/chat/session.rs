@@ -4,10 +4,13 @@ use std::{
 };
 
 use crate::runtime::request_policy::RuntimeRequestPolicy;
+use tokio_util::sync::CancellationToken;
+
+use crate::runtime::session::RuntimeTarget;
 
 use super::{
-    CancellationToken, ChatPerformanceMetrics, NativeChatError, NativeChatProgress,
-    NativeChatRequest, NativeChatResponse, send_chat_with_cancellation_and_token_progress,
+    ChatPerformanceMetrics, NativeChatError, NativeChatProgress, NativeChatRequest,
+    NativeChatResponse, send_chat_with_cancellation_and_token_progress,
 };
 
 /// `NativeChatRuntimeState` 管理内置 native chat 请求的后台 worker 与取消状态。
@@ -15,6 +18,7 @@ use super::{
 pub(crate) struct NativeChatRuntimeState {
     pub(crate) receiver: Option<Receiver<NativeChatEvent>>,
     pub(crate) cancellation: Option<CancellationToken>,
+    pub(crate) target: Option<RuntimeTarget>,
 }
 
 impl NativeChatRuntimeState {
@@ -26,6 +30,8 @@ impl NativeChatRuntimeState {
         let (sender, receiver) = mpsc::channel();
         let cancellation = CancellationToken::default();
         let thread_cancellation = cancellation.clone();
+        let target =
+            RuntimeTarget::native_chat(request.provider_id.clone(), request.model_id.clone());
         thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -48,6 +54,7 @@ impl NativeChatRuntimeState {
         });
         self.receiver = Some(receiver);
         self.cancellation = Some(cancellation);
+        self.target = Some(target);
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -59,6 +66,7 @@ impl NativeChatRuntimeState {
             cancellation.cancel();
         }
         self.receiver = None;
+        self.target = None;
     }
 
     pub(crate) fn interrupt(&mut self) -> bool {
@@ -69,7 +77,12 @@ impl NativeChatRuntimeState {
             cancellation.cancel();
         }
         self.receiver = None;
+        self.target = None;
         true
+    }
+
+    pub(crate) fn current_target(&self) -> Option<&RuntimeTarget> {
+        self.target.as_ref()
     }
 
     pub(crate) fn try_recv_event(&mut self) -> Option<NativeChatEvent> {
@@ -79,6 +92,7 @@ impl NativeChatRuntimeState {
                 if event.is_terminal() {
                     self.receiver = None;
                     self.cancellation = None;
+                    self.target = None;
                 }
                 Some(event)
             }
@@ -86,6 +100,7 @@ impl NativeChatRuntimeState {
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.receiver = None;
                 self.cancellation = None;
+                self.target = None;
                 Some(NativeChatEvent::Failed {
                     message: "chat request stopped before completion".to_string(),
                 })

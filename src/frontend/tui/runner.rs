@@ -20,6 +20,7 @@ use crate::runtime::native::{
     NativeChatRequest, NativeChatRuntimeState,
 };
 use crate::runtime::request_policy::RuntimeRequestPolicy;
+use crate::runtime::session::{RuntimeEvent, RuntimeRequestMetrics, RuntimeTarget};
 use crate::runtime::token_count::StreamingTokenProgress;
 use arboard::Clipboard;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -37,7 +38,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use super::{
     AppEffect, AppEvent, HeroOptions, Model, ModelOptions, RequestMetrics, STARTUP_PROBE_TIMEOUT,
-    StyleMode, theme,
+    StyleMode, runtime::RuntimeEventApply, theme,
 };
 
 mod event_pipeline;
@@ -504,44 +505,50 @@ fn drain_native_chat_runtime_events(
     native_chat_runtime: &mut NativeChatRuntimeState,
 ) -> bool {
     let mut changed = false;
-    while let Some(event) = native_chat_runtime.try_recv_event() {
-        apply_native_chat_event(model, event);
+    loop {
+        let target = native_chat_runtime.current_target().cloned();
+        let Some(event) = native_chat_runtime.try_recv_event() else {
+            break;
+        };
+        apply_native_chat_event(model, target, event);
         changed = true;
     }
     changed
 }
 
-fn apply_native_chat_event(model: &mut Model, event: NativeChatEvent) {
-    match event {
+fn apply_native_chat_event(
+    model: &mut Model,
+    target: Option<RuntimeTarget>,
+    event: NativeChatEvent,
+) {
+    let runtime_event = match event {
         NativeChatEvent::Retrying { message } => {
             model.show_acp_activity_with_header(message);
+            return;
         }
         NativeChatEvent::OutputTokenEstimate { total_tokens } => {
-            model.set_acp_activity_output_tokens(total_tokens);
-        }
-        NativeChatEvent::Thinking { is_thinking } => {
-            model.set_acp_activity_thinking(is_thinking);
-        }
-        NativeChatEvent::Finished { response, metrics } => {
-            if let Some(metrics) = metrics {
-                model.set_last_request_metrics(Some(RequestMetrics::new(
-                    metrics.latency,
-                    metrics.output_tokens,
-                    metrics.duration,
-                )));
+            RuntimeEvent::OutputTokenEstimate {
+                target,
+                total_tokens,
             }
-            model.clear_acp_activity();
-            model.append_native_chat_response_from_runtime(response);
         }
-        NativeChatEvent::Failed { message } => {
-            model.clear_acp_activity();
-            model.append_system_message_from_runtime(format!("Chat failed: {message}"));
-        }
-        NativeChatEvent::Interrupted => {
-            model.clear_acp_activity();
-            model.append_system_message_from_runtime("Chat interrupted");
-        }
-    }
+        NativeChatEvent::Thinking { is_thinking } => RuntimeEvent::Thinking {
+            target,
+            is_thinking,
+        },
+        NativeChatEvent::Finished { response, metrics } => RuntimeEvent::MessageFinished {
+            target,
+            content: response.content,
+            reasoning_content: response.reasoning_content,
+            reasoning_duration: response.reasoning_duration,
+            metrics: metrics.map(|metrics| {
+                RuntimeRequestMetrics::new(metrics.latency, metrics.output_tokens, metrics.duration)
+            }),
+        },
+        NativeChatEvent::Failed { message } => RuntimeEvent::Failed { target, message },
+        NativeChatEvent::Interrupted => RuntimeEvent::Interrupted { target },
+    };
+    model.apply_runtime_event(runtime_event);
 }
 
 fn run_send_native_chat_effect(
@@ -930,11 +937,12 @@ fn apply_acp_session_event(
             acp_runtime.mark_prompt_finished();
             model.clear_acp_activity();
         }
-        AcpSessionEvent::PermissionRequested { request, .. } => {
+        AcpSessionEvent::PermissionRequested { agent_id, request } => {
             if acp_runtime.should_discard_prompt_output() {
-                let options = acp_permission_option_ids(&request);
-                let _ = acp_runtime
-                    .respond_permission(&request.request_id, options.reject_for_cancel());
+                let _ = acp_runtime.respond_permission(
+                    &request.request_id,
+                    acp_reject_option_id_for_cancel(&request),
+                );
                 return;
             }
             if let Some(total_tokens) = acp_runtime.flush_output_tokens() {
@@ -942,22 +950,19 @@ fn apply_acp_session_event(
             }
             model.set_acp_activity_thinking(false);
             flush_acp_response_buffer(model, acp_runtime);
-            let options = acp_permission_option_ids(&request);
-            model.update(AppEvent::AcpPermissionRequested {
-                request_id: request.request_id,
-                title: request.title,
-                allow_option_id: options.allow_once,
-                allow_always_option_id: options.allow_always,
-                reject_option_id: options.reject,
-                reject_always_option_id: options.reject_always,
+            model.apply_runtime_event(RuntimeEvent::PermissionRequested {
+                target: RuntimeTarget::acp_agent(agent_id),
+                request: request.into(),
             });
         }
-        AcpSessionEvent::PermissionRequestCancelled { .. } => {
+        AcpSessionEvent::PermissionRequestCancelled { agent_id } => {
             if acp_runtime.should_discard_prompt_output() {
                 return;
             }
-            model.close_tool_approval_panel();
-            model.show_transient_status_notice("ACP permission request cancelled");
+            model.apply_runtime_event(RuntimeEvent::PermissionCancelled {
+                target: RuntimeTarget::acp_agent(agent_id),
+                request_id: None,
+            });
         }
         AcpSessionEvent::Stopped { message, .. } => {
             if acp_runtime.should_discard_prompt_output() {
@@ -1041,54 +1046,22 @@ fn run_set_acp_model_effect(
     }
 }
 
-struct AcpPermissionOptionIds {
-    allow_once: Option<String>,
-    allow_always: Option<String>,
-    reject: Option<String>,
-    reject_always: Option<String>,
-}
-
-impl AcpPermissionOptionIds {
-    fn reject_for_cancel(&self) -> Option<String> {
-        self.reject.clone().or_else(|| self.reject_always.clone())
-    }
-}
-
-fn acp_permission_option_ids(
+fn acp_reject_option_id_for_cancel(
     request: &crate::runtime::acp::AcpPermissionRequest,
-) -> AcpPermissionOptionIds {
+) -> Option<String> {
     use crate::runtime::acp::AcpPermissionOptionKind;
 
-    let allow_once = request
-        .options
-        .iter()
-        .find(|option| option.kind == AcpPermissionOptionKind::AllowOnce)
-        .map(|option| option.option_id.clone());
-
-    let allow_always = request
-        .options
-        .iter()
-        .find(|option| option.kind == AcpPermissionOptionKind::AllowAlways)
-        .map(|option| option.option_id.clone());
-
-    let reject = request
+    request
         .options
         .iter()
         .find(|option| option.kind == AcpPermissionOptionKind::RejectOnce)
-        .map(|option| option.option_id.clone());
-
-    let reject_always = request
-        .options
-        .iter()
-        .find(|option| option.kind == AcpPermissionOptionKind::RejectAlways)
-        .map(|option| option.option_id.clone());
-
-    AcpPermissionOptionIds {
-        allow_once,
-        allow_always,
-        reject,
-        reject_always,
-    }
+        .or_else(|| {
+            request
+                .options
+                .iter()
+                .find(|option| option.kind == AcpPermissionOptionKind::RejectAlways)
+        })
+        .map(|option| option.option_id.clone())
 }
 
 fn run_external_editor_effect(
@@ -1837,7 +1810,7 @@ mod tests {
             AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
         };
 
-        let options = acp_permission_option_ids(&AcpPermissionRequest {
+        let option_id = acp_reject_option_id_for_cancel(&AcpPermissionRequest {
             request_id: "permission-session-only".to_string(),
             title: Some("Run command".to_string()),
             options: vec![AcpPermissionOption {
@@ -1847,10 +1820,7 @@ mod tests {
             }],
         });
 
-        assert_eq!(
-            options.reject_for_cancel(),
-            Some("reject-always".to_string())
-        );
+        assert_eq!(option_id, Some("reject-always".to_string()));
     }
 
     #[test]
@@ -1861,6 +1831,7 @@ mod tests {
 
         apply_native_chat_event(
             &mut model,
+            None,
             NativeChatEvent::Finished {
                 response: NativeChatResponse {
                     content: "你好，我是本地模型".to_string(),
@@ -1890,6 +1861,7 @@ mod tests {
 
         apply_native_chat_event(
             &mut model,
+            None,
             NativeChatEvent::Finished {
                 response: NativeChatResponse {
                     content: "完成".to_string(),
@@ -1924,6 +1896,7 @@ mod tests {
 
         apply_native_chat_event(
             &mut model,
+            None,
             NativeChatEvent::Finished {
                 response: NativeChatResponse {
                     content: "结论".to_string(),
@@ -1963,6 +1936,7 @@ mod tests {
 
         apply_native_chat_event(
             &mut model,
+            None,
             NativeChatEvent::Finished {
                 response: NativeChatResponse {
                     content: "结论".to_string(),
@@ -1996,6 +1970,7 @@ mod tests {
 
         apply_native_chat_event(
             &mut model,
+            None,
             NativeChatEvent::Finished {
                 response: NativeChatResponse {
                     content: "结论".to_string(),
@@ -2061,6 +2036,7 @@ mod tests {
 
         apply_native_chat_event(
             &mut model,
+            None,
             NativeChatEvent::Finished {
                 response: NativeChatResponse {
                     content: "结论".to_string(),
@@ -2123,6 +2099,7 @@ mod tests {
 
         apply_native_chat_event(
             &mut model,
+            None,
             NativeChatEvent::Finished {
                 response: NativeChatResponse {
                     content: "结论".to_string(),
@@ -2169,6 +2146,7 @@ mod tests {
 
         apply_native_chat_event(
             &mut model,
+            None,
             NativeChatEvent::Finished {
                 response: NativeChatResponse {
                     content: "结论".to_string(),
@@ -2189,7 +2167,11 @@ mod tests {
         model.transcript_mut().clear();
         model.show_acp_activity("qwen3");
 
-        apply_native_chat_event(&mut model, NativeChatEvent::Thinking { is_thinking: true });
+        apply_native_chat_event(
+            &mut model,
+            None,
+            NativeChatEvent::Thinking { is_thinking: true },
+        );
 
         assert!(
             model
@@ -2198,7 +2180,11 @@ mod tests {
                 .contains("thinking")
         );
 
-        apply_native_chat_event(&mut model, NativeChatEvent::Thinking { is_thinking: false });
+        apply_native_chat_event(
+            &mut model,
+            None,
+            NativeChatEvent::Thinking { is_thinking: false },
+        );
 
         assert!(
             !model
@@ -2216,6 +2202,7 @@ mod tests {
 
         apply_native_chat_event(
             &mut model,
+            None,
             NativeChatEvent::Failed {
                 message: "request /v1/chat/completions: connection refused".to_string(),
             },
@@ -2237,6 +2224,7 @@ mod tests {
 
         apply_native_chat_event(
             &mut model,
+            None,
             NativeChatEvent::Retrying {
                 message: "Reconnecting... 1/3".to_string(),
             },
@@ -2268,6 +2256,7 @@ mod tests {
 
         apply_native_chat_event(
             &mut model,
+            None,
             NativeChatEvent::OutputTokenEstimate { total_tokens: 32 },
         );
 
@@ -2287,6 +2276,7 @@ mod tests {
         let mut runtime = NativeChatRuntimeState {
             receiver: Some(receiver),
             cancellation: Some(CancellationToken::default()),
+            target: Some(RuntimeTarget::native_chat("provider", "model")),
         };
 
         sender
@@ -2334,6 +2324,7 @@ mod tests {
         let mut runtime = NativeChatRuntimeState {
             receiver: Some(receiver),
             cancellation: Some(CancellationToken::default()),
+            target: Some(RuntimeTarget::native_chat("provider", "model")),
         };
 
         sender
@@ -2353,6 +2344,7 @@ mod tests {
         let mut runtime = NativeChatRuntimeState {
             receiver: Some(receiver),
             cancellation: Some(CancellationToken::default()),
+            target: Some(RuntimeTarget::native_chat("provider", "model")),
         };
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();

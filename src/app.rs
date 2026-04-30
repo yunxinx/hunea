@@ -234,6 +234,7 @@ fn model_options_from_configs(
         ctrl_c_clears_input: tui_config.ctrl_c_clears_input,
         esc_interrupt_presses: tui_config.esc_interrupt_presses,
         show_esc_interrupt_hint: tui_config.show_esc_interrupt_hint,
+        file_picker_popup_height: tui_config.file_picker_popup_height,
         show_reasoning_content: tui_config.show_reasoning_content,
         reasoning_display_mode: reasoning_display_mode_from_config(
             tui_config.reasoning_content_display,
@@ -290,6 +291,7 @@ mod tests {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
+            file_picker_popup_height: 7,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -325,6 +327,16 @@ mod tests {
     }
 
     #[test]
+    fn model_options_from_config_carries_file_picker_popup_height() {
+        let options = model_options_from_config(&TuiConfig {
+            file_picker_popup_height: 5,
+            ..default_tui_config()
+        });
+
+        assert_eq!(options.file_picker_popup_height, 5);
+    }
+
+    #[test]
     fn model_options_from_config_carries_second_status_line_items() {
         let options = model_options_from_config(&TuiConfig {
             status_line_2: vec!["current-dir".to_string(), "git-branch".to_string()],
@@ -350,6 +362,7 @@ mod tests {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
+            file_picker_popup_height: 7,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -371,6 +384,7 @@ mod tests {
             ctrl_c_clears_input: false,
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
+            file_picker_popup_height: 7,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -392,6 +406,7 @@ mod tests {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 3,
             show_esc_interrupt_hint: true,
+            file_picker_popup_height: 7,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -413,6 +428,7 @@ mod tests {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: false,
+            file_picker_popup_height: 7,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -434,6 +450,7 @@ mod tests {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
+            file_picker_popup_height: 7,
             print_transcript_on_exit: false,
             show_reasoning_content: true,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -455,6 +472,7 @@ mod tests {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
+            file_picker_popup_height: 7,
             print_transcript_on_exit: false,
             show_reasoning_content: true,
             reasoning_content_display: ReasoningContentDisplay::Expanded,
@@ -622,6 +640,7 @@ mod tests {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
+            file_picker_popup_height: 7,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -645,6 +664,7 @@ mod tests {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
+            file_picker_popup_height: 7,
             print_transcript_on_exit: true,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -669,6 +689,7 @@ mod tests {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
+            file_picker_popup_height: 7,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,

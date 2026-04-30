@@ -183,6 +183,42 @@ fn render_expands_tabs_using_prompt_aware_stops() {
     assert_eq!(render.cursor_y, 0);
 }
 
+#[test]
+fn current_at_token_only_uses_whitespace_delimited_mentions() {
+    let cases = [
+        ("@", 1, Some("")),
+        ("@src/main.rs", 5, Some("src/main.rs")),
+        ("open @src/main.rs now", 9, Some("src/main.rs")),
+        ("open @ now", 6, Some("")),
+        ("open @ now", 7, None),
+        ("email test@example.com", 18, None),
+        ("pkg @scope/name@latest", 19, Some("scope/name@latest")),
+    ];
+
+    for (value, cursor, expected) in cases {
+        let composer = composer_with_cursor(test_composer(80, 3, value), cursor);
+
+        assert_eq!(
+            composer.current_at_token().as_deref(),
+            expected,
+            "value={value:?} cursor={cursor}"
+        );
+    }
+}
+
+#[test]
+fn replace_current_at_token_keeps_surrounding_text_and_moves_cursor() {
+    let mut composer = test_composer(80, 3, "open @sr");
+
+    assert!(composer.replace_current_at_token("@src/main.rs "));
+
+    assert_eq!(composer.value(), "open @src/main.rs ");
+    assert_eq!(
+        composer.cursor_position(),
+        (0, "open @src/main.rs ".chars().count())
+    );
+}
+
 fn test_composer(width: u16, height: u16, value: &str) -> Composer {
     let mut composer = Composer::new(StyleMode::Ms);
     composer.set_width(width);

@@ -282,6 +282,10 @@ impl Model {
             return effect;
         }
 
+        if let Some(effect) = self.handle_file_picker_key(key) {
+            return effect;
+        }
+
         if key.code == KeyCode::Enter {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 if self.swap_enter_and_send {
@@ -315,6 +319,7 @@ impl Model {
             let old_column = self.composer.column();
             let direction = if key.code == KeyCode::PageUp { -1 } else { 1 };
             if self.composer_mut().handle_page_key(direction) {
+                self.sync_file_picker_state();
                 self.sync_composer_height();
                 self.document_runtime.follow_bottom = self.composer.viewport_offset()
                     == self.composer.bottom_viewport_offset()
@@ -338,6 +343,7 @@ impl Model {
         let old_column = self.composer.column();
         self.composer_mut().handle_key(key);
         self.sync_command_panel_navigation();
+        self.sync_file_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -383,6 +389,7 @@ impl Model {
         let old_column = self.composer.column();
         self.composer_mut().insert_newline();
         self.sync_command_panel_navigation();
+        self.sync_file_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -401,6 +408,7 @@ impl Model {
         self.composer_mut()
             .insert_text(&normalize_pasted_text(text));
         self.sync_command_panel_navigation();
+        self.sync_file_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -413,6 +421,7 @@ impl Model {
         let old_column = self.composer.column();
         self.composer_mut().clear();
         self.sync_command_panel_navigation();
+        self.sync_file_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -453,6 +462,7 @@ impl Model {
         self.sync_transcript_render();
         self.composer_mut().clear();
         self.sync_command_panel_navigation();
+        self.sync_file_picker_state();
         self.sync_external_editor_helper_after_draft_change(&content);
         self.sync_composer_height();
         self.document_runtime.follow_bottom = true;
@@ -490,6 +500,8 @@ impl Model {
         }
         self.sync_external_editor_helper_after_resize(previous_width);
         self.sync_command_panel_navigation();
+        self.sync_file_picker_state();
+        self.sync_composer_height();
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
     }
 }

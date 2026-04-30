@@ -113,6 +113,7 @@ impl Model {
         };
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.sync_command_panel_navigation();
+        self.sync_file_picker_state();
         self.sync_composer_height();
         self.sync_document_viewport_for_composer_cursor();
     }

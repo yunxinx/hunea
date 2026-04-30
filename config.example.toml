@@ -81,6 +81,11 @@ esc_interrupt_presses = 2
 # 这类打断提示。默认开启。
 show_esc_interrupt_hint = true
 
+# `file_picker_popup_height` 控制 @ 文件选择浮窗的行数。
+# 文件选择浮窗固定使用完整终端宽度；垂直方向以 @ 位置为锚点，空间不足时自动翻转。
+# 取值范围 3..21，默认高度 7 行。
+file_picker_popup_height = 7
+
 # `print_transcript_on_exit` 控制退出 TUI 后，是否把当前对话内容
 # 回放打印到终端 scrollback。
 print_transcript_on_exit = false

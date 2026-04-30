@@ -17,6 +17,7 @@ fn load_defaults_to_cx_when_no_config_exists() {
     assert_eq!(config.tui.user_input_style, UserInputStyle::Cx);
     assert!(config.tui.status_line.is_empty());
     assert!(config.tui.status_line_2.is_empty());
+    assert_eq!(config.tui.file_picker_popup_height, 7);
     assert!(!config.debug.enabled);
 }
 
@@ -462,6 +463,72 @@ fn load_accepts_configured_esc_interrupt_presses() {
         .expect("esc_interrupt_presses should accept 3");
 
     assert_eq!(config.tui.esc_interrupt_presses, 3);
+}
+
+#[test]
+fn load_accepts_configured_file_picker_popup_height() {
+    let working_dir = temp_test_dir("load-file-picker-popup-height-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nfile_picker_popup_height = 21\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("file picker popup height should accept values up to 21");
+
+    assert_eq!(config.tui.file_picker_popup_height, 21);
+}
+
+#[test]
+fn load_accepts_minimum_file_picker_popup_height() {
+    let working_dir = temp_test_dir("load-min-file-picker-popup-height-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nfile_picker_popup_height = 3\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("file picker popup height should accept the minimum value");
+
+    assert_eq!(config.tui.file_picker_popup_height, 3);
+}
+
+#[test]
+fn load_rejects_file_picker_popup_height_below_minimum() {
+    let working_dir = temp_test_dir("load-low-file-picker-popup-height-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nfile_picker_popup_height = 2\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("file picker popup height should reject values below 3");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.file_picker_popup_height must be between 3 and 21"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_rejects_file_picker_popup_height_above_maximum() {
+    let working_dir = temp_test_dir("load-high-file-picker-popup-height-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nfile_picker_popup_height = 22\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("file picker popup height should reject values above 21");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.file_picker_popup_height must be between 3 and 21"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

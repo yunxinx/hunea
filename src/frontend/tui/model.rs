@@ -21,6 +21,8 @@ use super::{
         offset_viewport_line_indices,
     },
     external_editor::ExternalEditorLaunch,
+    file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT, FilePickerState},
+    file_search::FileSearchCache,
     model_panel::ModelPanelState,
     selection::{AutoScrollDirection, MousePosition, SelectionClickState, SelectionState},
     status_line::{
@@ -62,11 +64,15 @@ pub struct Model {
     pub(super) status_phrase_selector: StatusPhraseSelector,
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
+    pub(super) file_picker: Option<FilePickerState>,
+    pub(super) file_search_cache: FileSearchCache,
+    pub(super) dismissed_file_picker_token: Option<String>,
     pub(super) copy_on_mouse_selection_release: bool,
     pub(super) swap_enter_and_send: bool,
     pub(super) ctrl_c_clears_input: bool,
     pub(super) esc_interrupt_presses: u8,
     pub(super) show_esc_interrupt_hint: bool,
+    pub(super) file_picker_popup_height: u16,
     pub(super) show_reasoning_content: bool,
     pub(super) reasoning_display_mode: ReasoningDisplayMode,
     pub(super) debug_commands_enabled: bool,
@@ -189,6 +195,7 @@ pub struct ModelOptions {
     pub ctrl_c_clears_input: bool,
     pub esc_interrupt_presses: u8,
     pub show_esc_interrupt_hint: bool,
+    pub file_picker_popup_height: u16,
     pub show_reasoning_content: bool,
     pub reasoning_display_mode: ReasoningDisplayMode,
     pub debug_commands_enabled: bool,
@@ -214,6 +221,7 @@ impl Default for ModelOptions {
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
+            file_picker_popup_height: 7,
             show_reasoning_content: false,
             reasoning_display_mode: ReasoningDisplayMode::Collapsed,
             debug_commands_enabled: false,
@@ -303,11 +311,17 @@ impl Model {
             ),
             command_panel_selected: 0,
             command_panel_scroll: 0,
+            file_picker: None,
+            file_search_cache: FileSearchCache::default(),
+            dismissed_file_picker_token: None,
             copy_on_mouse_selection_release: options.copy_on_mouse_selection_release,
             swap_enter_and_send: options.swap_enter_and_send,
             ctrl_c_clears_input: options.ctrl_c_clears_input,
             esc_interrupt_presses: options.esc_interrupt_presses.clamp(1, 3),
             show_esc_interrupt_hint: options.show_esc_interrupt_hint,
+            file_picker_popup_height: options
+                .file_picker_popup_height
+                .clamp(FILE_PICKER_POPUP_MIN_HEIGHT, FILE_PICKER_POPUP_MAX_HEIGHT),
             show_reasoning_content: options.show_reasoning_content,
             reasoning_display_mode: options.reasoning_display_mode,
             debug_commands_enabled: options.debug_commands_enabled,
@@ -459,6 +473,7 @@ impl Model {
             self.sync_transcript_render();
         }
         self.sync_command_panel_navigation();
+        self.sync_file_picker_state();
         self.sync_composer_height();
     }
 
@@ -510,6 +525,8 @@ impl Model {
         self.acp_activity = None;
         self.command_panel_selected = 0;
         self.command_panel_scroll = 0;
+        self.file_picker = None;
+        self.dismissed_file_picker_token = None;
         self.selection_runtime = SelectionRuntimeState::default();
         self.pending_composer_cursor_click = PendingComposerCursorClick::default();
         self.pending_reasoning_toggle_click = PendingReasoningToggleClick::default();
@@ -784,13 +801,14 @@ impl Model {
             || tool_approval_panel.has_content
         {
             if self.document_runtime.follow_bottom && !self.document_runtime.manual_scroll {
+                let panel_rows = command_panel.lines.len()
+                    + model_panel.lines.len()
+                    + acp_panel.lines.len()
+                    + tool_approval_panel.lines.len();
                 let visible_height = self.bottom_follow_composer_content_line_count(
                     &status_line,
                     &status_line_2,
-                    &command_panel,
-                    &model_panel,
-                    &acp_panel,
-                    &tool_approval_panel,
+                    panel_rows,
                 );
                 viewport_height =
                     viewport_height.min(u16::try_from(visible_height).unwrap_or(u16::MAX));
@@ -915,17 +933,11 @@ impl Model {
         &self,
         status_line: &StatusLineRenderResult,
         status_line_2: &StatusLineRenderResult,
-        command_panel: &super::command_panel::CommandPanelRenderResult,
-        model_panel: &super::model_panel::ModelPanelRenderResult,
-        acp_panel: &super::acp::AcpPanelRenderResult,
-        tool_approval_panel: &super::tool_approval_panel::ToolApprovalPanelRenderResult,
+        panel_rows: usize,
     ) -> usize {
         let viewport_height = usize::from(self.height.max(1));
         let acp_activity = self.current_acp_activity_render_result();
-        let mut tail_rows = command_panel.lines.len()
-            + model_panel.lines.len()
-            + acp_panel.lines.len()
-            + tool_approval_panel.lines.len();
+        let mut tail_rows = panel_rows;
         if acp_activity.has_content {
             tail_rows += 1;
         }

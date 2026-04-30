@@ -56,6 +56,7 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
 
     let document = model.build_document_layout();
     let viewport = model.build_document_viewport(&document);
+    let floating_layer = model.current_floating_layer(&document, &viewport);
 
     frame.render_widget(
         DocumentViewportWidget {
@@ -67,8 +68,11 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
     );
     model.render_history_scroll_indicator(frame, area, &document, &viewport);
 
-    let cursor_y = document.cursor_y.saturating_sub(viewport.resolved_offset);
-    if cursor_y < viewport.lines.len() {
+    frame.render_widget(floating_layer, area);
+
+    if let Some(cursor_y) = document.cursor_y.checked_sub(viewport.resolved_offset)
+        && cursor_y < viewport.lines.len()
+    {
         frame.set_cursor_position((
             area.x + document.cursor_x,
             area.y + u16::try_from(cursor_y).unwrap_or(u16::MAX),
@@ -80,7 +84,7 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
 mod tests {
     use std::time::Duration;
 
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, layout::Position};
 
     use super::*;
     use crate::frontend::tui::{
@@ -154,6 +158,41 @@ mod tests {
                 .any(|row| row == "• thoughts 16s      "),
             "snippet reasoning should start at column zero without assistant inset: {:?}",
             rendered_rows(terminal.backend().buffer())
+        );
+    }
+
+    #[test]
+    fn render_hides_cursor_when_composer_cursor_is_above_viewport() {
+        let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
+        model.transcript_mut().clear();
+        model.set_window(20, 4);
+        model.set_palette(default_palette(), true);
+        model
+            .composer_mut()
+            .set_text_for_test("line one\nline two\nline three\nline four\nline five");
+        model.composer_mut().move_to_begin_for_test();
+        model.sync_composer_height();
+
+        let layout = model.build_document_layout();
+        let document_offset = layout.cursor_y + 1;
+        let composer_offset = model.current_composer_viewport_offset(&layout, document_offset);
+        model.apply_document_viewport_position(
+            &layout,
+            document_offset,
+            composer_offset,
+            false,
+            true,
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
+        let sentinel = Position::new(17, 3);
+        terminal.set_cursor_position(sentinel).unwrap();
+        terminal.draw(|frame| model.render(frame)).unwrap();
+
+        assert_eq!(
+            terminal.get_cursor_position().unwrap(),
+            sentinel,
+            "render must not pin the hidden composer cursor to viewport row 0"
         );
     }
 

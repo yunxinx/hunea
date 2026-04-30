@@ -9,6 +9,8 @@ use crate::runtime::models::{
 };
 use crate::runtime::phrases::StatusPhraseOrder;
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::{Terminal, backend::TestBackend};
+use std::path::{Path, PathBuf};
 
 fn progressive_exactization_fixture() -> Model {
     let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
@@ -192,6 +194,629 @@ fn native_chat_request_excludes_runtime_system_messages() {
             "■ Chat failed: connection refused".to_string(),
             "› hello".to_string()
         ]
+    );
+}
+
+#[test]
+fn at_file_picker_opens_and_tab_completes_common_prefix() {
+    let root = TempFileTree::new("tab-complete");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    root.write_file("README.md");
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@s");
+
+    assert!(model.file_picker_active());
+    assert_eq!(
+        model
+            .current_file_picker_render_result()
+            .plain_lines
+            .iter()
+            .filter(|line| line.contains("src/"))
+            .count(),
+        2
+    );
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+
+    assert_eq!(model.composer_text(), "@src/");
+}
+
+#[test]
+fn at_file_picker_tab_completes_prefix_candidates_not_fuzzy_matches() {
+    let root = TempFileTree::new("tab-complete-prefix-only");
+    root.write_file("src/dir1/docs.md");
+    root.write_file("src/dir1/readme.md");
+    root.write_file("docs/status.md");
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@s");
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+
+    assert_eq!(model.composer_text(), "@src/dir1/");
+}
+
+#[test]
+fn file_picker_render_shifts_to_the_completed_directory_prefix() {
+    let root = TempFileTree::new("tab-complete-shifts-window");
+    root.write_file("src/dir1/dir2/dir3/docs.md");
+    root.write_file("src/dir1/dir2/dir4/readme.md");
+    root.write_file("docs/status.md");
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@s");
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+
+    assert_eq!(model.composer_text(), "@src/dir1/dir2/dir");
+
+    let lines = model.current_file_picker_render_result().plain_lines;
+    assert!(
+        lines.iter().any(|line| line.contains("dir3/docs.md")),
+        "completed directory prefix should be stripped from picker rows: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("src/dir1/dir2")),
+        "picker rows should not waste popup width on the already inserted prefix: {lines:?}"
+    );
+}
+
+#[test]
+fn file_picker_popup_uses_configured_height_and_full_width() {
+    let root = TempFileTree::new("configured-popup-height");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    root.write_file("src/model.rs");
+    root.write_file("src/view.rs");
+    root.write_file("src/update.rs");
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 3,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@s");
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+
+    assert_eq!(
+        rows.iter().filter(|line| line.contains("src/")).count(),
+        3,
+        "configured popup height should limit visible picker rows: {rows:?}"
+    );
+    assert!(
+        rendered_segment(&rows[1], 0, 40)
+            .trim_start()
+            .starts_with("src/"),
+        "file picker popup should render as a full-width row instead of a narrow anchored column: {rows:?}"
+    );
+}
+
+#[test]
+fn at_file_picker_enter_inserts_selected_path_with_prefix_and_space() {
+    let root = TempFileTree::new("enter-selected");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@src/l");
+
+    assert!(model.file_picker_active());
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(model.composer_text(), "@src/lib.rs ");
+    assert!(!model.file_picker_active());
+}
+
+#[test]
+fn at_file_picker_down_then_enter_inserts_the_selected_path() {
+    let root = TempFileTree::new("down-enter-selected");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@src");
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(model.composer_text(), "@src/main.rs ");
+    assert!(!model.file_picker_active());
+}
+
+#[test]
+fn at_file_picker_enter_on_empty_results_does_not_send_composer() {
+    let root = TempFileTree::new("enter-empty-results");
+    root.write_file("src/lib.rs");
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            model_catalog: file_picker_test_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@does-not-exist");
+
+    assert!(model.file_picker_active());
+    assert!(
+        model
+            .current_file_picker_render_result()
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("No files"))
+    );
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "@does-not-exist");
+    assert!(
+        !model
+            .transcript_plain_items()
+            .iter()
+            .any(|item| item.contains("@does-not-exist")),
+        "enter in an empty file picker must not submit the draft"
+    );
+}
+
+#[test]
+fn file_picker_floating_layer_covers_status_lines_without_removing_them_from_document_layout() {
+    let root = TempFileTree::new("hide-status-lines");
+    root.write_file("src/lib.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.status_line_items = vec![StatusLineItem::GitBranch];
+    model.status_line_2_items = vec![StatusLineItem::CurrentDir];
+    model.git_branch = "main".to_string();
+    model.current_dir = root.path().display().to_string();
+    type_text(&mut model, "@s");
+
+    let layout = model.build_document_layout();
+    let has_status_line = (0..layout.line_count()).any(|line_index| {
+        layout
+            .line_anchor_at(line_index)
+            .is_some_and(|anchor| anchor.region == DocumentAnchorRegion::StatusLine)
+    });
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+
+    assert!(
+        has_status_line,
+        "floating picker should not remove status lines from the document layout"
+    );
+    assert!(
+        !rows.iter().any(|line| line.contains("main")),
+        "floating picker should visually cover status lines in the rendered frame: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|line| line.contains("src/lib.rs")),
+        "floating picker content should still be visible in the rendered frame: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_hides_status_lines_when_popup_flips_above_anchor() {
+    let root = TempFileTree::new("hide-status-lines-flipped");
+    root.write_file("src/lib.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(40, 8);
+    model.status_line_items = vec![StatusLineItem::GitBranch];
+    model.status_line_2_items = vec![StatusLineItem::CurrentDir];
+    model.git_branch = "main".to_string();
+    model.current_dir = root.path().display().to_string();
+    type_text(
+        &mut model,
+        "line one\nline two\nline three\nline four\nline five\nline six\nline seven\n@s",
+    );
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+
+    assert!(
+        rows.iter().any(|line| line.contains("src/lib.rs")),
+        "file picker content should be visible after vertical flip: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|line| line.contains("main")),
+        "status line should stay visually hidden even when the picker flips above the anchor: {rows:?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|line| line.contains(root.path().display().to_string().as_str())),
+        "second status line should stay visually hidden even when the picker flips above the anchor: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_remains_visible_when_composer_uses_most_of_viewport() {
+    let root = TempFileTree::new("long-composer-visible");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    root.write_file("src/model.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(36, 6);
+    type_text(&mut model, "line one\nline two\nline three\nline four\n@s");
+
+    let layout = model.build_document_layout();
+    let rows = rendered_rows_for_model(&mut model, 36, 6);
+
+    assert!(
+        rows.iter().any(|line| line.contains("src/lib.rs")),
+        "file picker row should stay visible in the rendered frame: {rows:?}"
+    );
+
+    assert_eq!(
+        layout.composer_line_count,
+        usize::from(model.composer.full_height()),
+        "file picker should render as an overlay, not by clipping composer document content"
+    );
+}
+
+#[test]
+fn file_picker_remains_visible_when_composer_cursor_mode_fills_viewport() {
+    let root = TempFileTree::new("cursor-mode-visible");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    root.write_file("src/model.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(36, 6);
+    type_text(
+        &mut model,
+        "line one\nline two\nline three\nline four\nline five\nline six",
+    );
+    model.document_runtime.follow_bottom = false;
+    model.sync_document_viewport_for_composer_cursor();
+
+    type_text(&mut model, "\n@s");
+
+    let layout = model.build_document_layout();
+    let rows = rendered_rows_for_model(&mut model, 36, 6);
+
+    assert!(
+        rows.iter().any(|line| line.contains("src/lib.rs")),
+        "file picker row should stay visible in cursor viewport mode: {rows:?}"
+    );
+
+    assert_eq!(
+        layout.composer_line_count,
+        usize::from(model.composer.full_height()),
+        "file picker should not participate in document layout"
+    );
+}
+
+#[test]
+fn file_picker_overlay_does_not_clip_or_extend_the_composer_document_layout() {
+    let root = TempFileTree::new("top-trigger-full-composer");
+    root.write_file("line-target.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(36, 6);
+    model
+        .composer_mut()
+        .set_text_for_test("line one\nline two\nline three\nline four\nline five\nline six");
+    model.composer_mut().move_to_begin_for_test();
+    model.sync_composer_height();
+    model.sync_document_viewport_for_composer_cursor();
+
+    type_text(&mut model, "@");
+
+    let expected_composer_lines = usize::from(model.composer.full_height());
+    let layout = model.build_document_layout();
+    let viewport = model.build_document_viewport(&layout);
+    let rows = rendered_rows_for_model(&mut model, 36, 6);
+
+    assert_eq!(
+        layout.composer_line_count, expected_composer_lines,
+        "file picker overlay must not replace the full composer document with a clipped slice"
+    );
+    assert!(
+        !viewport
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("line-target.rs")),
+        "file picker overlay must not be part of the document viewport: {:?}",
+        viewport.plain_lines
+    );
+
+    assert!(
+        rows.iter().any(|line| line.contains("line-target.rs")),
+        "file picker row should still be visible in the rendered frame: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_overlay_does_not_shrink_the_composer_viewport() {
+    let root = TempFileTree::new("overlay-keeps-composer-viewport");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    root.write_file("src/model.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(36, 6);
+    model
+        .composer_mut()
+        .set_text_for_test("line one\nline two\nline three\nline four\nline five\nline six");
+    model.sync_composer_height();
+    let before_visible_height = model.composer.visible_height();
+
+    type_text(&mut model, "\n@s");
+
+    assert!(model.file_picker_active());
+    assert_eq!(
+        model.composer.visible_height(),
+        before_visible_height,
+        "file picker overlay should reserve document rows without shrinking the composer viewport"
+    );
+}
+
+#[test]
+fn file_picker_floating_layer_does_not_shrink_document_viewport() {
+    let root = TempFileTree::new("floating-keeps-document-viewport");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    root.write_file("src/model.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(36, 6);
+    type_text(
+        &mut model,
+        "line one\nline two\nline three\nline four\nline five\n@s",
+    );
+
+    assert!(model.file_picker_active());
+    let layout = model.build_document_layout();
+    let viewport = model.build_document_viewport(&layout);
+
+    assert_eq!(
+        viewport.lines.len(),
+        model.document_viewport_height().min(layout.line_count()),
+        "floating picker must not reserve or subtract document viewport rows"
+    );
+}
+
+#[test]
+fn file_picker_popup_anchors_below_the_at_token_with_full_width() {
+    let root = TempFileTree::new("popup-anchor-below");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    type_text(&mut model, "@s");
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+
+    assert_eq!(
+        rendered_column(&rows[1], "src/lib.rs"),
+        Some(2),
+        "file picker should keep vertical @ anchoring but use the full viewport width: {rows:?}"
+    );
+    assert!(
+        rendered_segment(&rows[1], 0, 40).contains("src/lib.rs"),
+        "file picker popup should own the whole viewport row: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_popup_flips_above_when_there_is_no_room_below_anchor() {
+    let root = TempFileTree::new("popup-anchor-above");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(40, 8);
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    type_text(&mut model, "one\ntwo\nthree\nfour\nfive\nsix\nseven\n@s");
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+
+    assert_eq!(
+        rendered_column(&rows[0], "src/lib.rs"),
+        Some(2),
+        "file picker should flip above the @ row instead of appending below the composer: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_popup_stays_full_width_when_anchor_is_near_right_edge() {
+    let root = TempFileTree::new("popup-full-width-near-right");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(26, 8);
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    type_text(&mut model, "abcdefghijklmnopqrs @s");
+
+    let rows = rendered_rows_for_model(&mut model, 26, 8);
+
+    assert_eq!(
+        rendered_column(&rows[1], "src/lib.rs"),
+        Some(2),
+        "file picker should use full-width rows instead of horizontal flip logic: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_popup_clears_full_width_rows_over_underlying_content() {
+    let root = TempFileTree::new("popup-clear-rect");
+    root.write_file("src/lib.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    model
+        .composer_mut()
+        .set_text_for_test("@s\nunderlying one\nunderlying two");
+    model.composer_mut().move_to_begin_for_test();
+    model.sync_composer_height();
+    model.sync_document_viewport_for_composer_cursor();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+
+    assert_eq!(
+        rendered_segment(&rows[2], 0, 40).trim(),
+        "",
+        "Clear should reset the whole viewport row before rendering short/empty picker rows: {rows:?}"
+    );
+    assert!(
+        !rows[2].contains("underlying"),
+        "underlying composer text inside the popup rect should be covered: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_esc_restores_area_cleared_by_previous_floating_frame() {
+    let root = TempFileTree::new("popup-esc-restore");
+    root.write_file("src/lib.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    model
+        .composer_mut()
+        .set_text_for_test("@s\nunderlying one\nunderlying two");
+    model.composer_mut().move_to_begin_for_test();
+    model.sync_composer_height();
+    model.sync_document_viewport_for_composer_cursor();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    assert!(model.file_picker_active());
+
+    let mut terminal =
+        Terminal::new(TestBackend::new(40, 8)).expect("test backend should initialize");
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render active popup");
+    let popup_rows = rendered_rows(terminal.backend().buffer());
+    assert!(
+        popup_rows.iter().any(|line| line.contains("src/lib.rs")),
+        "first frame should render the file picker popup: {popup_rows:?}"
+    );
+    assert!(
+        !popup_rows
+            .iter()
+            .any(|line| line.contains("underlying one")),
+        "first frame should cover underlying content inside the popup rect: {popup_rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert!(!model.file_picker_active());
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render after closing popup");
+    let restored_rows = rendered_rows(terminal.backend().buffer());
+
+    assert!(
+        restored_rows
+            .iter()
+            .any(|line| line.contains("underlying one")),
+        "closing the popup should repaint the content previously cleared by Clear: {restored_rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_esc_restores_flipped_popup_area_in_full_composer_viewport() {
+    let root = TempFileTree::new("popup-esc-restore-full");
+    root.write_file("src/lib.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    model.set_window(40, 8);
+    type_text(
+        &mut model,
+        "line one\nline two\nline three\nline four\nline five\nline six\nline seven\n@s",
+    );
+    assert!(model.file_picker_active());
+
+    let mut terminal =
+        Terminal::new(TestBackend::new(40, 8)).expect("test backend should initialize");
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render active popup");
+    let popup_rows = rendered_rows(terminal.backend().buffer());
+    assert!(
+        popup_rows.iter().any(|line| line.contains("src/lib.rs")),
+        "first frame should render the flipped file picker popup: {popup_rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert!(!model.file_picker_active());
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render after closing popup");
+    let restored_rows = rendered_rows(terminal.backend().buffer());
+
+    assert!(
+        restored_rows.iter().any(|line| line.contains("line two")),
+        "closing a flipped popup should repaint the composer rows it cleared: {restored_rows:?}"
+    );
+    assert!(
+        !restored_rows.iter().any(|line| line.contains("src/lib.rs")),
+        "closed file picker content must not remain in the frame: {restored_rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_esc_closes_overlay_without_moving_document_viewport() {
+    let root = TempFileTree::new("popup-esc-keeps-viewport");
+    root.write_file("src/lib.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    model.set_window(40, 6);
+    model.composer_mut().set_text_for_test(
+        "@s\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight",
+    );
+    model.composer_mut().move_to_begin_for_test();
+    model.sync_composer_height();
+    model.document_runtime.follow_bottom = false;
+    model.sync_document_viewport_for_composer_cursor();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    assert!(model.file_picker_active());
+
+    let before_document_offset = model.document_runtime.viewport_y;
+    let before_composer_offset = model.composer.viewport_offset();
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    assert!(!model.file_picker_active());
+    assert_eq!(
+        model.document_runtime.viewport_y, before_document_offset,
+        "closing a floating popup should not move the document viewport"
+    );
+    assert_eq!(
+        model.composer.viewport_offset(),
+        before_composer_offset,
+        "closing a floating popup should not page the composer to the bottom"
     );
 }
 
@@ -1377,4 +2002,92 @@ fn acp_activity_line_can_hide_interrupt_hint() {
     assert!(line.contains("Working (0s)"));
     assert!(!line.contains("esc"));
     assert!(!line.contains("interrupt"));
+}
+
+fn file_picker_model(root: &Path) -> Model {
+    let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
+    model.transcript_mut().clear();
+    model.current_dir = root.display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    model
+}
+
+fn file_picker_test_model_catalog() -> ModelCatalog {
+    ModelCatalog::new(vec![ModelProvider::new(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "Local",
+        Some("http://127.0.0.1:1234/v1".to_string()),
+        ModelSource::Configured,
+        vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+    )])
+}
+
+fn type_text(model: &mut Model, text: &str) {
+    for character in text.chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+}
+
+fn rendered_rows_for_model(model: &mut Model, width: u16, height: u16) -> Vec<String> {
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("test backend should initialize");
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render into test backend");
+    rendered_rows(terminal.backend().buffer())
+}
+
+fn rendered_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+    (0..buffer.area.height)
+        .map(|row| {
+            let mut line = String::new();
+            for column in 0..buffer.area.width {
+                line.push_str(buffer[(column, row)].symbol());
+            }
+            line
+        })
+        .collect()
+}
+
+fn rendered_column(row: &str, needle: &str) -> Option<usize> {
+    row.find(needle)
+        .map(|byte_index| row[..byte_index].chars().count())
+}
+
+fn rendered_segment(row: &str, start: usize, len: usize) -> String {
+    row.chars().skip(start).take(len).collect()
+}
+
+struct TempFileTree {
+    path: PathBuf,
+}
+
+impl TempFileTree {
+    fn new(name: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("lumos-file-picker-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("temp root should be creatable");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn write_file(&self, relative: &str) {
+        let path = self.path.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("temp parent should be creatable");
+        }
+        std::fs::write(path, "").expect("temp file should be writable");
+    }
+}
+
+impl Drop for TempFileTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }

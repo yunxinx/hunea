@@ -1,4 +1,6 @@
-use crate::appconfig::{self, AppConfigError};
+use crate::appconfig::{
+    self, AppConfigError, FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT,
+};
 use unicode_width::UnicodeWidthStr;
 
 /// `format_config_error` 将启动阶段配置错误渲染成面向用户的诊断表。
@@ -164,6 +166,18 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
                 ("Value", value.to_string()),
                 ("Reason", "Invalid interrupt press count".to_string()),
                 ("Expected", "1, 2, or 3".to_string()),
+            ],
+        ),
+        AppConfigError::InvalidFilePickerPopupHeight { path, value } => rows_with_optional_file(
+            path,
+            vec![
+                ("Setting", "tui.file_picker_popup_height".to_string()),
+                ("Value", value.to_string()),
+                ("Reason", "Invalid file picker popup height".to_string()),
+                (
+                    "Expected",
+                    format!("{FILE_PICKER_POPUP_MIN_HEIGHT}..{FILE_PICKER_POPUP_MAX_HEIGHT}"),
+                ),
             ],
         ),
         AppConfigError::InvalidReasoningContentDisplay { path, value } => validation_rows(

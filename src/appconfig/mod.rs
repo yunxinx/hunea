@@ -9,6 +9,11 @@ use serde::Deserialize;
 
 use crate::envinfo;
 
+/// @ 文件选择浮窗至少需要 3 行，避免列表在导航时过于局促。
+pub const FILE_PICKER_POPUP_MIN_HEIGHT: u16 = 3;
+/// @ 文件选择浮窗最多显示 21 行，避免覆盖过多上下文。
+pub const FILE_PICKER_POPUP_MAX_HEIGHT: u16 = 21;
+
 /// `Config` 表示当前 lumos 支持的启动配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -39,6 +44,7 @@ pub struct TuiConfig {
     pub ctrl_c_clears_input: bool,
     pub esc_interrupt_presses: u8,
     pub show_esc_interrupt_hint: bool,
+    pub file_picker_popup_height: u16,
     pub print_transcript_on_exit: bool,
     pub show_reasoning_content: bool,
     pub reasoning_content_display: ReasoningContentDisplay,
@@ -172,6 +178,10 @@ pub enum AppConfigError {
         path: Option<PathBuf>,
         value: u8,
     },
+    InvalidFilePickerPopupHeight {
+        path: Option<PathBuf>,
+        value: usize,
+    },
     InvalidReasoningContentDisplay {
         path: Option<PathBuf>,
         value: String,
@@ -206,6 +216,7 @@ struct FileTuiConfig {
     ctrl_c_clears_input: Option<bool>,
     esc_interrupt_presses: Option<u8>,
     show_esc_interrupt_hint: Option<bool>,
+    file_picker_popup_height: Option<usize>,
     print_transcript_on_exit: Option<bool>,
     show_reasoning_content: Option<bool>,
     reasoning_content_display: Option<String>,
@@ -265,6 +276,7 @@ impl Config {
                 ctrl_c_clears_input: true,
                 esc_interrupt_presses: 2,
                 show_esc_interrupt_hint: true,
+                file_picker_popup_height: 7,
                 print_transcript_on_exit: false,
                 show_reasoning_content: false,
                 reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -489,6 +501,22 @@ impl fmt::Display for AppConfigError {
                 f,
                 "tui.esc_interrupt_presses must be 1, 2, or 3, got {value}"
             ),
+            Self::InvalidFilePickerPopupHeight {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: tui.file_picker_popup_height must be between {} and {}, got {}",
+                path.display(),
+                FILE_PICKER_POPUP_MIN_HEIGHT,
+                FILE_PICKER_POPUP_MAX_HEIGHT,
+                value
+            ),
+            Self::InvalidFilePickerPopupHeight { path: None, value } => write!(
+                f,
+                "tui.file_picker_popup_height must be between {} and {}, got {value}",
+                FILE_PICKER_POPUP_MIN_HEIGHT, FILE_PICKER_POPUP_MAX_HEIGHT
+            ),
             Self::InvalidReasoningContentDisplay {
                 path: Some(path),
                 value,
@@ -532,6 +560,7 @@ impl std::error::Error for AppConfigError {
             | Self::InvalidAcpInstallRoot { .. }
             | Self::InvalidAcpDistribution { .. }
             | Self::InvalidEscInterruptPresses { .. }
+            | Self::InvalidFilePickerPopupHeight { .. }
             | Self::InvalidReasoningContentDisplay { .. }
             | Self::InvalidRuntimeRequestPolicy { .. } => None,
         }
@@ -721,6 +750,10 @@ fn merge_config_file(
         config.tui.show_esc_interrupt_hint = show_esc_interrupt_hint;
     }
 
+    if let Some(height) = file_config.tui.file_picker_popup_height {
+        config.tui.file_picker_popup_height = validate_file_picker_popup_height(height, path)?;
+    }
+
     if let Some(print_transcript_on_exit) = file_config.tui.print_transcript_on_exit {
         config.tui.print_transcript_on_exit = print_transcript_on_exit;
     }
@@ -819,6 +852,19 @@ fn validate_request_retry_attempts(attempts: usize, path: &Path) -> Result<(), A
         path: Some(path.to_path_buf()),
         reason: format!("runtime.request_retry_attempts must be between 1 and 10, got {attempts}"),
     })
+}
+
+fn validate_file_picker_popup_height(value: usize, path: &Path) -> Result<u16, AppConfigError> {
+    if !(usize::from(FILE_PICKER_POPUP_MIN_HEIGHT)..=usize::from(FILE_PICKER_POPUP_MAX_HEIGHT))
+        .contains(&value)
+    {
+        return Err(AppConfigError::InvalidFilePickerPopupHeight {
+            path: Some(path.to_path_buf()),
+            value,
+        });
+    }
+
+    Ok(value as u16)
 }
 
 fn validate_request_timeout_seconds(

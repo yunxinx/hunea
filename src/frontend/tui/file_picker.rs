@@ -132,8 +132,10 @@ impl Model {
 
         let visible_rows = self.file_picker_list_visible_rows();
         let width = usize::from(self.width.max(1));
+        let has_scrollbar = state.items.len() > visible_rows;
+        let content_width = width.saturating_sub(usize::from(has_scrollbar && width > 1));
         let (lines, plain_lines, selectable) =
-            self.render_file_picker_lines(state, width, visible_rows);
+            self.render_file_picker_lines(state, content_width, visible_rows);
 
         InlinePanelRenderResult {
             lines,

@@ -302,6 +302,44 @@ fn file_picker_popup_uses_configured_height_and_full_width() {
 }
 
 #[test]
+fn file_picker_popup_renders_vertical_scrollbar_for_overflowing_results() {
+    let root = TempFileTree::new("popup-scrollbar");
+    for index in 0..8 {
+        root.write_file(&format!("src/file_{index:02}.rs"));
+    }
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 3,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@s");
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+    let popup_rows = &rows[1..=3];
+
+    assert!(
+        popup_rows
+            .iter()
+            .any(|row| rendered_segment(row, 39, 1) == "█"),
+        "overflowing file picker should render a thicker right-side scrollbar thumb: {rows:?}"
+    );
+    assert!(
+        !popup_rows
+            .iter()
+            .any(|row| row.contains('↑') || row.contains('↓')),
+        "file picker scrollbar should not render begin/end arrow symbols: {rows:?}"
+    );
+}
+
+#[test]
 fn at_file_picker_enter_inserts_selected_path_with_prefix_and_space() {
     let root = TempFileTree::new("enter-selected");
     root.write_file("src/lib.rs");
@@ -378,70 +416,36 @@ fn at_file_picker_enter_on_empty_results_does_not_send_composer() {
 }
 
 #[test]
-fn file_picker_floating_layer_covers_status_lines_without_removing_them_from_document_layout() {
-    let root = TempFileTree::new("hide-status-lines");
+fn file_picker_does_not_clear_status_lines_outside_popup_area() {
+    let root = TempFileTree::new("keep-status-lines");
     root.write_file("src/lib.rs");
 
-    let mut model = file_picker_model(root.path());
-    model.status_line_items = vec![StatusLineItem::GitBranch];
-    model.status_line_2_items = vec![StatusLineItem::CurrentDir];
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 3,
+            status_line_items: vec![StatusLineItem::GitBranch],
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
     model.git_branch = "main".to_string();
     model.current_dir = root.path().display().to_string();
-    type_text(&mut model, "@s");
-
-    let layout = model.build_document_layout();
-    let has_status_line = (0..layout.line_count()).any(|line_index| {
-        layout
-            .line_anchor_at(line_index)
-            .is_some_and(|anchor| anchor.region == DocumentAnchorRegion::StatusLine)
-    });
-    let rows = rendered_rows_for_model(&mut model, 40, 8);
-
-    assert!(
-        has_status_line,
-        "floating picker should not remove status lines from the document layout"
-    );
-    assert!(
-        !rows.iter().any(|line| line.contains("main")),
-        "floating picker should visually cover status lines in the rendered frame: {rows:?}"
-    );
-    assert!(
-        rows.iter().any(|line| line.contains("src/lib.rs")),
-        "floating picker content should still be visible in the rendered frame: {rows:?}"
-    );
-}
-
-#[test]
-fn file_picker_hides_status_lines_when_popup_flips_above_anchor() {
-    let root = TempFileTree::new("hide-status-lines-flipped");
-    root.write_file("src/lib.rs");
-
-    let mut model = file_picker_model(root.path());
     model.set_window(40, 8);
-    model.status_line_items = vec![StatusLineItem::GitBranch];
-    model.status_line_2_items = vec![StatusLineItem::CurrentDir];
-    model.git_branch = "main".to_string();
-    model.current_dir = root.path().display().to_string();
-    type_text(
-        &mut model,
-        "line one\nline two\nline three\nline four\nline five\nline six\nline seven\n@s",
-    );
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "one\ntwo\nthree\nfour\nfive\nsix\n@s");
+    apply_scrolled_offset(&mut model, 1, true);
 
     let rows = rendered_rows_for_model(&mut model, 40, 8);
 
     assert!(
         rows.iter().any(|line| line.contains("src/lib.rs")),
-        "file picker content should be visible after vertical flip: {rows:?}"
+        "file picker content should still be visible in the rendered frame: {rows:?}"
     );
     assert!(
-        !rows.iter().any(|line| line.contains("main")),
-        "status line should stay visually hidden even when the picker flips above the anchor: {rows:?}"
-    );
-    assert!(
-        !rows
-            .iter()
-            .any(|line| line.contains(root.path().display().to_string().as_str())),
-        "second status line should stay visually hidden even when the picker flips above the anchor: {rows:?}"
+        rows.iter().any(|line| line.contains("main")),
+        "status line outside the popup area should not be cleared by the floating layer: {rows:?}"
     );
 }
 
@@ -817,6 +821,103 @@ fn file_picker_esc_closes_overlay_without_moving_document_viewport() {
         model.composer.viewport_offset(),
         before_composer_offset,
         "closing a floating popup should not page the composer to the bottom"
+    );
+}
+
+#[test]
+fn file_picker_mouse_wheel_scrolls_document_without_moving_popup_list() {
+    let root = TempFileTree::new("popup-wheel-passes-through");
+    for index in 0..8 {
+        root.write_file(&format!("src/file_{index:02}.rs"));
+    }
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 3,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    for index in 0..12 {
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, format!("history line {index}"));
+    }
+    model.sync_transcript_render();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@s");
+    assert!(model.file_picker_active());
+
+    let before_document_offset = model.document_runtime.viewport_y;
+    let before_picker_scroll = model.file_picker.as_ref().map(|state| state.scroll);
+    assert!(
+        before_document_offset > 0,
+        "fixture should start with scrollable document content"
+    );
+
+    model.update(AppEvent::MouseWheel { delta_lines: -3 });
+
+    assert!(
+        model.document_runtime.viewport_y < before_document_offset,
+        "mouse wheel should keep scrolling the underlying document while the file picker is active"
+    );
+    assert_eq!(
+        model.file_picker.as_ref().map(|state| state.scroll),
+        before_picker_scroll,
+        "mouse wheel should not move the file picker list viewport"
+    );
+}
+
+#[test]
+fn deleting_file_picker_trigger_after_mouse_wheel_keeps_manual_document_viewport() {
+    let root = TempFileTree::new("popup-wheel-delete-trigger");
+    root.write_file("src/lib.rs");
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 3,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    for index in 0..12 {
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, format!("history line {index}"));
+    }
+    model.sync_transcript_render();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@");
+    assert!(model.file_picker_active());
+
+    let bottom_offset = model.document_runtime.viewport_y;
+    model.update(AppEvent::MouseWheel { delta_lines: -3 });
+    let scrolled_offset = model.document_runtime.viewport_y;
+    assert!(
+        scrolled_offset < bottom_offset,
+        "fixture should manually scroll away from the bottom before deleting the trigger"
+    );
+    assert!(model.document_runtime.manual_scroll);
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Backspace)));
+
+    assert!(!model.file_picker_active());
+    assert_eq!(model.composer_text(), "");
+    assert_eq!(
+        model.document_runtime.viewport_y, scrolled_offset,
+        "removing the @ trigger after a wheel scroll should not restore the viewport to the bottom"
+    );
+    assert!(
+        model.document_runtime.manual_scroll,
+        "closing the popup by deleting its trigger should keep the user's manual scroll state"
     );
 }
 

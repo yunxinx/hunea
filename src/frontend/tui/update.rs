@@ -341,12 +341,29 @@ impl Model {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
+        let file_picker_was_active = self.file_picker_active();
+        let file_picker_manual_viewport_state = (file_picker_was_active
+            && self.document_runtime.manual_scroll)
+            .then(|| self.current_document_viewport_state());
         self.composer_mut().handle_key(key);
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();
+        let file_picker_closed = file_picker_was_active && !self.file_picker_active();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
-        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
+        if self.composer_text() != old_value
+            && file_picker_closed
+            && let Some(state) = file_picker_manual_viewport_state.as_ref()
+        {
+            if self.selection_runtime.selection.is_active() {
+                self.invalidate_selection_for_reflow();
+            }
+            self.sync_document_viewport_for_viewport_state(state);
+        } else {
+            self.sync_document_viewport_after_composer_interaction(
+                &old_value, old_line, old_column,
+            );
+        }
         None
     }
 

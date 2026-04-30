@@ -1,14 +1,16 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Style,
     text::Line,
-    widgets::{Clear, Widget},
+    widgets::{Clear, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget},
 };
 use unicode_width::UnicodeWidthStr;
 
 use super::{
     Model,
-    document::{DocumentAnchorRegion, DocumentLayout, DocumentViewport},
+    document::{DocumentLayout, DocumentViewport},
+    theme::{secondary_text_style, tertiary_text_style},
 };
 
 /// `FloatingLayer` 负责承载不参与 document flow 的后绘制浮窗。
@@ -18,11 +20,12 @@ pub(crate) struct FloatingLayer {
 }
 
 impl FloatingLayer {
-    fn push_anchored(
+    fn push_anchored_with_scrollbar(
         &mut self,
         anchor: FloatingAnchor,
         size: FloatingSize,
         lines: Vec<Line<'static>>,
+        scrollbar: Option<FloatingScrollbar>,
     ) {
         if lines.is_empty() {
             return;
@@ -31,17 +34,7 @@ impl FloatingLayer {
         self.surfaces.push(FloatingSurface {
             placement: FloatingPlacement::Anchored { anchor, size },
             lines,
-        });
-    }
-
-    fn push_clear_rect(&mut self, area: Rect) {
-        if area.is_empty() {
-            return;
-        }
-
-        self.surfaces.push(FloatingSurface {
-            placement: FloatingPlacement::Fixed { area },
-            lines: Vec::new(),
+            scrollbar,
         });
     }
 }
@@ -93,6 +86,7 @@ impl FloatingSize {
 struct FloatingSurface {
     placement: FloatingPlacement,
     lines: Vec<Line<'static>>,
+    scrollbar: Option<FloatingScrollbar>,
 }
 
 impl FloatingSurface {
@@ -113,6 +107,55 @@ impl FloatingSurface {
             let y = surface_area.y + u16::try_from(row).unwrap_or(u16::MAX);
             buf.set_line(surface_area.x, y, line, surface_area.width);
         }
+
+        if let Some(scrollbar) = self.scrollbar {
+            scrollbar.render(surface_area, buf);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FloatingScrollbar {
+    content_length: usize,
+    viewport_content_length: usize,
+    position: usize,
+    thumb_style: Style,
+    track_style: Style,
+}
+
+impl FloatingScrollbar {
+    const fn new(
+        content_length: usize,
+        viewport_content_length: usize,
+        position: usize,
+        thumb_style: Style,
+        track_style: Style,
+    ) -> Self {
+        Self {
+            content_length,
+            viewport_content_length,
+            position,
+            thumb_style,
+            track_style,
+        }
+    }
+
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if self.content_length <= self.viewport_content_length || area.width == 0 {
+            return;
+        }
+
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("┃"))
+            .thumb_symbol("█")
+            .thumb_style(self.thumb_style)
+            .track_style(self.track_style);
+        let mut state = ScrollbarState::new(self.content_length)
+            .position(self.position)
+            .viewport_content_length(self.viewport_content_length);
+        scrollbar.render(area, buf, &mut state);
     }
 }
 
@@ -155,9 +198,6 @@ enum FloatingPlacement {
         anchor: FloatingAnchor,
         size: FloatingSize,
     },
-    Fixed {
-        area: Rect,
-    },
 }
 
 impl FloatingPlacement {
@@ -168,7 +208,6 @@ impl FloatingPlacement {
 
         match self {
             Self::Anchored { anchor, size } => resolve_anchored_area(bounds, anchor, size),
-            Self::Fixed { area } => resolve_fixed_area(bounds, area),
         }
     }
 }
@@ -184,13 +223,21 @@ impl Model {
         if file_picker.has_content
             && let Some(anchor) = self.current_file_picker_floating_anchor(document, viewport)
         {
-            for row in visible_status_rows(document, viewport) {
-                layer.push_clear_rect(Rect::new(0, row, u16::MAX, 1));
-            }
-            layer.push_anchored(
+            let scrollbar = self.file_picker.as_ref().and_then(|state| {
+                let visible_rows = self.file_picker_list_visible_rows();
+                (state.items.len() > visible_rows).then_some(FloatingScrollbar::new(
+                    state.items.len(),
+                    visible_rows,
+                    state.scroll,
+                    secondary_text_style(self.palette),
+                    tertiary_text_style(self.palette),
+                ))
+            });
+            layer.push_anchored_with_scrollbar(
                 FloatingAnchor::new(0, anchor.y),
                 FloatingSize::full_width(self.file_picker_popup_height),
                 file_picker.lines,
+                scrollbar,
             );
         }
         layer
@@ -228,26 +275,6 @@ impl Model {
     }
 }
 
-fn visible_status_rows(document: &DocumentLayout, viewport: &DocumentViewport) -> Vec<u16> {
-    viewport
-        .lines
-        .iter()
-        .enumerate()
-        .filter_map(|(row, _)| {
-            let line_index = viewport.resolved_offset.saturating_add(row);
-            let anchor = document.line_anchor_at(line_index)?;
-            if matches!(
-                anchor.region,
-                DocumentAnchorRegion::StatusLine | DocumentAnchorRegion::ComposerStatusGap
-            ) {
-                u16::try_from(row).ok()
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 fn resolve_anchored_area(bounds: Rect, anchor: FloatingAnchor, size: FloatingSize) -> Rect {
     if anchor.x >= bounds.width || anchor.y >= bounds.height {
         return Rect::ZERO;
@@ -258,18 +285,6 @@ fn resolve_anchored_area(bounds: Rect, anchor: FloatingAnchor, size: FloatingSiz
     let (x, width) = resolve_horizontal_axis(bounds, anchor_x, size.width);
     let (y, height) = resolve_vertical_axis(bounds, anchor_y, size.height);
     Rect::new(x, y, width, height).intersection(bounds)
-}
-
-fn resolve_fixed_area(bounds: Rect, area: Rect) -> Rect {
-    if bounds.is_empty() {
-        return Rect::ZERO;
-    }
-
-    let x = bounds.x.saturating_add(area.x.min(bounds.width));
-    let y = bounds.y.saturating_add(area.y.min(bounds.height));
-    let width = area.width.min(bounds.right().saturating_sub(x));
-    let height = area.height.min(bounds.bottom().saturating_sub(y));
-    Rect::new(x, y, width, height)
 }
 
 fn resolve_horizontal_axis(bounds: Rect, anchor_x: u16, width: u16) -> (u16, u16) {

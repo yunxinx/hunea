@@ -45,13 +45,6 @@ fn anchored_area_clips_when_neither_side_can_fit() {
 }
 
 #[test]
-fn fixed_area_clips_to_bounds() {
-    let area = resolve_fixed_area(Rect::new(5, 3, 10, 6), Rect::new(8, 4, 10, 4));
-
-    assert_eq!(area, Rect::new(13, 7, 2, 2));
-}
-
-#[test]
 fn floating_surface_clears_wide_character_crossing_left_edge() {
     let mut buffer = Buffer::with_lines(["中文中文中文", "中文中文中文", "中文中文中文"]);
     let surface = FloatingSurface {
@@ -60,6 +53,7 @@ fn floating_surface_clears_wide_character_crossing_left_edge() {
             size: FloatingSize::new(4, 2),
         },
         lines: vec![Line::raw("abcd"), Line::raw("efgh")],
+        scrollbar: None,
     };
 
     surface.render(buffer.area, &mut buffer);
@@ -85,6 +79,7 @@ fn floating_surface_keeps_single_width_cell_before_left_edge() {
             size: FloatingSize::new(3, 2),
         },
         lines: vec![Line::raw("xyz"), Line::raw("123")],
+        scrollbar: None,
     };
 
     surface.render(buffer.area, &mut buffer);
@@ -106,6 +101,7 @@ fn floating_surface_uses_rectangular_clear_when_left_edge_crosses_wide_character
             size: FloatingSize::new(4, 2),
         },
         lines: vec![Line::raw("wxyz"), Line::raw("1234")],
+        scrollbar: None,
     };
 
     surface.render(buffer.area, &mut buffer);
@@ -131,6 +127,7 @@ fn floating_surface_uses_rectangular_clear_when_right_edge_crosses_wide_characte
             size: FloatingSize::new(4, 2),
         },
         lines: vec![Line::raw("wxyz"), Line::raw("1234")],
+        scrollbar: None,
     };
 
     surface.render(buffer.area, &mut buffer);

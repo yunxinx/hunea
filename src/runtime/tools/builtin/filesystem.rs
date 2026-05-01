@@ -57,7 +57,8 @@ impl RuntimeTool for FileReadTool {
                         "description": "1-based line number to stop reading at, inclusive"
                     }
                 },
-                "required": ["path"]
+                "required": ["path"],
+                "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Never)
     }
@@ -94,7 +95,8 @@ impl RuntimeTool for ListDirTool {
                         "description": "Include entries whose names start with '.'"
                     }
                 },
-                "required": ["path"]
+                "required": ["path"],
+                "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Never)
     }

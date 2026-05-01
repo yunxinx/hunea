@@ -2,7 +2,10 @@ use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
 use tokio_util::sync::CancellationToken;
 
-use super::{RuntimeToolCall, RuntimeToolDefinition, RuntimeToolRegistry, RuntimeToolResult};
+use super::{
+    RuntimeToolCall, RuntimeToolDefinition, RuntimeToolRegistry, RuntimeToolResult,
+    schema::validate_tool_arguments,
+};
 
 /// `RuntimeToolExecutionFuture` 是工具执行返回结果的异步任务。
 pub type RuntimeToolExecutionFuture<'a> =
@@ -76,6 +79,19 @@ impl RuntimeToolExecutor for RuntimeToolExecutorRegistry {
                 )
             });
         };
+        let definition = tool.definition();
+        if let Some(schema) = definition.input_schema.as_ref()
+            && let Err(error) = validate_tool_arguments(schema, &call.arguments)
+        {
+            let call_id = call.call_id;
+            let tool_name = call.name;
+            return Box::pin(async move {
+                RuntimeToolResult::error(
+                    call_id,
+                    format!("Tool {tool_name} arguments do not match schema: {error}"),
+                )
+            });
+        }
 
         Box::pin(async move { tool.execute(call, cancellation).await })
     }

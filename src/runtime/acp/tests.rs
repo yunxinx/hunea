@@ -1,8 +1,14 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     appconfig::{AcpConfig, AcpDistribution, AcpInstallRoot, AgentServerConfig, AgentServerType},
-    runtime::acp::{AcpSessionResolveError, resolve_session_command},
+    runtime::acp::{
+        AcpAgentIdentity, AcpPromptBlock, AcpSessionResolveError,
+        build_acp_prompt_from_composer_text, resolve_session_command,
+    },
 };
 
 #[test]
@@ -115,6 +121,134 @@ fn acp_config_with_server(server_id: &str, server: AgentServerConfig) -> AcpConf
         auto_update_check: true,
         agent_servers,
     }
+}
+
+#[test]
+fn acp_agent_identity_reports_prompt_capabilities() {
+    use agent_client_protocol::schema::{AgentCapabilities, PromptCapabilities};
+
+    let identity = AcpAgentIdentity {
+        agent_capabilities: AgentCapabilities::new().prompt_capabilities(
+            PromptCapabilities::new()
+                .image(true)
+                .audio(true)
+                .embedded_context(true),
+        ),
+        ..AcpAgentIdentity::default()
+    };
+
+    assert!(identity.supports_image());
+    assert!(identity.supports_audio());
+    assert!(identity.supports_embedded_context());
+}
+
+#[test]
+fn acp_prompt_builder_embeds_supported_image_audio_and_text_resources() {
+    use agent_client_protocol::schema::{
+        AgentCapabilities, ContentBlock, EmbeddedResourceResource, PromptCapabilities,
+    };
+
+    let root = AcpPromptTempFileTree::new("rich-blocks");
+    root.write_file("assets/sample.png", &[0x89, b'P', b'N', b'G']);
+    root.write_file("audio/sample.wav", b"RIFF");
+    root.write_file("src/code.py", b"print('hi')\n");
+    let identity = AcpAgentIdentity {
+        agent_capabilities: AgentCapabilities::new().prompt_capabilities(
+            PromptCapabilities::new()
+                .image(true)
+                .audio(true)
+                .embedded_context(true),
+        ),
+        ..AcpAgentIdentity::default()
+    };
+
+    let prompt = build_acp_prompt_from_composer_text(
+        "review @assets/sample.png @audio/sample.wav @src/code.py",
+        root.path(),
+        &identity,
+    );
+
+    let blocks = prompt.to_content_blocks();
+    assert_eq!(blocks.len(), 6);
+    assert!(matches!(
+        &blocks[0],
+        ContentBlock::Text(text) if text.text == "review "
+    ));
+    assert!(matches!(
+        &blocks[1],
+        ContentBlock::Image(image)
+            if image.mime_type == "image/png"
+                && image.data == "iVBORw=="
+                && image.uri.as_deref() == Some(root.file_uri("assets/sample.png").as_str())
+    ));
+    assert!(matches!(
+        &blocks[3],
+        ContentBlock::Audio(audio)
+            if audio.mime_type == "audio/wav" && audio.data == "UklGRg=="
+    ));
+    match &blocks[5] {
+        ContentBlock::Resource(resource) => match &resource.resource {
+            EmbeddedResourceResource::TextResourceContents(text) => {
+                assert_eq!(text.uri, root.file_uri("src/code.py"));
+                assert_eq!(text.mime_type.as_deref(), Some("text/x-python"));
+                assert_eq!(text.text, "print('hi')\n");
+            }
+            other => panic!("expected embedded text resource, got {other:?}"),
+        },
+        other => panic!("expected resource block, got {other:?}"),
+    }
+}
+
+#[test]
+fn acp_prompt_builder_downgrades_missing_optional_capability_to_resource_link() {
+    use agent_client_protocol::schema::ContentBlock;
+
+    let root = AcpPromptTempFileTree::new("baseline-link");
+    root.write_file("assets/sample.png", &[0x89, b'P', b'N', b'G']);
+
+    let prompt = build_acp_prompt_from_composer_text(
+        "inspect @assets/sample.png",
+        root.path(),
+        &AcpAgentIdentity::default(),
+    );
+
+    let blocks = prompt.to_content_blocks();
+    assert_eq!(blocks.len(), 2);
+    assert!(matches!(
+        &blocks[1],
+        ContentBlock::ResourceLink(link)
+            if link.name == "sample.png"
+                && link.uri == root.file_uri("assets/sample.png")
+                && link.mime_type.as_deref() == Some("image/png")
+                && link.size == Some(4)
+    ));
+}
+
+#[test]
+fn acp_prompt_builder_downgrades_unreadable_text_resource_to_resource_link() {
+    use agent_client_protocol::schema::{AgentCapabilities, ContentBlock, PromptCapabilities};
+
+    let root = AcpPromptTempFileTree::new("non-utf8-resource");
+    root.write_file("src/binary.py", &[0xff, 0xfe, 0xfd]);
+    let identity = AcpAgentIdentity {
+        agent_capabilities: AgentCapabilities::new()
+            .prompt_capabilities(PromptCapabilities::new().embedded_context(true)),
+        ..AcpAgentIdentity::default()
+    };
+
+    let prompt =
+        build_acp_prompt_from_composer_text("inspect @src/binary.py", root.path(), &identity);
+
+    let blocks = prompt.to_content_blocks();
+    assert_eq!(blocks.len(), 2);
+    assert!(matches!(
+        &blocks[1],
+        ContentBlock::ResourceLink(link)
+            if link.name == "binary.py"
+                && link.uri == root.file_uri("src/binary.py")
+                && link.mime_type.as_deref() == Some("text/x-python")
+                && link.size == Some(3)
+    ));
 }
 
 #[test]
@@ -290,7 +424,9 @@ async fn acp_worker_transport_creates_session_and_reads_prompt_response() {
     ));
 
     command_tx
-        .send(super::AcpWorkerCommand::Prompt("ping".to_string()))
+        .send(super::AcpWorkerCommand::Prompt(
+            super::AcpPrompt::from_text("ping"),
+        ))
         .expect("prompt command should send");
 
     let prompt_started = recv_worker_event(&event_rx, "worker should report prompt start").await;
@@ -462,7 +598,9 @@ async fn acp_worker_transport_forwards_thought_chunks_and_model_config() {
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
     command_tx
-        .send(super::AcpWorkerCommand::Prompt("ping".to_string()))
+        .send(super::AcpWorkerCommand::Prompt(
+            super::AcpPrompt::from_text("ping"),
+        ))
         .expect("prompt command should send");
     let _prompt_started = recv_worker_event(&event_rx, "worker should report prompt start").await;
 
@@ -489,6 +627,108 @@ async fn acp_worker_transport_forwards_thought_chunks_and_model_config() {
     assert!(matches!(
         prompt_chunk,
         super::AcpSessionEvent::AgentMessageChunk { ref content, .. } if content == "done"
+    ));
+
+    command_tx
+        .send(super::AcpWorkerCommand::Shutdown)
+        .expect("shutdown command should send");
+    worker
+        .await
+        .expect("worker task should join")
+        .expect("worker should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_worker_transport_sends_structured_prompt_blocks() {
+    use std::sync::{Arc, Mutex, atomic::AtomicBool, mpsc};
+
+    use acp::schema::{
+        ContentBlock, Implementation, InitializeRequest, InitializeResponse, NewSessionRequest,
+        NewSessionResponse, PromptRequest, PromptResponse, StopReason,
+    };
+    use agent_client_protocol as acp;
+
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    let (prompt_tx, prompt_rx) = tokio::sync::oneshot::channel();
+    let prompt_tx = Arc::new(Mutex::new(Some(prompt_tx)));
+    tokio::task::spawn({
+        let prompt_tx = Arc::clone(&prompt_tx);
+        async move {
+            acp::Agent
+                .builder()
+                .on_receive_request(
+                    async |request: InitializeRequest, responder, _connection| {
+                        responder.respond(
+                            InitializeResponse::new(request.protocol_version)
+                                .agent_info(Implementation::new("fake-agent", "0.1.0")),
+                        )
+                    },
+                    acp::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async |_request: NewSessionRequest, responder, _connection| {
+                        responder.respond(NewSessionResponse::new("test-session"))
+                    },
+                    acp::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: PromptRequest, responder, _connection| {
+                        if let Some(sender) = prompt_tx.lock().expect("prompt sender").take() {
+                            let _ = sender.send(request.prompt.clone());
+                        }
+                        responder.respond(PromptResponse::new(StopReason::EndTurn))
+                    },
+                    acp::on_receive_request!(),
+                )
+                .connect_to(agent_transport)
+                .await
+        }
+    });
+
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let worker = tokio::task::spawn(super::run_agent_transport_worker(
+        "fake".to_string(),
+        client_transport,
+        command_rx,
+        cancel_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+        super::AcpPermissionRegistry::default(),
+    ));
+
+    let _started = recv_worker_event(&event_rx, "worker should report session start").await;
+    command_tx
+        .send(super::AcpWorkerCommand::Prompt(
+            super::AcpPrompt::from_blocks(vec![
+                AcpPromptBlock::Text("look ".to_string()),
+                AcpPromptBlock::ResourceLink {
+                    name: "lib.rs".to_string(),
+                    uri: "file:///tmp/lib.rs".to_string(),
+                    mime_type: Some("text/x-rust".to_string()),
+                    size: Some(12),
+                },
+            ]),
+        ))
+        .expect("prompt command should send");
+
+    let _prompt_started = recv_worker_event(&event_rx, "worker should report prompt start").await;
+    let _prompt_response =
+        recv_worker_event(&event_rx, "worker should report prompt response").await;
+    let prompt = prompt_rx.await.expect("agent should receive prompt");
+    assert_eq!(prompt.len(), 2);
+    assert!(matches!(
+        &prompt[0],
+        ContentBlock::Text(text) if text.text == "look "
+    ));
+    assert!(matches!(
+        &prompt[1],
+        ContentBlock::ResourceLink(link)
+            if link.name == "lib.rs"
+                && link.uri == "file:///tmp/lib.rs"
+                && link.mime_type.as_deref() == Some("text/x-rust")
+                && link.size == Some(12)
     ));
 
     command_tx
@@ -754,7 +994,9 @@ async fn acp_worker_cancel_prompt_sends_session_cancel_notification() {
     ));
 
     command_tx
-        .send(super::AcpWorkerCommand::Prompt("ping".to_string()))
+        .send(super::AcpWorkerCommand::Prompt(
+            super::AcpPrompt::from_text("ping"),
+        ))
         .expect("prompt command should send");
 
     let prompt_started = recv_worker_event(&event_rx, "worker should report prompt start").await;
@@ -807,6 +1049,44 @@ async fn recv_worker_event(
         }
         assert!(std::time::Instant::now() < deadline, "{context}");
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+struct AcpPromptTempFileTree {
+    path: PathBuf,
+}
+
+impl AcpPromptTempFileTree {
+    fn new(name: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("lumos-acp-prompt-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("temp root should be creatable");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn write_file(&self, relative: &str, content: &[u8]) {
+        let path = self.path.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("temp parent should be creatable");
+        }
+        std::fs::write(path, content).expect("temp file should be writable");
+    }
+
+    fn file_uri(&self, relative: &str) -> String {
+        url::Url::from_file_path(self.path.join(relative))
+            .expect("temp file path should convert to URI")
+            .to_string()
+    }
+}
+
+impl Drop for AcpPromptTempFileTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
@@ -908,7 +1188,9 @@ async fn acp_worker_round_trips_permission_selection() {
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
     command_tx
-        .send(super::AcpWorkerCommand::Prompt("ping".to_string()))
+        .send(super::AcpWorkerCommand::Prompt(
+            super::AcpPrompt::from_text("ping"),
+        ))
         .expect("prompt command should send");
     let _prompt_started = recv_worker_event(&event_rx, "worker should report prompt start").await;
 

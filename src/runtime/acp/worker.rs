@@ -1,13 +1,13 @@
 use std::{fmt, sync::mpsc, thread};
 
 use super::{
-    AcpPermissionRespondError, AcpSessionCommand, AcpSessionEvent,
+    AcpPermissionRespondError, AcpPrompt, AcpSessionCommand, AcpSessionEvent,
     permission::AcpPermissionRegistry, protocol::run_worker_thread,
 };
 
 #[derive(Debug)]
 pub(crate) enum AcpWorkerCommand {
-    Prompt(String),
+    Prompt(AcpPrompt),
     SetConfigOption { config_id: String, value: String },
     Shutdown,
 }
@@ -60,7 +60,7 @@ impl AcpSessionWorker {
     }
 
     /// `send_prompt` 向已启动的 ACP session 发送一轮用户 prompt。
-    pub fn send_prompt(&self, prompt: String) -> Result<(), AcpWorkerSendError> {
+    pub fn send_prompt(&self, prompt: AcpPrompt) -> Result<(), AcpWorkerSendError> {
         self.commands
             .send(AcpWorkerCommand::Prompt(prompt))
             .map_err(|_| AcpWorkerSendError::Closed)

@@ -40,6 +40,21 @@ impl AcpAgentIdentity {
                 .is_some_and(|version| !version.trim().is_empty())
     }
 
+    /// `supports_image` 表示 agent 是否声明支持 prompt image block。
+    pub fn supports_image(&self) -> bool {
+        self.agent_capabilities.prompt_capabilities.image
+    }
+
+    /// `supports_audio` 表示 agent 是否声明支持 prompt audio block。
+    pub fn supports_audio(&self) -> bool {
+        self.agent_capabilities.prompt_capabilities.audio
+    }
+
+    /// `supports_embedded_context` 表示 agent 是否声明支持嵌入资源上下文。
+    pub fn supports_embedded_context(&self) -> bool {
+        self.agent_capabilities.prompt_capabilities.embedded_context
+    }
+
     /// `display_name` 返回面向用户的 agent 名称。
     pub fn display_name(&self) -> String {
         self.title

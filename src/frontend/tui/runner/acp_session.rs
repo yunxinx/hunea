@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 use color_eyre::eyre::Result;
 
 use crate::frontend::tui::{Model, RequestMetrics, runtime::RuntimeEventApply};
-use crate::runtime::acp::{AcpAgentIdentity, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker};
+use crate::runtime::acp::{
+    AcpAgentIdentity, AcpPrompt, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
+};
 use crate::runtime::session::{RuntimeEvent, RuntimeTarget};
 use crate::runtime::token_count::StreamingTokenProgress;
 
@@ -171,7 +173,7 @@ impl AcpRuntimeState {
         }
     }
 
-    fn send_prompt(&self, agent_id: &str, prompt: String) -> Result<(), String> {
+    fn send_prompt(&self, agent_id: &str, prompt: AcpPrompt) -> Result<(), String> {
         let Some(worker) = self.worker.as_ref() else {
             return Err(format!("ACP session is not ready: {agent_id}"));
         };
@@ -422,7 +424,7 @@ pub(super) fn run_send_acp_prompt_effect(
     model: &mut Model,
     acp_runtime: &mut AcpRuntimeState,
     agent_id: &str,
-    prompt: String,
+    prompt: AcpPrompt,
 ) {
     if let Err(message) = acp_runtime.send_prompt(agent_id, prompt) {
         model.clear_stream_activity();

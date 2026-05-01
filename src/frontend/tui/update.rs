@@ -3,6 +3,7 @@ use std::{path::PathBuf, time::Duration};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 
 use crate::runtime::{
+    acp::{AcpPrompt, build_acp_prompt_from_composer_text},
     model_catalog::ModelSelection,
     native::models::ProviderSyncRequest,
     native::{ChatMessage, NativeAgentRequest},
@@ -27,7 +28,7 @@ pub enum AppEffect {
     },
     SendAcpPrompt {
         agent_id: String,
-        prompt: String,
+        prompt: AcpPrompt,
     },
     RespondAcpPermission {
         request_id: String,
@@ -491,15 +492,43 @@ impl Model {
                     .clone()
                     .unwrap_or_else(|| agent_id.clone()),
             );
-            return Some(AppEffect::SendAcpPrompt {
-                agent_id,
-                prompt: content,
-            });
+            let identity = self
+                .acp_agent_identities
+                .get(&agent_id)
+                .cloned()
+                .unwrap_or_default();
+            let prompt =
+                build_acp_prompt_from_composer_text(&content, self.acp_prompt_root(), &identity);
+            return Some(AppEffect::SendAcpPrompt { agent_id, prompt });
         }
 
         let selection = self.selected_model.clone()?;
         self.native_agent_request_for_selection(&selection)
             .map(|request| AppEffect::SendNativeAgent { request })
+    }
+
+    fn acp_prompt_root(&self) -> PathBuf {
+        let trimmed = self.current_dir.trim();
+        if trimmed.is_empty() {
+            return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        }
+        if trimmed == "~" {
+            return home_dir().unwrap_or_else(|| PathBuf::from("."));
+        }
+        if let Some(rest) = trimmed.strip_prefix("~/") {
+            return home_dir()
+                .map(|home| home.join(rest))
+                .unwrap_or_else(|| PathBuf::from(trimmed));
+        }
+
+        let path = PathBuf::from(trimmed);
+        if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| PathBuf::from(trimmed))
+        }
     }
 
     fn handle_resize(&mut self, width: u16, height: u16) {
@@ -607,4 +636,10 @@ fn normalize_pasted_text(text: &str) -> String {
     }
 
     normalized
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
 }

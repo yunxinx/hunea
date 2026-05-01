@@ -6,6 +6,7 @@ mod identity;
 mod initialize;
 pub mod install;
 mod permission;
+mod prompt_builder;
 mod protocol;
 pub mod registry;
 mod worker;
@@ -24,6 +25,7 @@ pub(crate) use initialize::debug_protocol_version_system_message;
 pub use permission::{
     AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest, AcpPermissionRespondError,
 };
+pub use prompt_builder::{AcpPrompt, AcpPromptBlock, build_acp_prompt_from_composer_text};
 pub use worker::{AcpSessionWorker, AcpWorkerSendError};
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ use agent_client_protocol::schema::{
 };
 
 use super::{
-    AcpModelConfig, AcpModelOption, AcpSessionCommand, AcpSessionEvent,
+    AcpModelConfig, AcpModelOption, AcpPrompt, AcpSessionCommand, AcpSessionEvent,
     initialize::{
         build_initialize_request, initialize_outcome_from_response, protocol_version_warning,
     },
@@ -24,6 +24,8 @@ enum AcpPromptReadOutcome {
     Completed(String),
     Interrupted,
 }
+
+type AcpPromptResponseReceiver = tokio::sync::oneshot::Receiver<Result<String, String>>;
 
 pub(crate) fn run_worker_thread(
     agent_id: String,
@@ -210,13 +212,16 @@ async fn run_agent_prompt_loop(
                 let _ = event_tx.send(AcpSessionEvent::PromptStarted {
                     agent_id: agent_id.clone(),
                 });
-                if let Err(error) = session.send_prompt(prompt) {
-                    let _ = event_tx.send(AcpSessionEvent::PromptFailed {
-                        agent_id: agent_id.clone(),
-                        message: error.to_string(),
-                    });
-                    continue;
-                }
+                let prompt_response_rx = match send_acp_prompt_request(session, prompt) {
+                    Ok(receiver) => receiver,
+                    Err(error) => {
+                        let _ = event_tx.send(AcpSessionEvent::PromptFailed {
+                            agent_id: agent_id.clone(),
+                            message: error,
+                        });
+                        continue;
+                    }
+                };
 
                 match read_prompt_response(
                     session,
@@ -224,6 +229,7 @@ async fn run_agent_prompt_loop(
                     &event_tx,
                     &permissions,
                     &mut cancel_rx,
+                    prompt_response_rx,
                 )
                 .await
                 {
@@ -272,12 +278,39 @@ async fn run_agent_prompt_loop(
     }
 }
 
+fn send_acp_prompt_request(
+    session: &mut agent_client_protocol::ActiveSession<'static, agent_client_protocol::Agent>,
+    prompt: AcpPrompt,
+) -> Result<AcpPromptResponseReceiver, String> {
+    use acp::schema::{PromptRequest, PromptResponse};
+    use agent_client_protocol as acp;
+
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    session
+        .connection()
+        .send_request_to(
+            acp::Agent,
+            PromptRequest::new(session.session_id().clone(), prompt.into_content_blocks()),
+        )
+        .on_receiving_result(async move |result: Result<PromptResponse, acp::Error>| {
+            let result = result
+                .map(|response| format!("{:?}", response.stop_reason))
+                .map_err(|error| error.to_string());
+            let _ = response_tx.send(result);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+
+    Ok(response_rx)
+}
+
 async fn read_prompt_response(
     session: &mut agent_client_protocol::ActiveSession<'static, agent_client_protocol::Agent>,
     agent_id: &str,
     event_tx: &mpsc::Sender<AcpSessionEvent>,
     permissions: &AcpPermissionRegistry,
     cancel_rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+    mut prompt_response_rx: AcpPromptResponseReceiver,
 ) -> Result<AcpPromptReadOutcome, String> {
     use acp::schema::{
         ConfigOptionUpdate, ContentBlock, ContentChunk, RequestPermissionOutcome,
@@ -291,6 +324,7 @@ async fn read_prompt_response(
     let mut is_cancel_rx_closed = false;
     loop {
         let update = tokio::select! {
+            biased;
             cancel = cancel_rx.recv(), if !is_cancel_rx_closed => {
                 if cancel.is_some() {
                     send_acp_cancel_notification(session)?;
@@ -301,6 +335,17 @@ async fn read_prompt_response(
                 continue;
             }
             update = session.read_update() => update.map_err(|error| error.to_string())?,
+            response = &mut prompt_response_rx => {
+                let stop_reason = match response {
+                    Ok(Ok(stop_reason)) => stop_reason,
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => return Err("ACP prompt response channel closed".to_string()),
+                };
+                if is_interrupted {
+                    return Ok(AcpPromptReadOutcome::Interrupted);
+                }
+                return Ok(AcpPromptReadOutcome::Completed(stop_reason));
+            }
         };
         match update {
             SessionMessage::SessionMessage(dispatch) => {
@@ -319,6 +364,9 @@ async fn read_prompt_response(
                                     content: text.text,
                                 });
                             }
+                            SessionUpdate::AgentMessageChunk(_) => {
+                                // 当前 TUI transcript 只渲染 agent 文本输出；非文本 block 暂不展示。
+                            }
                             SessionUpdate::AgentThoughtChunk(ContentChunk {
                                 content: ContentBlock::Text(text),
                                 ..
@@ -327,6 +375,9 @@ async fn read_prompt_response(
                                     agent_id: agent_id.to_string(),
                                     content: text.text,
                                 });
+                            }
+                            SessionUpdate::AgentThoughtChunk(_) => {
+                                // 当前 reasoning transcript 只接收文本；非文本 thought block 暂不展示。
                             }
                             SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate {
                                 config_options,

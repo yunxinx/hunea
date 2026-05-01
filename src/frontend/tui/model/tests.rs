@@ -1992,7 +1992,7 @@ fn enter_acp_prompt_starts_activity_before_worker_ack() {
         effect,
         Some(AppEffect::SendAcpPrompt {
             agent_id: "Kimi Code CLI".to_string(),
-            prompt: "hello acp".to_string(),
+            prompt: crate::runtime::acp::AcpPrompt::from_text("hello acp"),
         })
     );
     assert!(
@@ -2001,6 +2001,66 @@ fn enter_acp_prompt_starts_activity_before_worker_ack() {
             .plain_line
             .contains("Submitted (0s")
     );
+}
+
+#[test]
+fn enter_acp_prompt_builds_structured_blocks_from_selected_agent_capabilities() {
+    use agent_client_protocol::schema::{
+        AgentCapabilities, ContentBlock, EmbeddedResourceResource, PromptCapabilities,
+    };
+
+    let root = TempFileTree::new("acp-structured-prompt");
+    root.write_file_with_content("assets/sample.png", &[0x89, b'P', b'N', b'G']);
+    root.write_file_with_content("src/code.py", b"print('hi')\n");
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_phrases: vec!["Submitted".to_string()],
+            status_phrase_order: StatusPhraseOrder::Cycle,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.selected_acp_agent = Some("fake".to_string());
+    model.apply_acp_agent_identity(
+        "fake",
+        crate::runtime::acp::AcpAgentIdentity {
+            agent_capabilities: AgentCapabilities::new()
+                .prompt_capabilities(PromptCapabilities::new().image(true).embedded_context(true)),
+            ..crate::runtime::acp::AcpAgentIdentity::default()
+        },
+    );
+    model
+        .composer_mut()
+        .insert_text("review @assets/sample.png @src/code.py");
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    let Some(AppEffect::SendAcpPrompt { agent_id, prompt }) = effect else {
+        panic!("expected structured ACP prompt effect");
+    };
+
+    assert_eq!(agent_id, "fake");
+    let blocks = prompt.to_content_blocks();
+    assert_eq!(blocks.len(), 4);
+    assert!(matches!(
+        &blocks[1],
+        ContentBlock::Image(image)
+            if image.mime_type == "image/png"
+                && image.data == "iVBORw=="
+                && image.uri.as_deref() == Some(root.file_uri("assets/sample.png").as_str())
+    ));
+    match &blocks[3] {
+        ContentBlock::Resource(resource) => match &resource.resource {
+            EmbeddedResourceResource::TextResourceContents(text) => {
+                assert_eq!(text.uri, root.file_uri("src/code.py"));
+                assert_eq!(text.text, "print('hi')\n");
+            }
+            other => panic!("expected embedded text resource, got {other:?}"),
+        },
+        other => panic!("expected resource block, got {other:?}"),
+    }
 }
 
 #[test]
@@ -2182,11 +2242,21 @@ impl TempFileTree {
     }
 
     fn write_file(&self, relative: &str) {
+        self.write_file_with_content(relative, b"");
+    }
+
+    fn write_file_with_content(&self, relative: &str, content: &[u8]) {
         let path = self.path.join(relative);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("temp parent should be creatable");
         }
-        std::fs::write(path, "").expect("temp file should be writable");
+        std::fs::write(path, content).expect("temp file should be writable");
+    }
+
+    fn file_uri(&self, relative: &str) -> String {
+        url::Url::from_file_path(self.path.join(relative))
+            .expect("temp file path should convert to URI")
+            .to_string()
     }
 }
 

@@ -30,7 +30,7 @@ pub(super) fn apply_native_agent_event(
 ) {
     let runtime_event = match event {
         NativeAgentEvent::Retrying { message } => {
-            model.show_acp_activity_with_header(message);
+            model.show_stream_activity_with_header(message);
             return;
         }
         NativeAgentEvent::OutputTokenEstimate { total_tokens } => {
@@ -44,7 +44,7 @@ pub(super) fn apply_native_agent_event(
             is_thinking,
         },
         NativeAgentEvent::ToolExecutionStarted { call } => {
-            model.show_acp_activity_with_header(format!(
+            model.show_stream_activity_with_header(format!(
                 "Running {}",
                 native_agent_tool_label(&call)
             ));
@@ -84,7 +84,7 @@ pub(super) fn run_send_native_agent_effect(
     let tools = native_agent_workspace_tools();
     let request = request.with_tools(tools.definitions());
     native_agent_runtime.start(request, tools, request_policy);
-    model.show_acp_activity(activity_label);
+    model.show_stream_activity(activity_label);
 }
 
 pub(super) fn native_agent_workspace_tools() -> RuntimeToolExecutorRegistry {
@@ -97,7 +97,7 @@ pub(super) fn run_interrupt_native_agent_effect(
     native_agent_runtime: &mut NativeAgentRuntimeState,
 ) -> bool {
     if native_agent_runtime.interrupt() {
-        model.clear_acp_activity();
+        model.clear_stream_activity();
         model.append_system_message_from_runtime("Chat interrupted");
         return true;
     }

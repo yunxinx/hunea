@@ -534,7 +534,7 @@ fn run_interrupt_acp_prompt_effect(model: &mut Model, acp_runtime: &mut AcpRunti
         let _ = acp_runtime.respond_permission(&pending.request_id, None);
         model.close_tool_approval_panel();
     }
-    model.clear_acp_activity();
+    model.clear_stream_activity();
     model.append_system_message_from_runtime("Chat interrupted");
 }
 
@@ -791,8 +791,8 @@ fn apply_acp_session_event(
                     .clone()
                     .unwrap_or_else(|| agent_id.clone()),
             );
-            if model.acp_activity.is_none() {
-                model.show_acp_activity(agent_id);
+            if model.stream_activity.is_none() {
+                model.show_stream_activity(agent_id);
             }
         }
         AcpSessionEvent::AgentThoughtChunk { content, .. } => {
@@ -800,19 +800,19 @@ fn apply_acp_session_event(
                 return;
             }
             acp_runtime.push_reasoning_chunk(&content);
-            model.set_acp_activity_thinking(true);
+            model.set_stream_activity_thinking(true);
             if let Some(total_tokens) = acp_runtime.observe_output_tokens(&content) {
-                model.set_acp_activity_output_tokens(total_tokens);
+                model.set_stream_activity_output_tokens(total_tokens);
             }
         }
         AcpSessionEvent::AgentMessageChunk { content, .. } => {
             if acp_runtime.should_discard_prompt_output() {
                 return;
             }
-            model.set_acp_activity_thinking(false);
+            model.set_stream_activity_thinking(false);
             acp_runtime.push_response_chunk(&content);
             if let Some(total_tokens) = acp_runtime.observe_output_tokens(&content) {
-                model.set_acp_activity_output_tokens(total_tokens);
+                model.set_stream_activity_output_tokens(total_tokens);
             }
         }
         AcpSessionEvent::ModelConfigChanged { agent_id, config } => {
@@ -828,26 +828,26 @@ fn apply_acp_session_event(
         } => {
             if acp_runtime.should_discard_prompt_output() {
                 acp_runtime.mark_prompt_finished();
-                model.clear_acp_activity();
+                model.clear_stream_activity();
                 return;
             }
             if !content.is_empty() {
                 acp_runtime.push_response_chunk(&content);
                 if let Some(total_tokens) = acp_runtime.observe_output_tokens(&content) {
-                    model.set_acp_activity_output_tokens(total_tokens);
+                    model.set_stream_activity_output_tokens(total_tokens);
                 }
             }
             if let Some(total_tokens) = acp_runtime.flush_output_tokens() {
-                model.set_acp_activity_output_tokens(total_tokens);
+                model.set_stream_activity_output_tokens(total_tokens);
             }
             let metrics = acp_runtime.request_metrics(Instant::now());
-            model.set_acp_activity_thinking(false);
+            model.set_stream_activity_thinking(false);
             flush_acp_response_buffer(model, acp_runtime);
             if let Some(metrics) = metrics {
                 model.set_last_request_metrics(Some(metrics));
             }
             acp_runtime.mark_prompt_finished();
-            model.clear_acp_activity();
+            model.clear_stream_activity();
             if stop_reason != "EndTurn" {
                 model.show_transient_status_notice(&format!("ACP prompt finished: {stop_reason}"));
             }
@@ -855,21 +855,21 @@ fn apply_acp_session_event(
         AcpSessionEvent::PromptFailed { message, .. } => {
             if acp_runtime.should_discard_prompt_output() {
                 acp_runtime.mark_prompt_finished();
-                model.clear_acp_activity();
+                model.clear_stream_activity();
                 return;
             }
             if let Some(total_tokens) = acp_runtime.flush_output_tokens() {
-                model.set_acp_activity_output_tokens(total_tokens);
+                model.set_stream_activity_output_tokens(total_tokens);
             }
-            model.set_acp_activity_thinking(false);
+            model.set_stream_activity_thinking(false);
             flush_acp_response_buffer(model, acp_runtime);
             acp_runtime.mark_prompt_finished();
-            model.clear_acp_activity();
+            model.clear_stream_activity();
             model.show_transient_status_notice(&format!("ACP prompt failed: {message}"));
         }
         AcpSessionEvent::PromptInterrupted { .. } => {
             acp_runtime.mark_prompt_finished();
-            model.clear_acp_activity();
+            model.clear_stream_activity();
         }
         AcpSessionEvent::PermissionRequested { agent_id, request } => {
             if acp_runtime.should_discard_prompt_output() {
@@ -880,9 +880,9 @@ fn apply_acp_session_event(
                 return;
             }
             if let Some(total_tokens) = acp_runtime.flush_output_tokens() {
-                model.set_acp_activity_output_tokens(total_tokens);
+                model.set_stream_activity_output_tokens(total_tokens);
             }
-            model.set_acp_activity_thinking(false);
+            model.set_stream_activity_thinking(false);
             flush_acp_response_buffer(model, acp_runtime);
             model.apply_runtime_event(RuntimeEvent::PermissionRequested {
                 target: RuntimeTarget::acp_agent(agent_id),
@@ -901,11 +901,11 @@ fn apply_acp_session_event(
         AcpSessionEvent::Stopped { message, .. } => {
             if acp_runtime.should_discard_prompt_output() {
                 acp_runtime.mark_prompt_finished();
-                model.clear_acp_activity();
+                model.clear_stream_activity();
                 return;
             }
             flush_acp_response_buffer(model, acp_runtime);
-            model.clear_acp_activity();
+            model.clear_stream_activity();
             if let Some(message) = message {
                 model.show_transient_status_notice(&format!("ACP session stopped: {message}"));
             }
@@ -951,7 +951,7 @@ fn run_send_acp_prompt_effect(
     prompt: String,
 ) {
     if let Err(message) = acp_runtime.send_prompt(agent_id, prompt) {
-        model.clear_acp_activity();
+        model.clear_stream_activity();
         model.show_transient_status_notice(&message);
     } else {
         acp_runtime.mark_prompt_submitted();
@@ -1121,7 +1121,7 @@ mod tests {
         );
 
         assert!(model.transcript_plain_items().is_empty());
-        assert!(model.current_acp_activity_render_result().has_content);
+        assert!(model.current_stream_activity_render_result().has_content);
 
         apply_acp_session_event(
             &mut model,
@@ -1137,7 +1137,7 @@ mod tests {
             model.transcript_plain_items(),
             vec!["你好！我是 Kimi Code CLI".to_string()]
         );
-        assert!(!model.current_acp_activity_render_result().has_content);
+        assert!(!model.current_stream_activity_render_result().has_content);
     }
 
     #[test]
@@ -1339,7 +1339,7 @@ mod tests {
         );
 
         let activity = model
-            .current_acp_activity_render_result_at(
+            .current_stream_activity_render_result_at(
                 std::time::Instant::now() + std::time::Duration::from_millis(120),
             )
             .plain_line;
@@ -1359,8 +1359,8 @@ mod tests {
             },
         );
         model.set_window(80, 6);
-        model.show_acp_activity("Kimi Code CLI");
-        let before = model.current_acp_activity_render_result().plain_line;
+        model.show_stream_activity("Kimi Code CLI");
+        let before = model.current_stream_activity_render_result().plain_line;
         let mut acp_runtime = AcpRuntimeState::default();
 
         apply_acp_session_event(
@@ -1371,7 +1371,7 @@ mod tests {
             },
         );
 
-        let after = model.current_acp_activity_render_result().plain_line;
+        let after = model.current_stream_activity_render_result().plain_line;
         assert!(before.contains("Submitted (0s"));
         assert_eq!(after, before);
     }
@@ -1450,7 +1450,7 @@ mod tests {
 
         assert!(
             model
-                .current_acp_activity_render_result()
+                .current_stream_activity_render_result()
                 .plain_line
                 .contains("thinking")
         );
@@ -1510,7 +1510,7 @@ mod tests {
         );
 
         let activity = model
-            .current_acp_activity_render_result_at(
+            .current_stream_activity_render_result_at(
                 std::time::Instant::now() + std::time::Duration::from_millis(120),
             )
             .plain_line;
@@ -1567,7 +1567,7 @@ mod tests {
     fn clear_runtime_discards_stale_native_agent_event() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
-        model.show_acp_activity("qwen3");
+        model.show_stream_activity("qwen3");
         let mut acp_runtime = AcpRuntimeState::default();
         let mut native_agent_runtime = NativeAgentRuntimeState::default();
         let (sender, receiver) = mpsc::channel();
@@ -1598,7 +1598,7 @@ mod tests {
                 .iter()
                 .all(|item| !item.contains("stale response"))
         );
-        assert!(!model.current_acp_activity_render_result().has_content);
+        assert!(!model.current_stream_activity_render_result().has_content);
     }
 
     #[test]
@@ -1656,7 +1656,7 @@ mod tests {
                 .iter()
                 .all(|item| !item.contains("old partial") && !item.contains("stale response"))
         );
-        assert!(!model.current_acp_activity_render_result().has_content);
+        assert!(!model.current_stream_activity_render_result().has_content);
     }
 
     #[test]
@@ -1683,7 +1683,7 @@ mod tests {
         );
 
         assert_eq!(model.selected_acp_agent(), Some("Kimi Code CLI"));
-        assert!(!model.current_acp_activity_render_result().has_content);
+        assert!(!model.current_stream_activity_render_result().has_content);
     }
 
     #[test]
@@ -1762,7 +1762,7 @@ mod tests {
     fn native_agent_completion_appends_assistant_message_after_request_finishes() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
-        model.show_acp_activity("qwen3");
+        model.show_stream_activity("qwen3");
 
         apply_native_agent_event(
             &mut model,
@@ -1782,7 +1782,7 @@ mod tests {
             model.transcript_plain_items(),
             vec!["你好，我是本地模型".to_string()]
         );
-        assert!(!model.current_acp_activity_render_result().has_content);
+        assert!(!model.current_stream_activity_render_result().has_content);
     }
 
     #[test]
@@ -1829,7 +1829,7 @@ mod tests {
             },
         );
         model.transcript_mut().clear();
-        model.show_acp_activity("qwen3");
+        model.show_stream_activity("qwen3");
 
         apply_native_agent_event(
             &mut model,
@@ -1870,7 +1870,7 @@ mod tests {
         );
         model.transcript_mut().clear();
         model.transcript_mut().set_width(40);
-        model.show_acp_activity("qwen3");
+        model.show_stream_activity("qwen3");
 
         apply_native_agent_event(
             &mut model,
@@ -2084,7 +2084,7 @@ mod tests {
     fn native_agent_completion_hides_reasoning_when_configured_off() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
-        model.show_acp_activity("qwen3");
+        model.show_stream_activity("qwen3");
 
         apply_native_agent_event(
             &mut model,
@@ -2108,7 +2108,7 @@ mod tests {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(80, 6);
         model.transcript_mut().clear();
-        model.show_acp_activity("qwen3");
+        model.show_stream_activity("qwen3");
 
         apply_native_agent_event(
             &mut model,
@@ -2118,7 +2118,7 @@ mod tests {
 
         assert!(
             model
-                .current_acp_activity_render_result()
+                .current_stream_activity_render_result()
                 .plain_line
                 .contains("thinking")
         );
@@ -2131,7 +2131,7 @@ mod tests {
 
         assert!(
             !model
-                .current_acp_activity_render_result()
+                .current_stream_activity_render_result()
                 .plain_line
                 .contains("thinking")
         );
@@ -2141,7 +2141,7 @@ mod tests {
     fn native_agent_failure_appends_system_message_in_transcript() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
-        model.show_acp_activity("qwen3");
+        model.show_stream_activity("qwen3");
 
         apply_native_agent_event(
             &mut model,
@@ -2156,14 +2156,14 @@ mod tests {
             vec!["■ Chat failed: request /v1/chat/completions: connection refused".to_string()]
         );
         assert!(model.current_status_notice_text().is_empty());
-        assert!(!model.current_acp_activity_render_result().has_content);
+        assert!(!model.current_stream_activity_render_result().has_content);
     }
 
     #[test]
     fn native_agent_retry_event_shows_reconnecting_activity() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
-        model.show_acp_activity("qwen3");
+        model.show_stream_activity("qwen3");
 
         apply_native_agent_event(
             &mut model,
@@ -2173,7 +2173,7 @@ mod tests {
             },
         );
 
-        let activity = model.current_acp_activity_render_result().plain_line;
+        let activity = model.current_stream_activity_render_result().plain_line;
         assert!(activity.contains("Reconnecting... 1/3"));
         assert!(model.transcript_plain_items().is_empty());
     }
@@ -2195,7 +2195,7 @@ mod tests {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(70, 6);
         model.transcript_mut().clear();
-        model.show_acp_activity("qwen3");
+        model.show_stream_activity("qwen3");
 
         apply_native_agent_event(
             &mut model,
@@ -2204,12 +2204,12 @@ mod tests {
         );
 
         let activity = model
-            .current_acp_activity_render_result_at(
+            .current_stream_activity_render_result_at(
                 std::time::Instant::now() + std::time::Duration::from_millis(120),
             )
             .plain_line;
         assert!(activity.contains("↓ 32 tokens"));
-        assert!(model.current_acp_activity_render_result().has_content);
+        assert!(model.current_stream_activity_render_result().has_content);
         assert!(model.transcript_plain_items().is_empty());
     }
 
@@ -2218,7 +2218,7 @@ mod tests {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(70, 6);
         model.transcript_mut().clear();
-        model.show_acp_activity("qwen3");
+        model.show_stream_activity("qwen3");
 
         apply_native_agent_event(
             &mut model,
@@ -2232,7 +2232,7 @@ mod tests {
             },
         );
 
-        let activity = model.current_acp_activity_render_result().plain_line;
+        let activity = model.current_stream_activity_render_result().plain_line;
         assert!(activity.contains("Running file_read Cargo.toml"));
         assert!(model.transcript_plain_items().is_empty());
     }
@@ -2242,7 +2242,7 @@ mod tests {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(70, 6);
         model.transcript_mut().clear();
-        model.show_acp_activity("qwen3");
+        model.show_stream_activity("qwen3");
 
         apply_native_agent_event(
             &mut model,
@@ -2392,7 +2392,7 @@ mod tests {
         };
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
-        model.show_acp_activity("qwen3");
+        model.show_stream_activity("qwen3");
 
         apply_effect_if_needed_for_test(
             &mut model,
@@ -2401,7 +2401,7 @@ mod tests {
         );
 
         assert!(!runtime.is_running());
-        assert!(!model.current_acp_activity_render_result().has_content);
+        assert!(!model.current_stream_activity_render_result().has_content);
         assert_eq!(
             model.transcript_plain_items(),
             vec!["■ Chat interrupted".to_string()]
@@ -2452,7 +2452,7 @@ mod tests {
         );
 
         assert_eq!(model.selected_acp_agent(), Some("Kimi Code CLI"));
-        assert!(!model.current_acp_activity_render_result().has_content);
+        assert!(!model.current_stream_activity_render_result().has_content);
         assert_eq!(
             model.transcript_plain_items(),
             vec!["■ Chat interrupted".to_string()]

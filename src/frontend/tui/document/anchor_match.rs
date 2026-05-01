@@ -161,13 +161,13 @@ fn score_document_anchor_match(
         DocumentAnchorRegion::ComposerStatusGap => {
             (candidate.gap_index == target.gap_index).then_some(0)
         }
-        DocumentAnchorRegion::AcpActivityComposerGap => {
+        DocumentAnchorRegion::StreamActivityComposerGap => {
             (candidate.gap_index == target.gap_index).then_some(0)
         }
         DocumentAnchorRegion::ComposerPadding => {
             (candidate.gap_index == target.gap_index).then_some(0)
         }
-        DocumentAnchorRegion::AcpActivity => Some(0),
+        DocumentAnchorRegion::StreamActivity => Some(0),
         DocumentAnchorRegion::StatusLine => (candidate.gap_index == target.gap_index).then_some(0),
         DocumentAnchorRegion::None => Some(0),
     }

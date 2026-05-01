@@ -6,26 +6,24 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::super::{
+use super::{
     Model,
     selection::SelectableLineRange,
     shimmer::shimmer_spans_at,
-    status_line::{
-        STATUS_LINE_INSET_WIDTH, StatusLineRenderResult, truncate_display_width_with_ellipsis,
-    },
+    status_line::{StatusLineRenderResult, truncate_display_width_with_ellipsis},
     theme::{TerminalPalette, secondary_text_style},
     transcript::DEFAULT_RENDER_WIDTH,
 };
 
-const ACP_ACTIVITY_FRAME_INTERVAL: Duration = Duration::from_millis(80);
-const ACP_ACTIVITY_TOKEN_TICK_INTERVAL: Duration = Duration::from_millis(33);
-const ACP_ACTIVITY_GLYPH: &str = "•";
+const STREAM_ACTIVITY_FRAME_INTERVAL: Duration = Duration::from_millis(80);
+const STREAM_ACTIVITY_TOKEN_TICK_INTERVAL: Duration = Duration::from_millis(33);
+const STREAM_ACTIVITY_GLYPH: &str = "•";
 const TOKEN_TWEEN_DURATION: Duration = Duration::from_millis(120);
 const TOKEN_STALE_THRESHOLD: Duration = Duration::from_millis(360);
 
-/// `AcpActivityState` 保存 ACP turn 正在运行时显示在输入框上方的状态。
+/// `StreamActivityState` 保存一次模型 turn 运行中显示在输入框上方的状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::frontend::tui) struct AcpActivityState {
+pub(in crate::frontend::tui) struct StreamActivityState {
     started_at: Instant,
     header: String,
     interrupt_hint: Option<String>,
@@ -52,26 +50,26 @@ enum ActivityTokenDirection {
 }
 
 impl Model {
-    pub(crate) fn show_acp_activity(&mut self, text: impl Into<String>) {
+    pub(crate) fn show_stream_activity(&mut self, text: impl Into<String>) {
         let text = text.into();
         if text.trim().is_empty() {
             return;
         }
 
         let header = self.status_phrase_selector.next_phrase();
-        self.show_acp_activity_with_header(header);
+        self.show_stream_activity_with_header(header);
     }
 
-    pub(crate) fn show_acp_activity_with_header(&mut self, header: impl Into<String>) {
+    pub(crate) fn show_stream_activity_with_header(&mut self, header: impl Into<String>) {
         let header = header.into().trim().to_string();
         if header.is_empty() {
             return;
         }
 
-        self.acp_activity = Some(AcpActivityState {
+        self.stream_activity = Some(StreamActivityState {
             started_at: Instant::now(),
             header,
-            interrupt_hint: self.current_acp_activity_interrupt_hint(),
+            interrupt_hint: self.current_stream_activity_interrupt_hint(),
             output_tokens: None,
             is_thinking: false,
         });
@@ -83,7 +81,7 @@ impl Model {
         }
     }
 
-    fn current_acp_activity_interrupt_hint(&self) -> Option<String> {
+    fn current_stream_activity_interrupt_hint(&self) -> Option<String> {
         if !self.show_esc_interrupt_hint {
             return None;
         }
@@ -94,12 +92,12 @@ impl Model {
         })
     }
 
-    pub(crate) fn clear_acp_activity(&mut self) {
-        if self.acp_activity.is_none() {
+    pub(crate) fn clear_stream_activity(&mut self) {
+        if self.stream_activity.is_none() {
             return;
         }
 
-        self.acp_activity = None;
+        self.stream_activity = None;
         self.reset_chat_interrupt_esc_count();
         self.bump_status_line_revision();
         self.sync_composer_height();
@@ -108,16 +106,20 @@ impl Model {
         }
     }
 
-    pub(crate) fn set_acp_activity_output_tokens(&mut self, total_tokens: usize) {
-        self.set_acp_activity_output_tokens_at(total_tokens, Instant::now());
+    pub(crate) fn set_stream_activity_output_tokens(&mut self, total_tokens: usize) {
+        self.set_stream_activity_output_tokens_at(total_tokens, Instant::now());
     }
 
-    pub(crate) fn set_acp_activity_output_tokens_at(&mut self, total_tokens: usize, now: Instant) {
-        self.record_acp_activity_output_tokens_at(total_tokens, now);
+    pub(crate) fn set_stream_activity_output_tokens_at(
+        &mut self,
+        total_tokens: usize,
+        now: Instant,
+    ) {
+        self.record_stream_activity_output_tokens_at(total_tokens, now);
     }
 
-    pub(crate) fn set_acp_activity_thinking(&mut self, is_thinking: bool) {
-        let Some(activity) = self.acp_activity.as_mut() else {
+    pub(crate) fn set_stream_activity_thinking(&mut self, is_thinking: bool) {
+        let Some(activity) = self.stream_activity.as_mut() else {
             return;
         };
         if activity.is_thinking == is_thinking {
@@ -130,8 +132,8 @@ impl Model {
         }
     }
 
-    fn record_acp_activity_output_tokens_at(&mut self, total_tokens: usize, now: Instant) {
-        let Some(activity) = self.acp_activity.as_mut() else {
+    fn record_stream_activity_output_tokens_at(&mut self, total_tokens: usize, now: Instant) {
+        let Some(activity) = self.stream_activity.as_mut() else {
             return;
         };
         activity.record_output_tokens(total_tokens, now);
@@ -142,8 +144,8 @@ impl Model {
     }
 
     #[cfg(test)]
-    pub(crate) fn add_acp_activity_input_tokens_at(&mut self, token_delta: usize, now: Instant) {
-        let Some(activity) = self.acp_activity.as_mut() else {
+    pub(crate) fn add_stream_activity_input_tokens_at(&mut self, token_delta: usize, now: Instant) {
+        let Some(activity) = self.stream_activity.as_mut() else {
             return;
         };
         activity.record_input_tokens(token_delta, now);
@@ -153,15 +155,15 @@ impl Model {
         }
     }
 
-    pub(crate) fn current_acp_activity_render_result(&self) -> StatusLineRenderResult {
-        self.current_acp_activity_render_result_at(Instant::now())
+    pub(crate) fn current_stream_activity_render_result(&self) -> StatusLineRenderResult {
+        self.current_stream_activity_render_result_at(Instant::now())
     }
 
-    pub(crate) fn current_acp_activity_render_result_at(
+    pub(crate) fn current_stream_activity_render_result_at(
         &self,
         now: Instant,
     ) -> StatusLineRenderResult {
-        let Some(activity) = self.acp_activity.as_ref() else {
+        let Some(activity) = self.stream_activity.as_ref() else {
             return StatusLineRenderResult::default();
         };
 
@@ -170,44 +172,35 @@ impl Model {
         } else {
             usize::from(self.width)
         };
-        let content_width = width.saturating_sub(STATUS_LINE_INSET_WIDTH);
-        let (text, spans) = render_activity_content(activity, self.palette, now, content_width);
+        let (text, spans) = render_activity_content(activity, self.palette, now, width);
         if text.is_empty() {
             return StatusLineRenderResult::default();
         }
 
-        let plain_line = format!("{}{}", " ".repeat(STATUS_LINE_INSET_WIDTH), text);
-        let mut line_spans = Vec::with_capacity(spans.len() + 1);
-        line_spans.push(Span::raw(" ".repeat(STATUS_LINE_INSET_WIDTH)));
-        line_spans.extend(spans);
-
         StatusLineRenderResult {
-            line: Some(Line::from(line_spans)),
-            plain_line,
-            selectable: SelectableLineRange::new(
-                STATUS_LINE_INSET_WIDTH,
-                STATUS_LINE_INSET_WIDTH + text.width(),
-            ),
+            line: Some(Line::from(spans)),
+            plain_line: text.clone(),
+            selectable: SelectableLineRange::new(0, text.width()),
             has_content: true,
             gap_before: 0,
         }
     }
 
-    pub(crate) fn acp_activity_frame_key(&self, now: Instant) -> usize {
-        self.acp_activity
+    pub(crate) fn stream_activity_frame_key(&self, now: Instant) -> usize {
+        self.stream_activity
             .as_ref()
             .map(|activity| activity.frame_index_at(now))
             .unwrap_or(0)
     }
 
-    pub(crate) fn acp_activity_frame_interval_at(&self, now: Instant) -> Option<Duration> {
-        self.acp_activity
+    pub(crate) fn stream_activity_frame_interval_at(&self, now: Instant) -> Option<Duration> {
+        self.stream_activity
             .as_ref()
             .map(|activity| activity.frame_interval_at(now))
     }
 }
 
-impl AcpActivityState {
+impl StreamActivityState {
     fn elapsed_at(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.started_at)
     }
@@ -266,9 +259,9 @@ impl AcpActivityState {
             .as_ref()
             .is_some_and(|progress| progress.needs_fast_tick_at(now))
         {
-            return ACP_ACTIVITY_TOKEN_TICK_INTERVAL;
+            return STREAM_ACTIVITY_TOKEN_TICK_INTERVAL;
         }
-        ACP_ACTIVITY_FRAME_INTERVAL
+        STREAM_ACTIVITY_FRAME_INTERVAL
     }
 
     fn record_output_tokens(&mut self, total_tokens: usize, now: Instant) {
@@ -374,14 +367,14 @@ impl ActivityTokenDirection {
 }
 
 fn render_activity_content(
-    activity: &AcpActivityState,
+    activity: &StreamActivityState,
     palette: TerminalPalette,
     now: Instant,
     content_width: usize,
 ) -> (String, Vec<Span<'static>>) {
     let elapsed_text = activity.elapsed_segment_at(now);
     let text = format!(
-        "{ACP_ACTIVITY_GLYPH} {} {elapsed_text}",
+        "{STREAM_ACTIVITY_GLYPH} {} {elapsed_text}",
         activity.header.as_str()
     );
     let truncated_text = truncate_display_width_with_ellipsis(&text, content_width);
@@ -406,14 +399,14 @@ fn render_activity_content(
 }
 
 fn activity_content_spans(
-    activity: &AcpActivityState,
+    activity: &StreamActivityState,
     palette: TerminalPalette,
     now: Instant,
     elapsed_text: String,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     spans.extend(shimmer_spans_at(
-        ACP_ACTIVITY_GLYPH,
+        STREAM_ACTIVITY_GLYPH,
         palette,
         activity.started_at,
         now,
@@ -504,16 +497,16 @@ mod tests {
     use crate::frontend::tui::{HeroOptions, theme::default_palette};
 
     #[test]
-    fn acp_activity_tail_cache_key_changes_when_elapsed_text_changes() {
+    fn stream_activity_tail_cache_key_changes_when_elapsed_text_changes() {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(50, 6);
         model.set_palette(default_palette(), true);
-        model.show_acp_activity_with_header("Working");
+        model.show_stream_activity_with_header("Working");
 
-        let started_at = model.acp_activity.as_ref().unwrap().started_at;
-        let initial_key = model.acp_activity_frame_key(started_at);
+        let started_at = model.stream_activity.as_ref().unwrap().started_at;
+        let initial_key = model.stream_activity_frame_key(started_at);
         let later_key =
-            model.acp_activity_frame_key(started_at + std::time::Duration::from_millis(1_200));
+            model.stream_activity_frame_key(started_at + std::time::Duration::from_millis(1_200));
 
         assert_ne!(
             initial_key, later_key,
@@ -522,21 +515,25 @@ mod tests {
     }
 
     #[test]
-    fn acp_activity_line_uses_shimmer_spans_without_changing_plain_text() {
+    fn stream_activity_line_uses_shimmer_spans_without_changing_plain_text() {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(50, 6);
         model.set_palette(default_palette(), true);
-        model.show_acp_activity_with_header("Working");
+        model.show_stream_activity_with_header("Working");
 
-        let started_at = model.acp_activity.as_ref().unwrap().started_at;
-        let first = model.current_acp_activity_render_result_at(started_at);
-        let second = model.current_acp_activity_render_result_at(
+        let started_at = model.stream_activity.as_ref().unwrap().started_at;
+        let first = model.current_stream_activity_render_result_at(started_at);
+        let second = model.current_stream_activity_render_result_at(
             started_at + std::time::Duration::from_millis(900),
         );
         let first_line = first.line.expect("activity line should render");
         let second_line = second.line.expect("activity line should render");
 
-        assert_eq!(first.plain_line, "  • Working (0s • esc 2x to interrupt)");
+        assert_eq!(first.plain_line, "• Working (0s • esc 2x to interrupt)");
+        assert_eq!(
+            first.selectable.content_columns().map(|(start, _)| start),
+            Some(0)
+        );
         assert_eq!(second.plain_line, first.plain_line);
         assert!(
             first_line.spans.len() > 8,
@@ -570,22 +567,22 @@ mod tests {
     }
 
     #[test]
-    fn acp_activity_line_tweens_output_token_estimate_to_target() {
+    fn stream_activity_line_tweens_output_token_estimate_to_target() {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(70, 6);
         model.set_palette(default_palette(), true);
-        model.show_acp_activity_with_header("Working");
+        model.show_stream_activity_with_header("Working");
 
-        let started_at = model.acp_activity.as_ref().unwrap().started_at;
-        model.set_acp_activity_output_tokens_at(24, started_at);
+        let started_at = model.stream_activity.as_ref().unwrap().started_at;
+        model.set_stream_activity_output_tokens_at(24, started_at);
 
         let early = model
-            .current_acp_activity_render_result_at(
+            .current_stream_activity_render_result_at(
                 started_at + std::time::Duration::from_millis(80),
             )
             .plain_line;
         let settled = model
-            .current_acp_activity_render_result_at(
+            .current_stream_activity_render_result_at(
                 started_at + std::time::Duration::from_millis(120),
             )
             .plain_line;
@@ -605,109 +602,109 @@ mod tests {
     }
 
     #[test]
-    fn acp_activity_token_indicator_uses_single_directional_total() {
+    fn stream_activity_token_indicator_uses_single_directional_total() {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(80, 6);
         model.set_palette(default_palette(), true);
-        model.show_acp_activity_with_header("Working");
+        model.show_stream_activity_with_header("Working");
 
-        let started_at = model.acp_activity.as_ref().unwrap().started_at;
-        model.set_acp_activity_output_tokens_at(200, started_at);
+        let started_at = model.stream_activity.as_ref().unwrap().started_at;
+        model.set_stream_activity_output_tokens_at(200, started_at);
         let output_line = model
-            .current_acp_activity_render_result_at(started_at + Duration::from_millis(120))
+            .current_stream_activity_render_result_at(started_at + Duration::from_millis(120))
             .plain_line;
         assert!(output_line.contains("↓ 200 tokens"));
 
-        model.add_acp_activity_input_tokens_at(100, started_at + Duration::from_millis(140));
+        model.add_stream_activity_input_tokens_at(100, started_at + Duration::from_millis(140));
         let input_line = model
-            .current_acp_activity_render_result_at(started_at + Duration::from_millis(260))
+            .current_stream_activity_render_result_at(started_at + Duration::from_millis(260))
             .plain_line;
         assert!(input_line.contains("↑ 300 tokens"));
         assert!(!input_line.contains("↓ 200 tokens"));
     }
 
     #[test]
-    fn acp_activity_thinking_segment_renders_between_timer_and_tokens() {
+    fn stream_activity_thinking_segment_renders_between_timer_and_tokens() {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(80, 6);
         model.set_palette(default_palette(), true);
-        model.show_acp_activity_with_header("Working");
+        model.show_stream_activity_with_header("Working");
 
-        let started_at = model.acp_activity.as_ref().unwrap().started_at;
-        model.set_acp_activity_thinking(true);
-        model.set_acp_activity_output_tokens_at(12, started_at);
+        let started_at = model.stream_activity.as_ref().unwrap().started_at;
+        model.set_stream_activity_thinking(true);
+        model.set_stream_activity_output_tokens_at(12, started_at);
 
         let thinking_line = model
-            .current_acp_activity_render_result_at(started_at + Duration::from_millis(120))
+            .current_stream_activity_render_result_at(started_at + Duration::from_millis(120))
             .plain_line;
         assert!(thinking_line.contains("(0s • thinking • ↓ 12 tokens"));
 
-        model.set_acp_activity_thinking(false);
+        model.set_stream_activity_thinking(false);
         let content_line = model
-            .current_acp_activity_render_result_at(started_at + Duration::from_millis(140))
+            .current_stream_activity_render_result_at(started_at + Duration::from_millis(140))
             .plain_line;
         assert!(!content_line.contains("thinking"));
         assert!(content_line.contains("(0s • ↓ 12 tokens"));
     }
 
     #[test]
-    fn acp_activity_token_indicator_compacts_thousands_to_k_unit() {
+    fn stream_activity_token_indicator_compacts_thousands_to_k_unit() {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(80, 6);
         model.set_palette(default_palette(), true);
-        model.show_acp_activity_with_header("Working");
+        model.show_stream_activity_with_header("Working");
 
-        let started_at = model.acp_activity.as_ref().unwrap().started_at;
-        model.set_acp_activity_output_tokens_at(999, started_at);
+        let started_at = model.stream_activity.as_ref().unwrap().started_at;
+        model.set_stream_activity_output_tokens_at(999, started_at);
         let under_k_line = model
-            .current_acp_activity_render_result_at(started_at + Duration::from_millis(120))
+            .current_stream_activity_render_result_at(started_at + Duration::from_millis(120))
             .plain_line;
         assert!(under_k_line.contains("↓ 999 tokens"));
 
-        model.set_acp_activity_output_tokens_at(1_200, started_at + Duration::from_millis(140));
+        model.set_stream_activity_output_tokens_at(1_200, started_at + Duration::from_millis(140));
         let k_line = model
-            .current_acp_activity_render_result_at(started_at + Duration::from_millis(260))
+            .current_stream_activity_render_result_at(started_at + Duration::from_millis(260))
             .plain_line;
         assert!(k_line.contains("↓ 1.2k tokens"));
         assert!(!k_line.contains("1200 tokens"));
     }
 
     #[test]
-    fn acp_activity_token_indicator_uses_fast_tick_until_target_or_stale() {
+    fn stream_activity_token_indicator_uses_fast_tick_until_target_or_stale() {
         let mut model = Model::new(HeroOptions::default());
         model.set_window(80, 6);
         model.set_palette(default_palette(), true);
-        model.show_acp_activity_with_header("Working");
+        model.show_stream_activity_with_header("Working");
 
-        let started_at = model.acp_activity.as_ref().unwrap().started_at;
-        model.set_acp_activity_output_tokens_at(36, started_at);
+        let started_at = model.stream_activity.as_ref().unwrap().started_at;
+        model.set_stream_activity_output_tokens_at(36, started_at);
 
         assert_eq!(
-            model.acp_activity_frame_interval_at(started_at + Duration::from_millis(33)),
+            model.stream_activity_frame_interval_at(started_at + Duration::from_millis(33)),
             Some(Duration::from_millis(33))
         );
         assert_eq!(
-            model.acp_activity_frame_interval_at(started_at + Duration::from_millis(130)),
+            model.stream_activity_frame_interval_at(started_at + Duration::from_millis(130)),
             Some(Duration::from_millis(80)),
             "token tick should stop once the displayed value catches the target"
         );
 
-        model.set_acp_activity_output_tokens_at(72, started_at + Duration::from_millis(200));
+        model.set_stream_activity_output_tokens_at(72, started_at + Duration::from_millis(200));
         assert_eq!(
-            model.acp_activity_frame_interval_at(started_at + Duration::from_millis(600)),
+            model.stream_activity_frame_interval_at(started_at + Duration::from_millis(600)),
             Some(Duration::from_millis(80)),
             "stale token snapshots should not keep the fast tick alive"
         );
     }
 
     #[test]
-    fn document_layout_rebuilds_when_acp_activity_tick_changes() {
+    fn document_layout_rebuilds_when_stream_activity_tick_changes() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();
         model.sync_transcript_render();
         model.set_window(50, 6);
         model.set_palette(default_palette(), true);
-        model.show_acp_activity_with_header("Working");
+        model.show_stream_activity_with_header("Working");
 
         let initial = model.build_document_layout();
         assert!(
@@ -715,7 +712,7 @@ mod tests {
             "activity should include the current elapsed segment"
         );
 
-        model.acp_activity.as_mut().unwrap().started_at -= std::time::Duration::from_secs(2);
+        model.stream_activity.as_mut().unwrap().started_at -= std::time::Duration::from_secs(2);
         let updated = model.build_document_layout();
 
         assert!(

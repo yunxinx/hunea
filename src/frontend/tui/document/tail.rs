@@ -51,7 +51,7 @@ pub(crate) struct DocumentTailLayoutKey {
     pub(crate) status_line_config: u8,
     pub(crate) status_line_2_config: u8,
     pub(crate) status_line_revision: usize,
-    pub(crate) acp_activity_frame: usize,
+    pub(crate) stream_activity_frame: usize,
 }
 
 /// `DocumentTailLayout` 保存 composer / command panel / status line 的独立 tail 布局。
@@ -86,7 +86,7 @@ pub(crate) struct DocumentTailLayoutInput {
     pub(crate) composer_frame_decoration_text_line: Option<String>,
     pub(crate) composer_cursor_x: u16,
     pub(crate) composer_cursor_y: usize,
-    pub(crate) acp_activity: StatusLineRenderResult,
+    pub(crate) stream_activity: StatusLineRenderResult,
     pub(crate) command_panel: CommandPanelRenderResult,
     pub(crate) acp_panel: AcpPanelRenderResult,
     pub(crate) tool_approval_panel: ToolApprovalPanelRenderResult,
@@ -149,7 +149,7 @@ impl Model {
             status_line_config: self.status_line_config_bits(),
             status_line_2_config: self.status_line_2_config_bits(),
             status_line_revision: self.status_line_revision(),
-            acp_activity_frame: self.acp_activity_frame_key(std::time::Instant::now()),
+            stream_activity_frame: self.stream_activity_frame_key(std::time::Instant::now()),
         }
     }
 
@@ -202,7 +202,7 @@ impl Model {
             composer_frame_decoration_text_line: composer_document.frame_decoration_plain_line,
             composer_cursor_x: composer_document.cursor_x,
             composer_cursor_y: composer_document.cursor_y,
-            acp_activity: self.current_acp_activity_render_result(),
+            stream_activity: self.current_stream_activity_render_result(),
             command_panel: self.current_inline_command_panel_render_result(),
             acp_panel: self.current_inline_acp_panel_render_result(),
             tool_approval_panel: self.current_inline_tool_approval_panel_render_result(),
@@ -217,8 +217,8 @@ impl Model {
 pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> DocumentTailLayout {
     let extra_gap =
         usize::from(input.transcript_has_content) * transcript_composer_gap_line_count();
-    let acp_activity_gap =
-        usize::from(input.acp_activity.has_content) * acp_activity_composer_gap_line_count();
+    let stream_activity_gap =
+        usize::from(input.stream_activity.has_content) * stream_activity_composer_gap_line_count();
     let has_composer_padding = input.composer_frame_decoration_line.is_some();
     let status_line_rows = status_line_pair_height(
         &input.status_line,
@@ -227,8 +227,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
     );
     let mut lines = Vec::with_capacity(
         extra_gap
-            + usize::from(input.acp_activity.has_content)
-            + acp_activity_gap
+            + usize::from(input.stream_activity.has_content)
+            + stream_activity_gap
             + input.composer_lines.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
@@ -239,8 +239,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
     );
     let mut text_lines = Vec::with_capacity(
         extra_gap
-            + usize::from(input.acp_activity.has_content)
-            + acp_activity_gap
+            + usize::from(input.stream_activity.has_content)
+            + stream_activity_gap
             + input.composer_text_lines.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.plain_lines.len()
@@ -251,8 +251,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
     );
     let mut anchors = Vec::with_capacity(
         extra_gap
-            + usize::from(input.acp_activity.has_content)
-            + acp_activity_gap
+            + usize::from(input.stream_activity.has_content)
+            + stream_activity_gap
             + input.composer_anchors.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
@@ -263,8 +263,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
     );
     let mut selectable = Vec::with_capacity(
         extra_gap
-            + usize::from(input.acp_activity.has_content)
-            + acp_activity_gap
+            + usize::from(input.stream_activity.has_content)
+            + stream_activity_gap
             + input.composer_selectable.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
@@ -278,16 +278,16 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
         append_transcript_gap(&mut lines, &mut text_lines, &mut anchors, &mut selectable);
     }
 
-    if input.acp_activity.has_content
-        && let Some(line) = input.acp_activity.line
+    if input.stream_activity.has_content
+        && let Some(line) = input.stream_activity.line
     {
         lines.push(line);
-        text_lines.push(input.acp_activity.plain_line);
+        text_lines.push(input.stream_activity.plain_line);
         anchors.push(DocumentLineAnchor {
-            region: DocumentAnchorRegion::AcpActivity,
+            region: DocumentAnchorRegion::StreamActivity,
             ..DocumentLineAnchor::default()
         });
-        selectable.push(input.acp_activity.selectable);
+        selectable.push(input.stream_activity.selectable);
     }
 
     if input.model_panel.has_content {
@@ -376,8 +376,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
         };
     }
 
-    if input.acp_activity.has_content {
-        append_acp_activity_composer_gap(
+    if input.stream_activity.has_content {
+        append_stream_activity_composer_gap(
             &mut lines,
             &mut text_lines,
             &mut anchors,
@@ -534,7 +534,7 @@ pub(crate) fn transcript_composer_gap_line_count() -> usize {
     1
 }
 
-fn acp_activity_composer_gap_line_count() -> usize {
+fn stream_activity_composer_gap_line_count() -> usize {
     1
 }
 
@@ -556,17 +556,17 @@ fn append_transcript_gap(
     }
 }
 
-fn append_acp_activity_composer_gap(
+fn append_stream_activity_composer_gap(
     lines: &mut Vec<Line<'static>>,
     text_lines: &mut Vec<String>,
     anchors: &mut Vec<DocumentLineAnchor>,
     selectable: &mut Vec<SelectableLineRange>,
 ) {
-    for gap_index in 0..acp_activity_composer_gap_line_count() {
+    for gap_index in 0..stream_activity_composer_gap_line_count() {
         lines.push(Line::raw(""));
         text_lines.push(String::new());
         anchors.push(DocumentLineAnchor {
-            region: DocumentAnchorRegion::AcpActivityComposerGap,
+            region: DocumentAnchorRegion::StreamActivityComposerGap,
             gap_index,
             ..DocumentLineAnchor::default()
         });

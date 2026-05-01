@@ -21,16 +21,16 @@ impl RuntimeEventApply for Model {
                 self.append_system_message_from_runtime(message);
             }
             RuntimeEvent::TurnStarted { label, .. } => {
-                if self.acp_activity.is_none() {
-                    self.show_acp_activity(label);
+                if self.stream_activity.is_none() {
+                    self.show_stream_activity(label);
                 }
             }
             RuntimeEvent::AssistantDelta { .. } | RuntimeEvent::ReasoningDelta { .. } => {}
             RuntimeEvent::OutputTokenEstimate { total_tokens, .. } => {
-                self.set_acp_activity_output_tokens(total_tokens);
+                self.set_stream_activity_output_tokens(total_tokens);
             }
             RuntimeEvent::Thinking { is_thinking, .. } => {
-                self.set_acp_activity_thinking(is_thinking);
+                self.set_stream_activity_thinking(is_thinking);
             }
             RuntimeEvent::PermissionRequested { request, .. } => {
                 show_runtime_permission_request(self, request);
@@ -59,7 +59,7 @@ impl RuntimeEventApply for Model {
                         metrics.duration,
                     )));
                 }
-                self.clear_acp_activity();
+                self.clear_stream_activity();
                 self.append_runtime_response_from_runtime(
                     content,
                     reasoning_content,
@@ -67,15 +67,15 @@ impl RuntimeEventApply for Model {
                 );
             }
             RuntimeEvent::Failed { message, .. } => {
-                self.clear_acp_activity();
+                self.clear_stream_activity();
                 self.append_system_message_from_runtime(format!("Chat failed: {message}"));
             }
             RuntimeEvent::Interrupted { .. } => {
-                self.clear_acp_activity();
+                self.clear_stream_activity();
                 self.append_system_message_from_runtime("Chat interrupted");
             }
             RuntimeEvent::Stopped { message, .. } => {
-                self.clear_acp_activity();
+                self.clear_stream_activity();
                 if let Some(message) = message {
                     self.show_transient_status_notice(&format!("Runtime stopped: {message}"));
                 }

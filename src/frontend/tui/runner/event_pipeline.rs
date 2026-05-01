@@ -60,7 +60,7 @@ fn next_pipeline_deadline(
         });
     }
 
-    if let Some(activity_interval) = model.acp_activity_frame_interval_at(now) {
+    if let Some(activity_interval) = model.stream_activity_frame_interval_at(now) {
         let activity_deadline = now + activity_interval;
         next_deadline = Some(match next_deadline {
             Some(deadline) => deadline.min(activity_deadline),
@@ -97,7 +97,7 @@ fn render_on_timeout(
     }
 
     model
-        .acp_activity_frame_interval_at(now)
+        .stream_activity_frame_interval_at(now)
         .is_some_and(|activity_interval| now + activity_interval == deadline)
 }
 
@@ -150,10 +150,10 @@ mod tests {
     }
 
     #[test]
-    fn acp_activity_deadline_requests_render_on_timeout() {
+    fn stream_activity_deadline_requests_render_on_timeout() {
         let mut model = Model::new(HeroOptions::default());
         model.update(crate::frontend::tui::AppEvent::StartupReadyTimeout);
-        model.show_acp_activity("working");
+        model.show_stream_activity("working");
         let now = Instant::now();
 
         assert_eq!(

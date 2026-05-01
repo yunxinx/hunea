@@ -394,7 +394,7 @@ impl Model {
     }
 
     fn chat_turn_interruptible(&self) -> bool {
-        self.acp_activity.is_some()
+        self.stream_activity.is_some()
     }
 
     pub(crate) fn reset_chat_interrupt_esc_count(&mut self) {
@@ -458,7 +458,7 @@ impl Model {
             self.show_transient_status_notice("Select a model before sending");
             return None;
         }
-        if self.acp_activity.is_some() && self.selected_acp_agent.is_none() {
+        if self.stream_activity.is_some() && self.selected_acp_agent.is_none() {
             self.show_transient_status_notice("Chat request is already running");
             return None;
         }
@@ -486,7 +486,7 @@ impl Model {
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         if let Some(agent_id) = self.selected_acp_agent.clone() {
-            self.show_acp_activity(
+            self.show_stream_activity(
                 self.acp_current_model
                     .clone()
                     .unwrap_or_else(|| agent_id.clone()),

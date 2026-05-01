@@ -33,6 +33,7 @@ mod sender;
 mod shimmer;
 mod status_line;
 mod status_phrases;
+mod stream_activity;
 mod style_mode;
 mod styled_text;
 mod system_message;

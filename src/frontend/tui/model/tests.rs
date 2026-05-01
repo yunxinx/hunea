@@ -1815,7 +1815,7 @@ fn acp_permission_shortcuts_use_session_options_when_once_options_are_absent() {
 }
 
 #[test]
-fn acp_activity_line_uses_dynamic_codex_style_indicator() {
+fn stream_activity_line_uses_dynamic_codex_style_indicator() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -1826,27 +1826,27 @@ fn acp_activity_line_uses_dynamic_codex_style_indicator() {
     );
     model.set_window(50, 6);
     model.set_palette(default_palette(), true);
-    model.show_acp_activity("Kimi Code CLI");
+    model.show_stream_activity("Kimi Code CLI");
 
     let first = model
-        .current_acp_activity_render_result_at(std::time::Instant::now())
+        .current_stream_activity_render_result_at(std::time::Instant::now())
         .plain_line;
     let second = model
-        .current_acp_activity_render_result_at(
+        .current_stream_activity_render_result_at(
             std::time::Instant::now() + std::time::Duration::from_millis(700),
         )
         .plain_line;
 
     assert!(first.contains("Cooking (0s"));
     assert!(first.contains("esc 2x to interrupt"));
-    assert!(first.starts_with("  • Cooking (0s"));
+    assert!(first.starts_with("• Cooking (0s"));
     assert!(!first.contains("Kimi Code CLI"));
     assert!(!first.contains('⠋'));
     assert_eq!(first, second);
 }
 
 #[test]
-fn acp_activity_line_cycles_configured_fallback_phrases() {
+fn stream_activity_line_cycles_configured_fallback_phrases() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -1858,18 +1858,18 @@ fn acp_activity_line_cycles_configured_fallback_phrases() {
     model.set_window(50, 6);
     model.set_palette(default_palette(), true);
 
-    model.show_acp_activity("qwen3");
-    let first = model.current_acp_activity_render_result().plain_line;
-    model.clear_acp_activity();
-    model.show_acp_activity("qwen3");
-    let second = model.current_acp_activity_render_result().plain_line;
+    model.show_stream_activity("qwen3");
+    let first = model.current_stream_activity_render_result().plain_line;
+    model.clear_stream_activity();
+    model.show_stream_activity("qwen3");
+    let second = model.current_stream_activity_render_result().plain_line;
 
     assert!(first.contains("Cooking (0s"));
     assert!(second.contains("Crafting (0s"));
 }
 
 #[test]
-fn acp_activity_line_renders_above_composer() {
+fn stream_activity_line_renders_above_composer() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -1881,7 +1881,7 @@ fn acp_activity_line_renders_above_composer() {
     model.transcript_mut().clear();
     model.set_window(40, 6);
     model.set_palette(default_palette(), true);
-    model.show_acp_activity("Kimi Code CLI");
+    model.show_stream_activity("Kimi Code CLI");
 
     let layout = model.build_document_layout();
 
@@ -1911,12 +1911,12 @@ fn esc_interrupts_native_agent_after_configured_press_count() {
             ..ModelOptions::default()
         },
     );
-    model.show_acp_activity("qwen3");
+    model.show_stream_activity("qwen3");
 
     let first = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
     assert_eq!(first, None);
     assert!(model.current_status_notice_text().contains("Esc again"));
-    assert!(model.current_acp_activity_render_result().has_content);
+    assert!(model.current_stream_activity_render_result().has_content);
 
     let second = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
     assert_eq!(second, Some(AppEffect::InterruptCurrentTurn));
@@ -1931,7 +1931,7 @@ fn esc_interrupts_native_agent_immediately_when_configured_for_one_press() {
             ..ModelOptions::default()
         },
     );
-    model.show_acp_activity("qwen3");
+    model.show_stream_activity("qwen3");
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
 
@@ -1958,7 +1958,7 @@ fn enter_during_native_agent_activity_does_not_append_unsent_message() {
     );
     model.transcript_mut().clear();
     model.composer_mut().insert_text("second message");
-    model.show_acp_activity("qwen3");
+    model.show_stream_activity("qwen3");
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
@@ -1997,7 +1997,7 @@ fn enter_acp_prompt_starts_activity_before_worker_ack() {
     );
     assert!(
         model
-            .current_acp_activity_render_result()
+            .current_stream_activity_render_result()
             .plain_line
             .contains("Submitted (0s")
     );
@@ -2031,18 +2031,18 @@ fn current_model_status_line_falls_back_to_selected_acp_agent() {
 }
 
 #[test]
-fn acp_activity_line_shows_interrupt_hint() {
+fn stream_activity_line_shows_interrupt_hint() {
     let mut model = Model::new(HeroOptions::default());
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
 
-    model.show_acp_activity("Kimi Code CLI");
-    let line = model.current_acp_activity_render_result().plain_line;
+    model.show_stream_activity("Kimi Code CLI");
+    let line = model.current_stream_activity_render_result().plain_line;
 
     assert!(line.contains("esc 2x to interrupt"));
 }
 
 #[test]
-fn esc_interrupts_acp_activity_after_configured_press_count() {
+fn esc_interrupts_stream_activity_after_configured_press_count() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -2051,7 +2051,7 @@ fn esc_interrupts_acp_activity_after_configured_press_count() {
         },
     );
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    model.show_acp_activity("Kimi Code CLI");
+    model.show_stream_activity("Kimi Code CLI");
 
     let first = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
     assert_eq!(first, None);
@@ -2070,7 +2070,7 @@ fn esc_interrupt_count_resets_when_interrupt_notice_expires() {
             ..ModelOptions::default()
         },
     );
-    model.show_acp_activity("qwen3");
+    model.show_stream_activity("qwen3");
 
     let first = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
     assert_eq!(first, None);
@@ -2091,7 +2091,7 @@ fn esc_interrupt_count_resets_when_interrupt_notice_expires() {
 }
 
 #[test]
-fn acp_activity_line_can_hide_interrupt_hint() {
+fn stream_activity_line_can_hide_interrupt_hint() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -2100,8 +2100,8 @@ fn acp_activity_line_can_hide_interrupt_hint() {
         },
     );
 
-    model.show_acp_activity_with_header("Working");
-    let line = model.current_acp_activity_render_result().plain_line;
+    model.show_stream_activity_with_header("Working");
+    let line = model.current_stream_activity_render_result().plain_line;
 
     assert!(line.contains("Working (0s)"));
     assert!(!line.contains("esc"));

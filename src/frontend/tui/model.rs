@@ -12,7 +12,7 @@ use crate::runtime::{
 
 use super::{
     HeroOptions, ReasoningDisplayMode, Sender,
-    acp::{AcpActivityState, AcpDebugPanelState, AcpPanelState, PendingAcpPermission},
+    acp::{AcpDebugPanelState, AcpPanelState, PendingAcpPermission},
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
     document::{
@@ -28,6 +28,7 @@ use super::{
         StatusLineItem, StatusLineRenderResult, status_line_gap_before, status_line_pair_height,
     },
     status_phrases::{StatusPhraseSelector, default_status_phrases},
+    stream_activity::StreamActivityState,
     style_mode::StyleMode,
     theme::{TerminalPalette, default_palette},
     tool_approval_panel::ToolApprovalPanelState,
@@ -59,7 +60,7 @@ pub struct Model {
     pub(super) tool_approval_panel: ToolApprovalPanelState,
     pub(super) tool_approval_panel_revision: usize,
     pub(super) pending_acp_permission: Option<PendingAcpPermission>,
-    pub(super) acp_activity: Option<AcpActivityState>,
+    pub(super) stream_activity: Option<StreamActivityState>,
     pub(super) status_phrase_selector: StatusPhraseSelector,
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
@@ -303,7 +304,7 @@ impl Model {
             tool_approval_panel: ToolApprovalPanelState::default(),
             tool_approval_panel_revision: 1,
             pending_acp_permission: None,
-            acp_activity: None,
+            stream_activity: None,
             status_phrase_selector: StatusPhraseSelector::new(
                 options.status_phrases,
                 options.status_phrase_order,
@@ -521,7 +522,7 @@ impl Model {
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.pending_acp_permission = None;
-        self.acp_activity = None;
+        self.stream_activity = None;
         self.command_panel_selected = 0;
         self.command_panel_scroll = 0;
         self.file_picker = None;
@@ -918,9 +919,9 @@ impl Model {
         panel_rows: usize,
     ) -> usize {
         let viewport_height = usize::from(self.height.max(1));
-        let acp_activity = self.current_acp_activity_render_result();
+        let stream_activity = self.current_stream_activity_render_result();
         let mut tail_rows = panel_rows;
-        if acp_activity.has_content {
+        if stream_activity.has_content {
             tail_rows += 1;
         }
         tail_rows += status_line_pair_height(

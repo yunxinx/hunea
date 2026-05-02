@@ -120,13 +120,23 @@ impl Model {
     pub fn update(&mut self, event: AppEvent) -> Option<AppEffect> {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
-            AppEvent::Paste(text) => self.handle_paste(&text),
+            AppEvent::Paste(text) => {
+                if self.transcript_overlay_active() {
+                    self.cancel_exit_confirmation();
+                    None
+                } else {
+                    self.handle_paste(&text)
+                }
+            }
             AppEvent::Resized { width, height } => {
                 self.handle_resize(width, height);
                 None
             }
             AppEvent::MouseWheel { delta_lines } => {
                 self.cancel_exit_confirmation();
+                if self.transcript_overlay_active() {
+                    return None;
+                }
                 let before_document_viewport_y = self.document_runtime.viewport_y;
                 let before_composer_viewport_y = self.composer.viewport_offset();
                 let before_follow_bottom = self.document_runtime.follow_bottom;
@@ -150,17 +160,32 @@ impl Model {
                 button,
                 column,
                 row,
-            } => self.handle_mouse_down(button, column, row),
+            } => {
+                if self.transcript_overlay_active() {
+                    return None;
+                }
+                self.handle_mouse_down(button, column, row)
+            }
             AppEvent::MouseUp {
                 button,
                 column,
                 row,
-            } => self.handle_mouse_up(button, column, row),
+            } => {
+                if self.transcript_overlay_active() {
+                    return None;
+                }
+                self.handle_mouse_up(button, column, row)
+            }
             AppEvent::MouseDrag {
                 button,
                 column,
                 row,
-            } => self.handle_mouse_drag(button, column, row),
+            } => {
+                if self.transcript_overlay_active() {
+                    return None;
+                }
+                self.handle_mouse_drag(button, column, row)
+            }
             AppEvent::DetectedPalette {
                 palette,
                 has_dark_background,
@@ -236,6 +261,13 @@ impl Model {
         }
 
         self.clear_history_scroll_indicator();
+        if self.transcript_overlay_active() {
+            self.cancel_exit_confirmation();
+            if let Some(effect) = self.handle_transcript_overlay_key(key) {
+                return effect;
+            }
+        }
+
         if !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
             self.cancel_exit_confirmation();
         }
@@ -254,6 +286,10 @@ impl Model {
         }
 
         if let Some(effect) = self.handle_tool_approval_panel_key(key) {
+            return effect;
+        }
+
+        if let Some(effect) = self.handle_transcript_overlay_key(key) {
             return effect;
         }
 
@@ -534,6 +570,7 @@ impl Model {
     fn handle_resize(&mut self, width: u16, height: u16) {
         self.cancel_exit_confirmation();
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        let transcript_overlay_anchor = self.capture_transcript_overlay_scroll_anchor();
         let previous_width = self.width;
         let had_pending_click = self.pending_composer_cursor_click.active;
 
@@ -550,6 +587,7 @@ impl Model {
         self.sync_file_picker_state();
         self.sync_composer_height();
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        self.restore_transcript_overlay_scroll_anchor(transcript_overlay_anchor);
     }
 }
 

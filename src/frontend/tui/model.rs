@@ -59,6 +59,8 @@ pub struct Model {
     pub(super) model_panel: ModelPanelState,
     pub(super) tool_approval_panel: ToolApprovalPanelState,
     pub(super) tool_approval_panel_revision: usize,
+    pub(super) transcript_overlay:
+        Option<crate::frontend::tui::transcript_overlay::TranscriptOverlayState>,
     pub(super) pending_acp_permission: Option<PendingAcpPermission>,
     pub(super) stream_activity: Option<StreamActivityState>,
     pub(super) status_phrase_selector: StatusPhraseSelector,
@@ -303,6 +305,7 @@ impl Model {
             model_panel: ModelPanelState::default(),
             tool_approval_panel: ToolApprovalPanelState::default(),
             tool_approval_panel_revision: 1,
+            transcript_overlay: None,
             pending_acp_permission: None,
             stream_activity: None,
             status_phrase_selector: StatusPhraseSelector::new(
@@ -821,6 +824,11 @@ impl Model {
         &mut self,
         collect_breakdown: bool,
     ) -> TranscriptSyncProfile {
+        let previous_overlay_index = self
+            .transcript_overlay
+            .as_ref()
+            .map(|_| self.transcript_render.index.clone());
+
         // metrics-only rebuild 不应保留旧 viewport 预热留下的 render block。
         self.transcript.begin_recent_render_block_batch();
         let estimate_started_at = Instant::now();
@@ -838,11 +846,18 @@ impl Model {
         let visible_exact_started_at = Instant::now();
         let index = self.exactize_visible_transcript_window_until_stable(index);
         let visible_exact_time = visible_exact_started_at.elapsed();
+        let next_overlay_index = index.clone();
         self.transcript_render = Rc::new(index_only_render_result(index));
         self.transcript_render_version += 1;
         self.invalidate_document_viewport_cache();
         self.document_runtime.transcript_cache = Default::default();
         self.document_runtime.layout_cache = Default::default();
+        if let Some(previous_overlay_index) = previous_overlay_index.as_ref() {
+            self.sync_transcript_overlay_after_transcript_refresh(
+                previous_overlay_index,
+                &next_overlay_index,
+            );
+        }
         TranscriptSyncProfile {
             estimate_time,
             visible_exact_time,

@@ -79,6 +79,7 @@ pub fn run_with_runtime_options(
 
     let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;
     let mut render_needed = true;
+    let mut mouse_capture_enabled = true;
 
     loop {
         render_needed |= drain_acp_runtime_events(&mut model, &mut acp_runtime);
@@ -87,6 +88,18 @@ pub fn run_with_runtime_options(
 
         if render_needed {
             terminal.draw(|frame| model.render(frame))?;
+            // 同步鼠标捕获状态：覆盖层激活时禁用，以恢复终端原生选区
+            let wants_capture = model.wants_mouse_capture();
+            if wants_capture != mouse_capture_enabled {
+                use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+                use crossterm::execute;
+                let _ = if wants_capture {
+                    execute!(terminal.backend_mut(), EnableMouseCapture)
+                } else {
+                    execute!(terminal.backend_mut(), DisableMouseCapture)
+                };
+                mouse_capture_enabled = wants_capture;
+            }
             render_needed = false;
         }
 

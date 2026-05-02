@@ -40,6 +40,7 @@ mod system_message;
 mod tool_approval_panel;
 mod tool_result;
 mod transcript;
+mod transcript_overlay;
 mod update;
 mod view;
 

@@ -364,6 +364,11 @@ impl Transcript {
         self.screen_cache.retained_block_memory_summary()
     }
 
+    #[cfg(test)]
+    pub(crate) fn cached_render_result_item_count_for_test(&self) -> usize {
+        self.screen_cache.result.items.len()
+    }
+
     /// `begin_recent_render_block_batch` 延迟 recent block cache 的裁剪，直到调用方完成预热。
     pub(crate) fn begin_recent_render_block_batch(&mut self) {
         self.screen_cache.begin_recent_limit_batch();

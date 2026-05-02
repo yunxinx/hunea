@@ -102,6 +102,7 @@ impl Model {
         title: String,
         details: Vec<ToolApprovalDetail>,
     ) {
+        self.close_transcript_overlay();
         self.model_panel.is_open = false;
         self.acp_panel.is_open = false;
         self.tool_approval_panel = ToolApprovalPanelState {

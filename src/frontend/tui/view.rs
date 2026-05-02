@@ -54,6 +54,12 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
         return;
     }
 
+    // Transcript 覆盖层模式：全屏渲染对话历史，隐藏 composer 和各面板
+    if model.transcript_overlay_active() {
+        model.render_transcript_overlay(frame, area);
+        return;
+    }
+
     let document = model.build_document_layout();
     let viewport = model.build_document_viewport(&document);
     let floating_layer = model.current_floating_layer(&document, &viewport);

@@ -250,6 +250,19 @@ impl Transcript {
         self.screen_cache.reset();
     }
 
+    /// `truncate_before_item` 删除指定 item 及其后的所有内容。
+    pub(crate) fn truncate_before_item(&mut self, item_index: usize) -> bool {
+        if item_index >= self.items.len() {
+            return false;
+        }
+
+        Rc::make_mut(&mut self.items).truncate(item_index);
+        self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.reset();
+        self.screen_cache.reset();
+        true
+    }
+
     /// `item` 返回指定索引的 transcript 项。
     #[cfg(test)]
     pub(crate) fn item(&self, index: usize) -> Option<&TranscriptItem> {

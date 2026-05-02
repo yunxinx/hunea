@@ -1,4 +1,10 @@
-use ratatui::{Frame, layout::Rect, style::Modifier, text::Line, widgets::Paragraph};
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::{Modifier, Style},
+    text::Line,
+    widgets::Paragraph,
+};
 
 use crate::frontend::tui::{
     Model,
@@ -7,6 +13,7 @@ use crate::frontend::tui::{
 };
 
 const FOOTER_HINT: &str = "  Esc/q close · ↑↓ scroll · PgUp/PgDn page · Home/End jump";
+const BACKTRACK_FOOTER_HINT: &str = "  Enter edit · ← older · → newer · ↑↓ scroll · Esc/q close";
 
 /// 右对齐百分比的分隔线。
 /// 格式：左侧为连续的 ─，百分比靠右，百分比右侧固定两个 ─。
@@ -42,6 +49,7 @@ impl Model {
         let Some(overlay) = &self.transcript_overlay else {
             return;
         };
+        let highlight_item_index = overlay.highlight_item_index;
 
         let metrics_index = self.transcript.progressive_item_metrics_index();
         let total_lines = metrics_index.line_count;
@@ -78,6 +86,12 @@ impl Model {
                 if row >= content_bottom {
                     break;
                 }
+                let line_content =
+                    if highlight_item_index.is_some() && line.item_index == highlight_item_index {
+                        line.line.patch_style(backtrack_highlight_style())
+                    } else {
+                        line.line
+                    };
                 let line_rect =
                     if line.is_assistant && inset > 0 && area.width > inset.saturating_mul(2) {
                         Rect::new(
@@ -89,7 +103,7 @@ impl Model {
                     } else {
                         Rect::new(area.x, row, area.width, 1)
                     };
-                frame.render_widget(Paragraph::new(line.line), line_rect);
+                frame.render_widget(Paragraph::new(line_content), line_rect);
                 row += 1;
             }
 
@@ -130,10 +144,19 @@ impl Model {
 
         // 底部单行提示区（风格与 model_panel footer 一致）
         let footer_y = area.y + area.height - 1;
+        let footer_hint = if self.backtrack.overlay_preview_active {
+            BACKTRACK_FOOTER_HINT
+        } else {
+            FOOTER_HINT
+        };
         let hint_style = tertiary_text_style(palette).add_modifier(Modifier::ITALIC);
         frame.render_widget(
-            Paragraph::new(Line::styled(FOOTER_HINT, hint_style)),
+            Paragraph::new(Line::styled(footer_hint, hint_style)),
             Rect::new(area.x, footer_y, area.width, 1),
         );
     }
+}
+
+fn backtrack_highlight_style() -> Style {
+    Style::new().add_modifier(Modifier::REVERSED)
 }

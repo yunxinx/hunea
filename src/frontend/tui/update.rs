@@ -11,6 +11,7 @@ use crate::runtime::{
 
 use super::{
     ExternalEditorLaunch, Model, Sender,
+    exit_confirmation::EXIT_CONFIRMATION_PROMPT,
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},
 };
 
@@ -200,6 +201,7 @@ impl Model {
                 None
             }
             AppEvent::StatusNoticeTimeout { token } => {
+                self.reset_backtrack_state_for_status_notice_timeout(token);
                 self.dismiss_status_notice(token);
                 self.reset_chat_interrupt_esc_count();
                 None
@@ -260,19 +262,34 @@ impl Model {
             return None;
         }
 
+        let is_plain_esc = key.code == KeyCode::Esc && key.modifiers.is_empty();
+        let is_ctrl_c =
+            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
         self.clear_history_scroll_indicator();
         if self.transcript_overlay_active() {
             self.cancel_exit_confirmation();
+            if let Some(effect) = self.handle_backtrack_overlay_key(key) {
+                return effect;
+            }
             if let Some(effect) = self.handle_transcript_overlay_key(key) {
                 return effect;
             }
         }
 
-        if !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
-            self.cancel_exit_confirmation();
+        if !is_plain_esc {
+            self.reset_backtrack_state();
         }
 
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        let was_canceling_exit_confirmation =
+            is_plain_esc && self.current_status_notice_text() == EXIT_CONFIRMATION_PROMPT;
+        if !is_ctrl_c {
+            self.cancel_exit_confirmation();
+            if was_canceling_exit_confirmation {
+                return None;
+            }
+        }
+
+        if is_ctrl_c {
             if self.ctrl_c_clears_input && !self.composer_text().is_empty() {
                 self.cancel_exit_confirmation();
                 return self.handle_composer_clear_input();
@@ -293,10 +310,7 @@ impl Model {
             return effect;
         }
 
-        if key.code == KeyCode::Esc
-            && key.modifiers.is_empty()
-            && let Some(effect) = self.handle_chat_interrupt_key()
-        {
+        if is_plain_esc && let Some(effect) = self.handle_chat_interrupt_key() {
             return Some(effect);
         } else if key.code != KeyCode::Esc {
             self.reset_chat_interrupt_esc_count();
@@ -321,6 +335,10 @@ impl Model {
         }
 
         if let Some(effect) = self.handle_file_picker_key(key) {
+            return effect;
+        }
+
+        if is_plain_esc && let Some(effect) = self.handle_backtrack_main_esc_key() {
             return effect;
         }
 

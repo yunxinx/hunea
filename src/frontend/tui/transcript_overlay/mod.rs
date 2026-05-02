@@ -11,6 +11,7 @@ use crate::frontend::tui::Model;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TranscriptOverlayState {
     pub(crate) scroll_offset: usize,
+    pub(crate) highlight_item_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +22,10 @@ pub(crate) struct TranscriptOverlayScrollAnchor {
 
 impl TranscriptOverlayState {
     pub(crate) fn new() -> Self {
-        Self { scroll_offset: 0 }
+        Self {
+            scroll_offset: 0,
+            highlight_item_index: None,
+        }
     }
 }
 
@@ -72,7 +76,10 @@ impl Model {
             document_offset.saturating_sub(hero_lines).min(max_offset)
         };
 
-        self.transcript_overlay = Some(TranscriptOverlayState { scroll_offset });
+        self.transcript_overlay = Some(TranscriptOverlayState {
+            scroll_offset,
+            highlight_item_index: None,
+        });
     }
 
     pub(crate) fn close_transcript_overlay(&mut self) {
@@ -80,7 +87,11 @@ impl Model {
             return;
         }
 
+        let had_backtrack_state = self.backtrack.primed || self.backtrack.overlay_preview_active;
         self.transcript_overlay = None;
+        if had_backtrack_state {
+            self.reset_backtrack_state();
+        }
         self.sync_composer_height();
     }
 

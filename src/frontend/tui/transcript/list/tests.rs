@@ -183,6 +183,29 @@ fn snippet_reasoning_without_duration_is_not_appended() {
 }
 
 #[test]
+fn truncate_before_item_removes_selected_and_later_history() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.append_message(Sender::User, "first question");
+    transcript.append_message(Sender::Assistant, "first answer");
+    transcript.append_message(Sender::User, "second question");
+    transcript.append_message(Sender::Assistant, "second answer");
+    let _ = transcript.render();
+
+    assert!(transcript.truncate_before_item(2));
+
+    assert_eq!(transcript.len(), 2);
+    assert_eq!(
+        transcript.source_messages(),
+        vec![
+            (Sender::User, "first question".to_string()),
+            (Sender::Assistant, "first answer".to_string()),
+        ]
+    );
+    assert_eq!(transcript.item_metrics_index().metrics.len(), 2);
+    assert!(!transcript.truncate_before_item(2));
+}
+
+#[test]
 fn item_metrics_index_tracks_invalidation_boundaries() {
     let mut transcript = Transcript::new(default_palette());
     transcript.items = Rc::new(vec![

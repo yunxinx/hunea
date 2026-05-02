@@ -6,6 +6,7 @@ use super::*;
 pub(crate) struct TranscriptViewportLine {
     pub(crate) line: Line<'static>,
     pub(crate) is_assistant: bool,
+    pub(crate) item_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -109,6 +110,7 @@ impl Transcript {
                 lines.push(TranscriptViewportLine {
                     line: Line::raw(""),
                     is_assistant: false,
+                    item_index: None,
                 });
             }
 
@@ -125,7 +127,11 @@ impl Transcript {
                     .unwrap_or(false);
                 for block_index in block_start..block_end {
                     if let Some(line) = block.line_at(block_index) {
-                        lines.push(TranscriptViewportLine { line, is_assistant });
+                        lines.push(TranscriptViewportLine {
+                            line,
+                            is_assistant,
+                            item_index: Some(position.item_index),
+                        });
                     }
                 }
             }

@@ -65,6 +65,12 @@ impl Model {
 
         if let Some(overlay) = self.transcript_overlay.as_mut() {
             overlay.scroll_offset = next_offset;
+            if overlay
+                .highlight_item_index
+                .is_some_and(|item_index| item_index >= next_index.metrics.len())
+            {
+                overlay.highlight_item_index = None;
+            }
         }
     }
 
@@ -100,6 +106,45 @@ impl Model {
         } else {
             anchor.scroll_offset.min(max_offset)
         };
+        if let Some(overlay) = self.transcript_overlay.as_mut() {
+            overlay.scroll_offset = next_offset;
+        }
+    }
+
+    pub(crate) fn scroll_transcript_overlay_item_into_view(&mut self, item_index: usize) {
+        if self.transcript_overlay.is_none() {
+            return;
+        }
+
+        let content_height = self.transcript_overlay_content_height();
+        let index = self.transcript.progressive_item_metrics_index();
+        let max_offset = self.transcript_overlay_max_offset_for_index(&index, content_height);
+        let hero_lines = self.transcript_overlay_hero_lines_for_index(&index);
+        let Some(position) = index.position_for_item(item_index) else {
+            return;
+        };
+
+        let item_start = position
+            .start_line
+            .saturating_add(position.gap_before)
+            .saturating_sub(hero_lines);
+        let item_end = item_start.saturating_add(position.content_line_count.max(1));
+        let current_offset = self
+            .transcript_overlay
+            .as_ref()
+            .map(|overlay| overlay.scroll_offset.min(max_offset))
+            .unwrap_or_default();
+        let viewport_end = current_offset.saturating_add(content_height);
+
+        let next_offset = if item_start < current_offset {
+            item_start
+        } else if item_end > viewport_end {
+            item_end.saturating_sub(content_height)
+        } else {
+            current_offset
+        }
+        .min(max_offset);
+
         if let Some(overlay) = self.transcript_overlay.as_mut() {
             overlay.scroll_offset = next_offset;
         }

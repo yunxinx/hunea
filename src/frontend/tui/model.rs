@@ -13,6 +13,7 @@ use crate::runtime::{
 use super::{
     HeroOptions, ReasoningDisplayMode, Sender,
     acp::{AcpDebugPanelState, AcpPanelState, PendingAcpPermission},
+    backtrack::BacktrackState,
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
     document::{
@@ -61,6 +62,7 @@ pub struct Model {
     pub(super) tool_approval_panel_revision: usize,
     pub(super) transcript_overlay:
         Option<crate::frontend::tui::transcript_overlay::TranscriptOverlayState>,
+    pub(super) backtrack: BacktrackState,
     pub(super) pending_acp_permission: Option<PendingAcpPermission>,
     pub(super) stream_activity: Option<StreamActivityState>,
     pub(super) status_phrase_selector: StatusPhraseSelector,
@@ -306,6 +308,7 @@ impl Model {
             tool_approval_panel: ToolApprovalPanelState::default(),
             tool_approval_panel_revision: 1,
             transcript_overlay: None,
+            backtrack: BacktrackState::default(),
             pending_acp_permission: None,
             stream_activity: None,
             status_phrase_selector: StatusPhraseSelector::new(
@@ -524,6 +527,7 @@ impl Model {
         self.model_panel = ModelPanelState::default();
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
+        self.backtrack = BacktrackState::default();
         self.pending_acp_permission = None;
         self.stream_activity = None;
         self.command_panel_selected = 0;

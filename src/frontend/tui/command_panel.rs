@@ -1,4 +1,4 @@
-use std::fmt::Write as _;
+use std::{collections::BTreeMap, fmt::Write as _};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
@@ -23,6 +23,7 @@ const COMMAND_PANEL_DESCRIPTION_GAP: usize = 4;
 pub(super) enum CommandPanelAction {
     Clear,
     Exit,
+    CompleteAcpCommand { command_name: String },
     OpenAcpDebug,
     OpenAcpPicker,
     OpenModelPanel,
@@ -120,7 +121,8 @@ impl Model {
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
                 let item = state.items.get(state.selected)?;
-                self.complete_command_panel_selection(item.name.as_str());
+                let completion_text = command_panel_completion_text(item);
+                self.complete_command_panel_selection(&completion_text);
                 Some(None)
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
@@ -371,6 +373,11 @@ impl Model {
                 self.mark_quitting();
                 None
             }
+            CommandPanelAction::CompleteAcpCommand { .. } => {
+                let completion_text = command_panel_completion_text(&item);
+                self.complete_command_panel_selection(&completion_text);
+                None
+            }
             CommandPanelAction::OpenAcpDebug => {
                 self.open_acp_debug_panel();
                 None
@@ -392,7 +399,18 @@ impl Model {
 
     fn filter_command_panel_items(&self, query: &str) -> Vec<CommandPanelItem> {
         let is_acp_session_active = self.selected_acp_agent.is_some();
-        filter_base_command_panel_items(query, is_acp_session_active, self.debug_commands_enabled)
+        let base_items =
+            filter_base_command_panel_items("", is_acp_session_active, self.debug_commands_enabled);
+        let items = merge_command_panel_items(base_items, self.selected_acp_available_commands());
+
+        if query.is_empty() {
+            return items;
+        }
+
+        items
+            .into_iter()
+            .filter(|item| command_panel_item_matches_query(item, query))
+            .collect()
     }
 }
 
@@ -491,6 +509,51 @@ fn base_command_panel_items_for_query(query: &str) -> Vec<CommandPanelItem> {
     filter_base_command_panel_items(query, false, false)
 }
 
+fn command_panel_completion_text(item: &CommandPanelItem) -> String {
+    match &item.action {
+        CommandPanelAction::CompleteAcpCommand { command_name } => {
+            format!("/{command_name} ")
+        }
+        _ => item.name.clone(),
+    }
+}
+
+fn merge_command_panel_items(
+    base_items: Vec<CommandPanelItem>,
+    acp_available_commands: &[crate::runtime::acp::AcpAvailableCommand],
+) -> Vec<CommandPanelItem> {
+    let mut items = BTreeMap::new();
+    for item in base_items {
+        items.insert(command_panel_item_sort_key(&item), item);
+    }
+    for item in acp_command_panel_items(acp_available_commands) {
+        items.insert(command_panel_item_sort_key(&item), item);
+    }
+
+    items.into_values().collect()
+}
+
+fn acp_command_panel_items(
+    commands: &[crate::runtime::acp::AcpAvailableCommand],
+) -> Vec<CommandPanelItem> {
+    commands
+        .iter()
+        .filter_map(|command| {
+            let command_name = command.name.trim().trim_start_matches('/').to_string();
+            if command_name.is_empty() {
+                return None;
+            }
+
+            Some(CommandPanelItem {
+                name: format!("/{command_name}"),
+                aliases: Vec::new(),
+                description: command.description.clone(),
+                action: CommandPanelAction::CompleteAcpCommand { command_name },
+            })
+        })
+        .collect()
+}
+
 fn command_panel_item_matches_query(item: &CommandPanelItem, query: &str) -> bool {
     let primary = item.name.trim_start_matches('/').to_lowercase();
     if primary.starts_with(query) {
@@ -503,6 +566,10 @@ fn command_panel_item_matches_query(item: &CommandPanelItem, query: &str) -> boo
             .to_lowercase()
             .starts_with(query)
     })
+}
+
+fn command_panel_item_sort_key(item: &CommandPanelItem) -> String {
+    item.name.trim_start_matches('/').to_lowercase()
 }
 
 fn pad_display_width_right(text: &str, width: usize) -> String {

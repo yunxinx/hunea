@@ -1,3 +1,5 @@
+use crossterm::event::KeyCode;
+
 use super::*;
 use crate::frontend::tui::{
     HeroOptions, ModelOptions, StatusLineItem, StyleMode, document::DocumentAnchorRegion,
@@ -84,4 +86,101 @@ fn rendered_command_panel_line_respects_available_width() {
         selectable.content_columns().map(|(start, _)| start),
         Some(2)
     );
+}
+
+#[test]
+fn acp_commands_merge_alphabetically_and_keep_acp_on_collision() {
+    let mut model = Model::new(HeroOptions::default());
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    model.apply_acp_available_commands(
+        "Kimi Code CLI",
+        vec![
+            crate::runtime::acp::AcpAvailableCommand {
+                name: "web".to_string(),
+                description: "Search the web".to_string(),
+                input: Some(
+                    crate::runtime::acp::AcpAvailableCommandInput::Unstructured {
+                        hint: "query to search for".to_string(),
+                    },
+                ),
+            },
+            crate::runtime::acp::AcpAvailableCommand {
+                name: "clear".to_string(),
+                description: "ACP clear".to_string(),
+                input: None,
+            },
+        ],
+    );
+
+    let items = model.filter_command_panel_items("");
+    let names = items
+        .iter()
+        .map(|item| item.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, vec!["/clear", "/exit", "/models", "/web"]);
+    assert_eq!(
+        items
+            .iter()
+            .find(|item| item.name == "/clear")
+            .expect("ACP clear command should be visible")
+            .description,
+        "ACP clear"
+    );
+}
+
+#[test]
+fn acp_command_enter_completion_keeps_trailing_space() {
+    let mut model = Model::new(HeroOptions::default());
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    model.apply_acp_available_commands(
+        "Kimi Code CLI",
+        vec![crate::runtime::acp::AcpAvailableCommand {
+            name: "web".to_string(),
+            description: "Search the web".to_string(),
+            input: Some(
+                crate::runtime::acp::AcpAvailableCommandInput::Unstructured {
+                    hint: "query to search for".to_string(),
+                },
+            ),
+        }],
+    );
+    model.composer_mut().replace_text_and_move_to_end("/we");
+    model.sync_command_panel_navigation();
+
+    let item = model
+        .filter_command_panel_items("we")
+        .into_iter()
+        .next()
+        .expect("ACP web command should be filtered");
+
+    let effect = model.execute_command_panel_item(item);
+
+    assert_eq!(model.composer_text(), "/web ");
+    assert!(effect.is_none());
+}
+
+#[test]
+fn acp_command_tab_completion_keeps_trailing_space() {
+    let mut model = Model::new(HeroOptions::default());
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    model.apply_acp_available_commands(
+        "Kimi Code CLI",
+        vec![crate::runtime::acp::AcpAvailableCommand {
+            name: "web".to_string(),
+            description: "Search the web".to_string(),
+            input: Some(
+                crate::runtime::acp::AcpAvailableCommandInput::Unstructured {
+                    hint: "query to search for".to_string(),
+                },
+            ),
+        }],
+    );
+    model.composer_mut().replace_text_and_move_to_end("/we");
+    model.sync_command_panel_navigation();
+
+    let handled = model.handle_command_panel_key(KeyCode::Tab.into());
+
+    assert_eq!(model.composer_text(), "/web ");
+    assert_eq!(handled, Some(None));
 }

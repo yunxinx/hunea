@@ -243,17 +243,18 @@ fn command_panel_selected_item_uses_accent_without_coloring_description_blue() {
 
     let buffer = render_buffer(&mut model, 64, 12);
 
-    assert_text_cells_use_color(&buffer, "/exit", palette.command_accent);
-    assert_text_cells_do_not_use_color(&buffer, "/exit", palette.accent);
-    assert_text_cells_are_bold(&buffer, "/exit");
-    assert_text_cells_use_color(&buffer, "Exit the application", palette.main);
-    assert_text_cells_do_not_use_color(&buffer, "Exit the application", palette.command_accent);
-    assert_text_cells_use_color(&buffer, "/acp", palette.secondary);
-    assert_text_cells_use_color(
+    assert_text_cells_use_color(&buffer, "/acp", palette.command_accent);
+    assert_text_cells_do_not_use_color(&buffer, "/acp", palette.accent);
+    assert_text_cells_are_bold(&buffer, "/acp");
+    assert_text_cells_use_color(&buffer, "Select ACP agent for this session", palette.main);
+    assert_text_cells_do_not_use_color(
         &buffer,
         "Select ACP agent for this session",
-        palette.secondary,
+        palette.command_accent,
     );
+    assert_text_cells_use_color(&buffer, "/exit", palette.secondary);
+    assert_text_cells_use_color(&buffer, "Exit the application", palette.secondary);
+    assert_text_cells_use_color(&buffer, "/models", palette.secondary);
 }
 
 #[test]
@@ -267,7 +268,6 @@ fn command_panel_enter_on_acp_command_opens_acp_panel() {
         },
     );
     type_text(&mut model, "/");
-    model.update(AppEvent::Key(KeyCode::Down.into()));
 
     model.update(AppEvent::Key(KeyCode::Enter.into()));
 

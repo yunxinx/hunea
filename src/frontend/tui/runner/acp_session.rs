@@ -294,6 +294,9 @@ pub(super) fn apply_acp_session_event(
         AcpSessionEvent::ModelConfigChanged { agent_id, config } => {
             model.apply_acp_model_config(&agent_id, config);
         }
+        AcpSessionEvent::AvailableCommandsChanged { agent_id, commands } => {
+            model.apply_acp_available_commands(agent_id, commands);
+        }
         AcpSessionEvent::ConfigChangeFailed { message, .. } => {
             model.show_transient_status_notice(&format!("ACP config change failed: {message}"));
         }
@@ -374,7 +377,8 @@ pub(super) fn apply_acp_session_event(
                 request_id: None,
             });
         }
-        AcpSessionEvent::Stopped { message, .. } => {
+        AcpSessionEvent::Stopped { agent_id, message } => {
+            model.clear_acp_available_commands(&agent_id);
             if acp_runtime.should_discard_prompt_output() {
                 acp_runtime.mark_prompt_finished();
                 model.clear_stream_activity();
@@ -407,6 +411,8 @@ pub(super) fn run_start_acp_session_effect(
     acp_runtime: &mut AcpRuntimeState,
     agent_id: &str,
 ) -> Result<()> {
+    model.clear_acp_available_commands(agent_id);
+
     let Some(command) = runtime_options.acp_sessions.command(agent_id) else {
         model.show_transient_status_notice(&format!(
             "ACP agent needs installation before starting: {agent_id}"

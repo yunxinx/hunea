@@ -6,7 +6,7 @@ use ratatui::Frame;
 use crate::envinfo;
 use crate::runtime::phrases::StatusPhraseOrder;
 use crate::runtime::{
-    acp::{AcpAgentIdentity, AcpModelConfig},
+    acp::{AcpAgentIdentity, AcpAvailableCommand, AcpModelConfig},
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
 };
 
@@ -52,6 +52,7 @@ pub struct Model {
     pub(super) selected_acp_agent: Option<String>,
     pub(super) acp_current_model: Option<String>,
     pub(super) acp_model_config_id: Option<String>,
+    pub(super) acp_available_commands_by_agent: BTreeMap<String, Vec<AcpAvailableCommand>>,
     pub(super) acp_panel: AcpPanelState,
     pub(super) acp_debug_panel: AcpDebugPanelState,
     pub(super) model_catalog: ModelCatalog,
@@ -299,6 +300,7 @@ impl Model {
             selected_acp_agent: None,
             acp_current_model: None,
             acp_model_config_id: None,
+            acp_available_commands_by_agent: BTreeMap::new(),
             acp_panel: AcpPanelState::default(),
             acp_debug_panel: AcpDebugPanelState::default(),
             model_catalog: options.model_catalog,
@@ -409,6 +411,37 @@ impl Model {
             .filter(|identity| identity.has_agent_info())
             .map(AcpAgentIdentity::display_label)
             .unwrap_or_else(|| agent_id.to_string())
+    }
+
+    /// `apply_acp_available_commands` 记录当前 ACP session 上报的动态斜杠命令。
+    pub(crate) fn apply_acp_available_commands(
+        &mut self,
+        agent_id: impl Into<String>,
+        commands: Vec<AcpAvailableCommand>,
+    ) {
+        let agent_id = agent_id.into();
+        if commands.is_empty() {
+            self.acp_available_commands_by_agent.remove(&agent_id);
+        } else {
+            self.acp_available_commands_by_agent
+                .insert(agent_id, commands);
+        }
+        self.sync_command_panel_navigation();
+    }
+
+    /// `clear_acp_available_commands` 清理指定 ACP agent 的动态斜杠命令。
+    pub(crate) fn clear_acp_available_commands(&mut self, agent_id: &str) {
+        self.acp_available_commands_by_agent.remove(agent_id);
+        self.sync_command_panel_navigation();
+    }
+
+    /// `selected_acp_available_commands` 返回当前活跃 ACP session 的动态命令。
+    pub(crate) fn selected_acp_available_commands(&self) -> &[AcpAvailableCommand] {
+        self.selected_acp_agent
+            .as_deref()
+            .and_then(|agent_id| self.acp_available_commands_by_agent.get(agent_id))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub(super) fn model_selection_display_name(&self, provider_id: &str, model_id: &str) -> String {

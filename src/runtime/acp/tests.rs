@@ -639,6 +639,196 @@ async fn acp_worker_transport_forwards_thought_chunks_and_model_config() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn acp_worker_transport_forwards_available_commands_update() {
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+
+    use acp::schema::{
+        AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate, Implementation,
+        InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
+        PromptRequest, PromptResponse, SessionNotification, SessionUpdate, StopReason,
+        UnstructuredCommandInput,
+    };
+    use agent_client_protocol as acp;
+
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    tokio::task::spawn(async move {
+        acp::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _connection| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_info(Implementation::new("fake-agent", "0.1.0")),
+                    )
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _connection| {
+                    responder.respond(NewSessionResponse::new("test-session"))
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |request: PromptRequest, responder, connection| {
+                    connection.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
+                            AvailableCommand::new("web", "Search the web").input(
+                                AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+                                    "query to search for",
+                                )),
+                            ),
+                            AvailableCommand::new("test", "Run tests"),
+                        ])),
+                    ))?;
+                    responder.respond(PromptResponse::new(StopReason::EndTurn))
+                },
+                acp::on_receive_request!(),
+            )
+            .connect_to(agent_transport)
+            .await
+    });
+
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let worker = tokio::task::spawn(super::run_agent_transport_worker(
+        "fake".to_string(),
+        client_transport,
+        command_rx,
+        cancel_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+        super::AcpPermissionRegistry::default(),
+    ));
+
+    let _started = recv_worker_event(&event_rx, "worker should report session start").await;
+    command_tx
+        .send(super::AcpWorkerCommand::Prompt(
+            super::AcpPrompt::from_text("ping"),
+        ))
+        .expect("prompt command should send");
+    let _prompt_started = recv_worker_event(&event_rx, "worker should report prompt start").await;
+
+    let available_commands_event =
+        recv_worker_event(&event_rx, "worker should report available commands").await;
+    match available_commands_event {
+        super::AcpSessionEvent::AvailableCommandsChanged { commands, .. } => {
+            assert_eq!(commands.len(), 2);
+            assert_eq!(commands[0].name, "web");
+            assert_eq!(commands[0].description, "Search the web");
+            assert!(matches!(
+                commands[0].input,
+                Some(super::AcpAvailableCommandInput::Unstructured { ref hint }) if hint == "query to search for"
+            ));
+            assert_eq!(commands[1].name, "test");
+            assert_eq!(commands[1].description, "Run tests");
+            assert!(commands[1].input.is_none());
+        }
+        other => panic!("expected available commands update, got {other:?}"),
+    }
+
+    command_tx
+        .send(super::AcpWorkerCommand::Shutdown)
+        .expect("shutdown command should send");
+    worker
+        .await
+        .expect("worker task should join")
+        .expect("worker should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_worker_transport_forwards_idle_available_commands_update() {
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+
+    use acp::schema::{
+        AvailableCommand, AvailableCommandsUpdate, Implementation, InitializeRequest,
+        InitializeResponse, NewSessionRequest, NewSessionResponse, SessionNotification,
+        SessionUpdate,
+    };
+    use agent_client_protocol as acp;
+
+    let (notify_tx, notify_rx) = tokio::sync::oneshot::channel();
+    let notify_rx = Arc::new(tokio::sync::Mutex::new(Some(notify_rx)));
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    tokio::task::spawn({
+        let notify_rx = Arc::clone(&notify_rx);
+        async move {
+            acp::Agent
+                .builder()
+                .on_receive_request(
+                    async |request: InitializeRequest, responder, _connection| {
+                        responder.respond(
+                            InitializeResponse::new(request.protocol_version)
+                                .agent_info(Implementation::new("fake-agent", "0.1.0")),
+                        )
+                    },
+                    acp::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |_request: NewSessionRequest, responder, connection| {
+                        responder.respond(NewSessionResponse::new("test-session"))?;
+                        if let Some(notify_rx) = notify_rx.lock().await.take() {
+                            let _ = notify_rx.await;
+                            connection.send_notification(SessionNotification::new(
+                                "test-session",
+                                SessionUpdate::AvailableCommandsUpdate(
+                                    AvailableCommandsUpdate::new(vec![AvailableCommand::new(
+                                        "web",
+                                        "Search the web",
+                                    )]),
+                                ),
+                            ))?;
+                        }
+                        Ok(())
+                    },
+                    acp::on_receive_request!(),
+                )
+                .connect_to(agent_transport)
+                .await
+        }
+    });
+
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let worker = tokio::task::spawn(super::run_agent_transport_worker(
+        "fake".to_string(),
+        client_transport,
+        command_rx,
+        cancel_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+        super::AcpPermissionRegistry::default(),
+    ));
+
+    let _started = recv_worker_event(&event_rx, "worker should report session start").await;
+    notify_tx
+        .send(())
+        .expect("idle update notification should be released");
+
+    let available_commands_event =
+        recv_worker_event(&event_rx, "worker should report idle available commands").await;
+    match available_commands_event {
+        super::AcpSessionEvent::AvailableCommandsChanged { commands, .. } => {
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].name, "web");
+            assert_eq!(commands[0].description, "Search the web");
+        }
+        other => panic!("expected idle available commands update, got {other:?}"),
+    }
+
+    command_tx
+        .send(super::AcpWorkerCommand::Shutdown)
+        .expect("shutdown command should send");
+    worker
+        .await
+        .expect("worker task should join")
+        .expect("worker should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn acp_worker_transport_sends_structured_prompt_blocks() {
     use std::sync::{Arc, Mutex, atomic::AtomicBool, mpsc};
 

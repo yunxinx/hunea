@@ -8,11 +8,13 @@ use std::{
 };
 
 use agent_client_protocol::schema::{
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions,
+    AvailableCommand, AvailableCommandInput, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOptions,
 };
 
 use super::{
-    AcpModelConfig, AcpModelOption, AcpPrompt, AcpSessionCommand, AcpSessionEvent,
+    AcpAvailableCommand, AcpAvailableCommandInput, AcpModelConfig, AcpModelOption, AcpPrompt,
+    AcpSessionCommand, AcpSessionEvent,
     initialize::{
         build_initialize_request, initialize_outcome_from_response, protocol_version_warning,
     },
@@ -186,7 +188,8 @@ where
                 event_tx.clone(),
                 permissions,
             )
-            .await;
+            .await
+            .map_err(|error| acp::Error::internal_error().data(error))?;
 
             let _ = event_tx.send(AcpSessionEvent::Stopped {
                 agent_id,
@@ -205,8 +208,33 @@ async fn run_agent_prompt_loop(
     mut cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
     permissions: AcpPermissionRegistry,
-) {
-    while let Some(command) = command_rx.recv().await {
+) -> Result<(), String> {
+    let mut is_cancel_rx_closed = false;
+    loop {
+        let command = tokio::select! {
+            biased;
+            command = command_rx.recv() => command,
+            cancel = cancel_rx.recv(), if !is_cancel_rx_closed => {
+                if cancel.is_none() {
+                    is_cancel_rx_closed = true;
+                }
+                continue;
+            }
+            update = session.read_update() => {
+                let update = update.map_err(|error| error.to_string())?;
+                let _ = handle_acp_session_message(
+                    update,
+                    &agent_id,
+                    &event_tx,
+                    &permissions,
+                )
+                .await?;
+                continue;
+            }
+        };
+        let Some(command) = command else {
+            break;
+        };
         match command {
             AcpWorkerCommand::Prompt(prompt) => {
                 let _ = event_tx.send(AcpSessionEvent::PromptStarted {
@@ -276,6 +304,7 @@ async fn run_agent_prompt_loop(
             AcpWorkerCommand::Shutdown => break,
         }
     }
+    Ok(())
 }
 
 fn send_acp_prompt_request(
@@ -312,14 +341,6 @@ async fn read_prompt_response(
     cancel_rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
     mut prompt_response_rx: AcpPromptResponseReceiver,
 ) -> Result<AcpPromptReadOutcome, String> {
-    use acp::schema::{
-        ConfigOptionUpdate, ContentBlock, ContentChunk, RequestPermissionOutcome,
-        RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-        SessionNotification, SessionUpdate,
-    };
-    use agent_client_protocol as acp;
-    use agent_client_protocol::{SessionMessage, util::MatchDispatch};
-
     let mut is_interrupted = false;
     let mut is_cancel_rx_closed = false;
     loop {
@@ -347,85 +368,112 @@ async fn read_prompt_response(
                 return Ok(AcpPromptReadOutcome::Completed(stop_reason));
             }
         };
-        match update {
-            SessionMessage::SessionMessage(dispatch) => {
-                let permission_agent_id = agent_id.to_string();
-                let permission_event_tx = event_tx.clone();
-                let permission_registry = permissions.clone();
-                MatchDispatch::new(dispatch)
-                    .if_notification(async |notification: SessionNotification| {
-                        match notification.update {
-                            SessionUpdate::AgentMessageChunk(ContentChunk {
-                                content: ContentBlock::Text(text),
-                                ..
-                            }) => {
-                                let _ = event_tx.send(AcpSessionEvent::AgentMessageChunk {
-                                    agent_id: agent_id.to_string(),
-                                    content: text.text,
-                                });
-                            }
-                            SessionUpdate::AgentMessageChunk(_) => {
-                                // 当前 TUI transcript 只渲染 agent 文本输出；非文本 block 暂不展示。
-                            }
-                            SessionUpdate::AgentThoughtChunk(ContentChunk {
-                                content: ContentBlock::Text(text),
-                                ..
-                            }) => {
-                                let _ = event_tx.send(AcpSessionEvent::AgentThoughtChunk {
-                                    agent_id: agent_id.to_string(),
-                                    content: text.text,
-                                });
-                            }
-                            SessionUpdate::AgentThoughtChunk(_) => {
-                                // 当前 reasoning transcript 只接收文本；非文本 thought block 暂不展示。
-                            }
-                            SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate {
-                                config_options,
-                                ..
-                            }) => {
-                                if let Some(config) =
-                                    acp_model_config_from_config_options(Some(&config_options))
-                                {
-                                    let _ = event_tx.send(AcpSessionEvent::ModelConfigChanged {
-                                        agent_id: agent_id.to_string(),
-                                        config,
-                                    });
-                                }
-                            }
-                            _ => {}
-                        }
-                        Ok(())
-                    })
-                    .await
-                    .if_request(async move |request: RequestPermissionRequest, responder| {
-                        let (request_id, response_rx) = permission_registry.register();
-                        let permission_request =
-                            acp_permission_request_from_sdk(request_id, &request);
-                        let _ = permission_event_tx.send(AcpSessionEvent::PermissionRequested {
-                            agent_id: permission_agent_id.clone(),
-                            request: permission_request,
-                        });
-
-                        let outcome = match response_rx.await {
-                            Ok(Some(option_id)) => RequestPermissionOutcome::Selected(
-                                SelectedPermissionOutcome::new(option_id),
-                            ),
-                            Ok(None) | Err(_) => RequestPermissionOutcome::Cancelled,
-                        };
-                        responder.respond(RequestPermissionResponse::new(outcome))
-                    })
-                    .await
-                    .otherwise_ignore()
-                    .map_err(|error| error.to_string())?;
+        if let Some(stop_reason) =
+            handle_acp_session_message(update, agent_id, event_tx, permissions).await?
+        {
+            if is_interrupted {
+                return Ok(AcpPromptReadOutcome::Interrupted);
             }
-            SessionMessage::StopReason(stop_reason) => {
-                if is_interrupted {
-                    return Ok(AcpPromptReadOutcome::Interrupted);
-                }
-                return Ok(AcpPromptReadOutcome::Completed(format!("{stop_reason:?}")));
-            }
-            _ => {}
+            return Ok(AcpPromptReadOutcome::Completed(stop_reason));
         }
+    }
+}
+
+async fn handle_acp_session_message(
+    update: agent_client_protocol::SessionMessage,
+    agent_id: &str,
+    event_tx: &mpsc::Sender<AcpSessionEvent>,
+    permissions: &AcpPermissionRegistry,
+) -> Result<Option<String>, String> {
+    use acp::schema::{
+        ConfigOptionUpdate, ContentBlock, ContentChunk, RequestPermissionOutcome,
+        RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+        SessionNotification, SessionUpdate,
+    };
+    use agent_client_protocol as acp;
+    use agent_client_protocol::{SessionMessage, util::MatchDispatch};
+
+    match update {
+        SessionMessage::SessionMessage(dispatch) => {
+            let permission_agent_id = agent_id.to_string();
+            let permission_event_tx = event_tx.clone();
+            let permission_registry = permissions.clone();
+            MatchDispatch::new(dispatch)
+                .if_notification(async |notification: SessionNotification| {
+                    match notification.update {
+                        SessionUpdate::AgentMessageChunk(ContentChunk {
+                            content: ContentBlock::Text(text),
+                            ..
+                        }) => {
+                            let _ = event_tx.send(AcpSessionEvent::AgentMessageChunk {
+                                agent_id: agent_id.to_string(),
+                                content: text.text,
+                            });
+                        }
+                        SessionUpdate::AgentMessageChunk(_) => {
+                            // 当前 TUI transcript 只渲染 agent 文本输出；非文本 block 暂不展示。
+                        }
+                        SessionUpdate::AgentThoughtChunk(ContentChunk {
+                            content: ContentBlock::Text(text),
+                            ..
+                        }) => {
+                            let _ = event_tx.send(AcpSessionEvent::AgentThoughtChunk {
+                                agent_id: agent_id.to_string(),
+                                content: text.text,
+                            });
+                        }
+                        SessionUpdate::AgentThoughtChunk(_) => {
+                            // 当前 reasoning transcript 只接收文本；非文本 thought block 暂不展示。
+                        }
+                        SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate {
+                            config_options,
+                            ..
+                        }) => {
+                            if let Some(config) =
+                                acp_model_config_from_config_options(Some(&config_options))
+                            {
+                                let _ = event_tx.send(AcpSessionEvent::ModelConfigChanged {
+                                    agent_id: agent_id.to_string(),
+                                    config,
+                                });
+                            }
+                        }
+                        SessionUpdate::AvailableCommandsUpdate(update) => {
+                            let _ = event_tx.send(AcpSessionEvent::AvailableCommandsChanged {
+                                agent_id: agent_id.to_string(),
+                                commands: acp_available_commands_from_sdk(
+                                    &update.available_commands,
+                                ),
+                            });
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                })
+                .await
+                .if_request(async move |request: RequestPermissionRequest, responder| {
+                    let (request_id, response_rx) = permission_registry.register();
+                    let permission_request = acp_permission_request_from_sdk(request_id, &request);
+                    let _ = permission_event_tx.send(AcpSessionEvent::PermissionRequested {
+                        agent_id: permission_agent_id.clone(),
+                        request: permission_request,
+                    });
+
+                    let outcome = match response_rx.await {
+                        Ok(Some(option_id)) => RequestPermissionOutcome::Selected(
+                            SelectedPermissionOutcome::new(option_id),
+                        ),
+                        Ok(None) | Err(_) => RequestPermissionOutcome::Cancelled,
+                    };
+                    responder.respond(RequestPermissionResponse::new(outcome))
+                })
+                .await
+                .otherwise_ignore()
+                .map_err(|error| error.to_string())?;
+            Ok(None)
+        }
+        SessionMessage::StopReason(stop_reason) => Ok(Some(format!("{stop_reason:?}"))),
+        _ => Ok(None),
     }
 }
 
@@ -451,6 +499,38 @@ async fn set_session_config_option(
         .await
         .map_err(|error| error.to_string())?;
     Ok(response.config_options)
+}
+
+fn acp_available_commands_from_sdk(commands: &[AvailableCommand]) -> Vec<AcpAvailableCommand> {
+    commands
+        .iter()
+        .filter_map(acp_available_command_from_sdk)
+        .collect()
+}
+
+fn acp_available_command_from_sdk(command: &AvailableCommand) -> Option<AcpAvailableCommand> {
+    let name = command.name.trim().trim_start_matches('/').to_string();
+    if name.is_empty() {
+        return None;
+    }
+
+    Some(AcpAvailableCommand {
+        name,
+        description: command.description.trim().to_string(),
+        input: command
+            .input
+            .as_ref()
+            .map(acp_available_command_input_from_sdk),
+    })
+}
+
+fn acp_available_command_input_from_sdk(input: &AvailableCommandInput) -> AcpAvailableCommandInput {
+    match input {
+        AvailableCommandInput::Unstructured(input) => AcpAvailableCommandInput::Unstructured {
+            hint: input.hint.trim().to_string(),
+        },
+        _ => AcpAvailableCommandInput::Unknown,
+    }
 }
 
 fn acp_model_config_from_config_options(

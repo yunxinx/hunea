@@ -1,6 +1,23 @@
 use super::AcpPermissionRequest;
 use agent_client_protocol::schema::{AgentCapabilities, ProtocolVersion};
 
+/// `AcpAvailableCommandInput` 表示 ACP agent 广告的命令输入要求。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcpAvailableCommandInput {
+    /// `Unstructured` 表示命令名后的全部文本都会作为输入传给 agent。
+    Unstructured { hint: String },
+    /// `Unknown` 为未来 ACP schema 新增输入类型预留扩展点。
+    Unknown,
+}
+
+/// `AcpAvailableCommand` 表示 ACP agent 广告的一条动态斜杠命令。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpAvailableCommand {
+    pub name: String,
+    pub description: String,
+    pub input: Option<AcpAvailableCommandInput>,
+}
+
 /// `AcpModelOption` 表示 ACP agent 暴露的一个模型配置选项。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpModelOption {
@@ -58,6 +75,10 @@ pub enum AcpSessionEvent {
     ModelConfigChanged {
         agent_id: String,
         config: AcpModelConfig,
+    },
+    AvailableCommandsChanged {
+        agent_id: String,
+        commands: Vec<AcpAvailableCommand>,
     },
     ConfigChangeFailed {
         agent_id: String,

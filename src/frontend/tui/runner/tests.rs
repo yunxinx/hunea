@@ -15,7 +15,9 @@ use super::native_agent::{
 };
 use super::*;
 use crate::frontend::tui::{AppEffect, ReasoningDisplayMode, Sender, StatusLineItem};
-use crate::runtime::acp::{AcpInitializeOutcome, AcpSessionEvent};
+use crate::runtime::acp::{
+    AcpAvailableCommand, AcpAvailableCommandInput, AcpInitializeOutcome, AcpSessionEvent,
+};
 use crate::runtime::model_catalog::ModelSelection;
 use crate::runtime::native::{
     CancellationToken, NativeAgentEvent, NativeAgentRequest, NativeAgentResponse,
@@ -500,6 +502,76 @@ fn acp_model_config_changed_updates_current_model_status_line_and_models_panel()
         model.selected_model,
         Some(ModelSelection::new("acp:Kimi Code CLI", "kimi-k2"))
     );
+}
+
+#[test]
+fn acp_available_commands_are_saved_and_cleared_with_session_lifecycle() {
+    let mut model = Model::new(HeroOptions::default());
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::Started {
+            agent_id: "Kimi Code CLI".to_string(),
+            session_id: "test-session".to_string(),
+            outcome: AcpInitializeOutcome {
+                protocol_version: ProtocolVersion::V1,
+                agent_name: Some("kimi".to_string()),
+                agent_title: Some("Kimi Code CLI".to_string()),
+                agent_version: Some("1.0.0".to_string()),
+                agent_capabilities: AgentCapabilities::new(),
+                auth_method_count: 0,
+            },
+        },
+    );
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::AvailableCommandsChanged {
+            agent_id: "Kimi Code CLI".to_string(),
+            commands: vec![
+                AcpAvailableCommand {
+                    name: "web".to_string(),
+                    description: "Search the web".to_string(),
+                    input: Some(AcpAvailableCommandInput::Unstructured {
+                        hint: "query to search for".to_string(),
+                    }),
+                },
+                AcpAvailableCommand {
+                    name: "clear".to_string(),
+                    description: "ACP clear".to_string(),
+                    input: None,
+                },
+            ],
+        },
+    );
+
+    let commands = model.selected_acp_available_commands();
+    assert_eq!(
+        commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["web", "clear"]
+    );
+    assert!(matches!(
+        commands[0].input,
+        Some(AcpAvailableCommandInput::Unstructured { ref hint }) if hint == "query to search for"
+    ));
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::Stopped {
+            agent_id: "Kimi Code CLI".to_string(),
+            message: None,
+        },
+    );
+
+    assert!(model.selected_acp_available_commands().is_empty());
 }
 
 #[test]

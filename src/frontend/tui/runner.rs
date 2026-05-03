@@ -21,7 +21,7 @@ use effects::apply_effect_if_needed;
 use input::{TerminalInputAction, coalesced_input_actions, read_ready_terminal_events};
 use model_refresh::drain_model_refresh_runtime_events;
 use native_agent::drain_native_agent_runtime_events;
-use terminal::{TerminalSession, wait_for_terminal_event};
+use terminal::{TerminalMouseMode, TerminalSession, apply_mouse_mode, wait_for_terminal_event};
 
 /// `RuntimeOptions` 表示 TUI runner 可执行的外部 runtime 能力。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -79,7 +79,7 @@ pub fn run_with_runtime_options(
 
     let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;
     let mut render_needed = true;
-    let mut mouse_capture_enabled = true;
+    let mut mouse_mode = TerminalMouseMode::for_mouse_capture(true);
 
     loop {
         render_needed |= drain_acp_runtime_events(&mut model, &mut acp_runtime);
@@ -88,17 +88,13 @@ pub fn run_with_runtime_options(
 
         if render_needed {
             terminal.draw(|frame| model.render(frame))?;
-            // 同步鼠标捕获状态：覆盖层激活时禁用，以恢复终端原生选区
-            let wants_capture = model.wants_mouse_capture();
-            if wants_capture != mouse_capture_enabled {
-                use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
-                use crossterm::execute;
-                let _ = if wants_capture {
-                    execute!(terminal.backend_mut(), EnableMouseCapture)
-                } else {
-                    execute!(terminal.backend_mut(), DisableMouseCapture)
-                };
-                mouse_capture_enabled = wants_capture;
+            // 覆盖层关闭 mouse capture 以保留原生选区，同时打开 alternate scroll，
+            // 让终端把滚轮转成方向键交给 pager 处理。
+            let desired_mouse_mode =
+                TerminalMouseMode::for_mouse_capture(model.wants_mouse_capture());
+            if desired_mouse_mode != mouse_mode {
+                apply_mouse_mode(&mut terminal, desired_mouse_mode)?;
+                mouse_mode = desired_mouse_mode;
             }
             render_needed = false;
         }

@@ -1,6 +1,7 @@
-use std::io;
+use std::{fmt, io};
 
 use crossterm::{
+    Command,
     cursor::{Hide, Show},
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -15,6 +16,70 @@ use super::event_pipeline::TerminalWaitPlan;
 
 pub(super) type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TerminalMouseMode {
+    has_mouse_capture: bool,
+    has_alternate_scroll: bool,
+}
+
+impl TerminalMouseMode {
+    pub(super) const fn for_mouse_capture(has_mouse_capture: bool) -> Self {
+        if has_mouse_capture {
+            Self {
+                has_mouse_capture: true,
+                has_alternate_scroll: false,
+            }
+        } else {
+            Self {
+                has_mouse_capture: false,
+                has_alternate_scroll: true,
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EnableAlternateScroll;
+
+impl Command for EnableAlternateScroll {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[?1007h")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Err(io::Error::other(
+            "tried to execute EnableAlternateScroll using WinAPI; use ANSI instead",
+        ))
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisableAlternateScroll;
+
+impl Command for DisableAlternateScroll {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[?1007l")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Err(io::Error::other(
+            "tried to execute DisableAlternateScroll using WinAPI; use ANSI instead",
+        ))
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        true
+    }
+}
+
 pub(super) fn wait_for_terminal_event(wait_plan: TerminalWaitPlan) -> io::Result<Option<Event>> {
     match wait_plan {
         TerminalWaitPlan::Block => event::read().map(Some),
@@ -28,6 +93,34 @@ pub(super) fn wait_for_terminal_event(wait_plan: TerminalWaitPlan) -> io::Result
     }
 }
 
+pub(super) fn apply_mouse_mode(
+    terminal: &mut TuiTerminal,
+    mode: TerminalMouseMode,
+) -> io::Result<()> {
+    match (mode.has_mouse_capture, mode.has_alternate_scroll) {
+        (true, false) => execute!(
+            terminal.backend_mut(),
+            DisableAlternateScroll,
+            EnableMouseCapture
+        ),
+        (false, true) => execute!(
+            terminal.backend_mut(),
+            DisableMouseCapture,
+            EnableAlternateScroll
+        ),
+        (true, true) => execute!(
+            terminal.backend_mut(),
+            EnableAlternateScroll,
+            EnableMouseCapture
+        ),
+        (false, false) => execute!(
+            terminal.backend_mut(),
+            DisableMouseCapture,
+            DisableAlternateScroll
+        ),
+    }
+}
+
 pub(super) struct TerminalSession;
 
 impl TerminalSession {
@@ -37,6 +130,7 @@ impl TerminalSession {
         execute!(
             stdout,
             EnterAlternateScreen,
+            DisableAlternateScroll,
             EnableMouseCapture,
             EnableBracketedPaste,
             Hide
@@ -55,6 +149,7 @@ impl TerminalSession {
             Show,
             DisableBracketedPaste,
             DisableMouseCapture,
+            DisableAlternateScroll,
             LeaveAlternateScreen
         )?;
         Ok(())
@@ -65,6 +160,7 @@ impl TerminalSession {
         execute!(
             terminal.backend_mut(),
             EnterAlternateScreen,
+            DisableAlternateScroll,
             EnableMouseCapture,
             EnableBracketedPaste,
             Hide
@@ -84,7 +180,44 @@ impl Drop for TerminalSession {
             Show,
             DisableBracketedPaste,
             DisableMouseCapture,
+            DisableAlternateScroll,
             LeaveAlternateScreen
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::Command;
+
+    use super::{DisableAlternateScroll, EnableAlternateScroll, TerminalMouseMode};
+
+    #[test]
+    fn alternate_scroll_commands_emit_xterm_mode_sequences() {
+        let mut enable = String::new();
+        EnableAlternateScroll.write_ansi(&mut enable).unwrap();
+        assert_eq!(enable, "\x1b[?1007h");
+
+        let mut disable = String::new();
+        DisableAlternateScroll.write_ansi(&mut disable).unwrap();
+        assert_eq!(disable, "\x1b[?1007l");
+    }
+
+    #[test]
+    fn overlay_mouse_mode_uses_alternate_scroll_without_mouse_capture() {
+        assert_eq!(
+            TerminalMouseMode::for_mouse_capture(true),
+            TerminalMouseMode {
+                has_mouse_capture: true,
+                has_alternate_scroll: false,
+            }
+        );
+        assert_eq!(
+            TerminalMouseMode::for_mouse_capture(false),
+            TerminalMouseMode {
+                has_mouse_capture: false,
+                has_alternate_scroll: true,
+            }
         );
     }
 }

@@ -8,8 +8,8 @@ use std::{
 };
 
 use agent_client_protocol::schema::{
-    AvailableCommand, AvailableCommandInput, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOptions,
+    AvailableCommand, AvailableCommandInput, ModelInfo, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOptions, SessionModelState,
 };
 
 use super::{
@@ -160,7 +160,8 @@ where
                 .block_task()
                 .await?;
             let initial_model_config =
-                acp_model_config_from_config_options(session_response.config_options.as_deref());
+                acp_model_config_from_config_options(session_response.config_options.as_deref())
+                    .or_else(|| acp_model_config_from_models(session_response.models.as_ref()));
             let mut session = connection.attach_session(session_response, Vec::new())?;
             let session_id = session.session_id().to_string();
             started.store(true, Ordering::SeqCst);
@@ -281,9 +282,9 @@ async fn run_agent_prompt_loop(
                     }
                 }
             }
-            AcpWorkerCommand::SetConfigOption { config_id, value } => {
-                match set_session_config_option(session, &config_id, &value).await {
-                    Ok(config_options) => {
+            AcpWorkerCommand::SetModel { config_id, value } => {
+                match set_acp_model(session, config_id.as_deref(), &value).await {
+                    Ok(Some(config_options)) => {
                         if let Some(config) =
                             acp_model_config_from_config_options(Some(&config_options))
                         {
@@ -291,7 +292,16 @@ async fn run_agent_prompt_loop(
                                 agent_id: agent_id.clone(),
                                 config,
                             });
+                        } else {
+                            let _ = event_tx.send(AcpSessionEvent::ConfigChangeSucceeded {
+                                agent_id: agent_id.clone(),
+                            });
                         }
+                    }
+                    Ok(None) => {
+                        let _ = event_tx.send(AcpSessionEvent::ConfigChangeSucceeded {
+                            agent_id: agent_id.clone(),
+                        });
                     }
                     Err(message) => {
                         let _ = event_tx.send(AcpSessionEvent::ConfigChangeFailed {
@@ -477,28 +487,44 @@ async fn handle_acp_session_message(
     }
 }
 
-async fn set_session_config_option(
+async fn set_acp_model(
     session: &mut agent_client_protocol::ActiveSession<'static, agent_client_protocol::Agent>,
-    config_id: &str,
+    config_id: Option<&str>,
     value: &str,
-) -> Result<Vec<SessionConfigOption>, String> {
-    use acp::schema::SetSessionConfigOptionRequest;
+) -> Result<Option<Vec<SessionConfigOption>>, String> {
+    use acp::schema::{SetSessionConfigOptionRequest, SetSessionModelRequest};
     use agent_client_protocol as acp;
 
-    let response = session
-        .connection()
-        .send_request_to(
-            acp::Agent,
-            SetSessionConfigOptionRequest::new(
-                session.session_id().clone(),
-                config_id.to_string(),
-                value.to_string(),
-            ),
-        )
-        .block_task()
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(response.config_options)
+    match config_id {
+        Some(config_id) => {
+            let response = session
+                .connection()
+                .send_request_to(
+                    acp::Agent,
+                    SetSessionConfigOptionRequest::new(
+                        session.session_id().clone(),
+                        config_id.to_string(),
+                        value.to_string(),
+                    ),
+                )
+                .block_task()
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(Some(response.config_options))
+        }
+        None => {
+            session
+                .connection()
+                .send_request_to(
+                    acp::Agent,
+                    SetSessionModelRequest::new(session.session_id().clone(), value.to_string()),
+                )
+                .block_task()
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(None)
+        }
+    }
 }
 
 fn acp_available_commands_from_sdk(commands: &[AvailableCommand]) -> Vec<AcpAvailableCommand> {
@@ -540,7 +566,7 @@ fn acp_model_config_from_config_options(
         .iter()
         .filter(|option| {
             matches!(option.category, Some(SessionConfigOptionCategory::Model))
-                || option.id.to_string() == "model"
+                || matches!(option.id.to_string().as_str(), "model" | "models")
         })
         .find(|option| matches!(option.kind, SessionConfigKind::Select(_)))?;
     let SessionConfigKind::Select(select) = &option.kind else {
@@ -558,7 +584,28 @@ fn acp_model_config_from_config_options(
         .map(|option| option.name.clone())
         .unwrap_or_else(|| current_value.clone());
     Some(AcpModelConfig {
-        config_id: option.id.to_string(),
+        config_id: Some(option.id.to_string()),
+        current_value,
+        current_name,
+        options,
+    })
+}
+
+fn acp_model_config_from_models(models: Option<&SessionModelState>) -> Option<AcpModelConfig> {
+    let models = models?;
+    let current_value = models.current_model_id.to_string();
+    let current_value = current_value.trim().to_string();
+    if current_value.is_empty() {
+        return None;
+    }
+    let options = model_options_from_models(&models.available_models);
+    let current_name = options
+        .iter()
+        .find(|option| option.value == current_value)
+        .map(|option| option.name.clone())
+        .unwrap_or_else(|| current_value.clone());
+    Some(AcpModelConfig {
+        config_id: None,
         current_value,
         current_name,
         options,
@@ -584,6 +631,16 @@ fn model_options_from_select_options(options: &SessionConfigSelectOptions) -> Ve
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn model_options_from_models(models: &[ModelInfo]) -> Vec<AcpModelOption> {
+    models
+        .iter()
+        .map(|model| AcpModelOption {
+            value: model.model_id.to_string(),
+            name: model.name.clone(),
+        })
+        .collect()
 }
 
 fn send_acp_cancel_notification(

@@ -5,7 +5,7 @@ use agent_client_protocol::schema::{AgentCapabilities, PromptCapabilities};
 
 use super::acp_session::{
     AcpRuntimeState, acp_reject_option_id_for_cancel, apply_acp_session_event,
-    run_interrupt_acp_prompt_effect,
+    run_interrupt_acp_prompt_effect, run_set_acp_model_effect,
 };
 use super::effects::{reset_runtime_session_after_clear, run_interrupt_current_turn_effect};
 use super::input::{TerminalInputAction, coalesced_input_actions};
@@ -14,7 +14,7 @@ use super::native_agent::{
     run_send_native_agent_effect,
 };
 use super::*;
-use crate::frontend::tui::{AppEffect, ReasoningDisplayMode, Sender, StatusLineItem};
+use crate::frontend::tui::{AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem};
 use crate::runtime::acp::{
     AcpAvailableCommand, AcpAvailableCommandInput, AcpInitializeOutcome, AcpSessionEvent,
 };
@@ -478,7 +478,7 @@ fn acp_model_config_changed_updates_current_model_status_line_and_models_panel()
         AcpSessionEvent::ModelConfigChanged {
             agent_id: "Kimi Code CLI".to_string(),
             config: crate::runtime::acp::AcpModelConfig {
-                config_id: "model".to_string(),
+                config_id: Some("model".to_string()),
                 current_value: "kimi-k2".to_string(),
                 current_name: "Kimi K2".to_string(),
                 options: vec![crate::runtime::acp::AcpModelOption {
@@ -501,6 +501,231 @@ fn acp_model_config_changed_updates_current_model_status_line_and_models_panel()
     assert_eq!(
         model.selected_model,
         Some(ModelSelection::new("acp:Kimi Code CLI", "kimi-k2"))
+    );
+}
+
+#[test]
+fn acp_model_config_change_failed_rolls_back_selected_model_and_status_line() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            ..ModelOptions::default()
+        },
+    );
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ModelConfigChanged {
+            agent_id: "Kimi Code CLI".to_string(),
+            config: crate::runtime::acp::AcpModelConfig {
+                config_id: Some("model".to_string()),
+                current_value: "kimi-k2".to_string(),
+                current_name: "Kimi K2".to_string(),
+                options: vec![
+                    crate::runtime::acp::AcpModelOption {
+                        value: "kimi-k2".to_string(),
+                        name: "Kimi K2".to_string(),
+                    },
+                    crate::runtime::acp::AcpModelOption {
+                        value: "kimi-k1.5".to_string(),
+                        name: "Kimi K1.5".to_string(),
+                    },
+                ],
+            },
+        },
+    );
+    model.open_model_panel();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::SetAcpModel {
+            config_id: Some("model".to_string()),
+            value: "kimi-k1.5".to_string(),
+        })
+    );
+    assert_eq!(
+        model.selected_model,
+        Some(ModelSelection::new("acp:Kimi Code CLI", "kimi-k1.5"))
+    );
+    assert_eq!(
+        model.current_status_line_parts(),
+        vec!["Kimi K1.5".to_string()]
+    );
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ConfigChangeFailed {
+            agent_id: "Kimi Code CLI".to_string(),
+            message: "boom".to_string(),
+        },
+    );
+
+    assert_eq!(
+        model.selected_model,
+        Some(ModelSelection::new("acp:Kimi Code CLI", "kimi-k2"))
+    );
+    assert_eq!(
+        model.current_status_line_parts(),
+        vec!["Kimi K2".to_string()]
+    );
+}
+
+#[test]
+fn acp_model_selection_effect_failure_rolls_back_selected_model_and_status_line() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            ..ModelOptions::default()
+        },
+    );
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ModelConfigChanged {
+            agent_id: "Kimi Code CLI".to_string(),
+            config: crate::runtime::acp::AcpModelConfig {
+                config_id: None,
+                current_value: "kimi-for-coding".to_string(),
+                current_name: "Kimi for Coding".to_string(),
+                options: vec![
+                    crate::runtime::acp::AcpModelOption {
+                        value: "kimi-for-coding".to_string(),
+                        name: "Kimi for Coding".to_string(),
+                    },
+                    crate::runtime::acp::AcpModelOption {
+                        value: "kimi-for-coding(thinking)".to_string(),
+                        name: "Kimi for Coding (thinking)".to_string(),
+                    },
+                ],
+            },
+        },
+    );
+    model.open_model_panel();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::SetAcpModel {
+            config_id: None,
+            value: "kimi-for-coding(thinking)".to_string(),
+        })
+    );
+    assert_eq!(
+        model.selected_model,
+        Some(ModelSelection::new(
+            "acp:Kimi Code CLI",
+            "kimi-for-coding(thinking)"
+        ))
+    );
+    assert_eq!(
+        model.current_status_line_parts(),
+        vec!["Kimi for Coding (thinking)".to_string()]
+    );
+
+    run_set_acp_model_effect(
+        &mut model,
+        &acp_runtime,
+        None,
+        "kimi-for-coding(thinking)".to_string(),
+    );
+
+    assert_eq!(
+        model.selected_model,
+        Some(ModelSelection::new("acp:Kimi Code CLI", "kimi-for-coding"))
+    );
+    assert_eq!(
+        model.current_status_line_parts(),
+        vec!["Kimi for Coding".to_string()]
+    );
+}
+
+#[test]
+fn acp_model_config_change_succeeded_commits_selected_model_and_status_line() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            ..ModelOptions::default()
+        },
+    );
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ModelConfigChanged {
+            agent_id: "Kimi Code CLI".to_string(),
+            config: crate::runtime::acp::AcpModelConfig {
+                config_id: None,
+                current_value: "kimi-for-coding".to_string(),
+                current_name: "Kimi for Coding".to_string(),
+                options: vec![
+                    crate::runtime::acp::AcpModelOption {
+                        value: "kimi-for-coding".to_string(),
+                        name: "Kimi for Coding".to_string(),
+                    },
+                    crate::runtime::acp::AcpModelOption {
+                        value: "kimi-for-coding(thinking)".to_string(),
+                        name: "Kimi for Coding (thinking)".to_string(),
+                    },
+                ],
+            },
+        },
+    );
+    model.open_model_panel();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::SetAcpModel {
+            config_id: None,
+            value: "kimi-for-coding(thinking)".to_string(),
+        })
+    );
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ConfigChangeSucceeded {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ConfigChangeFailed {
+            agent_id: "Kimi Code CLI".to_string(),
+            message: "stale failure".to_string(),
+        },
+    );
+
+    assert_eq!(
+        model.selected_model,
+        Some(ModelSelection::new(
+            "acp:Kimi Code CLI",
+            "kimi-for-coding(thinking)"
+        ))
+    );
+    assert_eq!(
+        model.current_status_line_parts(),
+        vec!["Kimi for Coding (thinking)".to_string()]
     );
 }
 

@@ -36,7 +36,7 @@ pub enum AppEffect {
         option_id: Option<String>,
     },
     SetAcpModel {
-        config_id: String,
+        config_id: Option<String>,
         value: String,
     },
     SendNativeAgent {

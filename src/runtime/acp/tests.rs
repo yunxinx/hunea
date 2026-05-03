@@ -607,7 +607,7 @@ async fn acp_worker_transport_forwards_thought_chunks_and_model_config() {
     let model_event = recv_worker_event(&event_rx, "worker should report current model").await;
     match model_event {
         super::AcpSessionEvent::ModelConfigChanged { config, .. } => {
-            assert_eq!(config.config_id, "model");
+            assert_eq!(config.config_id.as_deref(), Some("model"));
             assert_eq!(config.current_value, "kimi-k2");
             assert_eq!(config.current_name, "Kimi K2");
             assert_eq!(config.options.len(), 1);
@@ -958,7 +958,7 @@ async fn acp_worker_reports_initial_model_config_from_new_session() {
                 async |_request: NewSessionRequest, responder, _connection| {
                     responder.respond(NewSessionResponse::new("test-session").config_options(vec![
                             SessionConfigOption::select(
-                                "model",
+                                "models",
                                 "Model",
                                 "kimi-k2",
                                 vec![
@@ -992,7 +992,7 @@ async fn acp_worker_reports_initial_model_config_from_new_session() {
     let model_event = recv_worker_event(&event_rx, "worker should report initial model").await;
     match model_event {
         super::AcpSessionEvent::ModelConfigChanged { config, .. } => {
-            assert_eq!(config.config_id, "model");
+            assert_eq!(config.config_id.as_deref(), Some("models"));
             assert_eq!(config.current_value, "kimi-k2");
             assert_eq!(config.current_name, "Kimi K2");
             assert_eq!(
@@ -1005,6 +1005,94 @@ async fn acp_worker_reports_initial_model_config_from_new_session() {
             );
         }
         other => panic!("expected initial model config, got {other:?}"),
+    }
+
+    command_tx
+        .send(super::AcpWorkerCommand::Shutdown)
+        .expect("shutdown command should send");
+    worker
+        .await
+        .expect("worker task should join")
+        .expect("worker should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_worker_reports_initial_model_config_from_legacy_models_state() {
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+
+    use acp::schema::{
+        Implementation, InitializeRequest, InitializeResponse, ModelInfo, NewSessionRequest,
+        NewSessionResponse, SessionModelState,
+    };
+    use agent_client_protocol as acp;
+
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    tokio::task::spawn(async move {
+        acp::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _connection| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_info(Implementation::new("fake-agent", "0.1.0")),
+                    )
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _connection| {
+                    responder.respond(NewSessionResponse::new("test-session").models(
+                        SessionModelState::new(
+                            "kimi-for-coding",
+                            vec![
+                                ModelInfo::new("kimi-for-coding", "Kimi for Coding"),
+                                ModelInfo::new(
+                                    "kimi-for-coding(thinking)",
+                                    "Kimi for Coding (thinking)",
+                                ),
+                            ],
+                        ),
+                    ))
+                },
+                acp::on_receive_request!(),
+            )
+            .connect_to(agent_transport)
+            .await
+    });
+
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let worker = tokio::task::spawn(super::run_agent_transport_worker(
+        "fake".to_string(),
+        client_transport,
+        command_rx,
+        cancel_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+        super::AcpPermissionRegistry::default(),
+    ));
+
+    let _started = recv_worker_event(&event_rx, "worker should report session start").await;
+    let model_event = recv_worker_event(&event_rx, "worker should report legacy models").await;
+    match model_event {
+        super::AcpSessionEvent::ModelConfigChanged { config, .. } => {
+            assert_eq!(config.config_id, None);
+            assert_eq!(config.current_value, "kimi-for-coding");
+            assert_eq!(config.current_name, "Kimi for Coding");
+            assert_eq!(
+                config
+                    .options
+                    .iter()
+                    .map(|option| (option.value.as_str(), option.name.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("kimi-for-coding", "Kimi for Coding"),
+                    ("kimi-for-coding(thinking)", "Kimi for Coding (thinking)")
+                ]
+            );
+        }
+        other => panic!("expected legacy model config, got {other:?}"),
     }
 
     command_tx
@@ -1084,8 +1172,8 @@ async fn acp_worker_sets_model_config_option_and_reports_updated_options() {
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
     command_tx
-        .send(super::AcpWorkerCommand::SetConfigOption {
-            config_id: "model".to_string(),
+        .send(super::AcpWorkerCommand::SetModel {
+            config_id: Some("model".to_string()),
             value: "kimi-k1.5".to_string(),
         })
         .expect("config command should send");
@@ -1097,6 +1185,100 @@ async fn acp_worker_sets_model_config_option_and_reports_updated_options() {
             assert_eq!(config.current_name, "Kimi K1.5");
         }
         other => panic!("expected selected model config, got {other:?}"),
+    }
+
+    command_tx
+        .send(super::AcpWorkerCommand::Shutdown)
+        .expect("shutdown command should send");
+    worker
+        .await
+        .expect("worker task should join")
+        .expect("worker should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_worker_sets_legacy_model_with_set_session_model_request() {
+    use std::sync::{Arc, Mutex, atomic::AtomicBool, mpsc};
+
+    use acp::schema::{
+        Implementation, InitializeRequest, InitializeResponse, NewSessionRequest,
+        NewSessionResponse, SetSessionModelRequest, SetSessionModelResponse,
+    };
+    use agent_client_protocol as acp;
+
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    let (selected_model_tx, selected_model_rx) = tokio::sync::oneshot::channel();
+    let selected_model_tx = Arc::new(Mutex::new(Some(selected_model_tx)));
+    tokio::task::spawn({
+        let selected_model_tx = Arc::clone(&selected_model_tx);
+        async move {
+            acp::Agent
+                .builder()
+                .on_receive_request(
+                    async |request: InitializeRequest, responder, _connection| {
+                        responder.respond(
+                            InitializeResponse::new(request.protocol_version)
+                                .agent_info(Implementation::new("fake-agent", "0.1.0")),
+                        )
+                    },
+                    acp::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async |_request: NewSessionRequest, responder, _connection| {
+                        responder.respond(NewSessionResponse::new("test-session"))
+                    },
+                    acp::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: SetSessionModelRequest, responder, _connection| {
+                        let model_id = request.model_id.to_string();
+                        assert_eq!(model_id, "kimi-for-coding(thinking)");
+                        if let Some(sender) = selected_model_tx
+                            .lock()
+                            .expect("selected model sender")
+                            .take()
+                        {
+                            let _ = sender.send(model_id);
+                        }
+                        responder.respond(SetSessionModelResponse::new())
+                    },
+                    acp::on_receive_request!(),
+                )
+                .connect_to(agent_transport)
+                .await
+        }
+    });
+
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let worker = tokio::task::spawn(super::run_agent_transport_worker(
+        "fake".to_string(),
+        client_transport,
+        command_rx,
+        cancel_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+        super::AcpPermissionRegistry::default(),
+    ));
+
+    let _started = recv_worker_event(&event_rx, "worker should report session start").await;
+    command_tx
+        .send(super::AcpWorkerCommand::SetModel {
+            config_id: None,
+            value: "kimi-for-coding(thinking)".to_string(),
+        })
+        .expect("legacy model command should send");
+
+    let selected_model = selected_model_rx
+        .await
+        .expect("agent should receive legacy model change");
+    assert_eq!(selected_model, "kimi-for-coding(thinking)");
+    let success_event =
+        recv_worker_event(&event_rx, "worker should report model change success").await;
+    match success_event {
+        super::AcpSessionEvent::ConfigChangeSucceeded { ref agent_id } if agent_id == "fake" => {}
+        other => panic!("expected model change success, got {other:?}"),
     }
 
     command_tx

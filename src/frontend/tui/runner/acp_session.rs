@@ -200,13 +200,13 @@ impl AcpRuntimeState {
             .map_err(|error| error.to_string())
     }
 
-    fn set_config_option(&self, config_id: String, value: String) -> Result<(), String> {
+    fn set_model(&self, config_id: Option<String>, value: String) -> Result<(), String> {
         let Some(worker) = self.worker.as_ref() else {
             return Err("ACP session is not ready".to_string());
         };
 
         worker
-            .set_config_option(config_id, value)
+            .set_model(config_id, value)
             .map_err(|error| error.to_string())
     }
 }
@@ -297,7 +297,11 @@ pub(super) fn apply_acp_session_event(
         AcpSessionEvent::AvailableCommandsChanged { agent_id, commands } => {
             model.apply_acp_available_commands(agent_id, commands);
         }
-        AcpSessionEvent::ConfigChangeFailed { message, .. } => {
+        AcpSessionEvent::ConfigChangeSucceeded { agent_id } => {
+            model.commit_pending_acp_model_change(&agent_id);
+        }
+        AcpSessionEvent::ConfigChangeFailed { agent_id, message } => {
+            model.rollback_pending_acp_model_change(&agent_id);
             model.show_transient_status_notice(&format!("ACP config change failed: {message}"));
         }
         AcpSessionEvent::PromptResponse {
@@ -454,10 +458,13 @@ pub(super) fn run_respond_acp_permission_effect(
 pub(super) fn run_set_acp_model_effect(
     model: &mut Model,
     acp_runtime: &AcpRuntimeState,
-    config_id: String,
+    config_id: Option<String>,
     value: String,
 ) {
-    if let Err(message) = acp_runtime.set_config_option(config_id, value) {
+    if let Err(message) = acp_runtime.set_model(config_id, value) {
+        if let Some(agent_id) = model.selected_acp_agent().map(str::to_string) {
+            model.rollback_pending_acp_model_change(&agent_id);
+        }
         model.show_transient_status_notice(&message);
     }
 }

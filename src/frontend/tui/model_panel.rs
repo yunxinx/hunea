@@ -250,29 +250,35 @@ impl Model {
     }
 
     fn select_current_model_panel_model(&mut self) -> Option<AppEffect> {
-        let provider = self.active_model_panel_provider()?;
-        let model = provider.models.get(self.model_panel.model_index)?;
-        let provider_id = provider.id.clone();
-        let model_id = model.id.clone();
-        let model_label = model
-            .description
-            .clone()
-            .unwrap_or_else(|| model_id.clone());
+        let (provider_id, model_id, model_label) = {
+            let provider = self.active_model_panel_provider()?;
+            let model = provider.models.get(self.model_panel.model_index)?;
+            let provider_id = provider.id.clone();
+            let model_id = model.id.clone();
+            let model_label = model
+                .description
+                .clone()
+                .unwrap_or_else(|| model_id.clone());
+            (provider_id, model_id, model_label)
+        };
+        let acp_agent_id = self
+            .selected_acp_agent
+            .as_ref()
+            .filter(|agent_id| provider_id == acp_model_provider_id(agent_id))
+            .cloned();
+        if let Some(agent_id) = acp_agent_id.as_deref() {
+            self.begin_pending_acp_model_change(agent_id);
+        }
 
         let selection = ModelSelection::new(provider_id.clone(), model_id.clone());
         self.selected_model = Some(selection.clone());
         self.bump_status_line_revision();
-        if self
-            .selected_acp_agent
-            .as_ref()
-            .is_some_and(|agent_id| provider_id == acp_model_provider_id(agent_id))
-        {
-            let config_id = self.acp_model_config_id.clone()?;
+        if acp_agent_id.is_some() {
             self.set_acp_current_model(Some(model_label.clone()));
             self.show_transient_status_notice(&format!("ACP model selected: {model_label}"));
             self.close_model_panel();
             return Some(AppEffect::SetAcpModel {
-                config_id,
+                config_id: self.acp_model_config_id.clone(),
                 value: model_id,
             });
         }
@@ -580,6 +586,24 @@ fn append_model_entry_lines(
         secondary_text_style(model.palette)
     };
 
+    if provider.source == ModelSource::Acp {
+        let label = entry
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+            .unwrap_or(entry.id.as_str());
+        append_wrapped_inline_value(
+            lines,
+            width,
+            marker,
+            label,
+            style,
+            secondary_text_style(model.palette),
+        );
+        return;
+    }
+
     append_wrapped_inline_value(
         lines,
         width,
@@ -597,6 +621,28 @@ fn append_model_entry_lines(
             ));
         }
     }
+}
+
+#[cfg(test)]
+fn model_list_plain_lines(plain_lines: &[String]) -> Vec<&str> {
+    let start = plain_lines
+        .iter()
+        .position(|line| line.contains("Available Models:"))
+        .map(|index| index + 1)
+        .unwrap_or(plain_lines.len());
+
+    plain_lines[start..]
+        .iter()
+        .take_while(|line| !line.trim_start().starts_with("Enter select"))
+        .map(String::as_str)
+        .filter(|line| !line.trim().is_empty())
+        .collect()
+}
+
+#[cfg(test)]
+fn model_row_label(line: &str) -> &str {
+    let line = line.trim_start();
+    line.strip_prefix("➜ ").unwrap_or(line).trim()
 }
 
 fn wrapping_index(current: usize, len: usize, delta: isize) -> usize {
@@ -668,7 +714,7 @@ mod tests {
         model.apply_acp_model_config(
             "Kimi Code CLI",
             AcpModelConfig {
-                config_id: "model".to_string(),
+                config_id: Some("model".to_string()),
                 current_value: "kimi-k2".to_string(),
                 current_name: "Kimi K2".to_string(),
                 options: vec![
@@ -699,7 +745,7 @@ mod tests {
         assert_eq!(
             effect,
             Some(AppEffect::SetAcpModel {
-                config_id: "model".to_string(),
+                config_id: Some("model".to_string()),
                 value: "kimi-k1.5".to_string(),
             })
         );
@@ -708,6 +754,144 @@ mod tests {
             Some(ModelSelection::new("acp:Kimi Code CLI", "kimi-k1.5"))
         );
         assert_eq!(model.acp_current_model.as_deref(), Some("Kimi K1.5"));
+    }
+
+    #[test]
+    fn acp_model_panel_selects_legacy_agent_model_without_config_id() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                model_catalog: ModelCatalog::new(vec![ModelProvider::native(
+                    "local",
+                    ProviderKind::OpenAiCompatible,
+                    "Local",
+                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    ModelSource::Configured,
+                    vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+                )]),
+                selected_model: Some(ModelSelection::new("local", "qwen3")),
+                ..ModelOptions::default()
+            },
+        );
+        model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+        model.apply_acp_model_config(
+            "Kimi Code CLI",
+            AcpModelConfig {
+                config_id: None,
+                current_value: "kimi-for-coding".to_string(),
+                current_name: "Kimi for Coding".to_string(),
+                options: vec![
+                    AcpModelOption {
+                        value: "kimi-for-coding".to_string(),
+                        name: "Kimi for Coding".to_string(),
+                    },
+                    AcpModelOption {
+                        value: "kimi-for-coding(thinking)".to_string(),
+                        name: "Kimi for Coding (thinking)".to_string(),
+                    },
+                ],
+            },
+        );
+        model.open_model_panel();
+        model.move_model_panel_model(1);
+
+        let effect = model.select_current_model_panel_model();
+
+        assert_eq!(
+            effect,
+            Some(AppEffect::SetAcpModel {
+                config_id: None,
+                value: "kimi-for-coding(thinking)".to_string(),
+            })
+        );
+        assert_eq!(
+            model.selected_model,
+            Some(ModelSelection::new(
+                "acp:Kimi Code CLI",
+                "kimi-for-coding(thinking)"
+            ))
+        );
+        assert_eq!(
+            model.acp_current_model.as_deref(),
+            Some("Kimi for Coding (thinking)")
+        );
+    }
+
+    #[test]
+    fn acp_model_panel_prefers_model_name_and_falls_back_to_id() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                model_catalog: ModelCatalog::new(vec![ModelProvider::native(
+                    "local",
+                    ProviderKind::OpenAiCompatible,
+                    "Local",
+                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    ModelSource::Configured,
+                    vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+                )]),
+                selected_model: Some(ModelSelection::new("local", "qwen3")),
+                ..ModelOptions::default()
+            },
+        );
+        model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+        model.apply_acp_model_config(
+            "Kimi Code CLI",
+            AcpModelConfig {
+                config_id: Some("models".to_string()),
+                current_value: "kimi-code/kimi-for-coding".to_string(),
+                current_name: "kimi-for-coding".to_string(),
+                options: vec![
+                    AcpModelOption {
+                        value: "kimi-code/kimi-for-coding".to_string(),
+                        name: "Kimi for Coding".to_string(),
+                    },
+                    AcpModelOption {
+                        value: "kimi-code/kimi-for-coding,thinking".to_string(),
+                        name: String::new(),
+                    },
+                ],
+            },
+        );
+        model.set_window(80, 24);
+        model.open_model_panel();
+
+        let render = model.current_inline_model_panel_render_result();
+        let plain_lines = render.plain_lines;
+        let model_lines = model_list_plain_lines(&plain_lines);
+
+        assert_eq!(
+            model_lines
+                .iter()
+                .filter(|line| line.contains("Kimi for Coding"))
+                .count(),
+            1
+        );
+        assert!(
+            model_lines
+                .iter()
+                .any(|line| model_row_label(line) == "kimi-code/kimi-for-coding,thinking")
+        );
+        assert!(
+            !model_lines
+                .iter()
+                .any(|line| model_row_label(line) == "kimi-code/kimi-for-coding")
+        );
+
+        model.move_model_panel_model(1);
+        let effect = model.select_current_model_panel_model();
+
+        assert_eq!(
+            effect,
+            Some(AppEffect::SetAcpModel {
+                config_id: Some("models".to_string()),
+                value: "kimi-code/kimi-for-coding,thinking".to_string(),
+            })
+        );
+        assert_eq!(
+            model.acp_current_model.as_deref(),
+            Some("kimi-code/kimi-for-coding,thinking")
+        );
     }
 
     #[test]

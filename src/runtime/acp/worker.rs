@@ -8,7 +8,10 @@ use super::{
 #[derive(Debug)]
 pub(crate) enum AcpWorkerCommand {
     Prompt(AcpPrompt),
-    SetConfigOption { config_id: String, value: String },
+    SetModel {
+        config_id: Option<String>,
+        value: String,
+    },
     Shutdown,
 }
 
@@ -73,14 +76,14 @@ impl AcpSessionWorker {
             .map_err(|_| AcpWorkerSendError::Closed)
     }
 
-    /// `set_config_option` 请求 ACP agent 更新 session 配置项。
-    pub fn set_config_option(
+    /// `set_model` 请求 ACP agent 更新当前模型选择。
+    pub fn set_model(
         &self,
-        config_id: String,
+        config_id: Option<String>,
         value: String,
     ) -> Result<(), AcpWorkerSendError> {
         self.commands
-            .send(AcpWorkerCommand::SetConfigOption { config_id, value })
+            .send(AcpWorkerCommand::SetModel { config_id, value })
             .map_err(|_| AcpWorkerSendError::Closed)
     }
 

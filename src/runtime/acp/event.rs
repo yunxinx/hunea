@@ -28,7 +28,9 @@ pub struct AcpModelOption {
 /// `AcpModelConfig` 表示 ACP session 当前的模型选择器状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpModelConfig {
-    pub config_id: String,
+    /// `config_id` 为 `Some` 时表示该 session 使用 `config_options` 模型选择器。
+    /// `None` 时表示该 session 使用 legacy `models` 模型状态并应走 `session/set_model`。
+    pub config_id: Option<String>,
     pub current_value: String,
     pub current_name: String,
     pub options: Vec<AcpModelOption>,
@@ -79,6 +81,9 @@ pub enum AcpSessionEvent {
     AvailableCommandsChanged {
         agent_id: String,
         commands: Vec<AcpAvailableCommand>,
+    },
+    ConfigChangeSucceeded {
+        agent_id: String,
     },
     ConfigChangeFailed {
         agent_id: String,

@@ -5,7 +5,7 @@ mod scroll;
 #[cfg(test)]
 mod tests;
 
-use crate::frontend::tui::Model;
+use crate::frontend::tui::{Model, tool_result::ToolActivityRenderMode};
 
 /// `TranscriptOverlayState` 保存 transcript 覆盖层的滚动与展示状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +80,8 @@ impl Model {
             scroll_offset,
             highlight_item_index: None,
         });
+        self.transcript
+            .set_tool_activity_render_mode(ToolActivityRenderMode::Detailed);
     }
 
     pub(crate) fn close_transcript_overlay(&mut self) {
@@ -89,6 +91,8 @@ impl Model {
 
         let had_backtrack_state = self.backtrack.primed || self.backtrack.overlay_preview_active;
         self.transcript_overlay = None;
+        self.transcript
+            .set_tool_activity_render_mode(ToolActivityRenderMode::Compact);
         if had_backtrack_state {
             self.reset_backtrack_state();
         }

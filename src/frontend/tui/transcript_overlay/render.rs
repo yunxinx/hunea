@@ -9,6 +9,7 @@ use ratatui::{
 use crate::frontend::tui::{
     Model,
     message::assistant_message_visual_inset,
+    styled_text::render_line_with_full_width_background,
     theme::{TerminalPalette, muted_text_style, tertiary_text_style},
 };
 
@@ -103,7 +104,11 @@ impl Model {
                     } else {
                         Rect::new(area.x, row, area.width, 1)
                     };
-                frame.render_widget(Paragraph::new(line_content), line_rect);
+                render_line_with_full_width_background(
+                    &line_content,
+                    line_rect,
+                    frame.buffer_mut(),
+                );
                 row += 1;
             }
 

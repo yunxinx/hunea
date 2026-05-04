@@ -12,6 +12,7 @@ use super::{
     shimmer::shimmer_spans_at,
     status_line::{StatusLineRenderResult, truncate_display_width_with_ellipsis},
     theme::{TerminalPalette, secondary_text_style},
+    tool_result::TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL,
     transcript::DEFAULT_RENDER_WIDTH,
 };
 
@@ -29,6 +30,7 @@ pub(in crate::frontend::tui) struct StreamActivityState {
     interrupt_hint: Option<String>,
     output_tokens: Option<ActivityTokenProgress>,
     is_thinking: bool,
+    paused_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +74,7 @@ impl Model {
             interrupt_hint: self.current_stream_activity_interrupt_hint(),
             output_tokens: None,
             is_thinking: false,
+            paused_at: None,
         });
         self.reset_chat_interrupt_esc_count();
         self.bump_status_line_revision();
@@ -99,6 +102,45 @@ impl Model {
 
         self.stream_activity = None;
         self.reset_chat_interrupt_esc_count();
+        self.bump_status_line_revision();
+        self.sync_composer_height();
+        if self.document_runtime.follow_bottom {
+            self.sync_document_viewport_to_bottom();
+        }
+    }
+
+    pub(crate) fn pause_stream_activity(&mut self) {
+        self.pause_stream_activity_at(Instant::now());
+    }
+
+    fn pause_stream_activity_at(&mut self, now: Instant) {
+        let Some(activity) = self.stream_activity.as_mut() else {
+            return;
+        };
+        if activity.paused_at.is_some() {
+            return;
+        }
+
+        activity.pause_at(now);
+        self.bump_status_line_revision();
+        self.sync_composer_height();
+        if self.document_runtime.follow_bottom {
+            self.sync_document_viewport_to_bottom();
+        }
+    }
+
+    pub(crate) fn resume_stream_activity(&mut self) {
+        self.resume_stream_activity_at(Instant::now());
+    }
+
+    fn resume_stream_activity_at(&mut self, now: Instant) {
+        let Some(activity) = self.stream_activity.as_mut() else {
+            return;
+        };
+        if !activity.resume_at(now) {
+            return;
+        }
+
         self.bump_status_line_revision();
         self.sync_composer_height();
         if self.document_runtime.follow_bottom {
@@ -166,6 +208,9 @@ impl Model {
         let Some(activity) = self.stream_activity.as_ref() else {
             return StatusLineRenderResult::default();
         };
+        if activity.is_paused() {
+            return StatusLineRenderResult::default();
+        }
 
         let width = if self.width == 0 {
             DEFAULT_RENDER_WIDTH
@@ -189,18 +234,78 @@ impl Model {
     pub(crate) fn stream_activity_frame_key(&self, now: Instant) -> usize {
         self.stream_activity
             .as_ref()
-            .map(|activity| activity.frame_index_at(now))
+            .map(|activity| activity.frame_index_at(activity.active_now(now)))
             .unwrap_or(0)
     }
 
     pub(crate) fn stream_activity_frame_interval_at(&self, now: Instant) -> Option<Duration> {
         self.stream_activity
             .as_ref()
+            .filter(|activity| !activity.is_paused())
             .map(|activity| activity.frame_interval_at(now))
+    }
+
+    pub(crate) fn tool_activity_frame_key(&self, now: Instant) -> usize {
+        self.transcript
+            .active_tool_activity_started_at()
+            .map(|started_at| {
+                let interval_ms = TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL
+                    .as_millis()
+                    .max(1);
+                (now.saturating_duration_since(started_at).as_millis() / interval_ms) as usize
+            })
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn tool_activity_next_frame_deadline_at(&self, now: Instant) -> Option<Instant> {
+        let started_at = self.transcript.active_tool_activity_started_at()?;
+        let interval = TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL;
+        let interval_ms = interval.as_millis().max(1);
+        let elapsed_ms = now.saturating_duration_since(started_at).as_millis();
+        let next_frame = elapsed_ms / interval_ms + 1;
+        let offset_ms = interval_ms.saturating_mul(next_frame);
+        let offset = Duration::from_millis(u64::try_from(offset_ms).unwrap_or(u64::MAX));
+
+        started_at
+            .checked_add(offset)
+            .or_else(|| now.checked_add(interval))
     }
 }
 
 impl StreamActivityState {
+    fn is_paused(&self) -> bool {
+        self.paused_at.is_some()
+    }
+
+    fn active_now(&self, now: Instant) -> Instant {
+        self.paused_at.unwrap_or(now)
+    }
+
+    fn pause_at(&mut self, now: Instant) {
+        self.paused_at = Some(now);
+    }
+
+    fn resume_at(&mut self, now: Instant) -> bool {
+        let Some(paused_at) = self.paused_at.take() else {
+            return false;
+        };
+        let paused_for = now.saturating_duration_since(paused_at);
+        self.shift_activity_clock(paused_for);
+        true
+    }
+
+    fn shift_activity_clock(&mut self, offset: Duration) {
+        if offset.is_zero() {
+            return;
+        }
+        if let Some(started_at) = self.started_at.checked_add(offset) {
+            self.started_at = started_at;
+        }
+        if let Some(progress) = self.output_tokens.as_mut() {
+            progress.shift_clock(offset);
+        }
+    }
+
     fn elapsed_at(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.started_at)
     }
@@ -328,6 +433,12 @@ impl StreamActivityState {
 }
 
 impl ActivityTokenProgress {
+    fn shift_clock(&mut self, offset: Duration) {
+        if let Some(updated_at) = self.updated_at.checked_add(offset) {
+            self.updated_at = updated_at;
+        }
+    }
+
     fn display_at(&self, now: Instant) -> usize {
         if self.target <= self.previous_display {
             return self.target;
@@ -563,6 +674,39 @@ mod tests {
                 .map(|span| span.style)
                 .collect::<Vec<_>>(),
             "shimmer styles should advance while the visible text stays stable"
+        );
+    }
+
+    #[test]
+    fn stream_activity_pause_hides_and_resume_excludes_paused_duration() {
+        let mut model = Model::new(HeroOptions::default());
+        model.set_window(50, 6);
+        model.set_palette(default_palette(), true);
+        model.show_stream_activity_with_header("Working");
+        let started_at = model.stream_activity.as_ref().unwrap().started_at;
+        let pause_at = started_at + Duration::from_secs(2);
+        let resume_at = pause_at + Duration::from_secs(30);
+
+        model.pause_stream_activity_at(pause_at);
+        assert!(
+            !model
+                .current_stream_activity_render_result_at(resume_at)
+                .has_content,
+            "paused activity should be hidden"
+        );
+        assert_eq!(model.stream_activity_frame_interval_at(resume_at), None);
+
+        model.resume_stream_activity_at(resume_at);
+        let resumed = model
+            .current_stream_activity_render_result_at(resume_at + Duration::from_secs(1))
+            .plain_line;
+        assert!(
+            resumed.contains("(3s"),
+            "activity should resume from the elapsed time before approval wait: {resumed}"
+        );
+        assert!(
+            !resumed.contains("33s"),
+            "approval wait should not be counted into elapsed time: {resumed}"
         );
     }
 

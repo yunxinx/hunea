@@ -879,6 +879,76 @@ impl Model {
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
     }
 
+    pub(crate) fn append_acp_tool_call_from_runtime(
+        &mut self,
+        call: crate::runtime::acp::AcpToolCall,
+    ) -> usize {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        let item_index = self.transcript_mut().append_acp_tool_call(call);
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        item_index
+    }
+
+    pub(crate) fn update_acp_tool_call_from_runtime(
+        &mut self,
+        item_index: usize,
+        update: crate::runtime::acp::AcpToolCallUpdate,
+    ) -> bool {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        if !self
+            .transcript_mut()
+            .update_acp_tool_call(item_index, update)
+        {
+            return false;
+        }
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        true
+    }
+
+    pub(crate) fn set_acp_tool_call_approval_suspended_from_runtime(
+        &mut self,
+        item_index: usize,
+        suspended: bool,
+    ) -> bool {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        if !self
+            .transcript_mut()
+            .set_acp_tool_call_approval_suspended(item_index, suspended)
+        {
+            return false;
+        }
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        true
+    }
+
+    pub(crate) fn mark_acp_tool_calls_failed_from_runtime(
+        &mut self,
+        item_indices: impl IntoIterator<Item = usize>,
+        message: &str,
+    ) -> bool {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        if !self
+            .transcript_mut()
+            .mark_acp_tool_calls_failed(item_indices, message)
+        {
+            return false;
+        }
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        true
+    }
+
     pub(crate) fn sync_composer_height(&mut self) {
         let full_height = self.composer.full_height().max(1);
         let mut viewport_height = if !self.has_window || self.height == 0 {

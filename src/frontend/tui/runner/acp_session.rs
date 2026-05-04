@@ -1,10 +1,17 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use color_eyre::eyre::Result;
 
-use crate::frontend::tui::{Model, RequestMetrics, runtime::RuntimeEventApply};
+use crate::frontend::tui::{
+    Model, RequestMetrics, acp::AcpPermissionPanelRequest, acp_tool_preview::ToolApprovalPreview,
+    runtime::RuntimeEventApply,
+};
 use crate::runtime::acp::{
-    AcpAgentIdentity, AcpPrompt, AcpSessionCommand, AcpSessionEvent, AcpSessionWorker,
+    AcpAgentIdentity, AcpPermissionOptionKind, AcpPermissionRequest, AcpPrompt, AcpSessionCommand,
+    AcpSessionEvent, AcpSessionWorker, AcpToolCall, AcpToolCallContent, AcpToolCallUpdate,
 };
 use crate::runtime::session::{RuntimeEvent, RuntimeTarget};
 use crate::runtime::token_count::StreamingTokenProgress;
@@ -22,6 +29,8 @@ pub(super) struct AcpRuntimeState {
     token_progress: Option<StreamingTokenProgress>,
     prompt_started_at: Option<Instant>,
     first_token_at: Option<Instant>,
+    tool_call_items: HashMap<String, usize>,
+    tool_call_token_text: HashMap<String, String>,
 }
 
 impl AcpRuntimeState {
@@ -38,6 +47,8 @@ impl AcpRuntimeState {
         self.token_progress = None;
         self.prompt_started_at = None;
         self.first_token_at = None;
+        self.tool_call_items.clear();
+        self.tool_call_token_text.clear();
         self.worker = Some(AcpSessionWorker::start(command));
     }
 
@@ -94,6 +105,8 @@ impl AcpRuntimeState {
         self.prompt_in_flight = true;
         self.prompt_started_at = Some(Instant::now());
         self.first_token_at = None;
+        self.tool_call_items.clear();
+        self.tool_call_token_text.clear();
     }
 
     fn start_token_progress(&mut self, model_id: impl Into<String>) {
@@ -101,9 +114,36 @@ impl AcpRuntimeState {
     }
 
     fn observe_output_tokens(&mut self, content: &str) -> Option<usize> {
+        if !content.is_empty() {
+            self.first_token_at.get_or_insert_with(Instant::now);
+        }
         self.token_progress
             .as_mut()
             .and_then(|progress| progress.observe_delta(content, Instant::now()))
+    }
+
+    fn observe_tool_call_tokens(
+        &mut self,
+        tool_call_id: &str,
+        projected_text: Option<String>,
+    ) -> Option<usize> {
+        let projected_text = projected_text?;
+        if projected_text.is_empty() {
+            return None;
+        }
+
+        let previous = self
+            .tool_call_token_text
+            .entry(tool_call_id.to_string())
+            .or_default();
+        let delta = if projected_text.starts_with(previous.as_str()) {
+            projected_text[previous.len()..].to_string()
+        } else {
+            projected_text.clone()
+        };
+        *previous = projected_text;
+
+        self.observe_output_tokens(&delta)
     }
 
     fn flush_output_tokens(&mut self) -> Option<usize> {
@@ -138,6 +178,8 @@ impl AcpRuntimeState {
         self.token_progress = None;
         self.prompt_started_at = None;
         self.first_token_at = None;
+        self.tool_call_items.clear();
+        self.tool_call_token_text.clear();
     }
 
     fn should_discard_prompt_output(&self) -> bool {
@@ -155,6 +197,7 @@ impl AcpRuntimeState {
         self.prompt_started_at = None;
         self.first_token_at = None;
         self.discard_in_flight_prompt = true;
+        self.tool_call_token_text.clear();
         if let Some(worker) = self.worker.as_ref() {
             let _ = worker.cancel_prompt();
         }
@@ -168,9 +211,28 @@ impl AcpRuntimeState {
         self.token_progress = None;
         self.prompt_started_at = None;
         self.first_token_at = None;
+        self.tool_call_items.clear();
+        self.tool_call_token_text.clear();
         if self.prompt_in_flight {
             self.discard_in_flight_prompt = true;
         }
+    }
+
+    fn track_tool_call(&mut self, tool_call_id: String, item_index: usize) {
+        self.tool_call_items.insert(tool_call_id, item_index);
+    }
+
+    fn tool_call_item_index(&self, tool_call_id: &str) -> Option<usize> {
+        self.tool_call_items.get(tool_call_id).copied()
+    }
+
+    fn tracked_tool_call_indices(&self) -> Vec<usize> {
+        self.tool_call_items.values().copied().collect()
+    }
+
+    fn clear_tool_call_tracking(&mut self) {
+        self.tool_call_items.clear();
+        self.tool_call_token_text.clear();
     }
 
     fn send_prompt(&self, agent_id: &str, prompt: AcpPrompt) -> Result<(), String> {
@@ -291,6 +353,49 @@ pub(super) fn apply_acp_session_event(
                 model.set_stream_activity_output_tokens(total_tokens);
             }
         }
+        AcpSessionEvent::ToolCall { call, .. } => {
+            if acp_runtime.should_discard_prompt_output() {
+                return;
+            }
+            flush_acp_response_buffer(model, acp_runtime);
+            let tool_call_id = call.tool_call_id.clone();
+            if let Some(total_tokens) =
+                acp_runtime.observe_tool_call_tokens(&tool_call_id, acp_tool_call_token_text(&call))
+            {
+                model.set_stream_activity_output_tokens(total_tokens);
+            }
+            let item_index = model.append_acp_tool_call_from_runtime(call);
+            acp_runtime.track_tool_call(tool_call_id, item_index);
+            model.set_stream_activity_thinking(false);
+        }
+        AcpSessionEvent::ToolCallUpdate { update, .. } => {
+            if acp_runtime.should_discard_prompt_output() {
+                return;
+            }
+            flush_acp_response_buffer(model, acp_runtime);
+            let tool_call_id = update.tool_call_id.clone();
+            let should_forget = update.status.is_some_and(|status| {
+                matches!(
+                    status,
+                    crate::runtime::acp::AcpToolCallStatus::Completed
+                        | crate::runtime::acp::AcpToolCallStatus::Failed
+                )
+            });
+            if let Some(item_index) = acp_runtime.tool_call_item_index(&tool_call_id) {
+                if let Some(total_tokens) = acp_runtime.observe_tool_call_tokens(
+                    &tool_call_id,
+                    acp_tool_call_update_token_text(&update),
+                ) {
+                    model.set_stream_activity_output_tokens(total_tokens);
+                }
+                model.update_acp_tool_call_from_runtime(item_index, update);
+                if should_forget {
+                    acp_runtime.tool_call_items.remove(&tool_call_id);
+                    acp_runtime.tool_call_token_text.remove(&tool_call_id);
+                }
+            }
+            model.set_stream_activity_thinking(false);
+        }
         AcpSessionEvent::ModelConfigChanged { agent_id, config } => {
             model.apply_acp_model_config(&agent_id, config);
         }
@@ -329,6 +434,7 @@ pub(super) fn apply_acp_session_event(
             if let Some(metrics) = metrics {
                 model.set_last_request_metrics(Some(metrics));
             }
+            fail_tracked_acp_tool_calls(model, acp_runtime, "Tool call ended without final status");
             acp_runtime.mark_prompt_finished();
             model.clear_stream_activity();
             if stop_reason != "EndTurn" {
@@ -346,15 +452,24 @@ pub(super) fn apply_acp_session_event(
             }
             model.set_stream_activity_thinking(false);
             flush_acp_response_buffer(model, acp_runtime);
+            fail_tracked_acp_tool_calls(
+                model,
+                acp_runtime,
+                "Tool call ended because the ACP prompt failed",
+            );
             acp_runtime.mark_prompt_finished();
             model.clear_stream_activity();
             model.show_transient_status_notice(&format!("ACP prompt failed: {message}"));
         }
         AcpSessionEvent::PromptInterrupted { .. } => {
+            fail_tracked_acp_tool_calls(model, acp_runtime, "Interrupted");
             acp_runtime.mark_prompt_finished();
             model.clear_stream_activity();
         }
-        AcpSessionEvent::PermissionRequested { agent_id, request } => {
+        AcpSessionEvent::PermissionRequested {
+            agent_id: _,
+            request,
+        } => {
             if acp_runtime.should_discard_prompt_output() {
                 let _ = acp_runtime.respond_permission(
                     &request.request_id,
@@ -367,10 +482,34 @@ pub(super) fn apply_acp_session_event(
             }
             model.set_stream_activity_thinking(false);
             flush_acp_response_buffer(model, acp_runtime);
-            model.apply_runtime_event(RuntimeEvent::PermissionRequested {
-                target: RuntimeTarget::acp_agent(agent_id),
-                request: request.into(),
+            let preview = ToolApprovalPreview::from_acp_tool_call_update(&request.tool_call);
+            let suspended_tool_call_item_index = preview
+                .as_ref()
+                .and_then(|_| acp_runtime.tool_call_item_index(&request.tool_call.tool_call_id));
+            model.show_acp_permission_request_with_preview(AcpPermissionPanelRequest {
+                request_id: request.request_id.clone(),
+                title: request.title.clone(),
+                allow_option_id: acp_permission_option_id_for(
+                    &request,
+                    AcpPermissionOptionKind::AllowOnce,
+                ),
+                allow_always_option_id: acp_permission_option_id_for(
+                    &request,
+                    AcpPermissionOptionKind::AllowAlways,
+                ),
+                reject_option_id: acp_permission_option_id_for(
+                    &request,
+                    AcpPermissionOptionKind::RejectOnce,
+                ),
+                reject_always_option_id: acp_permission_option_id_for(
+                    &request,
+                    AcpPermissionOptionKind::RejectAlways,
+                ),
+                preview,
             });
+            if let Some(item_index) = suspended_tool_call_item_index {
+                model.suspend_acp_tool_call_for_approval_panel(item_index);
+            }
         }
         AcpSessionEvent::PermissionRequestCancelled { agent_id } => {
             if acp_runtime.should_discard_prompt_output() {
@@ -389,12 +528,132 @@ pub(super) fn apply_acp_session_event(
                 return;
             }
             flush_acp_response_buffer(model, acp_runtime);
+            fail_tracked_acp_tool_calls(
+                model,
+                acp_runtime,
+                "Tool call ended because the ACP session stopped",
+            );
+            acp_runtime.mark_prompt_finished();
             model.clear_stream_activity();
             if let Some(message) = message {
                 model.show_transient_status_notice(&format!("ACP session stopped: {message}"));
             }
         }
     }
+}
+
+fn acp_permission_option_id_for(
+    request: &AcpPermissionRequest,
+    kind: AcpPermissionOptionKind,
+) -> Option<String> {
+    request
+        .options
+        .iter()
+        .find(|option| option.kind == kind)
+        .map(|option| option.option_id.clone())
+}
+
+fn acp_tool_call_token_text(call: &AcpToolCall) -> Option<String> {
+    acp_tool_call_projected_token_text(
+        call.raw_input.as_deref(),
+        Some(call.content.as_slice()),
+        call.raw_output.as_deref(),
+    )
+}
+
+fn acp_tool_call_update_token_text(update: &AcpToolCallUpdate) -> Option<String> {
+    acp_tool_call_projected_token_text(
+        update.raw_input.as_deref(),
+        update.content.as_deref(),
+        update.raw_output.as_deref(),
+    )
+}
+
+fn acp_tool_call_projected_token_text(
+    raw_input: Option<&str>,
+    content: Option<&[AcpToolCallContent]>,
+    raw_output: Option<&str>,
+) -> Option<String> {
+    if let Some(raw_input) = raw_input.filter(|text| !text.is_empty()) {
+        return Some(raw_input.to_string());
+    }
+
+    let mut text = String::new();
+    if let Some(content) = content {
+        for content in content {
+            append_acp_tool_call_content_token_text(&mut text, content);
+        }
+    }
+    if let Some(raw_output) = raw_output.filter(|text| !text.is_empty()) {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(raw_output);
+    }
+
+    (!text.is_empty()).then_some(text)
+}
+
+fn append_acp_tool_call_content_token_text(text: &mut String, content: &AcpToolCallContent) {
+    match content {
+        AcpToolCallContent::Text(value) => append_token_text_segment(text, value),
+        AcpToolCallContent::Resource {
+            text: Some(value), ..
+        } => append_token_text_segment(text, value),
+        AcpToolCallContent::Diff {
+            path,
+            old_text,
+            new_text,
+        } => {
+            append_token_text_segment(text, path);
+            if let Some(old_text) = old_text {
+                append_token_text_segment(text, old_text);
+            }
+            append_token_text_segment(text, new_text);
+        }
+        AcpToolCallContent::Image { mime_type, uri } => {
+            append_token_text_segment(text, mime_type);
+            if let Some(uri) = uri {
+                append_token_text_segment(text, uri);
+            }
+        }
+        AcpToolCallContent::Audio { mime_type } => append_token_text_segment(text, mime_type),
+        AcpToolCallContent::ResourceLink { uri, name, title } => {
+            append_token_text_segment(text, uri);
+            append_token_text_segment(text, name);
+            if let Some(title) = title {
+                append_token_text_segment(text, title);
+            }
+        }
+        AcpToolCallContent::Terminal { terminal_id } => {
+            append_token_text_segment(text, terminal_id)
+        }
+        AcpToolCallContent::Resource { text: None, .. } | AcpToolCallContent::Unknown(_) => {}
+    }
+}
+
+fn append_token_text_segment(text: &mut String, segment: &str) {
+    if segment.is_empty() {
+        return;
+    }
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(segment);
+}
+
+fn fail_tracked_acp_tool_calls(
+    model: &mut Model,
+    acp_runtime: &mut AcpRuntimeState,
+    message: &str,
+) {
+    let active_tool_call_indices = acp_runtime.tracked_tool_call_indices();
+    if active_tool_call_indices.is_empty() {
+        return;
+    }
+
+    model.mark_acp_tool_calls_failed_from_runtime(active_tool_call_indices, message);
+    acp_runtime.clear_tool_call_tracking();
 }
 
 fn flush_acp_response_buffer(model: &mut Model, acp_runtime: &mut AcpRuntimeState) {
@@ -481,6 +740,7 @@ pub(super) fn run_interrupt_acp_prompt_effect(
         let _ = acp_runtime.respond_permission(&pending.request_id, None);
         model.close_tool_approval_panel();
     }
+    fail_tracked_acp_tool_calls(model, acp_runtime, "Interrupted");
     model.clear_stream_activity();
     model.append_system_message_from_runtime("Chat interrupted");
 }

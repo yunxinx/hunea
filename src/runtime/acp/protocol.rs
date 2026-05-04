@@ -14,7 +14,8 @@ use agent_client_protocol::schema::{
 
 use super::{
     AcpAvailableCommand, AcpAvailableCommandInput, AcpModelConfig, AcpModelOption, AcpPrompt,
-    AcpSessionCommand, AcpSessionEvent,
+    AcpSessionCommand, AcpSessionEvent, AcpToolCall, AcpToolCallContent, AcpToolCallLocation,
+    AcpToolCallStatus, AcpToolCallUpdate, AcpToolKind,
     initialize::{
         build_initialize_request, initialize_outcome_from_response, protocol_version_warning,
     },
@@ -456,6 +457,18 @@ async fn handle_acp_session_message(
                                 ),
                             });
                         }
+                        SessionUpdate::ToolCall(call) => {
+                            let _ = event_tx.send(AcpSessionEvent::ToolCall {
+                                agent_id: agent_id.to_string(),
+                                call: acp_tool_call_from_sdk(call),
+                            });
+                        }
+                        SessionUpdate::ToolCallUpdate(update) => {
+                            let _ = event_tx.send(AcpSessionEvent::ToolCallUpdate {
+                                agent_id: agent_id.to_string(),
+                                update: acp_tool_call_update_from_sdk(update),
+                            });
+                        }
                         _ => {}
                     }
                     Ok(())
@@ -463,7 +476,9 @@ async fn handle_acp_session_message(
                 .await
                 .if_request(async move |request: RequestPermissionRequest, responder| {
                     let (request_id, response_rx) = permission_registry.register();
-                    let permission_request = acp_permission_request_from_sdk(request_id, &request);
+                    let tool_call = acp_tool_call_update_from_sdk(request.tool_call.clone());
+                    let permission_request =
+                        acp_permission_request_from_sdk(request_id, &request, tool_call);
                     let _ = permission_event_tx.send(AcpSessionEvent::PermissionRequested {
                         agent_id: permission_agent_id.clone(),
                         request: permission_request,
@@ -557,6 +572,149 @@ fn acp_available_command_input_from_sdk(input: &AvailableCommandInput) -> AcpAva
         },
         _ => AcpAvailableCommandInput::Unknown,
     }
+}
+
+fn acp_tool_call_from_sdk(call: agent_client_protocol::schema::ToolCall) -> AcpToolCall {
+    AcpToolCall {
+        tool_call_id: call.tool_call_id.to_string(),
+        title: call.title,
+        kind: acp_tool_kind_from_sdk(call.kind),
+        status: acp_tool_call_status_from_sdk(call.status),
+        content: call
+            .content
+            .into_iter()
+            .map(acp_tool_call_content_from_sdk)
+            .collect(),
+        locations: call
+            .locations
+            .into_iter()
+            .map(acp_tool_call_location_from_sdk)
+            .collect(),
+        raw_input: call.raw_input.map(json_value_to_display_string),
+        raw_output: call.raw_output.map(json_value_to_display_string),
+    }
+}
+
+fn acp_tool_call_update_from_sdk(
+    update: agent_client_protocol::schema::ToolCallUpdate,
+) -> AcpToolCallUpdate {
+    let fields = update.fields;
+    AcpToolCallUpdate {
+        tool_call_id: update.tool_call_id.to_string(),
+        title: fields.title,
+        kind: fields.kind.map(acp_tool_kind_from_sdk),
+        status: fields.status.map(acp_tool_call_status_from_sdk),
+        content: fields.content.map(|content| {
+            content
+                .into_iter()
+                .map(acp_tool_call_content_from_sdk)
+                .collect()
+        }),
+        locations: fields.locations.map(|locations| {
+            locations
+                .into_iter()
+                .map(acp_tool_call_location_from_sdk)
+                .collect()
+        }),
+        raw_input: fields.raw_input.map(json_value_to_display_string),
+        raw_output: fields.raw_output.map(json_value_to_display_string),
+    }
+}
+
+fn acp_tool_kind_from_sdk(kind: agent_client_protocol::schema::ToolKind) -> AcpToolKind {
+    use agent_client_protocol::schema::ToolKind;
+
+    match kind {
+        ToolKind::Read => AcpToolKind::Read,
+        ToolKind::Edit => AcpToolKind::Edit,
+        ToolKind::Delete => AcpToolKind::Delete,
+        ToolKind::Move => AcpToolKind::Move,
+        ToolKind::Search => AcpToolKind::Search,
+        ToolKind::Execute => AcpToolKind::Execute,
+        ToolKind::Think => AcpToolKind::Think,
+        ToolKind::Fetch => AcpToolKind::Fetch,
+        ToolKind::SwitchMode => AcpToolKind::SwitchMode,
+        ToolKind::Other => AcpToolKind::Other,
+        _ => AcpToolKind::Other,
+    }
+}
+
+fn acp_tool_call_status_from_sdk(
+    status: agent_client_protocol::schema::ToolCallStatus,
+) -> AcpToolCallStatus {
+    use agent_client_protocol::schema::ToolCallStatus;
+
+    match status {
+        ToolCallStatus::Pending => AcpToolCallStatus::Pending,
+        ToolCallStatus::InProgress => AcpToolCallStatus::InProgress,
+        ToolCallStatus::Completed => AcpToolCallStatus::Completed,
+        ToolCallStatus::Failed => AcpToolCallStatus::Failed,
+        _ => AcpToolCallStatus::Pending,
+    }
+}
+
+fn acp_tool_call_location_from_sdk(
+    location: agent_client_protocol::schema::ToolCallLocation,
+) -> AcpToolCallLocation {
+    AcpToolCallLocation {
+        path: location.path.display().to_string(),
+        line: location.line,
+    }
+}
+
+fn acp_tool_call_content_from_sdk(
+    content: agent_client_protocol::schema::ToolCallContent,
+) -> AcpToolCallContent {
+    use agent_client_protocol::schema::{ContentBlock, EmbeddedResourceResource, ToolCallContent};
+
+    match content {
+        ToolCallContent::Content(content) => match content.content {
+            ContentBlock::Text(text) => AcpToolCallContent::Text(text.text),
+            ContentBlock::Image(image) => AcpToolCallContent::Image {
+                mime_type: image.mime_type,
+                uri: image.uri,
+            },
+            ContentBlock::Audio(audio) => AcpToolCallContent::Audio {
+                mime_type: audio.mime_type,
+            },
+            ContentBlock::ResourceLink(resource) => AcpToolCallContent::ResourceLink {
+                uri: resource.uri,
+                name: resource.name,
+                title: resource.title,
+            },
+            ContentBlock::Resource(resource) => match resource.resource {
+                EmbeddedResourceResource::TextResourceContents(resource) => {
+                    AcpToolCallContent::Resource {
+                        uri: resource.uri,
+                        mime_type: resource.mime_type,
+                        text: Some(resource.text),
+                    }
+                }
+                EmbeddedResourceResource::BlobResourceContents(resource) => {
+                    AcpToolCallContent::Resource {
+                        uri: resource.uri,
+                        mime_type: resource.mime_type,
+                        text: None,
+                    }
+                }
+                _ => AcpToolCallContent::Unknown("resource".to_string()),
+            },
+            _ => AcpToolCallContent::Unknown("content".to_string()),
+        },
+        ToolCallContent::Diff(diff) => AcpToolCallContent::Diff {
+            path: diff.path.display().to_string(),
+            old_text: diff.old_text,
+            new_text: diff.new_text,
+        },
+        ToolCallContent::Terminal(terminal) => AcpToolCallContent::Terminal {
+            terminal_id: terminal.terminal_id.to_string(),
+        },
+        _ => AcpToolCallContent::Unknown("tool_call_content".to_string()),
+    }
+}
+
+fn json_value_to_display_string(value: serde_json::Value) -> String {
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
 }
 
 fn acp_model_config_from_config_options(

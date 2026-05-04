@@ -7,6 +7,7 @@ use std::{
     },
 };
 
+use super::AcpToolCallUpdate;
 use crate::runtime::session::{
     RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,
 };
@@ -16,6 +17,7 @@ use crate::runtime::session::{
 pub struct AcpPermissionRequest {
     pub request_id: String,
     pub title: Option<String>,
+    pub tool_call: AcpToolCallUpdate,
     pub options: Vec<AcpPermissionOption>,
 }
 
@@ -102,10 +104,12 @@ impl std::error::Error for AcpPermissionRespondError {}
 pub(crate) fn acp_permission_request_from_sdk(
     request_id: String,
     request: &agent_client_protocol::schema::RequestPermissionRequest,
+    tool_call: AcpToolCallUpdate,
 ) -> AcpPermissionRequest {
     AcpPermissionRequest {
         request_id,
-        title: request.tool_call.fields.title.clone(),
+        title: tool_call.title.clone(),
+        tool_call,
         options: request
             .options
             .iter()

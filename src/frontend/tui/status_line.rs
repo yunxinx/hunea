@@ -57,14 +57,13 @@ impl Model {
     }
 
     pub(crate) fn current_status_line_render_result(&self) -> StatusLineRenderResult {
+        if self.tool_approval_panel_active() {
+            return StatusLineRenderResult::default();
+        }
         if !self.current_status_notice_text().is_empty() {
             return self.current_status_notice_render_result();
         }
-        if self.command_panel_active()
-            || self.model_panel_active()
-            || self.acp_panel_active()
-            || self.tool_approval_panel_active()
-        {
+        if self.command_panel_active() || self.model_panel_active() || self.acp_panel_active() {
             return StatusLineRenderResult::default();
         }
 

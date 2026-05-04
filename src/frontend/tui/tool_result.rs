@@ -1,6 +1,7 @@
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    time::{Duration, Instant},
 };
 
 use ratatui::{
@@ -9,19 +10,40 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+mod acp;
+
 use super::transcript::markdown_highlight::HighlightChunk;
 use super::{
+    acp_tool_preview::is_acp_write_tool_call,
     styled_text::{line_to_plain_text, lines_to_ansi_text, lines_to_plain_text},
-    theme::TerminalPalette,
+    theme::{TerminalPalette, secondary_text_style},
     transcript::{
         ItemLineAnchor, TranscriptEstimateKind, TranscriptFastEstimate, TranscriptItemMetrics,
         markdown_highlight::{highlight_code_chunks, wrap_highlight_chunks},
         wrap_prompt_visual_lines,
     },
 };
+use crate::runtime::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolCallUpdate};
+#[cfg(test)]
+use crate::runtime::acp::{AcpToolCallLocation, AcpToolKind};
+use acp::{
+    AcpDiffDetailLine, AcpToolCallDetailBlock, acp_diff_line_prefix,
+    acp_read_tool_call_title_chunks, acp_tool_call_content_byte_len, acp_tool_call_detail_blocks,
+    acp_tool_call_diff_header_chunks, acp_tool_call_diff_line_style, acp_tool_call_diff_row_style,
+    acp_tool_call_display_title, acp_tool_call_has_diff_content, acp_tool_call_location_suffix,
+    acp_tool_call_status_color, acp_write_tool_call_title_chunks, active_marker_visible_at,
+    is_acp_read_tool_call, style_for_color,
+};
 
 const TOOL_RESULT_PREFIX: &str = "● ";
 const TOOL_RESULT_CONTINUATION_PREFIX: &str = "  ";
+const TOOL_ACTIVITY_DETAIL_PREFIX: &str = "  └─ ";
+const TOOL_ACTIVITY_DETAIL_CONTINUATION_PREFIX: &str = "    ";
+pub(crate) const TOOL_ACTIVITY_LINE_NUMBER_WIDTH: usize = 7;
+pub(crate) const TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL: Duration = Duration::from_millis(600);
+const TOOL_ACTIVITY_DIFF_LINE_NUMBER_WIDTH: usize = TOOL_ACTIVITY_LINE_NUMBER_WIDTH;
+const TOOL_ACTIVITY_COMPACT_EDGE_LINES: usize = 5;
+const TOOL_ACTIVITY_TRANSCRIPT_HINT: &str = "ctrl + t to view transcript";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ToolResultKind {
@@ -29,30 +51,117 @@ pub(crate) enum ToolResultKind {
     Rejected,
 }
 
-/// `ToolResultItem` 表示工具审批后的 TUI 展示项，不参与模型上下文。
+/// `ToolActivityRenderMode` 控制工具活动在主界面与 transcript overlay 中的详略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ToolActivityRenderMode {
+    Compact,
+    Detailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ToolResultBody {
+    Approval {
+        content: String,
+        kind: ToolResultKind,
+    },
+    AcpToolCall(AcpToolCall),
+}
+
+/// `ToolResultItem` 表示只用于 TUI 展示的工具活动，不参与模型上下文。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolResultItem {
-    content: String,
-    kind: ToolResultKind,
+    body: ToolResultBody,
+    render_mode: ToolActivityRenderMode,
     render_cache_key: u64,
+    active_marker_started_at: Option<Instant>,
+    approval_suspended: bool,
 }
 
 impl ToolResultItem {
     /// `new` 创建一条工具审批结果展示项。
     pub(crate) fn new(content: impl Into<String>, kind: ToolResultKind) -> Self {
         let content = content.into();
-        let render_cache_key = tool_result_render_cache_key(&content, kind);
+        Self::from_body(
+            ToolResultBody::Approval { content, kind },
+            ToolActivityRenderMode::Compact,
+        )
+    }
 
+    /// `from_acp_tool_call` 创建一条 ACP tool call 展示项。
+    pub(crate) fn from_acp_tool_call(
+        call: AcpToolCall,
+        render_mode: ToolActivityRenderMode,
+    ) -> Self {
+        Self::from_body(ToolResultBody::AcpToolCall(call), render_mode)
+    }
+
+    fn from_body(body: ToolResultBody, render_mode: ToolActivityRenderMode) -> Self {
+        let approval_suspended = false;
+        let render_cache_key = tool_result_render_cache_key(&body, render_mode, approval_suspended);
+        let active_marker_started_at =
+            active_marker_started_at_for_body(&body).then_some(Instant::now());
         Self {
-            content,
-            kind,
+            body,
+            render_mode,
             render_cache_key,
+            active_marker_started_at,
+            approval_suspended,
         }
     }
 
     /// `render_lines` 将工具审批结果渲染为带颜色的文本行。
     pub(crate) fn render_lines(&self, width: u16, palette: TerminalPalette) -> Vec<Line<'static>> {
-        self.wrapped_styled_lines(width, palette)
+        self.wrapped_styled_lines_with_active_marker_visible(width, palette)
+    }
+
+    pub(crate) fn render_lines_at(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+        now: Instant,
+    ) -> Vec<Line<'static>> {
+        self.wrapped_styled_lines_at(width, palette, now)
+    }
+
+    pub(crate) fn has_active_acp_tool_call(&self) -> bool {
+        self.active_marker_started_at.is_some() && !self.is_compact_approval_suspended()
+    }
+
+    pub(crate) fn active_marker_started_at(&self) -> Option<Instant> {
+        if self.is_compact_approval_suspended() {
+            return None;
+        }
+
+        self.active_marker_started_at
+    }
+
+    fn wrapped_styled_lines_with_active_marker_visible(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+    ) -> Vec<Line<'static>> {
+        let now = self.active_marker_started_at.unwrap_or_else(Instant::now);
+        self.wrapped_styled_lines_at(width, palette, now)
+    }
+
+    fn wrapped_styled_lines_at(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+        now: Instant,
+    ) -> Vec<Line<'static>> {
+        if self.is_compact_approval_suspended() {
+            return Vec::new();
+        }
+
+        match &self.body {
+            ToolResultBody::Approval { content, .. } => {
+                self.approval_wrapped_styled_lines(content, width, palette)
+            }
+            ToolResultBody::AcpToolCall(call) => {
+                self.acp_tool_call_styled_lines_at(call, width, palette, now)
+            }
+        }
     }
 
     /// `render_for_terminal_replay` 返回适合退出 AltScreen 后回放到终端的文本。
@@ -80,7 +189,19 @@ impl ToolResultItem {
     }
 
     pub(crate) fn source_text_byte_len(&self) -> usize {
-        self.content.len()
+        match &self.body {
+            ToolResultBody::Approval { content, .. } => content.len(),
+            ToolResultBody::AcpToolCall(call) => {
+                call.title.len()
+                    + call.raw_input.as_deref().map(str::len).unwrap_or(0)
+                    + call.raw_output.as_deref().map(str::len).unwrap_or(0)
+                    + call
+                        .content
+                        .iter()
+                        .map(acp_tool_call_content_byte_len)
+                        .sum::<usize>()
+            }
+        }
     }
 
     pub(crate) fn measure_render_metrics(
@@ -88,7 +209,7 @@ impl ToolResultItem {
         width: u16,
         palette: TerminalPalette,
     ) -> (usize, usize) {
-        let lines = self.wrapped_styled_lines(width, palette);
+        let lines = self.wrapped_styled_lines_with_active_marker_visible(width, palette);
         let content_char_len = lines
             .iter()
             .map(|line| line_to_plain_text(line).len())
@@ -134,9 +255,90 @@ impl ToolResultItem {
         Vec::new()
     }
 
-    fn wrapped_styled_lines(&self, width: u16, palette: TerminalPalette) -> Vec<Line<'static>> {
+    pub(crate) fn set_render_mode(&mut self, render_mode: ToolActivityRenderMode) -> bool {
+        if self.render_mode == render_mode {
+            return false;
+        }
+
+        self.render_mode = render_mode;
+        self.refresh_render_cache_key();
+        true
+    }
+
+    pub(crate) fn set_approval_suspended(&mut self, suspended: bool) -> bool {
+        if !matches!(self.body, ToolResultBody::AcpToolCall(_)) {
+            return false;
+        }
+        if self.approval_suspended == suspended {
+            return false;
+        }
+
+        self.approval_suspended = suspended;
+        self.refresh_render_cache_key();
+        true
+    }
+
+    pub(crate) fn update_acp_tool_call(&mut self, update: AcpToolCallUpdate) -> bool {
+        let ToolResultBody::AcpToolCall(call) = &mut self.body else {
+            return false;
+        };
+        if call.tool_call_id != update.tool_call_id {
+            return false;
+        }
+
+        if let Some(title) = update.title {
+            call.title = title;
+        }
+        if let Some(kind) = update.kind {
+            call.kind = kind;
+        }
+        if let Some(status) = update.status {
+            call.status = status;
+        }
+        if let Some(content) = update.content {
+            call.content = content;
+        }
+        if let Some(locations) = update.locations {
+            call.locations = locations;
+        }
+        if let Some(raw_input) = update.raw_input {
+            call.raw_input = Some(raw_input);
+        }
+        if let Some(raw_output) = update.raw_output {
+            call.raw_output = Some(raw_output);
+        }
+        self.active_marker_started_at = active_marker_started_at_for_body(&self.body)
+            .then(|| self.active_marker_started_at.unwrap_or_else(Instant::now));
+        self.refresh_render_cache_key();
+        true
+    }
+
+    pub(crate) fn mark_acp_tool_call_failed(&mut self, message: impl Into<String>) -> bool {
+        let ToolResultBody::AcpToolCall(call) = &mut self.body else {
+            return false;
+        };
+        if matches!(
+            call.status,
+            AcpToolCallStatus::Completed | AcpToolCallStatus::Failed
+        ) {
+            return false;
+        }
+
+        call.status = AcpToolCallStatus::Failed;
+        call.content = vec![AcpToolCallContent::Text(message.into())];
+        self.active_marker_started_at = None;
+        self.refresh_render_cache_key();
+        true
+    }
+
+    fn approval_wrapped_styled_lines(
+        &self,
+        content: &str,
+        width: u16,
+        palette: TerminalPalette,
+    ) -> Vec<Line<'static>> {
         let width = usize::from(width.max(1));
-        self.content
+        content
             .split('\n')
             .enumerate()
             .flat_map(|(logical_line, content_line)| {
@@ -239,13 +441,21 @@ impl ToolResultItem {
     }
 
     fn shell_command_chunks(&self, command: &str) -> Vec<HighlightChunk> {
-        highlight_code_chunks(command, "bash", Style::new())
+        self.shell_command_chunks_with_style(command, Style::new())
+    }
+
+    fn shell_command_chunks_with_style(
+        &self,
+        command: &str,
+        base_style: Style,
+    ) -> Vec<HighlightChunk> {
+        highlight_code_chunks(command, "bash", base_style)
             .map(|highlighted| highlighted.into_iter().flatten().collect::<Vec<_>>())
             .filter(|chunks| !chunks.is_empty())
             .unwrap_or_else(|| {
                 vec![HighlightChunk {
                     text: command.to_string(),
-                    style: Style::new(),
+                    style: base_style,
                 }]
             })
     }
@@ -253,10 +463,279 @@ impl ToolResultItem {
     fn prefix_span(&self, prefix: &'static str, palette: TerminalPalette) -> Span<'static> {
         Span::styled(prefix, self.result_style(palette))
     }
+
+    fn acp_tool_call_styled_lines_at(
+        &self,
+        call: &AcpToolCall,
+        width: u16,
+        palette: TerminalPalette,
+        now: Instant,
+    ) -> Vec<Line<'static>> {
+        let width = usize::from(width.max(1));
+        let mut lines = self.acp_tool_call_header_lines_at(call, width, palette, now);
+        for block in acp_tool_call_detail_blocks(call, self.render_mode) {
+            lines.extend(self.wrap_acp_detail_block(&block, width, palette));
+        }
+        lines
+    }
+
+    fn acp_tool_call_header_lines_at(
+        &self,
+        call: &AcpToolCall,
+        width: usize,
+        palette: TerminalPalette,
+        now: Instant,
+    ) -> Vec<Line<'static>> {
+        let active_started_at = self.active_marker_started_at.filter(|_| {
+            matches!(
+                call.status,
+                AcpToolCallStatus::Pending | AcpToolCallStatus::InProgress
+            )
+        });
+        let marker_visible = active_started_at
+            .map(|started_at| active_marker_visible_at(started_at, now))
+            .unwrap_or(true);
+        let marker_text = if marker_visible {
+            TOOL_RESULT_PREFIX
+        } else {
+            TOOL_RESULT_CONTINUATION_PREFIX
+        };
+        let marker_color = if active_started_at.is_some() {
+            palette.main
+        } else {
+            acp_tool_call_status_color(call.status, palette)
+        };
+        let status_style = style_for_color(marker_color).add_modifier(Modifier::BOLD);
+        let location_style = style_for_color(palette.tertiary);
+        let mut chunks = vec![HighlightChunk {
+            text: marker_text.to_string(),
+            style: status_style,
+        }];
+        chunks.extend(self.acp_tool_call_title_chunks(call, palette));
+
+        if !is_acp_read_tool_call(call)
+            && !acp_tool_call_has_diff_content(call)
+            && let Some(locations) = acp_tool_call_location_suffix(&call.locations)
+        {
+            chunks.push(HighlightChunk {
+                text: format!(" {locations}"),
+                style: location_style,
+            });
+        }
+
+        wrap_highlight_chunks(&[chunks], width)
+            .into_iter()
+            .map(Line::from)
+            .collect()
+    }
+
+    fn acp_tool_call_title_chunks(
+        &self,
+        call: &AcpToolCall,
+        palette: TerminalPalette,
+    ) -> Vec<HighlightChunk> {
+        if let Some(chunks) = acp_tool_call_diff_header_chunks(call, palette) {
+            return chunks;
+        }
+
+        if is_acp_read_tool_call(call) {
+            return acp_read_tool_call_title_chunks(call);
+        }
+
+        if is_acp_write_tool_call(call) {
+            return acp_write_tool_call_title_chunks(call);
+        }
+
+        let title = acp_tool_call_display_title(call);
+        let title_style = Style::new().add_modifier(Modifier::BOLD);
+        if looks_like_shell_command(&title) {
+            return self.shell_command_chunks_with_style(&title, title_style);
+        }
+
+        vec![HighlightChunk {
+            text: title,
+            style: title_style,
+        }]
+    }
+
+    fn wrap_acp_detail_block(
+        &self,
+        block: &AcpToolCallDetailBlock,
+        width: usize,
+        palette: TerminalPalette,
+    ) -> Vec<Line<'static>> {
+        match block {
+            AcpToolCallDetailBlock::Text(logical_lines) => {
+                self.wrap_acp_text_detail_block(logical_lines, width)
+            }
+            AcpToolCallDetailBlock::SecondaryText(logical_lines) => {
+                self.wrap_acp_secondary_text_detail_block(logical_lines, width, palette)
+            }
+            AcpToolCallDetailBlock::Diff(logical_lines) => {
+                self.wrap_acp_diff_detail_block(logical_lines, width, palette)
+            }
+        }
+    }
+
+    fn wrap_acp_text_detail_block(
+        &self,
+        logical_lines: &[String],
+        width: usize,
+    ) -> Vec<Line<'static>> {
+        logical_lines
+            .iter()
+            .enumerate()
+            .flat_map(|(logical_index, content)| {
+                let initial_prefix = if logical_index == 0 {
+                    TOOL_ACTIVITY_DETAIL_PREFIX
+                } else {
+                    TOOL_ACTIVITY_DETAIL_CONTINUATION_PREFIX
+                };
+                let prefix_width = UnicodeWidthStr::width(initial_prefix);
+                let content_width = width.saturating_sub(prefix_width).max(1);
+                let wrapped = wrap_prompt_visual_lines(content, content_width, 0);
+
+                if wrapped.is_empty() {
+                    return vec![Line::from(vec![Span::raw(initial_prefix)])];
+                }
+
+                wrapped
+                    .into_iter()
+                    .enumerate()
+                    .map(|(wrapped_index, line)| {
+                        let prefix = if wrapped_index == 0 {
+                            initial_prefix
+                        } else {
+                            TOOL_ACTIVITY_DETAIL_CONTINUATION_PREFIX
+                        };
+                        Line::from(vec![Span::raw(prefix), Span::raw(line.text)])
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn wrap_acp_secondary_text_detail_block(
+        &self,
+        logical_lines: &[String],
+        width: usize,
+        palette: TerminalPalette,
+    ) -> Vec<Line<'static>> {
+        self.wrap_acp_styled_text_detail_block(logical_lines, width, secondary_text_style(palette))
+    }
+
+    fn wrap_acp_styled_text_detail_block(
+        &self,
+        logical_lines: &[String],
+        width: usize,
+        content_style: Style,
+    ) -> Vec<Line<'static>> {
+        logical_lines
+            .iter()
+            .enumerate()
+            .flat_map(|(logical_index, content)| {
+                let initial_prefix = if logical_index == 0 {
+                    TOOL_ACTIVITY_DETAIL_PREFIX
+                } else {
+                    TOOL_ACTIVITY_DETAIL_CONTINUATION_PREFIX
+                };
+                let prefix_width = UnicodeWidthStr::width(initial_prefix);
+                let content_width = width.saturating_sub(prefix_width).max(1);
+                let wrapped = wrap_highlight_chunks(
+                    &[vec![HighlightChunk {
+                        text: content.clone(),
+                        style: content_style,
+                    }]],
+                    content_width,
+                );
+
+                if wrapped.is_empty() {
+                    return vec![Line::from(vec![Span::raw(initial_prefix)])];
+                }
+
+                wrapped
+                    .into_iter()
+                    .enumerate()
+                    .map(|(wrapped_index, content_spans)| {
+                        let prefix = if wrapped_index == 0 {
+                            initial_prefix
+                        } else {
+                            TOOL_ACTIVITY_DETAIL_CONTINUATION_PREFIX
+                        };
+                        let mut spans = Vec::with_capacity(content_spans.len() + 1);
+                        spans.push(Span::raw(prefix));
+                        spans.extend(content_spans);
+                        Line::from(spans)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn wrap_acp_diff_detail_block(
+        &self,
+        logical_lines: &[AcpDiffDetailLine],
+        width: usize,
+        palette: TerminalPalette,
+    ) -> Vec<Line<'static>> {
+        logical_lines
+            .iter()
+            .flat_map(|content| {
+                let prefix = acp_diff_line_prefix(content.line_number, content.kind);
+                let continuation_prefix = " ".repeat(UnicodeWidthStr::width(prefix.as_str()));
+                let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+                let content_width = width.saturating_sub(prefix_width).max(1);
+                let line_style = acp_tool_call_diff_line_style(content.kind, palette);
+                let wrapped = wrap_highlight_chunks(
+                    &[vec![HighlightChunk {
+                        text: content.text.clone(),
+                        style: line_style,
+                    }]],
+                    content_width,
+                );
+
+                if wrapped.is_empty() {
+                    let mut line = Line::from(vec![Span::styled(prefix, line_style)]);
+                    line.style = line
+                        .style
+                        .patch(acp_tool_call_diff_row_style(content.kind, palette));
+                    return vec![line];
+                }
+
+                wrapped
+                    .into_iter()
+                    .enumerate()
+                    .map(|(wrapped_index, content_spans)| {
+                        let line_prefix = if wrapped_index == 0 {
+                            prefix.clone()
+                        } else {
+                            continuation_prefix.clone()
+                        };
+                        let mut spans = Vec::with_capacity(content_spans.len() + 1);
+                        spans.push(Span::styled(line_prefix, line_style));
+                        spans.extend(content_spans);
+                        let mut rendered = Line::from(spans);
+                        rendered.style = rendered
+                            .style
+                            .patch(acp_tool_call_diff_row_style(content.kind, palette));
+                        rendered
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     fn result_style(&self, palette: TerminalPalette) -> Style {
-        let color = match self.kind {
-            ToolResultKind::Ran => palette.quote,
-            ToolResultKind::Rejected => palette.approval_rejected,
+        let color = match &self.body {
+            ToolResultBody::Approval {
+                kind: ToolResultKind::Ran,
+                ..
+            } => palette.quote,
+            ToolResultBody::Approval {
+                kind: ToolResultKind::Rejected,
+                ..
+            } => palette.approval_rejected,
+            ToolResultBody::AcpToolCall(call) => acp_tool_call_status_color(call.status, palette),
         };
 
         if color == Color::Reset {
@@ -264,6 +743,15 @@ impl ToolResultItem {
         } else {
             Style::new().fg(color)
         }
+    }
+
+    fn refresh_render_cache_key(&mut self) {
+        self.render_cache_key =
+            tool_result_render_cache_key(&self.body, self.render_mode, self.approval_suspended);
+    }
+
+    fn is_compact_approval_suspended(&self) -> bool {
+        self.approval_suspended && self.render_mode == ToolActivityRenderMode::Compact
     }
 }
 
@@ -375,11 +863,26 @@ fn split_first_word(line: &str) -> Option<(&str, &str)> {
     Some((&line[..index], &line[index..]))
 }
 
-fn tool_result_render_cache_key(content: &str, kind: ToolResultKind) -> u64 {
+fn active_marker_started_at_for_body(body: &ToolResultBody) -> bool {
+    matches!(
+        body,
+        ToolResultBody::AcpToolCall(AcpToolCall {
+            status: AcpToolCallStatus::Pending | AcpToolCallStatus::InProgress,
+            ..
+        })
+    )
+}
+
+fn tool_result_render_cache_key(
+    body: &ToolResultBody,
+    render_mode: ToolActivityRenderMode,
+    approval_suspended: bool,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     "tool_result".hash(&mut hasher);
-    kind.hash(&mut hasher);
-    content.hash(&mut hasher);
+    render_mode.hash(&mut hasher);
+    approval_suspended.hash(&mut hasher);
+    body.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -478,6 +981,553 @@ mod tests {
                 .any(|span| span.style.fg.is_some()),
             "shell command spans should carry syntax highlight foreground colors: {:?}",
             lines[0].spans
+        );
+    }
+
+    #[test]
+    fn acp_tool_call_header_uses_title_only_and_strips_shell_prefix() {
+        let palette = default_palette();
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "Shell: cargo check".to_string(),
+                kind: AcpToolKind::Other,
+                status: AcpToolCallStatus::Completed,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let lines = item.render_lines(80, palette);
+
+        assert_eq!(line_to_plain_text(&lines[0]), "● cargo check");
+        assert_eq!(lines[0].spans[0].style.fg, Some(palette.quote));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|span| !span.content.as_ref().contains("Completed")),
+            "status text should not be part of the ACP header: {:?}",
+            lines[0].spans
+        );
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|span| !span.content.as_ref().contains("[Other]")),
+            "kind label should not be part of the ACP header: {:?}",
+            lines[0].spans
+        );
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|span| !span.content.as_ref().contains("Shell:")),
+            "tool prefix should be stripped from the ACP header: {:?}",
+            lines[0].spans
+        );
+    }
+
+    #[test]
+    fn acp_tool_call_header_highlights_shell_titles() {
+        let palette = default_palette();
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "Shell: cargo check".to_string(),
+                kind: AcpToolKind::Other,
+                status: AcpToolCallStatus::Completed,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let lines = item.render_lines(80, palette);
+
+        assert_eq!(line_to_plain_text(&lines[0]), "● cargo check");
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .skip(1)
+                .any(|span| span.style.fg.is_some()),
+            "shell-like ACP titles should carry syntax highlight foreground colors: {:?}",
+            lines[0].spans
+        );
+    }
+
+    #[test]
+    fn acp_tool_call_raw_output_trailing_newline_does_not_render_blank_line() {
+        let palette = default_palette();
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "Shell: cargo check".to_string(),
+                kind: AcpToolKind::Other,
+                status: AcpToolCallStatus::Completed,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: Some("Checking lumos\n".to_string()),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered = item.render_lines(80, palette);
+        let rendered_plain = rendered.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec![
+                "● cargo check".to_string(),
+                "  └─ Checking lumos".to_string(),
+            ]
+        );
+        assert!(
+            rendered
+                .last()
+                .is_some_and(|line| !line_to_plain_text(line).trim().is_empty()),
+            "rendered ACP output should not end with a blank line: {rendered_plain:?}"
+        );
+    }
+
+    #[test]
+    fn acp_tool_call_multi_line_raw_output_uses_four_space_continuation_prefix() {
+        let palette = default_palette();
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "Shell: git log --oneline -5".to_string(),
+                kind: AcpToolKind::Other,
+                status: AcpToolCallStatus::Completed,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: Some("first line\nsecond line".to_string()),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, palette)
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec![
+                "● git log --oneline -5".to_string(),
+                "  └─ first line".to_string(),
+                "    second line".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn acp_tool_call_raw_output_uses_secondary_color_and_codex_like_alignment() {
+        let palette = default_palette();
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "Shell: cargo check".to_string(),
+                kind: AcpToolKind::Other,
+                status: AcpToolCallStatus::Completed,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: Some(
+                    "Checking lumos v0.1.0 (/home/archie/GoCodes/lumos_rust)\nFinished `dev` profile [unoptimized + debuginfo] target(s) in 1.01s"
+                        .to_string(),
+                ),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let lines = item.render_lines(120, palette);
+        let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec![
+                "● cargo check".to_string(),
+                "  └─ Checking lumos v0.1.0 (/home/archie/GoCodes/lumos_rust)".to_string(),
+                "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.01s"
+                    .to_string(),
+            ]
+        );
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .skip(1)
+                .all(|span| span.style.fg == Some(palette.secondary)),
+            "raw output content should use the secondary semantic color: {:?}",
+            lines[1].spans
+        );
+    }
+
+    #[test]
+    fn acp_read_tool_call_renders_compact_summary_without_content_details() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "ReadFile: Temp.md".to_string(),
+                kind: AcpToolKind::Read,
+                status: AcpToolCallStatus::Completed,
+                content: vec![AcpToolCallContent::Text(
+                    "     1  # 临时文件\n     2\n     3  body".to_string(),
+                )],
+                locations: vec![AcpToolCallLocation {
+                    path: "Temp.md".to_string(),
+                    line: Some(1),
+                }],
+                raw_input: Some(r#"{"path":"Temp.md"}"#.to_string()),
+                raw_output: Some("# 临时文件\nbody".to_string()),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered_plain, vec!["● Read Temp.md".to_string()]);
+    }
+
+    #[test]
+    fn acp_readfile_title_fallback_renders_compact_summary_even_without_read_kind() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "ReadFile: Temp.md".to_string(),
+                kind: AcpToolKind::Other,
+                status: AcpToolCallStatus::Completed,
+                content: vec![AcpToolCallContent::Text(
+                    "     1  # 临时文件\n     2\n     3  body".to_string(),
+                )],
+                locations: Vec::new(),
+                raw_input: Some(r#"{"path":"Temp.md"}"#.to_string()),
+                raw_output: Some("# 临时文件\nbody".to_string()),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered_plain, vec!["● Read Temp.md".to_string()]);
+    }
+
+    #[test]
+    fn acp_writefile_in_progress_suppresses_raw_input_and_uses_compact_title() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "WriteFile: TEMP.md".to_string(),
+                kind: AcpToolKind::Other,
+                status: AcpToolCallStatus::InProgress,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: Some(
+                    r##"{"path":"TEMP.md","content":"# TEMP\n\nraw transport content"}"##
+                        .to_string(),
+                ),
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let lines = item.render_lines(80, default_palette());
+        let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered_plain, vec!["● Write TEMP.md".to_string()]);
+        assert!(
+            lines[0].spans[0].style.fg == Some(default_palette().main),
+            "active write calls should render the marker with the main text color: {:?}",
+            lines[0].spans[0]
+        );
+        assert!(
+            rendered_plain
+                .iter()
+                .all(|line| !line.contains("\"path\"") && !line.contains("\"content\"")),
+            "write calls should not expose raw transport JSON in the main transcript: {rendered_plain:?}"
+        );
+    }
+
+    #[test]
+    fn active_acp_write_marker_blinks_by_disappearing_with_main_text_color() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "WriteFile: TEMP.md".to_string(),
+                kind: AcpToolKind::Other,
+                status: AcpToolCallStatus::InProgress,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.to_string()),
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let palette = default_palette();
+        let started_at = item
+            .active_marker_started_at()
+            .expect("active tool call should record a blink start");
+        let visible = item.render_lines_at(80, palette, started_at);
+        let hidden = item.render_lines_at(
+            80,
+            palette,
+            started_at + TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL,
+        );
+
+        assert_eq!(line_to_plain_text(&visible[0]), "● Write TEMP.md");
+        assert_eq!(line_to_plain_text(&hidden[0]), "  Write TEMP.md");
+        assert_eq!(visible[0].spans[0].style.fg, Some(palette.main));
+        assert!(
+            !visible[0].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::RAPID_BLINK),
+            "active marker should blink through app rendering, not terminal blink modifier"
+        );
+    }
+
+    #[test]
+    fn acp_tool_call_diff_context_lines_keep_default_style() {
+        let palette = default_palette();
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "WriteFile: src/lib.rs".to_string(),
+                kind: AcpToolKind::Edit,
+                status: AcpToolCallStatus::Completed,
+                content: vec![AcpToolCallContent::Diff {
+                    path: "src/lib.rs".to_string(),
+                    old_text: Some("one\nold\ntail\n".to_string()),
+                    new_text: "one\nnew\ntail\n".to_string(),
+                }],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Detailed,
+        );
+        let lines = item.render_lines(80, palette);
+        let context_line = lines
+            .iter()
+            .find(|line| line_to_plain_text(line).contains(" one"))
+            .expect("context line should be rendered");
+        let insert_line = lines
+            .iter()
+            .find(|line| line_to_plain_text(line).contains("+  new"))
+            .expect("insert line should be rendered");
+        let delete_line = lines
+            .iter()
+            .find(|line| line_to_plain_text(line).contains("-  old"))
+            .expect("delete line should be rendered");
+
+        assert_eq!(context_line.style.bg, None);
+        assert!(
+            context_line
+                .spans
+                .iter()
+                .all(|span| span.style.bg.is_none() && span.style.fg.is_none()),
+            "context diff spans should keep default styling like codex-rs: {context_line:?}"
+        );
+        assert!(insert_line.style.bg.is_some());
+        assert!(delete_line.style.bg.is_some());
+    }
+
+    #[test]
+    fn acp_tool_call_added_diff_uses_codex_like_header_and_line_numbers() {
+        let palette = default_palette();
+        let absolute_path = std::env::current_dir()
+            .expect("cwd should be available")
+            .join("temp.md")
+            .display()
+            .to_string();
+        let new_text = (1..=25)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "WriteFile: temp.md".to_string(),
+                kind: AcpToolKind::Edit,
+                status: AcpToolCallStatus::Completed,
+                content: vec![AcpToolCallContent::Diff {
+                    path: absolute_path,
+                    old_text: None,
+                    new_text,
+                }],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let lines = item.render_lines(120, palette);
+        let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered_plain[0], "● Added temp.md (+25 -0)");
+        assert!(
+            rendered_plain
+                .iter()
+                .all(|line| !line.contains("WriteFile") && !line.contains("Diff:")),
+            "diff rendering should not expose redundant tool or diff labels: {rendered_plain:?}"
+        );
+        assert!(
+            rendered_plain
+                .iter()
+                .any(|line| line == "      1 +  line 1"),
+            "diff lines should right-align line numbers in a seven-column gutter: {rendered_plain:?}"
+        );
+        assert!(
+            rendered_plain
+                .iter()
+                .any(|line| line == "     25 +  line 25"),
+            "compact diff should keep the tail lines: {rendered_plain:?}"
+        );
+        assert!(
+            rendered_plain
+                .iter()
+                .any(|line| line == "      ⋮ +15 lines (ctrl + t to view transcript)"),
+            "compact diff omitted hint should align with the number gutter edge: {rendered_plain:?}"
+        );
+        assert!(
+            !rendered_plain
+                .iter()
+                .any(|line| line.contains("13 +line 13")),
+            "compact mode should omit middle diff rows: {rendered_plain:?}"
+        );
+    }
+
+    #[test]
+    fn acp_tool_call_detailed_diff_keeps_all_rows() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "WriteFile: temp.md".to_string(),
+                kind: AcpToolKind::Edit,
+                status: AcpToolCallStatus::Completed,
+                content: vec![AcpToolCallContent::Diff {
+                    path: "temp.md".to_string(),
+                    old_text: None,
+                    new_text: (1..=25)
+                        .map(|line| format!("line {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                }],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Detailed,
+        );
+        let rendered_plain = item
+            .render_lines(120, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert!(
+            rendered_plain
+                .iter()
+                .any(|line| line == "     13 +  line 13"),
+            "detailed mode should keep middle diff rows: {rendered_plain:?}"
+        );
+        assert!(
+            !rendered_plain
+                .iter()
+                .any(|line| line.contains("ctrl + t to view transcript")),
+            "detailed mode should not render compact truncation hints: {rendered_plain:?}"
+        );
+    }
+
+    #[test]
+    fn acp_tool_call_updated_diff_renders_delete_and_insert_line_numbers() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "WriteFile: src/lib.rs".to_string(),
+                kind: AcpToolKind::Edit,
+                status: AcpToolCallStatus::Completed,
+                content: vec![AcpToolCallContent::Diff {
+                    path: "src/lib.rs".to_string(),
+                    old_text: Some("one\nold\ntail\n".to_string()),
+                    new_text: "one\nnew\ntail\n".to_string(),
+                }],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Detailed,
+        );
+        let rendered_plain = item
+            .render_lines(120, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered_plain[0], "● Edited src/lib.rs (+1 -1)");
+        assert!(
+            rendered_plain.iter().any(|line| line == "      2 -  old"),
+            "updated diff should render old line numbers for deletions: {rendered_plain:?}"
+        );
+        assert!(
+            rendered_plain.iter().any(|line| line == "      2 +  new"),
+            "updated diff should render new line numbers for insertions: {rendered_plain:?}"
+        );
+        assert!(
+            rendered_plain.iter().any(|line| line == "      1    one"),
+            "context diff rows should right-align the line number and align content after the sign column: {rendered_plain:?}"
+        );
+        assert!(
+            rendered_plain
+                .iter()
+                .all(|line| !line.contains("---") && !line.contains("+++")),
+            "updated diff should not expose raw unified diff file headers: {rendered_plain:?}"
+        );
+    }
+
+    #[test]
+    fn acp_tool_call_diff_right_aligns_three_digit_line_numbers_in_fixed_gutter() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "WriteFile: temp.md".to_string(),
+                kind: AcpToolKind::Edit,
+                status: AcpToolCallStatus::Completed,
+                content: vec![AcpToolCallContent::Diff {
+                    path: "temp.md".to_string(),
+                    old_text: None,
+                    new_text: (1..=267)
+                        .map(|line| format!("line {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                }],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Detailed,
+        );
+        let rendered_plain = item
+            .render_lines(120, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert!(
+            rendered_plain
+                .iter()
+                .any(|line| line == "    267 +  line 267"),
+            "three-digit line numbers should grow left within the fixed seven-column gutter: {rendered_plain:?}"
         );
     }
 

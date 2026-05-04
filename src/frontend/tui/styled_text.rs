@@ -1,4 +1,6 @@
 use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::Line,
 };
@@ -51,6 +53,25 @@ pub(crate) fn line_to_plain_text(line: &Line<'_>) -> String {
 /// `line_plain_text_len` 返回单行纯文本的 UTF-8 字节长度。
 pub(crate) fn line_plain_text_len(line: &Line<'_>) -> usize {
     line.spans.iter().map(|span| span.content.len()).sum()
+}
+
+/// `render_line_with_full_width_background` 保证行级背景铺满整个绘制区域。
+pub(crate) fn render_line_with_full_width_background(
+    line: &Line<'_>,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let area = area.intersection(buf.area);
+    if area.is_empty() {
+        return;
+    }
+
+    if let Some(background) = line.style.bg
+        && background != Color::Reset
+    {
+        buf.set_style(area, Style::new().bg(background));
+    }
+    buf.set_line(area.x, area.y, line, area.width);
 }
 
 fn push_style_escape(rendered: &mut String, style: Style) {

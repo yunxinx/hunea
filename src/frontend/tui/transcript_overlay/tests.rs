@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::frontend::tui::{AppEvent, HeroOptions, Model, Sender, theme::default_palette};
+use crate::runtime::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
 
 #[test]
 fn overlay_scroll_boundary() {
@@ -104,6 +105,56 @@ fn toggle_with_ctrl_t() {
 }
 
 #[test]
+fn transcript_overlay_switches_tool_activity_detail_mode() {
+    let mut model = Model::new(HeroOptions::default());
+    model.set_window(40, 10);
+    model.set_palette(default_palette(), true);
+    model.transcript_mut().clear();
+    model.transcript_mut().append_acp_tool_call(AcpToolCall {
+        tool_call_id: "call-1".to_string(),
+        title: "Run tests".to_string(),
+        kind: AcpToolKind::Execute,
+        status: AcpToolCallStatus::Completed,
+        content: vec![AcpToolCallContent::Text("summary".to_string())],
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: Some(
+            (1..=14)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    });
+
+    let compact = model.transcript_plain_items().join("\n");
+    assert_contains_transcript_hint(&compact);
+    assert!(!compact.contains("line 7"));
+
+    model.open_transcript_overlay();
+    let detailed = model.transcript_plain_items().join("\n");
+    assert!(detailed.contains("line 7"));
+    assert!(!detailed.contains("ctrl + t to view transcript"));
+
+    model.close_transcript_overlay();
+    let compact_again = model.transcript_plain_items().join("\n");
+    assert_contains_transcript_hint(&compact_again);
+    assert!(!compact_again.contains("line 7"));
+}
+
+fn assert_contains_transcript_hint(text: &str) {
+    let compacted = text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    assert!(
+        compacted.contains("…+4lines(")
+            && compacted.contains("ctrl+t")
+            && compacted.contains("viewtranscript)"),
+        "expected wrapped transcript hint in {text:?}; compacted={compacted:?}"
+    );
+}
+
+#[test]
 fn overlay_assistant_message_inset() {
     let mut model = Model::new(HeroOptions::default());
     model.set_window(40, 10);
@@ -146,6 +197,55 @@ fn overlay_assistant_message_inset() {
         }
     }
     assert!(found, "should find assistant message in overlay render");
+}
+
+#[test]
+fn overlay_diff_line_background_fills_the_rendered_row() {
+    let mut model = Model::new(HeroOptions::default());
+    model.set_window(48, 8);
+    model.set_palette(default_palette(), true);
+    model.transcript_mut().clear();
+    model.transcript_mut().append_acp_tool_call(AcpToolCall {
+        tool_call_id: "call-1".to_string(),
+        title: "WriteFile: src/lib.rs".to_string(),
+        kind: AcpToolKind::Edit,
+        status: AcpToolCallStatus::Completed,
+        content: vec![AcpToolCallContent::Diff {
+            path: "src/lib.rs".to_string(),
+            old_text: Some("one\nold\ntail\n".to_string()),
+            new_text: "one\nnew\ntail\n".to_string(),
+        }],
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+    });
+    model.sync_transcript_render();
+    model.open_transcript_overlay();
+
+    let backend = ratatui::backend::TestBackend::new(48, 8);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            model.render_transcript_overlay(frame, area);
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let insert_row = (0..8)
+        .find(|row| {
+            let row_text = (0..48)
+                .map(|column| buffer[(column, *row)].symbol())
+                .collect::<String>();
+            row_text.contains("+  new")
+        })
+        .expect("insert diff row should be rendered");
+
+    assert_ne!(
+        buffer[(47, insert_row)].bg,
+        ratatui::style::Color::Reset,
+        "overlay diff insert row background should fill trailing cells"
+    );
 }
 
 #[test]

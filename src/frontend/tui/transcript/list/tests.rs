@@ -13,6 +13,7 @@ use crate::frontend::tui::{
     },
     theme::{default_palette, terminal_default_palette},
 };
+use crate::runtime::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
 
 #[test]
 fn render_returns_content_lines_and_line_count() {
@@ -135,6 +136,41 @@ fn tool_result_is_display_only_and_not_assistant_message() {
         item.render_plain_lines(80, default_palette()),
         vec!["● Ran cargo test".to_string()]
     );
+}
+
+#[test]
+fn tool_activity_uses_compact_and_detailed_rendering_modes() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.append_acp_tool_call(AcpToolCall {
+        tool_call_id: "call-1".to_string(),
+        title: "Shell: cargo check".to_string(),
+        kind: AcpToolKind::Other,
+        status: AcpToolCallStatus::Completed,
+        content: vec![AcpToolCallContent::Text("summary".to_string())],
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: Some(
+            (1..=14)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    });
+
+    let compact = transcript.plain_items().join("\n");
+    assert!(compact.contains("● cargo check"));
+    assert!(compact.contains("line 1"));
+    assert!(compact.contains("line 14"));
+    assert!(compact.contains("… +4 lines (ctrl + t to view transcript)"));
+    assert!(!compact.contains("line 7"));
+    assert!(!compact.contains("Completed"));
+    assert!(!compact.contains("[Other]"));
+    assert!(!compact.contains("Shell:"));
+
+    transcript.set_tool_activity_render_mode(ToolActivityRenderMode::Detailed);
+    let detailed = transcript.plain_items().join("\n");
+    assert!(detailed.contains("line 7"));
+    assert!(!detailed.contains("ctrl + t to view transcript"));
 }
 
 #[test]

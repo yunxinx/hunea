@@ -21,6 +21,7 @@ use super::{slot_frame::SlotFrame, tail::DocumentTailLayout};
 pub(crate) struct DocumentTranscriptKey {
     pub(super) transcript_render_version: usize,
     pub(super) document_width: u16,
+    pub(super) tool_activity_frame: usize,
 }
 
 /// `DocumentTranscriptSnapshot` 缓存 unified document 真正需要的 transcript 行级数据。
@@ -91,6 +92,7 @@ pub(crate) struct DocumentLayoutKey {
     pub(super) status_line_2_config: u8,
     pub(super) status_line_revision: usize,
     pub(super) stream_activity_frame: usize,
+    pub(super) tool_activity_frame: usize,
 }
 
 /// `DocumentLayout` 表示整份统一文档流的稳定布局。

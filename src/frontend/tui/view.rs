@@ -1,6 +1,9 @@
 use ratatui::{Frame, buffer::Buffer, layout::Rect, text::Line, widgets::Widget};
 
-use super::{Model, document::DocumentLayout, message::assistant_message_visual_inset};
+use super::{
+    Model, document::DocumentLayout, message::assistant_message_visual_inset,
+    styled_text::render_line_with_full_width_background,
+};
 
 struct DocumentViewportWidget<'a> {
     lines: &'a [Line<'static>],
@@ -21,7 +24,11 @@ impl Widget for DocumentViewportWidget<'_> {
             if self.layout.is_assistant_message_line(line_index) {
                 render_inset_line(line, area, y, buf);
             } else {
-                buf.set_line(area.x, y, line, area.width);
+                render_line_with_full_width_background(
+                    line,
+                    Rect::new(area.x, y, area.width, 1),
+                    buf,
+                );
             }
         }
     }
@@ -30,16 +37,20 @@ impl Widget for DocumentViewportWidget<'_> {
 fn render_inset_line(line: &Line<'static>, area: Rect, y: u16, buf: &mut Buffer) {
     let inset = assistant_message_visual_inset(area.width);
     if inset == 0 || area.width <= inset.saturating_mul(2) {
-        buf.set_line(area.x, y, line, area.width);
+        render_line_with_full_width_background(line, Rect::new(area.x, y, area.width, 1), buf);
         return;
     }
 
     buf.set_line(area.x, y, &Line::raw(""), area.width);
-    buf.set_line(
-        area.x + inset,
-        y,
+    render_line_with_full_width_background(
         line,
-        area.width.saturating_sub(inset.saturating_mul(2)),
+        Rect::new(
+            area.x + inset,
+            y,
+            area.width.saturating_sub(inset.saturating_mul(2)),
+            1,
+        ),
+        buf,
     );
 }
 
@@ -90,12 +101,13 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
 mod tests {
     use std::time::Duration;
 
-    use ratatui::{Terminal, backend::TestBackend, layout::Position};
+    use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
 
     use super::*;
     use crate::frontend::tui::{
         HeroOptions, ReasoningDisplayMode, StyleMode, theme::default_palette,
     };
+    use crate::runtime::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
 
     #[test]
     fn assistant_message_uses_two_column_visual_inset() {
@@ -222,6 +234,43 @@ mod tests {
         assert!(
             rows.iter().any(|row| row == "  qrstuvwxyz        "),
             "overflow should wrap to the next assistant row instead of being clipped: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn diff_line_background_fills_the_rendered_row() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.set_window(48, 8);
+        model.set_palette(default_palette(), true);
+        model.append_acp_tool_call_from_runtime(AcpToolCall {
+            tool_call_id: "call-1".to_string(),
+            title: "WriteFile: src/lib.rs".to_string(),
+            kind: AcpToolKind::Edit,
+            status: AcpToolCallStatus::Completed,
+            content: vec![AcpToolCallContent::Diff {
+                path: "src/lib.rs".to_string(),
+                old_text: Some("one\nold\ntail\n".to_string()),
+                new_text: "one\nnew\ntail\n".to_string(),
+            }],
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: None,
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(48, 8)).unwrap();
+        terminal.draw(|frame| model.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows = rendered_rows(buffer);
+        let insert_row = rows
+            .iter()
+            .position(|row| row.contains("+  new"))
+            .expect("insert diff row should be rendered");
+
+        assert_ne!(
+            buffer[(47, u16::try_from(insert_row).unwrap())].bg,
+            Color::Reset,
+            "diff insert row background should fill trailing cells: {rows:?}"
         );
     }
 

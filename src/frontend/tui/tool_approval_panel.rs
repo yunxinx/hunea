@@ -5,8 +5,11 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+mod file_preview;
+
 use super::{
     AppEffect, Model,
+    acp_tool_preview::ToolApprovalPreview,
     inline_panel::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, wrap_inline_text,
@@ -17,6 +20,7 @@ use super::{
     tool_result::ToolResultKind,
     transcript::markdown_highlight::{highlight_code_chunks, wrap_highlight_chunks},
 };
+use file_preview::build_file_preview_panel_lines;
 
 const ACTION_COLUMN_GAP: usize = 4;
 const ACTION_LEFT_LABEL_WIDTH: usize = 5;
@@ -29,6 +33,8 @@ pub(super) struct ToolApprovalPanelState {
     pub(super) source: Option<ToolApprovalSource>,
     pub(super) title: String,
     pub(super) details: Vec<ToolApprovalDetail>,
+    pub(super) preview: Option<ToolApprovalPreview>,
+    pub(super) suspended_acp_tool_call_item_index: Option<usize>,
 }
 
 /// `ToolApprovalSource` 描述工具审批确认后需要回到哪个运行时来源。
@@ -75,6 +81,15 @@ impl ToolApprovalChoice {
         self.label()
     }
 
+    fn file_preview_display_label(self) -> &'static str {
+        match self {
+            Self::Allow => "Yes",
+            Self::AllowInSession => "Yes, allow all edits during this session",
+            Self::Deny => "No",
+            Self::DenyInSession => "No, reject all edits during this session",
+        }
+    }
+
     fn position(self) -> ToolApprovalChoicePosition {
         match self {
             Self::Allow => ToolApprovalChoicePosition { row: 0, column: 0 },
@@ -102,7 +117,19 @@ impl Model {
         title: String,
         details: Vec<ToolApprovalDetail>,
     ) {
+        self.open_tool_approval_panel_with_preview(source, title, details, None);
+    }
+
+    pub(in crate::frontend::tui) fn open_tool_approval_panel_with_preview(
+        &mut self,
+        source: ToolApprovalSource,
+        title: String,
+        details: Vec<ToolApprovalDetail>,
+        preview: Option<ToolApprovalPreview>,
+    ) {
+        self.restore_suspended_acp_tool_call_for_approval_panel();
         self.close_transcript_overlay();
+        self.pause_stream_activity();
         self.model_panel.is_open = false;
         self.acp_panel.is_open = false;
         self.tool_approval_panel = ToolApprovalPanelState {
@@ -111,6 +138,8 @@ impl Model {
             source: Some(source),
             title,
             details,
+            preview,
+            suspended_acp_tool_call_item_index: None,
         };
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.sync_command_panel_navigation();
@@ -124,11 +153,27 @@ impl Model {
             return;
         }
 
+        let suspended_item_index = self
+            .tool_approval_panel
+            .suspended_acp_tool_call_item_index
+            .take();
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.pending_acp_permission = None;
+        self.restore_suspended_acp_tool_call_item(suspended_item_index);
+        self.resume_stream_activity();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.sync_composer_height();
         self.sync_document_viewport_for_composer_cursor();
+    }
+
+    pub(crate) fn suspend_acp_tool_call_for_approval_panel(&mut self, item_index: usize) {
+        if !self.tool_approval_panel_active() {
+            return;
+        }
+
+        if self.set_acp_tool_call_approval_suspended_from_runtime(item_index, true) {
+            self.tool_approval_panel.suspended_acp_tool_call_item_index = Some(item_index);
+        }
     }
 
     pub(crate) fn handle_tool_approval_panel_key(
@@ -212,10 +257,19 @@ impl Model {
     }
 
     fn resolve_tool_approval_choice(&mut self, choice: ToolApprovalChoice) -> Option<AppEffect> {
-        let source = self.tool_approval_panel.source.clone()?;
+        let suspended_item_index = self
+            .tool_approval_panel
+            .suspended_acp_tool_call_item_index
+            .take();
+        let Some(source) = self.tool_approval_panel.source.clone() else {
+            self.restore_suspended_acp_tool_call_item(suspended_item_index);
+            return None;
+        };
         let title = self.tool_approval_panel.title.clone();
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.pending_acp_permission = None;
+        self.restore_suspended_acp_tool_call_item(suspended_item_index);
+        self.resume_stream_activity();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.sync_composer_height();
         self.sync_document_viewport_for_composer_cursor();
@@ -234,10 +288,17 @@ impl Model {
                     ToolApprovalChoice::Deny => reject_option_id,
                     ToolApprovalChoice::DenyInSession => reject_always_option_id,
                 };
-                self.append_tool_result_from_runtime(
-                    approval_result_content(choice, &title),
-                    approval_result_kind(choice),
-                );
+                // ACP tool call items themselves will surface the execution result, so only
+                // rejection choices need a separate transcript entry here.
+                if matches!(
+                    choice,
+                    ToolApprovalChoice::Deny | ToolApprovalChoice::DenyInSession
+                ) {
+                    self.append_tool_result_from_runtime(
+                        approval_result_content(choice, &title),
+                        approval_result_kind(choice),
+                    );
+                }
                 Some(AppEffect::RespondAcpPermission {
                     request_id,
                     option_id,
@@ -250,6 +311,20 @@ impl Model {
                 );
                 None
             }
+        }
+    }
+
+    fn restore_suspended_acp_tool_call_for_approval_panel(&mut self) {
+        let suspended_item_index = self
+            .tool_approval_panel
+            .suspended_acp_tool_call_item_index
+            .take();
+        self.restore_suspended_acp_tool_call_item(suspended_item_index);
+    }
+
+    fn restore_suspended_acp_tool_call_item(&mut self, item_index: Option<usize>) {
+        if let Some(item_index) = item_index {
+            self.set_acp_tool_call_approval_suspended_from_runtime(item_index, false);
         }
     }
 }
@@ -276,6 +351,10 @@ fn approval_result_content(choice: ToolApprovalChoice, title: &str) -> String {
 
 fn build_panel_lines(model: &Model, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
+    if model.tool_approval_panel.preview.is_some() {
+        return build_file_preview_panel_lines(model, width);
+    }
+
     let mut lines = vec![
         inline_panel_rule_line(width, model.palette),
         header_line(model),
@@ -456,6 +535,11 @@ fn move_tool_approval_selection(
         return;
     };
 
+    if state.preview.is_some() {
+        move_file_preview_tool_approval_selection(state, choices.len(), direction);
+        return;
+    }
+
     let next_choice = match direction {
         ToolApprovalSelectionMove::Left => {
             let position = current_choice.position();
@@ -479,6 +563,27 @@ fn move_tool_approval_selection(
     {
         state.selected = index;
     }
+}
+
+fn move_file_preview_tool_approval_selection(
+    state: &mut ToolApprovalPanelState,
+    choice_count: usize,
+    direction: ToolApprovalSelectionMove,
+) {
+    if choice_count == 0 {
+        state.selected = 0;
+        return;
+    }
+
+    state.selected = match direction {
+        ToolApprovalSelectionMove::Up | ToolApprovalSelectionMove::Left => state
+            .selected
+            .checked_sub(1)
+            .unwrap_or(choice_count.saturating_sub(1)),
+        ToolApprovalSelectionMove::Down | ToolApprovalSelectionMove::Right => {
+            (state.selected + 1) % choice_count
+        }
+    };
 }
 
 fn move_tool_approval_selection_vertically(
@@ -535,7 +640,10 @@ fn preferred_tool_approval_choice(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::tui::{HeroOptions, Sender, theme::default_palette};
+    use crate::frontend::tui::{
+        HeroOptions, Sender,
+        theme::{default_palette, primary_text_style, secondary_text_style},
+    };
 
     #[test]
     fn preview_layout_omits_labels_and_places_wrapped_command_before_actions() {
@@ -812,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn acp_allow_choice_appends_ran_result_without_source_message() {
+    fn acp_allow_choice_does_not_append_redundant_ran_result() {
         let mut model = Model::new(HeroOptions::default());
         model.palette = default_palette();
         model.open_tool_approval_panel(
@@ -826,6 +934,7 @@ mod tests {
             "cargo test tool_approval".to_string(),
             Vec::new(),
         );
+        let before = model.transcript_mut().plain_items();
 
         let effect = model
             .handle_tool_approval_panel_key(KeyCode::Enter.into())
@@ -839,18 +948,180 @@ mod tests {
             })
         );
         assert!(
-            model
-                .transcript_mut()
-                .plain_items()
-                .iter()
-                .any(|item| item == "● Ran cargo test tool_approval"),
-            "approval result should be appended to transcript"
+            model.transcript_mut().plain_items() == before,
+            "ACP allow should not append a redundant approval result when the tool call item will already show execution"
         );
         assert_eq!(
             model.transcript_mut().source_messages(),
             Vec::<(Sender, String)>::new(),
             "tool approval results should not be sent back to the model"
         );
+    }
+
+    #[test]
+    fn file_preview_panel_renders_numbered_content_without_transport_json() {
+        let mut model = Model::new(HeroOptions::default());
+        model.palette = default_palette();
+        model.open_tool_approval_panel_with_preview(
+            ToolApprovalSource::AcpPermission {
+                request_id: "permission-write".to_string(),
+                allow_option_id: Some("allow-once".to_string()),
+                allow_always_option_id: Some("allow-always".to_string()),
+                reject_option_id: Some("reject-once".to_string()),
+                reject_always_option_id: None,
+            },
+            "WriteFile: TEMP.md".to_string(),
+            Vec::new(),
+            Some(ToolApprovalPreview::create_file(
+                "TEMP.md".to_string(),
+                "# 临时文档\n\nbody\n  indented".to_string(),
+            )),
+        );
+
+        let lines = build_panel_lines(&model, 72)
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.into_owned())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let text = lines.join("\n");
+
+        assert!(
+            !text.contains("Create file") && !text.contains("Edit file"),
+            "file preview should keep the header to the file path only: {lines:?}"
+        );
+        assert!(
+            text.contains("TEMP.md"),
+            "preview path should render: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "      1  # 临时文档")
+                && lines.iter().any(|line| line == "      2  ")
+                && lines.iter().any(|line| line == "      3  body")
+                && lines.iter().any(|line| line == "      4    indented"),
+            "file preview should render numbered file content: {lines:?}"
+        );
+        assert!(
+            !text.contains("\"path\"") && !text.contains("\"content\""),
+            "file preview should not expose raw transport JSON: {lines:?}"
+        );
+        assert!(
+            text.contains("Yes") && text.contains("Yes, allow all edits during this session"),
+            "file preview should use user-facing approval labels: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn file_preview_panel_choices_use_model_panel_selection_style() {
+        let mut model = Model::new(HeroOptions::default());
+        model.palette = default_palette();
+        model.open_tool_approval_panel_with_preview(
+            ToolApprovalSource::AcpPermission {
+                request_id: "permission-write".to_string(),
+                allow_option_id: Some("allow-once".to_string()),
+                allow_always_option_id: Some("allow-always".to_string()),
+                reject_option_id: Some("reject-once".to_string()),
+                reject_always_option_id: None,
+            },
+            "WriteFile: TEMP.md".to_string(),
+            Vec::new(),
+            Some(ToolApprovalPreview::create_file(
+                "TEMP.md".to_string(),
+                "body".to_string(),
+            )),
+        );
+
+        let selected_line = build_panel_lines(&model, 72)
+            .into_iter()
+            .find(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                    .contains("1. Yes")
+            })
+            .expect("selected file preview choice should render");
+        let plain = selected_line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(plain, "  ➜ 1. Yes");
+        assert_eq!(selected_line.spans[1].content.as_ref(), "➜ ");
+        assert_eq!(
+            selected_line.spans[1].style,
+            secondary_text_style(model.palette)
+        );
+        assert_eq!(
+            selected_line.spans[2].style,
+            primary_text_style(model.palette).bold()
+        );
+    }
+
+    #[test]
+    fn file_preview_panel_hides_status_notice() {
+        let mut model = Model::new(HeroOptions::default());
+        model.palette = default_palette();
+        model.open_tool_approval_panel_with_preview(
+            ToolApprovalSource::AcpPermission {
+                request_id: "permission-write".to_string(),
+                allow_option_id: Some("allow-once".to_string()),
+                allow_always_option_id: Some("allow-always".to_string()),
+                reject_option_id: Some("reject-once".to_string()),
+                reject_always_option_id: None,
+            },
+            "WriteFile: TEMP.md".to_string(),
+            Vec::new(),
+            Some(ToolApprovalPreview::create_file(
+                "TEMP.md".to_string(),
+                "body".to_string(),
+            )),
+        );
+        model.show_transient_status_notice("Selection copied");
+
+        assert!(
+            !model.current_status_line_render_result().has_content,
+            "file preview approval should suppress status notices while waiting for a choice"
+        );
+    }
+
+    #[test]
+    fn file_preview_panel_selection_moves_linearly_for_vertical_choices() {
+        let mut model = Model::new(HeroOptions::default());
+        model.palette = default_palette();
+        model.open_tool_approval_panel_with_preview(
+            ToolApprovalSource::AcpPermission {
+                request_id: "permission-write".to_string(),
+                allow_option_id: Some("allow-once".to_string()),
+                allow_always_option_id: Some("allow-always".to_string()),
+                reject_option_id: Some("reject-once".to_string()),
+                reject_always_option_id: None,
+            },
+            "WriteFile: TEMP.md".to_string(),
+            Vec::new(),
+            Some(ToolApprovalPreview::create_file(
+                "TEMP.md".to_string(),
+                "body".to_string(),
+            )),
+        );
+
+        assert_eq!(model.tool_approval_panel.selected, 0);
+        model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(
+            model.tool_approval_panel.selected, 1,
+            "vertical preview choices should move from Yes to session allow with Down"
+        );
+        model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(
+            model.tool_approval_panel.selected, 2,
+            "vertical preview choices should then move to No"
+        );
+        model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(model.tool_approval_panel.selected, 1);
     }
 
     #[test]

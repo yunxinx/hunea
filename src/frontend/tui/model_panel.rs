@@ -46,11 +46,7 @@ impl Model {
 
         self.composer.replace_text_and_move_to_end(String::new());
         self.acp_panel.is_open = false;
-        if self.tool_approval_panel.is_open {
-            self.tool_approval_panel = Default::default();
-            self.pending_acp_permission = None;
-            self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
-        }
+        self.close_tool_approval_panel();
         self.model_panel.is_open = true;
         self.sync_model_panel_to_selection();
         self.sync_command_panel_navigation();
@@ -659,7 +655,7 @@ fn wrapping_index(current: usize, len: usize, delta: isize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::tui::{HeroOptions, ModelOptions};
+    use crate::frontend::tui::{AppEvent, HeroOptions, ModelOptions};
     use crate::runtime::acp::{AcpModelConfig, AcpModelOption};
     use crate::runtime::model_catalog::{ModelCatalog, ModelProvider, ModelSource};
     use crate::runtime::native::ProviderKind;
@@ -691,6 +687,25 @@ mod tests {
         assert_eq!(model.selected_model, None);
         assert_eq!(model.model_panel.model_index, 0);
         assert_eq!(model.model_panel.scroll, 0);
+    }
+
+    #[test]
+    fn open_model_panel_closes_tool_approval_panel_and_resumes_stream_activity() {
+        let mut model = model_with_single_provider();
+        model.show_stream_activity_with_header("Working");
+        model.update(AppEvent::AcpPermissionRequested {
+            request_id: "permission-1".to_string(),
+            title: Some("Write file".to_string()),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        });
+        assert!(!model.current_stream_activity_render_result().has_content);
+
+        model.open_model_panel();
+
+        assert!(model.current_stream_activity_render_result().has_content);
     }
 
     #[test]

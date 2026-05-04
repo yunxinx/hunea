@@ -36,6 +36,95 @@ pub struct AcpModelConfig {
     pub options: Vec<AcpModelOption>,
 }
 
+/// `AcpToolKind` 是 ACP tool call 的内部工具分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AcpToolKind {
+    Read,
+    Edit,
+    Delete,
+    Move,
+    Search,
+    Execute,
+    Think,
+    Fetch,
+    SwitchMode,
+    Other,
+}
+
+/// `AcpToolCallStatus` 是 ACP tool call 的内部生命周期状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AcpToolCallStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
+}
+
+/// `AcpToolCallLocation` 表示 tool call 关联的文件位置。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AcpToolCallLocation {
+    pub path: String,
+    pub line: Option<u32>,
+}
+
+/// `AcpToolCallContent` 表示 tool call 的富内容片段。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AcpToolCallContent {
+    Text(String),
+    Image {
+        mime_type: String,
+        uri: Option<String>,
+    },
+    Audio {
+        mime_type: String,
+    },
+    ResourceLink {
+        uri: String,
+        name: String,
+        title: Option<String>,
+    },
+    Resource {
+        uri: String,
+        mime_type: Option<String>,
+        text: Option<String>,
+    },
+    Diff {
+        path: String,
+        old_text: Option<String>,
+        new_text: String,
+    },
+    Terminal {
+        terminal_id: String,
+    },
+    Unknown(String),
+}
+
+/// `AcpToolCall` 表示一次 ACP tool call 创建通知。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AcpToolCall {
+    pub tool_call_id: String,
+    pub title: String,
+    pub kind: AcpToolKind,
+    pub status: AcpToolCallStatus,
+    pub content: Vec<AcpToolCallContent>,
+    pub locations: Vec<AcpToolCallLocation>,
+    pub raw_input: Option<String>,
+    pub raw_output: Option<String>,
+}
+
+/// `AcpToolCallUpdate` 表示 ACP tool call 的增量更新。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AcpToolCallUpdate {
+    pub tool_call_id: String,
+    pub title: Option<String>,
+    pub kind: Option<AcpToolKind>,
+    pub status: Option<AcpToolCallStatus>,
+    pub content: Option<Vec<AcpToolCallContent>>,
+    pub locations: Option<Vec<AcpToolCallLocation>>,
+    pub raw_input: Option<String>,
+    pub raw_output: Option<String>,
+}
+
 /// `AcpInitializeOutcome` 表示 ACP initialize 握手后的 agent 基本信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpInitializeOutcome {
@@ -73,6 +162,14 @@ pub enum AcpSessionEvent {
     AgentThoughtChunk {
         agent_id: String,
         content: String,
+    },
+    ToolCall {
+        agent_id: String,
+        call: AcpToolCall,
+    },
+    ToolCallUpdate {
+        agent_id: String,
+        update: AcpToolCallUpdate,
     },
     ModelConfigChanged {
         agent_id: String,

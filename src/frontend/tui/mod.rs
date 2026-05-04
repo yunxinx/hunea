@@ -8,6 +8,7 @@ mod benchmark;
 pub mod benchmark;
 
 mod acp;
+mod acp_tool_preview;
 mod backtrack;
 mod command_panel;
 mod composer;

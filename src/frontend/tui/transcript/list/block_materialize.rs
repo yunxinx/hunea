@@ -48,10 +48,12 @@ impl Transcript {
         index: usize,
         width: u16,
     ) -> Rc<CachedRenderBlock> {
+        let has_dynamic_render = self.items[index].has_active_acp_tool_call();
         let cache_key = self.items[index].render_cache_key();
-        if let Some(cached) = self
-            .screen_cache
-            .reusable_item_block(index, width, cache_key)
+        if !has_dynamic_render
+            && let Some(cached) = self
+                .screen_cache
+                .reusable_item_block(index, width, cache_key)
         {
             return cached;
         }
@@ -61,7 +63,9 @@ impl Transcript {
             width,
             self.palette,
         ));
-        self.screen_cache.store_item_block(index, Rc::clone(&block));
+        if !has_dynamic_render {
+            self.screen_cache.store_item_block(index, Rc::clone(&block));
+        }
         block
     }
 }
@@ -94,7 +98,12 @@ pub(crate) fn materialize_transcript_item_render_block(
         };
     }
 
-    let lines = item.render_lines(width, palette);
+    let lines = match item {
+        TranscriptItem::ToolResult(tool_result) => {
+            tool_result.render_lines_at(width, palette, std::time::Instant::now())
+        }
+        _ => item.render_lines(width, palette),
+    };
     let anchors = item.render_line_anchors(width, palette);
     let plain_line_byte_lens = lines.iter().map(line_plain_text_len).collect::<Vec<_>>();
     let plain_text_char_len = plain_line_byte_lens.iter().sum();
@@ -259,6 +268,17 @@ impl TranscriptItem {
             Self::Reasoning(item) => item.source_text_byte_len(),
             Self::System(item) => item.source_text_byte_len(),
             Self::ToolResult(item) => item.source_text_byte_len(),
+        }
+    }
+
+    pub(crate) fn has_active_acp_tool_call(&self) -> bool {
+        matches!(self, Self::ToolResult(item) if item.has_active_acp_tool_call())
+    }
+
+    pub(crate) fn active_marker_started_at(&self) -> Option<std::time::Instant> {
+        match self {
+            Self::ToolResult(item) => item.active_marker_started_at(),
+            _ => None,
         }
     }
 }

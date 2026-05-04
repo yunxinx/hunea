@@ -68,6 +68,13 @@ fn next_pipeline_deadline(
         });
     }
 
+    if let Some(activity_deadline) = model.tool_activity_next_frame_deadline_at(now) {
+        next_deadline = Some(match next_deadline {
+            Some(deadline) => deadline.min(activity_deadline),
+            None => activity_deadline,
+        });
+    }
+
     if has_background_runtime {
         let background_deadline = now + BACKGROUND_EVENT_POLL_INTERVAL;
         next_deadline = Some(match next_deadline {
@@ -98,7 +105,10 @@ fn render_on_timeout(
 
     model
         .stream_activity_frame_interval_at(now)
-        .is_some_and(|activity_interval| now + activity_interval == deadline)
+        .is_some_and(|activity_interval| deadline <= now + activity_interval)
+        || model
+            .tool_activity_next_frame_deadline_at(now)
+            .is_some_and(|activity_deadline| deadline <= activity_deadline)
 }
 
 #[cfg(test)]
@@ -106,7 +116,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::frontend::tui::{HeroOptions, Model};
+    use crate::frontend::tui::{
+        HeroOptions, Model, tool_result::TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL,
+    };
+    use crate::runtime::acp::{AcpToolCall, AcpToolCallStatus, AcpToolKind};
 
     #[test]
     fn static_model_blocks_without_periodic_polling() {
@@ -160,6 +173,92 @@ mod tests {
             terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
             TerminalWaitPlan::Poll {
                 duration: Duration::from_millis(80),
+                render_on_timeout: true,
+            }
+        );
+    }
+
+    #[test]
+    fn active_tool_activity_deadline_requests_render_on_timeout() {
+        let mut model = Model::new(HeroOptions::default());
+        model.update(crate::frontend::tui::AppEvent::StartupReadyTimeout);
+        model.transcript_mut().append_acp_tool_call(AcpToolCall {
+            tool_call_id: "tool-1".to_string(),
+            title: "WriteFile: TEMP.md".to_string(),
+            kind: AcpToolKind::Other,
+            status: AcpToolCallStatus::InProgress,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.to_string()),
+            raw_output: None,
+        });
+        model.sync_transcript_render();
+        let now = model
+            .transcript_mut()
+            .active_tool_activity_started_at()
+            .expect("active tool activity should have a start time");
+
+        assert_eq!(
+            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
+            TerminalWaitPlan::Poll {
+                duration: TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL,
+                render_on_timeout: true,
+            }
+        );
+    }
+
+    #[test]
+    fn active_tool_activity_background_poll_still_requests_render_on_timeout() {
+        let mut model = Model::new(HeroOptions::default());
+        model.update(crate::frontend::tui::AppEvent::StartupReadyTimeout);
+        model.transcript_mut().append_acp_tool_call(AcpToolCall {
+            tool_call_id: "tool-1".to_string(),
+            title: "WriteFile: TEMP.md".to_string(),
+            kind: AcpToolKind::Other,
+            status: AcpToolCallStatus::InProgress,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.to_string()),
+            raw_output: None,
+        });
+        model.sync_transcript_render();
+        let now = Instant::now();
+
+        assert_eq!(
+            terminal_wait_plan(&model, now + Duration::from_secs(10), now, true),
+            TerminalWaitPlan::Poll {
+                duration: BACKGROUND_EVENT_POLL_INTERVAL,
+                render_on_timeout: true,
+            }
+        );
+    }
+
+    #[test]
+    fn active_tool_activity_uses_absolute_next_frame_deadline() {
+        let mut model = Model::new(HeroOptions::default());
+        model.update(crate::frontend::tui::AppEvent::StartupReadyTimeout);
+        model.transcript_mut().append_acp_tool_call(AcpToolCall {
+            tool_call_id: "tool-1".to_string(),
+            title: "WriteFile: TEMP.md".to_string(),
+            kind: AcpToolKind::Other,
+            status: AcpToolCallStatus::InProgress,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.to_string()),
+            raw_output: None,
+        });
+        model.sync_transcript_render();
+        let started_at = model
+            .transcript_mut()
+            .active_tool_activity_started_at()
+            .expect("active tool activity should have a start time");
+        let now =
+            started_at + TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL - Duration::from_millis(10);
+
+        assert_eq!(
+            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
+            TerminalWaitPlan::Poll {
+                duration: Duration::from_millis(10),
                 render_on_timeout: true,
             }
         );

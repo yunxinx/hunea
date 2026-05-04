@@ -39,11 +39,7 @@ impl Model {
 
         self.composer.replace_text_and_move_to_end(String::new());
         self.model_panel.is_open = false;
-        if self.tool_approval_panel.is_open {
-            self.tool_approval_panel = Default::default();
-            self.pending_acp_permission = None;
-            self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
-        }
+        self.close_tool_approval_panel();
         self.acp_debug_panel = Default::default();
         self.acp_panel.is_open = true;
         self.sync_acp_panel_to_selection();
@@ -203,11 +199,7 @@ impl Model {
         self.composer.replace_text_and_move_to_end(String::new());
         self.model_panel.is_open = false;
         self.acp_panel = Default::default();
-        if self.tool_approval_panel.is_open {
-            self.tool_approval_panel = Default::default();
-            self.pending_acp_permission = None;
-            self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
-        }
+        self.close_tool_approval_panel();
         self.acp_debug_panel.is_open = true;
         self.sync_acp_debug_panel_scroll();
         self.sync_command_panel_navigation();
@@ -296,7 +288,7 @@ fn append_agent_entry_lines(
 mod tests {
     use agent_client_protocol::schema::AgentCapabilities;
 
-    use crate::frontend::tui::{HeroOptions, ModelOptions, theme::default_palette};
+    use crate::frontend::tui::{AppEvent, HeroOptions, ModelOptions, theme::default_palette};
     use crate::runtime::acp::AcpAgentIdentity;
 
     use super::*;
@@ -332,6 +324,31 @@ mod tests {
             lines.iter().all(|line| !line.contains("current")),
             "ACP launcher should not append a current suffix: {lines:?}"
         );
+    }
+
+    #[test]
+    fn open_acp_panel_closes_tool_approval_panel_and_resumes_stream_activity() {
+        let mut model = Model::new_with_options(
+            HeroOptions::default(),
+            ModelOptions {
+                acp_agent_servers: vec!["kimi".to_string()],
+                ..ModelOptions::default()
+            },
+        );
+        model.show_stream_activity_with_header("Working");
+        model.update(AppEvent::AcpPermissionRequested {
+            request_id: "permission-1".to_string(),
+            title: Some("Write file".to_string()),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        });
+        assert!(!model.current_stream_activity_render_result().has_content);
+
+        model.open_acp_panel();
+
+        assert!(model.current_stream_activity_render_result().has_content);
     }
 
     #[test]

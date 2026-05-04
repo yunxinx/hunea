@@ -739,6 +739,152 @@ async fn acp_worker_transport_forwards_available_commands_update() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn acp_worker_transport_forwards_tool_call_lifecycle_updates() {
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+
+    use acp::schema::{
+        ContentBlock, ContentChunk, Diff, Implementation, InitializeRequest, InitializeResponse,
+        NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionNotification,
+        SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallLocation,
+        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    };
+    use agent_client_protocol as acp;
+
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    tokio::task::spawn(async move {
+        acp::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _connection| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_info(Implementation::new("fake-agent", "0.1.0")),
+                    )
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _connection| {
+                    responder.respond(NewSessionResponse::new("test-session"))
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |request: PromptRequest, responder, connection| {
+                    connection.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::ToolCall(
+                            ToolCall::new("call-1", "Reading configuration")
+                                .kind(ToolKind::Read)
+                                .status(ToolCallStatus::Pending)
+                                .locations(vec![ToolCallLocation::new("src/main.rs").line(12)])
+                                .raw_input(serde_json::json!({"path": "src/main.rs"})),
+                        ),
+                    ))?;
+                    connection.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                            "call-1",
+                            ToolCallUpdateFields::new()
+                                .status(ToolCallStatus::Completed)
+                                .content(vec![
+                                    ToolCallContent::from(ContentBlock::Text(TextContent::new(
+                                        "read complete",
+                                    ))),
+                                    ToolCallContent::from(
+                                        Diff::new("src/main.rs", "fn main() {}\n")
+                                            .old_text("fn main(){ }\n"),
+                                    ),
+                                ])
+                                .raw_output(serde_json::json!({"ok": true})),
+                        )),
+                    ))?;
+                    connection.send_notification(SessionNotification::new(
+                        request.session_id.clone(),
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new("done"),
+                        ))),
+                    ))?;
+                    responder.respond(PromptResponse::new(StopReason::EndTurn))
+                },
+                acp::on_receive_request!(),
+            )
+            .connect_to(agent_transport)
+            .await
+    });
+
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let worker = tokio::task::spawn(super::run_agent_transport_worker(
+        "fake".to_string(),
+        client_transport,
+        command_rx,
+        cancel_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+        super::AcpPermissionRegistry::default(),
+    ));
+
+    let _started = recv_worker_event(&event_rx, "worker should report session start").await;
+    command_tx
+        .send(super::AcpWorkerCommand::Prompt(
+            super::AcpPrompt::from_text("ping"),
+        ))
+        .expect("prompt command should send");
+    let _prompt_started = recv_worker_event(&event_rx, "worker should report prompt start").await;
+
+    let created = recv_worker_event(&event_rx, "worker should forward tool call").await;
+    match created {
+        super::AcpSessionEvent::ToolCall { call, .. } => {
+            assert_eq!(call.tool_call_id, "call-1");
+            assert_eq!(call.title, "Reading configuration");
+            assert_eq!(call.kind, super::AcpToolKind::Read);
+            assert_eq!(call.status, super::AcpToolCallStatus::Pending);
+            assert_eq!(call.locations[0].path, "src/main.rs");
+            assert_eq!(call.locations[0].line, Some(12));
+            assert!(
+                call.raw_input
+                    .as_deref()
+                    .is_some_and(|raw| raw.contains("src/main.rs"))
+            );
+        }
+        other => panic!("expected tool call event, got {other:?}"),
+    }
+
+    let updated = recv_worker_event(&event_rx, "worker should forward tool call update").await;
+    match updated {
+        super::AcpSessionEvent::ToolCallUpdate { update, .. } => {
+            assert_eq!(update.tool_call_id, "call-1");
+            assert_eq!(update.status, Some(super::AcpToolCallStatus::Completed));
+            assert!(
+                update
+                    .raw_output
+                    .as_deref()
+                    .is_some_and(|raw| raw.contains("true"))
+            );
+            assert_eq!(
+                update
+                    .content
+                    .as_ref()
+                    .expect("content should be present")
+                    .len(),
+                2
+            );
+        }
+        other => panic!("expected tool call update event, got {other:?}"),
+    }
+
+    command_tx
+        .send(super::AcpWorkerCommand::Shutdown)
+        .expect("shutdown command should send");
+    worker
+        .await
+        .expect("worker task should join")
+        .expect("worker should stop cleanly");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn acp_worker_transport_forwards_idle_available_commands_update() {
     use std::sync::{Arc, atomic::AtomicBool, mpsc};
 
@@ -1570,6 +1716,8 @@ async fn acp_worker_round_trips_permission_selection() {
     let request_id = match permission_event {
         super::AcpSessionEvent::PermissionRequested { request, .. } => {
             assert_eq!(request.title.as_deref(), Some("Write file"));
+            assert_eq!(request.tool_call.tool_call_id, "tool-1");
+            assert_eq!(request.tool_call.title.as_deref(), Some("Write file"));
             assert_eq!(request.options.len(), 2);
             request.request_id
         }

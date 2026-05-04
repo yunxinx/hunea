@@ -46,6 +46,7 @@ impl Model {
             key: DocumentTranscriptKey {
                 transcript_render_version: self.transcript_render_version,
                 document_width: self.width,
+                tool_activity_frame: self.tool_activity_frame_key(std::time::Instant::now()),
             },
             snapshot: Rc::clone(&layout.transcript),
             valid: true,
@@ -156,6 +157,7 @@ impl Model {
             status_line_2_config: self.status_line_2_config_bits(),
             status_line_revision: self.status_line_revision(),
             stream_activity_frame: self.stream_activity_frame_key(std::time::Instant::now()),
+            tool_activity_frame: self.tool_activity_frame_key(std::time::Instant::now()),
         }
     }
 
@@ -397,6 +399,7 @@ impl Model {
         let key = DocumentTranscriptKey {
             transcript_render_version: self.transcript_render_version,
             document_width: self.width,
+            tool_activity_frame: self.tool_activity_frame_key(std::time::Instant::now()),
         };
         if self.document_runtime.transcript_cache.valid
             && self.document_runtime.transcript_cache.key == key

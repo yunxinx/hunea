@@ -6,18 +6,22 @@ use super::super::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::frontend::tui) struct PendingAcpPermission {
     pub(in crate::frontend::tui) request_id: String,
+    pub(in crate::frontend::tui) tool_call_id: Option<String>,
+    pub(in crate::frontend::tui) tool_call_item_index: Option<usize>,
 }
 
 /// `AcpPermissionPanelRequest` 汇总打开 ACP 审批面板需要的前端状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::frontend::tui) struct AcpPermissionPanelRequest {
     pub(in crate::frontend::tui) request_id: String,
+    pub(in crate::frontend::tui) tool_call_id: Option<String>,
     pub(in crate::frontend::tui) title: Option<String>,
     pub(in crate::frontend::tui) allow_option_id: Option<String>,
     pub(in crate::frontend::tui) allow_always_option_id: Option<String>,
     pub(in crate::frontend::tui) reject_option_id: Option<String>,
     pub(in crate::frontend::tui) reject_always_option_id: Option<String>,
     pub(in crate::frontend::tui) preview: Option<ToolApprovalPreview>,
+    pub(in crate::frontend::tui) tool_call_item_index: Option<usize>,
 }
 
 impl Model {
@@ -32,12 +36,14 @@ impl Model {
     ) {
         self.show_acp_permission_request_with_preview(AcpPermissionPanelRequest {
             request_id,
+            tool_call_id: None,
             title,
             allow_option_id,
             allow_always_option_id,
             reject_option_id,
             reject_always_option_id,
             preview: None,
+            tool_call_item_index: None,
         });
     }
 
@@ -47,15 +53,19 @@ impl Model {
     ) {
         let AcpPermissionPanelRequest {
             request_id,
+            tool_call_id,
             title,
             allow_option_id,
             allow_always_option_id,
             reject_option_id,
             reject_always_option_id,
             preview,
+            tool_call_item_index,
         } = request;
         self.pending_acp_permission = Some(PendingAcpPermission {
             request_id: request_id.clone(),
+            tool_call_id,
+            tool_call_item_index,
         });
         let title = title.as_deref().unwrap_or("");
         self.clear_status_notice();

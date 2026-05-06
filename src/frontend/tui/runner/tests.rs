@@ -4,8 +4,8 @@ use std::time::Duration;
 use agent_client_protocol::schema::{AgentCapabilities, PromptCapabilities};
 
 use super::acp_session::{
-    AcpRuntimeState, acp_reject_option_id_for_cancel, apply_acp_session_event,
-    run_interrupt_acp_prompt_effect, run_set_acp_model_effect,
+    AcpRuntimeState, acp_reject_option_id_for_stale_discard, apply_acp_session_event,
+    run_interrupt_acp_prompt_effect, run_respond_acp_permission_effect, run_set_acp_model_effect,
 };
 use super::effects::{reset_runtime_session_after_clear, run_interrupt_current_turn_effect};
 use super::input::{TerminalInputAction, coalesced_input_actions};
@@ -135,7 +135,7 @@ fn acp_tool_call_update_replaces_same_transcript_item() {
                     path: "Cargo.toml".to_string(),
                     line: Some(1),
                 }],
-                raw_input: Some("{\"path\":\"Cargo.toml\"}".to_string()),
+                raw_input: Some("{\"path\":\"Cargo.toml\"}".into()),
                 raw_output: None,
             },
         },
@@ -160,7 +160,7 @@ fn acp_tool_call_update_replaces_same_transcript_item() {
                 content: Some(vec![AcpToolCallContent::Text("read complete".to_string())]),
                 locations: None,
                 raw_input: None,
-                raw_output: Some("{\"ok\":true}".to_string()),
+                raw_output: Some("{\"ok\":true}".into()),
             },
         },
     );
@@ -175,6 +175,364 @@ fn acp_tool_call_update_replaces_same_transcript_item() {
     assert!(!plain.contains("read complete"));
     assert!(!plain.contains("{\"ok\":true}"));
     assert!(!plain.contains("Pending [Read]"));
+}
+
+#[test]
+fn acp_tool_call_update_without_create_appends_transcript_item() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCallUpdate {
+            agent_id: "Kimi Code CLI".to_string(),
+            update: AcpToolCallUpdate {
+                tool_call_id: "call-orphan".to_string(),
+                title: Some("Search symbols".to_string()),
+                kind: Some(AcpToolKind::Search),
+                status: Some(AcpToolCallStatus::InProgress),
+                content: Some(vec![AcpToolCallContent::Text("scanning src".to_string())]),
+                locations: None,
+                raw_input: None,
+                raw_output: None,
+            },
+        },
+    );
+
+    assert_eq!(model.transcript_mut().len(), 1);
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(
+        plain.contains("Search symbols"),
+        "orphan tool_call_update should create a visible transcript row: {plain}"
+    );
+}
+
+#[test]
+fn acp_tool_call_create_after_update_updates_existing_item() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCallUpdate {
+            agent_id: "Kimi Code CLI".to_string(),
+            update: AcpToolCallUpdate {
+                tool_call_id: "call-reordered".to_string(),
+                title: Some("Preparing edit".to_string()),
+                kind: Some(AcpToolKind::Edit),
+                status: Some(AcpToolCallStatus::Pending),
+                content: None,
+                locations: None,
+                raw_input: None,
+                raw_output: None,
+            },
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCall {
+            agent_id: "Kimi Code CLI".to_string(),
+            call: AcpToolCall {
+                tool_call_id: "call-reordered".to_string(),
+                title: "Edit Cargo.toml".to_string(),
+                kind: AcpToolKind::Edit,
+                status: AcpToolCallStatus::InProgress,
+                content: Vec::new(),
+                locations: vec![AcpToolCallLocation {
+                    path: "Cargo.toml".to_string(),
+                    line: Some(2),
+                }],
+                raw_input: Some(r#"{"path":"Cargo.toml"}"#.into()),
+                raw_output: None,
+            },
+        },
+    );
+
+    assert_eq!(
+        model.transcript_mut().len(),
+        1,
+        "tool_call arriving after tool_call_update should update the existing row"
+    );
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(
+        plain.contains("Cargo.toml"),
+        "expected real title/location: {plain}"
+    );
+    assert!(
+        !plain.contains("Preparing edit"),
+        "create event should replace provisional update title: {plain}"
+    );
+}
+
+#[test]
+fn acp_late_tool_call_update_after_completion_updates_existing_item() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCall {
+            agent_id: "Kimi Code CLI".to_string(),
+            call: AcpToolCall {
+                tool_call_id: "call-late".to_string(),
+                title: "Run cargo test".to_string(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolCallStatus::InProgress,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCallUpdate {
+            agent_id: "Kimi Code CLI".to_string(),
+            update: AcpToolCallUpdate {
+                tool_call_id: "call-late".to_string(),
+                title: None,
+                kind: None,
+                status: Some(AcpToolCallStatus::Completed),
+                content: None,
+                locations: None,
+                raw_input: None,
+                raw_output: None,
+            },
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCallUpdate {
+            agent_id: "Kimi Code CLI".to_string(),
+            update: AcpToolCallUpdate {
+                tool_call_id: "call-late".to_string(),
+                title: None,
+                kind: None,
+                status: None,
+                content: None,
+                locations: None,
+                raw_input: None,
+                raw_output: Some("test result arrived late".into()),
+            },
+        },
+    );
+
+    assert_eq!(
+        model.transcript_mut().len(),
+        1,
+        "late update after completed status should not append a duplicate row"
+    );
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(
+        plain.contains("test result arrived late"),
+        "late raw output should update the completed row: {plain}"
+    );
+}
+
+#[test]
+fn acp_execute_tool_call_lifecycle_defers_content_until_completed() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCall {
+            agent_id: "Kimi Code CLI".to_string(),
+            call: AcpToolCall {
+                tool_call_id: "call-exec".to_string(),
+                title: "Shell: cargo check".to_string(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolCallStatus::Pending,
+                content: vec![AcpToolCallContent::Text(
+                    "Requesting approval to perform: Run command `cargo check`".to_string(),
+                )],
+                locations: Vec::new(),
+                raw_input: Some(r#"{"command":"cargo check"}"#.into()),
+                raw_output: None,
+            },
+        },
+    );
+
+    let pending_plain = model.transcript_plain_items().join("\n");
+    assert!(
+        pending_plain.contains("Waiting..."),
+        "pending command should render as waiting: {pending_plain}"
+    );
+    assert!(
+        !pending_plain.contains("Requesting approval")
+            && !pending_plain.contains(r#"{"command":"cargo check"}"#),
+        "pending command should not expose approval copy or raw input: {pending_plain}"
+    );
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCallUpdate {
+            agent_id: "Kimi Code CLI".to_string(),
+            update: AcpToolCallUpdate {
+                tool_call_id: "call-exec".to_string(),
+                title: None,
+                kind: None,
+                status: Some(AcpToolCallStatus::InProgress),
+                content: Some(vec![AcpToolCallContent::Text(
+                    "Checking lumos v0.1.0".to_string(),
+                )]),
+                locations: None,
+                raw_input: None,
+                raw_output: Some("streamed output should wait".into()),
+            },
+        },
+    );
+
+    let in_progress_plain = model.transcript_plain_items().join("\n");
+    assert!(
+        in_progress_plain.contains("Waiting..."),
+        "running command should still render as waiting: {in_progress_plain}"
+    );
+    assert!(
+        !in_progress_plain.contains("Checking lumos")
+            && !in_progress_plain.contains("streamed output should wait"),
+        "running command output should not stream into the transcript: {in_progress_plain}"
+    );
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCallUpdate {
+            agent_id: "Kimi Code CLI".to_string(),
+            update: AcpToolCallUpdate {
+                tool_call_id: "call-exec".to_string(),
+                title: None,
+                kind: None,
+                status: Some(AcpToolCallStatus::Completed),
+                content: None,
+                locations: None,
+                raw_input: None,
+                raw_output: Some("Finished dev profile".into()),
+            },
+        },
+    );
+
+    let completed_plain = model.transcript_plain_items().join("\n");
+    assert!(
+        completed_plain.contains("Finished dev profile"),
+        "completed command should reveal final output: {completed_plain}"
+    );
+    assert!(
+        !completed_plain.contains("Waiting...")
+            && !completed_plain.contains("Requesting approval")
+            && !completed_plain.contains("Checking lumos")
+            && !completed_plain.contains("Input:"),
+        "completed command should not replay deferred transport details: {completed_plain}"
+    );
+}
+
+#[test]
+fn acp_execute_tool_call_failed_reveals_final_output_without_input() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCallUpdate {
+            agent_id: "Kimi Code CLI".to_string(),
+            update: AcpToolCallUpdate {
+                tool_call_id: "call-exec".to_string(),
+                title: Some("Shell: cargo check".to_string()),
+                kind: Some(AcpToolKind::Execute),
+                status: Some(AcpToolCallStatus::Pending),
+                content: Some(vec![AcpToolCallContent::Text(
+                    "Requesting approval to perform: Run command `cargo check`".to_string(),
+                )]),
+                locations: None,
+                raw_input: Some(r#"{"command":"cargo check"}"#.into()),
+                raw_output: None,
+            },
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCallUpdate {
+            agent_id: "Kimi Code CLI".to_string(),
+            update: AcpToolCallUpdate {
+                tool_call_id: "call-exec".to_string(),
+                title: None,
+                kind: None,
+                status: Some(AcpToolCallStatus::Failed),
+                content: None,
+                locations: None,
+                raw_input: None,
+                raw_output: Some("error: could not compile `lumos`".into()),
+            },
+        },
+    );
+
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(
+        plain.contains("error: could not compile `lumos`"),
+        "failed command should reveal final output: {plain}"
+    );
+    assert!(
+        !plain.contains("Requesting approval")
+            && !plain.contains(r#"{"command":"cargo check"}"#)
+            && !plain.contains("Input:"),
+        "failed command should not reveal approval copy or raw transport input: {plain}"
+    );
+    assert_eq!(
+        model.transcript_mut().len(),
+        1,
+        "execute lifecycle updates should upsert one transcript row"
+    );
 }
 
 #[test]
@@ -204,7 +562,7 @@ fn acp_write_tool_call_stream_updates_token_activity() {
                 locations: Vec::new(),
                 raw_input: Some(
                     r##"{"path":"TEMP.md","content":"# TEMP\n\n正在写入一段较长的测试内容"}"##
-                        .to_string(),
+                        .into(),
                 ),
                 raw_output: None,
             },
@@ -608,9 +966,11 @@ fn acp_permission_request_flushes_buffered_agent_text() {
         },
     );
 
-    assert_eq!(
-        model.transcript_plain_items(),
-        vec!["需要先确认".to_string()]
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(plain.contains("需要先确认"));
+    assert!(
+        plain.contains("Write file"),
+        "permission request should upsert the pending tool call row: {plain}"
     );
     assert!(model.current_status_notice_text().is_empty());
     assert!(model.tool_approval_panel_active());
@@ -633,9 +993,591 @@ fn acp_permission_request_flushes_buffered_agent_text() {
         },
     );
 
-    assert_eq!(
-        model.transcript_plain_items(),
-        vec!["需要先确认".to_string(), "确认后继续".to_string()]
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(plain.contains("需要先确认"));
+    assert!(plain.contains("Write file"));
+    assert!(plain.contains("确认后继续"));
+}
+
+#[test]
+fn acp_permission_request_without_prior_tool_call_appends_transcript_item() {
+    let mut model = Model::new(HeroOptions::default());
+    model.set_window(80, 12);
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PermissionRequested {
+            agent_id: "Kimi Code CLI".to_string(),
+            request: crate::runtime::acp::AcpPermissionRequest {
+                request_id: "permission-exec".to_string(),
+                title: Some("Run cargo test".to_string()),
+                tool_call: AcpToolCallUpdate {
+                    tool_call_id: "tool-exec".to_string(),
+                    title: Some("Run cargo test".to_string()),
+                    kind: Some(AcpToolKind::Execute),
+                    status: Some(AcpToolCallStatus::Pending),
+                    content: None,
+                    locations: None,
+                    raw_input: Some(r#"{"command":"cargo test"}"#.into()),
+                    raw_output: None,
+                },
+                options: vec![
+                    crate::runtime::acp::AcpPermissionOption {
+                        option_id: "allow-once".to_string(),
+                        name: "Allow once".to_string(),
+                        kind: crate::runtime::acp::AcpPermissionOptionKind::AllowOnce,
+                    },
+                    crate::runtime::acp::AcpPermissionOption {
+                        option_id: "reject-once".to_string(),
+                        name: "Reject".to_string(),
+                        kind: crate::runtime::acp::AcpPermissionOptionKind::RejectOnce,
+                    },
+                ],
+            },
+        },
+    );
+
+    assert!(model.tool_approval_panel_active());
+    assert_eq!(model.transcript_mut().len(), 1);
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(
+        plain.contains("Run cargo test"),
+        "permission request should upsert its tool call into transcript: {plain}"
+    );
+}
+
+#[test]
+fn acp_permission_request_content_renders_waiting_instead_of_approval_text() {
+    let mut model = Model::new(HeroOptions::default());
+    model.set_window(80, 12);
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PermissionRequested {
+            agent_id: "Kimi Code CLI".to_string(),
+            request: crate::runtime::acp::AcpPermissionRequest {
+                request_id: "permission-exec".to_string(),
+                title: Some("cargo check".to_string()),
+                tool_call: AcpToolCallUpdate {
+                    tool_call_id: "tool-exec".to_string(),
+                    title: Some("cargo check".to_string()),
+                    kind: Some(AcpToolKind::Other),
+                    status: Some(AcpToolCallStatus::Pending),
+                    content: Some(vec![AcpToolCallContent::Text(
+                        "Requesting approval to perform: Run command `cargo check`".to_string(),
+                    )]),
+                    locations: None,
+                    raw_input: Some(r#"{"command":"cargo check"}"#.into()),
+                    raw_output: None,
+                },
+                options: vec![
+                    crate::runtime::acp::AcpPermissionOption {
+                        option_id: "allow-once".to_string(),
+                        name: "Allow once".to_string(),
+                        kind: crate::runtime::acp::AcpPermissionOptionKind::AllowOnce,
+                    },
+                    crate::runtime::acp::AcpPermissionOption {
+                        option_id: "reject-once".to_string(),
+                        name: "Reject".to_string(),
+                        kind: crate::runtime::acp::AcpPermissionOptionKind::RejectOnce,
+                    },
+                ],
+            },
+        },
+    );
+
+    assert!(model.tool_approval_panel_active());
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(
+        plain.contains("cargo check"),
+        "permission tool call title should remain visible: {plain}"
+    );
+    assert!(
+        plain.contains("Waiting..."),
+        "permission tool call should show a compact waiting row: {plain}"
+    );
+    assert!(
+        !plain.contains("Requesting approval to perform"),
+        "main transcript should not duplicate the approval panel request copy: {plain}"
+    );
+    assert!(
+        !plain.contains("Input:") && !plain.contains(r#"{"command":"cargo check"}"#),
+        "pending approval rows should not expose raw input while the approval panel is active: {plain}"
+    );
+}
+
+#[test]
+fn acp_permission_request_in_progress_command_renders_waiting_instead_of_approval_text() {
+    let mut model = Model::new(HeroOptions::default());
+    model.set_window(80, 12);
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PermissionRequested {
+            agent_id: "Kimi Code CLI".to_string(),
+            request: crate::runtime::acp::AcpPermissionRequest {
+                request_id: "permission-exec".to_string(),
+                title: Some("cargo check".to_string()),
+                tool_call: AcpToolCallUpdate {
+                    tool_call_id: "tool-exec".to_string(),
+                    title: Some("cargo check".to_string()),
+                    kind: Some(AcpToolKind::Execute),
+                    status: Some(AcpToolCallStatus::InProgress),
+                    content: Some(vec![AcpToolCallContent::Text(
+                        "Requesting approval to perform: Run command `cargo check`".to_string(),
+                    )]),
+                    locations: None,
+                    raw_input: Some(r#"{"command":"cargo check"}"#.into()),
+                    raw_output: None,
+                },
+                options: vec![
+                    crate::runtime::acp::AcpPermissionOption {
+                        option_id: "allow-once".to_string(),
+                        name: "Allow once".to_string(),
+                        kind: crate::runtime::acp::AcpPermissionOptionKind::AllowOnce,
+                    },
+                    crate::runtime::acp::AcpPermissionOption {
+                        option_id: "reject-once".to_string(),
+                        name: "Reject".to_string(),
+                        kind: crate::runtime::acp::AcpPermissionOptionKind::RejectOnce,
+                    },
+                ],
+            },
+        },
+    );
+
+    assert!(model.tool_approval_panel_active());
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(
+        plain.contains("cargo check"),
+        "permission tool call title should remain visible: {plain}"
+    );
+    assert!(
+        plain.contains("Waiting..."),
+        "permission command should show only a compact waiting row while approval is active: {plain}"
+    );
+    assert!(
+        !plain.contains("Requesting approval to perform")
+            && !plain.contains(r#"{"command":"cargo check"}"#),
+        "main transcript should not duplicate approval copy or raw command input: {plain}"
+    );
+}
+
+#[test]
+fn acp_command_permission_request_does_not_replay_approval_text_after_completion() {
+    let mut model = Model::new(HeroOptions::default());
+    model.set_window(80, 12);
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PermissionRequested {
+            agent_id: "Kimi Code CLI".to_string(),
+            request: crate::runtime::acp::AcpPermissionRequest {
+                request_id: "permission-exec".to_string(),
+                title: Some("cargo check".to_string()),
+                tool_call: AcpToolCallUpdate {
+                    tool_call_id: "tool-exec".to_string(),
+                    title: Some("cargo check".to_string()),
+                    kind: Some(AcpToolKind::Execute),
+                    status: Some(AcpToolCallStatus::InProgress),
+                    content: Some(vec![AcpToolCallContent::Text(
+                        "Requesting approval to perform: Run command `cargo check`".to_string(),
+                    )]),
+                    locations: None,
+                    raw_input: Some(r#"{"command":"cargo check"}"#.into()),
+                    raw_output: None,
+                },
+                options: Vec::new(),
+            },
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCallUpdate {
+            agent_id: "Kimi Code CLI".to_string(),
+            update: AcpToolCallUpdate {
+                tool_call_id: "tool-exec".to_string(),
+                title: None,
+                kind: None,
+                status: Some(AcpToolCallStatus::Completed),
+                content: None,
+                locations: None,
+                raw_input: None,
+                raw_output: Some("Finished dev profile".into()),
+            },
+        },
+    );
+
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(
+        plain.contains("Finished dev profile"),
+        "completed command should reveal deferred output: {plain}"
+    );
+    assert!(
+        !plain.contains("Requesting approval to perform"),
+        "permission request copy must not be replayed after command completion: {plain}"
+    );
+}
+
+#[test]
+fn acp_rejected_permission_internal_agent_notice_is_not_shown() {
+    let mut model = Model::new(HeroOptions::default());
+    model.set_window(80, 12);
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PermissionRequested {
+            agent_id: "Kimi Code CLI".to_string(),
+            request: crate::runtime::acp::AcpPermissionRequest {
+                request_id: "permission-exec".to_string(),
+                title: Some("cargo check".to_string()),
+                tool_call: AcpToolCallUpdate {
+                    tool_call_id: "tool-exec".to_string(),
+                    title: Some("cargo check".to_string()),
+                    kind: Some(AcpToolKind::Execute),
+                    status: Some(AcpToolCallStatus::Pending),
+                    content: None,
+                    locations: None,
+                    raw_input: Some(r#"{"command":"cargo check"}"#.into()),
+                    raw_output: None,
+                },
+                options: vec![crate::runtime::acp::AcpPermissionOption {
+                    option_id: "reject-once".to_string(),
+                    name: "Reject".to_string(),
+                    kind: crate::runtime::acp::AcpPermissionOptionKind::RejectOnce,
+                }],
+            },
+        },
+    );
+
+    let effect = model
+        .handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Enter))
+        .expect("permission panel should handle Enter");
+    assert!(matches!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            ref request_id,
+            option_id: Some(ref option_id),
+            is_rejection,
+            rejected_tool_call_id: Some(ref rejected_tool_call_id),
+        }) if request_id == "permission-exec"
+            && option_id == "reject-once"
+            && is_rejection
+            && rejected_tool_call_id == "tool-exec"
+    ));
+    if let Some(AppEffect::RespondAcpPermission {
+        request_id,
+        option_id,
+        is_rejection,
+        rejected_tool_call_id,
+    }) = effect
+    {
+        run_respond_acp_permission_effect(
+            &mut model,
+            &mut acp_runtime,
+            &request_id,
+            option_id,
+            is_rejection,
+            rejected_tool_call_id,
+        );
+    }
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::AgentMessageChunk {
+            agent_id: "Kimi Code CLI".to_string(),
+            content: concat!(
+                "The tool call is rejected by the user. ",
+                "Stop what you are doing and wait for the user to tell you how to proceed."
+            )
+            .to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptResponse {
+            agent_id: "Kimi Code CLI".to_string(),
+            content: String::new(),
+            stop_reason: "EndTurn".to_string(),
+        },
+    );
+
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(
+        !plain.contains("Reject cargo check"),
+        "the ACP tool row should carry permission rejection without a redundant reject item: {plain}"
+    );
+    assert!(
+        !plain.contains("Tool call ended without final status") && !plain.contains("Input:"),
+        "permission rejection should not fall back to generic failure/raw input details: {plain}"
+    );
+    assert!(
+        !plain.contains("The tool call is rejected by the user")
+            && !plain.contains("Stop what you are doing")
+            && !plain.contains("wait for the user to tell you how to proceed"),
+        "agent-facing rejection instruction must not be shown in the TUI: {plain}"
+    );
+}
+
+#[test]
+fn acp_rejected_permission_tool_call_update_hides_internal_notice_and_skips_reject_result() {
+    let mut model = Model::new(HeroOptions::default());
+    model.set_window(80, 12);
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PermissionRequested {
+            agent_id: "Kimi Code CLI".to_string(),
+            request: crate::runtime::acp::AcpPermissionRequest {
+                request_id: "permission-exec".to_string(),
+                title: Some("cargo check".to_string()),
+                tool_call: AcpToolCallUpdate {
+                    tool_call_id: "tool-exec".to_string(),
+                    title: Some("cargo check".to_string()),
+                    kind: Some(AcpToolKind::Execute),
+                    status: Some(AcpToolCallStatus::Pending),
+                    content: None,
+                    locations: None,
+                    raw_input: Some(r#"{"command":"cargo check"}"#.into()),
+                    raw_output: None,
+                },
+                options: vec![crate::runtime::acp::AcpPermissionOption {
+                    option_id: "reject-once".to_string(),
+                    name: "Reject".to_string(),
+                    kind: crate::runtime::acp::AcpPermissionOptionKind::RejectOnce,
+                }],
+            },
+        },
+    );
+
+    let effect = model
+        .handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Enter))
+        .expect("permission panel should handle Enter");
+    assert!(matches!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            ref request_id,
+            option_id: Some(ref option_id),
+            is_rejection,
+            rejected_tool_call_id: Some(ref rejected_tool_call_id),
+        }) if request_id == "permission-exec"
+            && option_id == "reject-once"
+            && is_rejection
+            && rejected_tool_call_id == "tool-exec"
+    ));
+    if let Some(AppEffect::RespondAcpPermission {
+        request_id,
+        option_id,
+        is_rejection,
+        rejected_tool_call_id,
+    }) = effect
+    {
+        run_respond_acp_permission_effect(
+            &mut model,
+            &mut acp_runtime,
+            &request_id,
+            option_id,
+            is_rejection,
+            rejected_tool_call_id,
+        );
+    }
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCallUpdate {
+            agent_id: "Kimi Code CLI".to_string(),
+            update: AcpToolCallUpdate {
+                tool_call_id: "tool-exec".to_string(),
+                title: None,
+                kind: None,
+                status: Some(AcpToolCallStatus::Failed),
+                content: Some(vec![AcpToolCallContent::Text(
+                    concat!(
+                        "The tool call is rejected by the user. ",
+                        "Stop what you are doing and wait for the user to tell you how to proceed."
+                    )
+                    .to_string(),
+                )]),
+                locations: None,
+                raw_input: None,
+                raw_output: None,
+            },
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptResponse {
+            agent_id: "Kimi Code CLI".to_string(),
+            content: String::new(),
+            stop_reason: "EndTurn".to_string(),
+        },
+    );
+
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(
+        plain.contains("cargo check"),
+        "tool row should remain: {plain}"
+    );
+    assert!(
+        !plain.contains("Reject cargo check"),
+        "the ACP tool row already carries the rejected state, so a separate reject result is redundant: {plain}"
+    );
+    assert!(
+        !plain.contains("Input:"),
+        "rejected permission rows should not reveal transport raw input: {plain}"
+    );
+    assert!(
+        !plain.contains("The tool call is rejected by the user")
+            && !plain.contains("Stop what you are doing")
+            && !plain.contains("wait for the user to tell you how to proceed"),
+        "agent-facing rejection instruction must not be rendered inside the tool row: {plain}"
+    );
+}
+
+#[test]
+fn acp_file_preview_permission_without_prior_tool_call_restores_upserted_item_after_choice() {
+    let mut model = Model::new(HeroOptions::default());
+    model.set_window(80, 12);
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PermissionRequested {
+            agent_id: "Kimi Code CLI".to_string(),
+            request: crate::runtime::acp::AcpPermissionRequest {
+                request_id: "permission-write-new".to_string(),
+                title: Some("WriteFile: TEMP.md".to_string()),
+                tool_call: AcpToolCallUpdate {
+                    tool_call_id: "tool-write-new".to_string(),
+                    title: Some("WriteFile: TEMP.md".to_string()),
+                    kind: Some(AcpToolKind::Edit),
+                    status: None,
+                    content: Some(vec![AcpToolCallContent::Diff {
+                        path: "TEMP.md".to_string(),
+                        old_text: None,
+                        new_text: "body".to_string(),
+                    }]),
+                    locations: None,
+                    raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
+                    raw_output: None,
+                },
+                options: vec![
+                    crate::runtime::acp::AcpPermissionOption {
+                        option_id: "allow-once".to_string(),
+                        name: "Allow once".to_string(),
+                        kind: crate::runtime::acp::AcpPermissionOptionKind::AllowOnce,
+                    },
+                    crate::runtime::acp::AcpPermissionOption {
+                        option_id: "reject-once".to_string(),
+                        name: "Reject".to_string(),
+                        kind: crate::runtime::acp::AcpPermissionOptionKind::RejectOnce,
+                    },
+                ],
+            },
+        },
+    );
+
+    assert_eq!(model.transcript_mut().len(), 1);
+    assert!(
+        !model
+            .transcript_plain_items()
+            .join("\n")
+            .contains("TEMP.md"),
+        "file preview approval should suspend the upserted write row while the panel is open"
+    );
+
+    let effect = model
+        .handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Enter))
+        .expect("file preview panel should handle Enter");
+    assert!(matches!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id,
+            option_id: Some(option_id),
+            is_rejection,
+            ..
+        }) if request_id == "permission-write-new" && option_id == "allow-once" && !is_rejection
+    ));
+    assert!(
+        model
+            .transcript_plain_items()
+            .join("\n")
+            .contains("TEMP.md"),
+        "upserted write row should render after the approval panel closes"
     );
 }
 
@@ -676,7 +1618,7 @@ fn acp_permission_request_renders_file_preview_and_pauses_activity() {
                     locations: None,
                     raw_input: Some(
                         r##"{"path":"__lumos_permission_preview__.md","content":"# Preview\n\nbody"}"##
-                            .to_string(),
+                            .into(),
                     ),
                     raw_output: None,
                 },
@@ -763,7 +1705,7 @@ fn acp_permission_choice_restores_paused_stream_activity() {
                     locations: None,
                     raw_input: Some(
                         r##"{"path":"__lumos_permission_preview__.md","content":"# Preview\n\nbody"}"##
-                            .to_string(),
+                            .into(),
                     ),
                     raw_output: None,
                 },
@@ -795,7 +1737,9 @@ fn acp_permission_choice_restores_paused_stream_activity() {
         Some(AppEffect::RespondAcpPermission {
             request_id,
             option_id: Some(option_id),
-        }) if request_id == "permission-write" && option_id == "allow-once"
+            is_rejection,
+            ..
+        }) if request_id == "permission-write" && option_id == "allow-once" && !is_rejection
     ));
     assert!(
         model.current_stream_activity_render_result().has_content,
@@ -829,7 +1773,7 @@ fn acp_file_preview_permission_hides_active_write_tool_call_until_choice() {
                 status: AcpToolCallStatus::InProgress,
                 content: Vec::new(),
                 locations: Vec::new(),
-                raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.to_string()),
+                raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
                 raw_output: None,
             },
         },
@@ -861,7 +1805,7 @@ fn acp_file_preview_permission_hides_active_write_tool_call_until_choice() {
                         new_text: "body".to_string(),
                     }]),
                     locations: None,
-                    raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.to_string()),
+                    raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
                     raw_output: None,
                 },
                 options: vec![
@@ -895,13 +1839,15 @@ fn acp_file_preview_permission_hides_active_write_tool_call_until_choice() {
         Some(AppEffect::RespondAcpPermission {
             request_id,
             option_id: Some(option_id),
-        }) if request_id == "permission-write" && option_id == "allow-once"
+            is_rejection,
+            ..
+        }) if request_id == "permission-write" && option_id == "allow-once" && !is_rejection
     ));
     assert!(
         model
             .transcript_plain_items()
             .join("\n")
-            .contains("Write TEMP.md"),
+            .contains("TEMP.md"),
         "active write tool call should reappear after the approval panel closes"
     );
 }
@@ -1636,10 +2582,45 @@ fn clear_runtime_discards_stale_acp_permission_request() {
 }
 
 #[test]
-fn acp_permission_cancel_reject_fallback_uses_reject_always() {
+fn cancelled_acp_prompt_cancels_late_permission_request() {
+    let mut model = Model::new(HeroOptions::default());
+    let mut acp_runtime = AcpRuntimeState::default();
+    acp_runtime.mark_prompt_submitted();
+    run_interrupt_acp_prompt_effect(&mut model, &mut acp_runtime);
+
+    let option_id = acp_runtime
+        .permission_option_id_for_discarded_prompt(&acp_permission_request_with_reject_always());
+
+    assert_eq!(
+        option_id, None,
+        "ACP session/cancel requires late permission requests to resolve as Cancelled"
+    );
+}
+
+#[test]
+fn stale_acp_permission_reject_fallback_uses_reject_always() {
+    let mut acp_runtime = AcpRuntimeState::default();
+    acp_runtime.mark_prompt_submitted();
+    acp_runtime.reset_after_clear();
+
+    let option_id = acp_runtime
+        .permission_option_id_for_discarded_prompt(&acp_permission_request_with_reject_always());
+
+    assert_eq!(option_id, Some("reject-always".to_string()));
+}
+
+#[test]
+fn acp_permission_stale_reject_fallback_prefers_reject_always() {
+    let option_id =
+        acp_reject_option_id_for_stale_discard(&acp_permission_request_with_reject_always());
+
+    assert_eq!(option_id, Some("reject-always".to_string()));
+}
+
+fn acp_permission_request_with_reject_always() -> crate::runtime::acp::AcpPermissionRequest {
     use crate::runtime::acp::{AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest};
 
-    let option_id = acp_reject_option_id_for_cancel(&AcpPermissionRequest {
+    AcpPermissionRequest {
         request_id: "permission-session-only".to_string(),
         title: Some("Run command".to_string()),
         tool_call: AcpToolCallUpdate {
@@ -1657,9 +2638,7 @@ fn acp_permission_cancel_reject_fallback_uses_reject_always() {
             name: "Reject in session".to_string(),
             kind: AcpPermissionOptionKind::RejectAlways,
         }],
-    });
-
-    assert_eq!(option_id, Some("reject-always".to_string()));
+    }
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use super::AcpPermissionRequest;
 use agent_client_protocol::schema::{AgentCapabilities, ProtocolVersion};
+use serde_json::Value;
 
 /// `AcpAvailableCommandInput` 表示 ACP agent 广告的命令输入要求。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +100,73 @@ pub enum AcpToolCallContent {
     Unknown(String),
 }
 
+/// `AcpToolCallRawValue` 保留 ACP `rawInput` / `rawOutput` 的原始 JSON 语义。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AcpToolCallRawValue {
+    value: Value,
+}
+
+impl AcpToolCallRawValue {
+    /// `new` 从 ACP schema 的 JSON value 创建原始值。
+    pub fn new(value: Value) -> Self {
+        Self { value }
+    }
+
+    /// `as_json` 返回未格式化的原始 JSON value。
+    pub fn as_json(&self) -> &Value {
+        &self.value
+    }
+
+    /// `display_text` 返回适合 transcript 展示的文本。
+    pub fn display_text(&self) -> Option<String> {
+        match &self.value {
+            Value::Null => None,
+            Value::String(value) => (!value.is_empty()).then(|| value.clone()),
+            value => {
+                Some(serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()))
+            }
+        }
+    }
+
+    /// `token_text` 返回适合 token 估算投影使用的文本。
+    pub fn token_text(&self) -> Option<String> {
+        self.display_text()
+    }
+
+    /// `display_byte_len` 返回展示文本的字节长度。
+    pub fn display_byte_len(&self) -> usize {
+        self.display_text().map(|text| text.len()).unwrap_or(0)
+    }
+
+    /// `string_field` 从对象中读取第一个匹配的字符串字段。
+    pub fn string_field(&self, keys: &[&str]) -> Option<String> {
+        keys.iter()
+            .find_map(|key| self.value.get(*key).and_then(Value::as_str))
+            .map(str::to_string)
+    }
+}
+
+impl From<Value> for AcpToolCallRawValue {
+    fn from(value: Value) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for AcpToolCallRawValue {
+    fn from(value: String) -> Self {
+        match serde_json::from_str(&value) {
+            Ok(json) => Self::new(json),
+            Err(_) => Self::new(Value::String(value)),
+        }
+    }
+}
+
+impl From<&str> for AcpToolCallRawValue {
+    fn from(value: &str) -> Self {
+        Self::from(value.to_string())
+    }
+}
+
 /// `AcpToolCall` 表示一次 ACP tool call 创建通知。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AcpToolCall {
@@ -108,8 +176,8 @@ pub struct AcpToolCall {
     pub status: AcpToolCallStatus,
     pub content: Vec<AcpToolCallContent>,
     pub locations: Vec<AcpToolCallLocation>,
-    pub raw_input: Option<String>,
-    pub raw_output: Option<String>,
+    pub raw_input: Option<AcpToolCallRawValue>,
+    pub raw_output: Option<AcpToolCallRawValue>,
 }
 
 /// `AcpToolCallUpdate` 表示 ACP tool call 的增量更新。
@@ -121,8 +189,8 @@ pub struct AcpToolCallUpdate {
     pub status: Option<AcpToolCallStatus>,
     pub content: Option<Vec<AcpToolCallContent>>,
     pub locations: Option<Vec<AcpToolCallLocation>>,
-    pub raw_input: Option<String>,
-    pub raw_output: Option<String>,
+    pub raw_input: Option<AcpToolCallRawValue>,
+    pub raw_output: Option<AcpToolCallRawValue>,
 }
 
 /// `AcpInitializeOutcome` 表示 ACP initialize 握手后的 agent 基本信息。

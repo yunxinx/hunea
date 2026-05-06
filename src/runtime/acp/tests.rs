@@ -796,7 +796,7 @@ async fn acp_worker_transport_forwards_tool_call_lifecycle_updates() {
                                             .old_text("fn main(){ }\n"),
                                     ),
                                 ])
-                                .raw_output(serde_json::json!({"ok": true})),
+                                .raw_output(serde_json::json!("plain command output")),
                         )),
                     ))?;
                     connection.send_notification(SessionNotification::new(
@@ -845,8 +845,8 @@ async fn acp_worker_transport_forwards_tool_call_lifecycle_updates() {
             assert_eq!(call.locations[0].line, Some(12));
             assert!(
                 call.raw_input
-                    .as_deref()
-                    .is_some_and(|raw| raw.contains("src/main.rs"))
+                    .as_ref()
+                    .is_some_and(|raw| raw.as_json()["path"] == "src/main.rs")
             );
         }
         other => panic!("expected tool call event, got {other:?}"),
@@ -860,8 +860,9 @@ async fn acp_worker_transport_forwards_tool_call_lifecycle_updates() {
             assert!(
                 update
                     .raw_output
-                    .as_deref()
-                    .is_some_and(|raw| raw.contains("true"))
+                    .as_ref()
+                    .and_then(|raw| raw.display_text())
+                    .is_some_and(|raw| raw == "plain command output")
             );
             assert_eq!(
                 update

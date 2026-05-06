@@ -189,7 +189,7 @@ mod tests {
             status: AcpToolCallStatus::InProgress,
             content: Vec::new(),
             locations: Vec::new(),
-            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.to_string()),
+            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
             raw_output: None,
         });
         model.sync_transcript_render();
@@ -218,7 +218,7 @@ mod tests {
             status: AcpToolCallStatus::InProgress,
             content: Vec::new(),
             locations: Vec::new(),
-            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.to_string()),
+            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
             raw_output: None,
         });
         model.sync_transcript_render();
@@ -244,7 +244,7 @@ mod tests {
             status: AcpToolCallStatus::InProgress,
             content: Vec::new(),
             locations: Vec::new(),
-            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.to_string()),
+            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
             raw_output: None,
         });
         model.sync_transcript_render();

@@ -892,6 +892,13 @@ impl Model {
         item_index
     }
 
+    pub(crate) fn acp_tool_call_item_index_from_runtime(
+        &self,
+        tool_call_id: &str,
+    ) -> Option<usize> {
+        self.transcript.acp_tool_call_index(tool_call_id)
+    }
+
     pub(crate) fn update_acp_tool_call_from_runtime(
         &mut self,
         item_index: usize,
@@ -930,6 +937,25 @@ impl Model {
         true
     }
 
+    pub(crate) fn set_acp_tool_call_permission_waiting_from_runtime(
+        &mut self,
+        item_index: usize,
+        waiting: bool,
+    ) -> bool {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        if !self
+            .transcript_mut()
+            .set_acp_tool_call_permission_waiting(item_index, waiting)
+        {
+            return false;
+        }
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        true
+    }
+
     pub(crate) fn mark_acp_tool_calls_failed_from_runtime(
         &mut self,
         item_indices: impl IntoIterator<Item = usize>,
@@ -939,6 +965,21 @@ impl Model {
         if !self
             .transcript_mut()
             .mark_acp_tool_calls_failed(item_indices, message)
+        {
+            return false;
+        }
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        true
+    }
+
+    pub(crate) fn mark_acp_tool_call_rejected_from_runtime(&mut self, item_index: usize) -> bool {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        if !self
+            .transcript_mut()
+            .mark_acp_tool_call_rejected(item_index)
         {
             return false;
         }

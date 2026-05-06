@@ -3,7 +3,6 @@ use ratatui::{
     style::Modifier,
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthStr;
 
 mod file_preview;
 
@@ -14,16 +13,11 @@ use super::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, wrap_inline_text,
     },
-    theme::{
-        command_accent_text_style, primary_text_style, secondary_text_style, tertiary_text_style,
-    },
+    theme::{primary_text_style, secondary_text_style, tertiary_text_style},
     tool_result::ToolResultKind,
     transcript::markdown_highlight::{highlight_code_chunks, wrap_highlight_chunks},
 };
 use file_preview::build_file_preview_panel_lines;
-
-const ACTION_COLUMN_GAP: usize = 4;
-const ACTION_LEFT_LABEL_WIDTH: usize = 5;
 
 /// `ToolApprovalPanelState` 保存通用工具审批面板的展示与导航状态。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -68,17 +62,13 @@ enum ToolApprovalChoice {
 }
 
 impl ToolApprovalChoice {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Allow => "Allow",
-            Self::AllowInSession => "Allow in session",
-            Self::Deny => "Reject",
-            Self::DenyInSession => "Reject in session",
-        }
-    }
-
     fn display_label(self) -> &'static str {
-        self.label()
+        match self {
+            Self::Allow => "Yes",
+            Self::AllowInSession => "Yes, allow similar requests during this session",
+            Self::Deny => "No",
+            Self::DenyInSession => "No, reject similar requests during this session",
+        }
     }
 
     fn file_preview_display_label(self) -> &'static str {
@@ -89,21 +79,6 @@ impl ToolApprovalChoice {
             Self::DenyInSession => "No, reject all edits during this session",
         }
     }
-
-    fn position(self) -> ToolApprovalChoicePosition {
-        match self {
-            Self::Allow => ToolApprovalChoicePosition { row: 0, column: 0 },
-            Self::AllowInSession => ToolApprovalChoicePosition { row: 0, column: 1 },
-            Self::Deny => ToolApprovalChoicePosition { row: 1, column: 0 },
-            Self::DenyInSession => ToolApprovalChoicePosition { row: 1, column: 1 },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ToolApprovalChoicePosition {
-    row: usize,
-    column: usize,
 }
 
 impl Model {
@@ -157,8 +132,13 @@ impl Model {
             .tool_approval_panel
             .suspended_acp_tool_call_item_index
             .take();
+        let permission_tool_call_item_index = self
+            .pending_acp_permission
+            .as_ref()
+            .and_then(|permission| permission.tool_call_item_index);
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.pending_acp_permission = None;
+        self.clear_acp_tool_call_permission_waiting(permission_tool_call_item_index);
         self.restore_suspended_acp_tool_call_item(suspended_item_index);
         self.resume_stream_activity();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
@@ -231,7 +211,7 @@ impl Model {
                     .unwrap_or(ToolApprovalChoice::Allow),
                 ),
             ),
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(
+            KeyCode::Char('n') | KeyCode::Char('N') => Some(
                 self.resolve_tool_approval_choice(
                     preferred_tool_approval_choice(
                         &self.tool_approval_panel,
@@ -240,6 +220,7 @@ impl Model {
                     .unwrap_or(ToolApprovalChoice::Deny),
                 ),
             ),
+            KeyCode::Esc if key.modifiers.is_empty() => Some(self.cancel_tool_approval_panel()),
             _ => Some(None),
         }
     }
@@ -262,12 +243,24 @@ impl Model {
             .suspended_acp_tool_call_item_index
             .take();
         let Some(source) = self.tool_approval_panel.source.clone() else {
+            let permission_tool_call_item_index = self
+                .pending_acp_permission
+                .as_ref()
+                .and_then(|permission| permission.tool_call_item_index);
+            self.clear_acp_tool_call_permission_waiting(permission_tool_call_item_index);
             self.restore_suspended_acp_tool_call_item(suspended_item_index);
             return None;
         };
         let title = self.tool_approval_panel.title.clone();
+        let pending_permission = self.pending_acp_permission.clone();
+        let permission_tool_call_item_index = pending_permission
+            .as_ref()
+            .and_then(|permission| permission.tool_call_item_index);
+        let permission_tool_call_id =
+            pending_permission.and_then(|permission| permission.tool_call_id);
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.pending_acp_permission = None;
+        self.clear_acp_tool_call_permission_waiting(permission_tool_call_item_index);
         self.restore_suspended_acp_tool_call_item(suspended_item_index);
         self.resume_stream_activity();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
@@ -288,20 +281,27 @@ impl Model {
                     ToolApprovalChoice::Deny => reject_option_id,
                     ToolApprovalChoice::DenyInSession => reject_always_option_id,
                 };
-                // ACP tool call items themselves will surface the execution result, so only
-                // rejection choices need a separate transcript entry here.
-                if matches!(
+                let is_rejection = matches!(
                     choice,
                     ToolApprovalChoice::Deny | ToolApprovalChoice::DenyInSession
-                ) {
-                    self.append_tool_result_from_runtime(
-                        approval_result_content(choice, &title),
-                        approval_result_kind(choice),
-                    );
+                );
+                if is_rejection {
+                    if let Some(item_index) = permission_tool_call_item_index {
+                        self.mark_acp_tool_call_rejected_from_runtime(item_index);
+                    } else {
+                        self.append_tool_result_from_runtime(
+                            approval_result_content(choice, &title),
+                            approval_result_kind(choice),
+                        );
+                    }
                 }
                 Some(AppEffect::RespondAcpPermission {
                     request_id,
                     option_id,
+                    is_rejection,
+                    rejected_tool_call_id: is_rejection
+                        .then_some(permission_tool_call_id)
+                        .flatten(),
                 })
             }
             ToolApprovalSource::Preview => {
@@ -311,6 +311,23 @@ impl Model {
                 );
                 None
             }
+        }
+    }
+
+    fn cancel_tool_approval_panel(&mut self) -> Option<AppEffect> {
+        let source = self.tool_approval_panel.source.clone();
+        self.close_tool_approval_panel();
+
+        match source {
+            Some(ToolApprovalSource::AcpPermission { request_id, .. }) => {
+                Some(AppEffect::RespondAcpPermission {
+                    request_id,
+                    option_id: None,
+                    is_rejection: false,
+                    rejected_tool_call_id: None,
+                })
+            }
+            Some(ToolApprovalSource::Preview) | None => None,
         }
     }
 
@@ -325,6 +342,12 @@ impl Model {
     fn restore_suspended_acp_tool_call_item(&mut self, item_index: Option<usize>) {
         if let Some(item_index) = item_index {
             self.set_acp_tool_call_approval_suspended_from_runtime(item_index, false);
+        }
+    }
+
+    fn clear_acp_tool_call_permission_waiting(&mut self, item_index: Option<usize>) {
+        if let Some(item_index) = item_index {
+            self.set_acp_tool_call_permission_waiting_from_runtime(item_index, false);
         }
     }
 }
@@ -368,14 +391,10 @@ fn build_panel_lines(model: &Model, width: usize) -> Vec<Line<'static>> {
         append_detail_lines(model, width, &mut lines);
         lines.push(Line::raw(""));
     }
-    lines.push(Line::styled(
-        "  Actions:",
-        secondary_text_style(model.palette).bold(),
-    ));
     append_choice_lines(model, width, &mut lines);
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "  Press Enter to choose · Y allow · ESC/N reject · ↑↓←→ to navigate",
+        " Esc to cancel · Enter to choose",
         tertiary_text_style(model.palette).add_modifier(Modifier::ITALIC),
     ));
 
@@ -435,52 +454,37 @@ fn append_detail_lines(model: &Model, width: usize, lines: &mut Vec<Line<'static
 }
 
 fn append_choice_lines(model: &Model, _width: usize, lines: &mut Vec<Line<'static>>) {
-    for row in 0..=1 {
-        let left = tool_approval_choice_at_position(&model.tool_approval_panel, row, 0);
-        let right = tool_approval_choice_at_position(&model.tool_approval_panel, row, 1);
-        if left.is_none() && right.is_none() {
-            continue;
-        }
-
-        let mut spans = vec![Span::raw("  ")];
-        append_choice_cell(model, &mut spans, left, ACTION_LEFT_LABEL_WIDTH);
-        spans.push(Span::raw(" ".repeat(ACTION_COLUMN_GAP)));
-        append_choice_cell(model, &mut spans, right, 0);
-        lines.push(Line::from(spans));
+    for (index, choice) in tool_approval_choices(&model.tool_approval_panel)
+        .into_iter()
+        .enumerate()
+    {
+        let selected = index == model.tool_approval_panel.selected;
+        lines.push(approval_choice_line(
+            model,
+            index,
+            selected,
+            choice.display_label(),
+        ));
     }
 }
 
-fn append_choice_cell(
+pub(super) fn approval_choice_line(
     model: &Model,
-    spans: &mut Vec<Span<'static>>,
-    choice: Option<ToolApprovalChoice>,
-    label_width: usize,
-) {
-    let Some(choice) = choice else {
-        spans.push(Span::raw(" ".repeat(2 + label_width)));
-        return;
-    };
-
-    let choices = tool_approval_choices(&model.tool_approval_panel);
-    let selected = choices
-        .get(model.tool_approval_panel.selected)
-        .is_some_and(|selected_choice| *selected_choice == choice);
+    index: usize,
+    selected: bool,
+    label: &str,
+) -> Line<'static> {
     let marker = if selected { "➜ " } else { "  " };
     let style = if selected {
-        command_accent_text_style(model.palette).bold()
+        primary_text_style(model.palette).bold()
     } else {
         secondary_text_style(model.palette)
     };
-    let mut label = choice.display_label().to_string();
-    if label_width > label.width() {
-        label.push_str(&" ".repeat(label_width - label.width()));
-    }
-
-    spans.push(Span::styled(
-        marker.to_string(),
-        secondary_text_style(model.palette),
-    ));
-    spans.push(Span::styled(label, style));
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(marker, secondary_text_style(model.palette)),
+        Span::styled(format!("{}. {label}", index + 1), style),
+    ])
 }
 
 fn tool_approval_choices(state: &ToolApprovalPanelState) -> Vec<ToolApprovalChoice> {
@@ -530,46 +534,7 @@ fn move_tool_approval_selection(
     direction: ToolApprovalSelectionMove,
 ) {
     let choices = tool_approval_choices(state);
-    let Some(current_choice) = choices.get(state.selected).copied() else {
-        state.selected = 0;
-        return;
-    };
-
-    if state.preview.is_some() {
-        move_file_preview_tool_approval_selection(state, choices.len(), direction);
-        return;
-    }
-
-    let next_choice = match direction {
-        ToolApprovalSelectionMove::Left => {
-            let position = current_choice.position();
-            if position.column == 0 {
-                None
-            } else {
-                tool_approval_choice_at_position(state, position.row, 0)
-            }
-        }
-        ToolApprovalSelectionMove::Right => {
-            let position = current_choice.position();
-            tool_approval_choice_at_position(state, position.row, position.column + 1)
-        }
-        ToolApprovalSelectionMove::Up | ToolApprovalSelectionMove::Down => {
-            move_tool_approval_selection_vertically(state, current_choice, direction)
-        }
-    };
-
-    if let Some(next_choice) = next_choice
-        && let Some(index) = choices.iter().position(|choice| *choice == next_choice)
-    {
-        state.selected = index;
-    }
-}
-
-fn move_file_preview_tool_approval_selection(
-    state: &mut ToolApprovalPanelState,
-    choice_count: usize,
-    direction: ToolApprovalSelectionMove,
-) {
+    let choice_count = choices.len();
     if choice_count == 0 {
         state.selected = 0;
         return;
@@ -584,46 +549,6 @@ fn move_file_preview_tool_approval_selection(
             (state.selected + 1) % choice_count
         }
     };
-}
-
-fn move_tool_approval_selection_vertically(
-    state: &ToolApprovalPanelState,
-    current_choice: ToolApprovalChoice,
-    direction: ToolApprovalSelectionMove,
-) -> Option<ToolApprovalChoice> {
-    let rows = tool_approval_choice_rows(state);
-    let position = current_choice.position();
-    let row_index = rows.iter().position(|row| *row == position.row)?;
-    let next_row_index = match direction {
-        ToolApprovalSelectionMove::Up => row_index.checked_sub(1).unwrap_or(rows.len() - 1),
-        ToolApprovalSelectionMove::Down => (row_index + 1) % rows.len(),
-        ToolApprovalSelectionMove::Left | ToolApprovalSelectionMove::Right => row_index,
-    };
-    let next_row = rows[next_row_index];
-    tool_approval_choice_at_position(state, next_row, position.column)
-        .or_else(|| tool_approval_choice_at_position(state, next_row, 0))
-        .or_else(|| tool_approval_choice_at_position(state, next_row, 1))
-}
-
-fn tool_approval_choice_rows(state: &ToolApprovalPanelState) -> Vec<usize> {
-    let mut rows = Vec::new();
-    for choice in tool_approval_choices(state) {
-        let row = choice.position().row;
-        if !rows.contains(&row) {
-            rows.push(row);
-        }
-    }
-    rows
-}
-
-fn tool_approval_choice_at_position(
-    state: &ToolApprovalPanelState,
-    row: usize,
-    column: usize,
-) -> Option<ToolApprovalChoice> {
-    tool_approval_choices(state)
-        .into_iter()
-        .find(|choice| choice.position() == ToolApprovalChoicePosition { row, column })
 }
 
 fn preferred_tool_approval_choice(
@@ -646,7 +571,7 @@ mod tests {
     };
 
     #[test]
-    fn preview_layout_omits_labels_and_places_wrapped_command_before_actions() {
+    fn preview_layout_omits_labels_and_uses_vertical_numbered_choices() {
         let mut model = Model::new(HeroOptions::default());
         model.palette = default_palette();
         open_preview_panel(&mut model);
@@ -681,13 +606,13 @@ mod tests {
             .iter()
             .position(|line| line.contains("sed -n"))
             .expect("command row should render");
-        let actions = lines
+        let first_choice = lines
             .iter()
-            .position(|line| line.contains("Actions:"))
-            .expect("actions row should render");
+            .position(|line| line.contains("1. Yes"))
+            .expect("first approval choice should render");
         assert!(
-            header < command && command < actions,
-            "command should sit between header and actions: {lines:?}"
+            header < command && command < first_choice,
+            "command should sit between header and choices: {lines:?}"
         );
         assert_eq!(
             lines.get(header + 1).map(String::as_str),
@@ -695,26 +620,38 @@ mod tests {
             "header should keep a blank row before the command: {lines:?}"
         );
         assert_eq!(
-            actions.saturating_sub(command + 1),
+            first_choice.saturating_sub(command + 1),
             1,
-            "actions should keep one blank row after the command when details are absent: {lines:?}"
+            "choices should keep one blank row after the command when details are absent: {lines:?}"
         );
         assert!(
             lines.iter().all(|line| !line.contains("Reason")),
             "preview should not synthesize a reason row: {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("Allow in session")),
+            lines.iter().all(|line| !line.contains("Actions:")),
+            "shell approval should not use the old actions heading: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "  ➜ 1. Yes"),
+            "selected choice should match the file-preview marker and numbering style: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("2. Yes, allow similar requests during this session")),
             "preview should expose the session allow option for design checks: {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("Reject in session")),
+            lines
+                .iter()
+                .any(|line| line.contains("4. No, reject similar requests during this session")),
             "preview should expose the session reject option for design checks: {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| {
-                line.contains("Press Enter to choose · Y allow · ESC/N reject · ↑↓←→ to navigate")
-            }),
+            lines
+                .iter()
+                .any(|line| line.contains("Esc to cancel · Enter to choose")),
             "footer hint should use the concise approval copy: {lines:?}"
         );
     }
@@ -759,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn long_command_keeps_full_document_flow_without_truncating_actions() {
+    fn long_command_keeps_full_document_flow_without_truncating_choices() {
         let mut model = Model::new(HeroOptions::default());
         model.palette = default_palette();
         model.set_window(24, 8);
@@ -777,8 +714,8 @@ mod tests {
             "long wrapped command should remain in document flow for viewport scrolling"
         );
         assert!(
-            text.contains("Actions:") && text.contains("Press Enter to choose"),
-            "actions and footer should not be truncated away: {text:?}"
+            text.contains("1. Yes") && text.contains("Esc to cancel · Enter to choose"),
+            "choices and footer should not be truncated away: {text:?}"
         );
     }
 
@@ -813,7 +750,7 @@ mod tests {
         assert!(
             without_session
                 .iter()
-                .all(|line| !line.contains("Allow in session")),
+                .all(|line| !line.contains("allow similar requests")),
             "session allow should not render without an upstream option: {without_session:?}"
         );
 
@@ -843,12 +780,17 @@ mod tests {
             .collect::<Vec<_>>();
         assert_ordered_plain_lines(
             &with_session,
-            &["Allow", "Allow in session", "Reject", "Reject in session"],
+            &[
+                "1. Yes",
+                "2. Yes, allow similar requests during this session",
+                "3. No",
+                "4. No, reject similar requests during this session",
+            ],
         );
     }
 
     #[test]
-    fn choices_render_session_options_in_right_column() {
+    fn choices_render_vertically_like_file_preview_panel() {
         let mut model = Model::new(HeroOptions::default());
         model.palette = default_palette();
         open_preview_panel(&mut model);
@@ -863,33 +805,22 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let allow_row = lines
-            .iter()
-            .find(|line| line.contains("Allow") && line.contains("Allow in session"))
-            .expect("allow choices should share one display row");
-        let deny_row = lines
-            .iter()
-            .find(|line| line.contains("Reject") && line.contains("Reject in session"))
-            .expect("reject choices should share one display row");
-
-        let allow_gap = allow_row
-            .find("Allow in session")
-            .expect("session allow should render")
-            .saturating_sub(allow_row.find("Allow").expect("allow should render") + "Allow".len());
-        let deny_gap = deny_row
-            .find("Reject in session")
-            .expect("session reject should render")
-            .saturating_sub(
-                deny_row.find("Reject").expect("reject should render") + "Reject".len(),
-            );
-
-        assert!(
-            allow_gap >= 4 && deny_gap >= 4,
-            "session choices should sit to the right with a visible gap: {lines:?}"
+        assert_ordered_plain_lines(
+            &lines,
+            &[
+                "  ➜ 1. Yes",
+                "    2. Yes, allow similar requests during this session",
+                "    3. No",
+                "    4. No, reject similar requests during this session",
+            ],
         );
         assert!(
-            deny_row.contains("Reject in session"),
-            "reject session label should render with consistent spacing: {lines:?}"
+            lines.iter().all(|line| {
+                let combines_allow_choices = line.contains("1. Yes") && line.contains("2.");
+                let combines_deny_choices = line.contains("3. No") && line.contains("4.");
+                !(combines_allow_choices || combines_deny_choices)
+            }),
+            "each approval choice should occupy its own line: {lines:?}"
         );
     }
 
@@ -945,6 +876,8 @@ mod tests {
             Some(AppEffect::RespondAcpPermission {
                 request_id: "permission-ran".to_string(),
                 option_id: Some("allow-once".to_string()),
+                is_rejection: false,
+                rejected_tool_call_id: None,
             })
         );
         assert!(
@@ -955,6 +888,44 @@ mod tests {
             model.transcript_mut().source_messages(),
             Vec::<(Sender, String)>::new(),
             "tool approval results should not be sent back to the model"
+        );
+    }
+
+    #[test]
+    fn esc_cancels_acp_permission_without_rejecting() {
+        let mut model = Model::new(HeroOptions::default());
+        model.palette = default_palette();
+        model.open_tool_approval_panel(
+            ToolApprovalSource::AcpPermission {
+                request_id: "permission-cancel".to_string(),
+                allow_option_id: Some("allow-once".to_string()),
+                allow_always_option_id: None,
+                reject_option_id: Some("reject-once".to_string()),
+                reject_always_option_id: Some("reject-always".to_string()),
+            },
+            "cargo check".to_string(),
+            Vec::new(),
+        );
+        let before = model.transcript_mut().plain_items();
+
+        let effect = model
+            .handle_tool_approval_panel_key(KeyCode::Esc.into())
+            .expect("tool approval panel should handle Esc");
+
+        assert_eq!(
+            effect,
+            Some(AppEffect::RespondAcpPermission {
+                request_id: "permission-cancel".to_string(),
+                option_id: None,
+                is_rejection: false,
+                rejected_tool_call_id: None,
+            })
+        );
+        assert!(!model.tool_approval_panel_active());
+        assert_eq!(
+            model.transcript_mut().plain_items(),
+            before,
+            "Esc is cancellation, so it must not append a reject result"
         );
     }
 
@@ -1125,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn arrow_keys_move_between_choice_rows_and_columns() {
+    fn arrow_keys_move_linearly_between_vertical_choices() {
         let mut model = Model::new(HeroOptions::default());
         model.palette = default_palette();
         model.open_tool_approval_panel(
@@ -1140,7 +1111,7 @@ mod tests {
             Vec::new(),
         );
 
-        model.handle_tool_approval_panel_key(KeyCode::Right.into());
+        model.handle_tool_approval_panel_key(KeyCode::Down.into());
         assert_eq!(
             selected_tool_approval_choice(&model),
             Some(ToolApprovalChoice::AllowInSession)
@@ -1149,19 +1120,19 @@ mod tests {
         model.handle_tool_approval_panel_key(KeyCode::Down.into());
         assert_eq!(
             selected_tool_approval_choice(&model),
-            Some(ToolApprovalChoice::DenyInSession)
+            Some(ToolApprovalChoice::Deny)
         );
 
-        model.handle_tool_approval_panel_key(KeyCode::Left.into());
+        model.handle_tool_approval_panel_key(KeyCode::Right.into());
         assert_eq!(
             selected_tool_approval_choice(&model),
-            Some(ToolApprovalChoice::Deny)
+            Some(ToolApprovalChoice::DenyInSession)
         );
 
         model.handle_tool_approval_panel_key(KeyCode::Up.into());
         assert_eq!(
             selected_tool_approval_choice(&model),
-            Some(ToolApprovalChoice::Allow)
+            Some(ToolApprovalChoice::Deny)
         );
     }
 

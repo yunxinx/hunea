@@ -122,7 +122,8 @@ fn transcript_overlay_switches_tool_activity_detail_mode() {
             (1..=14)
                 .map(|line| format!("line {line}"))
                 .collect::<Vec<_>>()
-                .join("\n"),
+                .join("\n")
+                .into(),
         ),
     });
 

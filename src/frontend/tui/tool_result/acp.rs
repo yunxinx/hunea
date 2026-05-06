@@ -59,6 +59,7 @@ struct AcpDiffSummary {
 pub(super) fn acp_tool_call_detail_blocks(
     call: &AcpToolCall,
     render_mode: ToolActivityRenderMode,
+    permission_waiting: bool,
 ) -> Vec<AcpToolCallDetailBlock> {
     if should_collapse_acp_read_tool_call(call) {
         return Vec::new();
@@ -67,25 +68,110 @@ pub(super) fn acp_tool_call_detail_blocks(
         return Vec::new();
     }
 
+    if is_execute_like_tool_call(call) {
+        return execute_tool_call_detail_blocks(call, render_mode, permission_waiting);
+    }
+
     let mut blocks = Vec::new();
 
     for content in &call.content {
         blocks.extend(acp_tool_call_content_blocks(content, render_mode));
     }
-    if let Some(raw_input) = &call.raw_input {
+    if let Some(raw_input) = call.raw_input.as_ref().and_then(|raw| raw.display_text()) {
         blocks.push(AcpToolCallDetailBlock::Text(labeled_detail_block(
             "Input",
-            raw_input,
+            &raw_input,
             render_mode,
         )));
     }
-    if let Some(raw_output) = &call.raw_output {
+    if let Some(raw_output) = call.raw_output.as_ref().and_then(|raw| raw.display_text()) {
         blocks.push(AcpToolCallDetailBlock::SecondaryText(
-            truncate_detail_block(text_lines(raw_output), render_mode),
+            truncate_detail_block(text_lines(&raw_output), render_mode),
         ));
     }
 
     blocks
+}
+
+fn execute_tool_call_detail_blocks(
+    call: &AcpToolCall,
+    render_mode: ToolActivityRenderMode,
+    permission_waiting: bool,
+) -> Vec<AcpToolCallDetailBlock> {
+    if should_defer_active_execute_details(call, permission_waiting) {
+        let terminal_blocks = active_execute_terminal_blocks(call, render_mode);
+        if !terminal_blocks.is_empty() {
+            return terminal_blocks;
+        }
+        return vec![AcpToolCallDetailBlock::SecondaryText(vec![
+            "Waiting...".to_string(),
+        ])];
+    }
+
+    if let Some(raw_output) = call.raw_output.as_ref().and_then(|raw| raw.display_text()) {
+        return vec![AcpToolCallDetailBlock::SecondaryText(
+            truncate_detail_block(text_lines(&raw_output), render_mode),
+        )];
+    }
+
+    let mut blocks = Vec::new();
+    for content in &call.content {
+        if should_hide_execute_text_content(content) {
+            continue;
+        }
+        blocks.extend(acp_tool_call_content_blocks(content, render_mode));
+    }
+
+    blocks
+}
+
+fn should_defer_active_execute_details(call: &AcpToolCall, permission_waiting: bool) -> bool {
+    is_active_tool_call_status(call.status)
+        && (permission_waiting || is_execute_like_tool_call(call))
+}
+
+fn active_execute_terminal_blocks(
+    call: &AcpToolCall,
+    render_mode: ToolActivityRenderMode,
+) -> Vec<AcpToolCallDetailBlock> {
+    call.content
+        .iter()
+        .filter(|content| matches!(content, AcpToolCallContent::Terminal { .. }))
+        .flat_map(|content| acp_tool_call_content_blocks(content, render_mode))
+        .collect()
+}
+
+fn is_active_tool_call_status(status: AcpToolCallStatus) -> bool {
+    matches!(
+        status,
+        AcpToolCallStatus::Pending | AcpToolCallStatus::InProgress
+    )
+}
+
+fn is_execute_like_tool_call(call: &AcpToolCall) -> bool {
+    call.kind == AcpToolKind::Execute
+        || call.title.trim_start().starts_with("Shell:")
+        || call.title.trim_start().starts_with("Run ")
+        || call
+            .raw_input
+            .as_ref()
+            .and_then(|raw_input| raw_input.string_field(&["command", "cmd"]))
+            .is_some()
+}
+
+fn should_hide_execute_text_content(content: &AcpToolCallContent) -> bool {
+    matches!(
+        content,
+        AcpToolCallContent::Text(text) if is_execute_protocol_copy_text(text)
+    )
+}
+
+fn is_execute_protocol_copy_text(text: &str) -> bool {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized.starts_with("Requesting approval to perform:")
+        || (normalized.starts_with("The tool call is rejected by the user.")
+            && normalized.contains("Stop what you are doing")
+            && normalized.contains("wait for the user to tell you how to proceed"))
 }
 
 fn acp_tool_call_content_blocks(
@@ -147,7 +233,7 @@ fn acp_tool_call_content_blocks(
         ))],
         AcpToolCallContent::Terminal { terminal_id } => {
             vec![AcpToolCallDetailBlock::Text(vec![format!(
-                "Terminal: {terminal_id}"
+                "ACP terminal unavailable: {terminal_id} (terminal/create unsupported)"
             )])]
         }
         AcpToolCallContent::Unknown(label) => vec![AcpToolCallDetailBlock::Text(vec![format!(

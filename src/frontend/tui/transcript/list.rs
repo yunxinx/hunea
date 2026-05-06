@@ -254,6 +254,23 @@ impl Transcript {
         index
     }
 
+    /// `acp_tool_call_index` 返回最近一条匹配 `toolCallId` 的 ACP tool call 展示项。
+    pub(crate) fn acp_tool_call_index(&self, tool_call_id: &str) -> Option<usize> {
+        self.items
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, item)| {
+                let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+                    return None;
+                };
+                tool_result
+                    .acp_tool_call_id()
+                    .is_some_and(|id| id == tool_call_id)
+                    .then_some(index)
+            })
+    }
+
     /// `update_acp_tool_call` 用 ACP 增量事件替换已有 tool call 项。
     pub(crate) fn update_acp_tool_call(
         &mut self,
@@ -296,6 +313,27 @@ impl Transcript {
         true
     }
 
+    /// `set_acp_tool_call_permission_waiting` 标记 tool call 正在等待 ACP 权限响应。
+    pub(crate) fn set_acp_tool_call_permission_waiting(
+        &mut self,
+        item_index: usize,
+        waiting: bool,
+    ) -> bool {
+        let Some(item) = self.items.get(item_index) else {
+            return false;
+        };
+        let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+            return false;
+        };
+
+        let mut tool_result = tool_result.clone();
+        if !tool_result.set_permission_waiting(waiting) {
+            return false;
+        }
+        self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
+        true
+    }
+
     /// `mark_acp_tool_calls_failed` 将仍在运行的 ACP tool call 标记为失败并写入原因。
     pub(crate) fn mark_acp_tool_calls_failed(
         &mut self,
@@ -326,6 +364,23 @@ impl Transcript {
         self.items_version = self.items_version.saturating_add(1);
         self.metrics_cache.mark_metrics_dirty_from(first_dirty);
         self.screen_cache.mark_dirty_from(first_dirty);
+        true
+    }
+
+    /// `mark_acp_tool_call_rejected` 将等待审批的 ACP tool call 标记为用户拒绝。
+    pub(crate) fn mark_acp_tool_call_rejected(&mut self, item_index: usize) -> bool {
+        let Some(item) = self.items.get(item_index) else {
+            return false;
+        };
+        let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+            return false;
+        };
+
+        let mut tool_result = tool_result.clone();
+        if !tool_result.mark_acp_tool_call_rejected() {
+            return false;
+        }
+        self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
         true
     }
 

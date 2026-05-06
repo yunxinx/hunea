@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -11,7 +11,8 @@ use crate::frontend::tui::{
 };
 use crate::runtime::acp::{
     AcpAgentIdentity, AcpPermissionOptionKind, AcpPermissionRequest, AcpPrompt, AcpSessionCommand,
-    AcpSessionEvent, AcpSessionWorker, AcpToolCall, AcpToolCallContent, AcpToolCallUpdate,
+    AcpSessionEvent, AcpSessionWorker, AcpToolCall, AcpToolCallContent, AcpToolCallStatus,
+    AcpToolCallUpdate, AcpToolKind,
 };
 use crate::runtime::session::{RuntimeEvent, RuntimeTarget};
 use crate::runtime::token_count::StreamingTokenProgress;
@@ -24,13 +25,21 @@ pub(super) struct AcpRuntimeState {
     response_buffer: String,
     reasoning_buffer: String,
     reasoning_started_at: Option<Instant>,
+    pending_rejected_permission_notice_suppression: bool,
     prompt_in_flight: bool,
-    discard_in_flight_prompt: bool,
+    discard_in_flight_prompt: Option<PromptDiscardReason>,
     token_progress: Option<StreamingTokenProgress>,
     prompt_started_at: Option<Instant>,
     first_token_at: Option<Instant>,
     tool_call_items: HashMap<String, usize>,
     tool_call_token_text: HashMap<String, String>,
+    rejected_permission_tool_calls: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptDiscardReason {
+    Cancelled,
+    Stale,
 }
 
 impl AcpRuntimeState {
@@ -42,13 +51,15 @@ impl AcpRuntimeState {
         self.response_buffer.clear();
         self.reasoning_buffer.clear();
         self.reasoning_started_at = None;
+        self.pending_rejected_permission_notice_suppression = false;
         self.prompt_in_flight = false;
-        self.discard_in_flight_prompt = false;
+        self.discard_in_flight_prompt = None;
         self.token_progress = None;
         self.prompt_started_at = None;
         self.first_token_at = None;
         self.tool_call_items.clear();
         self.tool_call_token_text.clear();
+        self.rejected_permission_tool_calls.clear();
         self.worker = Some(AcpSessionWorker::start(command));
     }
 
@@ -56,6 +67,7 @@ impl AcpRuntimeState {
         self.response_buffer.clear();
         self.reasoning_buffer.clear();
         self.reasoning_started_at = None;
+        self.pending_rejected_permission_notice_suppression = false;
     }
 
     fn push_response_chunk(&mut self, content: &str) {
@@ -79,6 +91,20 @@ impl AcpRuntimeState {
     fn take_response_buffer(&mut self) -> Option<String> {
         if self.response_buffer.is_empty() {
             return None;
+        }
+
+        if self.pending_rejected_permission_notice_suppression {
+            if is_agent_facing_permission_rejection_notice(&self.response_buffer) {
+                self.response_buffer.clear();
+                self.pending_rejected_permission_notice_suppression = false;
+                return None;
+            }
+
+            if is_agent_facing_permission_rejection_notice_prefix(&self.response_buffer) {
+                return None;
+            }
+
+            self.pending_rejected_permission_notice_suppression = false;
         }
 
         Some(std::mem::take(&mut self.response_buffer))
@@ -171,10 +197,11 @@ impl AcpRuntimeState {
 
     fn mark_prompt_finished(&mut self) {
         self.prompt_in_flight = false;
-        self.discard_in_flight_prompt = false;
+        self.discard_in_flight_prompt = None;
         self.response_buffer.clear();
         self.reasoning_buffer.clear();
         self.reasoning_started_at = None;
+        self.pending_rejected_permission_notice_suppression = false;
         self.token_progress = None;
         self.prompt_started_at = None;
         self.first_token_at = None;
@@ -183,7 +210,31 @@ impl AcpRuntimeState {
     }
 
     fn should_discard_prompt_output(&self) -> bool {
-        self.discard_in_flight_prompt
+        self.discard_in_flight_prompt.is_some()
+    }
+
+    pub(super) fn permission_option_id_for_discarded_prompt(
+        &self,
+        request: &AcpPermissionRequest,
+    ) -> Option<String> {
+        match self.discard_in_flight_prompt {
+            Some(PromptDiscardReason::Cancelled) => None,
+            Some(PromptDiscardReason::Stale) | None => {
+                acp_reject_option_id_for_stale_discard(request)
+            }
+        }
+    }
+
+    fn suppress_rejected_permission_notice_for_tool_call(&mut self, tool_call_id: Option<String>) {
+        self.pending_rejected_permission_notice_suppression = true;
+        if let Some(tool_call_id) = tool_call_id {
+            self.rejected_permission_tool_calls.insert(tool_call_id);
+        }
+    }
+
+    fn should_sanitize_rejected_permission_tool_update(&self, tool_call_id: &str) -> bool {
+        self.pending_rejected_permission_notice_suppression
+            || self.rejected_permission_tool_calls.contains(tool_call_id)
     }
 
     fn interrupt_prompt(&mut self) -> bool {
@@ -193,10 +244,11 @@ impl AcpRuntimeState {
         self.response_buffer.clear();
         self.reasoning_buffer.clear();
         self.reasoning_started_at = None;
+        self.pending_rejected_permission_notice_suppression = false;
         self.token_progress = None;
         self.prompt_started_at = None;
         self.first_token_at = None;
-        self.discard_in_flight_prompt = true;
+        self.discard_in_flight_prompt = Some(PromptDiscardReason::Cancelled);
         self.tool_call_token_text.clear();
         if let Some(worker) = self.worker.as_ref() {
             let _ = worker.cancel_prompt();
@@ -208,13 +260,15 @@ impl AcpRuntimeState {
         self.response_buffer.clear();
         self.reasoning_buffer.clear();
         self.reasoning_started_at = None;
+        self.pending_rejected_permission_notice_suppression = false;
         self.token_progress = None;
         self.prompt_started_at = None;
         self.first_token_at = None;
         self.tool_call_items.clear();
         self.tool_call_token_text.clear();
-        if self.prompt_in_flight {
-            self.discard_in_flight_prompt = true;
+        self.rejected_permission_tool_calls.clear();
+        if self.prompt_in_flight && self.discard_in_flight_prompt.is_none() {
+            self.discard_in_flight_prompt = Some(PromptDiscardReason::Stale);
         }
     }
 
@@ -271,6 +325,73 @@ impl AcpRuntimeState {
             .set_model(config_id, value)
             .map_err(|error| error.to_string())
     }
+}
+
+const AGENT_FACING_PERMISSION_REJECTION_NOTICE: &str = concat!(
+    "The tool call is rejected by the user. ",
+    "Stop what you are doing and wait for the user to tell you how to proceed."
+);
+
+fn normalized_agent_text(content: &str) -> String {
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn is_agent_facing_permission_rejection_notice(content: &str) -> bool {
+    let normalized = normalized_agent_text(content);
+    normalized == AGENT_FACING_PERMISSION_REJECTION_NOTICE
+        || (normalized.starts_with("The tool call is rejected by the user.")
+            && normalized.contains("Stop what you are doing")
+            && normalized.contains("wait for the user to tell you how to proceed"))
+}
+
+fn is_agent_facing_permission_rejection_notice_prefix(content: &str) -> bool {
+    let normalized = normalized_agent_text(content);
+    !normalized.is_empty() && AGENT_FACING_PERMISSION_REJECTION_NOTICE.starts_with(&normalized)
+}
+
+fn sanitize_rejected_permission_tool_call_update(
+    update: &mut AcpToolCallUpdate,
+    should_sanitize: bool,
+) {
+    if !should_sanitize {
+        return;
+    }
+
+    if let Some(content) = update.content.take() {
+        update.content = Some(
+            content
+                .into_iter()
+                .filter(|content| !is_agent_facing_permission_rejection_tool_content(content))
+                .collect(),
+        );
+    }
+
+    if update
+        .raw_input
+        .as_ref()
+        .is_some_and(is_agent_facing_permission_rejection_raw_value)
+    {
+        update.raw_input = None;
+    }
+    if update
+        .raw_output
+        .as_ref()
+        .is_some_and(is_agent_facing_permission_rejection_raw_value)
+    {
+        update.raw_output = None;
+    }
+}
+
+fn is_agent_facing_permission_rejection_tool_content(content: &AcpToolCallContent) -> bool {
+    matches!(content, AcpToolCallContent::Text(text) if is_agent_facing_permission_rejection_notice(text))
+}
+
+fn is_agent_facing_permission_rejection_raw_value(
+    raw_value: &crate::runtime::acp::AcpToolCallRawValue,
+) -> bool {
+    raw_value
+        .display_text()
+        .is_some_and(|text| is_agent_facing_permission_rejection_notice(&text))
 }
 
 pub(super) fn drain_acp_runtime_events(
@@ -364,36 +485,25 @@ pub(super) fn apply_acp_session_event(
             {
                 model.set_stream_activity_output_tokens(total_tokens);
             }
-            let item_index = model.append_acp_tool_call_from_runtime(call);
-            acp_runtime.track_tool_call(tool_call_id, item_index);
+            upsert_acp_tool_call(model, acp_runtime, call);
             model.set_stream_activity_thinking(false);
         }
-        AcpSessionEvent::ToolCallUpdate { update, .. } => {
+        AcpSessionEvent::ToolCallUpdate { mut update, .. } => {
             if acp_runtime.should_discard_prompt_output() {
                 return;
             }
             flush_acp_response_buffer(model, acp_runtime);
             let tool_call_id = update.tool_call_id.clone();
-            let should_forget = update.status.is_some_and(|status| {
-                matches!(
-                    status,
-                    crate::runtime::acp::AcpToolCallStatus::Completed
-                        | crate::runtime::acp::AcpToolCallStatus::Failed
-                )
-            });
-            if let Some(item_index) = acp_runtime.tool_call_item_index(&tool_call_id) {
-                if let Some(total_tokens) = acp_runtime.observe_tool_call_tokens(
-                    &tool_call_id,
-                    acp_tool_call_update_token_text(&update),
-                ) {
-                    model.set_stream_activity_output_tokens(total_tokens);
-                }
-                model.update_acp_tool_call_from_runtime(item_index, update);
-                if should_forget {
-                    acp_runtime.tool_call_items.remove(&tool_call_id);
-                    acp_runtime.tool_call_token_text.remove(&tool_call_id);
-                }
+            sanitize_rejected_permission_tool_call_update(
+                &mut update,
+                acp_runtime.should_sanitize_rejected_permission_tool_update(&tool_call_id),
+            );
+            if let Some(total_tokens) = acp_runtime
+                .observe_tool_call_tokens(&tool_call_id, acp_tool_call_update_token_text(&update))
+            {
+                model.set_stream_activity_output_tokens(total_tokens);
             }
+            upsert_acp_tool_call_update(model, acp_runtime, update, None);
             model.set_stream_activity_thinking(false);
         }
         AcpSessionEvent::ModelConfigChanged { agent_id, config } => {
@@ -473,7 +583,7 @@ pub(super) fn apply_acp_session_event(
             if acp_runtime.should_discard_prompt_output() {
                 let _ = acp_runtime.respond_permission(
                     &request.request_id,
-                    acp_reject_option_id_for_cancel(&request),
+                    acp_runtime.permission_option_id_for_discarded_prompt(&request),
                 );
                 return;
             }
@@ -482,12 +592,32 @@ pub(super) fn apply_acp_session_event(
             }
             model.set_stream_activity_thinking(false);
             flush_acp_response_buffer(model, acp_runtime);
-            let preview = ToolApprovalPreview::from_acp_tool_call_update(&request.tool_call);
-            let suspended_tool_call_item_index = preview
-                .as_ref()
-                .and_then(|_| acp_runtime.tool_call_item_index(&request.tool_call.tool_call_id));
+            let transcript_tool_call = acp_permission_transcript_tool_call_update(&request);
+            let permission_tool_call_item_index = {
+                let tool_call_id = transcript_tool_call.tool_call_id.clone();
+                if let Some(total_tokens) = acp_runtime.observe_tool_call_tokens(
+                    &tool_call_id,
+                    acp_tool_call_update_token_text(&transcript_tool_call),
+                ) {
+                    model.set_stream_activity_output_tokens(total_tokens);
+                }
+                upsert_acp_tool_call_update(
+                    model,
+                    acp_runtime,
+                    transcript_tool_call.clone(),
+                    request.title.clone(),
+                )
+            };
+            let preview = ToolApprovalPreview::from_acp_tool_call_update(&transcript_tool_call);
+            let suspended_tool_call_item_index =
+                preview.as_ref().map(|_| permission_tool_call_item_index);
+            model.set_acp_tool_call_permission_waiting_from_runtime(
+                permission_tool_call_item_index,
+                true,
+            );
             model.show_acp_permission_request_with_preview(AcpPermissionPanelRequest {
                 request_id: request.request_id.clone(),
+                tool_call_id: Some(transcript_tool_call.tool_call_id.clone()),
                 title: request.title.clone(),
                 allow_option_id: acp_permission_option_id_for(
                     &request,
@@ -506,6 +636,7 @@ pub(super) fn apply_acp_session_event(
                     AcpPermissionOptionKind::RejectAlways,
                 ),
                 preview,
+                tool_call_item_index: Some(permission_tool_call_item_index),
             });
             if let Some(item_index) = suspended_tool_call_item_index {
                 model.suspend_acp_tool_call_for_approval_panel(item_index);
@@ -542,6 +673,41 @@ pub(super) fn apply_acp_session_event(
     }
 }
 
+fn acp_permission_transcript_tool_call_update(request: &AcpPermissionRequest) -> AcpToolCallUpdate {
+    let mut update = request.tool_call.clone();
+    if is_execute_like_tool_call_update(&update, request.title.as_deref()) {
+        update.content = update.content.map(|content| {
+            content
+                .into_iter()
+                .filter(|content| !matches!(content, AcpToolCallContent::Text(_)))
+                .collect()
+        });
+    }
+    update
+}
+
+fn is_execute_like_tool_call_update(
+    update: &AcpToolCallUpdate,
+    fallback_title: Option<&str>,
+) -> bool {
+    update.kind == Some(AcpToolKind::Execute)
+        || update
+            .title
+            .as_deref()
+            .or(fallback_title)
+            .is_some_and(is_execute_like_tool_title)
+        || update
+            .raw_input
+            .as_ref()
+            .and_then(|raw_input| raw_input.string_field(&["command", "cmd"]))
+            .is_some()
+}
+
+fn is_execute_like_tool_title(title: &str) -> bool {
+    let title = title.trim_start();
+    title.starts_with("Shell:") || title.starts_with("Run ")
+}
+
 fn acp_permission_option_id_for(
     request: &AcpPermissionRequest,
     kind: AcpPermissionOptionKind,
@@ -555,27 +721,27 @@ fn acp_permission_option_id_for(
 
 fn acp_tool_call_token_text(call: &AcpToolCall) -> Option<String> {
     acp_tool_call_projected_token_text(
-        call.raw_input.as_deref(),
+        call.raw_input.as_ref().and_then(|raw| raw.token_text()),
         Some(call.content.as_slice()),
-        call.raw_output.as_deref(),
+        call.raw_output.as_ref().and_then(|raw| raw.token_text()),
     )
 }
 
 fn acp_tool_call_update_token_text(update: &AcpToolCallUpdate) -> Option<String> {
     acp_tool_call_projected_token_text(
-        update.raw_input.as_deref(),
+        update.raw_input.as_ref().and_then(|raw| raw.token_text()),
         update.content.as_deref(),
-        update.raw_output.as_deref(),
+        update.raw_output.as_ref().and_then(|raw| raw.token_text()),
     )
 }
 
 fn acp_tool_call_projected_token_text(
-    raw_input: Option<&str>,
+    raw_input: Option<String>,
     content: Option<&[AcpToolCallContent]>,
-    raw_output: Option<&str>,
+    raw_output: Option<String>,
 ) -> Option<String> {
     if let Some(raw_input) = raw_input.filter(|text| !text.is_empty()) {
-        return Some(raw_input.to_string());
+        return Some(raw_input);
     }
 
     let mut text = String::new();
@@ -588,7 +754,7 @@ fn acp_tool_call_projected_token_text(
         if !text.is_empty() {
             text.push('\n');
         }
-        text.push_str(raw_output);
+        text.push_str(&raw_output);
     }
 
     (!text.is_empty()).then_some(text)
@@ -640,6 +806,80 @@ fn append_token_text_segment(text: &mut String, segment: &str) {
         text.push('\n');
     }
     text.push_str(segment);
+}
+
+fn upsert_acp_tool_call(
+    model: &mut Model,
+    acp_runtime: &mut AcpRuntimeState,
+    call: AcpToolCall,
+) -> usize {
+    let tool_call_id = call.tool_call_id.clone();
+    let item_index = match model.acp_tool_call_item_index_from_runtime(&tool_call_id) {
+        Some(item_index) => {
+            let update = acp_tool_call_update_from_call(call);
+            model.update_acp_tool_call_from_runtime(item_index, update);
+            item_index
+        }
+        None => model.append_acp_tool_call_from_runtime(call),
+    };
+    acp_runtime.track_tool_call(tool_call_id, item_index);
+    item_index
+}
+
+fn upsert_acp_tool_call_update(
+    model: &mut Model,
+    acp_runtime: &mut AcpRuntimeState,
+    update: AcpToolCallUpdate,
+    fallback_title: Option<String>,
+) -> usize {
+    let tool_call_id = update.tool_call_id.clone();
+    let item_index = acp_runtime
+        .tool_call_item_index(&tool_call_id)
+        .or_else(|| model.acp_tool_call_item_index_from_runtime(&tool_call_id));
+
+    let item_index = match item_index {
+        Some(item_index) => {
+            model.update_acp_tool_call_from_runtime(item_index, update);
+            item_index
+        }
+        None => model
+            .append_acp_tool_call_from_runtime(acp_tool_call_from_update(update, fallback_title)),
+    };
+    acp_runtime.track_tool_call(tool_call_id, item_index);
+    item_index
+}
+
+fn acp_tool_call_update_from_call(call: AcpToolCall) -> AcpToolCallUpdate {
+    AcpToolCallUpdate {
+        tool_call_id: call.tool_call_id,
+        title: Some(call.title),
+        kind: Some(call.kind),
+        status: Some(call.status),
+        content: Some(call.content),
+        locations: Some(call.locations),
+        raw_input: call.raw_input,
+        raw_output: call.raw_output,
+    }
+}
+
+fn acp_tool_call_from_update(
+    update: AcpToolCallUpdate,
+    fallback_title: Option<String>,
+) -> AcpToolCall {
+    let tool_call_id = update.tool_call_id;
+    AcpToolCall {
+        title: update
+            .title
+            .or(fallback_title)
+            .unwrap_or_else(|| format!("Tool call {tool_call_id}")),
+        tool_call_id,
+        kind: update.kind.unwrap_or(AcpToolKind::Other),
+        status: update.status.unwrap_or(AcpToolCallStatus::Pending),
+        content: update.content.unwrap_or_default(),
+        locations: update.locations.unwrap_or_default(),
+        raw_input: update.raw_input,
+        raw_output: update.raw_output,
+    }
 }
 
 fn fail_tracked_acp_tool_calls(
@@ -705,10 +945,16 @@ pub(super) fn run_send_acp_prompt_effect(
 
 pub(super) fn run_respond_acp_permission_effect(
     model: &mut Model,
-    acp_runtime: &AcpRuntimeState,
+    acp_runtime: &mut AcpRuntimeState,
     request_id: &str,
     option_id: Option<String>,
+    is_rejection: bool,
+    rejected_tool_call_id: Option<String>,
 ) {
+    if is_rejection {
+        acp_runtime.suppress_rejected_permission_notice_for_tool_call(rejected_tool_call_id);
+    }
+
     if let Err(message) = acp_runtime.respond_permission(request_id, option_id) {
         model.show_transient_status_notice(&message);
     }
@@ -745,7 +991,7 @@ pub(super) fn run_interrupt_acp_prompt_effect(
     model.append_system_message_from_runtime("Chat interrupted");
 }
 
-pub(super) fn acp_reject_option_id_for_cancel(
+pub(super) fn acp_reject_option_id_for_stale_discard(
     request: &crate::runtime::acp::AcpPermissionRequest,
 ) -> Option<String> {
     use crate::runtime::acp::AcpPermissionOptionKind;

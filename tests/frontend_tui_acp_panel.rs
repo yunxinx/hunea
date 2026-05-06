@@ -215,17 +215,26 @@ fn acp_permission_request_replaces_composer_with_tool_approval_panel() {
         rows.iter().all(|row| !row.contains("Request:")),
         "request label row should not be rendered: {rows:?}"
     );
-    assert_ordered_rows(&rows, &["Tool Approval:", "Write file", "Actions:"]);
+    assert_ordered_rows(&rows, &["Tool Approval:", "Write file", "1. Yes"]);
     assert_ordered_rows(
         &rows,
-        &["Allow", "Allow in session", "Reject", "Reject in session"],
+        &[
+            "1. Yes",
+            "2. Yes, allow similar requests during this session",
+            "3. No",
+            "4. No, reject similar requests during this session",
+        ],
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("Actions:")),
+        "tool approval panel should use vertical choices without the old actions heading: {rows:?}"
     );
     assert!(
         rows.iter().all(|row| !row.contains("Reason")),
         "ACP permission panel should not synthesize a reason row: {rows:?}"
     );
     assert_blank_row_after(&rows, "Tool Approval:");
-    assert_gap_between_rows(&rows, "Write file", "Actions:", 1);
+    assert_gap_between_rows(&rows, "Write file", "1. Yes", 1);
     assert!(
         rows.iter().all(|row| !row.contains("ACP permission:")),
         "permission requests should not be rendered as status notices: {rows:?}"
@@ -298,6 +307,8 @@ fn acp_permission_enter_responds_with_selected_tool_approval_option() {
         Some(AppEffect::RespondAcpPermission {
             request_id: "permission-2".to_string(),
             option_id: Some("allow-once".to_string()),
+            is_rejection: false,
+            rejected_tool_call_id: None,
         })
     );
     let rows = render_trimmed_rows(&mut model, 72, 18);
@@ -326,6 +337,8 @@ fn acp_permission_deny_appends_reject_result_to_transcript() {
         Some(AppEffect::RespondAcpPermission {
             request_id: "permission-3".to_string(),
             option_id: Some("reject-once".to_string()),
+            is_rejection: true,
+            rejected_tool_call_id: None,
         })
     );
     let buffer = render_buffer(&mut model, 72, 18);

@@ -49,8 +49,17 @@ pub(super) fn apply_effect_if_needed(
         AppEffect::RespondAcpPermission {
             request_id,
             option_id,
+            is_rejection,
+            rejected_tool_call_id,
         } => {
-            run_respond_acp_permission_effect(model, acp_runtime, &request_id, option_id);
+            run_respond_acp_permission_effect(
+                model,
+                acp_runtime,
+                &request_id,
+                option_id,
+                is_rejection,
+                rejected_tool_call_id,
+            );
             Ok(())
         }
         AppEffect::SetAcpModel { config_id, value } => {

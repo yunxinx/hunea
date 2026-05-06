@@ -355,6 +355,8 @@ fn transcript_overlay_closes_for_runtime_tool_approval_request() {
             Some(AppEffect::RespondAcpPermission {
                 ref request_id,
                 option_id: Some(ref option_id),
+                is_rejection: false,
+                ..
             }) if request_id == "request-1" && option_id == "allow"
         ),
         "enter should route to the tool approval panel while approval is active: {:?}",

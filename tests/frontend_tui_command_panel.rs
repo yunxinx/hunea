@@ -338,21 +338,29 @@ fn debug_tool_command_opens_tool_approval_preview_panel() {
         rows.iter().all(|row| !row.contains("Request:")),
         "request label row should not be rendered: {rows:?}"
     );
-    assert_ordered_rows(&rows, &["Tool Approval:", "sed -n", "Actions:"]);
+    assert_ordered_rows(&rows, &["Tool Approval:", "sed -n", "1. Yes"]);
     assert_ordered_rows(
         &rows,
-        &["Allow", "Allow in session", "Reject", "Reject in session"],
+        &[
+            "1. Yes",
+            "2. Yes, allow similar requests during this session",
+            "3. No",
+            "4. No, reject similar requests during this session",
+        ],
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("Actions:")),
+        "tool approval preview should use vertical choices without the old actions heading: {rows:?}"
     );
     assert!(
         rows.iter().all(|row| !row.contains("Reason")),
         "preview panel should not synthesize a reason row: {rows:?}"
     );
     assert_blank_row_after(&rows, "Tool Approval:");
-    assert_gap_between_rows(&rows, "sed -n", "Actions:", 1);
+    assert_gap_between_rows(&rows, "sed -n", "1. Yes", 1);
     assert!(
-        rows.iter().any(|row| {
-            row.contains("Press Enter to choose · Y allow · ESC/N reject · ↑↓←→ to navigate")
-        }),
+        rows.iter()
+            .any(|row| { row.contains("Esc to cancel · Enter to choose") }),
         "approval footer should use concise key hint copy: {rows:?}"
     );
     let buffer = render_buffer(&mut model, 80, 16);

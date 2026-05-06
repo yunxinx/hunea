@@ -75,6 +75,7 @@ pub(crate) struct ToolResultItem {
     render_cache_key: u64,
     active_marker_started_at: Option<Instant>,
     approval_suspended: bool,
+    permission_waiting: bool,
 }
 
 impl ToolResultItem {
@@ -97,7 +98,13 @@ impl ToolResultItem {
 
     fn from_body(body: ToolResultBody, render_mode: ToolActivityRenderMode) -> Self {
         let approval_suspended = false;
-        let render_cache_key = tool_result_render_cache_key(&body, render_mode, approval_suspended);
+        let permission_waiting = false;
+        let render_cache_key = tool_result_render_cache_key(
+            &body,
+            render_mode,
+            approval_suspended,
+            permission_waiting,
+        );
         let active_marker_started_at =
             active_marker_started_at_for_body(&body).then_some(Instant::now());
         Self {
@@ -106,6 +113,7 @@ impl ToolResultItem {
             render_cache_key,
             active_marker_started_at,
             approval_suspended,
+            permission_waiting,
         }
     }
 
@@ -125,6 +133,13 @@ impl ToolResultItem {
 
     pub(crate) fn has_active_acp_tool_call(&self) -> bool {
         self.active_marker_started_at.is_some() && !self.is_compact_approval_suspended()
+    }
+
+    pub(crate) fn acp_tool_call_id(&self) -> Option<&str> {
+        match &self.body {
+            ToolResultBody::AcpToolCall(call) => Some(call.tool_call_id.as_str()),
+            ToolResultBody::Approval { .. } => None,
+        }
     }
 
     pub(crate) fn active_marker_started_at(&self) -> Option<Instant> {
@@ -193,8 +208,16 @@ impl ToolResultItem {
             ToolResultBody::Approval { content, .. } => content.len(),
             ToolResultBody::AcpToolCall(call) => {
                 call.title.len()
-                    + call.raw_input.as_deref().map(str::len).unwrap_or(0)
-                    + call.raw_output.as_deref().map(str::len).unwrap_or(0)
+                    + call
+                        .raw_input
+                        .as_ref()
+                        .map(|raw_input| raw_input.display_byte_len())
+                        .unwrap_or(0)
+                    + call
+                        .raw_output
+                        .as_ref()
+                        .map(|raw_output| raw_output.display_byte_len())
+                        .unwrap_or(0)
                     + call
                         .content
                         .iter()
@@ -278,6 +301,19 @@ impl ToolResultItem {
         true
     }
 
+    pub(crate) fn set_permission_waiting(&mut self, waiting: bool) -> bool {
+        if !matches!(self.body, ToolResultBody::AcpToolCall(_)) {
+            return false;
+        }
+        if self.permission_waiting == waiting {
+            return false;
+        }
+
+        self.permission_waiting = waiting;
+        self.refresh_render_cache_key();
+        true
+    }
+
     pub(crate) fn update_acp_tool_call(&mut self, update: AcpToolCallUpdate) -> bool {
         let ToolResultBody::AcpToolCall(call) = &mut self.body else {
             return false;
@@ -294,6 +330,9 @@ impl ToolResultItem {
         }
         if let Some(status) = update.status {
             call.status = status;
+            if status != AcpToolCallStatus::Pending {
+                self.permission_waiting = false;
+            }
         }
         if let Some(content) = update.content {
             call.content = content;
@@ -326,6 +365,28 @@ impl ToolResultItem {
 
         call.status = AcpToolCallStatus::Failed;
         call.content = vec![AcpToolCallContent::Text(message.into())];
+        self.permission_waiting = false;
+        self.active_marker_started_at = None;
+        self.refresh_render_cache_key();
+        true
+    }
+
+    pub(crate) fn mark_acp_tool_call_rejected(&mut self) -> bool {
+        let ToolResultBody::AcpToolCall(call) = &mut self.body else {
+            return false;
+        };
+        if call.status == AcpToolCallStatus::Failed
+            && call.content.is_empty()
+            && !self.permission_waiting
+        {
+            return false;
+        }
+
+        call.status = AcpToolCallStatus::Failed;
+        call.content.clear();
+        call.raw_input = None;
+        call.raw_output = None;
+        self.permission_waiting = false;
         self.active_marker_started_at = None;
         self.refresh_render_cache_key();
         true
@@ -473,7 +534,7 @@ impl ToolResultItem {
     ) -> Vec<Line<'static>> {
         let width = usize::from(width.max(1));
         let mut lines = self.acp_tool_call_header_lines_at(call, width, palette, now);
-        for block in acp_tool_call_detail_blocks(call, self.render_mode) {
+        for block in acp_tool_call_detail_blocks(call, self.render_mode, self.permission_waiting) {
             lines.extend(self.wrap_acp_detail_block(&block, width, palette));
         }
         lines
@@ -746,8 +807,12 @@ impl ToolResultItem {
     }
 
     fn refresh_render_cache_key(&mut self) {
-        self.render_cache_key =
-            tool_result_render_cache_key(&self.body, self.render_mode, self.approval_suspended);
+        self.render_cache_key = tool_result_render_cache_key(
+            &self.body,
+            self.render_mode,
+            self.approval_suspended,
+            self.permission_waiting,
+        );
     }
 
     fn is_compact_approval_suspended(&self) -> bool {
@@ -877,11 +942,13 @@ fn tool_result_render_cache_key(
     body: &ToolResultBody,
     render_mode: ToolActivityRenderMode,
     approval_suspended: bool,
+    permission_waiting: bool,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     "tool_result".hash(&mut hasher);
     render_mode.hash(&mut hasher);
     approval_suspended.hash(&mut hasher);
+    permission_waiting.hash(&mut hasher);
     body.hash(&mut hasher);
     hasher.finish()
 }
@@ -1061,6 +1128,212 @@ mod tests {
     }
 
     #[test]
+    fn pending_execute_tool_call_renders_waiting_detail() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-approval".to_string(),
+                title: "Shell: cargo check".to_string(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolCallStatus::Pending,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec!["● cargo check".to_string(), "  └─ Waiting...".to_string()]
+        );
+        assert!(
+            rendered_plain
+                .iter()
+                .all(|line| !line.contains("Requesting approval")),
+            "tool call row should not duplicate the approval panel request text: {rendered_plain:?}"
+        );
+    }
+
+    #[test]
+    fn active_execute_tool_call_defers_streamed_content_until_finished() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-exec".to_string(),
+                title: "Shell: cargo check".to_string(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolCallStatus::InProgress,
+                content: vec![AcpToolCallContent::Text(
+                    "Requesting approval to perform: Run command `cargo check`".to_string(),
+                )],
+                locations: Vec::new(),
+                raw_input: Some(r#"{"command":"cargo check"}"#.into()),
+                raw_output: Some("Checking lumos v0.1.0".into()),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec!["● cargo check".to_string(), "  └─ Waiting...".to_string()]
+        );
+        assert!(
+            rendered_plain.iter().all(|line| {
+                !line.contains("Requesting approval")
+                    && !line.contains("Checking lumos")
+                    && !line.contains(r#"{"command":"cargo check"}"#)
+            }),
+            "active command tool calls should not stream command details in the main transcript: {rendered_plain:?}"
+        );
+    }
+
+    #[test]
+    fn completed_execute_tool_call_renders_deferred_content() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-exec".to_string(),
+                title: "Shell: cargo check".to_string(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolCallStatus::Completed,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: Some("Checking lumos v0.1.0".into()),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec![
+                "● cargo check".to_string(),
+                "  └─ Checking lumos v0.1.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn completed_execute_tool_call_prefers_raw_output_and_hides_permission_copy_content() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-exec".to_string(),
+                title: "Shell: cargo check".to_string(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolCallStatus::Completed,
+                content: vec![AcpToolCallContent::Text(
+                    "Requesting approval to perform: Run command `cargo check`".to_string(),
+                )],
+                locations: Vec::new(),
+                raw_input: Some(r#"{"command":"cargo check"}"#.into()),
+                raw_output: Some("Finished dev profile".into()),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec![
+                "● cargo check".to_string(),
+                "  └─ Finished dev profile".to_string(),
+            ]
+        );
+        assert!(
+            rendered_plain.iter().all(|line| {
+                !line.contains("Requesting approval")
+                    && !line.contains("Input:")
+                    && !line.contains(r#"{"command":"cargo check"}"#)
+            }),
+            "completed command rows should show final output without approval copy or raw input: {rendered_plain:?}"
+        );
+    }
+
+    #[test]
+    fn failed_execute_tool_call_renders_final_output_without_raw_input() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-exec".to_string(),
+                title: "Shell: cargo check".to_string(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolCallStatus::Failed,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: Some(r#"{"command":"cargo check"}"#.into()),
+                raw_output: Some("error: could not compile `lumos`".into()),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec![
+                "● cargo check".to_string(),
+                "  └─ error: could not compile `lumos`".to_string(),
+            ]
+        );
+        assert!(
+            rendered_plain.iter().all(|line| {
+                !line.contains("Input:") && !line.contains(r#"{"command":"cargo check"}"#)
+            }),
+            "failed command rows should show final output without raw transport input: {rendered_plain:?}"
+        );
+    }
+
+    #[test]
+    fn completed_non_execute_tool_call_still_renders_text_content() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-fetch".to_string(),
+                title: "Fetch package metadata".to_string(),
+                kind: AcpToolKind::Fetch,
+                status: AcpToolCallStatus::Completed,
+                content: vec![AcpToolCallContent::Text("Found 3 releases".to_string())],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec![
+                "● Fetch package metadata".to_string(),
+                "  └─ Found 3 releases".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn acp_tool_call_raw_output_trailing_newline_does_not_render_blank_line() {
         let palette = default_palette();
         let item = ToolResultItem::from_acp_tool_call(
@@ -1072,7 +1345,7 @@ mod tests {
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: None,
-                raw_output: Some("Checking lumos\n".to_string()),
+                raw_output: Some("Checking lumos\n".into()),
             },
             ToolActivityRenderMode::Compact,
         );
@@ -1095,6 +1368,43 @@ mod tests {
     }
 
     #[test]
+    fn acp_pending_text_content_is_not_approval_waiting_without_permission_state() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "Check policy".to_string(),
+                kind: AcpToolKind::Other,
+                status: AcpToolCallStatus::Pending,
+                content: vec![AcpToolCallContent::Text(
+                    "This result requires approval from the project owner.".to_string(),
+                )],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert!(
+            rendered_plain
+                .iter()
+                .any(|line| line.contains("requires approval from the project owner")),
+            "plain tool text should remain visible unless the runtime marks the row as waiting for permission: {rendered_plain:?}"
+        );
+        assert!(
+            rendered_plain
+                .iter()
+                .all(|line| !line.contains("Waiting...")),
+            "plain tool text must not be inferred as approval waiting from content wording: {rendered_plain:?}"
+        );
+    }
+
+    #[test]
     fn acp_tool_call_multi_line_raw_output_uses_four_space_continuation_prefix() {
         let palette = default_palette();
         let item = ToolResultItem::from_acp_tool_call(
@@ -1106,7 +1416,7 @@ mod tests {
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: None,
-                raw_output: Some("first line\nsecond line".to_string()),
+                raw_output: Some("first line\nsecond line".into()),
             },
             ToolActivityRenderMode::Compact,
         );
@@ -1127,6 +1437,36 @@ mod tests {
     }
 
     #[test]
+    fn acp_tool_call_terminal_content_renders_unsupported_notice() {
+        let item = ToolResultItem::from_acp_tool_call(
+            AcpToolCall {
+                tool_call_id: "call-terminal".to_string(),
+                title: "Run tests".to_string(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolCallStatus::InProgress,
+                content: vec![AcpToolCallContent::Terminal {
+                    terminal_id: "term-1".to_string(),
+                }],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Compact,
+        );
+
+        let plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("ACP terminal unavailable"));
+        assert!(plain.contains("term-1"));
+        assert!(plain.contains("terminal/create unsupported"));
+    }
+
+    #[test]
     fn acp_tool_call_raw_output_uses_secondary_color_and_codex_like_alignment() {
         let palette = default_palette();
         let item = ToolResultItem::from_acp_tool_call(
@@ -1140,7 +1480,7 @@ mod tests {
                 raw_input: None,
                 raw_output: Some(
                     "Checking lumos v0.1.0 (/home/archie/GoCodes/lumos_rust)\nFinished `dev` profile [unoptimized + debuginfo] target(s) in 1.01s"
-                        .to_string(),
+                        .into(),
                 ),
             },
             ToolActivityRenderMode::Compact,
@@ -1183,8 +1523,8 @@ mod tests {
                     path: "Temp.md".to_string(),
                     line: Some(1),
                 }],
-                raw_input: Some(r#"{"path":"Temp.md"}"#.to_string()),
-                raw_output: Some("# 临时文件\nbody".to_string()),
+                raw_input: Some(r#"{"path":"Temp.md"}"#.into()),
+                raw_output: Some("# 临时文件\nbody".into()),
             },
             ToolActivityRenderMode::Compact,
         );
@@ -1209,8 +1549,8 @@ mod tests {
                     "     1  # 临时文件\n     2\n     3  body".to_string(),
                 )],
                 locations: Vec::new(),
-                raw_input: Some(r#"{"path":"Temp.md"}"#.to_string()),
-                raw_output: Some("# 临时文件\nbody".to_string()),
+                raw_input: Some(r#"{"path":"Temp.md"}"#.into()),
+                raw_output: Some("# 临时文件\nbody".into()),
             },
             ToolActivityRenderMode::Compact,
         );
@@ -1234,8 +1574,7 @@ mod tests {
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: Some(
-                    r##"{"path":"TEMP.md","content":"# TEMP\n\nraw transport content"}"##
-                        .to_string(),
+                    r##"{"path":"TEMP.md","content":"# TEMP\n\nraw transport content"}"##.into(),
                 ),
                 raw_output: None,
             },
@@ -1268,7 +1607,7 @@ mod tests {
                 status: AcpToolCallStatus::InProgress,
                 content: Vec::new(),
                 locations: Vec::new(),
-                raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.to_string()),
+                raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
                 raw_output: None,
             },
             ToolActivityRenderMode::Compact,

@@ -153,7 +153,8 @@ fn tool_activity_uses_compact_and_detailed_rendering_modes() {
             (1..=14)
                 .map(|line| format!("line {line}"))
                 .collect::<Vec<_>>()
-                .join("\n"),
+                .join("\n")
+                .into(),
         ),
     });
 

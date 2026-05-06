@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use crate::runtime::acp::{
-    AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolCallUpdate, AcpToolKind,
+    AcpToolCall, AcpToolCallContent, AcpToolCallRawValue, AcpToolCallStatus, AcpToolCallUpdate,
+    AcpToolKind,
 };
 
 /// `ToolApprovalPreview` 表示审批面板中可直接展示的工具变更预览。
@@ -39,7 +40,7 @@ impl ToolApprovalPreview {
             .and_then(file_preview_from_acp_content)
             .or_else(|| {
                 let path = acp_write_tool_call_update_target(update)?;
-                let content = update.raw_input.as_deref().and_then(raw_input_content)?;
+                let content = update.raw_input.as_ref().and_then(raw_input_content)?;
                 Some(Self::file_write(path, content))
             })
     }
@@ -90,7 +91,7 @@ pub(in crate::frontend::tui) fn acp_display_path(path: &str) -> String {
 pub(in crate::frontend::tui) fn is_acp_write_tool_call(call: &AcpToolCall) -> bool {
     acp_write_tool_call_title_target(&call.title).is_some()
         || (call.kind == AcpToolKind::Edit
-            && call.raw_input.as_deref().is_some_and(|raw_input| {
+            && call.raw_input.as_ref().is_some_and(|raw_input| {
                 raw_input_path(raw_input).is_some() && raw_input_content(raw_input).is_some()
             }))
 }
@@ -106,7 +107,7 @@ pub(in crate::frontend::tui) fn should_collapse_acp_write_tool_call(call: &AcpTo
 
 pub(in crate::frontend::tui) fn acp_write_tool_call_target(call: &AcpToolCall) -> Option<String> {
     acp_write_tool_call_title_target(&call.title)
-        .or_else(|| call.raw_input.as_deref().and_then(raw_input_path))
+        .or_else(|| call.raw_input.as_ref().and_then(raw_input_path))
         .map(|path| acp_display_path(&path))
 }
 
@@ -115,7 +116,7 @@ fn acp_write_tool_call_update_target(update: &AcpToolCallUpdate) -> Option<Strin
         .title
         .as_deref()
         .and_then(acp_write_tool_call_title_target)
-        .or_else(|| update.raw_input.as_deref().and_then(raw_input_path))
+        .or_else(|| update.raw_input.as_ref().and_then(raw_input_path))
         .map(|path| acp_display_path(&path))
 }
 
@@ -161,18 +162,15 @@ fn file_preview_from_acp_content(content: &[AcpToolCallContent]) -> Option<ToolA
     })
 }
 
-fn raw_input_path(raw_input: &str) -> Option<String> {
+fn raw_input_path(raw_input: &AcpToolCallRawValue) -> Option<String> {
     raw_input_string_field(raw_input, &["path", "file_path", "filePath"])
         .filter(|path| !path.trim().is_empty())
 }
 
-fn raw_input_content(raw_input: &str) -> Option<String> {
+fn raw_input_content(raw_input: &AcpToolCallRawValue) -> Option<String> {
     raw_input_string_field(raw_input, &["content", "new_text", "newText", "text"])
 }
 
-fn raw_input_string_field(raw_input: &str, keys: &[&str]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(raw_input).ok()?;
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
-        .map(str::to_string)
+fn raw_input_string_field(raw_input: &AcpToolCallRawValue, keys: &[&str]) -> Option<String> {
+    raw_input.string_field(keys)
 }

@@ -15,7 +15,7 @@ use agent_client_protocol::schema::{
 use super::{
     AcpAvailableCommand, AcpAvailableCommandInput, AcpModelConfig, AcpModelOption, AcpPrompt,
     AcpSessionCommand, AcpSessionEvent, AcpToolCall, AcpToolCallContent, AcpToolCallLocation,
-    AcpToolCallStatus, AcpToolCallUpdate, AcpToolKind,
+    AcpToolCallRawValue, AcpToolCallStatus, AcpToolCallUpdate, AcpToolKind,
     initialize::{
         build_initialize_request, initialize_outcome_from_response, protocol_version_warning,
     },
@@ -590,8 +590,8 @@ fn acp_tool_call_from_sdk(call: agent_client_protocol::schema::ToolCall) -> AcpT
             .into_iter()
             .map(acp_tool_call_location_from_sdk)
             .collect(),
-        raw_input: call.raw_input.map(json_value_to_display_string),
-        raw_output: call.raw_output.map(json_value_to_display_string),
+        raw_input: call.raw_input.map(AcpToolCallRawValue::new),
+        raw_output: call.raw_output.map(AcpToolCallRawValue::new),
     }
 }
 
@@ -616,8 +616,8 @@ fn acp_tool_call_update_from_sdk(
                 .map(acp_tool_call_location_from_sdk)
                 .collect()
         }),
-        raw_input: fields.raw_input.map(json_value_to_display_string),
-        raw_output: fields.raw_output.map(json_value_to_display_string),
+        raw_input: fields.raw_input.map(AcpToolCallRawValue::new),
+        raw_output: fields.raw_output.map(AcpToolCallRawValue::new),
     }
 }
 
@@ -711,10 +711,6 @@ fn acp_tool_call_content_from_sdk(
         },
         _ => AcpToolCallContent::Unknown("tool_call_content".to_string()),
     }
-}
-
-fn json_value_to_display_string(value: serde_json::Value) -> String {
-    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
 }
 
 fn acp_model_config_from_config_options(

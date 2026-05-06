@@ -34,6 +34,8 @@ pub enum AppEffect {
     RespondAcpPermission {
         request_id: String,
         option_id: Option<String>,
+        is_rejection: bool,
+        rejected_tool_call_id: Option<String>,
     },
     SetAcpModel {
         config_id: Option<String>,

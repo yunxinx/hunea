@@ -11,7 +11,7 @@ use crate::frontend::tui::{
     transcript::wrap_prompt_visual_lines,
 };
 
-use super::tool_approval_choices;
+use super::{approval_choice_line, tool_approval_choices};
 
 const FILE_PREVIEW_LINE_NUMBER_WIDTH: usize = TOOL_ACTIVITY_LINE_NUMBER_WIDTH;
 
@@ -116,19 +116,11 @@ fn append_file_preview_choice_lines(model: &Model, lines: &mut Vec<Line<'static>
         .enumerate()
     {
         let selected = index == model.tool_approval_panel.selected;
-        let marker = if selected { "➜ " } else { "  " };
-        let style = if selected {
-            primary_text_style(model.palette).bold()
-        } else {
-            secondary_text_style(model.palette)
-        };
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(marker, secondary_text_style(model.palette)),
-            Span::styled(
-                format!("{}. {}", index + 1, choice.file_preview_display_label()),
-                style,
-            ),
-        ]));
+        lines.push(approval_choice_line(
+            model,
+            index,
+            selected,
+            choice.file_preview_display_label(),
+        ));
     }
 }

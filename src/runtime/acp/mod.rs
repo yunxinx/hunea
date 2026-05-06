@@ -17,7 +17,7 @@ pub use command::{
 pub use event::{
     AcpAvailableCommand, AcpAvailableCommandInput, AcpInitializeOutcome, AcpModelConfig,
     AcpModelOption, AcpSessionEvent, AcpToolCall, AcpToolCallContent, AcpToolCallLocation,
-    AcpToolCallStatus, AcpToolCallUpdate, AcpToolKind,
+    AcpToolCallRawValue, AcpToolCallStatus, AcpToolCallUpdate, AcpToolKind,
 };
 pub use handshake::{
     AcpHandshakeError, initialize_agent_command, initialize_agent_command_blocking,

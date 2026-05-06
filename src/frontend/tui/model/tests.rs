@@ -1685,6 +1685,8 @@ fn acp_permission_accept_key_returns_selected_option() {
         Some(AppEffect::RespondAcpPermission {
             request_id: "permission-1".to_string(),
             option_id: Some("allow-once".to_string()),
+            is_rejection: false,
+            rejected_tool_call_id: None,
         })
     );
     assert!(model.current_status_notice_text().is_empty());
@@ -1712,6 +1714,8 @@ fn acp_permission_reject_key_returns_reject_option() {
         Some(AppEffect::RespondAcpPermission {
             request_id: "permission-2".to_string(),
             option_id: Some("reject-once".to_string()),
+            is_rejection: true,
+            rejected_tool_call_id: None,
         })
     );
     assert!(!model.tool_approval_panel_active());
@@ -1739,6 +1743,8 @@ fn acp_permission_enter_on_session_allow_returns_allow_always_option() {
         Some(AppEffect::RespondAcpPermission {
             request_id: "permission-3".to_string(),
             option_id: Some("allow-always".to_string()),
+            is_rejection: false,
+            rejected_tool_call_id: None,
         })
     );
     assert!(!model.tool_approval_panel_active());
@@ -1759,7 +1765,8 @@ fn acp_permission_enter_on_session_deny_returns_reject_always_option() {
     });
 
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
-    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
     assert_eq!(
@@ -1767,6 +1774,8 @@ fn acp_permission_enter_on_session_deny_returns_reject_always_option() {
         Some(AppEffect::RespondAcpPermission {
             request_id: "permission-4".to_string(),
             option_id: Some("reject-always".to_string()),
+            is_rejection: true,
+            rejected_tool_call_id: None,
         })
     );
     assert!(!model.tool_approval_panel_active());
@@ -1792,6 +1801,8 @@ fn acp_permission_shortcuts_use_session_options_when_once_options_are_absent() {
         Some(AppEffect::RespondAcpPermission {
             request_id: "permission-5".to_string(),
             option_id: Some("allow-always".to_string()),
+            is_rejection: false,
+            rejected_tool_call_id: None,
         })
     );
 
@@ -1810,6 +1821,8 @@ fn acp_permission_shortcuts_use_session_options_when_once_options_are_absent() {
         Some(AppEffect::RespondAcpPermission {
             request_id: "permission-6".to_string(),
             option_id: Some("reject-always".to_string()),
+            is_rejection: true,
+            rejected_tool_call_id: None,
         })
     );
 }

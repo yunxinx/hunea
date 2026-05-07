@@ -20,6 +20,7 @@ use super::{
         build_initialize_request, initialize_outcome_from_response, protocol_version_warning,
     },
     permission::{AcpPermissionRegistry, acp_permission_request_from_sdk},
+    terminal::{AcpTerminalError, AcpTerminalManager},
     worker::AcpWorkerCommand,
 };
 
@@ -29,6 +30,21 @@ enum AcpPromptReadOutcome {
 }
 
 type AcpPromptResponseReceiver = tokio::sync::oneshot::Receiver<Result<String, String>>;
+
+#[derive(Clone)]
+pub(crate) struct AcpTransportState {
+    started: Arc<AtomicBool>,
+    permissions: AcpPermissionRegistry,
+}
+
+impl AcpTransportState {
+    pub(crate) fn new(started: Arc<AtomicBool>, permissions: AcpPermissionRegistry) -> Self {
+        Self {
+            started,
+            permissions,
+        }
+    }
+}
 
 pub(crate) fn run_worker_thread(
     agent_id: String,
@@ -54,13 +70,13 @@ pub(crate) fn run_worker_thread(
         }
     };
 
+    let transport_state = AcpTransportState::new(Arc::clone(&started), permissions);
     let result = runtime.block_on(run_agent_command_worker(
         command,
         command_rx,
         cancel_rx,
         event_tx.clone(),
-        Arc::clone(&started),
-        permissions,
+        transport_state,
     ));
 
     if let Err(message) = result {
@@ -81,8 +97,7 @@ async fn run_agent_command_worker(
     command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
     cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
-    started: Arc<AtomicBool>,
-    permissions: AcpPermissionRegistry,
+    transport_state: AcpTransportState,
 ) -> Result<(), String> {
     use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
@@ -112,8 +127,7 @@ async fn run_agent_command_worker(
         command_rx,
         cancel_rx,
         event_tx,
-        started,
-        permissions,
+        transport_state,
     )
     .await;
 
@@ -127,18 +141,84 @@ pub(crate) async fn run_agent_transport_worker<T>(
     command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
     cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
-    started: Arc<AtomicBool>,
-    permissions: AcpPermissionRegistry,
+    transport_state: AcpTransportState,
 ) -> Result<(), String>
 where
     T: agent_client_protocol::ConnectTo<agent_client_protocol::Client> + 'static,
 {
-    use acp::schema::NewSessionRequest;
+    use acp::schema::{
+        CreateTerminalRequest, KillTerminalRequest, NewSessionRequest, ReleaseTerminalRequest,
+        TerminalOutputRequest, WaitForTerminalExitRequest,
+    };
     use agent_client_protocol as acp;
+
+    let terminal_manager = AcpTerminalManager::new(agent_id.clone(), event_tx.clone());
+    let create_terminal_manager = terminal_manager.clone();
+    let output_terminal_manager = terminal_manager.clone();
+    let wait_terminal_manager = terminal_manager.clone();
+    let kill_terminal_manager = terminal_manager.clone();
+    let release_terminal_manager = terminal_manager.clone();
+    let shutdown_terminal_manager = terminal_manager.clone();
 
     acp::Client
         .builder()
         .name("lumos")
+        .on_receive_request(
+            async move |request: CreateTerminalRequest, responder, _connection| {
+                let response = create_terminal_manager.create(request).await;
+                match response {
+                    Ok(response) => responder.respond(response),
+                    Err(error) => {
+                        responder.respond_with_error(acp_error_from_terminal_error(error))
+                    }
+                }
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: TerminalOutputRequest, responder, _connection| {
+                match output_terminal_manager.output(request) {
+                    Ok(response) => responder.respond(response),
+                    Err(error) => {
+                        responder.respond_with_error(acp_error_from_terminal_error(error))
+                    }
+                }
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: WaitForTerminalExitRequest, responder, _connection| {
+                match wait_terminal_manager.wait_for_exit(request).await {
+                    Ok(response) => responder.respond(response),
+                    Err(error) => {
+                        responder.respond_with_error(acp_error_from_terminal_error(error))
+                    }
+                }
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: KillTerminalRequest, responder, _connection| {
+                match kill_terminal_manager.kill(request) {
+                    Ok(response) => responder.respond(response),
+                    Err(error) => {
+                        responder.respond_with_error(acp_error_from_terminal_error(error))
+                    }
+                }
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: ReleaseTerminalRequest, responder, _connection| {
+                match release_terminal_manager.release(request) {
+                    Ok(response) => responder.respond(response),
+                    Err(error) => {
+                        responder.respond_with_error(acp_error_from_terminal_error(error))
+                    }
+                }
+            },
+            acp::on_receive_request!(),
+        )
         .connect_with(transport, async move |connection| {
             let response = connection
                 .send_request(build_initialize_request())
@@ -165,7 +245,7 @@ where
                     .or_else(|| acp_model_config_from_models(session_response.models.as_ref()));
             let mut session = connection.attach_session(session_response, Vec::new())?;
             let session_id = session.session_id().to_string();
-            started.store(true, Ordering::SeqCst);
+            transport_state.started.store(true, Ordering::SeqCst);
             event_tx
                 .send(AcpSessionEvent::Started {
                     agent_id: agent_id.clone(),
@@ -182,16 +262,18 @@ where
                     .map_err(|_| acp::Error::internal_error())?;
             }
 
-            run_agent_prompt_loop(
+            let prompt_loop_result = run_agent_prompt_loop(
                 agent_id.clone(),
                 &mut session,
                 command_rx,
                 cancel_rx,
                 event_tx.clone(),
-                permissions,
+                transport_state.permissions,
             )
-            .await
-            .map_err(|error| acp::Error::internal_error().data(error))?;
+            .await;
+
+            shutdown_terminal_manager.release_all_for_shutdown();
+            prompt_loop_result.map_err(|error| acp::Error::internal_error().data(error))?;
 
             let _ = event_tx.send(AcpSessionEvent::Stopped {
                 agent_id,
@@ -316,6 +398,19 @@ async fn run_agent_prompt_loop(
         }
     }
     Ok(())
+}
+
+fn acp_error_from_terminal_error(error: AcpTerminalError) -> agent_client_protocol::Error {
+    match error {
+        AcpTerminalError::InvalidRequest(message) => {
+            agent_client_protocol::Error::invalid_params().data(message)
+        }
+        AcpTerminalError::NotFound(message) => agent_client_protocol::Error::invalid_params()
+            .data(format!("unknown terminalId: {message}")),
+        AcpTerminalError::Spawn(message) => {
+            agent_client_protocol::Error::internal_error().data(message)
+        }
+    }
 }
 
 fn send_acp_prompt_request(

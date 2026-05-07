@@ -33,7 +33,7 @@ use crate::frontend::tui::{
     theme::TerminalPalette,
     tool_result::{ToolActivityRenderMode, ToolResultItem, ToolResultKind},
 };
-use crate::runtime::acp::{AcpToolCall, AcpToolCallUpdate};
+use crate::runtime::acp::{AcpTerminalSnapshot, AcpToolCall, AcpToolCallUpdate};
 
 mod block_materialize;
 mod metrics_exactize;
@@ -331,6 +331,32 @@ impl Transcript {
             return false;
         }
         self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
+        true
+    }
+
+    /// `set_acp_terminal_snapshot` 刷新引用指定 terminal 的 tool call 展示项。
+    pub(crate) fn set_acp_terminal_snapshot(&mut self, snapshot: AcpTerminalSnapshot) -> bool {
+        let mut first_dirty: Option<usize> = None;
+        let mut items = self.items.as_ref().clone();
+        for (item_index, item) in items.iter_mut().enumerate() {
+            let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+                continue;
+            };
+            let mut tool_result = tool_result.clone();
+            if !tool_result.set_acp_terminal_snapshot(snapshot.clone()) {
+                continue;
+            }
+            *item = Rc::new(TranscriptItem::ToolResult(tool_result));
+            first_dirty = Some(first_dirty.map_or(item_index, |dirty| dirty.min(item_index)));
+        }
+
+        let Some(first_dirty) = first_dirty else {
+            return false;
+        };
+        self.items = Rc::new(items);
+        self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.mark_metrics_dirty_from(first_dirty);
+        self.screen_cache.mark_dirty_from(first_dirty);
         true
     }
 

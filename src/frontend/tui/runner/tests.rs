@@ -17,8 +17,8 @@ use super::*;
 use crate::frontend::tui::{AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem};
 use crate::runtime::acp::{
     AcpAvailableCommand, AcpAvailableCommandInput, AcpInitializeOutcome, AcpSessionEvent,
-    AcpToolCall, AcpToolCallContent, AcpToolCallLocation, AcpToolCallStatus, AcpToolCallUpdate,
-    AcpToolKind,
+    AcpTerminalExitStatus, AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent,
+    AcpToolCallLocation, AcpToolCallStatus, AcpToolCallUpdate, AcpToolKind,
 };
 use crate::runtime::model_catalog::ModelSelection;
 use crate::runtime::native::{
@@ -997,6 +997,57 @@ fn acp_permission_request_flushes_buffered_agent_text() {
     assert!(plain.contains("需要先确认"));
     assert!(plain.contains("Write file"));
     assert!(plain.contains("确认后继续"));
+}
+
+#[test]
+fn acp_terminal_update_renders_embedded_terminal_output() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCall {
+            agent_id: "Kimi Code CLI".to_string(),
+            call: AcpToolCall {
+                tool_call_id: "tool-terminal".to_string(),
+                title: "cargo check".to_string(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolCallStatus::InProgress,
+                content: vec![AcpToolCallContent::Terminal {
+                    terminal_id: "term-1".to_string(),
+                }],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::TerminalUpdated {
+            agent_id: "Kimi Code CLI".to_string(),
+            snapshot: AcpTerminalSnapshot {
+                terminal_id: "term-1".to_string(),
+                output: "Checking lumos\nFinished".to_string(),
+                truncated: false,
+                exit_status: Some(AcpTerminalExitStatus {
+                    exit_code: Some(0),
+                    signal: None,
+                }),
+                released: false,
+            },
+        },
+    );
+
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(transcript.contains("cargo check"));
+    assert!(transcript.contains("Checking lumos"));
+    assert!(transcript.contains("Finished"));
+    assert!(transcript.contains("Exited with code 0"));
+    assert!(!transcript.contains("terminal/create unsupported"));
 }
 
 #[test]

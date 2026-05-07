@@ -193,6 +193,23 @@ pub struct AcpToolCallUpdate {
     pub raw_output: Option<AcpToolCallRawValue>,
 }
 
+/// `AcpTerminalExitStatus` 表示 ACP terminal 命令退出状态。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AcpTerminalExitStatus {
+    pub exit_code: Option<u32>,
+    pub signal: Option<String>,
+}
+
+/// `AcpTerminalSnapshot` 表示 TUI 渲染 terminal 嵌入块所需的当前输出快照。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AcpTerminalSnapshot {
+    pub terminal_id: String,
+    pub output: String,
+    pub truncated: bool,
+    pub exit_status: Option<AcpTerminalExitStatus>,
+    pub released: bool,
+}
+
 /// `AcpInitializeOutcome` 表示 ACP initialize 握手后的 agent 基本信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpInitializeOutcome {
@@ -269,6 +286,10 @@ pub enum AcpSessionEvent {
     PermissionRequested {
         agent_id: String,
         request: AcpPermissionRequest,
+    },
+    TerminalUpdated {
+        agent_id: String,
+        snapshot: AcpTerminalSnapshot,
     },
     PermissionRequestCancelled {
         agent_id: String,

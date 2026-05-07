@@ -9,6 +9,7 @@ mod permission;
 mod prompt_builder;
 mod protocol;
 pub mod registry;
+pub(crate) mod terminal;
 mod worker;
 
 pub use command::{
@@ -16,8 +17,9 @@ pub use command::{
 };
 pub use event::{
     AcpAvailableCommand, AcpAvailableCommandInput, AcpInitializeOutcome, AcpModelConfig,
-    AcpModelOption, AcpSessionEvent, AcpToolCall, AcpToolCallContent, AcpToolCallLocation,
-    AcpToolCallRawValue, AcpToolCallStatus, AcpToolCallUpdate, AcpToolKind,
+    AcpModelOption, AcpSessionEvent, AcpTerminalExitStatus, AcpTerminalSnapshot, AcpToolCall,
+    AcpToolCallContent, AcpToolCallLocation, AcpToolCallRawValue, AcpToolCallStatus,
+    AcpToolCallUpdate, AcpToolKind,
 };
 pub use handshake::{
     AcpHandshakeError, initialize_agent_command, initialize_agent_command_blocking,
@@ -35,7 +37,7 @@ pub use worker::{AcpSessionWorker, AcpWorkerSendError};
 #[cfg(test)]
 pub(crate) use permission::AcpPermissionRegistry;
 #[cfg(test)]
-pub(crate) use protocol::run_agent_transport_worker;
+pub(crate) use protocol::{AcpTransportState, run_agent_transport_worker};
 #[cfg(test)]
 pub(crate) use worker::AcpWorkerCommand;
 

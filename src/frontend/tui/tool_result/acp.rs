@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -10,7 +10,8 @@ use crate::frontend::tui::{
     transcript::markdown_highlight::HighlightChunk,
 };
 use crate::runtime::acp::{
-    AcpToolCall, AcpToolCallContent, AcpToolCallLocation, AcpToolCallStatus, AcpToolKind,
+    AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent, AcpToolCallLocation, AcpToolCallStatus,
+    AcpToolKind,
 };
 
 use super::{
@@ -60,6 +61,7 @@ pub(super) fn acp_tool_call_detail_blocks(
     call: &AcpToolCall,
     render_mode: ToolActivityRenderMode,
     permission_waiting: bool,
+    terminal_snapshots: &BTreeMap<String, AcpTerminalSnapshot>,
 ) -> Vec<AcpToolCallDetailBlock> {
     if should_collapse_acp_read_tool_call(call) {
         return Vec::new();
@@ -69,13 +71,22 @@ pub(super) fn acp_tool_call_detail_blocks(
     }
 
     if is_execute_like_tool_call(call) {
-        return execute_tool_call_detail_blocks(call, render_mode, permission_waiting);
+        return execute_tool_call_detail_blocks(
+            call,
+            render_mode,
+            permission_waiting,
+            terminal_snapshots,
+        );
     }
 
     let mut blocks = Vec::new();
 
     for content in &call.content {
-        blocks.extend(acp_tool_call_content_blocks(content, render_mode));
+        blocks.extend(acp_tool_call_content_blocks(
+            content,
+            render_mode,
+            terminal_snapshots,
+        ));
     }
     if let Some(raw_input) = call.raw_input.as_ref().and_then(|raw| raw.display_text()) {
         blocks.push(AcpToolCallDetailBlock::Text(labeled_detail_block(
@@ -97,9 +108,10 @@ fn execute_tool_call_detail_blocks(
     call: &AcpToolCall,
     render_mode: ToolActivityRenderMode,
     permission_waiting: bool,
+    terminal_snapshots: &BTreeMap<String, AcpTerminalSnapshot>,
 ) -> Vec<AcpToolCallDetailBlock> {
     if should_defer_active_execute_details(call, permission_waiting) {
-        let terminal_blocks = active_execute_terminal_blocks(call, render_mode);
+        let terminal_blocks = active_execute_terminal_blocks(call, render_mode, terminal_snapshots);
         if !terminal_blocks.is_empty() {
             return terminal_blocks;
         }
@@ -119,7 +131,11 @@ fn execute_tool_call_detail_blocks(
         if should_hide_execute_text_content(content) {
             continue;
         }
-        blocks.extend(acp_tool_call_content_blocks(content, render_mode));
+        blocks.extend(acp_tool_call_content_blocks(
+            content,
+            render_mode,
+            terminal_snapshots,
+        ));
     }
 
     blocks
@@ -133,11 +149,12 @@ fn should_defer_active_execute_details(call: &AcpToolCall, permission_waiting: b
 fn active_execute_terminal_blocks(
     call: &AcpToolCall,
     render_mode: ToolActivityRenderMode,
+    terminal_snapshots: &BTreeMap<String, AcpTerminalSnapshot>,
 ) -> Vec<AcpToolCallDetailBlock> {
     call.content
         .iter()
         .filter(|content| matches!(content, AcpToolCallContent::Terminal { .. }))
-        .flat_map(|content| acp_tool_call_content_blocks(content, render_mode))
+        .flat_map(|content| acp_tool_call_content_blocks(content, render_mode, terminal_snapshots))
         .collect()
 }
 
@@ -177,6 +194,7 @@ fn is_execute_protocol_copy_text(text: &str) -> bool {
 fn acp_tool_call_content_blocks(
     content: &AcpToolCallContent,
     render_mode: ToolActivityRenderMode,
+    terminal_snapshots: &BTreeMap<String, AcpTerminalSnapshot>,
 ) -> Vec<AcpToolCallDetailBlock> {
     match content {
         AcpToolCallContent::Text(text) => {
@@ -232,9 +250,9 @@ fn acp_tool_call_content_blocks(
             render_mode,
         ))],
         AcpToolCallContent::Terminal { terminal_id } => {
-            vec![AcpToolCallDetailBlock::Text(vec![format!(
-                "ACP terminal unavailable: {terminal_id} (terminal/create unsupported)"
-            )])]
+            vec![AcpToolCallDetailBlock::SecondaryText(
+                terminal_detail_lines(terminal_snapshots.get(terminal_id), render_mode),
+            )]
         }
         AcpToolCallContent::Unknown(label) => vec![AcpToolCallDetailBlock::Text(vec![format!(
             "Unknown content: {label}"
@@ -253,6 +271,40 @@ fn labeled_detail_block(
     }
 
     lines[0] = format!("{label}: {}", lines[0]);
+    truncate_detail_block(lines, render_mode)
+}
+
+fn terminal_detail_lines(
+    snapshot: Option<&AcpTerminalSnapshot>,
+    render_mode: ToolActivityRenderMode,
+) -> Vec<String> {
+    let Some(snapshot) = snapshot else {
+        return vec!["Waiting...".to_string()];
+    };
+
+    let mut lines = Vec::new();
+    if snapshot.exit_status.is_none() && !snapshot.released {
+        lines.push("Running...".to_string());
+    }
+    if snapshot.truncated {
+        lines.push("... output truncated ...".to_string());
+    }
+    if !snapshot.output.is_empty() {
+        lines.extend(text_lines(&snapshot.output));
+    }
+    if let Some(exit_status) = snapshot.exit_status.as_ref() {
+        lines.push(
+            match (exit_status.exit_code, exit_status.signal.as_deref()) {
+                (Some(code), _) => format!("Exited with code {code}"),
+                (None, Some(signal)) => format!("Terminated by {signal}"),
+                (None, None) => "Exited".to_string(),
+            },
+        );
+    }
+    if lines.is_empty() {
+        lines.push("Waiting...".to_string());
+    }
+
     truncate_detail_block(lines, render_mode)
 }
 

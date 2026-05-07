@@ -13,6 +13,7 @@ harness = false
 required-features = ["bench-support"]
 
 [dependencies]
+anyhow = "1"
 color-eyre = "0.6.5"
 crossterm = "0.29.0"
 ratatui = { version = "0.30.0", features = ["crossterm_0_29"] }
@@ -37,6 +38,8 @@ genai = "0.6.0-beta.17"
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 base64 = "0.22.1"
 agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model"] }
+libc = "0.2"
+portable-pty = "0.9.0"
 tokio = { version = "1.52.1", features = ["process", "rt", "macros", "io-util", "time", "sync"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 

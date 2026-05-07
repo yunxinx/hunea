@@ -413,8 +413,10 @@ async fn acp_worker_transport_creates_session_and_reads_prompt_response() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        super::AcpPermissionRegistry::default(),
+        super::AcpTransportState::new(
+            Arc::new(AtomicBool::new(false)),
+            super::AcpPermissionRegistry::default(),
+        ),
     ));
 
     let started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -499,8 +501,10 @@ async fn acp_worker_reports_protocol_warning_even_when_new_session_fails() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        super::AcpPermissionRegistry::default(),
+        super::AcpTransportState::new(
+            Arc::new(AtomicBool::new(false)),
+            super::AcpPermissionRegistry::default(),
+        ),
     )
     .await;
 
@@ -592,8 +596,10 @@ async fn acp_worker_transport_forwards_thought_chunks_and_model_config() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        super::AcpPermissionRegistry::default(),
+        super::AcpTransportState::new(
+            Arc::new(AtomicBool::new(false)),
+            super::AcpPermissionRegistry::default(),
+        ),
     ));
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -636,6 +642,24 @@ async fn acp_worker_transport_forwards_thought_chunks_and_model_config() {
         .await
         .expect("worker task should join")
         .expect("worker should stop cleanly");
+}
+
+fn platform_echo_command(text: &str) -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            "cmd".to_string(),
+            vec!["/C".to_string(), format!("echo {text}")],
+        )
+    }
+
+    #[cfg(not(windows))]
+    {
+        (
+            "sh".to_string(),
+            vec!["-c".to_string(), format!("printf {text}")],
+        )
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -699,8 +723,10 @@ async fn acp_worker_transport_forwards_available_commands_update() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        super::AcpPermissionRegistry::default(),
+        super::AcpTransportState::new(
+            Arc::new(AtomicBool::new(false)),
+            super::AcpPermissionRegistry::default(),
+        ),
     ));
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -822,8 +848,10 @@ async fn acp_worker_transport_forwards_tool_call_lifecycle_updates() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        super::AcpPermissionRegistry::default(),
+        super::AcpTransportState::new(
+            Arc::new(AtomicBool::new(false)),
+            super::AcpPermissionRegistry::default(),
+        ),
     ));
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -946,8 +974,10 @@ async fn acp_worker_transport_forwards_idle_available_commands_update() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        super::AcpPermissionRegistry::default(),
+        super::AcpTransportState::new(
+            Arc::new(AtomicBool::new(false)),
+            super::AcpPermissionRegistry::default(),
+        ),
     ));
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -1031,8 +1061,10 @@ async fn acp_worker_transport_sends_structured_prompt_blocks() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        super::AcpPermissionRegistry::default(),
+        super::AcpTransportState::new(
+            Arc::new(AtomicBool::new(false)),
+            super::AcpPermissionRegistry::default(),
+        ),
     ));
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -1131,8 +1163,10 @@ async fn acp_worker_reports_initial_model_config_from_new_session() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        super::AcpPermissionRegistry::default(),
+        super::AcpTransportState::new(
+            Arc::new(AtomicBool::new(false)),
+            super::AcpPermissionRegistry::default(),
+        ),
     ));
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -1216,8 +1250,10 @@ async fn acp_worker_reports_initial_model_config_from_legacy_models_state() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        super::AcpPermissionRegistry::default(),
+        super::AcpTransportState::new(
+            Arc::new(AtomicBool::new(false)),
+            super::AcpPermissionRegistry::default(),
+        ),
     ));
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -1313,8 +1349,10 @@ async fn acp_worker_sets_model_config_option_and_reports_updated_options() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        super::AcpPermissionRegistry::default(),
+        super::AcpTransportState::new(
+            Arc::new(AtomicBool::new(false)),
+            super::AcpPermissionRegistry::default(),
+        ),
     ));
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -1405,8 +1443,10 @@ async fn acp_worker_sets_legacy_model_with_set_session_model_request() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        super::AcpPermissionRegistry::default(),
+        super::AcpTransportState::new(
+            Arc::new(AtomicBool::new(false)),
+            super::AcpPermissionRegistry::default(),
+        ),
     ));
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -1502,8 +1542,10 @@ async fn acp_worker_cancel_prompt_sends_session_cancel_notification() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        super::AcpPermissionRegistry::default(),
+        super::AcpTransportState::new(
+            Arc::new(AtomicBool::new(false)),
+            super::AcpPermissionRegistry::default(),
+        ),
     ));
 
     let started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -1701,8 +1743,7 @@ async fn acp_worker_round_trips_permission_selection() {
         command_rx,
         cancel_rx,
         event_tx,
-        Arc::new(AtomicBool::new(false)),
-        permissions.clone(),
+        super::AcpTransportState::new(Arc::new(AtomicBool::new(false)), permissions.clone()),
     ));
 
     let _started = recv_worker_event(&event_rx, "worker should report session start").await;
@@ -1737,6 +1778,409 @@ async fn acp_worker_round_trips_permission_selection() {
     command_tx
         .send(super::AcpWorkerCommand::Shutdown)
         .expect("shutdown command should send");
+    worker
+        .await
+        .expect("worker task should join")
+        .expect("worker should stop cleanly");
+}
+
+#[test]
+fn acp_terminal_output_buffer_truncates_at_utf8_boundary() {
+    let mut buffer = super::terminal::AcpTerminalOutputBuffer::new(5);
+
+    buffer.push_bytes("ab你cd".as_bytes());
+
+    let snapshot = buffer.snapshot("term-test");
+    assert_eq!(snapshot.output, "你cd");
+    assert!(snapshot.truncated);
+    assert!(snapshot.output.is_char_boundary(snapshot.output.len()));
+}
+
+#[test]
+fn acp_terminal_output_buffer_interprets_carriage_return_and_strips_ansi() {
+    let mut buffer = super::terminal::AcpTerminalOutputBuffer::new(1024);
+
+    buffer.push_bytes(b"progress 1\rprogress 2\x1b[31m red\x1b[0m\n");
+
+    let snapshot = buffer.snapshot("term-test");
+    assert_eq!(snapshot.output, "progress 2 red\n");
+    assert!(!snapshot.truncated);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_terminal_create_runs_shell_command_line_without_args() {
+    use std::{sync::mpsc, time::Duration};
+
+    use acp::schema::{CreateTerminalRequest, WaitForTerminalExitRequest};
+    use agent_client_protocol as acp;
+
+    let (event_tx, _event_rx) = mpsc::channel();
+    let manager = super::terminal::AcpTerminalManager::new("fake", event_tx);
+    let terminal = manager
+        .create(CreateTerminalRequest::new(
+            "test-session",
+            "echo shell-line-ok",
+        ))
+        .await
+        .expect("terminal/create should execute shell command lines");
+    let terminal_id = terminal.terminal_id.clone();
+
+    let output = wait_for_terminal_output(&manager, &terminal_id, "shell-line-ok").await;
+    assert!(output.contains("shell-line-ok"));
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        manager.wait_for_exit(WaitForTerminalExitRequest::new("test-session", terminal_id)),
+    )
+    .await
+    .expect("terminal/wait_for_exit should not hang")
+    .expect("terminal/wait_for_exit should succeed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_terminal_create_quotes_args_when_launching_through_shell() {
+    use std::{sync::mpsc, time::Duration};
+
+    use acp::schema::{CreateTerminalRequest, WaitForTerminalExitRequest};
+    use agent_client_protocol as acp;
+
+    let (event_tx, _event_rx) = mpsc::channel();
+    let manager = super::terminal::AcpTerminalManager::new("fake", event_tx);
+    let terminal = manager
+        .create(
+            CreateTerminalRequest::new("test-session", "echo")
+                .args(vec!["arg with spaces".to_string()]),
+        )
+        .await
+        .expect("terminal/create should execute command plus args");
+    let terminal_id = terminal.terminal_id.clone();
+
+    let output = wait_for_terminal_output(&manager, &terminal_id, "arg with spaces").await;
+    assert!(output.contains("arg with spaces"));
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        manager.wait_for_exit(WaitForTerminalExitRequest::new("test-session", terminal_id)),
+    )
+    .await
+    .expect("terminal/wait_for_exit should not hang")
+    .expect("terminal/wait_for_exit should succeed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_terminal_release_invalidates_id_and_emits_released_snapshot() {
+    use std::{sync::mpsc, time::Duration};
+
+    use acp::schema::{
+        CreateTerminalRequest, ReleaseTerminalRequest, TerminalOutputRequest,
+        WaitForTerminalExitRequest,
+    };
+    use agent_client_protocol as acp;
+
+    let (event_tx, event_rx) = mpsc::channel();
+    let manager = super::terminal::AcpTerminalManager::new("fake", event_tx);
+    let (command, args) = platform_echo_command("release-ok");
+    let terminal = manager
+        .create(CreateTerminalRequest::new("test-session", command).args(args))
+        .await
+        .expect("terminal/create should succeed");
+    let terminal_id = terminal.terminal_id.clone();
+
+    let output = wait_for_terminal_output(&manager, &terminal_id, "release-ok").await;
+    assert!(output.contains("release-ok"));
+
+    let exit = tokio::time::timeout(
+        Duration::from_secs(5),
+        manager.wait_for_exit(WaitForTerminalExitRequest::new(
+            "test-session",
+            terminal_id.clone(),
+        )),
+    )
+    .await
+    .expect("terminal/wait_for_exit should not hang")
+    .expect("terminal/wait_for_exit should succeed");
+    assert_eq!(exit.exit_status.exit_code, Some(0));
+
+    manager
+        .release(ReleaseTerminalRequest::new(
+            "test-session",
+            terminal_id.clone(),
+        ))
+        .expect("terminal/release should succeed");
+    assert!(matches!(
+        manager.output(TerminalOutputRequest::new(
+            "test-session",
+            terminal_id.clone()
+        )),
+        Err(super::terminal::AcpTerminalError::NotFound(_))
+    ));
+
+    let released_snapshot = loop {
+        match event_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("terminal/release should emit a released snapshot")
+        {
+            super::AcpSessionEvent::TerminalUpdated { snapshot, .. }
+                if snapshot.terminal_id == terminal_id.to_string() && snapshot.released =>
+            {
+                break snapshot;
+            }
+            _ => {}
+        }
+    };
+    assert!(released_snapshot.output.contains("release-ok"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_terminal_release_all_invalidates_terminals_and_emits_released_snapshots() {
+    use std::{sync::mpsc, time::Duration};
+
+    use acp::schema::{CreateTerminalRequest, TerminalOutputRequest};
+    use agent_client_protocol as acp;
+
+    let (event_tx, event_rx) = mpsc::channel();
+    let manager = super::terminal::AcpTerminalManager::new("fake", event_tx);
+    let (command, args) = platform_echo_command("release-all-ok");
+    let terminal = manager
+        .create(CreateTerminalRequest::new("test-session", command).args(args))
+        .await
+        .expect("terminal/create should succeed");
+    let terminal_id = terminal.terminal_id.clone();
+
+    let output = wait_for_terminal_output(&manager, &terminal_id, "release-all-ok").await;
+    assert!(output.contains("release-all-ok"));
+
+    manager.release_all_for_shutdown();
+
+    assert!(matches!(
+        manager.output(TerminalOutputRequest::new(
+            "test-session",
+            terminal_id.clone()
+        )),
+        Err(super::terminal::AcpTerminalError::NotFound(_))
+    ));
+
+    let released_snapshot = loop {
+        match event_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("terminal shutdown should emit a released snapshot")
+        {
+            super::AcpSessionEvent::TerminalUpdated { snapshot, .. }
+                if snapshot.terminal_id == terminal_id.to_string() && snapshot.released =>
+            {
+                break snapshot;
+            }
+            _ => {}
+        }
+    };
+    assert!(released_snapshot.output.contains("release-all-ok"));
+}
+
+async fn wait_for_terminal_output(
+    manager: &super::terminal::AcpTerminalManager,
+    terminal_id: &agent_client_protocol::schema::TerminalId,
+    expected: &str,
+) -> String {
+    use acp::schema::TerminalOutputRequest;
+    use agent_client_protocol as acp;
+
+    let started_at = std::time::Instant::now();
+    loop {
+        let output = manager
+            .output(TerminalOutputRequest::new(
+                "test-session",
+                terminal_id.clone(),
+            ))
+            .expect("terminal/output should succeed")
+            .output;
+        if output.contains(expected) {
+            return output;
+        }
+        assert!(
+            started_at.elapsed() < std::time::Duration::from_secs(5),
+            "timed out waiting for terminal output {expected:?}, last output: {output:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_worker_terminal_create_runs_after_tool_permission_without_second_approval() {
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+
+    use acp::schema::{
+        ContentBlock, ContentChunk, CreateTerminalRequest, Implementation, InitializeRequest,
+        InitializeResponse, NewSessionRequest, NewSessionResponse, PermissionOption,
+        PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
+        RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason,
+        TerminalOutputRequest, TextContent, ToolCallUpdate, ToolCallUpdateFields,
+        WaitForTerminalExitRequest,
+    };
+    use agent_client_protocol as acp;
+
+    let (command, args) = platform_echo_command("terminal-ok");
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    tokio::task::spawn(async move {
+        acp::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _connection| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_info(Implementation::new("fake-agent", "0.1.0")),
+                    )
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _connection| {
+                    responder.respond(NewSessionResponse::new("test-session"))
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: PromptRequest, responder, connection| {
+                    let command = command.clone();
+                    let args = args.clone();
+                    let session_id = request.session_id.clone();
+                    let permission_connection = connection.clone();
+                    let output_connection = connection.clone();
+                    let response_connection = connection.clone();
+                    connection
+                        .send_request(RequestPermissionRequest::new(
+                            request.session_id.clone(),
+                            ToolCallUpdate::new(
+                                "tool-cargo-check",
+                                ToolCallUpdateFields::new().title("cargo check"),
+                            ),
+                            vec![
+                                PermissionOption::new(
+                                    "allow-once",
+                                    "Allow once",
+                                    PermissionOptionKind::AllowOnce,
+                                ),
+                                PermissionOption::new(
+                                    "reject-once",
+                                    "Reject once",
+                                    PermissionOptionKind::RejectOnce,
+                                ),
+                            ],
+                        ))
+                        .on_receiving_result(async move |permission| {
+                            let permission = permission?;
+                            match permission.outcome {
+                                RequestPermissionOutcome::Selected(selected)
+                                    if selected.option_id.to_string() == "allow-once" => {}
+                                _ => {
+                                    responder.respond(PromptResponse::new(StopReason::EndTurn))?;
+                                    return Ok(());
+                                }
+                            }
+
+                            let terminal = permission_connection
+                                .send_request(
+                                    CreateTerminalRequest::new(session_id.clone(), command.clone())
+                                        .args(args.clone()),
+                                )
+                                .block_task()
+                                .await?;
+                            output_connection
+                                .send_request(WaitForTerminalExitRequest::new(
+                                    session_id.clone(),
+                                    terminal.terminal_id.clone(),
+                                ))
+                                .block_task()
+                                .await?;
+                            let output = output_connection
+                                .send_request(TerminalOutputRequest::new(
+                                    session_id.clone(),
+                                    terminal.terminal_id,
+                                ))
+                                .block_task()
+                                .await?;
+                            response_connection.send_notification(SessionNotification::new(
+                                session_id,
+                                SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                    ContentBlock::Text(TextContent::new(output.output)),
+                                )),
+                            ))?;
+                            responder.respond(PromptResponse::new(StopReason::EndTurn))?;
+                            Ok(())
+                        })?;
+                    Ok(())
+                },
+                acp::on_receive_request!(),
+            )
+            .connect_to(agent_transport)
+            .await
+    });
+
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let permissions = super::AcpPermissionRegistry::default();
+    let worker = tokio::task::spawn(super::run_agent_transport_worker(
+        "fake".to_string(),
+        client_transport,
+        command_rx,
+        cancel_rx,
+        event_tx,
+        super::AcpTransportState::new(Arc::new(AtomicBool::new(false)), permissions.clone()),
+    ));
+
+    let _started = recv_worker_event(&event_rx, "worker should report session start").await;
+    command_tx
+        .send(super::AcpWorkerCommand::Prompt(
+            super::AcpPrompt::from_text("run terminal"),
+        ))
+        .expect("prompt command should send");
+    let _prompt_started = recv_worker_event(&event_rx, "worker should report prompt start").await;
+
+    let permission_event = recv_worker_event(&event_rx, "worker should request permission").await;
+    let request_id = match permission_event {
+        super::AcpSessionEvent::PermissionRequested { request, .. } => {
+            assert_eq!(request.tool_call.tool_call_id, "tool-cargo-check");
+            assert_eq!(request.tool_call.title.as_deref(), Some("cargo check"));
+            request.request_id
+        }
+        other => panic!("expected permission request, got {other:?}"),
+    };
+    permissions
+        .respond(&request_id, Some("allow-once".to_string()))
+        .expect("permission response should be accepted");
+
+    let mut saw_terminal_output = false;
+    loop {
+        match recv_worker_event(&event_rx, "worker should finish terminal prompt").await {
+            super::AcpSessionEvent::TerminalUpdated { snapshot, .. } => {
+                saw_terminal_output |= snapshot.output.contains("terminal-ok");
+            }
+            super::AcpSessionEvent::AgentMessageChunk { content, .. } => {
+                assert!(
+                    content.contains("terminal-ok"),
+                    "unexpected output: {content:?}"
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_terminal_output);
+
+    command_tx
+        .send(super::AcpWorkerCommand::Shutdown)
+        .expect("shutdown command should send");
+
+    let mut saw_released_terminal = false;
+    loop {
+        match recv_worker_event(&event_rx, "worker should release terminals on shutdown").await {
+            super::AcpSessionEvent::TerminalUpdated { snapshot, .. } => {
+                saw_released_terminal |= snapshot.released;
+            }
+            super::AcpSessionEvent::Stopped { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(saw_released_terminal);
+
     worker
         .await
         .expect("worker task should join")

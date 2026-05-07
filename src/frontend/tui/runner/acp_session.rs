@@ -642,6 +642,12 @@ pub(super) fn apply_acp_session_event(
                 model.suspend_acp_tool_call_for_approval_panel(item_index);
             }
         }
+        AcpSessionEvent::TerminalUpdated { snapshot, .. } => {
+            if acp_runtime.should_discard_prompt_output() {
+                return;
+            }
+            let _ = model.apply_acp_terminal_snapshot_from_runtime(snapshot);
+        }
         AcpSessionEvent::PermissionRequestCancelled { agent_id } => {
             if acp_runtime.should_discard_prompt_output() {
                 return;

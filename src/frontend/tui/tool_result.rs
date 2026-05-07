@@ -1,5 +1,5 @@
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{BTreeMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     time::{Duration, Instant},
 };
@@ -23,7 +23,9 @@ use super::{
         wrap_prompt_visual_lines,
     },
 };
-use crate::runtime::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolCallUpdate};
+use crate::runtime::acp::{
+    AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolCallUpdate,
+};
 #[cfg(test)]
 use crate::runtime::acp::{AcpToolCallLocation, AcpToolKind};
 use acp::{
@@ -76,6 +78,7 @@ pub(crate) struct ToolResultItem {
     active_marker_started_at: Option<Instant>,
     approval_suspended: bool,
     permission_waiting: bool,
+    terminal_snapshots: BTreeMap<String, AcpTerminalSnapshot>,
 }
 
 impl ToolResultItem {
@@ -99,11 +102,13 @@ impl ToolResultItem {
     fn from_body(body: ToolResultBody, render_mode: ToolActivityRenderMode) -> Self {
         let approval_suspended = false;
         let permission_waiting = false;
+        let terminal_snapshots = BTreeMap::new();
         let render_cache_key = tool_result_render_cache_key(
             &body,
             render_mode,
             approval_suspended,
             permission_waiting,
+            &terminal_snapshots,
         );
         let active_marker_started_at =
             active_marker_started_at_for_body(&body).then_some(Instant::now());
@@ -114,6 +119,7 @@ impl ToolResultItem {
             active_marker_started_at,
             approval_suspended,
             permission_waiting,
+            terminal_snapshots,
         }
     }
 
@@ -223,6 +229,11 @@ impl ToolResultItem {
                         .iter()
                         .map(acp_tool_call_content_byte_len)
                         .sum::<usize>()
+                    + self
+                        .terminal_snapshots
+                        .values()
+                        .map(|snapshot| snapshot.output.len())
+                        .sum::<usize>()
             }
         }
     }
@@ -314,6 +325,35 @@ impl ToolResultItem {
         true
     }
 
+    pub(crate) fn set_acp_terminal_snapshot(&mut self, snapshot: AcpTerminalSnapshot) -> bool {
+        let ToolResultBody::AcpToolCall(call) = &self.body else {
+            return false;
+        };
+        if !call.content.iter().any(|content| {
+            matches!(content, AcpToolCallContent::Terminal { terminal_id } if terminal_id == &snapshot.terminal_id)
+        }) {
+            return false;
+        }
+
+        if self
+            .terminal_snapshots
+            .get(&snapshot.terminal_id)
+            .is_some_and(|current| current == &snapshot)
+        {
+            return false;
+        }
+
+        self.terminal_snapshots
+            .insert(snapshot.terminal_id.clone(), snapshot);
+        self.refresh_render_cache_key();
+        true
+    }
+
+    #[cfg(test)]
+    fn set_acp_terminal_snapshot_for_test(&mut self, snapshot: AcpTerminalSnapshot) -> bool {
+        self.set_acp_terminal_snapshot(snapshot)
+    }
+
     pub(crate) fn update_acp_tool_call(&mut self, update: AcpToolCallUpdate) -> bool {
         let ToolResultBody::AcpToolCall(call) = &mut self.body else {
             return false;
@@ -336,6 +376,11 @@ impl ToolResultItem {
         }
         if let Some(content) = update.content {
             call.content = content;
+            self.terminal_snapshots.retain(|terminal_id, _| {
+                call.content.iter().any(|content| {
+                    matches!(content, AcpToolCallContent::Terminal { terminal_id: content_terminal_id } if content_terminal_id == terminal_id)
+                })
+            });
         }
         if let Some(locations) = update.locations {
             call.locations = locations;
@@ -534,7 +579,12 @@ impl ToolResultItem {
     ) -> Vec<Line<'static>> {
         let width = usize::from(width.max(1));
         let mut lines = self.acp_tool_call_header_lines_at(call, width, palette, now);
-        for block in acp_tool_call_detail_blocks(call, self.render_mode, self.permission_waiting) {
+        for block in acp_tool_call_detail_blocks(
+            call,
+            self.render_mode,
+            self.permission_waiting,
+            &self.terminal_snapshots,
+        ) {
             lines.extend(self.wrap_acp_detail_block(&block, width, palette));
         }
         lines
@@ -812,6 +862,7 @@ impl ToolResultItem {
             self.render_mode,
             self.approval_suspended,
             self.permission_waiting,
+            &self.terminal_snapshots,
         );
     }
 
@@ -943,12 +994,14 @@ fn tool_result_render_cache_key(
     render_mode: ToolActivityRenderMode,
     approval_suspended: bool,
     permission_waiting: bool,
+    terminal_snapshots: &BTreeMap<String, AcpTerminalSnapshot>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     "tool_result".hash(&mut hasher);
     render_mode.hash(&mut hasher);
     approval_suspended.hash(&mut hasher);
     permission_waiting.hash(&mut hasher);
+    terminal_snapshots.hash(&mut hasher);
     body.hash(&mut hasher);
     hasher.finish()
 }
@@ -1437,8 +1490,8 @@ mod tests {
     }
 
     #[test]
-    fn acp_tool_call_terminal_content_renders_unsupported_notice() {
-        let item = ToolResultItem::from_acp_tool_call(
+    fn acp_tool_call_terminal_content_renders_live_snapshot() {
+        let mut item = ToolResultItem::from_acp_tool_call(
             AcpToolCall {
                 tool_call_id: "call-terminal".to_string(),
                 title: "Run tests".to_string(),
@@ -1453,6 +1506,15 @@ mod tests {
             },
             ToolActivityRenderMode::Compact,
         );
+        assert!(item.set_acp_terminal_snapshot_for_test(
+            crate::runtime::acp::AcpTerminalSnapshot {
+                terminal_id: "term-1".to_string(),
+                output: "Checking lumos\nFinished".to_string(),
+                truncated: false,
+                exit_status: None,
+                released: false,
+            },
+        ));
 
         let plain = item
             .render_lines(80, default_palette())
@@ -1461,9 +1523,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(plain.contains("ACP terminal unavailable"));
-        assert!(plain.contains("term-1"));
-        assert!(plain.contains("terminal/create unsupported"));
+        assert!(plain.contains("Running..."));
+        assert!(plain.contains("Checking lumos"));
+        assert!(plain.contains("Finished"));
+        assert!(!plain.contains("ACP terminal unavailable"));
+        assert!(!plain.contains("terminal/create unsupported"));
     }
 
     #[test]

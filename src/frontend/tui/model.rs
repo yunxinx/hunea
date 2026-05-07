@@ -6,7 +6,7 @@ use ratatui::Frame;
 use crate::envinfo;
 use crate::runtime::phrases::StatusPhraseOrder;
 use crate::runtime::{
-    acp::{AcpAgentIdentity, AcpAvailableCommand, AcpModelConfig},
+    acp::{AcpAgentIdentity, AcpAvailableCommand, AcpModelConfig, AcpTerminalSnapshot},
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
 };
 
@@ -66,6 +66,7 @@ pub struct Model {
         Option<crate::frontend::tui::transcript_overlay::TranscriptOverlayState>,
     pub(super) backtrack: BacktrackState,
     pub(super) pending_acp_permission: Option<PendingAcpPermission>,
+    pub(super) acp_terminal_snapshots: BTreeMap<String, AcpTerminalSnapshot>,
     pub(super) stream_activity: Option<StreamActivityState>,
     pub(super) status_phrase_selector: StatusPhraseSelector,
     pub(super) command_panel_selected: usize,
@@ -336,6 +337,7 @@ impl Model {
             transcript_overlay: None,
             backtrack: BacktrackState::default(),
             pending_acp_permission: None,
+            acp_terminal_snapshots: BTreeMap::new(),
             stream_activity: None,
             status_phrase_selector: StatusPhraseSelector::new(
                 options.status_phrases,
@@ -586,6 +588,7 @@ impl Model {
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.backtrack = BacktrackState::default();
         self.pending_acp_permission = None;
+        self.acp_terminal_snapshots.clear();
         self.stream_activity = None;
         self.command_panel_selected = 0;
         self.command_panel_scroll = 0;
@@ -885,6 +888,14 @@ impl Model {
     ) -> usize {
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let item_index = self.transcript_mut().append_acp_tool_call(call);
+        for snapshot in self
+            .acp_terminal_snapshots
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            let _ = self.transcript_mut().set_acp_terminal_snapshot(snapshot);
+        }
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
         self.document_runtime.follow_bottom = true;
@@ -909,6 +920,31 @@ impl Model {
             .transcript_mut()
             .update_acp_tool_call(item_index, update)
         {
+            return false;
+        }
+        for snapshot in self
+            .acp_terminal_snapshots
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            let _ = self.transcript_mut().set_acp_terminal_snapshot(snapshot);
+        }
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        true
+    }
+
+    pub(crate) fn apply_acp_terminal_snapshot_from_runtime(
+        &mut self,
+        snapshot: AcpTerminalSnapshot,
+    ) -> bool {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        self.acp_terminal_snapshots
+            .insert(snapshot.terminal_id.clone(), snapshot.clone());
+        if !self.transcript_mut().set_acp_terminal_snapshot(snapshot) {
             return false;
         }
         self.refresh_status_line_after_transcript_change();

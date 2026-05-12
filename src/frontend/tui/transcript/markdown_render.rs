@@ -94,7 +94,7 @@ fn measure_markdown_metrics(
     let leading_blank_lines = count_leading_blank_lines(markdown);
     let trailing_blank_lines = count_trailing_blank_lines(markdown);
     let cwd = std::env::current_dir().ok();
-    let mut renderer = MarkdownRenderer::new(palette, cwd.as_deref(), width);
+    let mut renderer = MarkdownRenderer::new_for_metrics(palette, cwd.as_deref(), width);
     let options = markdown_options();
 
     renderer.render(Parser::new_ext(markdown, options));
@@ -328,6 +328,7 @@ struct MarkdownRenderer {
     palette: TerminalPalette,
     cwd: Option<PathBuf>,
     width: usize,
+    should_highlight_code: bool,
     output: Vec<LogicalLine>,
     current_block: Option<OpenBlock>,
     list_stack: Vec<ListFrame>,
@@ -345,10 +346,24 @@ struct MarkdownRenderer {
 
 impl MarkdownRenderer {
     fn new(palette: TerminalPalette, cwd: Option<&Path>, width: usize) -> Self {
+        Self::new_with_code_highlighting(palette, cwd, width, true)
+    }
+
+    fn new_for_metrics(palette: TerminalPalette, cwd: Option<&Path>, width: usize) -> Self {
+        Self::new_with_code_highlighting(palette, cwd, width, false)
+    }
+
+    fn new_with_code_highlighting(
+        palette: TerminalPalette,
+        cwd: Option<&Path>,
+        width: usize,
+        should_highlight_code: bool,
+    ) -> Self {
         Self {
             palette,
             cwd: cwd.map(Path::to_path_buf),
             width: width.max(1),
+            should_highlight_code,
             output: Vec::new(),
             current_block: None,
             list_stack: Vec::new(),
@@ -592,20 +607,26 @@ impl MarkdownRenderer {
         if let Some(lang) = self.code_block_lang.take() {
             let code = std::mem::take(&mut self.code_block_buffer);
             let code_style = self.code_style();
-            let highlighted = highlight_code_chunks(&code, &lang, self.highlighted_code_style())
-                .map(|lines| {
-                    lines
-                        .into_iter()
-                        .map(|line| {
-                            line.into_iter()
-                                .map(|chunk| StyledChunk {
-                                    text: chunk.text,
-                                    style: chunk.style,
+            let highlighted = self
+                .should_highlight_code
+                .then(|| {
+                    highlight_code_chunks(&code, &lang, self.highlighted_code_style()).map(
+                        |lines| {
+                            lines
+                                .into_iter()
+                                .map(|line| {
+                                    line.into_iter()
+                                        .map(|chunk| StyledChunk {
+                                            text: chunk.text,
+                                            style: chunk.style,
+                                        })
+                                        .collect::<Vec<_>>()
                                 })
                                 .collect::<Vec<_>>()
-                        })
-                        .collect::<Vec<_>>()
-                });
+                        },
+                    )
+                })
+                .flatten();
 
             if let Some(block) = &mut self.current_block {
                 if let Some(lines) = highlighted {
@@ -1401,10 +1422,13 @@ fn count_trailing_blank_lines(markdown: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::render_markdown_lines;
+    use super::{render_markdown_lines, render_markdown_metrics};
     use crate::frontend::tui::{
-        styled_text::{lines_to_ansi_text, lines_to_plain_text},
+        styled_text::{line_plain_text_len, lines_to_ansi_text, lines_to_plain_text},
         theme::{default_palette, terminal_default_palette},
+        transcript::markdown_highlight::{
+            highlight_code_chunks_call_count, reset_highlight_code_chunks_call_count,
+        },
     };
     use ratatui::style::Modifier;
 
@@ -1852,6 +1876,43 @@ mod tests {
         let lines = render_markdown_lines("中", 1, default_palette());
         assert_eq!(lines_to_plain_text(&lines), "中");
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn render_markdown_metrics_skip_code_highlighting_but_match_rendered_plain_text_shape() {
+        let markdown = r#"# Title
+
+```rust
+fn main() {
+    println!("hello");
+}
+```
+
+- after code
+"#;
+        let width = 32;
+        let palette = default_palette();
+
+        let rendered = render_markdown_lines(markdown, width, palette);
+        let rendered_line_count = rendered.len();
+        let rendered_plain_text_len = rendered.iter().map(line_plain_text_len).sum::<usize>();
+
+        reset_highlight_code_chunks_call_count();
+        let metrics = render_markdown_metrics(markdown, width, palette);
+
+        assert_eq!(metrics, (rendered_line_count, rendered_plain_text_len));
+        assert_eq!(
+            highlight_code_chunks_call_count(),
+            0,
+            "metrics-only Markdown measurement should not pay syntax highlighting cost"
+        );
+
+        reset_highlight_code_chunks_call_count();
+        let _ = render_markdown_lines(markdown, width, palette);
+        assert!(
+            highlight_code_chunks_call_count() > 0,
+            "visible rendering should still apply syntax highlighting"
+        );
     }
 
     #[test]

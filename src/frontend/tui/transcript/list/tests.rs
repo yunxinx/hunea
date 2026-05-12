@@ -827,6 +827,41 @@ fn progressive_metrics_resize_keeps_reused_assistant_metrics_estimated() {
 }
 
 #[test]
+fn exactize_line_window_keeps_incremental_index_self_consistent() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_gap(1);
+    transcript.set_width(20);
+    transcript.append_message(Sender::Assistant, "prefix");
+    transcript.append_message(
+        Sender::Assistant,
+        concat!(
+            "## Section\n\n",
+            "- list item\n\n",
+            "Follow-up **bold markdown content** wraps differently once Markdown metrics are exact."
+        ),
+    );
+    transcript.append_message(Sender::Assistant, "tail");
+
+    let estimated_index = transcript.progressive_item_metrics_index();
+    let item_position = estimated_index
+        .position_for_item(1)
+        .expect("middle item should be visible");
+
+    transcript.exactize_line_window(item_position.start_line, item_position.total_line_count, 0);
+    let updated_index = transcript.progressive_item_metrics_index();
+
+    assert!(
+        updated_index.metrics[1].is_exact(),
+        "visible exactization should update the requested item"
+    );
+    assert_ne!(
+        estimated_index.metrics[1], updated_index.metrics[1],
+        "test fixture should exercise an actual metrics update"
+    );
+    assert_metrics_index_self_consistent(&updated_index, transcript.gap);
+}
+
+#[test]
 fn metrics_rebuild_keeps_screen_block_cache_cold_until_render_materialization() {
     let mut transcript = Transcript::new(default_palette());
     transcript.set_gap(0);
@@ -1032,6 +1067,54 @@ fn palette_change_invalidates_item_metrics_when_render_shape_changes() {
 
 fn static_message(content: &str) -> MessageItem {
     MessageItem::new(Sender::Assistant, content)
+}
+
+fn assert_metrics_index_self_consistent(index: &TranscriptItemMetricsIndex, gap: usize) {
+    let mut expected_prefix_sums = Vec::with_capacity(index.metrics.len() + 1);
+    expected_prefix_sums.push(0);
+    for metrics in index.metrics.iter() {
+        expected_prefix_sums.push(
+            expected_prefix_sums
+                .last()
+                .copied()
+                .unwrap_or(0usize)
+                .saturating_add(metrics.content_char_len),
+        );
+    }
+
+    let mut expected_visible_positions = vec![usize::MAX; index.metrics.len()];
+    let mut expected_visible_items = Vec::new();
+    let mut total_lines = 0usize;
+    let mut previous_visible_item_index = None;
+    for (item_index, metrics) in index.metrics.iter().enumerate() {
+        if metrics.content_line_count == 0 {
+            continue;
+        }
+
+        let gap_before = usize::from(previous_visible_item_index.is_some()) * gap;
+        let position = TranscriptItemPosition {
+            item_index,
+            start_line: total_lines,
+            gap_before,
+            content_line_count: metrics.content_line_count,
+            total_line_count: gap_before + metrics.content_line_count,
+            content_char_len: metrics.content_char_len,
+            gap_owner_item_index: previous_visible_item_index,
+        };
+        expected_visible_positions[item_index] = expected_visible_items.len();
+        total_lines = total_lines.saturating_add(position.total_line_count);
+        previous_visible_item_index = Some(item_index);
+        expected_visible_items.push(position);
+    }
+
+    assert_eq!(*index.content_prefix_sums, expected_prefix_sums);
+    assert_eq!(*index.visible_positions, expected_visible_positions);
+    assert_eq!(*index.visible_items, expected_visible_items);
+    assert_eq!(index.line_count, total_lines);
+    assert_eq!(
+        index.content_char_len,
+        expected_prefix_sums.last().copied().unwrap_or(0)
+    );
 }
 
 fn retained_block_memory_summary_for_render(

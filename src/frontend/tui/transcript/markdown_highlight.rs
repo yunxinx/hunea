@@ -19,6 +19,12 @@ const MAX_HIGHLIGHT_LINES: usize = 10_000;
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static HIGHLIGHT_CODE_CHUNKS_CALL_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HighlightChunk {
     pub(crate) text: String,
@@ -30,6 +36,9 @@ pub(crate) fn highlight_code_chunks(
     lang: &str,
     base_style: Style,
 ) -> Option<Vec<Vec<HighlightChunk>>> {
+    #[cfg(test)]
+    HIGHLIGHT_CODE_CHUNKS_CALL_COUNT.with(|count| count.set(count.get() + 1));
+
     if code.is_empty()
         || code.len() > MAX_HIGHLIGHT_BYTES
         || code.lines().count() > MAX_HIGHLIGHT_LINES
@@ -67,6 +76,16 @@ pub(crate) fn highlight_code_chunks(
     }
 
     Some(lines)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_highlight_code_chunks_call_count() {
+    HIGHLIGHT_CODE_CHUNKS_CALL_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn highlight_code_chunks_call_count() -> usize {
+    HIGHLIGHT_CODE_CHUNKS_CALL_COUNT.with(std::cell::Cell::get)
 }
 
 /// `wrap_highlight_chunks` 按终端宽度折行已高亮的文本片段。

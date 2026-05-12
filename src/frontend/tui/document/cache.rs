@@ -235,6 +235,7 @@ pub(crate) struct DocumentViewportKey {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DocumentViewport {
     pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) assistant_lines: Vec<bool>,
     pub(crate) plain_text_len: usize,
     #[cfg(test)]
     pub(crate) plain_lines: Vec<String>,
@@ -249,6 +250,7 @@ impl DocumentViewport {
                 .iter()
                 .map(|line| Line::raw((*line).to_string()))
                 .collect(),
+            assistant_lines: vec![false; plain_lines.len()],
             plain_text_len: plain_lines.iter().map(|line| line.len()).sum::<usize>()
                 + plain_lines.len().saturating_sub(1),
             plain_lines: plain_lines.iter().map(|line| (*line).to_string()).collect(),

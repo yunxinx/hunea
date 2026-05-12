@@ -144,6 +144,27 @@ impl ViewportState {
         )
     }
 
+    /// `resolve_offset_for_current_geometry` 在终端几何未变化时复用已解析 offset。
+    ///
+    /// 手动滚动热路径只需要知道当前窗口覆盖哪些行；跨 resize / reflow 的语义
+    /// anchor 匹配仍由 `resolve_offset` 负责。
+    pub(crate) fn resolve_offset_for_current_geometry(
+        &self,
+        layout: &DocumentLayout,
+        viewport_height: usize,
+        document_width: u16,
+    ) -> usize {
+        if self.viewport_height == viewport_height && self.document_width == document_width {
+            return clamp_document_offset(
+                self.resolved_offset,
+                viewport_height,
+                layout.line_count(),
+            );
+        }
+
+        self.resolve_offset(layout, viewport_height)
+    }
+
     #[cfg(test)]
     pub(crate) fn anchor(&self) -> &ViewAnchor {
         &self.anchor

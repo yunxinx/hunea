@@ -17,6 +17,7 @@ use super::{
 };
 
 mod assistant;
+mod assistant_estimate;
 mod user;
 mod user_estimate;
 mod user_projection;

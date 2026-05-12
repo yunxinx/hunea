@@ -30,6 +30,7 @@ pub(crate) struct DocumentSelectionLine {
 #[derive(Debug, Clone, Default)]
 pub(super) struct DocumentTranscriptViewportSnapshot {
     pub(super) lines: Vec<Line<'static>>,
+    pub(super) assistant_lines: Vec<bool>,
     pub(super) plain_text_len: usize,
     pub(super) resolved_offset: usize,
     #[cfg(test)]
@@ -39,6 +40,7 @@ pub(super) struct DocumentTranscriptViewportSnapshot {
 #[derive(Debug, Clone)]
 struct DocumentTranscriptViewportLine {
     line: Line<'static>,
+    is_assistant: bool,
     plain_line_len: usize,
     #[cfg(test)]
     plain_line: String,
@@ -188,6 +190,7 @@ impl DocumentTranscriptSnapshot {
         if relative < position.gap_before {
             return Some(DocumentTranscriptViewportLine {
                 line: Line::raw(""),
+                is_assistant: false,
                 plain_line_len: 0,
                 #[cfg(test)]
                 plain_line: String::new(),
@@ -196,8 +199,13 @@ impl DocumentTranscriptSnapshot {
 
         let block = self.render_block(position.item_index)?;
         let block_index = relative - position.gap_before;
+        let is_assistant = self
+            .items
+            .get(position.item_index)
+            .is_some_and(|item| item.as_ref().is_assistant_message());
         Some(DocumentTranscriptViewportLine {
             line: block.line_at(block_index)?,
+            is_assistant,
             plain_line_len: block.plain_line_len(block_index)?,
             #[cfg(test)]
             plain_line: if include_test_plain_lines {
@@ -240,6 +248,7 @@ impl DocumentTranscriptSnapshot {
         self.prewarm_item_blocks_for_window(start, count);
         let end = (start + count).min(self.line_count());
         let mut lines = Vec::with_capacity(end - start);
+        let mut assistant_lines = Vec::with_capacity(end - start);
         let mut plain_text_len = 0;
         #[cfg(test)]
         let mut plain_lines = Vec::with_capacity(end - start);
@@ -252,6 +261,7 @@ impl DocumentTranscriptSnapshot {
                 plain_text_len += 1;
             }
             plain_text_len += line.plain_line_len;
+            assistant_lines.push(line.is_assistant);
             #[cfg(test)]
             if include_test_plain_lines {
                 plain_lines.push(line.plain_line.clone());
@@ -261,6 +271,7 @@ impl DocumentTranscriptSnapshot {
 
         DocumentTranscriptViewportSnapshot {
             lines,
+            assistant_lines,
             plain_text_len,
             resolved_offset: start,
             #[cfg(test)]

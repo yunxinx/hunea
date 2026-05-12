@@ -213,6 +213,10 @@ impl FloatingPlacement {
 }
 
 impl Model {
+    pub(crate) fn has_current_floating_layer(&self) -> bool {
+        self.file_picker.is_some()
+    }
+
     pub(crate) fn current_floating_layer(
         &self,
         document: &DocumentLayout,

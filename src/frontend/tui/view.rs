@@ -1,14 +1,13 @@
 use ratatui::{Frame, buffer::Buffer, layout::Rect, text::Line, widgets::Widget};
 
 use super::{
-    Model, document::DocumentLayout, message::assistant_message_visual_inset,
+    Model, message::assistant_message_visual_inset,
     styled_text::render_line_with_full_width_background,
 };
 
 struct DocumentViewportWidget<'a> {
     lines: &'a [Line<'static>],
-    layout: &'a DocumentLayout,
-    resolved_offset: usize,
+    assistant_lines: &'a [bool],
 }
 
 impl Widget for DocumentViewportWidget<'_> {
@@ -20,8 +19,7 @@ impl Widget for DocumentViewportWidget<'_> {
 
         for (row, line) in self.lines.iter().take(usize::from(area.height)).enumerate() {
             let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
-            let line_index = self.resolved_offset + row;
-            if self.layout.is_assistant_message_line(line_index) {
+            if self.assistant_lines.get(row).copied().unwrap_or(false) {
                 render_inset_line(line, area, y, buf);
             } else {
                 render_line_with_full_width_background(
@@ -73,19 +71,23 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
 
     let document = model.build_document_layout();
     let viewport = model.build_document_viewport(&document);
-    let floating_layer = model.current_floating_layer(&document, &viewport);
 
     frame.render_widget(
         DocumentViewportWidget {
             lines: &viewport.lines,
-            layout: &document,
-            resolved_offset: viewport.resolved_offset,
+            assistant_lines: &viewport.assistant_lines,
         },
         area,
     );
-    model.render_history_scroll_indicator(frame, area, &document, &viewport);
 
-    frame.render_widget(floating_layer, area);
+    if model.history_scroll_indicator_visible() {
+        model.render_history_scroll_indicator(frame, area, &document, &viewport);
+    }
+
+    if model.has_current_floating_layer() {
+        let floating_layer = model.current_floating_layer(&document, &viewport);
+        frame.render_widget(floating_layer, area);
+    }
 
     if let Some(cursor_y) = document.cursor_y.checked_sub(viewport.resolved_offset)
         && cursor_y < viewport.lines.len()

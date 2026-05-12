@@ -997,6 +997,48 @@ fn standard_benchmark_message(index: usize) -> (Sender, String) {
 }
 
 #[test]
+fn standard_benchmark_fast_estimates_match_exact_line_counts() {
+    let width = 80;
+    let palette = default_palette();
+    let mut mismatches = Vec::new();
+
+    for index in 0..30 {
+        let (sender, content) = standard_benchmark_message(index);
+        let mut transcript = Transcript::new(palette);
+        transcript.set_gap(0);
+        transcript.set_width(width);
+        transcript.append_message_with_style_mode(sender, content, StyleMode::Cx);
+
+        let estimated = transcript.progressive_item_metrics_index();
+        let estimated_metrics = estimated.metrics[0];
+        let exact = transcript.item_metrics_index();
+        let exact_metrics = exact.metrics[0];
+
+        if estimated_metrics.content_line_count != exact_metrics.content_line_count
+            || estimated_metrics.content_char_len != exact_metrics.content_char_len
+        {
+            mismatches.push((
+                index,
+                sender,
+                (
+                    estimated_metrics.content_line_count,
+                    estimated_metrics.content_char_len,
+                ),
+                (
+                    exact_metrics.content_line_count,
+                    exact_metrics.content_char_len,
+                ),
+            ));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "standard benchmark messages should not force suffix line-position rewrites during hot scroll: {mismatches:?}"
+    );
+}
+
+#[test]
 #[ignore = "stress profile for large transcript scales"]
 fn document_pipeline_stress_profiles_up_to_one_million_items() {
     for item_count in [10_000_usize, 100_000_usize, 1_000_000_usize] {

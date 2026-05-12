@@ -1198,21 +1198,30 @@ impl Model {
                 break;
             }
 
+            drop(index);
+            self.release_transcript_index_holders_for_exactization();
             let Some((start_item, end_item)) =
                 self.transcript
                     .exactize_line_window(start, count, overscan_lines)
             else {
+                index = self.transcript.progressive_item_metrics_index();
                 break;
             };
             let next_index = self.transcript.progressive_item_metrics_index();
-            if next_index == index {
-                break;
-            }
             index = next_index;
             remaining_items = remaining_items.saturating_sub(end_item.saturating_sub(start_item));
         }
 
         index
+    }
+
+    fn release_transcript_index_holders_for_exactization(&mut self) {
+        self.transcript_render = Rc::new(index_only_render_result(
+            crate::frontend::tui::transcript::TranscriptItemMetricsIndex::default(),
+        ));
+        self.document_runtime.transcript_cache = Default::default();
+        self.document_runtime.layout_cache = Default::default();
+        self.document_runtime.viewport_cache = Default::default();
     }
 
     pub(crate) fn status_line_revision(&self) -> usize {
@@ -1316,7 +1325,11 @@ impl Model {
         let document_offset = if manual_scroll {
             self.document_runtime
                 .viewport_state
-                .resolve_offset(layout, self.document_viewport_height())
+                .resolve_offset_for_current_geometry(
+                    layout,
+                    self.document_viewport_height(),
+                    self.width,
+                )
         } else {
             self.document_runtime.viewport_state.resolved_offset()
         };

@@ -91,6 +91,7 @@ pub(crate) fn compose_document_viewport_from_line_indices(
     if line_indices.is_empty() {
         return DocumentViewport {
             lines: vec![Line::raw("")],
+            assistant_lines: vec![false],
             plain_text_len: 0,
             #[cfg(test)]
             plain_lines: vec![String::new()],
@@ -101,6 +102,7 @@ pub(crate) fn compose_document_viewport_from_line_indices(
     if let Some((start, count)) = contiguous_line_range(line_indices) {
         return DocumentViewport {
             lines: layout.lines_for_range(start, count),
+            assistant_lines: assistant_flags_for_line_indices(layout, line_indices),
             plain_text_len: layout.plain_text_len_for_range(start, count),
             #[cfg(test)]
             plain_lines: layout.line_texts_for_range(start, count),
@@ -109,6 +111,7 @@ pub(crate) fn compose_document_viewport_from_line_indices(
     }
 
     let mut lines = Vec::with_capacity(line_indices.len());
+    let mut assistant_lines = Vec::with_capacity(line_indices.len());
     let mut plain_text_len = 0;
     #[cfg(test)]
     let mut plain_lines = Vec::with_capacity(line_indices.len());
@@ -119,12 +122,14 @@ pub(crate) fn compose_document_viewport_from_line_indices(
             }
             plain_text_len += line.plain_line.len();
             lines.push(line.line);
+            assistant_lines.push(layout.is_assistant_message_line(index));
             #[cfg(test)]
             plain_lines.push(line.plain_line);
         }
     }
     DocumentViewport {
         lines,
+        assistant_lines,
         plain_text_len,
         #[cfg(test)]
         plain_lines,
@@ -145,6 +150,13 @@ fn contiguous_line_range(line_indices: &[usize]) -> Option<(usize, usize)> {
     }
 
     Some((start, line_indices.len()))
+}
+
+fn assistant_flags_for_line_indices(layout: &DocumentLayout, line_indices: &[usize]) -> Vec<bool> {
+    line_indices
+        .iter()
+        .map(|index| layout.is_assistant_message_line(*index))
+        .collect()
 }
 
 #[cfg(test)]

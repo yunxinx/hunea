@@ -10,6 +10,10 @@ use crate::frontend::tui::{
     },
 };
 
+use super::assistant_estimate::{
+    estimate_common_markdown_metrics_exact_fast, estimate_common_markdown_metrics_fast,
+};
+
 const ASSISTANT_MESSAGE_INSET_WIDTH: usize = 2;
 
 pub(super) fn render_assistant_message(
@@ -35,6 +39,12 @@ pub(super) fn render_assistant_message_metrics(
     palette: TerminalPalette,
 ) -> (usize, usize) {
     let width = assistant_message_content_width(width);
+    if !content.contains('\t')
+        && let Some(metrics) = estimate_common_markdown_metrics_exact_fast(content, width)
+    {
+        return metrics.into_tuple();
+    }
+
     let metrics = render_markdown_metrics(content, width, palette);
     if metrics.0 > 0 {
         return metrics;
@@ -60,6 +70,8 @@ pub(super) fn estimate_assistant_message_metrics_fast(
             let rendered = render_markdown_lines(content, width, palette);
             (rendered.len().max(1), lines_to_plain_text(&rendered).len())
         }
+    } else if let Some(metrics) = estimate_common_markdown_metrics_fast(content, width) {
+        metrics.into_tuple()
     } else {
         let wrapped = wrap_assistant_text(content, width, 0);
         (
@@ -96,7 +108,7 @@ pub(crate) fn assistant_message_visual_inset(width: u16) -> u16 {
     u16::try_from(ASSISTANT_MESSAGE_INSET_WIDTH).unwrap_or(u16::MAX)
 }
 
-fn assistant_message_content_width(width: u16) -> usize {
+pub(super) fn assistant_message_content_width(width: u16) -> usize {
     let full_width = assistant_message_width(width);
     let inset = usize::from(assistant_message_visual_inset(width));
 

@@ -2,6 +2,13 @@ use std::rc::Rc;
 
 use super::*;
 
+#[derive(Debug, Clone, Copy)]
+struct TranscriptMetricUpdate {
+    item_index: usize,
+    previous: TranscriptItemMetrics,
+    next: TranscriptItemMetrics,
+}
+
 impl Transcript {
     /// `progressive_item_metrics_index` 返回 transcript 当前宽度下的混合质量索引。
     pub(crate) fn progressive_item_metrics_index(&mut self) -> TranscriptItemMetricsIndex {
@@ -139,6 +146,7 @@ impl Transcript {
             index.summary_positions_for_line_window(start_line, line_count, overscan_lines)?;
         let start_item = index.visible_items.get(start_position)?.item_index;
         let end_item = index.visible_items.get(end_position)?.item_index + 1;
+        drop(index);
         self.exactize_item_range(start_item, end_item);
         Some((start_item, end_item))
     }
@@ -168,10 +176,18 @@ impl Transcript {
                 quality: TranscriptItemMetricsQuality::Exact,
                 is_valid: true,
             };
-            if self.metrics_cache.index.metrics.get(index).copied() == Some(next_metrics) {
+            let Some(previous_metrics) = self.metrics_cache.index.metrics.get(index).copied()
+            else {
+                continue;
+            };
+            if previous_metrics == next_metrics {
                 continue;
             }
-            updated_metrics.push((index, next_metrics));
+            updated_metrics.push(TranscriptMetricUpdate {
+                item_index: index,
+                previous: previous_metrics,
+                next: next_metrics,
+            });
         }
 
         if updated_metrics.is_empty() {
@@ -180,13 +196,136 @@ impl Transcript {
 
         {
             let metrics = Rc::make_mut(&mut self.metrics_cache.index.metrics);
-            for (index, metrics_entry) in updated_metrics {
-                metrics[index] = metrics_entry;
+            for update in &updated_metrics {
+                metrics[update.item_index] = update.next;
             }
         }
-        self.rebuild_content_prefix_sums_from(start, item_count);
-        self.rebuild_visible_positions_from(start, item_count);
+        self.update_content_prefix_sums_for_metric_updates(&updated_metrics, item_count);
+        if !self.update_visible_positions_for_metric_updates(&updated_metrics, item_count) {
+            self.rebuild_visible_positions_from(start, item_count);
+        }
         self.metrics_cache.store_valid(width, self.gap, item_count);
+    }
+
+    fn update_content_prefix_sums_for_metric_updates(
+        &mut self,
+        updates: &[TranscriptMetricUpdate],
+        item_count: usize,
+    ) {
+        let Some(first_update) = updates.first() else {
+            return;
+        };
+        let Some(last_update) = updates.last() else {
+            return;
+        };
+        let start = first_update.item_index.min(item_count);
+        let end = last_update.item_index.saturating_add(1).min(item_count);
+        if start >= end {
+            return;
+        }
+
+        let prefix_sums = Rc::make_mut(&mut self.metrics_cache.index.content_prefix_sums);
+        resize_content_prefix_sums(prefix_sums, item_count);
+
+        let old_end = prefix_sums.get(end).copied().unwrap_or(0);
+        for index in start..end {
+            prefix_sums[index + 1] = prefix_sums[index]
+                .saturating_add(self.metrics_cache.index.metrics[index].content_char_len);
+        }
+        let new_end = prefix_sums[end];
+        if new_end >= old_end {
+            let delta = new_end - old_end;
+            if delta > 0 {
+                for value in prefix_sums.iter_mut().skip(end + 1) {
+                    *value = value.saturating_add(delta);
+                }
+            }
+        } else {
+            let delta = old_end - new_end;
+            for value in prefix_sums.iter_mut().skip(end + 1) {
+                *value = value.saturating_sub(delta);
+            }
+        }
+
+        self.metrics_cache.index.content_char_len = *prefix_sums.last().unwrap_or(&0);
+    }
+
+    fn update_visible_positions_for_metric_updates(
+        &mut self,
+        updates: &[TranscriptMetricUpdate],
+        item_count: usize,
+    ) -> bool {
+        let Some(first_update) = updates.first() else {
+            return true;
+        };
+        let visible_positions = Rc::make_mut(&mut self.metrics_cache.index.visible_positions);
+        resize_visible_positions(visible_positions, item_count);
+
+        for update in updates {
+            if update.previous.content_line_count == 0 || update.next.content_line_count == 0 {
+                return false;
+            }
+            if visible_positions.get(update.item_index).copied() == Some(usize::MAX) {
+                return false;
+            }
+        }
+
+        if updates
+            .iter()
+            .all(|update| update.previous.content_line_count == update.next.content_line_count)
+        {
+            let visible_items = Rc::make_mut(&mut self.metrics_cache.index.visible_items);
+            for update in updates {
+                let Some(position_index) = visible_positions.get(update.item_index).copied() else {
+                    return false;
+                };
+                let Some(position) = visible_items.get_mut(position_index) else {
+                    return false;
+                };
+                position.content_char_len = update.next.content_char_len;
+            }
+            return true;
+        }
+
+        let first_position = visible_positions
+            .get(first_update.item_index)
+            .copied()
+            .filter(|position| *position != usize::MAX)
+            .unwrap_or(usize::MAX);
+        if first_position == usize::MAX {
+            return false;
+        }
+
+        let visible_items = Rc::make_mut(&mut self.metrics_cache.index.visible_items);
+        let mut updates = updates.iter().peekable();
+        let mut total_lines = if first_position == 0 {
+            0
+        } else {
+            let Some(previous) = visible_items.get(first_position - 1).copied() else {
+                return false;
+            };
+            previous.start_line + previous.total_line_count
+        };
+
+        for position in visible_items.iter_mut().skip(first_position) {
+            position.start_line = total_lines;
+            if let Some(update) = updates.peek()
+                && update.item_index == position.item_index
+            {
+                position.content_line_count = update.next.content_line_count;
+                position.content_char_len = update.next.content_char_len;
+                position.total_line_count = position.gap_before + update.next.content_line_count;
+                updates.next();
+            }
+            total_lines = total_lines.saturating_add(position.total_line_count);
+        }
+
+        if updates.peek().is_some() {
+            return false;
+        }
+
+        self.metrics_cache.index.line_count = total_lines;
+        true
     }
 
     fn rebuild_content_prefix_sums_from(&mut self, start: usize, item_count: usize) {

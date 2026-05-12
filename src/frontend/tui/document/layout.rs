@@ -271,6 +271,7 @@ pub(crate) fn compose_document_viewport(
     if layout.line_count() == 0 {
         return DocumentViewport {
             lines: vec![Line::raw("")],
+            assistant_lines: vec![false],
             plain_text_len: 0,
             #[cfg(test)]
             plain_lines: vec![String::new()],
@@ -279,11 +280,13 @@ pub(crate) fn compose_document_viewport(
     }
 
     if height == 0 || height >= layout.line_count() {
+        let range = document_range_snapshot(layout, 0, layout.line_count());
         return DocumentViewport {
-            lines: layout.lines_for_range(0, layout.line_count()),
-            plain_text_len: layout.plain_text_len(),
+            lines: range.lines,
+            assistant_lines: range.assistant_lines,
+            plain_text_len: range.plain_text_len,
             #[cfg(test)]
-            plain_lines: layout.all_plain_lines(),
+            plain_lines: range.plain_lines,
             resolved_offset: 0,
         };
     }
@@ -295,6 +298,7 @@ pub(crate) fn compose_document_viewport(
 
     DocumentViewport {
         lines: range.lines,
+        assistant_lines: range.assistant_lines,
         plain_text_len: range.plain_text_len,
         #[cfg(test)]
         plain_lines: range.plain_lines,
@@ -329,6 +333,7 @@ pub(crate) fn visible_document_lines(
 #[derive(Debug, Clone, Default)]
 struct DocumentRangeSnapshot {
     lines: Vec<Line<'static>>,
+    assistant_lines: Vec<bool>,
     plain_text_len: usize,
     #[cfg(test)]
     plain_lines: Vec<String>,
@@ -345,6 +350,7 @@ fn document_range_snapshot(
 
     let end = (start + count).min(layout.line_count());
     let mut lines = Vec::with_capacity(end - start);
+    let mut assistant_lines = Vec::with_capacity(end - start);
     let mut plain_text_len = 0;
     let mut line_count = 0;
     #[cfg(test)]
@@ -358,6 +364,7 @@ fn document_range_snapshot(
         plain_text_len += transcript_slice.plain_text_len;
         line_count += transcript_slice.lines.len();
         lines.extend(transcript_slice.lines);
+        assistant_lines.extend(transcript_slice.assistant_lines);
         #[cfg(test)]
         plain_lines.extend(transcript_slice.plain_lines);
         start = transcript_end;
@@ -368,6 +375,7 @@ fn document_range_snapshot(
         let tail_end = end - layout.transcript_line_count;
         let tail_line_count = tail_end - tail_start;
         lines.extend_from_slice(&layout.tail.lines[tail_start..tail_end]);
+        assistant_lines.extend(std::iter::repeat_n(false, tail_line_count));
         if line_count > 0 && tail_line_count > 0 {
             plain_text_len += 1;
         }
@@ -386,6 +394,7 @@ fn document_range_snapshot(
 
     DocumentRangeSnapshot {
         lines,
+        assistant_lines,
         plain_text_len,
         #[cfg(test)]
         plain_lines,

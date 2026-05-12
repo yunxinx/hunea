@@ -1031,6 +1031,8 @@ fn acp_terminal_update_renders_embedded_terminal_output() {
             agent_id: "Kimi Code CLI".to_string(),
             snapshot: AcpTerminalSnapshot {
                 terminal_id: "term-1".to_string(),
+                command: Some("cargo check".to_string()),
+                cwd: None,
                 output: "Checking lumos\nFinished".to_string(),
                 truncated: false,
                 exit_status: Some(AcpTerminalExitStatus {
@@ -1048,6 +1050,173 @@ fn acp_terminal_update_renders_embedded_terminal_output() {
     assert!(transcript.contains("Finished"));
     assert!(transcript.contains("Exited with code 0"));
     assert!(!transcript.contains("terminal/create unsupported"));
+}
+
+#[test]
+fn acp_prompt_response_keeps_running_terminal_tool_call_active() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCall {
+            agent_id: "Kimi Code CLI".to_string(),
+            call: AcpToolCall {
+                tool_call_id: "tool-dev-server".to_string(),
+                title: "npm run dev".to_string(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolCallStatus::InProgress,
+                content: vec![AcpToolCallContent::Terminal {
+                    terminal_id: "term-dev".to_string(),
+                }],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::TerminalUpdated {
+            agent_id: "Kimi Code CLI".to_string(),
+            snapshot: AcpTerminalSnapshot {
+                terminal_id: "term-dev".to_string(),
+                command: Some("npm run dev".to_string()),
+                cwd: Some("/tmp/project".to_string()),
+                output: "ready on http://localhost:3000\n".to_string(),
+                truncated: false,
+                exit_status: None,
+                released: false,
+            },
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptResponse {
+            agent_id: "Kimi Code CLI".to_string(),
+            content: String::new(),
+            stop_reason: "EndTurn".to_string(),
+        },
+    );
+
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(transcript.contains("npm run dev"));
+    assert!(transcript.contains("Running..."));
+    assert!(transcript.contains("ready on http://localhost:3000"));
+    assert!(!transcript.contains("Tool call ended without final status"));
+    assert!(
+        model
+            .transcript_mut()
+            .active_tool_activity_started_at()
+            .is_some(),
+        "running background terminal should keep tool activity animation alive"
+    );
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::TerminalUpdated {
+            agent_id: "Kimi Code CLI".to_string(),
+            snapshot: AcpTerminalSnapshot {
+                terminal_id: "term-dev".to_string(),
+                command: Some("npm run dev".to_string()),
+                cwd: Some("/tmp/project".to_string()),
+                output: "ready on http://localhost:3000\nstopped\n".to_string(),
+                truncated: false,
+                exit_status: Some(AcpTerminalExitStatus {
+                    exit_code: Some(137),
+                    signal: None,
+                }),
+                released: false,
+            },
+        },
+    );
+    assert!(
+        model
+            .transcript_mut()
+            .active_tool_activity_started_at()
+            .is_none(),
+        "exited background terminal should not keep tool activity animation alive"
+    );
+}
+
+#[test]
+fn acp_prompt_response_keeps_terminal_tool_call_active_before_first_snapshot() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    let mut acp_runtime = AcpRuntimeState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::ToolCall {
+            agent_id: "Kimi Code CLI".to_string(),
+            call: AcpToolCall {
+                tool_call_id: "tool-dev-server".to_string(),
+                title: "npm run dev".to_string(),
+                kind: AcpToolKind::Execute,
+                status: AcpToolCallStatus::InProgress,
+                content: vec![AcpToolCallContent::Terminal {
+                    terminal_id: "term-dev".to_string(),
+                }],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::PromptResponse {
+            agent_id: "Kimi Code CLI".to_string(),
+            content: String::new(),
+            stop_reason: "EndTurn".to_string(),
+        },
+    );
+
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(transcript.contains("npm run dev"));
+    assert!(transcript.contains("Waiting..."));
+    assert!(!transcript.contains("Tool call ended without final status"));
+    assert!(
+        model
+            .transcript_mut()
+            .active_tool_activity_started_at()
+            .is_some(),
+        "terminal tool activity should remain active until the first terminal snapshot arrives"
+    );
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_runtime,
+        AcpSessionEvent::TerminalUpdated {
+            agent_id: "Kimi Code CLI".to_string(),
+            snapshot: AcpTerminalSnapshot {
+                terminal_id: "term-dev".to_string(),
+                command: Some("npm run dev".to_string()),
+                cwd: Some("/tmp/project".to_string()),
+                output: "stopped\n".to_string(),
+                truncated: false,
+                exit_status: Some(AcpTerminalExitStatus {
+                    exit_code: Some(0),
+                    signal: None,
+                }),
+                released: false,
+            },
+        },
+    );
+    assert!(
+        model
+            .transcript_mut()
+            .active_tool_activity_started_at()
+            .is_none(),
+        "terminal snapshot with exit status should clear the active marker"
+    );
 }
 
 #[test]

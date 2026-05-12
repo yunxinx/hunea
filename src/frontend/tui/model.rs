@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 use std::{collections::BTreeMap, rc::Rc};
 
@@ -954,6 +955,40 @@ impl Model {
         true
     }
 
+    pub(crate) fn has_active_acp_background_terminals(&self) -> bool {
+        self.acp_terminal_snapshots
+            .values()
+            .any(is_active_acp_terminal_snapshot)
+    }
+
+    pub(crate) fn acp_background_terminal_summary_text(&self) -> String {
+        let active = self
+            .acp_terminal_snapshots
+            .values()
+            .filter(|snapshot| is_active_acp_terminal_snapshot(snapshot))
+            .collect::<Vec<_>>();
+        if active.is_empty() {
+            return "No background terminals running.".to_string();
+        }
+
+        let mut summary = String::from("Background terminals:");
+        for snapshot in active {
+            let command = snapshot
+                .command
+                .as_deref()
+                .filter(|command| !command.trim().is_empty())
+                .unwrap_or("terminal");
+            let _ = write!(summary, "\n- {command}");
+            if let Some(cwd) = snapshot.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
+                let _ = write!(summary, "\n  {cwd}");
+            }
+            if let Some(output) = acp_terminal_recent_output(&snapshot.output) {
+                let _ = write!(summary, "\n  {output}");
+            }
+        }
+        summary
+    }
+
     pub(crate) fn set_acp_tool_call_approval_suspended_from_runtime(
         &mut self,
         item_index: usize,
@@ -1338,6 +1373,27 @@ fn resolve_initial_current_dir(
     } else {
         String::new()
     }
+}
+
+fn is_active_acp_terminal_snapshot(snapshot: &AcpTerminalSnapshot) -> bool {
+    snapshot.exit_status.is_none() && !snapshot.released
+}
+
+fn acp_terminal_recent_output(output: &str) -> Option<String> {
+    output
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let line = line.trim();
+            (!line.is_empty()).then(|| line.to_string())
+        })
+        .map(|line| {
+            const MAX_RECENT_OUTPUT_WIDTH: usize = 96;
+            crate::frontend::tui::status_line::truncate_display_width_with_ellipsis(
+                &line,
+                MAX_RECENT_OUTPUT_WIDTH,
+            )
+        })
 }
 
 #[cfg(test)]

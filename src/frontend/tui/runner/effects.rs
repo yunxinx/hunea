@@ -7,6 +7,7 @@ use super::RuntimeOptions;
 use super::acp_session::{
     AcpRuntimeState, run_interrupt_acp_prompt_effect, run_respond_acp_permission_effect,
     run_send_acp_prompt_effect, run_set_acp_model_effect, run_start_acp_session_effect,
+    run_stop_acp_background_terminals_effect,
 };
 use super::external_io::{run_copy_selection_effect, run_external_editor_effect};
 use super::model_refresh::{persist_selected_model, run_refresh_model_provider_effect};
@@ -64,6 +65,10 @@ pub(super) fn apply_effect_if_needed(
         }
         AppEffect::SetAcpModel { config_id, value } => {
             run_set_acp_model_effect(model, acp_runtime, config_id, value);
+            Ok(())
+        }
+        AppEffect::StopAcpBackgroundTerminals => {
+            run_stop_acp_background_terminals_effect(model, acp_runtime);
             Ok(())
         }
         AppEffect::PersistSelectedModel { selection } => {

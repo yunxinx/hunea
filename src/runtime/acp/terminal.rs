@@ -53,6 +53,8 @@ impl AcpTerminalManagerInner {
 }
 
 struct AcpTerminalSession {
+    command_label: String,
+    cwd_label: Option<String>,
     output: AcpTerminalOutputBuffer,
     exit_status: Option<AcpTerminalExitStatus>,
     released: bool,
@@ -155,6 +157,32 @@ impl AcpTerminalManager {
         Ok(KillTerminalResponse::new())
     }
 
+    pub(crate) fn kill_all_active(&self) -> usize {
+        let snapshots = {
+            let mut guard = self
+                .inner
+                .lock()
+                .expect("ACP terminal manager lock should not be poisoned");
+            guard
+                .terminals
+                .iter_mut()
+                .filter_map(|(terminal_id, session)| {
+                    if session.exit_status.is_some() || session.released {
+                        return None;
+                    }
+                    kill_session_process(session);
+                    Some(session.snapshot(terminal_id))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let count = snapshots.len();
+        for snapshot in snapshots {
+            self.send_snapshot(snapshot);
+        }
+        count
+    }
+
     pub(crate) fn release(
         &self,
         request: ReleaseTerminalRequest,
@@ -221,6 +249,8 @@ impl AcpTerminalManager {
             pixel_height: 0,
         })?;
         let (shell, shell_args) = terminal_shell_invocation(&request.command, &request.args);
+        let command_label = terminal_shell_command_line(&request.command, &request.args);
+        let cwd_label = request.cwd.as_ref().map(|cwd| cwd.display().to_string());
         let mut command = CommandBuilder::new(shell);
         for arg in shell_args {
             command.arg(arg);
@@ -239,6 +269,8 @@ impl AcpTerminalManager {
         let reader = pair.master.try_clone_reader()?;
         let (exit_tx, exit_rx) = watch::channel(None);
         let session = AcpTerminalSession {
+            command_label,
+            cwd_label,
             output: AcpTerminalOutputBuffer::new(output_byte_limit(request.output_byte_limit)),
             exit_status: None,
             released: false,
@@ -426,6 +458,8 @@ impl AcpTerminalOutputBuffer {
     pub(crate) fn snapshot(&self, terminal_id: impl Into<String>) -> AcpTerminalSnapshot {
         AcpTerminalSnapshot {
             terminal_id: terminal_id.into(),
+            command: None,
+            cwd: None,
             output: self.output(),
             truncated: self.truncated,
             exit_status: None,
@@ -737,6 +771,8 @@ fn kill_session_process(session: &mut AcpTerminalSession) {
 impl AcpTerminalSession {
     fn snapshot(&self, terminal_id: &str) -> AcpTerminalSnapshot {
         let mut snapshot = self.output.snapshot(terminal_id);
+        snapshot.command = Some(self.command_label.clone());
+        snapshot.cwd = self.cwd_label.clone();
         snapshot.exit_status = self.exit_status.clone();
         snapshot.released = self.released;
         snapshot

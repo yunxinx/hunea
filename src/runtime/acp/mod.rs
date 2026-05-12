@@ -37,9 +37,11 @@ pub use worker::{AcpSessionWorker, AcpWorkerSendError};
 #[cfg(test)]
 pub(crate) use permission::AcpPermissionRegistry;
 #[cfg(test)]
-pub(crate) use protocol::{AcpTransportState, run_agent_transport_worker};
+pub(crate) use protocol::{
+    AcpTransportState, run_agent_transport_worker, run_agent_transport_worker_with_terminal_control,
+};
 #[cfg(test)]
-pub(crate) use worker::AcpWorkerCommand;
+pub(crate) use worker::{AcpTerminalControlCommand, AcpWorkerCommand};
 
 #[cfg(test)]
 mod tests;

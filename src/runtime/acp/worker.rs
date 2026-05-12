@@ -15,12 +15,18 @@ pub(crate) enum AcpWorkerCommand {
     Shutdown,
 }
 
+#[derive(Debug)]
+pub(crate) enum AcpTerminalControlCommand {
+    StopAll,
+}
+
 /// `AcpSessionWorker` 在独立线程中持有 ACP agent 进程与会话。
 #[derive(Debug)]
 pub struct AcpSessionWorker {
     agent_id: String,
     commands: tokio::sync::mpsc::UnboundedSender<AcpWorkerCommand>,
     cancels: tokio::sync::mpsc::UnboundedSender<()>,
+    terminal_controls: tokio::sync::mpsc::UnboundedSender<AcpTerminalControlCommand>,
     events: mpsc::Receiver<AcpSessionEvent>,
     thread_handle: Option<thread::JoinHandle<()>>,
     permissions: AcpPermissionRegistry,
@@ -32,6 +38,7 @@ impl AcpSessionWorker {
         let agent_id = command.agent_id.clone();
         let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
         let (cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (terminal_control_tx, terminal_control_rx) = tokio::sync::mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::channel();
         let permissions = AcpPermissionRegistry::default();
         let thread_agent_id = agent_id.clone();
@@ -42,6 +49,7 @@ impl AcpSessionWorker {
                 command,
                 command_rx,
                 cancel_rx,
+                terminal_control_rx,
                 event_tx,
                 thread_permissions,
             );
@@ -51,6 +59,7 @@ impl AcpSessionWorker {
             agent_id,
             commands: command_tx,
             cancels: cancel_tx,
+            terminal_controls: terminal_control_tx,
             events: event_rx,
             thread_handle: Some(thread_handle),
             permissions,
@@ -84,6 +93,13 @@ impl AcpSessionWorker {
     ) -> Result<(), AcpWorkerSendError> {
         self.commands
             .send(AcpWorkerCommand::SetModel { config_id, value })
+            .map_err(|_| AcpWorkerSendError::Closed)
+    }
+
+    /// `stop_background_terminals` 请求停止仍在运行的 ACP terminal。
+    pub fn stop_background_terminals(&self) -> Result<(), AcpWorkerSendError> {
+        self.terminal_controls
+            .send(AcpTerminalControlCommand::StopAll)
             .map_err(|_| AcpWorkerSendError::Closed)
     }
 

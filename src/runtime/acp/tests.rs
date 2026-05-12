@@ -1865,6 +1865,58 @@ async fn acp_terminal_create_quotes_args_when_launching_through_shell() {
     .expect("terminal/wait_for_exit should succeed");
 }
 
+#[cfg(not(windows))]
+#[tokio::test(flavor = "current_thread")]
+async fn acp_terminal_create_returns_before_long_running_command_exits() {
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+
+    use acp::schema::{CreateTerminalRequest, WaitForTerminalExitRequest};
+    use agent_client_protocol as acp;
+
+    let (event_tx, _event_rx) = mpsc::channel();
+    let manager = super::terminal::AcpTerminalManager::new("fake", event_tx);
+    let started_at = Instant::now();
+    let terminal = manager
+        .create(CreateTerminalRequest::new(
+            "test-session",
+            "printf 'ready\\n'; sleep 60",
+        ))
+        .await
+        .expect("terminal/create should return without waiting for command exit");
+    assert!(
+        started_at.elapsed() < Duration::from_secs(1),
+        "terminal/create should return immediately for long-running commands"
+    );
+    let terminal_id = terminal.terminal_id.clone();
+
+    let output = wait_for_terminal_output(&manager, &terminal_id, "ready").await;
+    assert!(output.contains("ready"));
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            manager.wait_for_exit(WaitForTerminalExitRequest::new(
+                "test-session",
+                terminal_id.clone()
+            )),
+        )
+        .await
+        .is_err(),
+        "terminal/wait_for_exit should keep waiting while the process is running"
+    );
+
+    assert_eq!(manager.kill_all_active(), 1);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        manager.wait_for_exit(WaitForTerminalExitRequest::new("test-session", terminal_id)),
+    )
+    .await
+    .expect("terminal/wait_for_exit should complete after kill_all_active")
+    .expect("terminal/wait_for_exit should succeed after kill_all_active");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn acp_terminal_release_invalidates_id_and_emits_released_snapshot() {
     use std::{sync::mpsc, time::Duration};
@@ -2181,6 +2233,147 @@ async fn acp_worker_terminal_create_runs_after_tool_permission_without_second_ap
     }
     assert!(saw_released_terminal);
 
+    worker
+        .await
+        .expect("worker task should join")
+        .expect("worker should stop cleanly");
+}
+
+#[cfg(not(windows))]
+#[tokio::test(flavor = "current_thread")]
+async fn acp_worker_terminal_control_stops_prompt_blocked_on_wait_for_exit() {
+    use std::sync::{Arc, atomic::AtomicBool, mpsc};
+
+    use acp::schema::{
+        ContentBlock, ContentChunk, CreateTerminalRequest, Implementation, InitializeRequest,
+        InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+        SessionNotification, SessionUpdate, StopReason, TerminalOutputRequest, TextContent,
+        WaitForTerminalExitRequest,
+    };
+    use agent_client_protocol as acp;
+
+    let (client_transport, agent_transport) = acp::Channel::duplex();
+    tokio::task::spawn(async move {
+        acp::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _connection| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_info(Implementation::new("fake-agent", "0.1.0")),
+                    )
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _connection| {
+                    responder.respond(NewSessionResponse::new("test-session"))
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: PromptRequest, responder, connection| {
+                    let session_id = request.session_id.clone();
+                    let wait_connection = connection.clone();
+                    let output_connection = connection.clone();
+                    let response_connection = connection.clone();
+                    connection
+                        .send_request(CreateTerminalRequest::new(
+                            session_id.clone(),
+                            "printf 'control-ready\\n'; sleep 60",
+                        ))
+                        .on_receiving_result(async move |terminal| {
+                            let terminal = terminal?;
+                            wait_connection
+                                .send_request(WaitForTerminalExitRequest::new(
+                                    session_id.clone(),
+                                    terminal.terminal_id.clone(),
+                                ))
+                                .block_task()
+                                .await?;
+                            let output = output_connection
+                                .send_request(TerminalOutputRequest::new(
+                                    session_id.clone(),
+                                    terminal.terminal_id,
+                                ))
+                                .block_task()
+                                .await?;
+                            response_connection.send_notification(SessionNotification::new(
+                                session_id,
+                                SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                    ContentBlock::Text(TextContent::new(output.output)),
+                                )),
+                            ))?;
+                            responder.respond(PromptResponse::new(StopReason::EndTurn))?;
+                            Ok(())
+                        })?;
+                    Ok(())
+                },
+                acp::on_receive_request!(),
+            )
+            .connect_to(agent_transport)
+            .await
+    });
+
+    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (terminal_control_tx, terminal_control_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let permissions = super::AcpPermissionRegistry::default();
+    let worker = tokio::task::spawn(super::run_agent_transport_worker_with_terminal_control(
+        "fake".to_string(),
+        client_transport,
+        command_rx,
+        cancel_rx,
+        terminal_control_rx,
+        event_tx,
+        super::AcpTransportState::new(Arc::new(AtomicBool::new(false)), permissions.clone()),
+    ));
+
+    let _started = recv_worker_event(&event_rx, "worker should report session start").await;
+    command_tx
+        .send(super::AcpWorkerCommand::Prompt(
+            super::AcpPrompt::from_text("run dev server"),
+        ))
+        .expect("prompt command should send");
+    let _prompt_started = recv_worker_event(&event_rx, "worker should report prompt start").await;
+
+    let terminal_id = loop {
+        match recv_worker_event(&event_rx, "worker should stream terminal output").await {
+            super::AcpSessionEvent::TerminalUpdated { snapshot, .. }
+                if snapshot.output.contains("control-ready") =>
+            {
+                break snapshot.terminal_id;
+            }
+            _ => {}
+        }
+    };
+
+    terminal_control_tx
+        .send(super::AcpTerminalControlCommand::StopAll)
+        .expect("terminal control command should send while prompt is blocked");
+
+    let mut saw_output_after_stop = false;
+    loop {
+        match recv_worker_event(&event_rx, "worker should finish after terminal stop").await {
+            super::AcpSessionEvent::TerminalUpdated { snapshot, .. }
+                if snapshot.terminal_id == terminal_id =>
+            {
+                saw_output_after_stop |= snapshot.exit_status.is_some();
+            }
+            super::AcpSessionEvent::AgentMessageChunk { content, .. } => {
+                assert!(content.contains("control-ready"));
+                saw_output_after_stop = true;
+            }
+            super::AcpSessionEvent::PromptResponse { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(saw_output_after_stop);
+
+    command_tx
+        .send(super::AcpWorkerCommand::Shutdown)
+        .expect("shutdown command should send");
     worker
         .await
         .expect("worker task should join")

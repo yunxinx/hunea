@@ -41,6 +41,7 @@ pub enum AppEffect {
         config_id: Option<String>,
         value: String,
     },
+    StopAcpBackgroundTerminals,
     SendNativeAgent {
         request: NativeAgentRequest,
     },

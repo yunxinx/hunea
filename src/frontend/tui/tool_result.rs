@@ -111,7 +111,7 @@ impl ToolResultItem {
             &terminal_snapshots,
         );
         let active_marker_started_at =
-            active_marker_started_at_for_body(&body).then_some(Instant::now());
+            active_marker_started_at_for_body(&body, &terminal_snapshots).then_some(Instant::now());
         Self {
             body,
             render_mode,
@@ -345,6 +345,7 @@ impl ToolResultItem {
 
         self.terminal_snapshots
             .insert(snapshot.terminal_id.clone(), snapshot);
+        self.refresh_active_marker_started_at();
         self.refresh_render_cache_key();
         true
     }
@@ -391,8 +392,7 @@ impl ToolResultItem {
         if let Some(raw_output) = update.raw_output {
             call.raw_output = Some(raw_output);
         }
-        self.active_marker_started_at = active_marker_started_at_for_body(&self.body)
-            .then(|| self.active_marker_started_at.unwrap_or_else(Instant::now));
+        self.refresh_active_marker_started_at();
         self.refresh_render_cache_key();
         true
     }
@@ -414,6 +414,12 @@ impl ToolResultItem {
         self.active_marker_started_at = None;
         self.refresh_render_cache_key();
         true
+    }
+
+    fn refresh_active_marker_started_at(&mut self) {
+        self.active_marker_started_at =
+            active_marker_started_at_for_body(&self.body, &self.terminal_snapshots)
+                .then(|| self.active_marker_started_at.unwrap_or_else(Instant::now));
     }
 
     pub(crate) fn mark_acp_tool_call_rejected(&mut self) -> bool {
@@ -979,14 +985,35 @@ fn split_first_word(line: &str) -> Option<(&str, &str)> {
     Some((&line[..index], &line[index..]))
 }
 
-fn active_marker_started_at_for_body(body: &ToolResultBody) -> bool {
-    matches!(
-        body,
-        ToolResultBody::AcpToolCall(AcpToolCall {
-            status: AcpToolCallStatus::Pending | AcpToolCallStatus::InProgress,
-            ..
+fn active_marker_started_at_for_body(
+    body: &ToolResultBody,
+    terminal_snapshots: &BTreeMap<String, AcpTerminalSnapshot>,
+) -> bool {
+    let ToolResultBody::AcpToolCall(call) = body else {
+        return false;
+    };
+    if !matches!(
+        call.status,
+        AcpToolCallStatus::Pending | AcpToolCallStatus::InProgress
+    ) {
+        return false;
+    }
+    let terminal_ids = call
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            AcpToolCallContent::Terminal { terminal_id } => Some(terminal_id),
+            _ => None,
         })
-    )
+        .collect::<Vec<_>>();
+    if terminal_ids.is_empty() {
+        return true;
+    }
+    terminal_ids.iter().any(|terminal_id| {
+        terminal_snapshots
+            .get(*terminal_id)
+            .is_none_or(|snapshot| snapshot.exit_status.is_none() && !snapshot.released)
+    })
 }
 
 fn tool_result_render_cache_key(
@@ -1509,6 +1536,8 @@ mod tests {
         assert!(item.set_acp_terminal_snapshot_for_test(
             crate::runtime::acp::AcpTerminalSnapshot {
                 terminal_id: "term-1".to_string(),
+                command: Some("cargo check".to_string()),
+                cwd: None,
                 output: "Checking lumos\nFinished".to_string(),
                 truncated: false,
                 exit_status: None,

@@ -11,8 +11,8 @@ use crate::frontend::tui::{
 };
 use crate::runtime::acp::{
     AcpAgentIdentity, AcpPermissionOptionKind, AcpPermissionRequest, AcpPrompt, AcpSessionCommand,
-    AcpSessionEvent, AcpSessionWorker, AcpToolCall, AcpToolCallContent, AcpToolCallStatus,
-    AcpToolCallUpdate, AcpToolKind,
+    AcpSessionEvent, AcpSessionWorker, AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent,
+    AcpToolCallStatus, AcpToolCallUpdate, AcpToolKind,
 };
 use crate::runtime::session::{RuntimeEvent, RuntimeTarget};
 use crate::runtime::token_count::StreamingTokenProgress;
@@ -32,6 +32,8 @@ pub(super) struct AcpRuntimeState {
     prompt_started_at: Option<Instant>,
     first_token_at: Option<Instant>,
     tool_call_items: HashMap<String, usize>,
+    tool_call_terminal_ids: HashMap<String, HashSet<String>>,
+    terminal_active_states: HashMap<String, bool>,
     tool_call_token_text: HashMap<String, String>,
     rejected_permission_tool_calls: HashSet<String>,
 }
@@ -58,6 +60,8 @@ impl AcpRuntimeState {
         self.prompt_started_at = None;
         self.first_token_at = None;
         self.tool_call_items.clear();
+        self.tool_call_terminal_ids.clear();
+        self.terminal_active_states.clear();
         self.tool_call_token_text.clear();
         self.rejected_permission_tool_calls.clear();
         self.worker = Some(AcpSessionWorker::start(command));
@@ -132,6 +136,7 @@ impl AcpRuntimeState {
         self.prompt_started_at = Some(Instant::now());
         self.first_token_at = None;
         self.tool_call_items.clear();
+        self.tool_call_terminal_ids.clear();
         self.tool_call_token_text.clear();
     }
 
@@ -206,6 +211,7 @@ impl AcpRuntimeState {
         self.prompt_started_at = None;
         self.first_token_at = None;
         self.tool_call_items.clear();
+        self.tool_call_terminal_ids.clear();
         self.tool_call_token_text.clear();
     }
 
@@ -265,6 +271,7 @@ impl AcpRuntimeState {
         self.prompt_started_at = None;
         self.first_token_at = None;
         self.tool_call_items.clear();
+        self.tool_call_terminal_ids.clear();
         self.tool_call_token_text.clear();
         self.rejected_permission_tool_calls.clear();
         if self.prompt_in_flight && self.discard_in_flight_prompt.is_none() {
@@ -276,16 +283,66 @@ impl AcpRuntimeState {
         self.tool_call_items.insert(tool_call_id, item_index);
     }
 
+    fn track_tool_call_terminal_content(
+        &mut self,
+        tool_call_id: &str,
+        content: Option<&[AcpToolCallContent]>,
+    ) {
+        let Some(content) = content else {
+            return;
+        };
+        let terminal_ids = content
+            .iter()
+            .filter_map(|content| match content {
+                AcpToolCallContent::Terminal { terminal_id } => Some(terminal_id.clone()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        if terminal_ids.is_empty() {
+            self.tool_call_terminal_ids.remove(tool_call_id);
+        } else {
+            self.tool_call_terminal_ids
+                .insert(tool_call_id.to_string(), terminal_ids);
+        }
+    }
+
+    fn observe_terminal_snapshot(&mut self, snapshot: &AcpTerminalSnapshot) {
+        self.terminal_active_states.insert(
+            snapshot.terminal_id.clone(),
+            snapshot.exit_status.is_none() && !snapshot.released,
+        );
+    }
+
     fn tool_call_item_index(&self, tool_call_id: &str) -> Option<usize> {
         self.tool_call_items.get(tool_call_id).copied()
     }
 
-    fn tracked_tool_call_indices(&self) -> Vec<usize> {
-        self.tool_call_items.values().copied().collect()
+    fn tracked_non_background_tool_call_indices(&self) -> Vec<usize> {
+        self.tool_call_items
+            .iter()
+            .filter_map(|(tool_call_id, item_index)| {
+                (!self.tool_call_has_running_or_pending_terminal(tool_call_id))
+                    .then_some(*item_index)
+            })
+            .collect()
+    }
+
+    fn tool_call_has_running_or_pending_terminal(&self, tool_call_id: &str) -> bool {
+        self.tool_call_terminal_ids
+            .get(tool_call_id)
+            .is_some_and(|terminal_ids| {
+                terminal_ids.iter().any(|terminal_id| {
+                    self.terminal_active_states
+                        .get(terminal_id)
+                        .copied()
+                        .unwrap_or(true)
+                })
+            })
     }
 
     fn clear_tool_call_tracking(&mut self) {
         self.tool_call_items.clear();
+        self.tool_call_terminal_ids.clear();
         self.tool_call_token_text.clear();
     }
 
@@ -323,6 +380,16 @@ impl AcpRuntimeState {
 
         worker
             .set_model(config_id, value)
+            .map_err(|error| error.to_string())
+    }
+
+    fn stop_background_terminals(&self) -> Result<(), String> {
+        let Some(worker) = self.worker.as_ref() else {
+            return Err("ACP session is not ready".to_string());
+        };
+
+        worker
+            .stop_background_terminals()
             .map_err(|error| error.to_string())
     }
 }
@@ -643,6 +710,7 @@ pub(super) fn apply_acp_session_event(
             }
         }
         AcpSessionEvent::TerminalUpdated { snapshot, .. } => {
+            acp_runtime.observe_terminal_snapshot(&snapshot);
             if acp_runtime.should_discard_prompt_output() {
                 return;
             }
@@ -820,6 +888,7 @@ fn upsert_acp_tool_call(
     call: AcpToolCall,
 ) -> usize {
     let tool_call_id = call.tool_call_id.clone();
+    acp_runtime.track_tool_call_terminal_content(&tool_call_id, Some(call.content.as_slice()));
     let item_index = match model.acp_tool_call_item_index_from_runtime(&tool_call_id) {
         Some(item_index) => {
             let update = acp_tool_call_update_from_call(call);
@@ -839,6 +908,7 @@ fn upsert_acp_tool_call_update(
     fallback_title: Option<String>,
 ) -> usize {
     let tool_call_id = update.tool_call_id.clone();
+    acp_runtime.track_tool_call_terminal_content(&tool_call_id, update.content.as_deref());
     let item_index = acp_runtime
         .tool_call_item_index(&tool_call_id)
         .or_else(|| model.acp_tool_call_item_index_from_runtime(&tool_call_id));
@@ -893,8 +963,9 @@ fn fail_tracked_acp_tool_calls(
     acp_runtime: &mut AcpRuntimeState,
     message: &str,
 ) {
-    let active_tool_call_indices = acp_runtime.tracked_tool_call_indices();
+    let active_tool_call_indices = acp_runtime.tracked_non_background_tool_call_indices();
     if active_tool_call_indices.is_empty() {
+        acp_runtime.clear_tool_call_tracking();
         return;
     }
 
@@ -976,6 +1047,15 @@ pub(super) fn run_set_acp_model_effect(
         if let Some(agent_id) = model.selected_acp_agent().map(str::to_string) {
             model.rollback_pending_acp_model_change(&agent_id);
         }
+        model.show_transient_status_notice(&message);
+    }
+}
+
+pub(super) fn run_stop_acp_background_terminals_effect(
+    model: &mut Model,
+    acp_runtime: &AcpRuntimeState,
+) {
+    if let Err(message) = acp_runtime.stop_background_terminals() {
         model.show_transient_status_notice(&message);
     }
 }

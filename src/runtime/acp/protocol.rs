@@ -21,7 +21,7 @@ use super::{
     },
     permission::{AcpPermissionRegistry, acp_permission_request_from_sdk},
     terminal::{AcpTerminalError, AcpTerminalManager},
-    worker::AcpWorkerCommand,
+    worker::{AcpTerminalControlCommand, AcpWorkerCommand},
 };
 
 enum AcpPromptReadOutcome {
@@ -51,6 +51,7 @@ pub(crate) fn run_worker_thread(
     command: AcpSessionCommand,
     command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
     cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    terminal_control_rx: tokio::sync::mpsc::UnboundedReceiver<AcpTerminalControlCommand>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
     permissions: AcpPermissionRegistry,
 ) {
@@ -75,6 +76,7 @@ pub(crate) fn run_worker_thread(
         command,
         command_rx,
         cancel_rx,
+        terminal_control_rx,
         event_tx.clone(),
         transport_state,
     ));
@@ -96,6 +98,7 @@ async fn run_agent_command_worker(
     command: AcpSessionCommand,
     command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
     cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    terminal_control_rx: tokio::sync::mpsc::UnboundedReceiver<AcpTerminalControlCommand>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
     transport_state: AcpTransportState,
 ) -> Result<(), String> {
@@ -121,11 +124,12 @@ async fn run_agent_command_worker(
         .ok_or_else(|| format!("spawn ACP agent {}: missing stdout", command.agent_id))?;
 
     let transport = agent_client_protocol::ByteStreams::new(stdin.compat_write(), stdout.compat());
-    let result = run_agent_transport_worker(
+    let result = run_agent_transport_worker_with_terminal_control(
         command.agent_id.clone(),
         transport,
         command_rx,
         cancel_rx,
+        terminal_control_rx,
         event_tx,
         transport_state,
     )
@@ -135,11 +139,37 @@ async fn run_agent_command_worker(
     result
 }
 
+#[cfg(test)]
 pub(crate) async fn run_agent_transport_worker<T>(
     agent_id: String,
     transport: T,
     command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
     cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    event_tx: mpsc::Sender<AcpSessionEvent>,
+    transport_state: AcpTransportState,
+) -> Result<(), String>
+where
+    T: agent_client_protocol::ConnectTo<agent_client_protocol::Client> + 'static,
+{
+    let (_terminal_control_tx, terminal_control_rx) = tokio::sync::mpsc::unbounded_channel();
+    run_agent_transport_worker_with_terminal_control(
+        agent_id,
+        transport,
+        command_rx,
+        cancel_rx,
+        terminal_control_rx,
+        event_tx,
+        transport_state,
+    )
+    .await
+}
+
+pub(crate) async fn run_agent_transport_worker_with_terminal_control<T>(
+    agent_id: String,
+    transport: T,
+    command_rx: tokio::sync::mpsc::UnboundedReceiver<AcpWorkerCommand>,
+    cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    terminal_control_rx: tokio::sync::mpsc::UnboundedReceiver<AcpTerminalControlCommand>,
     event_tx: mpsc::Sender<AcpSessionEvent>,
     transport_state: AcpTransportState,
 ) -> Result<(), String>
@@ -220,6 +250,8 @@ where
             acp::on_receive_request!(),
         )
         .connect_with(transport, async move |connection| {
+            let terminal_control_task =
+                spawn_terminal_control_task(terminal_manager.clone(), terminal_control_rx);
             let response = connection
                 .send_request(build_initialize_request())
                 .block_task()
@@ -272,6 +304,7 @@ where
             )
             .await;
 
+            terminal_control_task.abort();
             shutdown_terminal_manager.release_all_for_shutdown();
             prompt_loop_result.map_err(|error| acp::Error::internal_error().data(error))?;
 
@@ -283,6 +316,21 @@ where
         })
         .await
         .map_err(|error| error.to_string())
+}
+
+fn spawn_terminal_control_task(
+    terminal_manager: AcpTerminalManager,
+    mut terminal_control_rx: tokio::sync::mpsc::UnboundedReceiver<AcpTerminalControlCommand>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(command) = terminal_control_rx.recv().await {
+            match command {
+                AcpTerminalControlCommand::StopAll => {
+                    terminal_manager.kill_all_active();
+                }
+            }
+        }
+    })
 }
 
 async fn run_agent_prompt_loop(

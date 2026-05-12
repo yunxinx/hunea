@@ -204,6 +204,8 @@ pub struct AcpTerminalExitStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AcpTerminalSnapshot {
     pub terminal_id: String,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
     pub output: String,
     pub truncated: bool,
     pub exit_status: Option<AcpTerminalExitStatus>,

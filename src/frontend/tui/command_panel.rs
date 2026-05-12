@@ -24,10 +24,12 @@ pub(super) enum CommandPanelAction {
     Clear,
     Exit,
     CompleteAcpCommand { command_name: String },
+    ListAcpBackgroundTerminals,
     OpenAcpDebug,
     OpenAcpPicker,
     OpenModelPanel,
     OpenToolApprovalDebug,
+    StopAcpBackgroundTerminals,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,6 +380,12 @@ impl Model {
                 self.complete_command_panel_selection(&completion_text);
                 None
             }
+            CommandPanelAction::ListAcpBackgroundTerminals => {
+                let summary = self.acp_background_terminal_summary_text();
+                self.clear_command_panel_input();
+                self.append_system_message_from_runtime(summary);
+                None
+            }
             CommandPanelAction::OpenAcpDebug => {
                 self.open_acp_debug_panel();
                 None
@@ -394,13 +402,22 @@ impl Model {
                 self.open_tool_approval_debug_preview_panel();
                 None
             }
+            CommandPanelAction::StopAcpBackgroundTerminals => {
+                self.clear_command_panel_input();
+                self.append_system_message_from_runtime("Stopping all background terminals.");
+                Some(AppEffect::StopAcpBackgroundTerminals)
+            }
         }
     }
 
     fn filter_command_panel_items(&self, query: &str) -> Vec<CommandPanelItem> {
         let is_acp_session_active = self.selected_acp_agent.is_some();
-        let base_items =
-            filter_base_command_panel_items("", is_acp_session_active, self.debug_commands_enabled);
+        let base_items = filter_base_command_panel_items(
+            "",
+            is_acp_session_active,
+            self.has_active_acp_background_terminals(),
+            self.debug_commands_enabled,
+        );
         let items = merge_command_panel_items(base_items, self.selected_acp_available_commands());
 
         if query.is_empty() {
@@ -412,6 +429,18 @@ impl Model {
             .filter(|item| command_panel_item_matches_query(item, query))
             .collect()
     }
+
+    fn clear_command_panel_input(&mut self) {
+        let old_value = self.composer_text().to_string();
+        let old_line = self.composer.line();
+        let old_column = self.composer.column();
+        self.composer.clear();
+        self.sync_command_panel_navigation();
+        self.sync_file_picker_state();
+        self.sync_external_editor_helper_after_draft_change(&old_value);
+        self.sync_composer_height();
+        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
+    }
 }
 
 #[cfg(test)]
@@ -421,7 +450,7 @@ fn command_panel_query(value: &str) -> Option<String> {
     }
 
     let query = raw_command_panel_query(value)?;
-    if !filter_base_command_panel_items(&query, false, false).is_empty()
+    if !filter_base_command_panel_items(&query, false, false, false).is_empty()
         || query.chars().count() == 1
     {
         return Some(query);
@@ -460,6 +489,7 @@ fn raw_command_panel_query(value: &str) -> Option<String> {
 fn filter_base_command_panel_items(
     query: &str,
     is_acp_session_active: bool,
+    has_active_acp_background_terminals: bool,
     debug_commands_enabled: bool,
 ) -> Vec<CommandPanelItem> {
     let mut items = vec![CommandPanelItem {
@@ -475,6 +505,20 @@ fn filter_base_command_panel_items(
             aliases: Vec::new(),
             description: "Select ACP agent for this session".to_string(),
             action: CommandPanelAction::OpenAcpPicker,
+        });
+    }
+    if has_active_acp_background_terminals {
+        items.push(CommandPanelItem {
+            name: "/ps".to_string(),
+            aliases: Vec::new(),
+            description: "List background terminals".to_string(),
+            action: CommandPanelAction::ListAcpBackgroundTerminals,
+        });
+        items.push(CommandPanelItem {
+            name: "/stop".to_string(),
+            aliases: Vec::new(),
+            description: "Stop background terminals".to_string(),
+            action: CommandPanelAction::StopAcpBackgroundTerminals,
         });
     }
 
@@ -506,7 +550,7 @@ fn filter_base_command_panel_items(
 
 #[cfg(test)]
 fn base_command_panel_items_for_query(query: &str) -> Vec<CommandPanelItem> {
-    filter_base_command_panel_items(query, false, false)
+    filter_base_command_panel_items(query, false, false, false)
 }
 
 fn command_panel_completion_text(item: &CommandPanelItem) -> String {

@@ -184,3 +184,94 @@ fn acp_command_tab_completion_keeps_trailing_space() {
     assert_eq!(model.composer_text(), "/web ");
     assert_eq!(handled, Some(None));
 }
+
+#[test]
+fn background_terminal_commands_show_when_acp_terminal_is_active() {
+    let mut model = Model::new(HeroOptions::default());
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    model.apply_acp_terminal_snapshot_from_runtime(crate::runtime::acp::AcpTerminalSnapshot {
+        terminal_id: "term-1".to_string(),
+        command: Some("npm run dev".to_string()),
+        cwd: Some("/tmp/project".to_string()),
+        output: "ready on http://localhost:3000\n".to_string(),
+        truncated: false,
+        exit_status: None,
+        released: false,
+    });
+
+    let names = model
+        .filter_command_panel_items("")
+        .into_iter()
+        .map(|item| item.name)
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"/ps".to_string()));
+    assert!(names.contains(&"/stop".to_string()));
+}
+
+#[test]
+fn ps_command_appends_background_terminal_summary() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    model.apply_acp_terminal_snapshot_from_runtime(crate::runtime::acp::AcpTerminalSnapshot {
+        terminal_id: "term-1".to_string(),
+        command: Some("npm run dev".to_string()),
+        cwd: Some("/tmp/project".to_string()),
+        output: "ready on http://localhost:3000\n".to_string(),
+        truncated: false,
+        exit_status: None,
+        released: false,
+    });
+    model.composer_mut().replace_text_and_move_to_end("/ps");
+    model.sync_command_panel_navigation();
+
+    let item = model
+        .filter_command_panel_items("ps")
+        .into_iter()
+        .next()
+        .expect("/ps command should be filtered");
+    let effect = model.execute_command_panel_item(item);
+
+    let plain = model.transcript_plain_items().join("\n");
+    assert!(effect.is_none());
+    assert_eq!(model.composer_text(), "");
+    assert!(plain.contains("Background terminals:"));
+    assert!(plain.contains("npm run dev"));
+    assert!(plain.contains("/tmp/project"));
+    assert!(plain.contains("ready on http://localhost:3000"));
+}
+
+#[test]
+fn stop_command_requests_background_terminal_stop() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    model.apply_acp_terminal_snapshot_from_runtime(crate::runtime::acp::AcpTerminalSnapshot {
+        terminal_id: "term-1".to_string(),
+        command: Some("npm run dev".to_string()),
+        cwd: None,
+        output: String::new(),
+        truncated: false,
+        exit_status: None,
+        released: false,
+    });
+    model.composer_mut().replace_text_and_move_to_end("/stop");
+    model.sync_command_panel_navigation();
+
+    let item = model
+        .filter_command_panel_items("stop")
+        .into_iter()
+        .next()
+        .expect("/stop command should be filtered");
+    let effect = model.execute_command_panel_item(item);
+
+    assert_eq!(effect, Some(AppEffect::StopAcpBackgroundTerminals));
+    assert_eq!(model.composer_text(), "");
+    assert!(
+        model
+            .transcript_plain_items()
+            .join("\n")
+            .contains("Stopping all background terminals.")
+    );
+}

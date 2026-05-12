@@ -1,12 +1,10 @@
 use crate::frontend::tui::{
     Model,
-    document::{DocumentAnchorRegion, DocumentLayout, DocumentLineAnchor, DocumentViewport},
+    document::{DocumentAnchorRegion, DocumentLayout, DocumentViewport},
+    message::assistant_message_visual_inset,
 };
 
-use super::{
-    SelectableLineRange, SelectionPoint, SelectionState, apply_selection_to_line,
-    selection_columns_for_line,
-};
+use super::{SelectionPoint, SelectionState, apply_selection_to_line, selection_columns_for_line};
 
 /// `VisibleSelectableRange` 表示当前 viewport 中一段可见的选区高亮投影。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,11 +25,10 @@ impl Model {
             .document_viewport_line_indices(layout)
             .get(usize::from(row))?;
         let selection_line = layout.selection_line_at(line)?;
-        selection_point_for_selectable_line(
-            usize::from(column),
-            selection_line.anchor,
-            selection_line.selectable,
-        )
+        let column = self.selection_column_for_display_column(usize::from(column), line, layout)?;
+        selection_line
+            .selectable
+            .point_for_mouse_down(selection_line.anchor, column)
     }
 
     pub(crate) fn selection_point_for_drag_mouse(
@@ -48,11 +45,11 @@ impl Model {
         let clamped_row = usize::from(row).min(line_indices.len().saturating_sub(1));
         let line = *line_indices.get(clamped_row)?;
         let selection_line = layout.selection_line_at(line)?;
-        selection_point_for_drag_on_selectable_line(
-            usize::from(column),
-            selection_line.anchor,
-            selection_line.selectable,
-        )
+        let column =
+            self.selection_column_for_display_column(usize::from(column), line, &layout)?;
+        selection_line
+            .selectable
+            .point_for_drag(selection_line.anchor, column)
     }
 
     pub(crate) fn document_viewport_line_indices(&self, layout: &DocumentLayout) -> Vec<usize> {
@@ -74,6 +71,27 @@ impl Model {
             self.clear_selection();
         }
     }
+
+    fn selection_column_for_display_column(
+        &self,
+        column: usize,
+        line: usize,
+        layout: &DocumentLayout,
+    ) -> Option<usize> {
+        if !layout.is_assistant_message_line(line) {
+            return Some(column);
+        }
+
+        let inset = usize::from(assistant_message_visual_inset(self.width));
+        if inset == 0 {
+            return Some(column);
+        }
+        if column < inset {
+            return Some(0);
+        }
+
+        Some(column - inset)
+    }
 }
 
 fn selection_intersects_status_line(layout: &DocumentLayout, selection: SelectionState) -> bool {
@@ -91,31 +109,6 @@ fn selection_intersects_status_line(layout: &DocumentLayout, selection: Selectio
     }
 
     false
-}
-
-fn selection_point_for_selectable_line(
-    column: usize,
-    anchor: DocumentLineAnchor,
-    selectable: SelectableLineRange,
-) -> Option<SelectionPoint> {
-    if !selectable.contains(column) {
-        return None;
-    }
-
-    Some(SelectionPoint::new(
-        anchor,
-        if selectable.has_content() { column } else { 0 },
-    ))
-}
-
-fn selection_point_for_drag_on_selectable_line(
-    column: usize,
-    anchor: DocumentLineAnchor,
-    selectable: SelectableLineRange,
-) -> Option<SelectionPoint> {
-    selectable
-        .has_anchor()
-        .then_some(SelectionPoint::new(anchor, selectable.clamp(column)))
 }
 
 pub(crate) fn visible_selection_ranges(

@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fs, io, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-/// `InstallManifest` 记录一个 ACP binary runtime 的本地安装结果。
+/// `InstallManifest` 记录一个 ACP binary 的本地安装结果。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstallManifest {
     pub agent_id: String,

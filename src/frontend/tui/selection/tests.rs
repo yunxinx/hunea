@@ -19,10 +19,10 @@ fn transcript_selection_survives_append_and_copies_using_anchor_bound_range() {
 
     let layout = model.build_document_layout();
     let anchor = model
-        .selection_point_for_mouse_with_layout(1, 0, &layout)
+        .selection_point_for_mouse_with_layout(3, 0, &layout)
         .expect("selection should start inside the transcript line");
     let focus = model
-        .selection_point_for_drag_mouse(5, 0)
+        .selection_point_for_drag_mouse(7, 0)
         .expect("drag selection should clamp to the line end");
     model.start_selection(anchor);
     model.finish_selection(focus);
@@ -35,6 +35,42 @@ fn transcript_selection_survives_append_and_copies_using_anchor_bound_range() {
     assert_eq!(
         model.request_copy_selection(),
         Some(AppEffect::CopySelection("lpha".to_string()))
+    );
+}
+
+#[test]
+fn assistant_selection_uses_visual_inset_as_display_only_offset() {
+    let mut model = Model::new(HeroOptions::default());
+    model.set_window(24, 6);
+    model.set_palette(default_palette(), true);
+    model.transcript_mut().clear();
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "alpha");
+    model.sync_transcript_render();
+
+    let layout = model.build_document_layout();
+
+    let inset_start = model
+        .selection_point_for_mouse_with_layout(1, 0, &layout)
+        .expect("assistant visual inset should be usable as a selection handle");
+    let text_start = model
+        .selection_point_for_mouse_with_layout(2, 0, &layout)
+        .expect("the first visible assistant character should start selection");
+    let end = model
+        .selection_point_for_drag_mouse(7, 0)
+        .expect("dragging past assistant text should clamp to content end");
+
+    assert_eq!(inset_start.column(), 0);
+    assert_eq!(text_start.column(), 0);
+    assert_eq!(end.column(), 5);
+
+    model.start_selection(inset_start);
+    model.finish_selection(end);
+
+    assert_eq!(
+        model.request_copy_selection(),
+        Some(AppEffect::CopySelection("alpha".to_string()))
     );
 }
 

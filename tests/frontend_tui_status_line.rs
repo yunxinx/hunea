@@ -2,13 +2,18 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crossterm::event::{KeyCode, KeyEvent};
 use lumos::frontend::tui::{
-    AppEvent, HeroOptions, Model, ModelOptions, StatusLineItem, StyleMode, theme::default_palette,
+    AppEvent, HeroOptions, Model, ModelOptions, RequestMetrics, StatusLineItem, StyleMode,
+    theme::default_palette,
 };
+use lumos::runtime::model_catalog::{
+    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
+};
+use lumos::runtime::native::ProviderKind;
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 #[test]
@@ -55,6 +60,248 @@ fn status_line_renders_current_dir_and_preserves_configured_order() {
     assert_eq!(
         render_trimmed_rows(&mut model, 40, 4),
         vec!["", "› Enter to send Prompt", "", "  ~/repo · main"]
+    );
+
+    env::set_current_dir(original_dir).expect("should restore original directory");
+    restore_env_var("HOME", original_home);
+}
+
+#[test]
+fn status_line_renders_current_model_when_selected() {
+    let mut model = ready_model_with_options(
+        48,
+        4,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            ..ModelOptions::default()
+        },
+    );
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 48, 4),
+        vec!["", "› Enter to send Prompt", "", "  [Local] qwen3"]
+    );
+}
+
+#[test]
+fn status_line_uses_provider_display_name_for_current_model() {
+    let mut model = ready_model_with_options(
+        72,
+        4,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "LM Studio",
+                Some("http://localhost:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new(
+                    "qwen/qwen3-4b-2507",
+                    None,
+                    ModelSource::Configured,
+                )],
+            )]),
+            selected_model: Some(ModelSelection::new("local", "qwen/qwen3-4b-2507")),
+            ..ModelOptions::default()
+        },
+    );
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 72, 4),
+        vec![
+            "",
+            "› Enter to send Prompt",
+            "",
+            "  [LM Studio] qwen/qwen3-4b-2507"
+        ]
+    );
+}
+
+#[test]
+fn status_line_omits_current_model_when_unselected() {
+    let mut model = ready_model_with_options(
+        48,
+        4,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            model_catalog: single_model_catalog(),
+            ..ModelOptions::default()
+        },
+    );
+
+    let rows = render_trimmed_rows(&mut model, 48, 4);
+    assert_eq!(rows, vec!["", "", "› Enter to send Prompt"]);
+    assert!(
+        rows.iter().all(|row| !row.contains("local/qwen3")),
+        "current-model should not render without a selected model, got: {rows:?}"
+    );
+}
+
+#[test]
+fn status_line_updates_current_model_after_model_panel_selection() {
+    let mut model = ready_model_with_options(
+        72,
+        18,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            model_catalog: single_model_catalog(),
+            ..ModelOptions::default()
+        },
+    );
+
+    type_text(&mut model, "/models");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    model.update(AppEvent::StatusNoticeTimeout { token: 1 });
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter().any(|row| row.contains("[Local] qwen3")),
+        "current-model should reflect the selected model after panel selection, got: {rows:?}"
+    );
+}
+
+#[test]
+fn status_line_renders_request_metrics_in_configured_order() {
+    let mut model = ready_model(
+        48,
+        4,
+        StyleMode::Cx,
+        vec![StatusLineItem::Throughput, StatusLineItem::Latency],
+    );
+    model.set_last_request_metrics(Some(RequestMetrics::new(
+        Duration::from_millis(530),
+        139,
+        Duration::from_secs(1),
+    )));
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 48, 4),
+        vec!["", "› Enter to send Prompt", "", "  139tps · 0.53s"]
+    );
+}
+
+#[test]
+fn status_line_skips_request_metrics_before_successful_request() {
+    let mut model = ready_model(
+        48,
+        4,
+        StyleMode::Cx,
+        vec![StatusLineItem::Throughput, StatusLineItem::Latency],
+    );
+
+    let rows = render_trimmed_rows(&mut model, 48, 4);
+    assert_eq!(rows, vec!["", "", "› Enter to send Prompt"]);
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("tps") && !row.contains("0.00s")),
+        "request metrics should not render before a successful request, got: {rows:?}"
+    );
+}
+
+#[test]
+fn status_line_preserves_request_metrics_order_with_other_items() {
+    let mut model = ready_model_with_options(
+        72,
+        4,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![
+                StatusLineItem::CurrentModel,
+                StatusLineItem::Latency,
+                StatusLineItem::Throughput,
+            ],
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            ..ModelOptions::default()
+        },
+    );
+    model.set_last_request_metrics(Some(RequestMetrics::new(
+        Duration::from_millis(5),
+        0,
+        Duration::from_millis(250),
+    )));
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 72, 4),
+        vec![
+            "",
+            "› Enter to send Prompt",
+            "",
+            "  [Local] qwen3 · 0.01s · 0tps"
+        ]
+    );
+}
+
+#[test]
+fn second_status_line_renders_after_first_line_and_deduplicates_first_line_items() {
+    let _guard = lock_test_environment();
+    let original_dir = env::current_dir().expect("current directory should be available");
+    let original_home = env::var_os("HOME");
+
+    let home_dir = temp_test_dir("status-line-second-home");
+    let repo_dir = home_dir.join("repo");
+    fs::create_dir_all(&repo_dir).expect("repo directory should exist");
+    write_git_head(&repo_dir, "ref: refs/heads/main\n");
+    env::set_current_dir(&repo_dir).expect("should switch into repo directory");
+    unsafe {
+        env::set_var("HOME", &home_dir);
+    }
+
+    let mut model = ready_model_with_options(
+        48,
+        5,
+        ModelOptions {
+            style_mode: StyleMode::Cx,
+            status_line_items: vec![StatusLineItem::GitBranch],
+            status_line_2_items: vec![StatusLineItem::CurrentDir, StatusLineItem::GitBranch],
+            ..ModelOptions::default()
+        },
+    );
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 48, 5),
+        vec!["", "› Enter to send Prompt", "", "  main", "  ~/repo"]
+    );
+
+    env::set_current_dir(original_dir).expect("should restore original directory");
+    restore_env_var("HOME", original_home);
+}
+
+#[test]
+fn second_status_line_inherits_gap_when_first_line_is_empty() {
+    let _guard = lock_test_environment();
+    let original_dir = env::current_dir().expect("current directory should be available");
+    let original_home = env::var_os("HOME");
+
+    let home_dir = temp_test_dir("status-line-second-gap-home");
+    let repo_dir = home_dir.join("repo");
+    fs::create_dir_all(&repo_dir).expect("repo directory should exist");
+    env::set_current_dir(&repo_dir).expect("should switch into repo directory");
+    unsafe {
+        env::set_var("HOME", &home_dir);
+    }
+
+    let mut model = ready_model_with_options(
+        48,
+        4,
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            status_line_2_items: vec![StatusLineItem::CurrentDir],
+            ..ModelOptions::default()
+        },
+    );
+
+    assert_eq!(
+        render_trimmed_rows(&mut model, 48, 4),
+        vec!["", "┃ Enter to send Prompt", "", "  ~/repo"]
     );
 
     env::set_current_dir(original_dir).expect("should restore original directory");
@@ -162,20 +409,42 @@ fn ready_model(
     style_mode: StyleMode,
     status_line_items: Vec<StatusLineItem>,
 ) -> Model {
-    let mut model = Model::new_with_options(
-        HeroOptions::default(),
+    ready_model_with_options(
+        width,
+        height,
         ModelOptions {
             style_mode,
             status_line_items,
             ..ModelOptions::default()
         },
-    );
+    )
+}
+
+fn ready_model_with_options(width: u16, height: u16, options: ModelOptions) -> Model {
+    let mut model = Model::new_with_options(HeroOptions::default(), options);
     model.update(AppEvent::Resized { width, height });
     model.update(AppEvent::DetectedPalette {
         palette: default_palette(),
         has_dark_background: true,
     });
     model
+}
+
+fn single_model_catalog() -> ModelCatalog {
+    ModelCatalog::new(vec![ModelProvider::native(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "Local",
+        Some("http://127.0.0.1:1234/v1".to_string()),
+        ModelSource::Configured,
+        vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+    )])
+}
+
+fn type_text(model: &mut Model, text: &str) {
+    for character in text.chars() {
+        model.update(AppEvent::Key(KeyCode::Char(character).into()));
+    }
 }
 
 fn render_trimmed_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {

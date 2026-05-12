@@ -21,6 +21,7 @@ use super::{slot_frame::SlotFrame, tail::DocumentTailLayout};
 pub(crate) struct DocumentTranscriptKey {
     pub(super) transcript_render_version: usize,
     pub(super) document_width: u16,
+    pub(super) tool_activity_frame: usize,
 }
 
 /// `DocumentTranscriptSnapshot` 缓存 unified document 真正需要的 transcript 行级数据。
@@ -73,8 +74,25 @@ pub(crate) struct DocumentLayoutKey {
     pub(super) composer_width: usize,
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
+    pub(super) acp_panel_active: bool,
+    pub(super) acp_panel_selected: usize,
+    pub(super) acp_panel_scroll: usize,
+    pub(super) acp_debug_panel_selected: usize,
+    pub(super) acp_debug_panel_scroll: usize,
+    pub(super) tool_approval_panel_active: bool,
+    pub(super) tool_approval_panel_selected: usize,
+    pub(super) tool_approval_panel_revision: usize,
+    pub(super) selected_acp_agent: Option<String>,
+    pub(super) model_panel_active: bool,
+    pub(super) model_panel_provider_index: usize,
+    pub(super) model_panel_model_index: usize,
+    pub(super) model_panel_scroll: usize,
+    pub(super) selected_model: Option<String>,
     pub(super) status_line_config: u8,
+    pub(super) status_line_2_config: u8,
     pub(super) status_line_revision: usize,
+    pub(super) stream_activity_frame: usize,
+    pub(super) tool_activity_frame: usize,
 }
 
 /// `DocumentLayout` 表示整份统一文档流的稳定布局。
@@ -252,8 +270,13 @@ pub(crate) enum DocumentAnchorRegion {
     #[default]
     None,
     Transcript,
+    StreamActivity,
+    StreamActivityComposerGap,
     Composer,
     CommandPanel,
+    AcpPanel,
+    ToolApprovalPanel,
+    ModelPanel,
     ComposerPadding,
     TranscriptComposerGap,
     ComposerStatusGap,

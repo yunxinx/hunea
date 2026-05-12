@@ -1,4 +1,8 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{
+    collections::HashMap,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use ratatui::text::Line;
 
@@ -6,7 +10,7 @@ use super::{
     DEFAULT_RENDER_WIDTH, ItemLineAnchor, RenderResult, TranscriptEstimateBreakdown,
     TranscriptEstimateKind, TranscriptEstimateSource, TranscriptFastEstimate,
     TranscriptItemMetrics, TranscriptItemMetricsCache, TranscriptItemMetricsIndex,
-    TranscriptItemMetricsQuality, TranscriptItemPosition, ViewportRenderResult,
+    TranscriptItemMetricsQuality, TranscriptItemPosition,
     cache::{CachedLineAnchors, CachedRenderBlock, MAX_RECENT_RENDER_BLOCKS, ScreenRenderCache},
     new_render_result_with_append_start,
     render_state::RenderItemSummary,
@@ -16,14 +20,20 @@ use super::{
 #[cfg(test)]
 use super::LineAnchorKind;
 #[cfg(test)]
+use super::ViewportRenderResult;
+#[cfg(test)]
 use crate::frontend::tui::styled_text::line_to_plain_text;
 use crate::frontend::tui::{
     HeroOptions, Sender, StyleMode,
     hero_item::HeroItem,
     message::MessageItem,
+    reasoning_message::{ReasoningDisplayMode, ReasoningMessageItem},
     selection::{SelectableLineRange, normalize_transcript_selectable_range},
+    system_message::SystemMessageItem,
     theme::TerminalPalette,
+    tool_result::{ToolActivityRenderMode, ToolResultItem, ToolResultKind},
 };
+use crate::runtime::acp::{AcpTerminalSnapshot, AcpToolCall, AcpToolCallUpdate};
 
 mod block_materialize;
 mod metrics_exactize;
@@ -36,6 +46,9 @@ pub(crate) use block_materialize::materialize_transcript_item_render_block;
 pub(crate) enum TranscriptItem {
     Hero(HeroItem),
     Message(MessageItem),
+    Reasoning(ReasoningMessageItem),
+    System(SystemMessageItem),
+    ToolResult(ToolResultItem),
 }
 
 /// `Transcript` 管理 document-flow 顺序、宽度与逐项渲染缓存。
@@ -45,6 +58,7 @@ pub(crate) struct Transcript {
     gap: usize,
     width: u16,
     palette: TerminalPalette,
+    tool_activity_render_mode: ToolActivityRenderMode,
     items_version: usize,
     metrics_cache: TranscriptItemMetricsCache,
     screen_cache: ScreenRenderCache,
@@ -56,6 +70,7 @@ impl PartialEq for Transcript {
             && self.gap == other.gap
             && self.width == other.width
             && self.palette == other.palette
+            && self.tool_activity_render_mode == other.tool_activity_render_mode
     }
 }
 
@@ -69,6 +84,7 @@ impl Transcript {
             gap: 1,
             width: DEFAULT_RENDER_WIDTH as u16,
             palette,
+            tool_activity_render_mode: ToolActivityRenderMode::Compact,
             items_version: 1,
             metrics_cache: TranscriptItemMetricsCache::default(),
             screen_cache: ScreenRenderCache::default(),
@@ -134,14 +150,307 @@ impl Transcript {
         )));
     }
 
+    /// `append_assistant_message_with_reasoning` 追加带 reasoning 展示段的助手消息。
+    pub(crate) fn append_assistant_message_with_reasoning(
+        &mut self,
+        content: impl Into<String>,
+        reasoning_content: impl Into<String>,
+        reasoning_display_mode: ReasoningDisplayMode,
+        reasoning_duration: Option<Duration>,
+        style_mode: StyleMode,
+    ) {
+        let content = content.into();
+        let reasoning_content = reasoning_content.into();
+        if !reasoning_content.is_empty()
+            && should_append_reasoning_message(reasoning_display_mode, reasoning_duration)
+        {
+            self.append_reasoning_message(
+                reasoning_content,
+                reasoning_display_mode,
+                reasoning_duration,
+            );
+        }
+        if !content.is_empty() {
+            self.append_message_with_style_mode(Sender::Assistant, content, style_mode);
+        }
+    }
+
+    /// `append_reasoning_message` 追加一条只展示、不回传给模型的思维链项。
+    pub(crate) fn append_reasoning_message(
+        &mut self,
+        content: impl Into<String>,
+        display_mode: ReasoningDisplayMode,
+        duration: Option<Duration>,
+    ) {
+        if !should_append_reasoning_message(display_mode, duration) {
+            return;
+        }
+
+        self.push_item(TranscriptItem::Reasoning(ReasoningMessageItem::new(
+            content,
+            display_mode,
+            duration,
+        )));
+    }
+
+    pub(crate) fn is_reasoning_header_hit(
+        &self,
+        item_index: usize,
+        rendered_line: usize,
+        column: usize,
+    ) -> bool {
+        self.items
+            .get(item_index)
+            .is_some_and(|item| match item.as_ref() {
+                TranscriptItem::Reasoning(reasoning) => {
+                    reasoning.is_header_line(rendered_line)
+                        && column < reasoning.header_display_width()
+                }
+                TranscriptItem::Hero(_)
+                | TranscriptItem::Message(_)
+                | TranscriptItem::ToolResult(_)
+                | TranscriptItem::System(_) => false,
+            })
+    }
+
+    pub(crate) fn toggle_reasoning_item(&mut self, item_index: usize) -> bool {
+        let Some(item) = self.items.get(item_index) else {
+            return false;
+        };
+        let TranscriptItem::Reasoning(reasoning) = item.as_ref() else {
+            return false;
+        };
+        if !reasoning.is_header_line(0) {
+            return false;
+        }
+
+        let mut reasoning = reasoning.clone();
+        reasoning.toggle();
+        Rc::make_mut(&mut self.items)[item_index] = Rc::new(TranscriptItem::Reasoning(reasoning));
+        self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.mark_metrics_dirty_from(item_index);
+        self.screen_cache.mark_dirty_from(item_index);
+        true
+    }
+
+    /// `append_system_message` 追加一条只用于 TUI 展示的 system message。
+    pub(crate) fn append_system_message(&mut self, content: impl Into<String>) {
+        self.push_item(TranscriptItem::System(SystemMessageItem::new(content)));
+    }
+
+    /// `append_tool_result` 追加一条只用于 TUI 展示的工具审批结果。
+    pub(crate) fn append_tool_result(&mut self, content: impl Into<String>, kind: ToolResultKind) {
+        let mut item = ToolResultItem::new(content, kind);
+        item.set_render_mode(self.tool_activity_render_mode);
+        self.push_item(TranscriptItem::ToolResult(item));
+    }
+
+    /// `append_acp_tool_call` 追加一条可更新的 ACP tool call 展示项。
+    pub(crate) fn append_acp_tool_call(&mut self, call: AcpToolCall) -> usize {
+        let index = self.items.len();
+        self.push_item(TranscriptItem::ToolResult(
+            ToolResultItem::from_acp_tool_call(call, self.tool_activity_render_mode),
+        ));
+        index
+    }
+
+    /// `acp_tool_call_index` 返回最近一条匹配 `toolCallId` 的 ACP tool call 展示项。
+    pub(crate) fn acp_tool_call_index(&self, tool_call_id: &str) -> Option<usize> {
+        self.items
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, item)| {
+                let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+                    return None;
+                };
+                tool_result
+                    .acp_tool_call_id()
+                    .is_some_and(|id| id == tool_call_id)
+                    .then_some(index)
+            })
+    }
+
+    /// `update_acp_tool_call` 用 ACP 增量事件替换已有 tool call 项。
+    pub(crate) fn update_acp_tool_call(
+        &mut self,
+        item_index: usize,
+        update: AcpToolCallUpdate,
+    ) -> bool {
+        let Some(item) = self.items.get(item_index) else {
+            return false;
+        };
+        let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+            return false;
+        };
+
+        let mut tool_result = tool_result.clone();
+        if !tool_result.update_acp_tool_call(update) {
+            return false;
+        }
+        self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
+        true
+    }
+
+    /// `set_acp_tool_call_approval_suspended` 在审批面板打开期间临时隐藏主界面的活跃写入项。
+    pub(crate) fn set_acp_tool_call_approval_suspended(
+        &mut self,
+        item_index: usize,
+        suspended: bool,
+    ) -> bool {
+        let Some(item) = self.items.get(item_index) else {
+            return false;
+        };
+        let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+            return false;
+        };
+
+        let mut tool_result = tool_result.clone();
+        if !tool_result.set_approval_suspended(suspended) {
+            return false;
+        }
+        self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
+        true
+    }
+
+    /// `set_acp_tool_call_permission_waiting` 标记 tool call 正在等待 ACP 权限响应。
+    pub(crate) fn set_acp_tool_call_permission_waiting(
+        &mut self,
+        item_index: usize,
+        waiting: bool,
+    ) -> bool {
+        let Some(item) = self.items.get(item_index) else {
+            return false;
+        };
+        let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+            return false;
+        };
+
+        let mut tool_result = tool_result.clone();
+        if !tool_result.set_permission_waiting(waiting) {
+            return false;
+        }
+        self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
+        true
+    }
+
+    /// `set_acp_terminal_snapshot` 刷新引用指定 terminal 的 tool call 展示项。
+    pub(crate) fn set_acp_terminal_snapshot(&mut self, snapshot: AcpTerminalSnapshot) -> bool {
+        let mut first_dirty: Option<usize> = None;
+        let mut items = self.items.as_ref().clone();
+        for (item_index, item) in items.iter_mut().enumerate() {
+            let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+                continue;
+            };
+            let mut tool_result = tool_result.clone();
+            if !tool_result.set_acp_terminal_snapshot(snapshot.clone()) {
+                continue;
+            }
+            *item = Rc::new(TranscriptItem::ToolResult(tool_result));
+            first_dirty = Some(first_dirty.map_or(item_index, |dirty| dirty.min(item_index)));
+        }
+
+        let Some(first_dirty) = first_dirty else {
+            return false;
+        };
+        self.items = Rc::new(items);
+        self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.mark_metrics_dirty_from(first_dirty);
+        self.screen_cache.mark_dirty_from(first_dirty);
+        true
+    }
+
+    /// `mark_acp_tool_calls_failed` 将仍在运行的 ACP tool call 标记为失败并写入原因。
+    pub(crate) fn mark_acp_tool_calls_failed(
+        &mut self,
+        item_indices: impl IntoIterator<Item = usize>,
+        message: &str,
+    ) -> bool {
+        let mut first_dirty: Option<usize> = None;
+        let mut items = self.items.as_ref().clone();
+        for item_index in item_indices {
+            let Some(item) = items.get(item_index) else {
+                continue;
+            };
+            let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+                continue;
+            };
+            let mut tool_result = tool_result.clone();
+            if !tool_result.mark_acp_tool_call_failed(message) {
+                continue;
+            }
+            items[item_index] = Rc::new(TranscriptItem::ToolResult(tool_result));
+            first_dirty = Some(first_dirty.map_or(item_index, |dirty| dirty.min(item_index)));
+        }
+
+        let Some(first_dirty) = first_dirty else {
+            return false;
+        };
+        self.items = Rc::new(items);
+        self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.mark_metrics_dirty_from(first_dirty);
+        self.screen_cache.mark_dirty_from(first_dirty);
+        true
+    }
+
+    /// `mark_acp_tool_call_rejected` 将等待审批的 ACP tool call 标记为用户拒绝。
+    pub(crate) fn mark_acp_tool_call_rejected(&mut self, item_index: usize) -> bool {
+        let Some(item) = self.items.get(item_index) else {
+            return false;
+        };
+        let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+            return false;
+        };
+
+        let mut tool_result = tool_result.clone();
+        if !tool_result.mark_acp_tool_call_rejected() {
+            return false;
+        }
+        self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
+        true
+    }
+
+    /// `set_tool_activity_render_mode` 切换工具活动在主 transcript 与 overlay 中的详略。
+    pub(crate) fn set_tool_activity_render_mode(&mut self, mode: ToolActivityRenderMode) {
+        if self.tool_activity_render_mode == mode {
+            return;
+        }
+
+        self.tool_activity_render_mode = mode;
+        let mut first_dirty: Option<usize> = None;
+        let mut items = self.items.as_ref().clone();
+        for (index, item) in items.iter_mut().enumerate() {
+            let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+                continue;
+            };
+            let mut tool_result = tool_result.clone();
+            if !tool_result.set_render_mode(mode) {
+                continue;
+            }
+            *item = Rc::new(TranscriptItem::ToolResult(tool_result));
+            first_dirty = Some(first_dirty.map_or(index, |dirty| dirty.min(index)));
+        }
+        if let Some(first_dirty) = first_dirty {
+            self.items = Rc::new(items);
+            self.items_version = self.items_version.saturating_add(1);
+            self.metrics_cache.mark_metrics_dirty_from(first_dirty);
+            self.screen_cache.mark_dirty_from(first_dirty);
+        }
+    }
+
+    pub(crate) fn active_tool_activity_started_at(&self) -> Option<Instant> {
+        self.items
+            .iter()
+            .filter_map(|item| item.active_marker_started_at())
+            .min()
+    }
+
     /// `len` 返回 transcript 项数量。
-    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.items.len()
     }
 
     /// `clear` 清空 transcript。
-    #[allow(dead_code)]
     pub(crate) fn clear(&mut self) {
         Rc::make_mut(&mut self.items).clear();
         self.items_version = self.items_version.saturating_add(1);
@@ -149,8 +458,21 @@ impl Transcript {
         self.screen_cache.reset();
     }
 
+    /// `truncate_before_item` 删除指定 item 及其后的所有内容。
+    pub(crate) fn truncate_before_item(&mut self, item_index: usize) -> bool {
+        if item_index >= self.items.len() {
+            return false;
+        }
+
+        Rc::make_mut(&mut self.items).truncate(item_index);
+        self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.reset();
+        self.screen_cache.reset();
+        true
+    }
+
     /// `item` 返回指定索引的 transcript 项。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn item(&self, index: usize) -> Option<&TranscriptItem> {
         self.items.get(index).map(Rc::as_ref)
     }
@@ -174,6 +496,22 @@ impl Transcript {
             .iter()
             .map(|item| item.render_plain_text(width, self.palette))
             .filter(|item| !item.is_empty())
+            .collect()
+    }
+
+    /// `source_messages` 返回 transcript 中可发送给模型的原始对话消息。
+    pub(crate) fn source_messages(&self) -> Vec<(Sender, String)> {
+        self.items
+            .iter()
+            .filter_map(|item| match item.as_ref() {
+                TranscriptItem::Message(message) => {
+                    Some((message.sender(), message.source_content().to_string()))
+                }
+                TranscriptItem::Hero(_)
+                | TranscriptItem::Reasoning(_)
+                | TranscriptItem::System(_)
+                | TranscriptItem::ToolResult(_) => None,
+            })
             .collect()
     }
 
@@ -247,6 +585,11 @@ impl Transcript {
         self.screen_cache.retained_block_memory_summary()
     }
 
+    #[cfg(test)]
+    pub(crate) fn cached_render_result_item_count_for_test(&self) -> usize {
+        self.screen_cache.result.items.len()
+    }
+
     /// `begin_recent_render_block_batch` 延迟 recent block cache 的裁剪，直到调用方完成预热。
     pub(crate) fn begin_recent_render_block_batch(&mut self) {
         self.screen_cache.begin_recent_limit_batch();
@@ -282,6 +625,13 @@ impl Transcript {
         self.screen_cache.mark_dirty_from(len_before_append);
     }
 
+    fn replace_item(&mut self, index: usize, item: TranscriptItem) {
+        Rc::make_mut(&mut self.items)[index] = Rc::new(item);
+        self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.mark_metrics_dirty_from(index);
+        self.screen_cache.mark_dirty_from(index);
+    }
+
     #[cfg(test)]
     fn replace_item_for_test(&mut self, index: usize, item: TranscriptItem) {
         Rc::make_mut(&mut self.items)[index] = Rc::new(item);
@@ -304,6 +654,13 @@ impl Transcript {
     pub(crate) fn item_positions_dirty_from_for_test(&self) -> usize {
         self.metrics_cache.positions_dirty_from
     }
+}
+
+fn should_append_reasoning_message(
+    display_mode: ReasoningDisplayMode,
+    duration: Option<Duration>,
+) -> bool {
+    !matches!(display_mode, ReasoningDisplayMode::Snippet) || duration.is_some()
 }
 
 #[cfg(test)]

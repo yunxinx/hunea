@@ -32,8 +32,6 @@ pub(super) struct DocumentTranscriptViewportSnapshot {
     pub(super) lines: Vec<Line<'static>>,
     pub(super) plain_text_len: usize,
     pub(super) resolved_offset: usize,
-    #[allow(dead_code)]
-    pub(super) item_range: Option<(usize, usize)>,
     #[cfg(test)]
     pub(super) plain_lines: Vec<String>,
 }
@@ -42,7 +40,6 @@ pub(super) struct DocumentTranscriptViewportSnapshot {
 struct DocumentTranscriptViewportLine {
     line: Line<'static>,
     plain_line_len: usize,
-    item_index: usize,
     #[cfg(test)]
     plain_line: String,
 }
@@ -192,7 +189,6 @@ impl DocumentTranscriptSnapshot {
             return Some(DocumentTranscriptViewportLine {
                 line: Line::raw(""),
                 plain_line_len: 0,
-                item_index: position.gap_owner_item_index.unwrap_or(position.item_index),
                 #[cfg(test)]
                 plain_line: String::new(),
             });
@@ -203,7 +199,6 @@ impl DocumentTranscriptSnapshot {
         Some(DocumentTranscriptViewportLine {
             line: block.line_at(block_index)?,
             plain_line_len: block.plain_line_len(block_index)?,
-            item_index: position.item_index,
             #[cfg(test)]
             plain_line: if include_test_plain_lines {
                 block.plain_line_at(block_index)?
@@ -246,7 +241,6 @@ impl DocumentTranscriptSnapshot {
         let end = (start + count).min(self.line_count());
         let mut lines = Vec::with_capacity(end - start);
         let mut plain_text_len = 0;
-        let mut item_range = None;
         #[cfg(test)]
         let mut plain_lines = Vec::with_capacity(end - start);
 
@@ -258,10 +252,6 @@ impl DocumentTranscriptSnapshot {
                 plain_text_len += 1;
             }
             plain_text_len += line.plain_line_len;
-            item_range = Some(match item_range {
-                Some((start_item, _)) => (start_item, line.item_index),
-                None => (line.item_index, line.item_index),
-            });
             #[cfg(test)]
             if include_test_plain_lines {
                 plain_lines.push(line.plain_line.clone());
@@ -273,7 +263,6 @@ impl DocumentTranscriptSnapshot {
             lines,
             plain_text_len,
             resolved_offset: start,
-            item_range,
             #[cfg(test)]
             plain_lines,
         }
@@ -342,6 +331,9 @@ impl DocumentTranscriptSnapshot {
 
     fn warmed_block(&self, item_index: usize) -> Option<Rc<CachedRenderBlock>> {
         let item = self.items.get(item_index)?.as_ref();
+        if item.has_active_acp_tool_call() {
+            return None;
+        }
         let warmed_block = self
             .warmed_item_block_cache
             .borrow()
@@ -513,6 +505,23 @@ impl DocumentLayout {
             .anchors
             .get(index - self.transcript_line_count)
             .copied()
+    }
+
+    /// `is_assistant_message_line` 判断指定文档行是否属于 assistant 消息正文。
+    pub(crate) fn is_assistant_message_line(&self, index: usize) -> bool {
+        let Some(anchor) = self.line_anchor_at(index) else {
+            return false;
+        };
+        if anchor.region != DocumentAnchorRegion::Transcript
+            || matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap)
+        {
+            return false;
+        }
+
+        self.transcript
+            .items
+            .get(anchor.transcript.item_index)
+            .is_some_and(|item| item.as_ref().is_assistant_message())
     }
 
     /// `line_index_for_anchor` 把语义锚点解析回当前布局中的视觉行。

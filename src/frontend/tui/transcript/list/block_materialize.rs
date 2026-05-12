@@ -48,10 +48,12 @@ impl Transcript {
         index: usize,
         width: u16,
     ) -> Rc<CachedRenderBlock> {
+        let has_dynamic_render = self.items[index].has_active_acp_tool_call();
         let cache_key = self.items[index].render_cache_key();
-        if let Some(cached) = self
-            .screen_cache
-            .reusable_item_block(index, width, cache_key)
+        if !has_dynamic_render
+            && let Some(cached) = self
+                .screen_cache
+                .reusable_item_block(index, width, cache_key)
         {
             return cached;
         }
@@ -61,7 +63,9 @@ impl Transcript {
             width,
             self.palette,
         ));
-        self.screen_cache.store_item_block(index, Rc::clone(&block));
+        if !has_dynamic_render {
+            self.screen_cache.store_item_block(index, Rc::clone(&block));
+        }
         block
     }
 }
@@ -94,7 +98,12 @@ pub(crate) fn materialize_transcript_item_render_block(
         };
     }
 
-    let lines = item.render_lines(width, palette);
+    let lines = match item {
+        TranscriptItem::ToolResult(tool_result) => {
+            tool_result.render_lines_at(width, palette, std::time::Instant::now())
+        }
+        _ => item.render_lines(width, palette),
+    };
     let anchors = item.render_line_anchors(width, palette);
     let plain_line_byte_lens = lines.iter().map(line_plain_text_len).collect::<Vec<_>>();
     let plain_text_char_len = plain_line_byte_lens.iter().sum();
@@ -128,6 +137,15 @@ impl TranscriptItem {
             Self::Message(item) => {
                 item.estimate_render_metrics_fast(width, palette, previous_metrics)
             }
+            Self::Reasoning(item) => {
+                item.estimate_render_metrics_fast(width, palette, previous_metrics)
+            }
+            Self::System(item) => {
+                item.estimate_render_metrics_fast(width, palette, previous_metrics)
+            }
+            Self::ToolResult(item) => {
+                item.estimate_render_metrics_fast(width, palette, previous_metrics)
+            }
         }
     }
 
@@ -139,6 +157,9 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.measure_render_metrics(width, palette),
             Self::Message(item) => item.measure_render_metrics(width, palette),
+            Self::Reasoning(item) => item.measure_render_metrics(width, palette),
+            Self::System(item) => item.measure_render_metrics(width, palette),
+            Self::ToolResult(item) => item.measure_render_metrics(width, palette),
         }
     }
 
@@ -146,6 +167,9 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.render_lines(width, palette),
             Self::Message(item) => item.render_lines(width, palette),
+            Self::Reasoning(item) => item.render_lines(width, palette),
+            Self::System(item) => item.render_lines(width, palette),
+            Self::ToolResult(item) => item.render_lines(width, palette),
         }
     }
 
@@ -158,6 +182,11 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.render_for_terminal_replay(width, palette, preserve_ansi),
             Self::Message(item) => item.render_for_terminal_replay(width, palette, preserve_ansi),
+            Self::Reasoning(item) => item.render_for_terminal_replay(width, palette, preserve_ansi),
+            Self::System(item) => item.render_for_terminal_replay(width, palette, preserve_ansi),
+            Self::ToolResult(item) => {
+                item.render_for_terminal_replay(width, palette, preserve_ansi)
+            }
         }
     }
 
@@ -165,6 +194,9 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.render_plain_text(width, palette),
             Self::Message(item) => item.render_plain_text(width, palette),
+            Self::Reasoning(item) => item.render_plain_text(width, palette),
+            Self::System(item) => item.render_plain_text(width, palette),
+            Self::ToolResult(item) => item.render_plain_text(width, palette),
         }
     }
 
@@ -183,6 +215,9 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.render_line_anchors(width, palette),
             Self::Message(item) => item.render_line_anchors(width, palette),
+            Self::Reasoning(item) => item.render_line_anchors(width, palette),
+            Self::System(item) => item.render_line_anchors(width, palette),
+            Self::ToolResult(item) => item.render_line_anchors(width, palette),
         }
     }
 
@@ -195,6 +230,9 @@ impl TranscriptItem {
         let ranges = match self {
             Self::Hero(_) => Vec::new(),
             Self::Message(item) => item.render_selectable_line_ranges(width, palette),
+            Self::Reasoning(_) => Vec::new(),
+            Self::System(_) => Vec::new(),
+            Self::ToolResult(_) => Vec::new(),
         };
         if ranges.len() == plain_lines.len() {
             return ranges;
@@ -208,10 +246,18 @@ impl TranscriptItem {
             .collect()
     }
 
+    pub(crate) fn is_assistant_message(&self) -> bool {
+        matches!(self, Self::Message(item) if item.is_assistant())
+            || matches!(self, Self::Reasoning(item) if item.uses_assistant_visual_inset())
+    }
+
     pub(crate) fn render_cache_key(&self) -> u64 {
         match self {
             Self::Hero(item) => item.render_cache_key(),
             Self::Message(item) => item.render_cache_key(),
+            Self::Reasoning(item) => item.render_cache_key(),
+            Self::System(item) => item.render_cache_key(),
+            Self::ToolResult(item) => item.render_cache_key(),
         }
     }
 
@@ -219,6 +265,20 @@ impl TranscriptItem {
         match self {
             Self::Hero(item) => item.source_text_byte_len(),
             Self::Message(item) => item.source_text_byte_len(),
+            Self::Reasoning(item) => item.source_text_byte_len(),
+            Self::System(item) => item.source_text_byte_len(),
+            Self::ToolResult(item) => item.source_text_byte_len(),
+        }
+    }
+
+    pub(crate) fn has_active_acp_tool_call(&self) -> bool {
+        matches!(self, Self::ToolResult(item) if item.has_active_acp_tool_call())
+    }
+
+    pub(crate) fn active_marker_started_at(&self) -> Option<std::time::Instant> {
+        match self {
+            Self::ToolResult(item) => item.active_marker_started_at(),
+            _ => None,
         }
     }
 }

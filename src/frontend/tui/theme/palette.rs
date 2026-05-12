@@ -10,8 +10,16 @@ const DARK_BACKGROUND_SECONDARY: Color = Color::Rgb(166, 166, 166);
 const LIGHT_BACKGROUND_SECONDARY: Color = Color::Rgb(110, 110, 110);
 const DARK_BACKGROUND_TERTIARY: Color = Color::Rgb(154, 154, 154);
 const LIGHT_BACKGROUND_TERTIARY: Color = Color::Rgb(122, 122, 122);
+const DARK_BACKGROUND_QUOTE: Color = Color::Rgb(166, 220, 176);
+const LIGHT_BACKGROUND_QUOTE: Color = Color::Rgb(70, 128, 82);
+const DARK_BACKGROUND_APPROVAL_REJECTED: Color = Color::Rgb(245, 213, 130);
+const LIGHT_BACKGROUND_APPROVAL_REJECTED: Color = Color::Rgb(150, 115, 42);
 const DARK_BACKGROUND_SURFACE: Color = Color::Rgb(46, 46, 46);
 const LIGHT_BACKGROUND_SURFACE: Color = Color::Rgb(236, 236, 236);
+const DARK_BACKGROUND_SYSTEM_ERROR: Color = Color::Rgb(255, 153, 153);
+const LIGHT_BACKGROUND_SYSTEM_ERROR: Color = Color::Rgb(188, 74, 74);
+const PANEL_ACCENT: Color = Color::Blue;
+const COMMAND_ACCENT: Color = Color::Cyan;
 
 /// `PaletteDetection` 描述一次可确认的终端背景探测结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,13 +30,21 @@ pub struct PaletteDetection {
 
 /// `TerminalPalette` 定义当前终端下的一组基础语义颜色。
 /// `main` 用于主体信息，`muted` 用于输入正文，`secondary` 用于辅助信息，
-/// `tertiary` 用于更弱的状态信息，`surface` 用于弱化背景块。
+/// `tertiary` 用于更弱的状态信息，`accent` 用于面板强调线，
+/// `command_accent` 用于斜杠菜单当前命令，`approval_rejected` 用于人为拒绝审批，
+/// `system_error` 用于运行时错误提示，
+/// `quote` 用于 Markdown 引用块，`surface` 用于弱化背景块。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalPalette {
     pub main: Color,
     pub muted: Color,
     pub secondary: Color,
     pub tertiary: Color,
+    pub accent: Color,
+    pub command_accent: Color,
+    pub approval_rejected: Color,
+    pub system_error: Color,
+    pub quote: Color,
     pub surface: Option<Color>,
     mode: PaletteMode,
 }
@@ -58,6 +74,11 @@ pub fn terminal_default_palette() -> TerminalPalette {
         muted: Color::Reset,
         secondary: Color::Reset,
         tertiary: Color::Reset,
+        accent: PANEL_ACCENT,
+        command_accent: COMMAND_ACCENT,
+        approval_rejected: Color::LightYellow,
+        system_error: Color::LightRed,
+        quote: Color::LightGreen,
         surface: None,
         mode: PaletteMode::TerminalDefault,
     }
@@ -125,6 +146,23 @@ pub fn palette_from_background(
             DARK_BACKGROUND_TERTIARY
         } else {
             LIGHT_BACKGROUND_TERTIARY
+        },
+        accent: PANEL_ACCENT,
+        command_accent: COMMAND_ACCENT,
+        approval_rejected: if has_dark_background {
+            DARK_BACKGROUND_APPROVAL_REJECTED
+        } else {
+            LIGHT_BACKGROUND_APPROVAL_REJECTED
+        },
+        system_error: if has_dark_background {
+            DARK_BACKGROUND_SYSTEM_ERROR
+        } else {
+            LIGHT_BACKGROUND_SYSTEM_ERROR
+        },
+        quote: if has_dark_background {
+            DARK_BACKGROUND_QUOTE
+        } else {
+            LIGHT_BACKGROUND_QUOTE
         },
         surface: Some(surface_color(has_dark_background, background)),
         mode: PaletteMode::Explicit,
@@ -242,6 +280,21 @@ mod tests {
         let green_palette = palette_from_background(true, Some(Color::Rgb(20, 48, 31)));
 
         assert_eq!(blue_palette.secondary, green_palette.secondary);
+    }
+
+    #[test]
+    fn palette_uses_stable_quote_color_without_following_background_hue() {
+        let blue_palette = palette_from_background(true, Some(Color::Rgb(16, 36, 63)));
+        let green_palette = palette_from_background(true, Some(Color::Rgb(20, 48, 31)));
+
+        assert_eq!(blue_palette.quote, green_palette.quote);
+    }
+
+    #[test]
+    fn palette_separates_approval_rejection_from_system_error() {
+        let palette = palette_from_background(true, Some(Color::Rgb(16, 36, 63)));
+
+        assert_ne!(palette.approval_rejected, palette.system_error);
     }
 
     #[test]

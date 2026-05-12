@@ -21,6 +21,7 @@ mod user;
 mod user_estimate;
 mod user_projection;
 
+pub(crate) use self::assistant::assistant_message_visual_inset;
 #[cfg(test)]
 use self::user_estimate::{
     estimate_hard_wrap_line_count, estimate_hard_wrap_visible_text,
@@ -125,6 +126,18 @@ impl MessageItem {
         }
     }
 
+    pub(crate) fn is_assistant(&self) -> bool {
+        self.sender == Sender::Assistant
+    }
+
+    pub(crate) fn sender(&self) -> Sender {
+        self.sender
+    }
+
+    pub(crate) fn source_content(&self) -> &str {
+        &self.content
+    }
+
     pub(crate) fn render_cache_key(&self) -> u64 {
         self.render_cache_key
     }
@@ -162,9 +175,12 @@ impl MessageItem {
                 self.style_mode,
                 previous_metrics,
             ),
-            Sender::Assistant => {
-                estimate_assistant_message_metrics_fast(&self.content, width, previous_metrics)
-            }
+            Sender::Assistant => estimate_assistant_message_metrics_fast(
+                &self.content,
+                width,
+                palette,
+                previous_metrics,
+            ),
         }
     }
 
@@ -233,7 +249,6 @@ fn message_item_render_cache_key(sender: Sender, content: &str, style_mode: Styl
     MESSAGE_ITEM_RENDER_CACHE_KEY_CALL_COUNT.with(|count| count.set(count.get() + 1));
 
     let mut hasher = DefaultHasher::new();
-    (sender as u8).hash(&mut hasher);
     if sender == Sender::User {
         style_mode.hash(&mut hasher);
     }

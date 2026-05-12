@@ -1,0 +1,13 @@
+# mode = "append" keeps built-in phrases and adds yours.
+# mode = "override" uses only phrases listed below.
+mode = "append"
+
+# order = "random" chooses one phrase for each request.
+# order = "cycle" walks through phrases in order.
+order = "random"
+
+phrases = [
+  "Reading context",
+  "Thinking through it",
+  "Checking the edges",
+]

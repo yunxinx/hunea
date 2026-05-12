@@ -1,7 +1,17 @@
 use std::rc::Rc;
 
 use super::*;
-use crate::frontend::tui::{Sender, StyleMode, document::DocumentAnchorRegion};
+use crate::frontend::tui::{
+    AppEffect, AppEvent, Sender, StyleMode, document::DocumentAnchorRegion,
+};
+use crate::runtime::model_catalog::{
+    ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
+};
+use crate::runtime::native::ProviderKind;
+use crate::runtime::phrases::StatusPhraseOrder;
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::{Terminal, backend::TestBackend};
+use std::path::{Path, PathBuf};
 
 fn progressive_exactization_fixture() -> Model {
     let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
@@ -81,7 +91,837 @@ fn transcript_plain_items_use_assistant_markdown_render_path() {
         .transcript_mut()
         .append_message(Sender::Assistant, "# Overview of the API");
 
-    assert_eq!(model.transcript_plain_items(), vec!["Overview of the API"]);
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["# Overview of the API"]
+    );
+}
+
+#[test]
+fn native_agent_request_includes_full_transcript_history() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            )]),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model
+        .transcript_mut()
+        .append_message(Sender::User, "first question");
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "first answer");
+
+    for character in "follow up".chars() {
+        model.update(AppEvent::Key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Char(character),
+        )));
+    }
+    let effect = model.update(AppEvent::Key(crossterm::event::KeyEvent::from(
+        crossterm::event::KeyCode::Enter,
+    )));
+
+    let Some(AppEffect::SendNativeAgent { request }) = effect else {
+        panic!("expected native agent effect, got {effect:?}");
+    };
+    let roles_and_content = request
+        .llm_request()
+        .messages
+        .iter()
+        .map(|message| (message.role.as_str(), message.content.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roles_and_content,
+        vec![
+            ("user", "first question"),
+            ("assistant", "first answer"),
+            ("user", "follow up"),
+        ]
+    );
+}
+
+#[test]
+fn native_agent_request_excludes_runtime_system_messages() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            )]),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.append_system_message_from_runtime("Chat failed: connection refused");
+
+    for character in "hello".chars() {
+        model.update(AppEvent::Key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Char(character),
+        )));
+    }
+    let effect = model.update(AppEvent::Key(crossterm::event::KeyEvent::from(
+        crossterm::event::KeyCode::Enter,
+    )));
+
+    let Some(AppEffect::SendNativeAgent { request }) = effect else {
+        panic!("expected native agent effect, got {effect:?}");
+    };
+    let roles_and_content = request
+        .llm_request()
+        .messages
+        .iter()
+        .map(|message| (message.role.as_str(), message.content.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(roles_and_content, vec![("user", "hello")]);
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec![
+            "■ Chat failed: connection refused".to_string(),
+            "› hello".to_string()
+        ]
+    );
+}
+
+#[test]
+fn at_file_picker_opens_and_tab_completes_common_prefix() {
+    let root = TempFileTree::new("tab-complete");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    root.write_file("README.md");
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@s");
+
+    assert!(model.file_picker_active());
+    assert_eq!(
+        model
+            .current_file_picker_render_result()
+            .plain_lines
+            .iter()
+            .filter(|line| line.contains("src/"))
+            .count(),
+        2
+    );
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+
+    assert_eq!(model.composer_text(), "@src/");
+}
+
+#[test]
+fn at_file_picker_tab_completes_prefix_candidates_not_fuzzy_matches() {
+    let root = TempFileTree::new("tab-complete-prefix-only");
+    root.write_file("src/dir1/docs.md");
+    root.write_file("src/dir1/readme.md");
+    root.write_file("docs/status.md");
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@s");
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+
+    assert_eq!(model.composer_text(), "@src/dir1/");
+}
+
+#[test]
+fn file_picker_render_shifts_to_the_completed_directory_prefix() {
+    let root = TempFileTree::new("tab-complete-shifts-window");
+    root.write_file("src/dir1/dir2/dir3/docs.md");
+    root.write_file("src/dir1/dir2/dir4/readme.md");
+    root.write_file("docs/status.md");
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@s");
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+
+    assert_eq!(model.composer_text(), "@src/dir1/dir2/dir");
+
+    let lines = model.current_file_picker_render_result().plain_lines;
+    assert!(
+        lines.iter().any(|line| line.contains("dir3/docs.md")),
+        "completed directory prefix should be stripped from picker rows: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("src/dir1/dir2")),
+        "picker rows should not waste popup width on the already inserted prefix: {lines:?}"
+    );
+}
+
+#[test]
+fn file_picker_popup_uses_configured_height_and_full_width() {
+    let root = TempFileTree::new("configured-popup-height");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    root.write_file("src/model.rs");
+    root.write_file("src/view.rs");
+    root.write_file("src/update.rs");
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 3,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@s");
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+
+    assert_eq!(
+        rows.iter().filter(|line| line.contains("src/")).count(),
+        3,
+        "configured popup height should limit visible picker rows: {rows:?}"
+    );
+    assert!(
+        rendered_segment(&rows[1], 0, 40)
+            .trim_start()
+            .starts_with("src/"),
+        "file picker popup should render as a full-width row instead of a narrow anchored column: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_popup_renders_vertical_scrollbar_for_overflowing_results() {
+    let root = TempFileTree::new("popup-scrollbar");
+    for index in 0..8 {
+        root.write_file(&format!("src/file_{index:02}.rs"));
+    }
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 3,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@s");
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+    let popup_rows = &rows[1..=3];
+
+    assert!(
+        popup_rows
+            .iter()
+            .any(|row| rendered_segment(row, 39, 1) == "█"),
+        "overflowing file picker should render a thicker right-side scrollbar thumb: {rows:?}"
+    );
+    assert!(
+        !popup_rows
+            .iter()
+            .any(|row| row.contains('↑') || row.contains('↓')),
+        "file picker scrollbar should not render begin/end arrow symbols: {rows:?}"
+    );
+}
+
+#[test]
+fn at_file_picker_enter_inserts_selected_path_with_prefix_and_space() {
+    let root = TempFileTree::new("enter-selected");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@src/l");
+
+    assert!(model.file_picker_active());
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(model.composer_text(), "@src/lib.rs ");
+    assert!(!model.file_picker_active());
+}
+
+#[test]
+fn at_file_picker_down_then_enter_inserts_the_selected_path() {
+    let root = TempFileTree::new("down-enter-selected");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@src");
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(model.composer_text(), "@src/main.rs ");
+    assert!(!model.file_picker_active());
+}
+
+#[test]
+fn at_file_picker_enter_on_empty_results_does_not_send_composer() {
+    let root = TempFileTree::new("enter-empty-results");
+    root.write_file("src/lib.rs");
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            model_catalog: file_picker_test_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@does-not-exist");
+
+    assert!(model.file_picker_active());
+    assert!(
+        model
+            .current_file_picker_render_result()
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("No files"))
+    );
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "@does-not-exist");
+    assert!(
+        !model
+            .transcript_plain_items()
+            .iter()
+            .any(|item| item.contains("@does-not-exist")),
+        "enter in an empty file picker must not submit the draft"
+    );
+}
+
+#[test]
+fn file_picker_does_not_clear_status_lines_outside_popup_area() {
+    let root = TempFileTree::new("keep-status-lines");
+    root.write_file("src/lib.rs");
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 3,
+            status_line_items: vec![StatusLineItem::GitBranch],
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.git_branch = "main".to_string();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "one\ntwo\nthree\nfour\nfive\nsix\n@s");
+    apply_scrolled_offset(&mut model, 1, true);
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+
+    assert!(
+        rows.iter().any(|line| line.contains("src/lib.rs")),
+        "file picker content should still be visible in the rendered frame: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|line| line.contains("main")),
+        "status line outside the popup area should not be cleared by the floating layer: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_remains_visible_when_composer_uses_most_of_viewport() {
+    let root = TempFileTree::new("long-composer-visible");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    root.write_file("src/model.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(36, 6);
+    type_text(&mut model, "line one\nline two\nline three\nline four\n@s");
+
+    let layout = model.build_document_layout();
+    let rows = rendered_rows_for_model(&mut model, 36, 6);
+
+    assert!(
+        rows.iter().any(|line| line.contains("src/lib.rs")),
+        "file picker row should stay visible in the rendered frame: {rows:?}"
+    );
+
+    assert_eq!(
+        layout.composer_line_count,
+        usize::from(model.composer.full_height()),
+        "file picker should render as an overlay, not by clipping composer document content"
+    );
+}
+
+#[test]
+fn file_picker_remains_visible_when_composer_cursor_mode_fills_viewport() {
+    let root = TempFileTree::new("cursor-mode-visible");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    root.write_file("src/model.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(36, 6);
+    type_text(
+        &mut model,
+        "line one\nline two\nline three\nline four\nline five\nline six",
+    );
+    model.document_runtime.follow_bottom = false;
+    model.sync_document_viewport_for_composer_cursor();
+
+    type_text(&mut model, "\n@s");
+
+    let layout = model.build_document_layout();
+    let rows = rendered_rows_for_model(&mut model, 36, 6);
+
+    assert!(
+        rows.iter().any(|line| line.contains("src/lib.rs")),
+        "file picker row should stay visible in cursor viewport mode: {rows:?}"
+    );
+
+    assert_eq!(
+        layout.composer_line_count,
+        usize::from(model.composer.full_height()),
+        "file picker should not participate in document layout"
+    );
+}
+
+#[test]
+fn file_picker_overlay_does_not_clip_or_extend_the_composer_document_layout() {
+    let root = TempFileTree::new("top-trigger-full-composer");
+    root.write_file("line-target.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(36, 6);
+    model
+        .composer_mut()
+        .set_text_for_test("line one\nline two\nline three\nline four\nline five\nline six");
+    model.composer_mut().move_to_begin_for_test();
+    model.sync_composer_height();
+    model.sync_document_viewport_for_composer_cursor();
+
+    type_text(&mut model, "@");
+
+    let expected_composer_lines = usize::from(model.composer.full_height());
+    let layout = model.build_document_layout();
+    let viewport = model.build_document_viewport(&layout);
+    let rows = rendered_rows_for_model(&mut model, 36, 6);
+
+    assert_eq!(
+        layout.composer_line_count, expected_composer_lines,
+        "file picker overlay must not replace the full composer document with a clipped slice"
+    );
+    assert!(
+        !viewport
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("line-target.rs")),
+        "file picker overlay must not be part of the document viewport: {:?}",
+        viewport.plain_lines
+    );
+
+    assert!(
+        rows.iter().any(|line| line.contains("line-target.rs")),
+        "file picker row should still be visible in the rendered frame: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_overlay_does_not_shrink_the_composer_viewport() {
+    let root = TempFileTree::new("overlay-keeps-composer-viewport");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    root.write_file("src/model.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(36, 6);
+    model
+        .composer_mut()
+        .set_text_for_test("line one\nline two\nline three\nline four\nline five\nline six");
+    model.sync_composer_height();
+    let before_visible_height = model.composer.visible_height();
+
+    type_text(&mut model, "\n@s");
+
+    assert!(model.file_picker_active());
+    assert_eq!(
+        model.composer.visible_height(),
+        before_visible_height,
+        "file picker overlay should reserve document rows without shrinking the composer viewport"
+    );
+}
+
+#[test]
+fn file_picker_floating_layer_does_not_shrink_document_viewport() {
+    let root = TempFileTree::new("floating-keeps-document-viewport");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+    root.write_file("src/model.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(36, 6);
+    type_text(
+        &mut model,
+        "line one\nline two\nline three\nline four\nline five\n@s",
+    );
+
+    assert!(model.file_picker_active());
+    let layout = model.build_document_layout();
+    let viewport = model.build_document_viewport(&layout);
+
+    assert_eq!(
+        viewport.lines.len(),
+        model.document_viewport_height().min(layout.line_count()),
+        "floating picker must not reserve or subtract document viewport rows"
+    );
+}
+
+#[test]
+fn file_picker_popup_anchors_below_the_at_token_with_full_width() {
+    let root = TempFileTree::new("popup-anchor-below");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    type_text(&mut model, "@s");
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+
+    assert_eq!(
+        rendered_column(&rows[1], "src/lib.rs"),
+        Some(2),
+        "file picker should keep vertical @ anchoring but use the full viewport width: {rows:?}"
+    );
+    assert!(
+        rendered_segment(&rows[1], 0, 40).contains("src/lib.rs"),
+        "file picker popup should own the whole viewport row: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_popup_flips_above_when_there_is_no_room_below_anchor() {
+    let root = TempFileTree::new("popup-anchor-above");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(40, 8);
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    type_text(&mut model, "one\ntwo\nthree\nfour\nfive\nsix\nseven\n@s");
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+
+    assert_eq!(
+        rendered_column(&rows[0], "src/lib.rs"),
+        Some(2),
+        "file picker should flip above the @ row instead of appending below the composer: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_popup_stays_full_width_when_anchor_is_near_right_edge() {
+    let root = TempFileTree::new("popup-full-width-near-right");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_window(26, 8);
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    type_text(&mut model, "abcdefghijklmnopqrs @s");
+
+    let rows = rendered_rows_for_model(&mut model, 26, 8);
+
+    assert_eq!(
+        rendered_column(&rows[1], "src/lib.rs"),
+        Some(2),
+        "file picker should use full-width rows instead of horizontal flip logic: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_popup_clears_full_width_rows_over_underlying_content() {
+    let root = TempFileTree::new("popup-clear-rect");
+    root.write_file("src/lib.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    model
+        .composer_mut()
+        .set_text_for_test("@s\nunderlying one\nunderlying two");
+    model.composer_mut().move_to_begin_for_test();
+    model.sync_composer_height();
+    model.sync_document_viewport_for_composer_cursor();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+
+    assert_eq!(
+        rendered_segment(&rows[2], 0, 40).trim(),
+        "",
+        "Clear should reset the whole viewport row before rendering short/empty picker rows: {rows:?}"
+    );
+    assert!(
+        !rows[2].contains("underlying"),
+        "underlying composer text inside the popup rect should be covered: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_esc_restores_area_cleared_by_previous_floating_frame() {
+    let root = TempFileTree::new("popup-esc-restore");
+    root.write_file("src/lib.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    model
+        .composer_mut()
+        .set_text_for_test("@s\nunderlying one\nunderlying two");
+    model.composer_mut().move_to_begin_for_test();
+    model.sync_composer_height();
+    model.sync_document_viewport_for_composer_cursor();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    assert!(model.file_picker_active());
+
+    let mut terminal =
+        Terminal::new(TestBackend::new(40, 8)).expect("test backend should initialize");
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render active popup");
+    let popup_rows = rendered_rows(terminal.backend().buffer());
+    assert!(
+        popup_rows.iter().any(|line| line.contains("src/lib.rs")),
+        "first frame should render the file picker popup: {popup_rows:?}"
+    );
+    assert!(
+        !popup_rows
+            .iter()
+            .any(|line| line.contains("underlying one")),
+        "first frame should cover underlying content inside the popup rect: {popup_rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert!(!model.file_picker_active());
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render after closing popup");
+    let restored_rows = rendered_rows(terminal.backend().buffer());
+
+    assert!(
+        restored_rows
+            .iter()
+            .any(|line| line.contains("underlying one")),
+        "closing the popup should repaint the content previously cleared by Clear: {restored_rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_esc_restores_flipped_popup_area_in_full_composer_viewport() {
+    let root = TempFileTree::new("popup-esc-restore-full");
+    root.write_file("src/lib.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    model.set_window(40, 8);
+    type_text(
+        &mut model,
+        "line one\nline two\nline three\nline four\nline five\nline six\nline seven\n@s",
+    );
+    assert!(model.file_picker_active());
+
+    let mut terminal =
+        Terminal::new(TestBackend::new(40, 8)).expect("test backend should initialize");
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render active popup");
+    let popup_rows = rendered_rows(terminal.backend().buffer());
+    assert!(
+        popup_rows.iter().any(|line| line.contains("src/lib.rs")),
+        "first frame should render the flipped file picker popup: {popup_rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert!(!model.file_picker_active());
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render after closing popup");
+    let restored_rows = rendered_rows(terminal.backend().buffer());
+
+    assert!(
+        restored_rows.iter().any(|line| line.contains("line two")),
+        "closing a flipped popup should repaint the composer rows it cleared: {restored_rows:?}"
+    );
+    assert!(
+        !restored_rows.iter().any(|line| line.contains("src/lib.rs")),
+        "closed file picker content must not remain in the frame: {restored_rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_esc_closes_overlay_without_moving_document_viewport() {
+    let root = TempFileTree::new("popup-esc-keeps-viewport");
+    root.write_file("src/lib.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.status_line_items.clear();
+    model.status_line_2_items.clear();
+    model.set_window(40, 6);
+    model.composer_mut().set_text_for_test(
+        "@s\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight",
+    );
+    model.composer_mut().move_to_begin_for_test();
+    model.sync_composer_height();
+    model.document_runtime.follow_bottom = false;
+    model.sync_document_viewport_for_composer_cursor();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    assert!(model.file_picker_active());
+
+    let before_document_offset = model.document_runtime.viewport_y;
+    let before_composer_offset = model.composer.viewport_offset();
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    assert!(!model.file_picker_active());
+    assert_eq!(
+        model.document_runtime.viewport_y, before_document_offset,
+        "closing a floating popup should not move the document viewport"
+    );
+    assert_eq!(
+        model.composer.viewport_offset(),
+        before_composer_offset,
+        "closing a floating popup should not page the composer to the bottom"
+    );
+}
+
+#[test]
+fn file_picker_mouse_wheel_scrolls_document_without_moving_popup_list() {
+    let root = TempFileTree::new("popup-wheel-passes-through");
+    for index in 0..8 {
+        root.write_file(&format!("src/file_{index:02}.rs"));
+    }
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 3,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    for index in 0..12 {
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, format!("history line {index}"));
+    }
+    model.sync_transcript_render();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@s");
+    assert!(model.file_picker_active());
+
+    let before_document_offset = model.document_runtime.viewport_y;
+    let before_picker_scroll = model.file_picker.as_ref().map(|state| state.scroll);
+    assert!(
+        before_document_offset > 0,
+        "fixture should start with scrollable document content"
+    );
+
+    model.update(AppEvent::MouseWheel { delta_lines: -3 });
+
+    assert!(
+        model.document_runtime.viewport_y < before_document_offset,
+        "mouse wheel should keep scrolling the underlying document while the file picker is active"
+    );
+    assert_eq!(
+        model.file_picker.as_ref().map(|state| state.scroll),
+        before_picker_scroll,
+        "mouse wheel should not move the file picker list viewport"
+    );
+}
+
+#[test]
+fn deleting_file_picker_trigger_after_mouse_wheel_keeps_manual_document_viewport() {
+    let root = TempFileTree::new("popup-wheel-delete-trigger");
+    root.write_file("src/lib.rs");
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 3,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    for index in 0..12 {
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, format!("history line {index}"));
+    }
+    model.sync_transcript_render();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@");
+    assert!(model.file_picker_active());
+
+    let bottom_offset = model.document_runtime.viewport_y;
+    model.update(AppEvent::MouseWheel { delta_lines: -3 });
+    let scrolled_offset = model.document_runtime.viewport_y;
+    assert!(
+        scrolled_offset < bottom_offset,
+        "fixture should manually scroll away from the bottom before deleting the trigger"
+    );
+    assert!(model.document_runtime.manual_scroll);
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Backspace)));
+
+    assert!(!model.file_picker_active());
+    assert_eq!(model.composer_text(), "");
+    assert_eq!(
+        model.document_runtime.viewport_y, scrolled_offset,
+        "removing the @ trigger after a wheel scroll should not restore the viewport to the bottom"
+    );
+    assert!(
+        model.document_runtime.manual_scroll,
+        "closing the popup by deleting its trigger should keep the user's manual scroll state"
+    );
 }
 
 #[test]
@@ -819,4 +1659,622 @@ fn build_document_layout_resyncs_idle_viewport_after_exactization_reflow() {
                     .saturating_add(model.document_viewport_height()),
         "render-time exactization should leave the active composer cursor inside the visible document viewport"
     );
+}
+
+#[test]
+fn acp_permission_accept_key_returns_selected_option() {
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    let mut model = Model::new(HeroOptions::default());
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-1".to_string(),
+        title: Some("Write file".to_string()),
+        allow_option_id: Some("allow-once".to_string()),
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: Some("reject-once".to_string()),
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    assert!(model.current_status_notice_text().is_empty());
+    assert!(model.tool_approval_panel_active());
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('y'))));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-1".to_string(),
+            option_id: Some("allow-once".to_string()),
+            is_rejection: false,
+            rejected_tool_call_id: None,
+        })
+    );
+    assert!(model.current_status_notice_text().is_empty());
+    assert!(!model.tool_approval_panel_active());
+}
+
+#[test]
+fn acp_permission_reject_key_returns_reject_option() {
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    let mut model = Model::new(HeroOptions::default());
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-2".to_string(),
+        title: None,
+        allow_option_id: Some("allow-once".to_string()),
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: Some("reject-once".to_string()),
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-2".to_string(),
+            option_id: Some("reject-once".to_string()),
+            is_rejection: true,
+            rejected_tool_call_id: None,
+        })
+    );
+    assert!(!model.tool_approval_panel_active());
+}
+
+#[test]
+fn acp_permission_enter_on_session_allow_returns_allow_always_option() {
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    let mut model = Model::new(HeroOptions::default());
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-3".to_string(),
+        title: Some("Run command".to_string()),
+        allow_option_id: Some("allow-once".to_string()),
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: Some("reject-once".to_string()),
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-3".to_string(),
+            option_id: Some("allow-always".to_string()),
+            is_rejection: false,
+            rejected_tool_call_id: None,
+        })
+    );
+    assert!(!model.tool_approval_panel_active());
+}
+
+#[test]
+fn acp_permission_enter_on_session_deny_returns_reject_always_option() {
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    let mut model = Model::new(HeroOptions::default());
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-4".to_string(),
+        title: Some("Run command".to_string()),
+        allow_option_id: Some("allow-once".to_string()),
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: Some("reject-once".to_string()),
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-4".to_string(),
+            option_id: Some("reject-always".to_string()),
+            is_rejection: true,
+            rejected_tool_call_id: None,
+        })
+    );
+    assert!(!model.tool_approval_panel_active());
+}
+
+#[test]
+fn acp_permission_shortcuts_use_session_options_when_once_options_are_absent() {
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    let mut model = Model::new(HeroOptions::default());
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-5".to_string(),
+        title: Some("Run command".to_string()),
+        allow_option_id: None,
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: None,
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('y'))));
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-5".to_string(),
+            option_id: Some("allow-always".to_string()),
+            is_rejection: false,
+            rejected_tool_call_id: None,
+        })
+    );
+
+    model.update(AppEvent::AcpPermissionRequested {
+        request_id: "permission-6".to_string(),
+        title: Some("Run command".to_string()),
+        allow_option_id: None,
+        allow_always_option_id: Some("allow-always".to_string()),
+        reject_option_id: None,
+        reject_always_option_id: Some("reject-always".to_string()),
+    });
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondAcpPermission {
+            request_id: "permission-6".to_string(),
+            option_id: Some("reject-always".to_string()),
+            is_rejection: true,
+            rejected_tool_call_id: None,
+        })
+    );
+}
+
+#[test]
+fn stream_activity_line_uses_dynamic_codex_style_indicator() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_phrases: vec!["Cooking".to_string()],
+            status_phrase_order: StatusPhraseOrder::Cycle,
+            ..ModelOptions::default()
+        },
+    );
+    model.set_window(50, 6);
+    model.set_palette(default_palette(), true);
+    model.show_stream_activity("Kimi Code CLI");
+
+    let first = model
+        .current_stream_activity_render_result_at(std::time::Instant::now())
+        .plain_line;
+    let second = model
+        .current_stream_activity_render_result_at(
+            std::time::Instant::now() + std::time::Duration::from_millis(700),
+        )
+        .plain_line;
+
+    assert!(first.contains("Cooking (0s"));
+    assert!(first.contains("esc 2x to interrupt"));
+    assert!(first.starts_with("• Cooking (0s"));
+    assert!(!first.contains("Kimi Code CLI"));
+    assert!(!first.contains('⠋'));
+    assert_eq!(first, second);
+}
+
+#[test]
+fn stream_activity_line_cycles_configured_fallback_phrases() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_phrases: vec!["Cooking".to_string(), "Crafting".to_string()],
+            status_phrase_order: StatusPhraseOrder::Cycle,
+            ..ModelOptions::default()
+        },
+    );
+    model.set_window(50, 6);
+    model.set_palette(default_palette(), true);
+
+    model.show_stream_activity("qwen3");
+    let first = model.current_stream_activity_render_result().plain_line;
+    model.clear_stream_activity();
+    model.show_stream_activity("qwen3");
+    let second = model.current_stream_activity_render_result().plain_line;
+
+    assert!(first.contains("Cooking (0s"));
+    assert!(second.contains("Crafting (0s"));
+}
+
+#[test]
+fn stream_activity_line_renders_above_composer() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_phrases: vec!["Cooking".to_string()],
+            status_phrase_order: StatusPhraseOrder::Cycle,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.set_window(40, 6);
+    model.set_palette(default_palette(), true);
+    model.show_stream_activity("Kimi Code CLI");
+
+    let layout = model.build_document_layout();
+
+    let activity_line = layout
+        .tail
+        .text_lines
+        .first()
+        .map(|line| line.trim())
+        .unwrap_or_default();
+    assert!(activity_line.contains("Cooking"));
+    assert!(!activity_line.contains("Kimi Code CLI"));
+    assert_eq!(
+        layout.tail.text_lines.get(1).map(String::as_str),
+        Some(""),
+        "activity indicator should breathe before the composer"
+    );
+    assert_eq!(layout.composer_slot.frame_start_line, 2);
+    assert!(layout.composer_slot.content_start_line > layout.composer_slot.frame_start_line);
+}
+
+#[test]
+fn esc_interrupts_native_agent_after_configured_press_count() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            esc_interrupt_presses: 2,
+            ..ModelOptions::default()
+        },
+    );
+    model.show_stream_activity("qwen3");
+
+    let first = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert_eq!(first, None);
+    assert!(model.current_status_notice_text().contains("Esc again"));
+    assert!(model.current_stream_activity_render_result().has_content);
+
+    let second = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert_eq!(second, Some(AppEffect::InterruptCurrentTurn));
+}
+
+#[test]
+fn esc_interrupts_native_agent_immediately_when_configured_for_one_press() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            esc_interrupt_presses: 1,
+            ..ModelOptions::default()
+        },
+    );
+    model.show_stream_activity("qwen3");
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    assert_eq!(effect, Some(AppEffect::InterruptCurrentTurn));
+}
+
+#[test]
+fn enter_during_native_agent_activity_does_not_append_unsent_message() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            )]),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.composer_mut().insert_text("second message");
+    model.show_stream_activity("qwen3");
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert!(
+        model
+            .current_status_notice_text()
+            .contains("already running")
+    );
+    assert_eq!(model.composer_text(), "second message");
+    assert!(model.transcript_plain_items().is_empty());
+}
+
+#[test]
+fn enter_acp_prompt_starts_activity_before_worker_ack() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_phrases: vec!["Submitted".to_string()],
+            status_phrase_order: StatusPhraseOrder::Cycle,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    model.composer_mut().insert_text("hello acp");
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::SendAcpPrompt {
+            agent_id: "Kimi Code CLI".to_string(),
+            prompt: crate::runtime::acp::AcpPrompt::from_text("hello acp"),
+        })
+    );
+    assert!(
+        model
+            .current_stream_activity_render_result()
+            .plain_line
+            .contains("Submitted (0s")
+    );
+}
+
+#[test]
+fn enter_acp_prompt_builds_structured_blocks_from_selected_agent_capabilities() {
+    use agent_client_protocol::schema::{
+        AgentCapabilities, ContentBlock, EmbeddedResourceResource, PromptCapabilities,
+    };
+
+    let root = TempFileTree::new("acp-structured-prompt");
+    root.write_file_with_content("assets/sample.png", &[0x89, b'P', b'N', b'G']);
+    root.write_file_with_content("src/code.py", b"print('hi')\n");
+
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_phrases: vec!["Submitted".to_string()],
+            status_phrase_order: StatusPhraseOrder::Cycle,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.selected_acp_agent = Some("fake".to_string());
+    model.apply_acp_agent_identity(
+        "fake",
+        crate::runtime::acp::AcpAgentIdentity {
+            agent_capabilities: AgentCapabilities::new()
+                .prompt_capabilities(PromptCapabilities::new().image(true).embedded_context(true)),
+            ..crate::runtime::acp::AcpAgentIdentity::default()
+        },
+    );
+    model
+        .composer_mut()
+        .insert_text("review @assets/sample.png @src/code.py");
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    let Some(AppEffect::SendAcpPrompt { agent_id, prompt }) = effect else {
+        panic!("expected structured ACP prompt effect");
+    };
+
+    assert_eq!(agent_id, "fake");
+    let blocks = prompt.to_content_blocks();
+    assert_eq!(blocks.len(), 4);
+    assert!(matches!(
+        &blocks[1],
+        ContentBlock::Image(image)
+            if image.mime_type == "image/png"
+                && image.data == "iVBORw=="
+                && image.uri.as_deref() == Some(root.file_uri("assets/sample.png").as_str())
+    ));
+    match &blocks[3] {
+        ContentBlock::Resource(resource) => match &resource.resource {
+            EmbeddedResourceResource::TextResourceContents(text) => {
+                assert_eq!(text.uri, root.file_uri("src/code.py"));
+                assert_eq!(text.text, "print('hi')\n");
+            }
+            other => panic!("expected embedded text resource, got {other:?}"),
+        },
+        other => panic!("expected resource block, got {other:?}"),
+    }
+}
+
+#[test]
+fn current_model_status_line_falls_back_to_selected_acp_agent() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_line_items: vec![StatusLineItem::CurrentModel],
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            )]),
+            ..ModelOptions::default()
+        },
+    );
+
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+
+    assert_eq!(
+        model.current_status_line_parts(),
+        vec!["Kimi Code CLI".to_string()]
+    );
+}
+
+#[test]
+fn stream_activity_line_shows_interrupt_hint() {
+    let mut model = Model::new(HeroOptions::default());
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+
+    model.show_stream_activity("Kimi Code CLI");
+    let line = model.current_stream_activity_render_result().plain_line;
+
+    assert!(line.contains("esc 2x to interrupt"));
+}
+
+#[test]
+fn esc_interrupts_stream_activity_after_configured_press_count() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            esc_interrupt_presses: 2,
+            ..ModelOptions::default()
+        },
+    );
+    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
+    model.show_stream_activity("Kimi Code CLI");
+
+    let first = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert_eq!(first, None);
+    assert!(model.current_status_notice_text().contains("Esc again"));
+
+    let second = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert_eq!(second, Some(AppEffect::InterruptCurrentTurn));
+}
+
+#[test]
+fn esc_interrupt_count_resets_when_interrupt_notice_expires() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            esc_interrupt_presses: 2,
+            ..ModelOptions::default()
+        },
+    );
+    model.show_stream_activity("qwen3");
+
+    let first = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert_eq!(first, None);
+    assert!(model.current_status_notice_text().contains("Esc again"));
+
+    let timeout = model
+        .timeout_event(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .expect("interrupt notice should time out");
+    assert_eq!(model.update(timeout), None);
+    assert!(model.current_status_notice_text().is_empty());
+
+    let second_after_timeout = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert_eq!(second_after_timeout, None);
+    assert!(model.current_status_notice_text().contains("Esc again"));
+
+    let third = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert_eq!(third, Some(AppEffect::InterruptCurrentTurn));
+}
+
+#[test]
+fn stream_activity_line_can_hide_interrupt_hint() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            show_esc_interrupt_hint: false,
+            ..ModelOptions::default()
+        },
+    );
+
+    model.show_stream_activity_with_header("Working");
+    let line = model.current_stream_activity_render_result().plain_line;
+
+    assert!(line.contains("Working (0s)"));
+    assert!(!line.contains("esc"));
+    assert!(!line.contains("interrupt"));
+}
+
+fn file_picker_model(root: &Path) -> Model {
+    let mut model = Model::new_with_style_mode(HeroOptions::default(), StyleMode::Ms);
+    model.transcript_mut().clear();
+    model.current_dir = root.display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    model
+}
+
+fn file_picker_test_model_catalog() -> ModelCatalog {
+    ModelCatalog::new(vec![ModelProvider::native(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "Local",
+        Some("http://127.0.0.1:1234/v1".to_string()),
+        ModelSource::Configured,
+        vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+    )])
+}
+
+fn type_text(model: &mut Model, text: &str) {
+    for character in text.chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+}
+
+fn rendered_rows_for_model(model: &mut Model, width: u16, height: u16) -> Vec<String> {
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("test backend should initialize");
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render into test backend");
+    rendered_rows(terminal.backend().buffer())
+}
+
+fn rendered_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+    (0..buffer.area.height)
+        .map(|row| {
+            let mut line = String::new();
+            for column in 0..buffer.area.width {
+                line.push_str(buffer[(column, row)].symbol());
+            }
+            line
+        })
+        .collect()
+}
+
+fn rendered_column(row: &str, needle: &str) -> Option<usize> {
+    row.find(needle)
+        .map(|byte_index| row[..byte_index].chars().count())
+}
+
+fn rendered_segment(row: &str, start: usize, len: usize) -> String {
+    row.chars().skip(start).take(len).collect()
+}
+
+struct TempFileTree {
+    path: PathBuf,
+}
+
+impl TempFileTree {
+    fn new(name: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("lumos-file-picker-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("temp root should be creatable");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn write_file(&self, relative: &str) {
+        self.write_file_with_content(relative, b"");
+    }
+
+    fn write_file_with_content(&self, relative: &str, content: &[u8]) {
+        let path = self.path.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("temp parent should be creatable");
+        }
+        std::fs::write(path, content).expect("temp file should be writable");
+    }
+
+    fn file_uri(&self, relative: &str) -> String {
+        url::Url::from_file_path(self.path.join(relative))
+            .expect("temp file path should convert to URI")
+            .to_string()
+    }
+}
+
+impl Drop for TempFileTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }

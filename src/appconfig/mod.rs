@@ -9,18 +9,25 @@ use serde::Deserialize;
 
 use crate::envinfo;
 
+/// @ 文件选择浮窗至少需要 3 行，避免列表在导航时过于局促。
+pub const FILE_PICKER_POPUP_MIN_HEIGHT: u16 = 3;
+/// @ 文件选择浮窗最多显示 21 行，避免覆盖过多上下文。
+pub const FILE_PICKER_POPUP_MAX_HEIGHT: u16 = 21;
+
 /// `Config` 表示当前 lumos 支持的启动配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub tui: TuiConfig,
     pub runtime: RuntimeConfig,
+    pub debug: DebugConfig,
+    pub acp: AcpConfig,
 }
 
-/// `LoadedConfig` 保留配置内容以及 ACP runtime 字段来自哪个配置文件。
+/// `LoadedConfig` 保留配置内容以及 ACP 字段来自哪个配置文件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedConfig {
     pub config: Config,
-    pub runtime_source: Option<PathBuf>,
+    pub acp_source: Option<PathBuf>,
     pub user_acp_path: Option<PathBuf>,
 }
 
@@ -29,12 +36,24 @@ pub struct LoadedConfig {
 pub struct TuiConfig {
     pub user_input_style: UserInputStyle,
     pub status_line: Vec<String>,
+    pub status_line_2: Vec<String>,
     pub external_editor: Vec<String>,
     pub show_external_editor_helper: bool,
     pub copy_on_mouse_selection_release: bool,
     pub swap_enter_and_send: bool,
     pub ctrl_c_clears_input: bool,
+    pub esc_interrupt_presses: u8,
+    pub show_esc_interrupt_hint: bool,
+    pub file_picker_popup_height: u16,
     pub print_transcript_on_exit: bool,
+    pub show_reasoning_content: bool,
+    pub reasoning_content_display: ReasoningContentDisplay,
+}
+
+/// `DebugConfig` 表示仅用于本地调试与界面预览的配置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugConfig {
+    pub enabled: bool,
 }
 
 /// `UserInputStyle` 表示用户输入区与用户消息的展示模式。
@@ -45,14 +64,30 @@ pub enum UserInputStyle {
     Ms,
 }
 
-/// `RuntimeConfig` 表示 ACP runtime 层的启动配置。
+/// `ReasoningContentDisplay` 表示思维链内容的默认展示方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningContentDisplay {
+    Collapsed,
+    Expanded,
+    Snippet,
+}
+
+/// `RuntimeConfig` 表示可被多个 runtime 复用的执行策略。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
+    pub request_retry_attempts: usize,
+    pub request_retry_delays: Vec<u64>,
+    pub request_timeout_seconds: u64,
+}
+
+/// `AcpConfig` 表示 ACP 层的启动配置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpConfig {
     pub enabled: bool,
     pub registry_url: String,
-    pub install_root: RuntimeInstallRoot,
+    pub install_root: AcpInstallRoot,
     pub custom_install_dir: PathBuf,
-    pub distribution_preference: Vec<RuntimeDistribution>,
+    pub distribution_preference: Vec<AcpDistribution>,
     pub auto_update_check: bool,
     pub agent_servers: BTreeMap<String, AgentServerConfig>,
 }
@@ -76,9 +111,9 @@ pub enum AgentServerType {
     Custom,
 }
 
-/// `RuntimeInstallRoot` 表示 ACP runtime 包安装位置策略。
+/// `AcpInstallRoot` 表示 ACP 包安装位置策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeInstallRoot {
+pub enum AcpInstallRoot {
     Config,
     Data,
     Cache,
@@ -86,9 +121,9 @@ pub enum RuntimeInstallRoot {
     Custom,
 }
 
-/// `RuntimeDistribution` 表示 registry 分发类型偏好。
+/// `AcpDistribution` 表示 registry 分发类型偏好。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeDistribution {
+pub enum AcpDistribution {
     Binary,
 }
 
@@ -131,13 +166,29 @@ pub enum AppConfigError {
         server: String,
         value: String,
     },
-    InvalidRuntimeInstallRoot {
+    InvalidAcpInstallRoot {
         path: Option<PathBuf>,
         value: String,
     },
-    InvalidRuntimeDistribution {
+    InvalidAcpDistribution {
         path: Option<PathBuf>,
         value: String,
+    },
+    InvalidEscInterruptPresses {
+        path: Option<PathBuf>,
+        value: u8,
+    },
+    InvalidFilePickerPopupHeight {
+        path: Option<PathBuf>,
+        value: usize,
+    },
+    InvalidReasoningContentDisplay {
+        path: Option<PathBuf>,
+        value: String,
+    },
+    InvalidRuntimeRequestPolicy {
+        path: Option<PathBuf>,
+        reason: String,
     },
 }
 
@@ -146,6 +197,10 @@ pub enum AppConfigError {
 struct FileConfig {
     #[serde(default)]
     tui: FileTuiConfig,
+    #[serde(default)]
+    runtime: FileRuntimeConfig,
+    #[serde(default)]
+    debug: FileDebugConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -153,17 +208,37 @@ struct FileConfig {
 struct FileTuiConfig {
     user_input_style: Option<String>,
     status_line: Option<Vec<String>>,
+    status_line_2: Option<Vec<String>>,
     external_editor: Option<Vec<String>>,
     show_external_editor_helper: Option<bool>,
     copy_on_mouse_selection_release: Option<bool>,
     swap_enter_and_send: Option<bool>,
     ctrl_c_clears_input: Option<bool>,
+    esc_interrupt_presses: Option<u8>,
+    show_esc_interrupt_hint: Option<bool>,
+    file_picker_popup_height: Option<usize>,
     print_transcript_on_exit: Option<bool>,
+    show_reasoning_content: Option<bool>,
+    reasoning_content_display: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileRuntimeConfig {
+    request_retry_attempts: Option<usize>,
+    request_retry_delays: Option<Vec<u64>>,
+    request_timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileDebugConfig {
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileAcpConfig {
     enabled: Option<bool>,
     registry_url: Option<String>,
     install_root: Option<String>,
@@ -193,24 +268,50 @@ impl Config {
             tui: TuiConfig {
                 user_input_style: UserInputStyle::Cx,
                 status_line: Vec::new(),
+                status_line_2: Vec::new(),
                 external_editor: Vec::new(),
                 show_external_editor_helper: true,
                 copy_on_mouse_selection_release: false,
                 swap_enter_and_send: false,
                 ctrl_c_clears_input: true,
+                esc_interrupt_presses: 2,
+                show_esc_interrupt_hint: true,
+                file_picker_popup_height: 7,
                 print_transcript_on_exit: false,
+                show_reasoning_content: false,
+                reasoning_content_display: ReasoningContentDisplay::Collapsed,
             },
             runtime: RuntimeConfig {
+                request_retry_attempts: 3,
+                request_retry_delays: vec![1, 2, 3],
+                request_timeout_seconds: 120,
+            },
+            debug: DebugConfig { enabled: false },
+            acp: AcpConfig {
                 enabled: false,
                 registry_url:
                     "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
                         .to_string(),
-                install_root: RuntimeInstallRoot::Config,
+                install_root: AcpInstallRoot::Config,
                 custom_install_dir: PathBuf::new(),
-                distribution_preference: vec![RuntimeDistribution::Binary],
+                distribution_preference: vec![AcpDistribution::Binary],
                 auto_update_check: true,
                 agent_servers: BTreeMap::new(),
             },
+        }
+    }
+}
+
+impl ReasoningContentDisplay {
+    fn parse(value: &str) -> Result<Self, AppConfigError> {
+        match value {
+            "collapsed" => Ok(Self::Collapsed),
+            "expanded" => Ok(Self::Expanded),
+            "snippet" => Ok(Self::Snippet),
+            other => Err(AppConfigError::InvalidReasoningContentDisplay {
+                path: None,
+                value: other.to_string(),
+            }),
         }
     }
 }
@@ -257,7 +358,7 @@ impl AgentServerType {
     }
 }
 
-impl RuntimeInstallRoot {
+impl AcpInstallRoot {
     fn parse(value: &str) -> Result<Self, AppConfigError> {
         match value {
             "config" => Ok(Self::Config),
@@ -265,7 +366,7 @@ impl RuntimeInstallRoot {
             "cache" => Ok(Self::Cache),
             "project" => Ok(Self::Project),
             "custom" => Ok(Self::Custom),
-            other => Err(AppConfigError::InvalidRuntimeInstallRoot {
+            other => Err(AppConfigError::InvalidAcpInstallRoot {
                 path: None,
                 value: other.to_string(),
             }),
@@ -273,11 +374,11 @@ impl RuntimeInstallRoot {
     }
 }
 
-impl RuntimeDistribution {
+impl AcpDistribution {
     fn parse(value: &str) -> Result<Self, AppConfigError> {
         match value {
             "binary" => Ok(Self::Binary),
-            other => Err(AppConfigError::InvalidRuntimeDistribution {
+            other => Err(AppConfigError::InvalidAcpDistribution {
                 path: None,
                 value: other.to_string(),
             }),
@@ -363,33 +464,82 @@ impl fmt::Display for AppConfigError {
                 server,
                 value,
             } => write!(f, "unknown agent_servers.{}.type {:?}", server, value),
-            Self::InvalidRuntimeInstallRoot {
+            Self::InvalidAcpInstallRoot {
                 path: Some(path),
                 value,
             } => write!(
                 f,
-                "validate config file {}: unknown runtime.install_root {:?}",
+                "validate config file {}: unknown acp.install_root {:?}",
                 path.display(),
                 value
             ),
-            Self::InvalidRuntimeInstallRoot { path: None, value } => {
-                write!(f, "unknown runtime.install_root {:?}", value)
+            Self::InvalidAcpInstallRoot { path: None, value } => {
+                write!(f, "unknown acp.install_root {:?}", value)
             }
-            Self::InvalidRuntimeDistribution {
+            Self::InvalidAcpDistribution {
                 path: Some(path),
                 value,
             } => write!(
                 f,
-                "validate config file {}: unknown runtime.distribution_preference item {:?}",
+                "validate config file {}: unknown acp.distribution_preference item {:?}",
                 path.display(),
                 value
             ),
-            Self::InvalidRuntimeDistribution { path: None, value } => {
-                write!(
-                    f,
-                    "unknown runtime.distribution_preference item {:?}",
-                    value
-                )
+            Self::InvalidAcpDistribution { path: None, value } => {
+                write!(f, "unknown acp.distribution_preference item {:?}", value)
+            }
+            Self::InvalidEscInterruptPresses {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: tui.esc_interrupt_presses must be 1, 2, or 3, got {}",
+                path.display(),
+                value
+            ),
+            Self::InvalidEscInterruptPresses { path: None, value } => write!(
+                f,
+                "tui.esc_interrupt_presses must be 1, 2, or 3, got {value}"
+            ),
+            Self::InvalidFilePickerPopupHeight {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: tui.file_picker_popup_height must be between {} and {}, got {}",
+                path.display(),
+                FILE_PICKER_POPUP_MIN_HEIGHT,
+                FILE_PICKER_POPUP_MAX_HEIGHT,
+                value
+            ),
+            Self::InvalidFilePickerPopupHeight { path: None, value } => write!(
+                f,
+                "tui.file_picker_popup_height must be between {} and {}, got {value}",
+                FILE_PICKER_POPUP_MIN_HEIGHT, FILE_PICKER_POPUP_MAX_HEIGHT
+            ),
+            Self::InvalidReasoningContentDisplay {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: unknown tui.reasoning_content_display {:?}",
+                path.display(),
+                value
+            ),
+            Self::InvalidReasoningContentDisplay { path: None, value } => {
+                write!(f, "unknown tui.reasoning_content_display {:?}", value)
+            }
+            Self::InvalidRuntimeRequestPolicy {
+                path: Some(path),
+                reason,
+            } => write!(
+                f,
+                "validate config file {}: invalid runtime.request policy: {}",
+                path.display(),
+                reason
+            ),
+            Self::InvalidRuntimeRequestPolicy { path: None, reason } => {
+                write!(f, "invalid runtime.request policy: {reason}")
             }
         }
     }
@@ -407,8 +557,12 @@ impl std::error::Error for AppConfigError {
             | Self::InvalidExternalEditorCommand { .. }
             | Self::ExternalEditorMustWait { .. }
             | Self::InvalidAgentServerType { .. }
-            | Self::InvalidRuntimeInstallRoot { .. }
-            | Self::InvalidRuntimeDistribution { .. } => None,
+            | Self::InvalidAcpInstallRoot { .. }
+            | Self::InvalidAcpDistribution { .. }
+            | Self::InvalidEscInterruptPresses { .. }
+            | Self::InvalidFilePickerPopupHeight { .. }
+            | Self::InvalidReasoningContentDisplay { .. }
+            | Self::InvalidRuntimeRequestPolicy { .. } => None,
         }
     }
 }
@@ -431,7 +585,7 @@ pub fn load_from_paths(
     .map(|loaded| loaded.config)
 }
 
-/// `load_with_sources_from_paths` 加载配置并保留 runtime 来源文件，便于后续写回。
+/// `load_with_sources_from_paths` 加载配置并保留 acp 来源文件，便于后续写回。
 pub fn load_with_sources_from_paths(
     working_dir: Option<&Path>,
     user_config_dir: Option<&Path>,
@@ -473,33 +627,38 @@ fn load_from_base_config(
         config_paths.push(path.join(".lumos").join("config.toml"));
     }
 
+    let mut reasoning_content_display_configured = false;
     for path in config_paths {
-        config = merge_config_file(config, &path)?;
+        config = merge_config_file(config, &path, &mut reasoning_content_display_configured)?;
     }
 
-    let mut runtime_source = None;
+    let mut acp_source = None;
     if let Some(path) = user_acp_path.clone() {
-        let merge_result = merge_runtime_config_file(&mut config.runtime, &path)?;
-        if merge_result.has_runtime {
-            runtime_source = Some(path);
+        let merge_result = merge_acp_config_file(&mut config.acp, &path)?;
+        if merge_result.has_acp {
+            acp_source = Some(path);
         }
     }
     if let Some(path) = working_dir.as_ref() {
         let path = path.join(".lumos").join("acp.toml");
-        let merge_result = merge_runtime_config_file(&mut config.runtime, &path)?;
-        if merge_result.has_runtime {
-            runtime_source = Some(path);
+        let merge_result = merge_acp_config_file(&mut config.acp, &path)?;
+        if merge_result.has_acp {
+            acp_source = Some(path);
         }
     }
 
     Ok(LoadedConfig {
         config,
-        runtime_source,
+        acp_source,
         user_acp_path,
     })
 }
 
-fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfigError> {
+fn merge_config_file(
+    mut config: Config,
+    path: &Path,
+    reasoning_content_display_configured: &mut bool,
+) -> Result<Config, AppConfigError> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(config),
@@ -516,6 +675,9 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
             path: path.to_path_buf(),
             source,
         })?;
+    let enables_reasoning_without_display =
+        matches!(file_config.tui.show_reasoning_content, Some(true))
+            && file_config.tui.reasoning_content_display.is_none();
 
     if let Some(style) = file_config.tui.user_input_style {
         config.tui.user_input_style =
@@ -531,16 +693,13 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
     }
 
     if let Some(items) = file_config.tui.status_line {
-        validate_status_line_items(&items).map_err(|error| match error {
-            AppConfigError::InvalidStatusLineItem { value, .. } => {
-                AppConfigError::InvalidStatusLineItem {
-                    path: Some(path.to_path_buf()),
-                    value,
-                }
-            }
-            other => other,
-        })?;
+        validate_status_line_items_for_path(&items, path)?;
         config.tui.status_line = items;
+    }
+
+    if let Some(items) = file_config.tui.status_line_2 {
+        validate_status_line_items_for_path(&items, path)?;
+        config.tui.status_line_2 = items;
     }
 
     if let Some(command) = file_config.tui.external_editor {
@@ -577,25 +736,209 @@ fn merge_config_file(mut config: Config, path: &Path) -> Result<Config, AppConfi
         config.tui.ctrl_c_clears_input = ctrl_c_clears_input;
     }
 
+    if let Some(esc_interrupt_presses) = file_config.tui.esc_interrupt_presses {
+        if !(1..=3).contains(&esc_interrupt_presses) {
+            return Err(AppConfigError::InvalidEscInterruptPresses {
+                path: Some(path.to_path_buf()),
+                value: esc_interrupt_presses,
+            });
+        }
+        config.tui.esc_interrupt_presses = esc_interrupt_presses;
+    }
+
+    if let Some(show_esc_interrupt_hint) = file_config.tui.show_esc_interrupt_hint {
+        config.tui.show_esc_interrupt_hint = show_esc_interrupt_hint;
+    }
+
+    if let Some(height) = file_config.tui.file_picker_popup_height {
+        config.tui.file_picker_popup_height = validate_file_picker_popup_height(height, path)?;
+    }
+
     if let Some(print_transcript_on_exit) = file_config.tui.print_transcript_on_exit {
         config.tui.print_transcript_on_exit = print_transcript_on_exit;
+    }
+
+    if let Some(show_reasoning_content) = file_config.tui.show_reasoning_content {
+        config.tui.show_reasoning_content = show_reasoning_content;
+    }
+
+    if let Some(reasoning_content_display) = file_config.tui.reasoning_content_display {
+        config.tui.reasoning_content_display = ReasoningContentDisplay::parse(
+            &reasoning_content_display,
+        )
+        .map_err(|error| match error {
+            AppConfigError::InvalidReasoningContentDisplay { value, .. } => {
+                AppConfigError::InvalidReasoningContentDisplay {
+                    path: Some(path.to_path_buf()),
+                    value,
+                }
+            }
+            other => other,
+        })?;
+        *reasoning_content_display_configured = true;
+    } else if enables_reasoning_without_display && !*reasoning_content_display_configured {
+        config.tui.reasoning_content_display = ReasoningContentDisplay::Expanded;
+    }
+
+    merge_runtime_config(&mut config.runtime, file_config.runtime, path)?;
+
+    if let Some(enabled) = file_config.debug.enabled {
+        config.debug.enabled = enabled;
     }
 
     Ok(config)
 }
 
-struct RuntimeConfigMergeResult {
-    has_runtime: bool,
+fn validate_status_line_items_for_path(
+    items: &[String],
+    path: &Path,
+) -> Result<(), AppConfigError> {
+    validate_status_line_items(items).map_err(|error| match error {
+        AppConfigError::InvalidStatusLineItem { value, .. } => {
+            AppConfigError::InvalidStatusLineItem {
+                path: Some(path.to_path_buf()),
+                value,
+            }
+        }
+        other => other,
+    })
 }
 
-fn merge_runtime_config_file(
+fn merge_runtime_config(
     config: &mut RuntimeConfig,
+    file_config: FileRuntimeConfig,
     path: &Path,
-) -> Result<RuntimeConfigMergeResult, AppConfigError> {
+) -> Result<(), AppConfigError> {
+    if file_config.request_retry_attempts.is_none()
+        && file_config.request_retry_delays.is_none()
+        && file_config.request_timeout_seconds.is_none()
+    {
+        return Ok(());
+    }
+
+    let has_explicit_delays = file_config.request_retry_delays.is_some();
+    let attempts = match file_config.request_retry_attempts {
+        Some(attempts) => attempts,
+        None => file_config
+            .request_retry_delays
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(config.request_retry_attempts),
+    };
+    validate_request_retry_attempts(attempts, path)?;
+
+    let mut delays = file_config
+        .request_retry_delays
+        .unwrap_or_else(|| config.request_retry_delays.clone());
+    normalize_request_retry_delays(&mut delays, attempts, has_explicit_delays, path)?;
+
+    let timeout_seconds = file_config
+        .request_timeout_seconds
+        .unwrap_or(config.request_timeout_seconds);
+    validate_request_timeout_seconds(timeout_seconds, path)?;
+
+    config.request_retry_attempts = attempts;
+    config.request_retry_delays = delays;
+    config.request_timeout_seconds = timeout_seconds;
+    Ok(())
+}
+
+fn validate_request_retry_attempts(attempts: usize, path: &Path) -> Result<(), AppConfigError> {
+    if (1..=10).contains(&attempts) {
+        return Ok(());
+    }
+
+    Err(AppConfigError::InvalidRuntimeRequestPolicy {
+        path: Some(path.to_path_buf()),
+        reason: format!("runtime.request_retry_attempts must be between 1 and 10, got {attempts}"),
+    })
+}
+
+fn validate_file_picker_popup_height(value: usize, path: &Path) -> Result<u16, AppConfigError> {
+    if !(usize::from(FILE_PICKER_POPUP_MIN_HEIGHT)..=usize::from(FILE_PICKER_POPUP_MAX_HEIGHT))
+        .contains(&value)
+    {
+        return Err(AppConfigError::InvalidFilePickerPopupHeight {
+            path: Some(path.to_path_buf()),
+            value,
+        });
+    }
+
+    Ok(value as u16)
+}
+
+fn validate_request_timeout_seconds(
+    timeout_seconds: u64,
+    path: &Path,
+) -> Result<(), AppConfigError> {
+    if (1..=7200).contains(&timeout_seconds) {
+        return Ok(());
+    }
+
+    Err(AppConfigError::InvalidRuntimeRequestPolicy {
+        path: Some(path.to_path_buf()),
+        reason: format!(
+            "runtime.request_timeout_seconds must be between 1 and 7200, got {timeout_seconds}"
+        ),
+    })
+}
+
+fn normalize_request_retry_delays(
+    delays: &mut Vec<u64>,
+    attempts: usize,
+    has_explicit_delays: bool,
+    path: &Path,
+) -> Result<(), AppConfigError> {
+    if delays.is_empty() {
+        return Err(AppConfigError::InvalidRuntimeRequestPolicy {
+            path: Some(path.to_path_buf()),
+            reason: "runtime.request_retry_delays must not be empty".to_string(),
+        });
+    }
+
+    if let Some(delay) = delays.iter().find(|delay| !(1..=1800).contains(*delay)) {
+        return Err(AppConfigError::InvalidRuntimeRequestPolicy {
+            path: Some(path.to_path_buf()),
+            reason: format!(
+                "runtime.request_retry_delays items must be between 1 and 1800 seconds, got {delay}"
+            ),
+        });
+    }
+
+    if delays.len() > attempts && has_explicit_delays {
+        return Err(AppConfigError::InvalidRuntimeRequestPolicy {
+            path: Some(path.to_path_buf()),
+            reason: format!(
+                "runtime.request_retry_delays has {} items but runtime.request_retry_attempts is {attempts}",
+                delays.len()
+            ),
+        });
+    }
+
+    delays.truncate(attempts);
+
+    if delays.len() < attempts {
+        let last_delay = *delays
+            .last()
+            .expect("empty retry delay list is rejected before extension");
+        delays.resize(attempts, last_delay);
+    }
+
+    Ok(())
+}
+
+struct AcpConfigMergeResult {
+    has_acp: bool,
+}
+
+fn merge_acp_config_file(
+    config: &mut AcpConfig,
+    path: &Path,
+) -> Result<AcpConfigMergeResult, AppConfigError> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(RuntimeConfigMergeResult { has_runtime: false });
+            return Ok(AcpConfigMergeResult { has_acp: false });
         }
         Err(source) => {
             return Err(AppConfigError::Read {
@@ -605,19 +948,19 @@ fn merge_runtime_config_file(
         }
     };
 
-    let file_config: FileRuntimeConfig =
+    let file_config: FileAcpConfig =
         toml::from_str(&content).map_err(|source| AppConfigError::Decode {
             path: path.to_path_buf(),
             source,
         })?;
-    merge_runtime_config(config, file_config, path)?;
+    merge_acp_config(config, file_config, path)?;
 
-    Ok(RuntimeConfigMergeResult { has_runtime: true })
+    Ok(AcpConfigMergeResult { has_acp: true })
 }
 
-fn merge_runtime_config(
-    config: &mut RuntimeConfig,
-    file_config: FileRuntimeConfig,
+fn merge_acp_config(
+    config: &mut AcpConfig,
+    file_config: FileAcpConfig,
     path: &Path,
 ) -> Result<(), AppConfigError> {
     if let Some(enabled) = file_config.enabled {
@@ -630,9 +973,9 @@ fn merge_runtime_config(
 
     if let Some(install_root) = file_config.install_root {
         config.install_root =
-            RuntimeInstallRoot::parse(&install_root).map_err(|error| match error {
-                AppConfigError::InvalidRuntimeInstallRoot { value, .. } => {
-                    AppConfigError::InvalidRuntimeInstallRoot {
+            AcpInstallRoot::parse(&install_root).map_err(|error| match error {
+                AppConfigError::InvalidAcpInstallRoot { value, .. } => {
+                    AppConfigError::InvalidAcpInstallRoot {
                         path: Some(path.to_path_buf()),
                         value,
                     }
@@ -648,17 +991,15 @@ fn merge_runtime_config(
     if let Some(preference) = file_config.distribution_preference {
         let mut parsed = Vec::with_capacity(preference.len());
         for item in preference {
-            parsed.push(
-                RuntimeDistribution::parse(&item).map_err(|error| match error {
-                    AppConfigError::InvalidRuntimeDistribution { value, .. } => {
-                        AppConfigError::InvalidRuntimeDistribution {
-                            path: Some(path.to_path_buf()),
-                            value,
-                        }
+            parsed.push(AcpDistribution::parse(&item).map_err(|error| match error {
+                AppConfigError::InvalidAcpDistribution { value, .. } => {
+                    AppConfigError::InvalidAcpDistribution {
+                        path: Some(path.to_path_buf()),
+                        value,
                     }
-                    other => other,
-                })?,
-            );
+                }
+                other => other,
+            })?);
         }
         config.distribution_preference = parsed;
     }
@@ -675,7 +1016,7 @@ fn merge_runtime_config(
 }
 
 fn merge_agent_server_config(
-    config: &mut RuntimeConfig,
+    config: &mut AcpConfig,
     server_id: String,
     file_server: FileAgentServerConfig,
     path: &Path,
@@ -734,29 +1075,26 @@ fn user_config_directory() -> Option<PathBuf> {
     ProjectDirs::from("", "", "lumos").map(|dirs| dirs.config_dir().to_path_buf())
 }
 
-/// `write_runtime_enabled` 将 runtime enabled 开关写回来源配置。
-pub fn write_runtime_enabled(
+/// `write_acp_enabled` 将 acp enabled 开关写回来源配置。
+pub fn write_acp_enabled(source: &LoadedConfig, enabled: bool) -> Result<PathBuf, AppConfigError> {
+    write_acp_bool(source, "enabled", enabled)
+}
+
+/// `write_acp_auto_update_check` 将自动更新检查开关写回来源配置。
+pub fn write_acp_auto_update_check(
     source: &LoadedConfig,
     enabled: bool,
 ) -> Result<PathBuf, AppConfigError> {
-    write_runtime_bool(source, "enabled", enabled)
+    write_acp_bool(source, "auto_update_check", enabled)
 }
 
-/// `write_runtime_auto_update_check` 将自动更新检查开关写回来源配置。
-pub fn write_runtime_auto_update_check(
-    source: &LoadedConfig,
-    enabled: bool,
-) -> Result<PathBuf, AppConfigError> {
-    write_runtime_bool(source, "auto_update_check", enabled)
-}
-
-fn write_runtime_bool(
+fn write_acp_bool(
     source: &LoadedConfig,
     key: &str,
     enabled: bool,
 ) -> Result<PathBuf, AppConfigError> {
     let path = source
-        .runtime_source
+        .acp_source
         .clone()
         .or_else(|| source.user_acp_path.clone())
         .or_else(default_user_config_path)
@@ -798,7 +1136,7 @@ fn default_user_config_path() -> Option<PathBuf> {
 fn validate_status_line_items(items: &[String]) -> Result<(), AppConfigError> {
     for item in items {
         match item.as_str() {
-            "git-branch" | "current-dir" => {}
+            "git-branch" | "current-dir" | "current-model" | "throughput" | "latency" => {}
             other => {
                 return Err(AppConfigError::InvalidStatusLineItem {
                     path: None,
@@ -834,9 +1172,8 @@ fn validate_external_editor(command: &[String]) -> Result<(), AppConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RuntimeDistribution, RuntimeInstallRoot, UserInputStyle, load_from_paths,
-        load_with_lookups, load_with_sources_from_paths, write_runtime_auto_update_check,
-        write_runtime_enabled,
+        AcpDistribution, AcpInstallRoot, UserInputStyle, load_from_paths, load_with_lookups,
+        load_with_sources_from_paths, write_acp_auto_update_check, write_acp_enabled,
     };
     use std::{
         fs, io,
@@ -855,22 +1192,22 @@ mod tests {
     }
 
     #[test]
-    fn load_defaults_to_disabled_runtime() {
-        let working_dir = temp_test_dir("load-runtime-default-working");
-        let user_config_dir = temp_test_dir("load-runtime-default-config");
+    fn load_defaults_to_disabled_acp() {
+        let working_dir = temp_test_dir("load-acp-default-working");
+        let user_config_dir = temp_test_dir("load-acp-default-config");
 
         let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
             .expect("missing config files should fall back to defaults");
 
-        assert!(!config.runtime.enabled);
-        assert_eq!(config.runtime.install_root, RuntimeInstallRoot::Config);
+        assert!(!config.acp.enabled);
+        assert_eq!(config.acp.install_root, AcpInstallRoot::Config);
         assert_eq!(
-            config.runtime.distribution_preference,
-            vec![RuntimeDistribution::Binary]
+            config.acp.distribution_preference,
+            vec![AcpDistribution::Binary]
         );
-        assert!(config.runtime.auto_update_check);
+        assert!(config.acp.auto_update_check);
         assert_eq!(
-            config.runtime.registry_url,
+            config.acp.registry_url,
             "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
         );
     }
@@ -895,8 +1232,8 @@ mod tests {
     }
 
     #[test]
-    fn load_runtime_config_from_project_acp_config() {
-        let working_dir = temp_test_dir("load-runtime-project-working");
+    fn load_acp_config_from_project_acp_config() {
+        let working_dir = temp_test_dir("load-acp-project-working");
         write_config(
             &working_dir.join(".lumos").join("acp.toml"),
             r#"
@@ -916,19 +1253,19 @@ env = { LUMOS_TEST = "1" }
         );
 
         let config = load_from_paths(Some(working_dir.as_path()), None)
-            .expect("runtime config should be loaded");
+            .expect("acp config should be loaded");
 
         let server = config
-            .runtime
+            .acp
             .agent_servers
             .get("kimi")
             .expect("kimi server should be configured");
 
-        assert!(config.runtime.enabled);
-        assert_eq!(config.runtime.install_root, RuntimeInstallRoot::Project);
-        assert!(!config.runtime.auto_update_check);
+        assert!(config.acp.enabled);
+        assert_eq!(config.acp.install_root, AcpInstallRoot::Project);
+        assert!(!config.acp.auto_update_check);
         assert_eq!(
-            config.runtime.registry_url,
+            config.acp.registry_url,
             "https://example.test/registry.json"
         );
         assert_eq!(server.agent, "kimi");
@@ -938,26 +1275,26 @@ env = { LUMOS_TEST = "1" }
     }
 
     #[test]
-    fn load_rejects_runtime_table_in_main_config() {
-        let working_dir = temp_test_dir("load-runtime-main-config-ignored");
+    fn load_rejects_acp_table_in_main_config() {
+        let working_dir = temp_test_dir("load-acp-main-config-ignored");
         write_config(
             &working_dir.join(".lumos").join("config.toml"),
-            "[runtime]\nenabled = true\nagent = \"kimi\"\n",
+            "[acp]\nenabled = true\nagent = \"kimi\"\n",
         );
 
         let error = load_from_paths(Some(working_dir.as_path()), None)
-            .expect_err("runtime table in main config should be rejected");
+            .expect_err("acp table in main config should be rejected");
 
         assert!(
-            error.to_string().contains("unknown field `runtime`"),
+            error.to_string().contains("unknown field `acp`"),
             "unexpected error: {error}"
         );
     }
 
     #[test]
-    fn load_tracks_runtime_source() {
-        let working_dir = temp_test_dir("load-runtime-source-working");
-        let user_config_dir = temp_test_dir("load-runtime-source-config");
+    fn load_tracks_acp_source() {
+        let working_dir = temp_test_dir("load-acp-source-working");
+        let user_config_dir = temp_test_dir("load-acp-source-config");
         let user_config = user_config_dir.join("acp.toml");
         let project_config = working_dir.join(".lumos").join("acp.toml");
         write_config(&user_config, "[agent_servers.kimi]\ntype = \"registry\"\n");
@@ -972,20 +1309,14 @@ env = { LUMOS_TEST = "1" }
         )
         .expect("config should load with source metadata");
 
-        assert_eq!(loaded.runtime_source, Some(project_config));
+        assert_eq!(loaded.acp_source, Some(project_config));
         assert_eq!(loaded.user_acp_path, Some(user_config));
-        assert!(
-            loaded
-                .config
-                .runtime
-                .agent_servers
-                .contains_key("codex-acp")
-        );
+        assert!(loaded.config.acp.agent_servers.contains_key("codex-acp"));
     }
 
     #[test]
-    fn write_runtime_enabled_preserves_existing_toml() {
-        let working_dir = temp_test_dir("write-runtime-enabled-working");
+    fn write_acp_enabled_preserves_existing_toml() {
+        let working_dir = temp_test_dir("write-acp-enabled-working");
         let project_config = working_dir.join(".lumos").join("acp.toml");
         write_config(
             &project_config,
@@ -995,7 +1326,7 @@ env = { LUMOS_TEST = "1" }
             .expect("config should load");
 
         let written_path =
-            write_runtime_enabled(&loaded, false).expect("runtime enabled should be written back");
+            write_acp_enabled(&loaded, false).expect("acp enabled should be written back");
 
         assert_eq!(written_path, project_config);
         let content = fs::read_to_string(written_path).expect("config should be readable");
@@ -1005,9 +1336,9 @@ env = { LUMOS_TEST = "1" }
     }
 
     #[test]
-    fn write_runtime_auto_update_check_uses_runtime_source() {
-        let working_dir = temp_test_dir("write-runtime-update-working");
-        let user_config_dir = temp_test_dir("write-runtime-update-config");
+    fn write_acp_auto_update_check_uses_acp_source() {
+        let working_dir = temp_test_dir("write-acp-update-working");
+        let user_config_dir = temp_test_dir("write-acp-update-config");
         let user_config = user_config_dir.join("acp.toml");
         write_config(&user_config, "auto_update_check = true\n");
         let loaded = load_with_sources_from_paths(
@@ -1016,8 +1347,8 @@ env = { LUMOS_TEST = "1" }
         )
         .expect("config should load");
 
-        let written_path = write_runtime_auto_update_check(&loaded, false)
-            .expect("runtime auto update should be written back");
+        let written_path = write_acp_auto_update_check(&loaded, false)
+            .expect("acp auto update should be written back");
 
         assert_eq!(written_path, user_config);
         let content = fs::read_to_string(written_path).expect("config should be readable");

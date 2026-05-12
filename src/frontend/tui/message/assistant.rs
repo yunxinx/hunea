@@ -1,24 +1,23 @@
 use ratatui::text::Line;
 
 use crate::frontend::tui::{
+    styled_text::lines_to_plain_text,
     theme::TerminalPalette,
     transcript::{
         DEFAULT_RENDER_WIDTH, TranscriptEstimateKind, TranscriptEstimateSource,
-        TranscriptFastEstimate, TranscriptItemMetrics, render_markdown_lines,
-        render_markdown_metrics, wrap_assistant_text,
+        TranscriptFastEstimate, TranscriptItemMetrics, estimate_markdown_metrics_for_tabs,
+        render_markdown_lines, render_markdown_metrics, wrap_assistant_text,
     },
 };
+
+const ASSISTANT_MESSAGE_INSET_WIDTH: usize = 2;
 
 pub(super) fn render_assistant_message(
     content: &str,
     width: u16,
     palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
-    let width = if width == 0 {
-        DEFAULT_RENDER_WIDTH
-    } else {
-        usize::from(width)
-    };
+    let width = assistant_message_content_width(width);
     let rendered = render_markdown_lines(content, width, palette);
     if rendered.is_empty() {
         return wrap_assistant_text(content, width, 0)
@@ -35,11 +34,7 @@ pub(super) fn render_assistant_message_metrics(
     width: u16,
     palette: TerminalPalette,
 ) -> (usize, usize) {
-    let width = if width == 0 {
-        DEFAULT_RENDER_WIDTH
-    } else {
-        usize::from(width)
-    };
+    let width = assistant_message_content_width(width);
     let metrics = render_markdown_metrics(content, width, palette);
     if metrics.0 > 0 {
         return metrics;
@@ -52,14 +47,30 @@ pub(super) fn render_assistant_message_metrics(
 pub(super) fn estimate_assistant_message_metrics_fast(
     content: &str,
     width: u16,
+    palette: TerminalPalette,
     previous_metrics: Option<TranscriptItemMetrics>,
 ) -> TranscriptFastEstimate {
-    let width = usize::from(width.max(1));
-    let wrapped = wrap_assistant_text(content, width, 0);
-    let content_line_count = wrapped.len().max(1);
-    let estimated_char_len = wrapped.iter().map(String::len).sum::<usize>();
-    let reused_metrics =
-        previous_metrics.filter(|metrics| metrics.is_valid && usize::from(metrics.width) != width);
+    let width = assistant_message_content_width(width);
+    let uses_tab_exact_estimate = content.contains('\t');
+    let (content_line_count, estimated_char_len) = if uses_tab_exact_estimate {
+        let metrics = estimate_markdown_metrics_for_tabs(content, width, palette);
+        if metrics.0 > 0 {
+            metrics
+        } else {
+            let rendered = render_markdown_lines(content, width, palette);
+            (rendered.len().max(1), lines_to_plain_text(&rendered).len())
+        }
+    } else {
+        let wrapped = wrap_assistant_text(content, width, 0);
+        (
+            wrapped.len().max(1),
+            wrapped.iter().map(String::len).sum::<usize>(),
+        )
+    };
+    let reused_metrics = (!uses_tab_exact_estimate)
+        .then_some(previous_metrics)
+        .flatten()
+        .filter(|metrics| metrics.is_valid && usize::from(metrics.width) != width);
     let content_char_len = reused_metrics
         .map(|metrics| metrics.content_char_len.max(estimated_char_len))
         .unwrap_or(estimated_char_len);
@@ -73,5 +84,29 @@ pub(super) fn estimate_assistant_message_metrics_fast(
         } else {
             TranscriptEstimateSource::Fresh
         },
+    }
+}
+
+pub(crate) fn assistant_message_visual_inset(width: u16) -> u16 {
+    let width = assistant_message_width(width);
+    if width < ASSISTANT_MESSAGE_INSET_WIDTH * 4 {
+        return 0;
+    }
+
+    u16::try_from(ASSISTANT_MESSAGE_INSET_WIDTH).unwrap_or(u16::MAX)
+}
+
+fn assistant_message_content_width(width: u16) -> usize {
+    let full_width = assistant_message_width(width);
+    let inset = usize::from(assistant_message_visual_inset(width));
+
+    full_width.saturating_sub(inset.saturating_mul(2)).max(1)
+}
+
+fn assistant_message_width(width: u16) -> usize {
+    if width == 0 {
+        DEFAULT_RENDER_WIDTH
+    } else {
+        usize::from(width)
     }
 }

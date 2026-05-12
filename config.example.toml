@@ -21,10 +21,18 @@ user_input_style = "cx"
 # 当前支持的值：
 # - "git-branch"：当前工作目录所在 Git 仓库的分支名
 # - "current-dir"：当前工作目录的短路径，home 前缀会缩写为 ~
+# - "current-model"：当前选择的模型，格式为 provider/model
+# - "throughput"：最近一次成功请求的每秒输出 token 数，例如 139tps
+# - "latency"：最近一次成功请求的首 token 延迟，例如 0.53s
 #
 # 未配置时不显示状态行；如果配置了但当前所有项都拿不到内容，
 # 状态行也会保持隐藏。
 status_line = ["git-branch"]
+
+# `status_line_2` 使用与 `status_line` 相同的数组格式，用于配置第二行状态行。
+# 如果第二行与第一行配置了相同项目，第一行优先显示，第二行会自动跳过重复项。
+# 未配置或显式写成 [] 时，不显示第二行。
+status_line_2 = ["current-dir"]
 
 # `external_editor` 控制 Ctrl+G 打开的外部编辑器命令。
 # 使用 TOML 数组原生表达 argv，例如：
@@ -64,6 +72,54 @@ swap_enter_and_send = false
 # 默认开启；关闭后，Ctrl+C 会恢复为退出确认语义。
 ctrl_c_clears_input = true
 
+# `esc_interrupt_presses` 控制当前对话 turn 运行中，
+# 需要连续按多少次 Esc 才会中断当前请求或 ACP prompt。
+# 可选值为 1、2、3；默认 2。
+esc_interrupt_presses = 2
+
+# `show_esc_interrupt_hint` 控制等待行是否显示 `esc 2x to interrupt`
+# 这类打断提示。默认开启。
+show_esc_interrupt_hint = true
+
+# `file_picker_popup_height` 控制 @ 文件选择浮窗的行数。
+# 文件选择浮窗固定使用完整终端宽度；垂直方向以 @ 位置为锚点，空间不足时自动翻转。
+# 取值范围 3..21，默认高度 7 行。
+file_picker_popup_height = 7
+
 # `print_transcript_on_exit` 控制退出 TUI 后，是否把当前对话内容
 # 回放打印到终端 scrollback。
 print_transcript_on_exit = false
+
+# `show_reasoning_content` 控制思考模型返回 reasoning / thinking 内容时，
+# 是否在助手消息正文前显示这段内容。
+# 默认关闭；关闭时仍会把 reasoning 输出计入等待行 tokens，并在 reasoning 流式输出期间
+# 显示临时 `thinking` 状态。
+show_reasoning_content = false
+
+# `reasoning_content_display` 控制 show_reasoning_content = true 时，
+# 思维链内容进入 transcript 后的默认展示状态。
+# 未配置时，show_reasoning_content = true 会默认使用 `expanded`。
+# 可选值：`collapsed`、`expanded`、`snippet`。
+reasoning_content_display = "collapsed"
+
+[runtime]
+# `request_retry_attempts` 控制 runtime 请求失败后最多重试几次。
+# 当前 native chat 会使用该策略；后续 ACP 等 runtime 请求也可以复用。
+# 可选值为 1..10；默认 3。
+request_retry_attempts = 3
+
+# `request_retry_delays` 控制每次重试前等待的秒数。
+# 每个值范围为 1..1800。
+# 例如 [1, 3, 5] 表示第 1 次重试前等待 1s，第 2 次等待 3s，
+# 第 3 次等待 5s。列表短于 request_retry_attempts 时，会复用最后一个值补齐。
+request_retry_delays = [1, 2, 3]
+
+# `request_timeout_seconds` 控制每次 runtime 请求 attempt 的最长持续时间。
+# 超时后会进入上面的重试流程；每次重试都会重新拥有完整 timeout。
+# 可选值为 1..7200；默认 120。
+request_timeout_seconds = 120
+
+[debug]
+# `enabled` 控制是否显示仅用于本地调试 TUI 效果的斜杠命令。
+# 默认关闭；开启后会显示 `/tool-debug` 等临时调试入口。
+enabled = false

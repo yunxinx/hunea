@@ -1,4 +1,5 @@
 use super::*;
+
 use crate::frontend::tui::{
     selection::SelectableLineRange,
     theme::{default_palette, secondary_text_style, surface_text_style},
@@ -82,6 +83,48 @@ fn legacy_user_render_preserves_long_wrapped_leading_spaces() {
 }
 
 #[test]
+fn assistant_render_keeps_inset_out_of_plain_message_lines() {
+    let item = MessageItem::new(Sender::Assistant, "hello world");
+
+    let lines = item
+        .render_lines(20, default_palette())
+        .into_iter()
+        .map(plain_line)
+        .collect::<Vec<_>>();
+
+    assert_eq!(lines, vec!["hello world"]);
+}
+
+#[test]
+fn assistant_render_wraps_to_visual_content_width() {
+    let item = MessageItem::new(Sender::Assistant, "abcdefghijklmnopqrstuvwxyz");
+
+    let lines = item
+        .render_lines(20, default_palette())
+        .into_iter()
+        .map(plain_line)
+        .collect::<Vec<_>>();
+
+    assert_eq!(lines, vec!["abcdefghijklmnop", "qrstuvwxyz"]);
+}
+
+#[test]
+fn assistant_markdown_table_uses_visual_content_width() {
+    let item = MessageItem::new(
+        Sender::Assistant,
+        "| Name | Status |\n| --- | --- |\n| alpha beta gamma | delta epsilon zeta |",
+    );
+
+    let lines = item.render_lines(28, default_palette());
+
+    assert!(
+        lines.iter().all(|line| line.width() <= 24),
+        "table rows should fit the inset content width: {:?}",
+        lines.into_iter().map(plain_line).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn assistant_render_wraps_leading_make_explanation_as_prose() {
     let item = MessageItem::new(Sender::Assistant, "make the handler return early");
 
@@ -99,12 +142,12 @@ fn assistant_render_uses_markdown_heading_rendering() {
     let item = MessageItem::new(Sender::Assistant, "# Overview of the API");
 
     let lines = item
-        .render_lines(20, default_palette())
+        .render_lines(40, default_palette())
         .into_iter()
         .map(plain_line)
         .collect::<Vec<_>>();
 
-    assert_eq!(lines, vec!["Overview of the API"]);
+    assert_eq!(lines, vec!["# Overview of the API"]);
 }
 
 #[test]
@@ -145,8 +188,8 @@ fn user_message_selectable_ranges_skip_prompt_only_leading_blank_line() {
 
     assert_eq!(ranges.len(), 4);
     assert_eq!(ranges[0], SelectableLineRange::default());
-    assert_eq!(ranges[1], SelectableLineRange::blank_anchor(0, 20));
-    assert_eq!(ranges[2], SelectableLineRange::new(2, 5));
+    assert_eq!(ranges[1], SelectableLineRange::blank_hit_range(0, 20));
+    assert_eq!(ranges[2], SelectableLineRange::with_hit_range(2, 5, 0, 5));
     assert_eq!(ranges[3], SelectableLineRange::default());
 }
 
@@ -157,7 +200,7 @@ fn user_message_selectable_ranges_ignore_trailing_fill() {
     let ranges = item.render_selectable_line_ranges(10, default_palette());
 
     assert_eq!(ranges.len(), 3);
-    assert_eq!(ranges[1], SelectableLineRange::new(0, 4));
+    assert_eq!(ranges[1], SelectableLineRange::with_hit_range(2, 4, 0, 4));
 }
 
 #[test]

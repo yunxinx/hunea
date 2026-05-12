@@ -82,7 +82,7 @@ impl Composer {
     }
 
     /// `visible_height` 返回当前 viewport 的可视高度。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn visible_height(&self) -> u16 {
         self.height.max(1)
     }
@@ -139,6 +139,38 @@ impl Composer {
         self.set_cursor(self.cursor + total_chars(text));
         self.bump_content_revision();
         self.sync_viewport_to_cursor();
+    }
+
+    /// `current_at_token` 返回当前光标所在的 `@` 文件 token，不含前导 `@`。
+    pub(crate) fn current_at_token(&self) -> Option<String> {
+        self.current_prefixed_token('@').map(|token| token.query)
+    }
+
+    /// `current_at_token_start_char` 返回当前 `@` token 起点的字符偏移。
+    pub(crate) fn current_at_token_start_char(&self) -> Option<usize> {
+        self.current_prefixed_token('@')
+            .map(|token| token.start_char)
+    }
+
+    /// `replace_current_at_token` 替换当前 `@` token，并把光标移动到替换文本末尾。
+    pub(crate) fn replace_current_at_token(&mut self, replacement: &str) -> bool {
+        let Some(token) = self.current_prefixed_token('@') else {
+            return false;
+        };
+
+        let byte_start = char_to_byte_index(&self.value, token.start_char);
+        let byte_end = char_to_byte_index(&self.value, token.end_char);
+        if self.value.get(byte_start..byte_end) == Some(replacement) {
+            self.set_cursor(token.start_char + total_chars(replacement));
+            self.sync_viewport_to_cursor();
+            return true;
+        }
+
+        self.value.replace_range(byte_start..byte_end, replacement);
+        self.set_cursor(token.start_char + total_chars(replacement));
+        self.bump_content_revision();
+        self.sync_viewport_to_cursor();
+        true
     }
 
     /// `handle_key` 处理输入编辑、导航与分页相关按键。
@@ -237,6 +269,25 @@ impl Composer {
         anchors: &[LineAnchor],
     ) -> Option<(u16, usize)> {
         let (logical_line, logical_column) = self.cursor_position();
+        self.visual_position_for_logical_position(logical_line, logical_column, anchors)
+    }
+
+    /// `visual_position_for_char_in_anchors` 基于已渲染 anchors 计算字符的视觉坐标。
+    pub(crate) fn visual_position_for_char_in_anchors(
+        &self,
+        char_index: usize,
+        anchors: &[LineAnchor],
+    ) -> Option<(u16, usize)> {
+        let (logical_line, logical_column) = logical_position(&self.value, char_index);
+        self.visual_position_for_logical_position(logical_line, logical_column, anchors)
+    }
+
+    fn visual_position_for_logical_position(
+        &self,
+        logical_line: usize,
+        logical_column: usize,
+        anchors: &[LineAnchor],
+    ) -> Option<(u16, usize)> {
         let prompt_width = measure_width(self.prompt());
         let (visual_line, visual_x) = cursor_visual_position_for_anchors(
             self.value(),
@@ -565,6 +616,35 @@ impl Composer {
         visual_line_count(&self.value, self.content_width(), prompt_width).max(1)
     }
 
+    fn current_prefixed_token(&self, prefix: char) -> Option<PrefixedToken> {
+        let chars = self.value.chars().collect::<Vec<_>>();
+        if chars.is_empty() {
+            return None;
+        }
+
+        let cursor = self.cursor.min(chars.len());
+        let mut start = cursor;
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+
+        let mut end = cursor;
+        while end < chars.len() && !chars[end].is_whitespace() {
+            end += 1;
+        }
+
+        if start >= end || chars.get(start).copied() != Some(prefix) {
+            return None;
+        }
+
+        let query = chars[start + 1..end].iter().collect::<String>();
+        Some(PrefixedToken {
+            query,
+            start_char: start,
+            end_char: end,
+        })
+    }
+
     fn delete_absolute_range(&mut self, start: usize, end: usize) {
         if end <= start {
             return;
@@ -589,6 +669,13 @@ impl Composer {
         self.cursor = cursor;
         self.cursor_revision = self.cursor_revision.saturating_add(1);
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrefixedToken {
+    query: String,
+    start_char: usize,
+    end_char: usize,
 }
 
 #[derive(Debug, Clone, Copy)]

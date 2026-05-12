@@ -25,6 +25,26 @@ pub fn tertiary_text_style(palette: TerminalPalette) -> Style {
     apply_foreground(Style::new(), palette.tertiary)
 }
 
+/// `accent_text_style` 返回用于当前选择与面板强调线的样式。
+pub fn accent_text_style(palette: TerminalPalette) -> Style {
+    apply_foreground(Style::new(), palette.accent)
+}
+
+/// `command_accent_text_style` 返回用于斜杠菜单当前命令的样式。
+pub fn command_accent_text_style(palette: TerminalPalette) -> Style {
+    apply_foreground(Style::new(), palette.command_accent)
+}
+
+/// `system_error_text_style` 返回运行时 system message 的错误文字样式。
+pub fn system_error_text_style(palette: TerminalPalette) -> Style {
+    apply_foreground(Style::new(), palette.system_error)
+}
+
+/// `quote_text_style` 返回 Markdown 引用块的文字样式。
+pub fn quote_text_style(palette: TerminalPalette) -> Style {
+    apply_foreground(Style::new().italic(), palette.quote)
+}
+
 /// `surface_text_style` 返回带弱化背景的正文样式。
 pub fn surface_text_style(palette: TerminalPalette) -> Style {
     apply_surface(Style::new(), palette)
@@ -70,8 +90,9 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
 
     use super::{
-        muted_text_style, panel_block, primary_text_style, secondary_text_style,
-        surface_emphasis_style, surface_text_style, tertiary_text_style,
+        accent_text_style, command_accent_text_style, muted_text_style, panel_block,
+        primary_text_style, quote_text_style, secondary_text_style, surface_emphasis_style,
+        surface_text_style, system_error_text_style, tertiary_text_style,
     };
     use crate::frontend::tui::theme::{default_palette, terminal_default_palette};
 
@@ -83,6 +104,21 @@ mod tests {
         assert_eq!(muted_text_style(palette).fg, Some(palette.muted));
         assert_eq!(secondary_text_style(palette).fg, Some(palette.secondary));
         assert_eq!(tertiary_text_style(palette).fg, Some(palette.tertiary));
+        assert_eq!(accent_text_style(palette).fg, Some(palette.accent));
+        assert_eq!(
+            command_accent_text_style(palette).fg,
+            Some(palette.command_accent)
+        );
+        assert_eq!(
+            system_error_text_style(palette).fg,
+            Some(palette.system_error)
+        );
+        assert_eq!(quote_text_style(palette).fg, Some(palette.quote));
+        assert!(
+            quote_text_style(palette)
+                .add_modifier
+                .contains(ratatui::style::Modifier::ITALIC)
+        );
         assert_eq!(surface_text_style(palette).fg, Some(palette.main));
         assert_eq!(surface_text_style(palette).bg, palette.surface);
         assert_eq!(surface_emphasis_style(palette).fg, Some(palette.main));

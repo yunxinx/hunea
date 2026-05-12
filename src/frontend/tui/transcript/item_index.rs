@@ -110,7 +110,7 @@ impl TranscriptItemMetricsIndex {
         })
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn item_index_for_line(&self, line_index: usize) -> Option<usize> {
         let position = self.position_for_line(line_index)?;
         let relative = line_index.saturating_sub(position.start_line);
@@ -131,7 +131,6 @@ impl TranscriptItemMetricsIndex {
         (position != usize::MAX).then_some(position)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn position_for_line(&self, line_index: usize) -> Option<TranscriptItemPosition> {
         let position = self.summary_position_for_line(line_index)?;
         self.visible_items.get(position).copied()
@@ -152,7 +151,6 @@ impl TranscriptItemMetricsIndex {
             .unwrap_or(0)
     }
 
-    #[allow(dead_code)]
     fn summary_position_for_line(&self, line_index: usize) -> Option<usize> {
         self.visible_items
             .binary_search_by(|item| {

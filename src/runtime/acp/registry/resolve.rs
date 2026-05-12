@@ -4,9 +4,9 @@ use crate::appconfig::{AgentServerConfig, AgentServerType};
 
 use super::model::{RegistryAgent, RegistryBinaryTarget, RegistryDocument};
 
-/// `ResolvedRuntimeCommand` 是 registry binary target 解析后的启动信息。
+/// `ResolvedAcpCommand` 是 registry binary target 解析后的启动信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedRuntimeCommand {
+pub struct ResolvedAcpCommand {
     pub agent_id: String,
     pub agent_name: String,
     pub agent_version: String,
@@ -72,7 +72,7 @@ pub fn current_platform_target() -> Option<&'static str> {
 pub fn resolve_binary_command(
     registry: &RegistryDocument,
     agent_id: &str,
-) -> Result<ResolvedRuntimeCommand, RegistryResolveError> {
+) -> Result<ResolvedAcpCommand, RegistryResolveError> {
     let platform = current_platform_target().ok_or(RegistryResolveError::UnsupportedPlatform)?;
     let agent = find_agent(registry, agent_id)?;
     let empty_env = BTreeMap::new();
@@ -84,7 +84,7 @@ pub fn resolve_binary_command_for_server(
     registry: &RegistryDocument,
     server_id: &str,
     server: &AgentServerConfig,
-) -> Result<ResolvedRuntimeCommand, RegistryResolveError> {
+) -> Result<ResolvedAcpCommand, RegistryResolveError> {
     if server.server_type != AgentServerType::Registry {
         return Err(RegistryResolveError::NonRegistryServer {
             server_id: server_id.to_string(),
@@ -107,7 +107,7 @@ fn resolve_agent_binary_target(
     configured_command: &str,
     args_override: &[String],
     env_override: &BTreeMap<String, String>,
-) -> Result<ResolvedRuntimeCommand, RegistryResolveError> {
+) -> Result<ResolvedAcpCommand, RegistryResolveError> {
     let targets = agent.distribution.binary.as_ref().ok_or_else(|| {
         RegistryResolveError::BinaryDistributionMissing {
             agent_id: agent.id.clone(),
@@ -149,11 +149,11 @@ fn apply_override(
     configured_command: &str,
     args_override: &[String],
     env_override: &BTreeMap<String, String>,
-) -> ResolvedRuntimeCommand {
+) -> ResolvedAcpCommand {
     let mut env = target.env.clone();
     env.extend(env_override.clone());
 
-    ResolvedRuntimeCommand {
+    ResolvedAcpCommand {
         agent_id: agent.id.clone(),
         agent_name: agent.name.clone(),
         agent_version: agent.version.clone(),

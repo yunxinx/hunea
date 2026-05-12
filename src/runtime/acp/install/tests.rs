@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::{
-    appconfig::RuntimeInstallRoot,
-    runtime::install::{
+    appconfig::AcpInstallRoot,
+    runtime::acp::install::{
         manifest::{InstallManifest, read_install_manifest, write_install_manifest},
         paths::{InstallPathInputs, resolve_install_paths},
     },
@@ -12,7 +12,7 @@ use crate::{
 fn resolve_install_root_config() {
     let inputs = install_inputs();
 
-    let paths = resolve_install_paths(&inputs, RuntimeInstallRoot::Config, "kimi", "1.39.0")
+    let paths = resolve_install_paths(&inputs, AcpInstallRoot::Config, "kimi", "1.39.0")
         .expect("config install root should resolve");
 
     assert_eq!(
@@ -29,7 +29,7 @@ fn resolve_install_root_config() {
 fn resolve_install_root_project() {
     let inputs = install_inputs();
 
-    let paths = resolve_install_paths(&inputs, RuntimeInstallRoot::Project, "kimi", "1.39.0")
+    let paths = resolve_install_paths(&inputs, AcpInstallRoot::Project, "kimi", "1.39.0")
         .expect("project install root should resolve");
 
     assert_eq!(

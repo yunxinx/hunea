@@ -1,7 +1,5 @@
 const EXPECTED_MAX_RECENT_RENDER_BLOCKS: usize = 48;
 
-use ratatui::text::Span;
-
 use super::*;
 use crate::frontend::tui::transcript::{
     render_markdown_metrics_call_count, reset_render_markdown_metrics_call_count,
@@ -15,6 +13,7 @@ use crate::frontend::tui::{
     },
     theme::{default_palette, terminal_default_palette},
 };
+use crate::runtime::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
 
 #[test]
 fn render_returns_content_lines_and_line_count() {
@@ -123,6 +122,124 @@ fn item_metrics_index_matches_materialized_block_metrics_for_mixed_item_types() 
             "metrics-only path should preserve plain_text_char_len for item {item_index}"
         );
     }
+}
+
+#[test]
+fn tool_result_is_display_only_and_not_assistant_message() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.append_tool_result("Ran cargo test", ToolResultKind::Ran);
+
+    assert_eq!(transcript.source_messages(), Vec::<(Sender, String)>::new());
+    let item = transcript.item(0).expect("tool result item should exist");
+    assert!(!item.is_assistant_message());
+    assert_eq!(
+        item.render_plain_lines(80, default_palette()),
+        vec!["● Ran cargo test".to_string()]
+    );
+}
+
+#[test]
+fn tool_activity_uses_compact_and_detailed_rendering_modes() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.append_acp_tool_call(AcpToolCall {
+        tool_call_id: "call-1".to_string(),
+        title: "Shell: cargo check".to_string(),
+        kind: AcpToolKind::Other,
+        status: AcpToolCallStatus::Completed,
+        content: vec![AcpToolCallContent::Text("summary".to_string())],
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: Some(
+            (1..=14)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into(),
+        ),
+    });
+
+    let compact = transcript.plain_items().join("\n");
+    assert!(compact.contains("● cargo check"));
+    assert!(compact.contains("line 1"));
+    assert!(compact.contains("line 14"));
+    assert!(compact.contains("… +4 lines (ctrl + t to view transcript)"));
+    assert!(!compact.contains("line 7"));
+    assert!(!compact.contains("Completed"));
+    assert!(!compact.contains("[Other]"));
+    assert!(!compact.contains("Shell:"));
+
+    transcript.set_tool_activity_render_mode(ToolActivityRenderMode::Detailed);
+    let detailed = transcript.plain_items().join("\n");
+    assert!(detailed.contains("line 7"));
+    assert!(!detailed.contains("ctrl + t to view transcript"));
+}
+
+#[test]
+fn snippet_reasoning_is_display_only_and_not_clickable() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.append_assistant_message_with_reasoning(
+        "结论",
+        "这段内容不能保留",
+        ReasoningDisplayMode::Snippet,
+        Some(Duration::from_secs(16)),
+        StyleMode::Cx,
+    );
+
+    assert_eq!(
+        transcript.plain_items(),
+        vec!["• thoughts 16s".to_string(), "结论".to_string()]
+    );
+    assert_eq!(
+        transcript.source_messages(),
+        vec![(Sender::Assistant, "结论".to_string())]
+    );
+    assert!(!transcript.is_reasoning_header_hit(0, 0, 0));
+    assert!(!transcript.toggle_reasoning_item(0));
+    assert_eq!(
+        transcript.plain_items(),
+        vec!["• thoughts 16s".to_string(), "结论".to_string()]
+    );
+}
+
+#[test]
+fn snippet_reasoning_without_duration_is_not_appended() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.append_assistant_message_with_reasoning(
+        "结论",
+        "这段内容不能保留",
+        ReasoningDisplayMode::Snippet,
+        None,
+        StyleMode::Cx,
+    );
+
+    assert_eq!(transcript.plain_items(), vec!["结论".to_string()]);
+    assert_eq!(
+        transcript.source_messages(),
+        vec![(Sender::Assistant, "结论".to_string())]
+    );
+}
+
+#[test]
+fn truncate_before_item_removes_selected_and_later_history() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.append_message(Sender::User, "first question");
+    transcript.append_message(Sender::Assistant, "first answer");
+    transcript.append_message(Sender::User, "second question");
+    transcript.append_message(Sender::Assistant, "second answer");
+    let _ = transcript.render();
+
+    assert!(transcript.truncate_before_item(2));
+
+    assert_eq!(transcript.len(), 2);
+    assert_eq!(
+        transcript.source_messages(),
+        vec![
+            (Sender::User, "first question".to_string()),
+            (Sender::Assistant, "first answer".to_string()),
+        ]
+    );
+    assert_eq!(transcript.item_metrics_index().metrics.len(), 2);
+    assert!(!transcript.truncate_before_item(2));
 }
 
 #[test]
@@ -660,16 +777,15 @@ fn progressive_metrics_resize_defers_tabbed_markdown_prefix_sum_exactization() {
     );
 
     assert!(exact_index.metrics[0].is_exact());
-    assert!(
-        estimated_index.metrics[0].content_char_len
-            >= exact_before_resize.metrics[0].content_char_len,
-        "resize reuse should preserve the previous assistant plain-text length floor until exactization"
+    assert!(exact_before_resize.metrics[0].is_exact());
+    assert_eq!(
+        estimated_index.metrics[0].content_char_len, exact_index.metrics[0].content_char_len,
+        "tabbed Markdown estimates use the current-width Markdown measurement without bumping the tracked exactization counter"
     );
-    assert!(
-        estimated_index.content_char_len >= exact_before_resize.content_char_len,
-        "full-range plain-text totals should not shrink while resize reuse is still estimated"
+    assert_eq!(
+        estimated_index.content_char_len,
+        exact_index.content_char_len
     );
-    assert!(estimated_index.metrics[0].content_char_len <= exact_index.metrics[0].content_char_len);
 }
 
 #[test]
@@ -916,11 +1032,6 @@ fn palette_change_invalidates_item_metrics_when_render_shape_changes() {
 
 fn static_message(content: &str) -> MessageItem {
     MessageItem::new(Sender::Assistant, content)
-}
-
-#[allow(dead_code)]
-fn styled_line(text: &str) -> Line<'static> {
-    Line::from(Span::raw(text.to_string()))
 }
 
 fn retained_block_memory_summary_for_render(

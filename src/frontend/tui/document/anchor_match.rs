@@ -123,7 +123,10 @@ fn score_document_anchor_match(
                 target.composer.visible_start_char,
             ))
         }
-        DocumentAnchorRegion::CommandPanel => {
+        DocumentAnchorRegion::CommandPanel
+        | DocumentAnchorRegion::AcpPanel
+        | DocumentAnchorRegion::ToolApprovalPanel
+        | DocumentAnchorRegion::ModelPanel => {
             (candidate.gap_index == target.gap_index).then_some(0)
         }
         DocumentAnchorRegion::Transcript => {
@@ -158,10 +161,14 @@ fn score_document_anchor_match(
         DocumentAnchorRegion::ComposerStatusGap => {
             (candidate.gap_index == target.gap_index).then_some(0)
         }
+        DocumentAnchorRegion::StreamActivityComposerGap => {
+            (candidate.gap_index == target.gap_index).then_some(0)
+        }
         DocumentAnchorRegion::ComposerPadding => {
             (candidate.gap_index == target.gap_index).then_some(0)
         }
-        DocumentAnchorRegion::StatusLine => Some(0),
+        DocumentAnchorRegion::StreamActivity => Some(0),
+        DocumentAnchorRegion::StatusLine => (candidate.gap_index == target.gap_index).then_some(0),
         DocumentAnchorRegion::None => Some(0),
     }
 }

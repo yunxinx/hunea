@@ -1,6 +1,16 @@
+use std::time::Duration;
+
 use crossterm::event::{KeyCode, KeyEvent, MouseButton};
-use lumos::frontend::tui::{AppEffect, AppEvent, HeroOptions, Model, ModelOptions};
-use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Modifier};
+use lumos::frontend::tui::theme::default_palette;
+use lumos::frontend::tui::{
+    AppEffect, AppEvent, HeroOptions, Model, ModelOptions, RequestMetrics, StatusLineItem,
+};
+use ratatui::{
+    Terminal,
+    backend::TestBackend,
+    buffer::Buffer,
+    style::{Color, Modifier},
+};
 
 #[test]
 fn drag_selection_highlights_text_and_copies_on_release_when_enabled() {
@@ -56,7 +66,322 @@ fn drag_selection_highlights_text_and_copies_on_release_when_enabled() {
 
     assert_eq!(
         effect,
-        Some(AppEffect::CopySelection("lpha\n› be".to_string()))
+        Some(AppEffect::CopySelection("lpha\nbe".to_string()))
+    );
+}
+
+#[test]
+fn user_message_selection_starts_at_content_not_prompt() {
+    let mut model = ready_selection_model(true);
+    submit_message(&mut model, "alpha");
+    submit_message(&mut model, "beta");
+
+    let (alpha_row, alpha_column) = find_cell_containing(&mut model, 24, 6, "alpha");
+    let (beta_row, beta_column) = find_cell_containing(&mut model, 24, 6, "beta");
+
+    assert!(
+        model
+            .update(AppEvent::MouseDown {
+                button: MouseButton::Left,
+                column: u16::try_from(alpha_column).unwrap(),
+                row: u16::try_from(alpha_row).unwrap(),
+            })
+            .is_none()
+    );
+    assert!(
+        model
+            .update(AppEvent::MouseDrag {
+                button: MouseButton::Left,
+                column: u16::try_from(beta_column + 4).unwrap(),
+                row: u16::try_from(beta_row).unwrap(),
+            })
+            .is_none()
+    );
+
+    let effect = model.update(AppEvent::MouseUp {
+        button: MouseButton::Left,
+        column: u16::try_from(beta_column + 4).unwrap(),
+        row: u16::try_from(beta_row).unwrap(),
+    });
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::CopySelection("alpha\nbeta".to_string()))
+    );
+}
+
+#[test]
+fn user_message_selection_can_start_from_prompt_area_without_copying_it() {
+    let mut model = ready_selection_model(true);
+    submit_message(&mut model, "alpha");
+    submit_message(&mut model, "beta");
+
+    let (alpha_row, alpha_column) = find_cell_containing(&mut model, 24, 6, "alpha");
+    let (beta_row, beta_column) = find_cell_containing(&mut model, 24, 6, "beta");
+    let prompt_column = alpha_column.saturating_sub(2);
+
+    assert!(
+        model
+            .update(AppEvent::MouseDown {
+                button: MouseButton::Left,
+                column: u16::try_from(prompt_column).unwrap(),
+                row: u16::try_from(alpha_row).unwrap(),
+            })
+            .is_none()
+    );
+    assert!(
+        model
+            .update(AppEvent::MouseDrag {
+                button: MouseButton::Left,
+                column: u16::try_from(beta_column + 4).unwrap(),
+                row: u16::try_from(beta_row).unwrap(),
+            })
+            .is_none()
+    );
+
+    let effect = model.update(AppEvent::MouseUp {
+        button: MouseButton::Left,
+        column: u16::try_from(beta_column + 4).unwrap(),
+        row: u16::try_from(beta_row).unwrap(),
+    });
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::CopySelection("alpha\nbeta".to_string()))
+    );
+}
+
+#[test]
+fn composer_selection_can_start_from_prompt_area_without_copying_it() {
+    let mut model = ready_selection_model(true);
+    type_text(&mut model, "alpha");
+
+    let (row, content_column) = find_cell_containing(&mut model, 24, 6, "alpha");
+    let prompt_column = content_column.saturating_sub(2);
+
+    assert!(
+        model
+            .update(AppEvent::MouseDown {
+                button: MouseButton::Left,
+                column: u16::try_from(prompt_column).unwrap(),
+                row: u16::try_from(row).unwrap(),
+            })
+            .is_none()
+    );
+    assert!(
+        model
+            .update(AppEvent::MouseDrag {
+                button: MouseButton::Left,
+                column: u16::try_from(content_column + 5).unwrap(),
+                row: u16::try_from(row).unwrap(),
+            })
+            .is_none()
+    );
+
+    let effect = model.update(AppEvent::MouseUp {
+        button: MouseButton::Left,
+        column: u16::try_from(content_column + 5).unwrap(),
+        row: u16::try_from(row).unwrap(),
+    });
+
+    assert_eq!(effect, Some(AppEffect::CopySelection("alpha".to_string())));
+}
+
+#[test]
+fn status_line_selection_can_start_from_left_inset_without_copying_it() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            copy_on_mouse_selection_release: true,
+            status_line_items: vec![StatusLineItem::CurrentDir],
+            ..ModelOptions::default()
+        },
+    );
+    model.update(AppEvent::Resized {
+        width: 40,
+        height: 6,
+    });
+    model.update(AppEvent::DetectedPalette {
+        palette: default_palette(),
+        has_dark_background: true,
+    });
+    model.update(AppEvent::StartupReadyTimeout);
+
+    let rows = render_rows(&mut model, 40, 6);
+    let (row, status_text) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| {
+            line.contains("lumos_rust")
+                .then(|| (row, line.trim().to_string()))
+        })
+        .expect("status line should include current directory");
+
+    assert!(
+        model
+            .update(AppEvent::MouseDown {
+                button: MouseButton::Left,
+                column: 0,
+                row: u16::try_from(row).unwrap(),
+            })
+            .is_none()
+    );
+    assert!(
+        model
+            .update(AppEvent::MouseDrag {
+                button: MouseButton::Left,
+                column: 39,
+                row: u16::try_from(row).unwrap(),
+            })
+            .is_none()
+    );
+
+    let effect = model.update(AppEvent::MouseUp {
+        button: MouseButton::Left,
+        column: 39,
+        row: u16::try_from(row).unwrap(),
+    });
+
+    assert_eq!(effect, Some(AppEffect::CopySelection(status_text)));
+}
+
+#[test]
+fn second_status_line_selection_uses_its_own_anchor() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            copy_on_mouse_selection_release: true,
+            status_line_items: vec![StatusLineItem::Latency],
+            status_line_2_items: vec![StatusLineItem::CurrentDir],
+            ..ModelOptions::default()
+        },
+    );
+    model.set_last_request_metrics(Some(RequestMetrics::new(
+        Duration::from_millis(530),
+        139,
+        Duration::from_secs(1),
+    )));
+    model.update(AppEvent::Resized {
+        width: 40,
+        height: 7,
+    });
+    model.update(AppEvent::DetectedPalette {
+        palette: default_palette(),
+        has_dark_background: true,
+    });
+    model.update(AppEvent::StartupReadyTimeout);
+
+    let rows = render_rows(&mut model, 40, 7);
+    let (row, status_text) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| {
+            line.contains("lumos_rust")
+                .then(|| (row, line.trim().to_string()))
+        })
+        .expect("second status line should include current directory");
+
+    assert!(
+        model
+            .update(AppEvent::MouseDown {
+                button: MouseButton::Left,
+                column: 0,
+                row: u16::try_from(row).unwrap(),
+            })
+            .is_none()
+    );
+    assert!(
+        model
+            .update(AppEvent::MouseDrag {
+                button: MouseButton::Left,
+                column: 39,
+                row: u16::try_from(row).unwrap(),
+            })
+            .is_none()
+    );
+
+    let effect = model.update(AppEvent::MouseUp {
+        button: MouseButton::Left,
+        column: 39,
+        row: u16::try_from(row).unwrap(),
+    });
+
+    assert_eq!(effect, Some(AppEffect::CopySelection(status_text)));
+}
+
+#[test]
+fn status_line_selection_keeps_unselected_cells_dim() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            status_line_items: vec![StatusLineItem::CurrentDir],
+            ..ModelOptions::default()
+        },
+    );
+    model.update(AppEvent::Resized {
+        width: 40,
+        height: 6,
+    });
+    model.update(AppEvent::DetectedPalette {
+        palette: default_palette(),
+        has_dark_background: true,
+    });
+    model.update(AppEvent::StartupReadyTimeout);
+
+    let before = render_buffer(&mut model, 40, 6);
+    let (row, content_column) = find_symbol_in_buffer(&before, "lumos_rust")
+        .expect("status line should include current directory");
+    let unselected_column = content_column + 3;
+    let original_fg = before[(
+        u16::try_from(unselected_column).unwrap(),
+        u16::try_from(row).unwrap(),
+    )]
+        .fg;
+    assert_ne!(original_fg, Color::Reset);
+
+    assert!(
+        model
+            .update(AppEvent::MouseDown {
+                button: MouseButton::Left,
+                column: u16::try_from(content_column).unwrap(),
+                row: u16::try_from(row).unwrap(),
+            })
+            .is_none()
+    );
+    assert!(
+        model
+            .update(AppEvent::MouseDrag {
+                button: MouseButton::Left,
+                column: u16::try_from(content_column + 1).unwrap(),
+                row: u16::try_from(row).unwrap(),
+            })
+            .is_none()
+    );
+
+    let after = render_buffer(&mut model, 40, 6);
+    assert!(
+        after[(
+            u16::try_from(content_column).unwrap(),
+            u16::try_from(row).unwrap(),
+        )]
+            .modifier
+            .contains(Modifier::REVERSED)
+    );
+    assert_eq!(
+        after[(
+            u16::try_from(unselected_column).unwrap(),
+            u16::try_from(row).unwrap(),
+        )]
+            .fg,
+        original_fg
+    );
+    assert!(
+        !after[(
+            u16::try_from(unselected_column).unwrap(),
+            u16::try_from(row).unwrap(),
+        )]
+            .modifier
+            .contains(Modifier::REVERSED)
     );
 }
 
@@ -124,10 +449,14 @@ fn ready_selection_model(copy_on_release: bool) -> Model {
 }
 
 fn submit_message(model: &mut Model, text: &str) {
+    type_text(model, text);
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+}
+
+fn type_text(model: &mut Model, text: &str) {
     for character in text.chars() {
         model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
     }
-    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 }
 
 fn find_cell_containing(
@@ -157,6 +486,26 @@ fn find_cell_containing(
         "could not find {needle:?} in rendered rows: {:?}",
         render_rows(model, width, height)
     )
+}
+
+fn find_symbol_in_buffer(buffer: &Buffer, needle: &str) -> Option<(usize, usize)> {
+    let needle_symbols = needle
+        .chars()
+        .map(|character| character.to_string())
+        .collect::<Vec<_>>();
+
+    for row in 0..buffer.area.height {
+        let symbols = (0..buffer.area.width)
+            .map(|column| buffer[(column, row)].symbol().to_string())
+            .collect::<Vec<_>>();
+        for column in 0..=symbols.len().saturating_sub(needle_symbols.len()) {
+            if symbols[column..column + needle_symbols.len()] == needle_symbols {
+                return Some((usize::from(row), column));
+            }
+        }
+    }
+
+    None
 }
 
 fn render_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {

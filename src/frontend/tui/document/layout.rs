@@ -46,6 +46,7 @@ impl Model {
             key: DocumentTranscriptKey {
                 transcript_render_version: self.transcript_render_version,
                 document_width: self.width,
+                tool_activity_frame: self.tool_activity_frame_key(std::time::Instant::now()),
             },
             snapshot: Rc::clone(&layout.transcript),
             valid: true,
@@ -64,10 +65,11 @@ impl Model {
     ) -> Rc<DocumentViewport> {
         let uses_bottom_follow = self.document_runtime.viewport_state.follow_bottom()
             && !self.document_runtime.viewport_state.manual_scroll();
+        let viewport_height = self.document_viewport_height();
         let key = DocumentViewportKey {
             layout_key: self.current_document_layout_key(),
             offset: self.document_runtime.viewport_state.resolved_offset(),
-            height: self.document_viewport_height(),
+            height: viewport_height,
             bottom_follow: uses_bottom_follow,
             selection_version: self.selection_runtime.version,
         };
@@ -80,12 +82,12 @@ impl Model {
         let mut viewport = compose_document_viewport(
             layout,
             self.document_runtime.viewport_state.resolved_offset(),
-            self.document_viewport_height(),
+            viewport_height,
         );
         if uses_bottom_follow {
             viewport = compose_bottom_follow_document_viewport(
                 layout,
-                self.document_viewport_height(),
+                viewport_height,
                 self.bottom_follow_presentation(layout),
             );
         }
@@ -134,8 +136,28 @@ impl Model {
             composer_width: self.composer.content_width(),
             command_panel_selected: self.command_panel_selected,
             command_panel_scroll: self.command_panel_scroll,
+            acp_panel_active: self.acp_panel_active(),
+            acp_panel_selected: self.acp_panel.selected,
+            acp_panel_scroll: self.acp_panel.scroll,
+            acp_debug_panel_selected: self.acp_debug_panel.selected,
+            acp_debug_panel_scroll: self.acp_debug_panel.scroll,
+            tool_approval_panel_active: self.tool_approval_panel_active(),
+            tool_approval_panel_selected: self.tool_approval_panel.selected,
+            tool_approval_panel_revision: self.tool_approval_panel_revision,
+            selected_acp_agent: self.selected_acp_agent.clone(),
+            model_panel_active: self.model_panel_active(),
+            model_panel_provider_index: self.model_panel.provider_index,
+            model_panel_model_index: self.model_panel.model_index,
+            model_panel_scroll: self.model_panel.scroll,
+            selected_model: self
+                .selected_model
+                .as_ref()
+                .map(|model| model.display_name()),
             status_line_config: self.status_line_config_bits(),
+            status_line_2_config: self.status_line_2_config_bits(),
             status_line_revision: self.status_line_revision(),
+            stream_activity_frame: self.stream_activity_frame_key(std::time::Instant::now()),
+            tool_activity_frame: self.tool_activity_frame_key(std::time::Instant::now()),
         }
     }
 
@@ -377,6 +399,7 @@ impl Model {
         let key = DocumentTranscriptKey {
             transcript_render_version: self.transcript_render_version,
             document_width: self.width,
+            tool_activity_frame: self.tool_activity_frame_key(std::time::Instant::now()),
         };
         if self.document_runtime.transcript_cache.valid
             && self.document_runtime.transcript_cache.key == key

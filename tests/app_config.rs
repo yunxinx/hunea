@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use lumos::appconfig::{UserInputStyle, load_from_paths};
+use lumos::appconfig::{AppConfigError, ReasoningContentDisplay, UserInputStyle, load_from_paths};
 
 #[test]
 fn load_defaults_to_cx_when_no_config_exists() {
@@ -16,6 +16,9 @@ fn load_defaults_to_cx_when_no_config_exists() {
 
     assert_eq!(config.tui.user_input_style, UserInputStyle::Cx);
     assert!(config.tui.status_line.is_empty());
+    assert!(config.tui.status_line_2.is_empty());
+    assert_eq!(config.tui.file_picker_popup_height, 7);
+    assert!(!config.debug.enabled);
 }
 
 #[test]
@@ -80,6 +83,115 @@ fn load_accepts_current_dir_status_line() {
 }
 
 #[test]
+fn load_accepts_current_model_status_line() {
+    let working_dir = temp_test_dir("load-accepts-current-model-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line = [\"current-model\"]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("current-model should be accepted as a valid status line item");
+
+    assert_eq!(config.tui.status_line, vec!["current-model"]);
+}
+
+#[test]
+fn load_accepts_throughput_status_line() {
+    let working_dir = temp_test_dir("load-accepts-throughput-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line = [\"throughput\"]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("throughput should be accepted as a valid status line item");
+
+    assert_eq!(config.tui.status_line, vec!["throughput"]);
+}
+
+#[test]
+fn load_accepts_latency_status_line() {
+    let working_dir = temp_test_dir("load-accepts-latency-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line = [\"latency\"]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("latency should be accepted as a valid status line item");
+
+    assert_eq!(config.tui.status_line, vec!["latency"]);
+}
+
+#[test]
+fn load_accepts_second_status_line() {
+    let working_dir = temp_test_dir("load-accepts-second-status-line-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line_2 = [\"current-dir\", \"git-branch\"]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("status_line_2 should accept the same item format as status_line");
+
+    assert_eq!(config.tui.status_line_2, vec!["current-dir", "git-branch"]);
+}
+
+#[test]
+fn load_project_config_can_clear_user_second_status_line() {
+    let working_dir = temp_test_dir("load-clears-second-status-line-working");
+    let user_config_dir = temp_test_dir("load-clears-second-status-line-config");
+    write_config(
+        &user_config_dir.join("config.toml"),
+        "[tui]\nstatus_line_2 = [\"current-dir\"]\n",
+    );
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line_2 = []\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("project config should be able to clear user-level second status line items");
+
+    assert!(config.tui.status_line_2.is_empty());
+}
+
+#[test]
+fn load_rejects_unknown_second_status_line_item() {
+    let working_dir = temp_test_dir("load-rejects-second-status-line-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line_2 = [\"weird-item\"]\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("unknown second status line item should be rejected");
+
+    assert!(
+        error.to_string().contains("unknown tui.status_line item"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_rejects_underscore_current_model_status_line() {
+    let working_dir = temp_test_dir("load-rejects-underscore-current-model-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nstatus_line = [\"current_model\"]\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("current_model should not be accepted as a status line item");
+
+    assert!(
+        error.to_string().contains("unknown tui.status_line item"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn load_accepts_external_editor_command() {
     let working_dir = temp_test_dir("load-accepts-external-editor-working");
     write_config(
@@ -141,6 +253,28 @@ fn load_defaults_ctrl_c_clears_input_to_true() {
 }
 
 #[test]
+fn load_defaults_esc_interrupt_presses_to_two() {
+    let working_dir = temp_test_dir("load-default-esc-interrupt-working");
+    let user_config_dir = temp_test_dir("load-default-esc-interrupt-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep esc interrupt presses at two");
+
+    assert_eq!(config.tui.esc_interrupt_presses, 2);
+}
+
+#[test]
+fn load_defaults_show_esc_interrupt_hint_to_true() {
+    let working_dir = temp_test_dir("load-default-show-esc-hint-working");
+    let user_config_dir = temp_test_dir("load-default-show-esc-hint-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep esc interrupt hint enabled");
+
+    assert!(config.tui.show_esc_interrupt_hint);
+}
+
+#[test]
 fn load_defaults_print_transcript_on_exit_to_false() {
     let working_dir = temp_test_dir("load-default-print-transcript-working");
     let user_config_dir = temp_test_dir("load-default-print-transcript-config");
@@ -149,6 +283,130 @@ fn load_defaults_print_transcript_on_exit_to_false() {
         .expect("missing config files should keep terminal replay disabled");
 
     assert!(!config.tui.print_transcript_on_exit);
+}
+
+#[test]
+fn load_defaults_show_reasoning_content_to_false() {
+    let working_dir = temp_test_dir("load-default-show-reasoning-working");
+    let user_config_dir = temp_test_dir("load-default-show-reasoning-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep reasoning content hidden");
+
+    assert!(!config.tui.show_reasoning_content);
+}
+
+#[test]
+fn load_defaults_reasoning_content_display_to_collapsed() {
+    let working_dir = temp_test_dir("load-default-reasoning-display-working");
+    let user_config_dir = temp_test_dir("load-default-reasoning-display-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep reasoning display collapsed");
+
+    assert_eq!(
+        config.tui.reasoning_content_display,
+        ReasoningContentDisplay::Collapsed
+    );
+}
+
+#[test]
+fn load_accepts_enabling_show_reasoning_content() {
+    let working_dir = temp_test_dir("load-enable-show-reasoning-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nshow_reasoning_content = true\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("show_reasoning_content should accept true");
+
+    assert!(config.tui.show_reasoning_content);
+}
+
+#[test]
+fn load_defaults_reasoning_content_display_to_expanded_when_reasoning_content_is_enabled() {
+    let working_dir = temp_test_dir("load-show-reasoning-default-expanded-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nshow_reasoning_content = true\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("show_reasoning_content without display should default to expanded");
+
+    assert_eq!(
+        config.tui.reasoning_content_display,
+        ReasoningContentDisplay::Expanded
+    );
+}
+
+#[test]
+fn load_keeps_explicit_reasoning_content_display_when_reasoning_content_is_enabled() {
+    let working_dir = temp_test_dir("load-show-reasoning-keeps-explicit-display-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nshow_reasoning_content = true\nreasoning_content_display = \"collapsed\"\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("explicit reasoning_content_display should be preserved");
+
+    assert_eq!(
+        config.tui.reasoning_content_display,
+        ReasoningContentDisplay::Collapsed
+    );
+}
+
+#[test]
+fn load_accepts_expanded_reasoning_content_display() {
+    let working_dir = temp_test_dir("load-expanded-reasoning-display-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nreasoning_content_display = \"expanded\"\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("reasoning_content_display should accept expanded");
+
+    assert_eq!(
+        config.tui.reasoning_content_display,
+        ReasoningContentDisplay::Expanded
+    );
+}
+
+#[test]
+fn load_accepts_snippet_reasoning_content_display() {
+    let working_dir = temp_test_dir("load-snippet-reasoning-display-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nreasoning_content_display = \"snippet\"\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("reasoning_content_display should accept snippet");
+
+    assert_eq!(
+        config.tui.reasoning_content_display,
+        ReasoningContentDisplay::Snippet
+    );
+}
+
+#[test]
+fn load_rejects_unknown_reasoning_content_display() {
+    let working_dir = temp_test_dir("load-invalid-reasoning-display-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nreasoning_content_display = \"always\"\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("unknown reasoning_content_display should be rejected");
+
+    assert!(matches!(
+        error,
+        AppConfigError::InvalidReasoningContentDisplay { .. }
+    ));
 }
 
 #[test]
@@ -191,6 +449,242 @@ fn load_accepts_disabling_ctrl_c_clears_input() {
         .expect("ctrl_c_clears_input should accept false");
 
     assert!(!config.tui.ctrl_c_clears_input);
+}
+
+#[test]
+fn load_accepts_configured_esc_interrupt_presses() {
+    let working_dir = temp_test_dir("load-esc-interrupt-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nesc_interrupt_presses = 3\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("esc_interrupt_presses should accept 3");
+
+    assert_eq!(config.tui.esc_interrupt_presses, 3);
+}
+
+#[test]
+fn load_accepts_configured_file_picker_popup_height() {
+    let working_dir = temp_test_dir("load-file-picker-popup-height-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nfile_picker_popup_height = 21\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("file picker popup height should accept values up to 21");
+
+    assert_eq!(config.tui.file_picker_popup_height, 21);
+}
+
+#[test]
+fn load_accepts_minimum_file_picker_popup_height() {
+    let working_dir = temp_test_dir("load-min-file-picker-popup-height-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nfile_picker_popup_height = 3\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("file picker popup height should accept the minimum value");
+
+    assert_eq!(config.tui.file_picker_popup_height, 3);
+}
+
+#[test]
+fn load_rejects_file_picker_popup_height_below_minimum() {
+    let working_dir = temp_test_dir("load-low-file-picker-popup-height-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nfile_picker_popup_height = 2\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("file picker popup height should reject values below 3");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.file_picker_popup_height must be between 3 and 21"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_rejects_file_picker_popup_height_above_maximum() {
+    let working_dir = temp_test_dir("load-high-file-picker-popup-height-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nfile_picker_popup_height = 22\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("file picker popup height should reject values above 21");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.file_picker_popup_height must be between 3 and 21"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_defaults_runtime_request_policy() {
+    let working_dir = temp_test_dir("load-default-runtime-retry-working");
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("default runtime retry policy should load");
+
+    assert_eq!(config.runtime.request_retry_attempts, 3);
+    assert_eq!(config.runtime.request_retry_delays, vec![1, 2, 3]);
+    assert_eq!(config.runtime.request_timeout_seconds, 120);
+}
+
+#[test]
+fn load_accepts_configured_runtime_request_policy() {
+    let working_dir = temp_test_dir("load-runtime-retry-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_retry_attempts = 5\nrequest_retry_delays = [1, 3]\nrequest_timeout_seconds = 240\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("runtime request policy should accept configured values");
+
+    assert_eq!(config.runtime.request_retry_attempts, 5);
+    assert_eq!(config.runtime.request_retry_delays, vec![1, 3, 3, 3, 3]);
+    assert_eq!(config.runtime.request_timeout_seconds, 240);
+}
+
+#[test]
+fn load_uses_runtime_request_retry_delay_count_when_attempts_are_omitted() {
+    let working_dir = temp_test_dir("load-runtime-retry-delays-only-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_retry_delays = [1, 3, 5]\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("runtime request retry delays should imply retry attempts");
+
+    assert_eq!(config.runtime.request_retry_attempts, 3);
+    assert_eq!(config.runtime.request_retry_delays, vec![1, 3, 5]);
+}
+
+#[test]
+fn load_truncates_default_runtime_request_retry_delays_when_only_attempts_are_configured() {
+    let working_dir = temp_test_dir("load-runtime-retry-attempts-only-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_retry_attempts = 2\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("runtime request retry attempts should truncate default delays");
+
+    assert_eq!(config.runtime.request_retry_attempts, 2);
+    assert_eq!(config.runtime.request_retry_delays, vec![1, 2]);
+}
+
+#[test]
+fn load_rejects_invalid_runtime_request_retry_policy_shape() {
+    let working_dir = temp_test_dir("load-invalid-runtime-retry-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_retry_attempts = 3\nrequest_retry_delays = [1, 3, 5, 8]\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("runtime retry delays longer than attempts should be rejected");
+
+    assert!(error.to_string().contains("runtime.request_retry"));
+}
+
+#[test]
+fn load_rejects_out_of_range_runtime_request_retry_values() {
+    let attempts_dir = temp_test_dir("load-invalid-runtime-retry-attempts-working");
+    write_config(
+        &attempts_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_retry_attempts = 11\n",
+    );
+    let attempts_error = load_from_paths(Some(attempts_dir.as_path()), None)
+        .expect_err("request_retry_attempts should reject values above 10");
+    assert!(attempts_error.to_string().contains("between 1 and 10"));
+
+    let delays_dir = temp_test_dir("load-invalid-runtime-retry-delays-working");
+    write_config(
+        &delays_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_retry_delays = [1, 1801]\n",
+    );
+    let delays_error = load_from_paths(Some(delays_dir.as_path()), None)
+        .expect_err("request_retry_delays should reject values above 1800 seconds");
+    assert!(delays_error.to_string().contains("between 1 and 1800"));
+}
+
+#[test]
+fn load_rejects_out_of_range_runtime_request_timeout_values() {
+    let zero_dir = temp_test_dir("load-invalid-runtime-timeout-zero-working");
+    write_config(
+        &zero_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_timeout_seconds = 0\n",
+    );
+    let zero_error = load_from_paths(Some(zero_dir.as_path()), None)
+        .expect_err("request_timeout_seconds should reject zero");
+    assert!(zero_error.to_string().contains("between 1 and 7200"));
+
+    let too_large_dir = temp_test_dir("load-invalid-runtime-timeout-large-working");
+    write_config(
+        &too_large_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nrequest_timeout_seconds = 7201\n",
+    );
+    let too_large_error = load_from_paths(Some(too_large_dir.as_path()), None)
+        .expect_err("request_timeout_seconds should reject values above 7200 seconds");
+    assert!(too_large_error.to_string().contains("between 1 and 7200"));
+}
+
+#[test]
+fn load_accepts_disabling_show_esc_interrupt_hint() {
+    let working_dir = temp_test_dir("load-disable-show-esc-hint-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nshow_esc_interrupt_hint = false\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("show_esc_interrupt_hint should accept false");
+
+    assert!(!config.tui.show_esc_interrupt_hint);
+}
+
+#[test]
+fn load_accepts_enabling_debug_commands() {
+    let working_dir = temp_test_dir("load-enable-debug-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[debug]\nenabled = true\n",
+    );
+
+    let config =
+        load_from_paths(Some(working_dir.as_path()), None).expect("debug should accept true");
+
+    assert!(config.debug.enabled);
+}
+
+#[test]
+fn load_rejects_invalid_esc_interrupt_presses() {
+    let working_dir = temp_test_dir("load-invalid-esc-interrupt-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[tui]\nesc_interrupt_presses = 4\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("esc_interrupt_presses should only accept 1, 2, or 3");
+
+    assert!(error.to_string().contains("tui.esc_interrupt_presses"));
 }
 
 #[test]

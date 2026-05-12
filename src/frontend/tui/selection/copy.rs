@@ -1,9 +1,12 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::frontend::tui::document::{DocumentAnchorRegion, DocumentLayout};
+use crate::frontend::tui::document::DocumentLayout;
 
-use super::{SelectionState, selection_columns_for_line, selection_ends_before_line_content};
+use super::{
+    SelectionState, policy::preserves_blank_selection, selection_columns_for_line,
+    selection_ends_before_line_content,
+};
 
 pub(crate) fn selection_text(layout: &DocumentLayout, selection: SelectionState) -> Option<String> {
     let (start, end) = selection.ordered_points(layout)?;
@@ -28,7 +31,7 @@ pub(crate) fn selection_text(layout: &DocumentLayout, selection: SelectionState)
         let line_data = layout.selection_line_at(line);
         let preserves_blank = line_data
             .as_ref()
-            .is_some_and(|line_data| line_preserves_blank_selection(&line_data.anchor));
+            .is_some_and(|line_data| preserves_blank_selection(&line_data.anchor));
         let selectable = line_data
             .map(|line_data| line_data.selectable)
             .unwrap_or_default();
@@ -68,19 +71,6 @@ pub(crate) fn selection_text_for_line(
     }
 
     rendered
-}
-
-fn line_preserves_blank_selection(
-    anchor: &crate::frontend::tui::document::DocumentLineAnchor,
-) -> bool {
-    match anchor.region {
-        DocumentAnchorRegion::Transcript => !matches!(
-            anchor.transcript.item_anchor.kind,
-            crate::frontend::tui::transcript::LineAnchorKind::ItemGap
-        ),
-        DocumentAnchorRegion::Composer => true,
-        _ => false,
-    }
 }
 
 #[cfg(test)]

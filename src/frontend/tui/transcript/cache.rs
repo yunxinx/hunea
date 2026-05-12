@@ -286,6 +286,7 @@ impl CachedRenderBlock {
             .and_then(|projection| projection.line_at(index))
     }
 
+    #[cfg(test)]
     pub(crate) fn extend_lines(&self, target: &mut Vec<Line<'static>>, start: usize, end: usize) {
         if start >= end || start >= self.line_count() {
             return;

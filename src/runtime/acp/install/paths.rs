@@ -1,6 +1,6 @@
 use std::{fmt, path::PathBuf};
 
-use crate::appconfig::RuntimeInstallRoot;
+use crate::appconfig::AcpInstallRoot;
 
 /// `InstallPathInputs` 是安装目录解析所需的环境路径快照。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,19 +33,16 @@ impl fmt::Display for InstallPathError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingDataDir => {
-                write!(f, "runtime install_root=data requires a data directory")
+                write!(f, "acp install_root=data requires a data directory")
             }
             Self::MissingCacheDir => {
-                write!(f, "runtime install_root=cache requires a cache directory")
+                write!(f, "acp install_root=cache requires a cache directory")
             }
             Self::MissingProjectDir => {
-                write!(
-                    f,
-                    "runtime install_root=project requires a project directory"
-                )
+                write!(f, "acp install_root=project requires a project directory")
             }
             Self::MissingCustomInstallDir => {
-                write!(f, "runtime install_root=custom requires custom_install_dir")
+                write!(f, "acp install_root=custom requires custom_install_dir")
             }
         }
     }
@@ -68,29 +65,29 @@ impl InstallPathInputs {
 /// `resolve_install_paths` 根据配置策略解析 agent 版本安装目录。
 pub fn resolve_install_paths(
     inputs: &InstallPathInputs,
-    install_root: RuntimeInstallRoot,
+    install_root: AcpInstallRoot,
     agent_id: &str,
     version: &str,
 ) -> Result<InstallPaths, InstallPathError> {
     let root = match install_root {
-        RuntimeInstallRoot::Config => inputs.user_config_dir.join(".acpclient"),
-        RuntimeInstallRoot::Data => inputs
+        AcpInstallRoot::Config => inputs.user_config_dir.join(".acpclient"),
+        AcpInstallRoot::Data => inputs
             .user_data_dir
             .clone()
             .ok_or(InstallPathError::MissingDataDir)?
             .join(".acpclient"),
-        RuntimeInstallRoot::Cache => inputs
+        AcpInstallRoot::Cache => inputs
             .user_cache_dir
             .clone()
             .ok_or(InstallPathError::MissingCacheDir)?
             .join(".acpclient"),
-        RuntimeInstallRoot::Project => inputs
+        AcpInstallRoot::Project => inputs
             .project_dir
             .clone()
             .ok_or(InstallPathError::MissingProjectDir)?
             .join(".lumos")
             .join(".acpclient"),
-        RuntimeInstallRoot::Custom => inputs
+        AcpInstallRoot::Custom => inputs
             .custom_install_dir
             .clone()
             .ok_or(InstallPathError::MissingCustomInstallDir)?,

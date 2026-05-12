@@ -195,6 +195,46 @@ fn status_line_selectable_range_skips_leading_inset() {
             .and_then(|line| line.selectable.content_columns().map(|(start, _)| start)),
         Some(2)
     );
+    assert_eq!(
+        layout
+            .line_at(status_line)
+            .and_then(|line| line.selectable.hit_columns().map(|(start, _)| start)),
+        Some(0)
+    );
+}
+
+#[test]
+fn second_status_line_viewport_anchor_resolves_to_second_status_line() {
+    let mut model = ready_document_model(24, 5);
+    model.status_line_items = vec![StatusLineItem::GitBranch];
+    model.status_line_2_items = vec![StatusLineItem::CurrentDir];
+    model.git_branch = "main".to_string();
+    model.current_dir = "~/repo".to_string();
+
+    let layout = model.build_document_layout();
+    let status_lines = (0..layout.line_count())
+        .filter_map(|index| {
+            let anchor = layout.line_anchor_at(index)?;
+            matches!(anchor.region, DocumentAnchorRegion::StatusLine).then_some((index, anchor))
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(status_lines.len(), 2);
+
+    let (second_index, second_anchor) = status_lines[1];
+    let viewport_anchor = DocumentViewportAnchor {
+        line_anchor: second_anchor,
+        line_text: layout
+            .line_at(second_index)
+            .map(|line| line.plain_line.clone())
+            .unwrap_or_default(),
+        ..DocumentViewportAnchor::default()
+    };
+
+    assert_eq!(
+        anchor_match::find_document_offset_for_viewport_anchor(&layout, &viewport_anchor),
+        Some(second_index)
+    );
 }
 
 #[test]

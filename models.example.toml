@@ -1,0 +1,77 @@
+# Lumos native model configuration example.
+#
+# Copy this file to `models.toml` and adjust providers for your local model
+# server, OpenAI-compatible service, or native genai-backed provider. `base_url`
+# should include the `/v1` prefix for OpenAI-compatible APIs.
+#
+# If `models` is present, it is treated as the provider's allowlist. If
+# `models` is omitted, OpenAI-compatible providers sync from `{base_url}/models`,
+# and native providers use genai's default provider model listing.
+#
+# Native providers can also set `base_url` for third-party native-compatible
+# endpoints. In that case, configure `models = [...]` explicitly; automatic
+# model sync for custom native endpoints is not supported yet.
+
+# Empty means Lumos starts with no selected model. When you choose a model from
+# /models, Lumos writes the last selected model back here as `provider/model`.
+default = ""
+
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+display_name = "Local"
+base_url = "http://127.0.0.1:1234/v1"
+# Local model servers often do not require Authorization.
+# Use `api_key` when you want to keep the token directly in this file, or
+# `api_key_env` when you prefer reading it from an environment variable. If both
+# are present, `api_key` is used.
+# api_key = "local-secret"
+# api_key_env = "LOCAL_OPENAI_API_KEY"
+models = ["qwen3", "deepseek-r1-distill"]
+
+[providers.deepseek]
+enabled = true
+kind = "deepseek"
+display_name = "DeepSeek"
+api_key_env = "DEEPSEEK_API_KEY"
+models = ["deepseek-chat", "deepseek-reasoner"]
+
+[providers.openai]
+enabled = false
+kind = "openai"
+display_name = "OpenAI"
+api_key_env = "OPENAI_API_KEY"
+models = ["gpt-4.1", "gpt-4o"]
+
+[providers.anthropic]
+enabled = false
+kind = "anthropic"
+display_name = "Anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+models = ["claude-sonnet-4-5"]
+
+# Example: a third-party endpoint that speaks Anthropic's native API shape.
+# Automatic model sync is disabled by the explicit allowlist.
+# [providers.anthropic_proxy]
+# enabled = false
+# kind = "anthropic"
+# display_name = "Anthropic Proxy"
+# base_url = "https://proxy.example.com/anthropic/v1"
+# api_key_env = "ANTHROPIC_PROXY_API_KEY"
+# models = ["claude-sonnet-4-5"]
+
+[providers.gemini]
+enabled = false
+kind = "gemini"
+display_name = "Gemini"
+api_key_env = "GEMINI_API_KEY"
+models = ["gemini-2.5-pro"]
+
+[providers.openai_compatible_auto]
+enabled = false
+kind = "openai_compatible"
+display_name = "Auto Sync Provider"
+base_url = "https://api.example.com/v1"
+api_key = "replace-with-provider-token"
+# api_key_env = "EXAMPLE_OPENAI_API_KEY"
+# Omit `models` to sync from `/v1/models`.

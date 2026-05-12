@@ -1,17 +1,21 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::frontend::tui::document::DocumentLayout;
+use crate::frontend::tui::document::{DocumentLayout, DocumentLineAnchor};
 
-use super::SelectionState;
+use super::{SelectionPoint, SelectionState};
 
-/// `SelectableLineRange` 描述一条渲染行里真正可落点、可复制的正文列范围。
+/// `SelectableLineRange` 描述一条渲染行的可选择列范围。
+///
+/// `content_*` 是真正参与复制与高亮的正文范围；`hit_*` 是允许鼠标按下或拖拽
+/// 锚定选择的范围。二者分离后，左侧提示符、视觉缩进、状态行内边距等区域可以
+/// 作为更容易命中的选择手柄，但不会混入复制文本。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SelectableLineRange {
-    start_column: usize,
-    end_column: usize,
-    anchor_start_column: usize,
-    anchor_end_column: usize,
+    content_start_column: usize,
+    content_end_column: usize,
+    hit_start_column: usize,
+    hit_end_column: usize,
 }
 
 impl SelectableLineRange {
@@ -21,64 +25,108 @@ impl SelectableLineRange {
         }
 
         Self {
-            start_column,
-            end_column,
-            anchor_start_column: start_column,
-            anchor_end_column: end_column,
+            content_start_column: start_column,
+            content_end_column: end_column,
+            hit_start_column: start_column,
+            hit_end_column: end_column,
         }
     }
 
-    pub(crate) fn blank_anchor(anchor_start_column: usize, anchor_end_column: usize) -> Self {
-        if anchor_end_column <= anchor_start_column {
+    pub(crate) fn with_hit_range(
+        start_column: usize,
+        end_column: usize,
+        hit_start_column: usize,
+        hit_end_column: usize,
+    ) -> Self {
+        if end_column <= start_column || hit_end_column <= hit_start_column {
             return Self::default();
         }
 
         Self {
-            anchor_start_column,
-            anchor_end_column,
+            content_start_column: start_column,
+            content_end_column: end_column,
+            hit_start_column,
+            hit_end_column,
+        }
+    }
+
+    pub(crate) fn blank_hit_range(hit_start_column: usize, hit_end_column: usize) -> Self {
+        if hit_end_column <= hit_start_column {
+            return Self::default();
+        }
+
+        Self {
+            hit_start_column,
+            hit_end_column,
             ..Self::default()
         }
     }
 
     pub(crate) fn has_content(self) -> bool {
-        self.end_column > self.start_column
+        self.content_end_column > self.content_start_column
     }
 
-    pub(crate) fn has_anchor(self) -> bool {
-        self.anchor_end_column > self.anchor_start_column
+    pub(crate) fn has_hit_range(self) -> bool {
+        self.hit_end_column > self.hit_start_column
     }
 
     pub(crate) fn content_columns(self) -> Option<(usize, usize)> {
         self.has_content()
-            .then_some((self.start_column, self.end_column))
+            .then_some((self.content_start_column, self.content_end_column))
     }
 
     #[cfg(test)]
-    pub(crate) fn anchor_columns(self) -> Option<(usize, usize)> {
-        self.has_anchor()
-            .then_some((self.anchor_start_column, self.anchor_end_column))
+    pub(crate) fn hit_columns(self) -> Option<(usize, usize)> {
+        self.has_hit_range()
+            .then_some((self.hit_start_column, self.hit_end_column))
     }
 
-    pub(crate) fn contains(self, column: usize) -> bool {
-        self.has_anchor() && self.anchor_start_column <= column && column < self.anchor_end_column
+    pub(crate) fn contains_hit(self, column: usize) -> bool {
+        self.has_hit_range() && self.hit_start_column <= column && column < self.hit_end_column
     }
 
     pub(crate) fn contains_content(self, column: usize) -> bool {
-        self.has_content() && self.start_column <= column && column < self.end_column
+        self.has_content()
+            && self.content_start_column <= column
+            && column < self.content_end_column
     }
 
-    pub(crate) fn clamp(self, column: usize) -> usize {
+    pub(crate) fn clamp_to_content(self, column: usize) -> usize {
         if !self.has_content() {
             return 0;
         }
-        if column < self.start_column {
-            return self.start_column;
+        if column < self.content_start_column {
+            return self.content_start_column;
         }
-        if column > self.end_column {
-            return self.end_column;
+        if column > self.content_end_column {
+            return self.content_end_column;
         }
 
         column
+    }
+
+    pub(crate) fn point_for_mouse_down(
+        self,
+        anchor: DocumentLineAnchor,
+        column: usize,
+    ) -> Option<SelectionPoint> {
+        if !self.contains_hit(column) {
+            return None;
+        }
+
+        Some(SelectionPoint::new(
+            anchor,
+            if self.has_content() { column } else { 0 },
+        ))
+    }
+
+    pub(crate) fn point_for_drag(
+        self,
+        anchor: DocumentLineAnchor,
+        column: usize,
+    ) -> Option<SelectionPoint> {
+        self.has_hit_range()
+            .then_some(SelectionPoint::new(anchor, self.clamp_to_content(column)))
     }
 }
 
@@ -89,15 +137,15 @@ pub(crate) fn selectable_range_for_plain_line(text: &str) -> SelectableLineRange
 pub(crate) fn normalize_transcript_selectable_range(
     text: &str,
     width: usize,
-    preserves_blank_anchor: bool,
+    preserves_blank_hit_range: bool,
 ) -> SelectableLineRange {
     let range = selectable_range_for_plain_line(text);
     if range.has_content() {
         return range;
     }
 
-    if preserves_blank_anchor && width > 0 {
-        return SelectableLineRange::blank_anchor(0, width);
+    if preserves_blank_hit_range && width > 0 {
+        return SelectableLineRange::blank_hit_range(0, width);
     }
 
     SelectableLineRange::default()
@@ -116,19 +164,19 @@ pub(crate) fn selection_columns_for_line(
 
     let (start_column, end_column) = if start.line() == end.line() {
         (
-            selectable.clamp(start.column()),
-            selectable.clamp(end.column()),
+            selectable.clamp_to_content(start.column()),
+            selectable.clamp_to_content(end.column()),
         )
     } else if line == start.line() {
         let (_, end_column) = selectable
             .content_columns()
             .expect("content columns checked above");
-        (selectable.clamp(start.column()), end_column)
+        (selectable.clamp_to_content(start.column()), end_column)
     } else if line == end.line() {
         let (start_column, _) = selectable
             .content_columns()
             .expect("content columns checked above");
-        (start_column, selectable.clamp(end.column()))
+        (start_column, selectable.clamp_to_content(end.column()))
     } else {
         selectable
             .content_columns()
@@ -292,24 +340,82 @@ mod tests {
     }
 
     #[test]
-    fn selectable_range_reports_semantic_content_and_anchor_bounds() {
+    fn selectable_range_reports_semantic_content_and_hit_bounds() {
         let content = SelectableLineRange::new(2, 6);
         assert_eq!(content.content_columns(), Some((2, 6)));
-        assert_eq!(content.anchor_columns(), Some((2, 6)));
+        assert_eq!(content.hit_columns(), Some((2, 6)));
 
-        let blank = SelectableLineRange::blank_anchor(0, 8);
+        let blank = SelectableLineRange::blank_hit_range(0, 8);
         assert_eq!(blank.content_columns(), None);
-        assert_eq!(blank.anchor_columns(), Some((0, 8)));
+        assert_eq!(blank.hit_columns(), Some((0, 8)));
     }
 
     #[test]
-    fn blank_anchor_can_accept_mouse_hit_without_copying_fill() {
-        let range = SelectableLineRange::blank_anchor(0, 8);
+    fn blank_hit_range_can_accept_mouse_hit_without_copying_fill() {
+        let range = SelectableLineRange::blank_hit_range(0, 8);
 
-        assert!(range.contains(0));
-        assert!(range.contains(7));
+        assert!(range.contains_hit(0));
+        assert!(range.contains_hit(7));
         assert!(!range.has_content());
-        assert_eq!(range.clamp(3), 0);
+        assert_eq!(range.clamp_to_content(3), 0);
+        assert_eq!(
+            range
+                .point_for_mouse_down(DocumentLineAnchor::default(), 3)
+                .expect("blank hit range should accept mouse down")
+                .column(),
+            0
+        );
+        assert_eq!(
+            range
+                .point_for_drag(DocumentLineAnchor::default(), 3)
+                .expect("blank hit range should accept drag")
+                .column(),
+            0
+        );
+    }
+
+    #[test]
+    fn hit_range_can_extend_before_content_without_copying_prefix() {
+        let range = SelectableLineRange::with_hit_range(2, 6, 0, 6);
+        assert_eq!(range.content_columns(), Some((2, 6)));
+        assert_eq!(range.hit_columns(), Some((0, 6)));
+        assert!(range.contains_hit(0));
+        assert!(!range.contains_content(0));
+        let layout = selection_test_layout(1);
+        let anchor = layout.line_anchor_at(0).expect("line anchor");
+
+        let hit = range
+            .point_for_mouse_down(anchor, 0)
+            .expect("prompt area should be a valid hit target");
+        assert_eq!(hit.column(), 0);
+
+        let mut selection = SelectionState::default();
+        selection.select_range(hit, SelectionPoint::new(hit.anchor(), 6));
+        assert_eq!(
+            selection_columns_for_line(selection, &layout, 0, range),
+            Some((2, 6))
+        );
+    }
+
+    #[test]
+    fn drag_point_clamps_to_content_range() {
+        let range = SelectableLineRange::with_hit_range(2, 6, 0, 8);
+        let anchor = DocumentLineAnchor::default();
+
+        assert_eq!(
+            range
+                .point_for_drag(anchor, 0)
+                .expect("drag should clamp before content")
+                .column(),
+            2
+        );
+        assert_eq!(
+            range
+                .point_for_drag(anchor, 8)
+                .expect("drag should clamp after content")
+                .column(),
+            6
+        );
     }
 
     #[test]

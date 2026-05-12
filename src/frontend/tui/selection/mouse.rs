@@ -2,7 +2,13 @@ use std::time::Instant;
 
 use crossterm::event::MouseButton;
 
-use crate::frontend::tui::{AppEffect, Model, composer_mouse::PendingComposerCursorClick};
+use crate::frontend::tui::{
+    AppEffect, Model,
+    composer_mouse::ComposerMouseOutcome,
+    document::{DocumentAnchorRegion, DocumentLayout},
+    message::assistant_message_visual_inset,
+    transcript::LineAnchorKind,
+};
 
 use super::{AutoScrollDirection, MousePosition};
 
@@ -29,32 +35,15 @@ impl Model {
             MouseButton::Left => {
                 self.stop_selection_auto_scroll();
                 let layout = self.build_document_layout();
-                if let Some(click) = self.composer_cursor_click_for_mouse(column, row) {
-                    if !click.hit_content && click.line_has_content {
-                        self.reset_selection_click();
-                        self.clear_selection_range();
-                        self.pending_composer_cursor_click = click;
-                        return None;
-                    }
-
-                    match self.register_selection_click(click.selection_point, Instant::now()) {
-                        2 => {
-                            self.clear_pending_composer_cursor_click();
-                            if self.select_word_at_point(click.selection_point, &layout) {
-                                return None;
-                            }
-                        }
-                        3 => {
-                            self.clear_pending_composer_cursor_click();
-                            self.select_line_at_point(click.selection_point, &layout);
-                            return None;
-                        }
-                        _ => {}
-                    }
-
-                    self.clear_selection_range();
-                    self.pending_composer_cursor_click = click;
-                    return None;
+                self.prepare_reasoning_toggle_click(column, row, &layout);
+                match self.handle_composer_selection_mouse_down(
+                    column,
+                    row,
+                    &layout,
+                    Instant::now(),
+                ) {
+                    ComposerMouseOutcome::Handled(effect) => return effect,
+                    ComposerMouseOutcome::Ignored => {}
                 }
 
                 self.clear_pending_composer_cursor_click();
@@ -90,47 +79,14 @@ impl Model {
         self.clear_history_scroll_indicator();
         self.cancel_exit_confirmation();
 
-        if button == MouseButton::Left && self.pending_composer_cursor_click.active {
-            let click = self.pending_composer_cursor_click;
-            self.clear_pending_composer_cursor_click();
-
-            if let Some(release_click) = self.composer_cursor_click_for_mouse(column, row)
-                && self.same_composer_cursor_target(click, release_click)
-                && !self.is_composer_end_gutter_drag(click, column, row)
-            {
-                self.clear_selection_range();
-                self.handle_composer_cursor_click(release_click);
+        if button == MouseButton::Left {
+            if self.finish_pending_reasoning_toggle_click(column, row) {
                 return None;
             }
-
-            if let Some(point) = self.selection_point_for_drag_mouse(column, row)
-                && point != click.selection_point
-            {
-                self.start_selection(click.selection_point);
-                self.finish_selection(point);
-                self.reset_selection_click();
-                let layout = self.build_document_layout();
-                if self.copy_on_mouse_selection_release
-                    && self
-                        .selection_runtime
-                        .selection
-                        .ordered_points(&layout)
-                        .is_some()
-                {
-                    return self.request_copy_selection();
-                }
-                return None;
+            match self.handle_pending_composer_mouse_up(column, row) {
+                ComposerMouseOutcome::Handled(effect) => return effect,
+                ComposerMouseOutcome::Ignored => {}
             }
-
-            if column != click.column || row != click.row {
-                self.reset_selection_click();
-                self.clear_selection_range();
-                return None;
-            }
-
-            self.clear_selection_range();
-            self.handle_composer_cursor_click(click);
-            return None;
         }
 
         if button != MouseButton::Left || !self.selection_runtime.selection.is_active() {
@@ -175,58 +131,11 @@ impl Model {
             return None;
         }
 
-        if self.pending_composer_cursor_click.active {
-            let click = self.pending_composer_cursor_click;
-            if let Some(motion_click) = self.composer_cursor_click_for_mouse(column, row)
-                && self.same_composer_cursor_target(click, motion_click)
-            {
-                if self.is_composer_end_gutter_drag(click, column, row) {
-                    self.start_selection(click.selection_point);
-                    self.clear_pending_composer_cursor_click();
-                    if let Some(point) = self.selection_point_for_drag_mouse(column, row) {
-                        self.update_selection_focus(point);
-                    }
-                    self.update_selection_auto_scroll(MousePosition::new(column, row));
-                    return None;
-                }
-
-                if self.is_composer_edge_clamped_motion(click, row) {
-                    if click.edge_motions == 0 {
-                        self.pending_composer_cursor_click = PendingComposerCursorClick {
-                            edge_motions: 1,
-                            ..click
-                        };
-                        return None;
-                    }
-
-                    self.start_selection(click.selection_point);
-                    self.clear_pending_composer_cursor_click();
-                    self.update_selection_auto_scroll(MousePosition::new(column, row));
-                    return None;
-                }
-
-                return None;
-            }
-
-            let point = self.selection_point_for_drag_mouse(column, row);
-            let left_viewport = usize::from(row) >= self.document_viewport_height();
-            if point.is_none() || point == Some(click.selection_point) {
-                if left_viewport || self.is_composer_edge_clamped_motion(click, row) {
-                    self.start_selection(click.selection_point);
-                    self.clear_pending_composer_cursor_click();
-                    self.update_selection_auto_scroll(MousePosition::new(column, row));
-                    return None;
-                }
-
-                return None;
-            }
-
-            self.start_selection(click.selection_point);
-            self.clear_pending_composer_cursor_click();
-            self.update_selection_focus(point.expect("point checked to exist"));
-            self.update_selection_auto_scroll(MousePosition::new(column, row));
-            return None;
+        match self.handle_pending_composer_mouse_drag(column, row) {
+            ComposerMouseOutcome::Handled(effect) => return effect,
+            ComposerMouseOutcome::Ignored => {}
         }
+        self.clear_pending_reasoning_toggle_click();
 
         if !self.selection_runtime.selection.is_dragging() {
             return None;
@@ -266,5 +175,79 @@ impl Model {
             self.update_selection_focus(point);
         }
         self.arm_selection_auto_scroll();
+    }
+
+    fn prepare_reasoning_toggle_click(&mut self, column: u16, row: u16, layout: &DocumentLayout) {
+        self.clear_pending_reasoning_toggle_click();
+        let Some(item_index) = self.reasoning_header_item_at(column, row, layout) else {
+            return;
+        };
+
+        self.pending_reasoning_toggle_click = super::super::model::PendingReasoningToggleClick {
+            item_index,
+            column,
+            row,
+            active: true,
+        };
+    }
+
+    fn finish_pending_reasoning_toggle_click(&mut self, column: u16, row: u16) -> bool {
+        let pending = self.pending_reasoning_toggle_click;
+        if !pending.active {
+            return false;
+        }
+        self.clear_pending_reasoning_toggle_click();
+        if pending.column != column || pending.row != row {
+            return false;
+        }
+
+        let layout = self.build_document_layout();
+        let Some(item_index) = self.reasoning_header_item_at(column, row, &layout) else {
+            return false;
+        };
+        if item_index != pending.item_index {
+            return false;
+        }
+
+        self.stop_selection_auto_scroll();
+        self.clear_selection();
+        self.toggle_reasoning_item(item_index)
+    }
+
+    fn clear_pending_reasoning_toggle_click(&mut self) {
+        self.pending_reasoning_toggle_click =
+            super::super::model::PendingReasoningToggleClick::default();
+    }
+
+    fn reasoning_header_item_at(
+        &self,
+        column: u16,
+        row: u16,
+        layout: &DocumentLayout,
+    ) -> Option<usize> {
+        let line = *self
+            .document_viewport_line_indices(layout)
+            .get(usize::from(row))?;
+        let anchor = layout.line_anchor_at(line)?;
+        if anchor.region != DocumentAnchorRegion::Transcript
+            || matches!(anchor.transcript.item_anchor.kind, LineAnchorKind::ItemGap)
+        {
+            return None;
+        }
+
+        let inset = usize::from(assistant_message_visual_inset(self.width));
+        let column = usize::from(column);
+        if column < inset {
+            return None;
+        }
+
+        let item_index = anchor.transcript.item_index;
+        self.transcript
+            .is_reasoning_header_hit(
+                item_index,
+                anchor.transcript.item_anchor.rendered_line,
+                column - inset,
+            )
+            .then_some(item_index)
     }
 }

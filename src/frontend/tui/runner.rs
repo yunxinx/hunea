@@ -1,26 +1,35 @@
-use std::{
-    io,
-    process::Command,
-    time::{Duration, Instant},
-};
+use std::{path::PathBuf, time::Instant};
 
-use arboard::Clipboard;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use crate::runtime::acp::AcpSessionCatalog;
+use crate::runtime::native::{ModelProviderRefreshRuntimeState, NativeAgentRuntimeState};
+use crate::runtime::request_policy::RuntimeRequestPolicy;
 use color_eyre::eyre::Result;
-use crossterm::{
-    cursor::{Hide, Show},
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, MouseEventKind,
-    },
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use ratatui::{Terminal, backend::CrosstermBackend};
 
-use super::{
-    AppEffect, AppEvent, HeroOptions, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StyleMode, theme,
-};
+use super::{AppEvent, HeroOptions, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StyleMode, theme};
+
+mod acp_session;
+mod effects;
+mod event_pipeline;
+mod external_io;
+mod input;
+mod model_refresh;
+mod native_agent;
+mod terminal;
+
+use acp_session::{AcpRuntimeState, drain_acp_runtime_events};
+use effects::apply_effect_if_needed;
+use input::{TerminalInputAction, coalesced_input_actions, read_ready_terminal_events};
+use model_refresh::drain_model_refresh_runtime_events;
+use native_agent::drain_native_agent_runtime_events;
+use terminal::{TerminalMouseMode, TerminalSession, apply_mouse_mode, wait_for_terminal_event};
+
+/// `RuntimeOptions` 表示 TUI runner 可执行的外部 runtime 能力。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeOptions {
+    pub acp_sessions: AcpSessionCatalog,
+    pub model_config_path: Option<PathBuf>,
+    pub runtime_request_policy: RuntimeRequestPolicy,
+}
 
 /// `run` 启动交互式 TUI，并在退出后返回最终模型。
 pub fn run(hero_options: HeroOptions) -> Result<Model> {
@@ -40,7 +49,19 @@ pub fn run_with_style_mode(hero_options: HeroOptions, style_mode: StyleMode) -> 
 
 /// `run_with_options` 启动带显式选项的交互式 TUI。
 pub fn run_with_options(hero_options: HeroOptions, options: ModelOptions) -> Result<Model> {
+    run_with_runtime_options(hero_options, options, RuntimeOptions::default())
+}
+
+/// `run_with_runtime_options` 启动带显式 runtime 能力的交互式 TUI。
+pub fn run_with_runtime_options(
+    hero_options: HeroOptions,
+    options: ModelOptions,
+    runtime_options: RuntimeOptions,
+) -> Result<Model> {
     let mut model = Model::new_with_options(hero_options, options);
+    let mut acp_runtime = AcpRuntimeState::default();
+    let mut native_agent_runtime = NativeAgentRuntimeState::default();
+    let mut model_refresh_runtime = ModelProviderRefreshRuntimeState::default();
 
     if let Some(detection) = theme::try_detect_palette() {
         let _ = model.update(AppEvent::DetectedPalette {
@@ -57,9 +78,26 @@ pub fn run_with_options(hero_options: HeroOptions, options: ModelOptions) -> Res
     });
 
     let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;
+    let mut render_needed = true;
+    let mut mouse_mode = TerminalMouseMode::for_mouse_capture(true);
 
     loop {
-        terminal.draw(|frame| model.render(frame))?;
+        render_needed |= drain_acp_runtime_events(&mut model, &mut acp_runtime);
+        render_needed |= drain_native_agent_runtime_events(&mut model, &mut native_agent_runtime);
+        render_needed |= drain_model_refresh_runtime_events(&mut model, &mut model_refresh_runtime);
+
+        if render_needed {
+            terminal.draw(|frame| model.render(frame))?;
+            // 覆盖层关闭 mouse capture 以保留原生选区，同时打开 alternate scroll，
+            // 让终端把滚轮转成方向键交给 pager 处理。
+            let desired_mouse_mode =
+                TerminalMouseMode::for_mouse_capture(model.wants_mouse_capture());
+            if desired_mouse_mode != mouse_mode {
+                apply_mouse_mode(&mut terminal, desired_mouse_mode)?;
+                mouse_mode = desired_mouse_mode;
+            }
+            render_needed = false;
+        }
 
         if model.is_quitting() {
             break;
@@ -68,37 +106,71 @@ pub fn run_with_options(hero_options: HeroOptions, options: ModelOptions) -> Res
         let now = Instant::now();
         if !model.has_palette() && now >= startup_deadline {
             let effect = model.update(AppEvent::StartupReadyTimeout);
-            apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+            apply_effect_if_needed(
+                &mut terminal,
+                &mut model,
+                &runtime_options,
+                &mut acp_runtime,
+                &mut native_agent_runtime,
+                &mut model_refresh_runtime,
+                effect,
+            )?;
+            render_needed = true;
             continue;
         }
 
         if let Some(timeout_event) = model.timeout_event(now) {
             let effect = model.update(timeout_event);
-            apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+            apply_effect_if_needed(
+                &mut terminal,
+                &mut model,
+                &runtime_options,
+                &mut acp_runtime,
+                &mut native_agent_runtime,
+                &mut model_refresh_runtime,
+                effect,
+            )?;
+            render_needed = true;
             continue;
         }
 
-        let wait_duration = next_wait_duration(&model, startup_deadline, now);
+        let wait_plan = event_pipeline::terminal_wait_plan(
+            &model,
+            startup_deadline,
+            now,
+            has_background_runtime(&acp_runtime, &native_agent_runtime, &model_refresh_runtime),
+        );
 
-        if !event::poll(wait_duration)? {
-            if !model.has_palette() {
-                let effect = model.update(AppEvent::StartupReadyTimeout);
-                apply_effect_if_needed(&mut terminal, &mut model, effect)?;
-            } else if let Some(timeout_event) = model.timeout_event(Instant::now()) {
-                let effect = model.update(timeout_event);
-                apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+        let first_event = match wait_for_terminal_event(wait_plan)? {
+            Some(event) => event,
+            None => {
+                // timeout 到期或后台 runtime poll 到期。下一轮会先 drain runtime，
+                // activity frame 到期时需要重绘；后台 poll 到期则只检查事件。
+                render_needed = wait_plan.render_on_timeout();
+                continue;
             }
-            continue;
-        }
+        };
 
-        let terminal_events = read_ready_terminal_events(event::read()?)?;
+        let terminal_events = read_ready_terminal_events(first_event)?;
         for action in coalesced_input_actions(terminal_events) {
             match action {
                 TerminalInputAction::App(app_event) => {
                     let effect = model.update(app_event);
-                    apply_effect_if_needed(&mut terminal, &mut model, effect)?;
+                    apply_effect_if_needed(
+                        &mut terminal,
+                        &mut model,
+                        &runtime_options,
+                        &mut acp_runtime,
+                        &mut native_agent_runtime,
+                        &mut model_refresh_runtime,
+                        effect,
+                    )?;
+                    render_needed = true;
                 }
-                TerminalInputAction::CancelExitConfirmation => model.cancel_exit_confirmation(),
+                TerminalInputAction::CancelExitConfirmation => {
+                    model.cancel_exit_confirmation();
+                    render_needed = true;
+                }
             }
 
             if model.is_quitting() {
@@ -110,308 +182,15 @@ pub fn run_with_options(hero_options: HeroOptions, options: ModelOptions) -> Res
     Ok(model)
 }
 
-struct TerminalSession;
-
-impl TerminalSession {
-    fn enter() -> io::Result<(Terminal<CrosstermBackend<io::Stdout>>, Self)> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste,
-            Hide
-        )?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-        terminal.hide_cursor()?;
-        Ok((terminal, Self))
-    }
-
-    fn suspend(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-        terminal.show_cursor()?;
-        disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            Show,
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            LeaveAlternateScreen
-        )?;
-        Ok(())
-    }
-
-    fn resume(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-        enable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste,
-            Hide
-        )?;
-        terminal.hide_cursor()?;
-        terminal.clear()?;
-        Ok(())
-    }
-}
-
-impl Drop for TerminalSession {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let mut stdout = io::stdout();
-        let _ = execute!(
-            stdout,
-            Show,
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            LeaveAlternateScreen
-        );
-    }
-}
-
-const MAX_READY_TERMINAL_EVENTS_PER_FRAME: usize = 4096;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TerminalInputAction {
-    App(AppEvent),
-    CancelExitConfirmation,
-}
-
-fn read_ready_terminal_events(first_event: Event) -> Result<Vec<Event>> {
-    let mut events = vec![first_event];
-    while events.len() < MAX_READY_TERMINAL_EVENTS_PER_FRAME && event::poll(Duration::ZERO)? {
-        events.push(event::read()?);
-    }
-    Ok(events)
-}
-
-fn coalesced_input_actions(events: impl IntoIterator<Item = Event>) -> Vec<TerminalInputAction> {
-    let mut actions = Vec::new();
-    let mut pending_wheel_delta = 0_isize;
-
-    for event in events {
-        match event {
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    pending_wheel_delta -= Model::document_mouse_wheel_delta();
-                }
-                MouseEventKind::ScrollDown => {
-                    pending_wheel_delta += Model::document_mouse_wheel_delta();
-                }
-                MouseEventKind::Down(button) => {
-                    flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
-                    actions.push(TerminalInputAction::App(AppEvent::MouseDown {
-                        button,
-                        column: mouse.column,
-                        row: mouse.row,
-                    }));
-                }
-                MouseEventKind::Up(button) => {
-                    flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
-                    actions.push(TerminalInputAction::App(AppEvent::MouseUp {
-                        button,
-                        column: mouse.column,
-                        row: mouse.row,
-                    }));
-                }
-                MouseEventKind::Drag(button) => {
-                    flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
-                    actions.push(TerminalInputAction::App(AppEvent::MouseDrag {
-                        button,
-                        column: mouse.column,
-                        row: mouse.row,
-                    }));
-                }
-                _ => {
-                    flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
-                    actions.push(TerminalInputAction::CancelExitConfirmation);
-                }
-            },
-            Event::Key(key) => {
-                flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
-                actions.push(TerminalInputAction::App(AppEvent::Key(key)));
-            }
-            Event::Paste(text) => {
-                flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
-                actions.push(TerminalInputAction::App(AppEvent::Paste(text)));
-            }
-            Event::Resize(width, height) => {
-                flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
-                actions.push(TerminalInputAction::App(AppEvent::Resized {
-                    width,
-                    height,
-                }));
-            }
-            _ => {
-                flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
-            }
-        }
-    }
-
-    flush_pending_wheel_delta(&mut actions, &mut pending_wheel_delta);
-    actions
-}
-
-fn flush_pending_wheel_delta(actions: &mut Vec<TerminalInputAction>, delta: &mut isize) {
-    if *delta == 0 {
-        return;
-    }
-
-    actions.push(TerminalInputAction::App(AppEvent::MouseWheel {
-        delta_lines: *delta,
-    }));
-    *delta = 0;
-}
-
-fn next_wait_duration(model: &Model, startup_deadline: Instant, now: Instant) -> Duration {
-    let mut next_deadline = if model.has_palette() {
-        None
-    } else {
-        Some(startup_deadline)
-    };
-
-    if let Some(model_deadline) = model.next_timeout_deadline() {
-        next_deadline = Some(match next_deadline {
-            Some(deadline) => deadline.min(model_deadline),
-            None => model_deadline,
-        });
-    }
-
-    next_deadline
-        .map(|deadline| deadline.saturating_duration_since(now))
-        .unwrap_or_else(|| Duration::from_millis(250))
-}
-
-fn apply_effect_if_needed(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    model: &mut Model,
-    effect: Option<AppEffect>,
-) -> Result<()> {
-    let Some(effect) = effect else {
-        return Ok(());
-    };
-
-    match effect {
-        AppEffect::LaunchExternalEditor(launch) => {
-            run_external_editor_effect(terminal, model, launch)
-        }
-        AppEffect::CopySelection(text) => run_copy_selection_effect(terminal, model, &text),
-    }
-}
-
-fn run_external_editor_effect(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    model: &mut Model,
-    launch: super::ExternalEditorLaunch,
-) -> Result<()> {
-    TerminalSession::suspend(terminal)?;
-    let failed = run_external_editor_command(&launch.command).is_err();
-    TerminalSession::resume(terminal)?;
-
-    let area = terminal.size()?;
-    let _ = model.update(AppEvent::Resized {
-        width: area.width,
-        height: area.height,
-    });
-    let _ = model.update(AppEvent::ExternalEditorFinished {
-        draft_path: launch.draft_path,
-        original_draft: launch.original_draft,
-        failed,
-    });
-    Ok(())
-}
-
-fn run_copy_selection_effect(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    model: &mut Model,
-    text: &str,
-) -> Result<()> {
-    let copied = copy_selection_to_system_or_terminal_clipboard(terminal, text);
-    let _ = model.update(AppEvent::SelectionCopyCompleted { success: copied });
-    Ok(())
-}
-
-fn run_external_editor_command(command: &[String]) -> io::Result<()> {
-    if command.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "external editor command is empty",
-        ));
-    }
-
-    let status = Command::new(&command[0]).args(&command[1..]).status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(
-            "external editor exited with a failure status",
-        ))
-    }
-}
-
-fn copy_selection_to_system_or_terminal_clipboard(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    text: &str,
+fn has_background_runtime(
+    acp_runtime: &AcpRuntimeState,
+    native_agent_runtime: &NativeAgentRuntimeState,
+    model_refresh_runtime: &ModelProviderRefreshRuntimeState,
 ) -> bool {
-    if copy_selection_to_system_clipboard(text).is_ok() {
-        return true;
-    }
-
-    copy_selection_to_terminal_clipboard(terminal, text).is_ok()
-}
-
-fn copy_selection_to_system_clipboard(text: &str) -> Result<(), arboard::Error> {
-    let mut clipboard = Clipboard::new()?;
-    clipboard.set_text(text.to_string())
-}
-
-fn copy_selection_to_terminal_clipboard(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    text: &str,
-) -> io::Result<()> {
-    use std::io::Write as _;
-
-    let encoded = BASE64_STANDARD.encode(text.as_bytes());
-    let sequence = format!("\u{1b}]52;c;{encoded}\u{7}");
-    terminal.backend_mut().write_all(sequence.as_bytes())?;
-    terminal.backend_mut().flush()
+    acp_runtime.should_poll_events()
+        || native_agent_runtime.is_running()
+        || model_refresh_runtime.is_running()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-
-    #[test]
-    fn ready_input_batch_coalesces_wheel_burst_before_key() {
-        let events = (0..128)
-            .map(|_| {
-                Event::Mouse(MouseEvent {
-                    kind: MouseEventKind::ScrollUp,
-                    column: 0,
-                    row: 0,
-                    modifiers: KeyModifiers::empty(),
-                })
-            })
-            .chain(std::iter::once(Event::Key(KeyEvent::from(KeyCode::Char(
-                'x',
-            )))))
-            .collect::<Vec<_>>();
-
-        let actions = coalesced_input_actions(events);
-
-        assert_eq!(actions.len(), 2);
-        assert_eq!(
-            actions[0],
-            TerminalInputAction::App(AppEvent::MouseWheel {
-                delta_lines: -128 * Model::document_mouse_wheel_delta(),
-            })
-        );
-        assert_eq!(
-            actions[1],
-            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Char('x'))))
-        );
-    }
-}
+mod tests;

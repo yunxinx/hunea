@@ -1,5 +1,5 @@
 use lumos::frontend::tui::theme::{
-    palette_from_background, terminal_default_palette, tertiary_text_style,
+    palette_from_background, system_error_text_style, terminal_default_palette, tertiary_text_style,
 };
 use ratatui::style::Color;
 
@@ -40,4 +40,15 @@ fn tertiary_text_style_uses_the_tertiary_palette_slot() {
     let palette = palette_from_background(true, Some(Color::Rgb(32, 64, 96)));
 
     assert_eq!(tertiary_text_style(palette).fg, Some(palette.tertiary));
+}
+
+#[test]
+fn system_error_text_style_uses_the_system_error_palette_slot() {
+    let palette = palette_from_background(true, Some(Color::Rgb(32, 64, 96)));
+
+    assert_eq!(
+        system_error_text_style(palette).fg,
+        Some(palette.system_error)
+    );
+    assert_ne!(palette.system_error, palette.main);
 }

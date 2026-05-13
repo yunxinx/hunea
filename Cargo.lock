@@ -1838,42 +1838,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
-name = "lumos"
-version = "0.1.0"
-dependencies = [
- "agent-client-protocol",
- "anyhow",
- "arboard",
- "base64",
- "color-eyre",
- "criterion",
- "crossterm",
- "diffy",
- "directories",
- "futures-util",
- "genai",
- "libc",
- "percent-encoding",
- "portable-pty",
- "pulldown-cmark",
- "ratatui",
- "reqwest",
- "serde",
- "serde_json",
- "syntect",
- "terminal-light",
- "tiktoken",
- "tokio",
- "tokio-util",
- "toml",
- "toml_edit",
- "two-face",
- "unicode-segmentation",
- "unicode-width",
- "url",
-]
-
-[[package]]
 name = "mac_address"
 version = "1.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1946,6 +1910,114 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mo-acp"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "base64",
+ "libc",
+ "mo-core",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "url",
+]
+
+[[package]]
+name = "mo-app"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "crossterm",
+ "mo-acp",
+ "mo-config",
+ "mo-core",
+ "mo-native-agent",
+ "mo-tui",
+]
+
+[[package]]
+name = "mo-cli"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "mo-app",
+ "mo-config",
+]
+
+[[package]]
+name = "mo-config"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "mo-core",
+ "serde",
+ "toml",
+ "toml_edit",
+ "unicode-width",
+]
+
+[[package]]
+name = "mo-core"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "serde",
+ "serde_json",
+ "tiktoken",
+ "tokio",
+ "tokio-util",
+ "toml",
+]
+
+[[package]]
+name = "mo-native-agent"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "futures-util",
+ "genai",
+ "mo-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "toml_edit",
+]
+
+[[package]]
+name = "mo-tui"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "arboard",
+ "base64",
+ "color-eyre",
+ "criterion",
+ "crossterm",
+ "diffy",
+ "mo-acp",
+ "mo-core",
+ "mo-native-agent",
+ "percent-encoding",
+ "pulldown-cmark",
+ "ratatui",
+ "serde_json",
+ "syntect",
+ "terminal-light",
+ "two-face",
+ "unicode-segmentation",
+ "unicode-width",
+ "url",
 ]
 
 [[package]]

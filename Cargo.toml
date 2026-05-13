@@ -1,47 +1,53 @@
-[package]
-name = "lumos"
+[workspace]
+members = [
+    "crates/cli",
+    "crates/app",
+    "crates/config",
+    "crates/tui",
+    "crates/core",
+    "crates/acp",
+    "crates/native-agent",
+]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[features]
-default = []
-bench-support = []
-
-[[bench]]
-name = "frontend_tui"
-harness = false
-required-features = ["bench-support"]
-
-[dependencies]
+[workspace.dependencies]
+agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model"] }
 anyhow = "1"
-color-eyre = "0.6.5"
-crossterm = "0.29.0"
-ratatui = { version = "0.30.0", features = ["crossterm_0_29"] }
-terminal-light = "1.8.0"
-pulldown-cmark = "0.13.3"
-percent-encoding = "2"
-syntect = "5"
-tiktoken = "3.1.4"
-two-face = "0.5.1"
-url = "2"
-unicode-segmentation = "1.13.2"
-unicode-width = "0.2.2"
-directories = "6"
-diffy = "0.4.2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "1.1.2"
-toml_edit = "0.23.9"
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "stream"] }
-futures-util = "0.3.31"
-genai = "0.6.0-beta.17"
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 base64 = "0.22.1"
-agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model"] }
+color-eyre = "0.6.5"
+criterion = { version = "0.8.2", features = ["html_reports"] }
+crossterm = "0.29.0"
+diffy = "0.4.2"
+directories = "6"
+futures-util = "0.3.31"
+genai = "0.6.0-beta.17"
 libc = "0.2"
+mo-acp = { path = "crates/acp" }
+mo-app = { path = "crates/app" }
+mo-config = { path = "crates/config" }
+mo-core = { path = "crates/core" }
+mo-native-agent = { path = "crates/native-agent" }
+mo-tui = { path = "crates/tui" }
+percent-encoding = "2"
 portable-pty = "0.9.0"
+pulldown-cmark = "0.13.3"
+ratatui = { version = "0.30.0", features = ["crossterm_0_29"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syntect = "5"
+terminal-light = "1.8.0"
+tiktoken = "3.1.4"
 tokio = { version = "1.52.1", features = ["process", "rt", "macros", "io-util", "time", "sync"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
-
-[dev-dependencies]
-criterion = { version = "0.8.2", features = ["html_reports"] }
+toml = "1.1.2"
+toml_edit = "0.23.9"
+two-face = "0.5.1"
+unicode-segmentation = "1.13.2"
+unicode-width = "0.2.2"
+url = "2"

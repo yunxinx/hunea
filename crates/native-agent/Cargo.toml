@@ -1,0 +1,17 @@
+[package]
+name = "mo-native-agent"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+directories.workspace = true
+futures-util.workspace = true
+genai.workspace = true
+mo-core.workspace = true
+reqwest.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+toml_edit.workspace = true

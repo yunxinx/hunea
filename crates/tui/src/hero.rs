@@ -222,10 +222,8 @@ fn reset_glyphs(text: &str) -> Vec<HeroGlyph> {
 }
 
 fn render_glyph_line(buffer: &mut Buffer, y: u16, glyphs: &[HeroGlyph]) {
-    let mut cursor_x = 1 + HORIZONTAL_PADDING;
-    for glyph in glyphs {
+    for (cursor_x, glyph) in (1 + HORIZONTAL_PADDING..).zip(glyphs.iter()) {
         set_cell(buffer, cursor_x, y, glyph.character, glyph.foreground, None);
-        cursor_x += 1;
     }
 }
 

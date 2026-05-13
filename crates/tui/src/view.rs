@@ -107,7 +107,7 @@ mod tests {
 
     use super::*;
     use crate::{HeroOptions, ReasoningDisplayMode, StyleMode, theme::default_palette};
-    use ::mo_acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
+    use mo_core::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
 
     #[test]
     fn assistant_message_uses_two_column_visual_inset() {

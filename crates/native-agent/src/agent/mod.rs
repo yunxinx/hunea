@@ -4,7 +4,6 @@
 
 mod client;
 mod error;
-mod request;
 mod response;
 mod session;
 mod stream;
@@ -13,6 +12,6 @@ mod tool_mapping;
 
 pub use client::send_agent_loop_with_cancellation;
 pub use error::NativeAgentError;
-pub use request::NativeAgentRequest;
+pub use mo_core::session::{NativeAgentEvent, NativeAgentRequest};
 pub use response::NativeAgentResponse;
-pub use session::{NativeAgentEvent, NativeAgentRuntimeState};
+pub use session::NativeAgentRuntimeState;

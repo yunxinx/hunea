@@ -16,7 +16,9 @@ use toml_edit::DocumentMut;
 
 use crate::provider_kind::ProviderKindGenAiExt;
 use mo_core::{
-    model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
+    model_catalog::{
+        ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderSyncRequest,
+    },
     provider::{ProviderApiKey, ProviderKind},
 };
 
@@ -31,17 +33,6 @@ pub struct LoadedModelCatalog {
     pub selected_model: Option<ModelSelection>,
     pub source_path: Option<PathBuf>,
     pub requires_model_selection: bool,
-}
-
-/// `ProviderSyncRequest` 描述一次 provider 模型列表同步请求。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderSyncRequest {
-    pub provider_id: String,
-    pub kind: ProviderKind,
-    pub display_name: String,
-    pub base_url: Option<String>,
-    pub api_key: Option<ProviderApiKey>,
-    pub api_key_env: Option<String>,
 }
 
 /// `ModelsConfigError` 描述模型配置读取或校验失败。

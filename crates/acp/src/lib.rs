@@ -28,7 +28,7 @@ pub use handshake::{
 };
 pub use identity::AcpAgentIdentity;
 pub use identity::agent_display_name;
-pub use initialize::debug_protocol_version_system_message;
+pub use mo_core::acp::debug_protocol_version_system_message;
 pub use permission::{
     AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest, AcpPermissionRespondError,
 };

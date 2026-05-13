@@ -33,7 +33,7 @@ use crate::{
     theme::TerminalPalette,
     tool_result::{ToolActivityRenderMode, ToolResultItem, ToolResultKind},
 };
-use ::mo_acp::{AcpTerminalSnapshot, AcpToolCall, AcpToolCallUpdate};
+use mo_core::acp::{AcpTerminalSnapshot, AcpToolCall, AcpToolCallUpdate};
 
 mod block_materialize;
 mod metrics_exactize;

@@ -1,7 +1,4 @@
-use std::sync::mpsc;
 use std::time::Duration;
-
-use agent_client_protocol::schema::{AgentCapabilities, PromptCapabilities};
 
 use super::acp_session::{
     AcpRuntimeState, acp_reject_option_id_for_stale_discard, apply_acp_session_event,
@@ -9,29 +6,73 @@ use super::acp_session::{
 };
 use super::effects::{reset_runtime_session_after_clear, run_interrupt_current_turn_effect};
 use super::input::{TerminalInputAction, coalesced_input_actions};
-use super::native_agent::{
-    apply_native_agent_event, drain_native_agent_runtime_events, native_agent_workspace_tools,
-    run_send_native_agent_effect,
-};
+use super::native_agent::{apply_native_agent_event, run_send_native_agent_effect};
 use super::*;
 use crate::{AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem};
-use ::mo_acp::{
-    AcpAvailableCommand, AcpAvailableCommandInput, AcpInitializeOutcome, AcpSessionEvent,
-    AcpTerminalExitStatus, AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent,
-    AcpToolCallLocation, AcpToolCallStatus, AcpToolCallUpdate, AcpToolKind,
-};
-use ::mo_native_agent::{
-    CancellationToken, NativeAgentEvent, NativeAgentRequest, NativeAgentResponse,
-    NativeLlmPerformanceMetrics,
-};
-use agent_client_protocol::schema::ProtocolVersion;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use mo_core::model_catalog::ModelSelection;
+use mo_core::acp::{
+    AcpAgentCapabilities, AcpAvailableCommand, AcpAvailableCommandInput, AcpInitializeOutcome,
+    AcpPromptCapabilities, AcpProtocolVersion, AcpSessionEvent, AcpTerminalExitStatus,
+    AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent, AcpToolCallLocation, AcpToolCallStatus,
+    AcpToolCallUpdate, AcpToolKind,
+};
+use mo_core::model_catalog::{ModelSelection, ProviderSyncRequest};
 use mo_core::phrases::StatusPhraseOrder;
-use mo_core::session::RuntimeTarget;
+use mo_core::provider::ProviderKind;
+use mo_core::request_policy::RuntimeRequestPolicy;
+use mo_core::session::{
+    NativeAgentEvent, NativeAgentRequest, NativeAgentResponse, NativeLlmPerformanceMetrics,
+    RuntimeTarget,
+};
 use mo_core::tools::{RuntimeToolCall, RuntimeToolResult};
+
+#[derive(Default)]
+struct TestRuntimeDriver {
+    native_events: Vec<NativeAgentRuntimeEvent>,
+    native_running: bool,
+    native_interrupted: bool,
+    native_request: Option<NativeAgentRequest>,
+    reset_count: usize,
+}
+
+impl RuntimeDriver for TestRuntimeDriver {
+    fn drain_native_agent_events(&mut self) -> Vec<NativeAgentRuntimeEvent> {
+        std::mem::take(&mut self.native_events)
+    }
+
+    fn reset_runtime_session(&mut self) {
+        self.native_events.clear();
+        self.native_running = false;
+        self.reset_count += 1;
+    }
+
+    fn send_native_agent(&mut self, request: NativeAgentRequest) -> Result<String, String> {
+        if self.native_running {
+            return Err("Chat request is already running".to_string());
+        }
+
+        let activity_label = request.llm_request().model_id.clone();
+        self.native_running = true;
+        self.native_request = Some(request);
+        Ok(activity_label)
+    }
+
+    fn interrupt_native_agent(&mut self) -> bool {
+        if !self.native_running {
+            return false;
+        }
+
+        self.native_running = false;
+        self.native_interrupted = true;
+        true
+    }
+
+    fn refresh_model_provider(&mut self, _request: ProviderSyncRequest) -> Result<(), String> {
+        Ok(())
+    }
+}
 
 #[test]
 fn acp_chunks_buffer_until_prompt_response() {
@@ -94,7 +135,7 @@ fn acp_system_message_event_appends_runtime_system_message() {
         &mut acp_runtime,
         AcpSessionEvent::SystemMessage {
             agent_id: "kimi".to_string(),
-            message: ::mo_acp::debug_protocol_version_system_message(),
+            message: mo_core::acp::debug_protocol_version_system_message(),
         },
     );
 
@@ -611,7 +652,11 @@ fn acp_interrupt_marks_active_tool_calls_failed() {
         },
     );
 
-    run_interrupt_acp_prompt_effect(&mut model, &mut acp_runtime);
+    run_interrupt_acp_prompt_effect(
+        &mut model,
+        &mut acp_runtime,
+        &mut TestRuntimeDriver::default(),
+    );
 
     let plain = model.transcript_plain_items().join("\n");
     assert!(plain.contains("● Run tests"));
@@ -855,13 +900,17 @@ fn acp_started_uses_agent_title_and_version_in_current_model_status_line() {
             agent_id: "kimi".to_string(),
             session_id: "test-session".to_string(),
             outcome: AcpInitializeOutcome {
-                protocol_version: ProtocolVersion::V1,
+                protocol_version: AcpProtocolVersion::V1,
                 agent_name: Some("kimi".to_string()),
                 agent_title: Some("Kimi Code CLI".to_string()),
                 agent_version: Some("1.39.0".to_string()),
-                agent_capabilities: AgentCapabilities::new()
-                    .load_session(true)
-                    .prompt_capabilities(PromptCapabilities::new().image(true)),
+                agent_capabilities: AcpAgentCapabilities {
+                    load_session: true,
+                    prompt_capabilities: AcpPromptCapabilities {
+                        image: true,
+                        ..AcpPromptCapabilities::default()
+                    },
+                },
                 auth_method_count: 0,
             },
         },
@@ -900,11 +949,11 @@ fn acp_started_without_agent_info_keeps_configured_agent_label_in_status_line() 
             agent_id: "Kimi Code CLI".to_string(),
             session_id: "test-session".to_string(),
             outcome: AcpInitializeOutcome {
-                protocol_version: ProtocolVersion::V1,
+                protocol_version: AcpProtocolVersion::V1,
                 agent_name: None,
                 agent_title: None,
                 agent_version: None,
-                agent_capabilities: AgentCapabilities::new(),
+                agent_capabilities: AcpAgentCapabilities::default(),
                 auth_method_count: 0,
             },
         },
@@ -915,7 +964,7 @@ fn acp_started_without_agent_info_keeps_configured_agent_label_in_status_line() 
         .get("Kimi Code CLI")
         .expect("started ACP agent identity snapshot should be saved");
     assert!(!identity.has_agent_info());
-    assert_eq!(identity.agent_capabilities, AgentCapabilities::new());
+    assert_eq!(identity.agent_capabilities, AcpAgentCapabilities::default());
     assert_eq!(
         model.current_status_line_parts(),
         vec!["Kimi Code CLI".to_string()]
@@ -948,7 +997,7 @@ fn acp_permission_request_flushes_buffered_agent_text() {
         &mut acp_runtime,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
-            request: mo_acp::AcpPermissionRequest {
+            request: mo_core::acp::AcpPermissionRequest {
                 request_id: "permission-1".to_string(),
                 title: Some("Write file".to_string()),
                 tool_call: AcpToolCallUpdate {
@@ -1238,7 +1287,7 @@ fn acp_permission_request_without_prior_tool_call_appends_transcript_item() {
         &mut acp_runtime,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
-            request: mo_acp::AcpPermissionRequest {
+            request: mo_core::acp::AcpPermissionRequest {
                 request_id: "permission-exec".to_string(),
                 title: Some("Run cargo test".to_string()),
                 tool_call: AcpToolCallUpdate {
@@ -1252,15 +1301,15 @@ fn acp_permission_request_without_prior_tool_call_appends_transcript_item() {
                     raw_output: None,
                 },
                 options: vec![
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "allow-once".to_string(),
                         name: "Allow once".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::AllowOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::AllowOnce,
                     },
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "reject-once".to_string(),
                         name: "Reject".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::RejectOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::RejectOnce,
                     },
                 ],
             },
@@ -1295,7 +1344,7 @@ fn acp_permission_request_content_renders_waiting_instead_of_approval_text() {
         &mut acp_runtime,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
-            request: mo_acp::AcpPermissionRequest {
+            request: mo_core::acp::AcpPermissionRequest {
                 request_id: "permission-exec".to_string(),
                 title: Some("cargo check".to_string()),
                 tool_call: AcpToolCallUpdate {
@@ -1311,15 +1360,15 @@ fn acp_permission_request_content_renders_waiting_instead_of_approval_text() {
                     raw_output: None,
                 },
                 options: vec![
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "allow-once".to_string(),
                         name: "Allow once".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::AllowOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::AllowOnce,
                     },
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "reject-once".to_string(),
                         name: "Reject".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::RejectOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::RejectOnce,
                     },
                 ],
             },
@@ -1365,7 +1414,7 @@ fn acp_permission_request_in_progress_command_renders_waiting_instead_of_approva
         &mut acp_runtime,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
-            request: mo_acp::AcpPermissionRequest {
+            request: mo_core::acp::AcpPermissionRequest {
                 request_id: "permission-exec".to_string(),
                 title: Some("cargo check".to_string()),
                 tool_call: AcpToolCallUpdate {
@@ -1381,15 +1430,15 @@ fn acp_permission_request_in_progress_command_renders_waiting_instead_of_approva
                     raw_output: None,
                 },
                 options: vec![
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "allow-once".to_string(),
                         name: "Allow once".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::AllowOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::AllowOnce,
                     },
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "reject-once".to_string(),
                         name: "Reject".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::RejectOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::RejectOnce,
                     },
                 ],
             },
@@ -1432,7 +1481,7 @@ fn acp_command_permission_request_does_not_replay_approval_text_after_completion
         &mut acp_runtime,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
-            request: mo_acp::AcpPermissionRequest {
+            request: mo_core::acp::AcpPermissionRequest {
                 request_id: "permission-exec".to_string(),
                 title: Some("cargo check".to_string()),
                 tool_call: AcpToolCallUpdate {
@@ -1499,7 +1548,7 @@ fn acp_rejected_permission_internal_agent_notice_is_not_shown() {
         &mut acp_runtime,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
-            request: mo_acp::AcpPermissionRequest {
+            request: mo_core::acp::AcpPermissionRequest {
                 request_id: "permission-exec".to_string(),
                 title: Some("cargo check".to_string()),
                 tool_call: AcpToolCallUpdate {
@@ -1512,10 +1561,10 @@ fn acp_rejected_permission_internal_agent_notice_is_not_shown() {
                     raw_input: Some(r#"{"command":"cargo check"}"#.into()),
                     raw_output: None,
                 },
-                options: vec![mo_acp::AcpPermissionOption {
+                options: vec![mo_core::acp::AcpPermissionOption {
                     option_id: "reject-once".to_string(),
                     name: "Reject".to_string(),
-                    kind: mo_acp::AcpPermissionOptionKind::RejectOnce,
+                    kind: mo_core::acp::AcpPermissionOptionKind::RejectOnce,
                 }],
             },
         },
@@ -1546,6 +1595,7 @@ fn acp_rejected_permission_internal_agent_notice_is_not_shown() {
         run_respond_acp_permission_effect(
             &mut model,
             &mut acp_runtime,
+            &mut TestRuntimeDriver::default(),
             &request_id,
             option_id,
             is_rejection,
@@ -1611,7 +1661,7 @@ fn acp_rejected_permission_tool_call_update_hides_internal_notice_and_skips_reje
         &mut acp_runtime,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
-            request: mo_acp::AcpPermissionRequest {
+            request: mo_core::acp::AcpPermissionRequest {
                 request_id: "permission-exec".to_string(),
                 title: Some("cargo check".to_string()),
                 tool_call: AcpToolCallUpdate {
@@ -1624,10 +1674,10 @@ fn acp_rejected_permission_tool_call_update_hides_internal_notice_and_skips_reje
                     raw_input: Some(r#"{"command":"cargo check"}"#.into()),
                     raw_output: None,
                 },
-                options: vec![mo_acp::AcpPermissionOption {
+                options: vec![mo_core::acp::AcpPermissionOption {
                     option_id: "reject-once".to_string(),
                     name: "Reject".to_string(),
-                    kind: mo_acp::AcpPermissionOptionKind::RejectOnce,
+                    kind: mo_core::acp::AcpPermissionOptionKind::RejectOnce,
                 }],
             },
         },
@@ -1658,6 +1708,7 @@ fn acp_rejected_permission_tool_call_update_hides_internal_notice_and_skips_reje
         run_respond_acp_permission_effect(
             &mut model,
             &mut acp_runtime,
+            &mut TestRuntimeDriver::default(),
             &request_id,
             option_id,
             is_rejection,
@@ -1738,7 +1789,7 @@ fn acp_file_preview_permission_without_prior_tool_call_restores_upserted_item_af
         &mut acp_runtime,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
-            request: mo_acp::AcpPermissionRequest {
+            request: mo_core::acp::AcpPermissionRequest {
                 request_id: "permission-write-new".to_string(),
                 title: Some("WriteFile: TEMP.md".to_string()),
                 tool_call: AcpToolCallUpdate {
@@ -1756,15 +1807,15 @@ fn acp_file_preview_permission_without_prior_tool_call_restores_upserted_item_af
                     raw_output: None,
                 },
                 options: vec![
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "allow-once".to_string(),
                         name: "Allow once".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::AllowOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::AllowOnce,
                     },
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "reject-once".to_string(),
                         name: "Reject".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::RejectOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::RejectOnce,
                     },
                 ],
             },
@@ -1822,7 +1873,7 @@ fn acp_permission_request_renders_file_preview_and_pauses_activity() {
         &mut acp_runtime,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
-            request: mo_acp::AcpPermissionRequest {
+            request: mo_core::acp::AcpPermissionRequest {
                 request_id: "permission-write".to_string(),
                 title: Some("WriteFile: __lumos_permission_preview__.md".to_string()),
                 tool_call: AcpToolCallUpdate {
@@ -1843,20 +1894,20 @@ fn acp_permission_request_renders_file_preview_and_pauses_activity() {
                     raw_output: None,
                 },
                 options: vec![
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "allow-once".to_string(),
                         name: "Allow once".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::AllowOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::AllowOnce,
                     },
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "allow-always".to_string(),
                         name: "Allow always".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::AllowAlways,
+                        kind: mo_core::acp::AcpPermissionOptionKind::AllowAlways,
                     },
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "reject-once".to_string(),
                         name: "Reject".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::RejectOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::RejectOnce,
                     },
                 ],
             },
@@ -1909,7 +1960,7 @@ fn acp_permission_choice_restores_paused_stream_activity() {
         &mut acp_runtime,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
-            request: mo_acp::AcpPermissionRequest {
+            request: mo_core::acp::AcpPermissionRequest {
                 request_id: "permission-write".to_string(),
                 title: Some("WriteFile: __lumos_permission_preview__.md".to_string()),
                 tool_call: AcpToolCallUpdate {
@@ -1930,15 +1981,15 @@ fn acp_permission_choice_restores_paused_stream_activity() {
                     raw_output: None,
                 },
                 options: vec![
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "allow-once".to_string(),
                         name: "Allow once".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::AllowOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::AllowOnce,
                     },
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "reject-once".to_string(),
                         name: "Reject".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::RejectOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::RejectOnce,
                     },
                 ],
             },
@@ -2011,7 +2062,7 @@ fn acp_file_preview_permission_hides_active_write_tool_call_until_choice() {
         &mut acp_runtime,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
-            request: mo_acp::AcpPermissionRequest {
+            request: mo_core::acp::AcpPermissionRequest {
                 request_id: "permission-write".to_string(),
                 title: Some("WriteFile: TEMP.md".to_string()),
                 tool_call: AcpToolCallUpdate {
@@ -2029,15 +2080,15 @@ fn acp_file_preview_permission_hides_active_write_tool_call_until_choice() {
                     raw_output: None,
                 },
                 options: vec![
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "allow-once".to_string(),
                         name: "Allow once".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::AllowOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::AllowOnce,
                     },
-                    mo_acp::AcpPermissionOption {
+                    mo_core::acp::AcpPermissionOption {
                         option_id: "reject-once".to_string(),
                         name: "Reject".to_string(),
-                        kind: mo_acp::AcpPermissionOptionKind::RejectOnce,
+                        kind: mo_core::acp::AcpPermissionOptionKind::RejectOnce,
                     },
                 ],
             },
@@ -2293,11 +2344,11 @@ fn acp_model_config_changed_updates_current_model_status_line_and_models_panel()
         &mut acp_runtime,
         AcpSessionEvent::ModelConfigChanged {
             agent_id: "Kimi Code CLI".to_string(),
-            config: mo_acp::AcpModelConfig {
+            config: mo_core::acp::AcpModelConfig {
                 config_id: Some("model".to_string()),
                 current_value: "kimi-k2".to_string(),
                 current_name: "Kimi K2".to_string(),
-                options: vec![mo_acp::AcpModelOption {
+                options: vec![mo_core::acp::AcpModelOption {
                     value: "kimi-k2".to_string(),
                     name: "Kimi K2".to_string(),
                 }],
@@ -2337,16 +2388,16 @@ fn acp_model_config_change_failed_rolls_back_selected_model_and_status_line() {
         &mut acp_runtime,
         AcpSessionEvent::ModelConfigChanged {
             agent_id: "Kimi Code CLI".to_string(),
-            config: mo_acp::AcpModelConfig {
+            config: mo_core::acp::AcpModelConfig {
                 config_id: Some("model".to_string()),
                 current_value: "kimi-k2".to_string(),
                 current_name: "Kimi K2".to_string(),
                 options: vec![
-                    mo_acp::AcpModelOption {
+                    mo_core::acp::AcpModelOption {
                         value: "kimi-k2".to_string(),
                         name: "Kimi K2".to_string(),
                     },
-                    mo_acp::AcpModelOption {
+                    mo_core::acp::AcpModelOption {
                         value: "kimi-k1.5".to_string(),
                         name: "Kimi K1.5".to_string(),
                     },
@@ -2411,16 +2462,16 @@ fn acp_model_selection_effect_failure_rolls_back_selected_model_and_status_line(
         &mut acp_runtime,
         AcpSessionEvent::ModelConfigChanged {
             agent_id: "Kimi Code CLI".to_string(),
-            config: mo_acp::AcpModelConfig {
+            config: mo_core::acp::AcpModelConfig {
                 config_id: None,
                 current_value: "kimi-for-coding".to_string(),
                 current_name: "Kimi for Coding".to_string(),
                 options: vec![
-                    mo_acp::AcpModelOption {
+                    mo_core::acp::AcpModelOption {
                         value: "kimi-for-coding".to_string(),
                         name: "Kimi for Coding".to_string(),
                     },
-                    mo_acp::AcpModelOption {
+                    mo_core::acp::AcpModelOption {
                         value: "kimi-for-coding(thinking)".to_string(),
                         name: "Kimi for Coding (thinking)".to_string(),
                     },
@@ -2454,7 +2505,7 @@ fn acp_model_selection_effect_failure_rolls_back_selected_model_and_status_line(
 
     run_set_acp_model_effect(
         &mut model,
-        &acp_runtime,
+        &mut TestRuntimeDriver::default(),
         None,
         "kimi-for-coding(thinking)".to_string(),
     );
@@ -2486,16 +2537,16 @@ fn acp_model_config_change_succeeded_commits_selected_model_and_status_line() {
         &mut acp_runtime,
         AcpSessionEvent::ModelConfigChanged {
             agent_id: "Kimi Code CLI".to_string(),
-            config: mo_acp::AcpModelConfig {
+            config: mo_core::acp::AcpModelConfig {
                 config_id: None,
                 current_value: "kimi-for-coding".to_string(),
                 current_name: "Kimi for Coding".to_string(),
                 options: vec![
-                    mo_acp::AcpModelOption {
+                    mo_core::acp::AcpModelOption {
                         value: "kimi-for-coding".to_string(),
                         name: "Kimi for Coding".to_string(),
                     },
-                    mo_acp::AcpModelOption {
+                    mo_core::acp::AcpModelOption {
                         value: "kimi-for-coding(thinking)".to_string(),
                         name: "Kimi for Coding (thinking)".to_string(),
                     },
@@ -2558,11 +2609,11 @@ fn acp_available_commands_are_saved_and_cleared_with_session_lifecycle() {
             agent_id: "Kimi Code CLI".to_string(),
             session_id: "test-session".to_string(),
             outcome: AcpInitializeOutcome {
-                protocol_version: ProtocolVersion::V1,
+                protocol_version: AcpProtocolVersion::V1,
                 agent_name: Some("kimi".to_string()),
                 agent_title: Some("Kimi Code CLI".to_string()),
                 agent_version: Some("1.0.0".to_string()),
-                agent_capabilities: AgentCapabilities::new(),
+                agent_capabilities: AcpAgentCapabilities::default(),
                 auth_method_count: 0,
             },
         },
@@ -2621,28 +2672,26 @@ fn clear_runtime_discards_stale_native_agent_event() {
     model.transcript_mut().clear();
     model.show_stream_activity("qwen3");
     let mut acp_runtime = AcpRuntimeState::default();
-    let mut native_agent_runtime = NativeAgentRuntimeState::default();
-    let (sender, receiver) = mpsc::channel();
-    native_agent_runtime.receiver = Some(receiver);
-
-    sender
-        .send(NativeAgentEvent::Finished {
-            response: NativeAgentResponse {
-                content: "stale response".to_string(),
-                reasoning_content: None,
-                reasoning_duration: None,
-                ..Default::default()
+    let mut runtime_driver = TestRuntimeDriver {
+        native_events: vec![NativeAgentRuntimeEvent {
+            target: Some(RuntimeTarget::native_agent("local", "qwen3")),
+            event: NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
+                    content: "stale response".to_string(),
+                    reasoning_content: None,
+                    reasoning_duration: None,
+                    ..Default::default()
+                },
+                metrics: None,
             },
-            metrics: None,
-        })
-        .expect("stale native event should still be produced by worker");
+        }],
+        native_running: true,
+        ..TestRuntimeDriver::default()
+    };
+
     model.reset_to_initial_tui_state();
-    reset_runtime_session_after_clear(
-        &mut acp_runtime,
-        &mut native_agent_runtime,
-        &mut ModelProviderRefreshRuntimeState::default(),
-    );
-    drain_native_agent_runtime_events(&mut model, &mut native_agent_runtime);
+    reset_runtime_session_after_clear(&mut acp_runtime, &mut runtime_driver);
+    drain_runtime_driver_events(&mut model, &mut acp_runtime, &mut runtime_driver);
 
     assert!(
         model
@@ -2651,6 +2700,7 @@ fn clear_runtime_discards_stale_native_agent_event() {
             .all(|item| !item.contains("stale response"))
     );
     assert!(!model.current_stream_activity_render_result().has_content);
+    assert_eq!(runtime_driver.reset_count, 1);
 }
 
 #[test]
@@ -2659,7 +2709,7 @@ fn clear_runtime_discards_stale_acp_prompt_output_without_exiting_acp_mode() {
     model.transcript_mut().clear();
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
     let mut acp_runtime = AcpRuntimeState::default();
-    let mut native_agent_runtime = NativeAgentRuntimeState::default();
+    let mut runtime_driver = TestRuntimeDriver::default();
 
     apply_acp_session_event(
         &mut model,
@@ -2678,11 +2728,7 @@ fn clear_runtime_discards_stale_acp_prompt_output_without_exiting_acp_mode() {
     );
 
     model.reset_to_initial_tui_state();
-    reset_runtime_session_after_clear(
-        &mut acp_runtime,
-        &mut native_agent_runtime,
-        &mut ModelProviderRefreshRuntimeState::default(),
-    );
+    reset_runtime_session_after_clear(&mut acp_runtime, &mut runtime_driver);
     apply_acp_session_event(
         &mut model,
         &mut acp_runtime,
@@ -2717,15 +2763,11 @@ fn clear_runtime_discards_stale_acp_prompt_start_activity() {
     model.transcript_mut().clear();
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
     let mut acp_runtime = AcpRuntimeState::default();
-    let mut native_agent_runtime = NativeAgentRuntimeState::default();
+    let mut runtime_driver = TestRuntimeDriver::default();
 
     acp_runtime.mark_prompt_submitted();
     model.reset_to_initial_tui_state();
-    reset_runtime_session_after_clear(
-        &mut acp_runtime,
-        &mut native_agent_runtime,
-        &mut ModelProviderRefreshRuntimeState::default(),
-    );
+    reset_runtime_session_after_clear(&mut acp_runtime, &mut runtime_driver);
     apply_acp_session_event(
         &mut model,
         &mut acp_runtime,
@@ -2744,7 +2786,7 @@ fn clear_runtime_discards_stale_acp_permission_request() {
     model.transcript_mut().clear();
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
     let mut acp_runtime = AcpRuntimeState::default();
-    let mut native_agent_runtime = NativeAgentRuntimeState::default();
+    let mut runtime_driver = TestRuntimeDriver::default();
 
     apply_acp_session_event(
         &mut model,
@@ -2763,17 +2805,13 @@ fn clear_runtime_discards_stale_acp_permission_request() {
     );
 
     model.reset_to_initial_tui_state();
-    reset_runtime_session_after_clear(
-        &mut acp_runtime,
-        &mut native_agent_runtime,
-        &mut ModelProviderRefreshRuntimeState::default(),
-    );
+    reset_runtime_session_after_clear(&mut acp_runtime, &mut runtime_driver);
     apply_acp_session_event(
         &mut model,
         &mut acp_runtime,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
-            request: mo_acp::AcpPermissionRequest {
+            request: mo_core::acp::AcpPermissionRequest {
                 request_id: "stale-permission".to_string(),
                 title: Some("旧请求写文件".to_string()),
                 tool_call: AcpToolCallUpdate {
@@ -2806,7 +2844,11 @@ fn cancelled_acp_prompt_cancels_late_permission_request() {
     let mut model = Model::new(HeroOptions::default());
     let mut acp_runtime = AcpRuntimeState::default();
     acp_runtime.mark_prompt_submitted();
-    run_interrupt_acp_prompt_effect(&mut model, &mut acp_runtime);
+    run_interrupt_acp_prompt_effect(
+        &mut model,
+        &mut acp_runtime,
+        &mut TestRuntimeDriver::default(),
+    );
 
     let option_id = acp_runtime
         .permission_option_id_for_discarded_prompt(&acp_permission_request_with_reject_always());
@@ -2837,8 +2879,8 @@ fn acp_permission_stale_reject_fallback_prefers_reject_always() {
     assert_eq!(option_id, Some("reject-always".to_string()));
 }
 
-fn acp_permission_request_with_reject_always() -> mo_acp::AcpPermissionRequest {
-    use ::mo_acp::{AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest};
+fn acp_permission_request_with_reject_always() -> mo_core::acp::AcpPermissionRequest {
+    use mo_core::acp::{AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest};
 
     AcpPermissionRequest {
         request_id: "permission-session-only".to_string(),
@@ -3369,10 +3411,10 @@ fn native_agent_tool_finished_appends_transcript_only_result() {
 #[test]
 fn native_agent_send_effect_starts_native_agent_target() {
     let mut model = Model::new(HeroOptions::default());
-    let mut runtime = NativeAgentRuntimeState::default();
+    let mut runtime_driver = TestRuntimeDriver::default();
     let request = NativeAgentRequest::new(
         "local",
-        ::mo_native_agent::ProviderKind::OpenAiCompatible,
+        ProviderKind::OpenAiCompatible,
         "qwen3",
         None,
         None,
@@ -3380,118 +3422,41 @@ fn native_agent_send_effect_starts_native_agent_target() {
         vec![],
     );
 
-    run_send_native_agent_effect(
-        &mut model,
-        &mut runtime,
-        request,
-        RuntimeRequestPolicy::default(),
-    );
+    run_send_native_agent_effect(&mut model, &mut runtime_driver, request);
 
     assert_eq!(
-        runtime.current_target(),
-        Some(&RuntimeTarget::native_agent("local", "qwen3"))
+        runtime_driver
+            .native_request
+            .as_ref()
+            .map(NativeAgentRequest::target),
+        Some(RuntimeTarget::native_agent("local", "qwen3"))
     );
+    assert!(model.current_stream_activity_render_result().has_content);
 }
 
 #[test]
-fn native_agent_request_attaches_workspace_tools() {
-    let tools = native_agent_workspace_tools();
+fn native_agent_request_keeps_runtime_target_in_core_dto() {
     let request = NativeAgentRequest::new(
         "local",
-        ::mo_native_agent::ProviderKind::OpenAiCompatible,
+        ProviderKind::OpenAiCompatible,
         "qwen3",
         None,
         None,
         None,
         vec![],
-    )
-    .with_tools(tools.definitions());
+    );
 
     assert_eq!(
         request.target(),
         RuntimeTarget::native_agent("local", "qwen3")
     );
-    assert!(request.tools().definition("file_read").is_some());
-    assert!(request.tools().definition("list_dir").is_some());
-}
-
-#[test]
-fn native_agent_runtime_keeps_receiver_after_retry_event() {
-    let (sender, receiver) = mpsc::channel();
-    let mut runtime = NativeAgentRuntimeState {
-        receiver: Some(receiver),
-        cancellation: Some(CancellationToken::default()),
-        target: Some(RuntimeTarget::native_agent("provider", "model")),
-    };
-
-    sender
-        .send(NativeAgentEvent::Retrying {
-            message: "Reconnecting... 1/3".to_string(),
-        })
-        .expect("retry event should be queued");
-
-    assert_eq!(
-        runtime.try_recv_event(),
-        Some(NativeAgentEvent::Retrying {
-            message: "Reconnecting... 1/3".to_string(),
-        })
-    );
-    assert!(runtime.is_running());
-
-    sender
-        .send(NativeAgentEvent::Finished {
-            response: NativeAgentResponse {
-                content: "完成".to_string(),
-                reasoning_content: None,
-                reasoning_duration: None,
-                ..Default::default()
-            },
-            metrics: None,
-        })
-        .expect("finish event should be queued");
-
-    assert_eq!(
-        runtime.try_recv_event(),
-        Some(NativeAgentEvent::Finished {
-            response: NativeAgentResponse {
-                content: "完成".to_string(),
-                reasoning_content: None,
-                reasoning_duration: None,
-                ..Default::default()
-            },
-            metrics: None,
-        })
-    );
-    assert!(!runtime.is_running());
-}
-
-#[test]
-fn native_agent_runtime_keeps_receiver_after_token_estimate_event() {
-    let (sender, receiver) = mpsc::channel();
-    let mut runtime = NativeAgentRuntimeState {
-        receiver: Some(receiver),
-        cancellation: Some(CancellationToken::default()),
-        target: Some(RuntimeTarget::native_agent("provider", "model")),
-    };
-
-    sender
-        .send(NativeAgentEvent::OutputTokenEstimate { total_tokens: 12 })
-        .expect("token estimate event should be queued");
-
-    assert_eq!(
-        runtime.try_recv_event(),
-        Some(NativeAgentEvent::OutputTokenEstimate { total_tokens: 12 })
-    );
-    assert!(runtime.is_running());
 }
 
 #[test]
 fn interrupt_native_agent_clears_runtime_and_appends_system_message() {
-    let (_sender, receiver) = mpsc::channel();
-    let mut runtime = NativeAgentRuntimeState {
-        receiver: Some(receiver),
-        cancellation: Some(CancellationToken::default()),
-        target: Some(RuntimeTarget::native_agent("provider", "model")),
+    let mut runtime_driver = TestRuntimeDriver {
+        native_running: true,
+        ..TestRuntimeDriver::default()
     };
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
@@ -3499,11 +3464,11 @@ fn interrupt_native_agent_clears_runtime_and_appends_system_message() {
 
     apply_effect_if_needed_for_test(
         &mut model,
-        &mut runtime,
+        &mut runtime_driver,
         Some(AppEffect::InterruptCurrentTurn),
     );
 
-    assert!(!runtime.is_running());
+    assert!(runtime_driver.native_interrupted);
     assert!(!model.current_stream_activity_render_result().has_content);
     assert_eq!(
         model.transcript_plain_items(),
@@ -3534,7 +3499,11 @@ fn interrupt_acp_prompt_discards_stale_output_and_keeps_session_selected() {
         },
     );
 
-    run_interrupt_acp_prompt_effect(&mut model, &mut acp_runtime);
+    run_interrupt_acp_prompt_effect(
+        &mut model,
+        &mut acp_runtime,
+        &mut TestRuntimeDriver::default(),
+    );
 
     apply_acp_session_event(
         &mut model,
@@ -3595,14 +3564,10 @@ fn ready_input_batch_coalesces_wheel_burst_before_key() {
 
 fn apply_effect_if_needed_for_test(
     model: &mut Model,
-    native_agent_runtime: &mut NativeAgentRuntimeState,
+    runtime_driver: &mut TestRuntimeDriver,
     effect: Option<AppEffect>,
 ) {
     if let Some(AppEffect::InterruptCurrentTurn) = effect {
-        run_interrupt_current_turn_effect(
-            model,
-            &mut AcpRuntimeState::default(),
-            native_agent_runtime,
-        );
+        run_interrupt_current_turn_effect(model, &mut AcpRuntimeState::default(), runtime_driver);
     }
 }

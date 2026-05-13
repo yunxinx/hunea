@@ -5,11 +5,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use ::mo_native_agent::ProviderKind;
 use crossterm::event::{KeyCode, KeyEvent};
 use mo_core::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
+use mo_core::provider::ProviderKind;
 use mo_tui::{
     AppEvent, HeroOptions, Model, ModelOptions, RequestMetrics, StatusLineItem, StyleMode,
     theme::default_palette,

@@ -86,6 +86,30 @@ pub struct NativeModelProviderRuntime {
     pub api_key_env: Option<String>,
 }
 
+/// `ProviderSyncRequest` 描述一次 provider 模型列表同步请求。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSyncRequest {
+    pub provider_id: String,
+    pub kind: ProviderKind,
+    pub display_name: String,
+    pub base_url: Option<String>,
+    pub api_key: Option<ProviderApiKey>,
+    pub api_key_env: Option<String>,
+}
+
+/// `ModelProviderRefreshEvent` 是 provider 模型列表刷新后的消费层事件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelProviderRefreshEvent {
+    Finished {
+        provider_id: String,
+        model_ids: Vec<String>,
+    },
+    Failed {
+        provider_id: String,
+        message: String,
+    },
+}
+
 impl ModelProvider {
     /// `native` 创建启用状态的 native provider。
     pub fn native(

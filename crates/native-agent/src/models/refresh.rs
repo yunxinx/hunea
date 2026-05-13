@@ -3,6 +3,8 @@ use std::{
     thread,
 };
 
+use mo_core::model_catalog::ModelProviderRefreshEvent;
+
 use super::{ProviderSyncRequest, sync_provider_models_once};
 
 /// `ModelProviderRefreshRuntimeState` 管理 native provider 模型列表刷新 worker。
@@ -56,17 +58,4 @@ impl ModelProviderRefreshRuntimeState {
             }
         }
     }
-}
-
-/// `ModelProviderRefreshEvent` 是 native provider 模型刷新 worker 的结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModelProviderRefreshEvent {
-    Finished {
-        provider_id: String,
-        model_ids: Vec<String>,
-    },
-    Failed {
-        provider_id: String,
-        message: String,
-    },
 }

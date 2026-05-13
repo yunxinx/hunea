@@ -24,6 +24,7 @@ use super::{AcpSessionEvent, AcpTerminalExitStatus, AcpTerminalSnapshot};
 
 const DEFAULT_TERMINAL_OUTPUT_BYTE_LIMIT: usize = 1024 * 1024;
 const TERMINAL_OUTPUT_UPDATE_INTERVAL: Duration = Duration::from_millis(50);
+const TERMINAL_READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const DEFAULT_TERMINAL_ROWS: u16 = 24;
 const DEFAULT_TERMINAL_COLS: u16 = 80;
 static NEXT_TERMINAL_MANAGER_ID: AtomicUsize = AtomicUsize::new(1);
@@ -60,6 +61,7 @@ struct AcpTerminalSession {
     released: bool,
     exit_tx: watch::Sender<Option<AcpTerminalExitStatus>>,
     exit_rx: watch::Receiver<Option<AcpTerminalExitStatus>>,
+    reader_done_rx: watch::Receiver<bool>,
     killer: Option<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
     #[cfg(unix)]
     process_group_id: Option<u32>,
@@ -110,7 +112,7 @@ impl AcpTerminalManager {
         request: WaitForTerminalExitRequest,
     ) -> Result<WaitForTerminalExitResponse, AcpTerminalError> {
         let terminal_id = request.terminal_id.to_string();
-        let mut exit_rx = {
+        let (initial_exit_status, mut exit_rx, mut reader_done_rx) = {
             let guard = self
                 .inner
                 .lock()
@@ -119,25 +121,29 @@ impl AcpTerminalManager {
                 .terminals
                 .get(&terminal_id)
                 .ok_or_else(|| AcpTerminalError::NotFound(terminal_id.clone()))?;
-            if let Some(exit_status) = session.exit_status.clone() {
-                return Ok(WaitForTerminalExitResponse::new(sdk_terminal_exit_status(
-                    exit_status,
-                )));
-            }
-            session.exit_rx.clone()
+            (
+                session.exit_status.clone(),
+                session.exit_rx.clone(),
+                session.reader_done_rx.clone(),
+            )
         };
 
-        loop {
-            if let Some(exit_status) = exit_rx.borrow().clone() {
-                return Ok(WaitForTerminalExitResponse::new(sdk_terminal_exit_status(
-                    exit_status,
-                )));
-            }
-            exit_rx
-                .changed()
-                .await
-                .map_err(|_| AcpTerminalError::NotFound(terminal_id.clone()))?;
-        }
+        let exit_status = match initial_exit_status {
+            Some(exit_status) => exit_status,
+            None => loop {
+                if let Some(exit_status) = exit_rx.borrow().clone() {
+                    break exit_status;
+                }
+                exit_rx
+                    .changed()
+                    .await
+                    .map_err(|_| AcpTerminalError::NotFound(terminal_id.clone()))?;
+            },
+        };
+        wait_for_terminal_reader_drain(&mut reader_done_rx).await;
+        Ok(WaitForTerminalExitResponse::new(sdk_terminal_exit_status(
+            exit_status,
+        )))
     }
 
     pub(crate) fn kill(
@@ -268,6 +274,7 @@ impl AcpTerminalManager {
         let killer = child.clone_killer();
         let reader = pair.master.try_clone_reader()?;
         let (exit_tx, exit_rx) = watch::channel(None);
+        let (reader_done_tx, reader_done_rx) = watch::channel(false);
         let session = AcpTerminalSession {
             command_label,
             cwd_label,
@@ -276,6 +283,7 @@ impl AcpTerminalManager {
             released: false,
             exit_tx,
             exit_rx,
+            reader_done_rx,
             killer: Some(killer),
             #[cfg(unix)]
             process_group_id,
@@ -294,12 +302,17 @@ impl AcpTerminalManager {
             self.send_snapshot(snapshot);
         }
 
-        self.spawn_reader(terminal_id.clone(), reader);
+        self.spawn_reader(terminal_id.clone(), reader, reader_done_tx);
         self.spawn_waiter(terminal_id, child);
         Ok(())
     }
 
-    fn spawn_reader(&self, terminal_id: String, mut reader: Box<dyn Read + Send>) {
+    fn spawn_reader(
+        &self,
+        terminal_id: String,
+        mut reader: Box<dyn Read + Send>,
+        reader_done_tx: watch::Sender<bool>,
+    ) {
         let manager = self.clone();
         std::thread::spawn(move || {
             let mut last_sent_at = Instant::now()
@@ -328,6 +341,7 @@ impl AcpTerminalManager {
             if let Some(snapshot) = manager.snapshot(&terminal_id) {
                 manager.send_snapshot(snapshot);
             }
+            let _ = reader_done_tx.send(true);
         });
     }
 
@@ -401,6 +415,21 @@ impl AcpTerminalManager {
             snapshot,
         });
     }
+}
+
+async fn wait_for_terminal_reader_drain(reader_done_rx: &mut watch::Receiver<bool>) {
+    if *reader_done_rx.borrow() {
+        return;
+    }
+
+    let wait_for_done = async {
+        while !*reader_done_rx.borrow() {
+            if reader_done_rx.changed().await.is_err() {
+                break;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(TERMINAL_READER_DRAIN_TIMEOUT, wait_for_done).await;
 }
 
 /// `AcpTerminalOutputBuffer` 将 PTY 字节转换为 TUI 安全文本并按字节上限保留尾部。

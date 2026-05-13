@@ -564,7 +564,7 @@ fn command_panel_completion_text(item: &CommandPanelItem) -> String {
 
 fn merge_command_panel_items(
     base_items: Vec<CommandPanelItem>,
-    acp_available_commands: &[mo_acp::AcpAvailableCommand],
+    acp_available_commands: &[mo_core::acp::AcpAvailableCommand],
 ) -> Vec<CommandPanelItem> {
     let mut items = BTreeMap::new();
     for item in base_items {
@@ -577,7 +577,9 @@ fn merge_command_panel_items(
     items.into_values().collect()
 }
 
-fn acp_command_panel_items(commands: &[mo_acp::AcpAvailableCommand]) -> Vec<CommandPanelItem> {
+fn acp_command_panel_items(
+    commands: &[mo_core::acp::AcpAvailableCommand],
+) -> Vec<CommandPanelItem> {
     commands
         .iter()
         .filter_map(|command| {

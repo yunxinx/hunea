@@ -1,4 +1,10 @@
-use agent_client_protocol::schema::{InitializeRequest, InitializeResponse, ProtocolVersion};
+use agent_client_protocol::schema::{
+    AgentCapabilities, InitializeRequest, InitializeResponse, PromptCapabilities, ProtocolVersion,
+};
+use mo_core::acp::{
+    AcpAgentCapabilities, AcpPromptCapabilities, AcpProtocolVersion,
+    acp_protocol_version_warning_message,
+};
 
 use super::{
     AcpInitializeOutcome, capabilities::lumos_client_capabilities, identity::lumos_client_info,
@@ -20,28 +26,40 @@ pub(crate) fn initialize_outcome_from_response(
 ) -> AcpInitializeOutcome {
     let agent_info = response.agent_info;
     AcpInitializeOutcome {
-        protocol_version: response.protocol_version,
+        protocol_version: acp_protocol_version_from_schema(response.protocol_version),
         agent_name: agent_info.as_ref().map(|info| info.name.clone()),
         agent_title: agent_info.as_ref().and_then(|info| info.title.clone()),
         agent_version: agent_info.as_ref().map(|info| info.version.clone()),
-        agent_capabilities: response.agent_capabilities,
+        agent_capabilities: acp_agent_capabilities_from_schema(response.agent_capabilities),
         auth_method_count: response.auth_methods.len(),
     }
 }
 
 /// `protocol_version_warning` 在协商版本超出 Lumos 支持范围时返回提示文案。
 pub(crate) fn protocol_version_warning(outcome: &AcpInitializeOutcome) -> Option<String> {
-    (outcome.protocol_version != SUPPORTED_PROTOCOL_VERSION)
-        .then(|| protocol_version_warning_message(&outcome.protocol_version))
+    (outcome.protocol_version != AcpProtocolVersion::V1)
+        .then(|| acp_protocol_version_warning_message(&outcome.protocol_version))
 }
 
-/// `debug_protocol_version_system_message` 返回 ACP debug 面板使用的协议版本提示样例。
-pub fn debug_protocol_version_system_message() -> String {
-    protocol_version_warning_message(&ProtocolVersion::V0)
+fn acp_protocol_version_from_schema(version: ProtocolVersion) -> AcpProtocolVersion {
+    match version {
+        ProtocolVersion::V0 => AcpProtocolVersion::V0,
+        ProtocolVersion::V1 => AcpProtocolVersion::V1,
+        _ => AcpProtocolVersion::Other(version.to_string()),
+    }
 }
 
-fn protocol_version_warning_message(negotiated: &ProtocolVersion) -> String {
-    format!(
-        "ACP protocol version mismatch: Lumos supports v{SUPPORTED_PROTOCOL_VERSION}, agent negotiated v{negotiated}. Continuing may be unstable."
-    )
+fn acp_agent_capabilities_from_schema(capabilities: AgentCapabilities) -> AcpAgentCapabilities {
+    AcpAgentCapabilities {
+        load_session: capabilities.load_session,
+        prompt_capabilities: acp_prompt_capabilities_from_schema(capabilities.prompt_capabilities),
+    }
+}
+
+fn acp_prompt_capabilities_from_schema(capabilities: PromptCapabilities) -> AcpPromptCapabilities {
+    AcpPromptCapabilities {
+        image: capabilities.image,
+        audio: capabilities.audio,
+        embedded_context: capabilities.embedded_context,
+    }
 }

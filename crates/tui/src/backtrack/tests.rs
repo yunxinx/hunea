@@ -1,9 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use ::mo_native_agent::ProviderKind;
 use mo_core::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
+use mo_core::provider::ProviderKind;
 
 use crate::{
     AppEffect, AppEvent, HeroOptions, Model, ModelOptions, Sender, theme::default_palette,

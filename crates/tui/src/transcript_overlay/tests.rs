@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{AppEvent, HeroOptions, Model, Sender, theme::default_palette};
-use ::mo_acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
+use mo_core::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
 
 #[test]
 fn overlay_scroll_boundary() {

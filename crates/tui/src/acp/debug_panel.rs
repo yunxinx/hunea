@@ -118,7 +118,7 @@ impl Model {
             ACP_DEBUG_PROTOCOL_VERSION_SYSTEM_MSG => {
                 self.close_acp_panel();
                 self.append_system_message_from_runtime(
-                    ::mo_acp::debug_protocol_version_system_message(),
+                    mo_core::acp::debug_protocol_version_system_message(),
                 );
             }
             ACP_DEBUG_AGENT_CAPABILITIES_SYSTEM_MSG => {
@@ -273,10 +273,8 @@ fn agent_capabilities_system_message(model: &Model) -> String {
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol::schema::{AgentCapabilities, PromptCapabilities};
-
     use crate::{HeroOptions, ModelOptions, theme::default_palette};
-    use ::mo_acp::AcpAgentIdentity;
+    use mo_core::acp::{AcpAgentCapabilities, AcpAgentIdentity, AcpPromptCapabilities};
 
     use super::*;
 
@@ -297,9 +295,14 @@ mod tests {
                 name: Some("kimi".to_string()),
                 title: Some("Kimi Code CLI".to_string()),
                 version: Some("1.39.0".to_string()),
-                agent_capabilities: AgentCapabilities::new()
-                    .load_session(true)
-                    .prompt_capabilities(PromptCapabilities::new().image(true).audio(true)),
+                agent_capabilities: AcpAgentCapabilities {
+                    load_session: true,
+                    prompt_capabilities: AcpPromptCapabilities {
+                        image: true,
+                        audio: true,
+                        ..AcpPromptCapabilities::default()
+                    },
+                },
             },
         );
 
@@ -344,9 +347,14 @@ mod tests {
                 name: Some("kimi".to_string()),
                 title: Some("Kimi Code CLI".to_string()),
                 version: Some("1.39.0".to_string()),
-                agent_capabilities: AgentCapabilities::new()
-                    .load_session(true)
-                    .prompt_capabilities(PromptCapabilities::new().image(true).audio(true)),
+                agent_capabilities: AcpAgentCapabilities {
+                    load_session: true,
+                    prompt_capabilities: AcpPromptCapabilities {
+                        image: true,
+                        audio: true,
+                        ..AcpPromptCapabilities::default()
+                    },
+                },
             },
         );
         model.open_acp_debug_panel();

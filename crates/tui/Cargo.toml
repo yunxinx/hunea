@@ -13,9 +13,7 @@ base64.workspace = true
 color-eyre.workspace = true
 crossterm.workspace = true
 diffy.workspace = true
-mo-acp.workspace = true
 mo-core.workspace = true
-mo-native-agent.workspace = true
 percent-encoding.workspace = true
 pulldown-cmark.workspace = true
 ratatui.workspace = true
@@ -28,7 +26,6 @@ unicode-width.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-agent-client-protocol.workspace = true
 criterion.workspace = true
 
 [[bench]]

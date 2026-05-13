@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use genai::{
     Client, Headers, ModelIden, ModelSpec, ServiceTarget,
     resolver::{AuthData, AuthResolver, Endpoint},
@@ -15,13 +13,7 @@ pub(crate) enum NativeLlmProgress {
     Thinking { is_thinking: bool },
 }
 
-/// `NativeLlmPerformanceMetrics` 记录一次成功请求的输出性能指标。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NativeLlmPerformanceMetrics {
-    pub latency: Duration,
-    pub output_tokens: usize,
-    pub duration: Duration,
-}
+pub use mo_core::session::NativeLlmPerformanceMetrics;
 
 pub(crate) fn client_for_request(request: &NativeLlmRequest) -> Client {
     let Some(auth_data) = request_auth_data(request) else {

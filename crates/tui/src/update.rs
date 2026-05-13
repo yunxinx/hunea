@@ -1,9 +1,11 @@
 use std::{path::PathBuf, time::Duration};
 
-use ::mo_acp::{AcpPrompt, build_acp_prompt_from_composer_text};
-use ::mo_native_agent::{ChatMessage, NativeAgentRequest, models::ProviderSyncRequest};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
-use mo_core::model_catalog::ModelSelection;
+use mo_core::{
+    acp::AcpAgentIdentity,
+    model_catalog::{ModelSelection, ProviderSyncRequest},
+    session::{ChatMessage, NativeAgentRequest},
+};
 
 use super::{
     ExternalEditorLaunch, Model, Sender,
@@ -23,10 +25,7 @@ pub enum AppEffect {
     StartAcpSession {
         agent_id: String,
     },
-    SendAcpPrompt {
-        agent_id: String,
-        prompt: AcpPrompt,
-    },
+    SubmitAcpPrompt(AcpPromptSubmission),
     RespondAcpPermission {
         request_id: String,
         option_id: Option<String>,
@@ -48,6 +47,15 @@ pub enum AppEffect {
     RefreshModelProvider {
         request: ProviderSyncRequest,
     },
+}
+
+/// `AcpPromptSubmission` 保存消费层提交给 ACP runtime 的原始输入。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpPromptSubmission {
+    pub agent_id: String,
+    pub text: String,
+    pub current_dir: PathBuf,
+    pub identity: Box<AcpAgentIdentity>,
 }
 
 /// `AppEvent` 描述 TUI 模型可处理的外部事件。
@@ -550,9 +558,12 @@ impl Model {
                 .get(&agent_id)
                 .cloned()
                 .unwrap_or_default();
-            let prompt =
-                build_acp_prompt_from_composer_text(&content, self.acp_prompt_root(), &identity);
-            return Some(AppEffect::SendAcpPrompt { agent_id, prompt });
+            return Some(AppEffect::SubmitAcpPrompt(AcpPromptSubmission {
+                agent_id,
+                text: content,
+                current_dir: self.acp_prompt_root(),
+                identity: Box::new(identity),
+            }));
         }
 
         let selection = self.selected_model.clone()?;

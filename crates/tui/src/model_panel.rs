@@ -4,8 +4,9 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use ::mo_native_agent::models::ProviderSyncRequest;
-use mo_core::model_catalog::{ModelEntry, ModelProvider, ModelSelection, ModelSource};
+use mo_core::model_catalog::{
+    ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderSyncRequest,
+};
 
 use super::{
     AppEffect, Model,
@@ -656,9 +657,9 @@ fn wrapping_index(current: usize, len: usize, delta: isize) -> usize {
 mod tests {
     use super::*;
     use crate::{AppEvent, HeroOptions, ModelOptions};
-    use ::mo_acp::{AcpModelConfig, AcpModelOption};
-    use ::mo_native_agent::ProviderKind;
+    use mo_core::acp::{AcpModelConfig, AcpModelOption};
     use mo_core::model_catalog::{ModelCatalog, ModelProvider, ModelSource};
+    use mo_core::provider::ProviderKind;
 
     #[test]
     fn provider_refresh_success_replaces_models_and_drops_stale_selection() {

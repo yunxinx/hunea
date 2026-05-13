@@ -1,8 +1,8 @@
-use ::mo_native_agent::ProviderKind;
 use crossterm::event::{KeyCode, KeyEvent};
 use mo_core::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
+use mo_core::provider::ProviderKind;
 use mo_tui::{AppEffect, AppEvent, HeroOptions, Model, ModelOptions, theme::default_palette};
 use ratatui::{
     Terminal,

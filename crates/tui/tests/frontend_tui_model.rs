@@ -1,7 +1,10 @@
-use ::mo_native_agent::{ChatRole, ProviderApiKey, ProviderKind};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use mo_core::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
+};
+use mo_core::{
+    provider::{ProviderApiKey, ProviderKind},
+    session::ChatRole,
 };
 use mo_tui::{
     AppEffect, AppEvent, HeroOptions, Model, ModelOptions,

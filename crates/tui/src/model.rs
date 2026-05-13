@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 use std::{collections::BTreeMap, rc::Rc};
 
-use ::mo_acp::{AcpAgentIdentity, AcpAvailableCommand, AcpModelConfig, AcpTerminalSnapshot};
+use mo_core::acp::{AcpAgentIdentity, AcpAvailableCommand, AcpModelConfig, AcpTerminalSnapshot};
 use mo_core::{
     envinfo,
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
@@ -881,7 +881,10 @@ impl Model {
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
     }
 
-    pub(crate) fn append_acp_tool_call_from_runtime(&mut self, call: mo_acp::AcpToolCall) -> usize {
+    pub(crate) fn append_acp_tool_call_from_runtime(
+        &mut self,
+        call: mo_core::acp::AcpToolCall,
+    ) -> usize {
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let item_index = self.transcript_mut().append_acp_tool_call(call);
         for snapshot in self
@@ -909,7 +912,7 @@ impl Model {
     pub(crate) fn update_acp_tool_call_from_runtime(
         &mut self,
         item_index: usize,
-        update: mo_acp::AcpToolCallUpdate,
+        update: mo_core::acp::AcpToolCallUpdate,
     ) -> bool {
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         if !self

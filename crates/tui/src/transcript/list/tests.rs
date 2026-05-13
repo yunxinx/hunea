@@ -13,7 +13,7 @@ use crate::{
     },
     theme::{default_palette, terminal_default_palette},
 };
-use ::mo_acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
+use mo_core::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
 
 #[test]
 fn render_returns_content_lines_and_line_count() {

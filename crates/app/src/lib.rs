@@ -14,9 +14,13 @@ use mo_core::{
 };
 use mo_native_agent::models::{self as native_models, LoadedModelCatalog};
 use mo_tui::{
-    self, HeroOptions, Model, ModelOptions, ReasoningDisplayMode, RuntimeOptions,
-    RuntimeRequestPolicy, StatusLineItem, StyleMode,
+    self, HeroOptions, Model, ModelOptions, ReasoningDisplayMode, RuntimeRequestPolicy,
+    StatusLineItem, StyleMode,
 };
+
+mod runtime;
+
+use runtime::{AppRuntimeDriver, AppRuntimeOptions};
 
 /// `AppRunError` 区分用户配置错误与运行期错误，便于 CLI 使用不同输出策略。
 #[derive(Debug)]
@@ -52,13 +56,14 @@ pub fn run_with_writer<W: Write>(
 ) -> Result<()> {
     let loaded_models = native_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
-    let model = mo_tui::run_with_runtime_options(
+    let mut runtime_driver = AppRuntimeDriver::new(AppRuntimeOptions {
+        model_config_path: loaded_models.source_path.clone(),
+        ..AppRuntimeOptions::default()
+    });
+    let model = mo_tui::run_with_runtime_driver(
         HeroOptions::default(),
         model_options_from_config_and_models(tui_config, &loaded_models, &loaded_phrases),
-        RuntimeOptions {
-            model_config_path: loaded_models.source_path.clone(),
-            ..RuntimeOptions::default()
-        },
+        &mut runtime_driver,
     )
     .wrap_err("failed to run tui application")?;
     write_terminal_replay_on_exit(writer, &model, preserve_ansi, tui_config)
@@ -72,10 +77,14 @@ pub fn run_with_config_writer<W: Write>(
 ) -> Result<()> {
     let loaded_models = native_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
-    let model = mo_tui::run_with_runtime_options(
+    let mut runtime_driver = AppRuntimeDriver::new(runtime_options_from_app_config_and_models(
+        config,
+        &loaded_models,
+    ));
+    let model = mo_tui::run_with_runtime_driver(
         HeroOptions::default(),
         model_options_from_app_config_and_models(config, &loaded_models, &loaded_phrases),
-        runtime_options_from_app_config_and_models(config, &loaded_models),
+        &mut runtime_driver,
     )
     .wrap_err("failed to run tui application")?;
     write_terminal_replay_on_exit(writer, &model, preserve_ansi, &config.tui)
@@ -169,7 +178,7 @@ fn model_options_from_app_config(config: &Config) -> ModelOptions {
 }
 
 #[cfg(test)]
-fn runtime_options_from_app_config(config: &Config) -> RuntimeOptions {
+fn runtime_options_from_app_config(config: &Config) -> AppRuntimeOptions {
     runtime_options_from_app_config_and_models(config, &LoadedModelCatalog::default())
 }
 
@@ -198,8 +207,8 @@ fn model_options_from_app_config_and_models(
 fn runtime_options_from_app_config_and_models(
     config: &Config,
     loaded_models: &LoadedModelCatalog,
-) -> RuntimeOptions {
-    RuntimeOptions {
+) -> AppRuntimeOptions {
+    AppRuntimeOptions {
         acp_sessions: acp_session_catalog_from_config(&config.acp),
         model_config_path: loaded_models.source_path.clone(),
         runtime_request_policy: runtime_request_policy_from_config(&config.runtime),

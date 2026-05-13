@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod envinfo;
 pub mod model_catalog;
 pub mod phrases;

@@ -7,15 +7,14 @@ use tokio_util::sync::CancellationToken;
 
 use mo_core::{
     request_policy::RuntimeRequestPolicy,
-    session::RuntimeTarget,
-    tools::{RuntimeToolCall, RuntimeToolExecutorRegistry, RuntimeToolResult},
+    session::{NativeAgentEvent, RuntimeTarget},
+    tools::RuntimeToolExecutorRegistry,
 };
 
 use super::{
-    NativeAgentError, NativeAgentRequest, NativeAgentResponse, response::NativeAgentProgress,
+    NativeAgentError, NativeAgentRequest, response::NativeAgentProgress,
     tool_loop::send_agent_loop_with_cancellation_and_progress,
 };
-use crate::NativeLlmPerformanceMetrics;
 
 /// `NativeAgentRuntimeState` 管理内置 native agent 请求的后台 worker 与取消状态。
 #[derive(Default)]
@@ -111,44 +110,6 @@ impl NativeAgentRuntimeState {
                 })
             }
         }
-    }
-}
-
-/// `NativeAgentEvent` 是 native agent worker 返回给 TUI runner 的内部事件。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NativeAgentEvent {
-    Retrying {
-        message: String,
-    },
-    OutputTokenEstimate {
-        total_tokens: usize,
-    },
-    Thinking {
-        is_thinking: bool,
-    },
-    ToolExecutionStarted {
-        call: RuntimeToolCall,
-    },
-    ToolExecutionFinished {
-        call: RuntimeToolCall,
-        result: RuntimeToolResult,
-    },
-    Finished {
-        response: NativeAgentResponse,
-        metrics: Option<NativeLlmPerformanceMetrics>,
-    },
-    Failed {
-        message: String,
-    },
-    Interrupted,
-}
-
-impl NativeAgentEvent {
-    fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Finished { .. } | Self::Failed { .. } | Self::Interrupted
-        )
     }
 }
 
@@ -268,7 +229,7 @@ async fn retry_native_agent_after_attempt(
 mod tests {
     use std::sync::mpsc;
 
-    use crate::{ChatMessage, NativeAgentRequest, ProviderKind};
+    use crate::{ChatMessage, NativeAgentRequest, NativeAgentResponse, ProviderKind};
     use mo_core::{
         request_policy::RuntimeRequestPolicy, session::RuntimeTarget,
         tools::RuntimeToolExecutorRegistry,
@@ -295,6 +256,76 @@ mod tests {
         );
         assert!(!runtime.is_running());
         assert!(runtime.current_target().is_none());
+    }
+
+    #[test]
+    fn native_agent_runtime_keeps_receiver_after_retry_event() {
+        let (sender, receiver) = mpsc::channel();
+        let mut runtime = NativeAgentRuntimeState {
+            receiver: Some(receiver),
+            cancellation: Some(CancellationToken::new()),
+            target: Some(RuntimeTarget::native_agent("provider", "model")),
+        };
+
+        sender
+            .send(NativeAgentEvent::Retrying {
+                message: "Reconnecting... 1/3".to_string(),
+            })
+            .expect("retry event should be queued");
+
+        assert_eq!(
+            runtime.try_recv_event(),
+            Some(NativeAgentEvent::Retrying {
+                message: "Reconnecting... 1/3".to_string(),
+            })
+        );
+        assert!(runtime.is_running());
+
+        sender
+            .send(NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
+                    content: "完成".to_string(),
+                    reasoning_content: None,
+                    reasoning_duration: None,
+                    ..Default::default()
+                },
+                metrics: None,
+            })
+            .expect("finish event should be queued");
+
+        assert_eq!(
+            runtime.try_recv_event(),
+            Some(NativeAgentEvent::Finished {
+                response: NativeAgentResponse {
+                    content: "完成".to_string(),
+                    reasoning_content: None,
+                    reasoning_duration: None,
+                    ..Default::default()
+                },
+                metrics: None,
+            })
+        );
+        assert!(!runtime.is_running());
+    }
+
+    #[test]
+    fn native_agent_runtime_keeps_receiver_after_token_estimate_event() {
+        let (sender, receiver) = mpsc::channel();
+        let mut runtime = NativeAgentRuntimeState {
+            receiver: Some(receiver),
+            cancellation: Some(CancellationToken::new()),
+            target: Some(RuntimeTarget::native_agent("provider", "model")),
+        };
+
+        sender
+            .send(NativeAgentEvent::OutputTokenEstimate { total_tokens: 12 })
+            .expect("token estimate event should be queued");
+
+        assert_eq!(
+            runtime.try_recv_event(),
+            Some(NativeAgentEvent::OutputTokenEstimate { total_tokens: 12 })
+        );
+        assert!(runtime.is_running());
     }
 
     #[tokio::test]

@@ -1,27 +1,10 @@
-use std::path::PathBuf;
-
 use crate::{Model, runtime::RuntimeEventApply};
-use ::mo_native_agent::{NativeAgentEvent, NativeAgentRequest, NativeAgentRuntimeState};
-use mo_core::request_policy::RuntimeRequestPolicy;
-use mo_core::session::{RuntimeEvent, RuntimeRequestMetrics, RuntimeTarget};
-use mo_core::tools::builtin::workspace_readonly_tool_registry;
-use mo_core::tools::{RuntimeToolCall, RuntimeToolExecutorRegistry, RuntimeToolResult};
+use mo_core::session::{
+    NativeAgentEvent, NativeAgentRequest, RuntimeEvent, RuntimeRequestMetrics, RuntimeTarget,
+};
+use mo_core::tools::{RuntimeToolCall, RuntimeToolResult};
 
-pub(super) fn drain_native_agent_runtime_events(
-    model: &mut Model,
-    native_agent_runtime: &mut NativeAgentRuntimeState,
-) -> bool {
-    let mut changed = false;
-    loop {
-        let target = native_agent_runtime.current_target().cloned();
-        let Some(event) = native_agent_runtime.try_recv_event() else {
-            break;
-        };
-        apply_native_agent_event(model, target, event);
-        changed = true;
-    }
-    changed
-}
+use super::RuntimeDriver;
 
 pub(super) fn apply_native_agent_event(
     model: &mut Model,
@@ -71,32 +54,20 @@ pub(super) fn apply_native_agent_event(
 
 pub(super) fn run_send_native_agent_effect(
     model: &mut Model,
-    native_agent_runtime: &mut NativeAgentRuntimeState,
+    runtime_driver: &mut impl RuntimeDriver,
     request: NativeAgentRequest,
-    request_policy: RuntimeRequestPolicy,
 ) {
-    if native_agent_runtime.is_running() {
-        model.show_transient_status_notice("Chat request is already running");
-        return;
+    match runtime_driver.send_native_agent(request) {
+        Ok(activity_label) => model.show_stream_activity(activity_label),
+        Err(message) => model.show_transient_status_notice(&message),
     }
-
-    let activity_label = request.llm_request().model_id.clone();
-    let tools = native_agent_workspace_tools();
-    let request = request.with_tools(tools.definitions());
-    native_agent_runtime.start(request, tools, request_policy);
-    model.show_stream_activity(activity_label);
-}
-
-pub(super) fn native_agent_workspace_tools() -> RuntimeToolExecutorRegistry {
-    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    workspace_readonly_tool_registry(root)
 }
 
 pub(super) fn run_interrupt_native_agent_effect(
     model: &mut Model,
-    native_agent_runtime: &mut NativeAgentRuntimeState,
+    runtime_driver: &mut impl RuntimeDriver,
 ) -> bool {
-    if native_agent_runtime.interrupt() {
+    if runtime_driver.interrupt_native_agent() {
         model.clear_stream_activity();
         model.append_system_message_from_runtime("Chat interrupted");
         return true;

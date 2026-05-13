@@ -286,10 +286,8 @@ fn append_agent_entry_lines(
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol::schema::AgentCapabilities;
-
     use crate::{AppEvent, HeroOptions, ModelOptions, theme::default_palette};
-    use ::mo_acp::AcpAgentIdentity;
+    use mo_core::acp::{AcpAgentCapabilities, AcpAgentIdentity};
 
     use super::*;
 
@@ -367,7 +365,7 @@ mod tests {
                 name: Some("kimi".to_string()),
                 title: Some("Kimi Code CLI".to_string()),
                 version: Some("1.39.0".to_string()),
-                agent_capabilities: AgentCapabilities::new(),
+                agent_capabilities: AcpAgentCapabilities::default(),
             },
         );
         model.open_acp_panel();

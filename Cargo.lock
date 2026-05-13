@@ -1979,16 +1979,13 @@ dependencies = [
 name = "mo-tui"
 version = "0.1.0"
 dependencies = [
- "agent-client-protocol",
  "arboard",
  "base64",
  "color-eyre",
  "criterion",
  "crossterm",
  "diffy",
- "mo-acp",
  "mo-core",
- "mo-native-agent",
  "percent-encoding",
  "pulldown-cmark",
  "ratatui",

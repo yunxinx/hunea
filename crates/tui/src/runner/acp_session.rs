@@ -3,25 +3,24 @@ use std::{
     time::{Duration, Instant},
 };
 
-use color_eyre::eyre::Result;
-
 use crate::{
-    Model, RequestMetrics, acp::AcpPermissionPanelRequest, acp_tool_preview::ToolApprovalPreview,
-    runtime::RuntimeEventApply,
+    AcpPromptSubmission, Model, RequestMetrics, acp::AcpPermissionPanelRequest,
+    acp_tool_preview::ToolApprovalPreview, runtime::RuntimeEventApply,
 };
-use ::mo_acp::{
-    AcpAgentIdentity, AcpPermissionOptionKind, AcpPermissionRequest, AcpPrompt, AcpSessionCommand,
-    AcpSessionEvent, AcpSessionWorker, AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent,
-    AcpToolCallStatus, AcpToolCallUpdate, AcpToolKind,
+use mo_core::acp::{
+    AcpAgentIdentity, AcpPermissionOptionKind, AcpPermissionRequest, AcpSessionEvent,
+    AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolCallUpdate,
+    AcpToolKind,
 };
 use mo_core::session::{RuntimeEvent, RuntimeTarget};
 use mo_core::token_count::StreamingTokenProgress;
 
-use super::RuntimeOptions;
+#[cfg(test)]
+use super::NoopRuntimeDriver;
+use super::RuntimeDriver;
 
 #[derive(Default)]
 pub(super) struct AcpRuntimeState {
-    worker: Option<AcpSessionWorker>,
     response_buffer: String,
     reasoning_buffer: String,
     reasoning_started_at: Option<Instant>,
@@ -45,11 +44,7 @@ enum PromptDiscardReason {
 }
 
 impl AcpRuntimeState {
-    pub(super) fn should_poll_events(&self) -> bool {
-        self.worker.is_some()
-    }
-
-    fn start(&mut self, command: AcpSessionCommand) {
+    fn reset_for_new_session(&mut self) {
         self.response_buffer.clear();
         self.reasoning_buffer.clear();
         self.reasoning_started_at = None;
@@ -64,7 +59,6 @@ impl AcpRuntimeState {
         self.terminal_active_states.clear();
         self.tool_call_token_text.clear();
         self.rejected_permission_tool_calls.clear();
-        self.worker = Some(AcpSessionWorker::start(command));
     }
 
     fn reset_response_buffer(&mut self) {
@@ -256,9 +250,6 @@ impl AcpRuntimeState {
         self.first_token_at = None;
         self.discard_in_flight_prompt = Some(PromptDiscardReason::Cancelled);
         self.tool_call_token_text.clear();
-        if let Some(worker) = self.worker.as_ref() {
-            let _ = worker.cancel_prompt();
-        }
         true
     }
 
@@ -345,53 +336,6 @@ impl AcpRuntimeState {
         self.tool_call_terminal_ids.clear();
         self.tool_call_token_text.clear();
     }
-
-    fn send_prompt(&self, agent_id: &str, prompt: AcpPrompt) -> Result<(), String> {
-        let Some(worker) = self.worker.as_ref() else {
-            return Err(format!("ACP session is not ready: {agent_id}"));
-        };
-        if worker.agent_id() != agent_id {
-            return Err(format!("ACP session is not active: {agent_id}"));
-        }
-
-        worker
-            .send_prompt(prompt)
-            .map_err(|error| error.to_string())
-    }
-
-    fn respond_permission(
-        &self,
-        request_id: &str,
-        option_id: Option<String>,
-    ) -> Result<(), String> {
-        let Some(worker) = self.worker.as_ref() else {
-            return Err("ACP session is not ready".to_string());
-        };
-
-        worker
-            .respond_permission(request_id, option_id)
-            .map_err(|error| error.to_string())
-    }
-
-    fn set_model(&self, config_id: Option<String>, value: String) -> Result<(), String> {
-        let Some(worker) = self.worker.as_ref() else {
-            return Err("ACP session is not ready".to_string());
-        };
-
-        worker
-            .set_model(config_id, value)
-            .map_err(|error| error.to_string())
-    }
-
-    fn stop_background_terminals(&self) -> Result<(), String> {
-        let Some(worker) = self.worker.as_ref() else {
-            return Err("ACP session is not ready".to_string());
-        };
-
-        worker
-            .stop_background_terminals()
-            .map_err(|error| error.to_string())
-    }
 }
 
 const AGENT_FACING_PERMISSION_REJECTION_NOTICE: &str = concat!(
@@ -453,35 +397,28 @@ fn is_agent_facing_permission_rejection_tool_content(content: &AcpToolCallConten
     matches!(content, AcpToolCallContent::Text(text) if is_agent_facing_permission_rejection_notice(text))
 }
 
-fn is_agent_facing_permission_rejection_raw_value(raw_value: &mo_acp::AcpToolCallRawValue) -> bool {
+fn is_agent_facing_permission_rejection_raw_value(
+    raw_value: &mo_core::acp::AcpToolCallRawValue,
+) -> bool {
     raw_value
         .display_text()
         .is_some_and(|text| is_agent_facing_permission_rejection_notice(&text))
 }
 
-pub(super) fn drain_acp_runtime_events(
-    model: &mut Model,
-    acp_runtime: &mut AcpRuntimeState,
-) -> bool {
-    let Some(worker) = acp_runtime.worker.as_ref() else {
-        return false;
-    };
-
-    let mut events = Vec::new();
-    while let Some(event) = worker.try_recv_event() {
-        events.push(event);
-    }
-
-    let changed = !events.is_empty();
-    for event in events {
-        apply_acp_session_event(model, acp_runtime, event);
-    }
-    changed
-}
-
+#[cfg(test)]
 pub(super) fn apply_acp_session_event(
     model: &mut Model,
     acp_runtime: &mut AcpRuntimeState,
+    event: AcpSessionEvent,
+) {
+    let mut runtime_driver = NoopRuntimeDriver;
+    apply_acp_session_event_with_driver(model, acp_runtime, &mut runtime_driver, event);
+}
+
+pub(super) fn apply_acp_session_event_with_driver(
+    model: &mut Model,
+    acp_runtime: &mut AcpRuntimeState,
+    runtime_driver: &mut impl RuntimeDriver,
     event: AcpSessionEvent,
 ) {
     match event {
@@ -494,7 +431,7 @@ pub(super) fn apply_acp_session_event(
             );
             model.show_transient_status_notice(&format!(
                 "ACP session ready: {}",
-                ::mo_acp::agent_display_name(&outcome)
+                mo_core::acp::agent_display_name(&outcome)
             ));
         }
         AcpSessionEvent::StartFailed { message, .. } => {
@@ -646,7 +583,7 @@ pub(super) fn apply_acp_session_event(
             request,
         } => {
             if acp_runtime.should_discard_prompt_output() {
-                let _ = acp_runtime.respond_permission(
+                let _ = runtime_driver.respond_acp_permission(
                     &request.request_id,
                     acp_runtime.permission_option_id_for_discarded_prompt(&request),
                 );
@@ -985,32 +922,31 @@ fn flush_acp_response_buffer(model: &mut Model, acp_runtime: &mut AcpRuntimeStat
 
 pub(super) fn run_start_acp_session_effect(
     model: &mut Model,
-    runtime_options: &RuntimeOptions,
     acp_runtime: &mut AcpRuntimeState,
+    runtime_driver: &mut impl RuntimeDriver,
     agent_id: &str,
-) -> Result<()> {
+) {
     model.clear_acp_available_commands(agent_id);
 
-    let Some(command) = runtime_options.acp_sessions.command(agent_id) else {
-        model.show_transient_status_notice(&format!(
-            "ACP agent needs installation before starting: {agent_id}"
-        ));
-        return Ok(());
-    };
-
-    acp_runtime.start(command.clone());
-    model.set_acp_current_model(command.default_model.clone());
-    model.show_transient_status_notice(&format!("Starting ACP agent: {agent_id}"));
-    Ok(())
+    match runtime_driver.start_acp_session(agent_id) {
+        Ok(start) => {
+            acp_runtime.reset_for_new_session();
+            model.set_acp_current_model(start.default_model);
+            model.show_transient_status_notice(&format!("Starting ACP agent: {agent_id}"));
+        }
+        Err(message) => {
+            model.show_transient_status_notice(&message);
+        }
+    }
 }
 
 pub(super) fn run_send_acp_prompt_effect(
     model: &mut Model,
     acp_runtime: &mut AcpRuntimeState,
-    agent_id: &str,
-    prompt: AcpPrompt,
+    runtime_driver: &mut impl RuntimeDriver,
+    submission: AcpPromptSubmission,
 ) {
-    if let Err(message) = acp_runtime.send_prompt(agent_id, prompt) {
+    if let Err(message) = runtime_driver.submit_acp_prompt(submission) {
         model.clear_stream_activity();
         model.show_transient_status_notice(&message);
     } else {
@@ -1021,6 +957,7 @@ pub(super) fn run_send_acp_prompt_effect(
 pub(super) fn run_respond_acp_permission_effect(
     model: &mut Model,
     acp_runtime: &mut AcpRuntimeState,
+    runtime_driver: &mut impl RuntimeDriver,
     request_id: &str,
     option_id: Option<String>,
     is_rejection: bool,
@@ -1030,18 +967,18 @@ pub(super) fn run_respond_acp_permission_effect(
         acp_runtime.suppress_rejected_permission_notice_for_tool_call(rejected_tool_call_id);
     }
 
-    if let Err(message) = acp_runtime.respond_permission(request_id, option_id) {
+    if let Err(message) = runtime_driver.respond_acp_permission(request_id, option_id) {
         model.show_transient_status_notice(&message);
     }
 }
 
 pub(super) fn run_set_acp_model_effect(
     model: &mut Model,
-    acp_runtime: &AcpRuntimeState,
+    runtime_driver: &mut impl RuntimeDriver,
     config_id: Option<String>,
     value: String,
 ) {
-    if let Err(message) = acp_runtime.set_model(config_id, value) {
+    if let Err(message) = runtime_driver.set_acp_model(config_id, value) {
         if let Some(agent_id) = model.selected_acp_agent().map(str::to_string) {
             model.rollback_pending_acp_model_change(&agent_id);
         }
@@ -1051,9 +988,9 @@ pub(super) fn run_set_acp_model_effect(
 
 pub(super) fn run_stop_acp_background_terminals_effect(
     model: &mut Model,
-    acp_runtime: &AcpRuntimeState,
+    runtime_driver: &mut impl RuntimeDriver,
 ) {
-    if let Err(message) = acp_runtime.stop_background_terminals() {
+    if let Err(message) = runtime_driver.stop_acp_background_terminals() {
         model.show_transient_status_notice(&message);
     }
 }
@@ -1061,13 +998,15 @@ pub(super) fn run_stop_acp_background_terminals_effect(
 pub(super) fn run_interrupt_acp_prompt_effect(
     model: &mut Model,
     acp_runtime: &mut AcpRuntimeState,
+    runtime_driver: &mut impl RuntimeDriver,
 ) {
     if !acp_runtime.interrupt_prompt() {
         return;
     }
 
+    let _ = runtime_driver.cancel_acp_prompt();
     if let Some(pending) = model.pending_acp_permission.take() {
-        let _ = acp_runtime.respond_permission(&pending.request_id, None);
+        let _ = runtime_driver.respond_acp_permission(&pending.request_id, None);
         model.close_tool_approval_panel();
     }
     fail_tracked_acp_tool_calls(model, acp_runtime, "Interrupted");
@@ -1076,9 +1015,9 @@ pub(super) fn run_interrupt_acp_prompt_effect(
 }
 
 pub(super) fn acp_reject_option_id_for_stale_discard(
-    request: &mo_acp::AcpPermissionRequest,
+    request: &mo_core::acp::AcpPermissionRequest,
 ) -> Option<String> {
-    use ::mo_acp::AcpPermissionOptionKind;
+    use mo_core::acp::AcpPermissionOptionKind;
 
     request
         .options

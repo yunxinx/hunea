@@ -117,7 +117,7 @@ mod tests {
 
     use super::*;
     use crate::{HeroOptions, Model, tool_result::TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL};
-    use ::mo_acp::{AcpToolCall, AcpToolCallStatus, AcpToolKind};
+    use mo_core::acp::{AcpToolCall, AcpToolCallStatus, AcpToolKind};
 
     #[test]
     fn static_model_blocks_without_periodic_polling() {

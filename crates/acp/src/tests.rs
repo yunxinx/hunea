@@ -8,6 +8,7 @@ use crate::{
     AcpSessionCatalogConfig, AcpSessionResolveError, build_acp_prompt_from_composer_text,
     resolve_session_command,
 };
+use mo_core::acp::{AcpAgentCapabilities, AcpPromptCapabilities};
 
 #[test]
 fn resolve_custom_agent_session_command() {
@@ -121,15 +122,15 @@ fn acp_config_with_server(
 
 #[test]
 fn acp_agent_identity_reports_prompt_capabilities() {
-    use agent_client_protocol::schema::{AgentCapabilities, PromptCapabilities};
-
     let identity = AcpAgentIdentity {
-        agent_capabilities: AgentCapabilities::new().prompt_capabilities(
-            PromptCapabilities::new()
-                .image(true)
-                .audio(true)
-                .embedded_context(true),
-        ),
+        agent_capabilities: AcpAgentCapabilities {
+            prompt_capabilities: AcpPromptCapabilities {
+                image: true,
+                audio: true,
+                embedded_context: true,
+            },
+            ..AcpAgentCapabilities::default()
+        },
         ..AcpAgentIdentity::default()
     };
 
@@ -140,21 +141,21 @@ fn acp_agent_identity_reports_prompt_capabilities() {
 
 #[test]
 fn acp_prompt_builder_embeds_supported_image_audio_and_text_resources() {
-    use agent_client_protocol::schema::{
-        AgentCapabilities, ContentBlock, EmbeddedResourceResource, PromptCapabilities,
-    };
+    use agent_client_protocol::schema::{ContentBlock, EmbeddedResourceResource};
 
     let root = AcpPromptTempFileTree::new("rich-blocks");
     root.write_file("assets/sample.png", &[0x89, b'P', b'N', b'G']);
     root.write_file("audio/sample.wav", b"RIFF");
     root.write_file("src/code.py", b"print('hi')\n");
     let identity = AcpAgentIdentity {
-        agent_capabilities: AgentCapabilities::new().prompt_capabilities(
-            PromptCapabilities::new()
-                .image(true)
-                .audio(true)
-                .embedded_context(true),
-        ),
+        agent_capabilities: AcpAgentCapabilities {
+            prompt_capabilities: AcpPromptCapabilities {
+                image: true,
+                audio: true,
+                embedded_context: true,
+            },
+            ..AcpAgentCapabilities::default()
+        },
         ..AcpAgentIdentity::default()
     };
 
@@ -222,13 +223,18 @@ fn acp_prompt_builder_downgrades_missing_optional_capability_to_resource_link() 
 
 #[test]
 fn acp_prompt_builder_downgrades_unreadable_text_resource_to_resource_link() {
-    use agent_client_protocol::schema::{AgentCapabilities, ContentBlock, PromptCapabilities};
+    use agent_client_protocol::schema::ContentBlock;
 
     let root = AcpPromptTempFileTree::new("non-utf8-resource");
     root.write_file("src/binary.py", &[0xff, 0xfe, 0xfd]);
     let identity = AcpAgentIdentity {
-        agent_capabilities: AgentCapabilities::new()
-            .prompt_capabilities(PromptCapabilities::new().embedded_context(true)),
+        agent_capabilities: AcpAgentCapabilities {
+            prompt_capabilities: AcpPromptCapabilities {
+                embedded_context: true,
+                ..AcpPromptCapabilities::default()
+            },
+            ..AcpAgentCapabilities::default()
+        },
         ..AcpAgentIdentity::default()
     };
 

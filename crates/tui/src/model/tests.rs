@@ -2,12 +2,12 @@ use std::rc::Rc;
 
 use super::*;
 use crate::{AppEffect, AppEvent, Sender, StyleMode, document::DocumentAnchorRegion};
-use ::mo_native_agent::ProviderKind;
 use crossterm::event::{KeyCode, KeyEvent};
 use mo_core::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
 use mo_core::phrases::StatusPhraseOrder;
+use mo_core::provider::ProviderKind;
 use ratatui::{Terminal, backend::TestBackend};
 use std::path::{Path, PathBuf};
 
@@ -1997,13 +1997,11 @@ fn enter_acp_prompt_starts_activity_before_worker_ack() {
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    assert_eq!(
-        effect,
-        Some(AppEffect::SendAcpPrompt {
-            agent_id: "Kimi Code CLI".to_string(),
-            prompt: mo_acp::AcpPrompt::from_text("hello acp"),
-        })
-    );
+    let Some(AppEffect::SubmitAcpPrompt(submission)) = effect else {
+        panic!("expected ACP prompt submission effect");
+    };
+    assert_eq!(submission.agent_id, "Kimi Code CLI");
+    assert_eq!(submission.text, "hello acp");
     assert!(
         model
             .current_stream_activity_render_result()
@@ -2013,8 +2011,8 @@ fn enter_acp_prompt_starts_activity_before_worker_ack() {
 }
 
 #[test]
-fn enter_acp_prompt_builds_structured_blocks_from_selected_agent_capabilities() {
-    use agent_client_protocol::schema::{AgentCapabilities, PromptCapabilities};
+fn enter_acp_prompt_submits_root_and_selected_agent_capabilities() {
+    use mo_core::acp::{AcpAgentCapabilities, AcpPromptCapabilities};
 
     let root = TempFileTree::new("acp-structured-prompt");
     root.write_file_with_content("assets/sample.png", &[0x89, b'P', b'N', b'G']);
@@ -2033,10 +2031,16 @@ fn enter_acp_prompt_builds_structured_blocks_from_selected_agent_capabilities() 
     model.selected_acp_agent = Some("fake".to_string());
     model.apply_acp_agent_identity(
         "fake",
-        mo_acp::AcpAgentIdentity {
-            agent_capabilities: AgentCapabilities::new()
-                .prompt_capabilities(PromptCapabilities::new().image(true).embedded_context(true)),
-            ..mo_acp::AcpAgentIdentity::default()
+        mo_core::acp::AcpAgentIdentity {
+            agent_capabilities: AcpAgentCapabilities {
+                prompt_capabilities: AcpPromptCapabilities {
+                    image: true,
+                    embedded_context: true,
+                    ..AcpPromptCapabilities::default()
+                },
+                ..AcpAgentCapabilities::default()
+            },
+            ..mo_core::acp::AcpAgentIdentity::default()
         },
     );
     model
@@ -2044,27 +2048,15 @@ fn enter_acp_prompt_builds_structured_blocks_from_selected_agent_capabilities() 
         .insert_text("review @assets/sample.png @src/code.py");
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
-    let Some(AppEffect::SendAcpPrompt { agent_id, prompt }) = effect else {
-        panic!("expected structured ACP prompt effect");
+    let Some(AppEffect::SubmitAcpPrompt(submission)) = effect else {
+        panic!("expected ACP prompt submission effect");
     };
 
-    assert_eq!(agent_id, "fake");
-    let blocks = prompt.blocks();
-    assert_eq!(blocks.len(), 4);
-    assert!(matches!(
-        &blocks[1],
-        mo_acp::AcpPromptBlock::Image { data_base64, mime_type, uri }
-            if mime_type == "image/png"
-                && data_base64 == "iVBORw=="
-                && uri.as_deref() == Some(root.file_uri("assets/sample.png").as_str())
-    ));
-    match &blocks[3] {
-        mo_acp::AcpPromptBlock::ResourceText { uri, text, .. } => {
-            assert_eq!(uri, &root.file_uri("src/code.py"));
-            assert_eq!(text, "print('hi')\n");
-        }
-        other => panic!("expected resource block, got {other:?}"),
-    }
+    assert_eq!(submission.agent_id, "fake");
+    assert_eq!(submission.text, "review @assets/sample.png @src/code.py");
+    assert_eq!(submission.current_dir, root.path());
+    assert!(submission.identity.supports_image());
+    assert!(submission.identity.supports_embedded_context());
 }
 
 #[test]
@@ -2255,12 +2247,6 @@ impl TempFileTree {
             std::fs::create_dir_all(parent).expect("temp parent should be creatable");
         }
         std::fs::write(path, content).expect("temp file should be writable");
-    }
-
-    fn file_uri(&self, relative: &str) -> String {
-        url::Url::from_file_path(self.path.join(relative))
-            .expect("temp file path should convert to URI")
-            .to_string()
     }
 }
 

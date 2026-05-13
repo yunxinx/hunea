@@ -9,7 +9,7 @@ use crate::{
     theme::TerminalPalette,
     transcript::markdown_highlight::HighlightChunk,
 };
-use ::mo_acp::{
+use mo_core::acp::{
     AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent, AcpToolCallLocation, AcpToolCallStatus,
     AcpToolKind,
 };

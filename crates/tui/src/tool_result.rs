@@ -23,11 +23,6 @@ use super::{
         wrap_prompt_visual_lines,
     },
 };
-use ::mo_acp::{
-    AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolCallUpdate,
-};
-#[cfg(test)]
-use ::mo_acp::{AcpToolCallLocation, AcpToolKind};
 use acp::{
     AcpDiffDetailLine, AcpToolCallDetailBlock, acp_diff_line_prefix,
     acp_read_tool_call_title_chunks, acp_tool_call_content_byte_len, acp_tool_call_detail_blocks,
@@ -36,6 +31,11 @@ use acp::{
     acp_tool_call_status_color, acp_write_tool_call_title_chunks, active_marker_visible_at,
     is_acp_read_tool_call, style_for_color,
 };
+use mo_core::acp::{
+    AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolCallUpdate,
+};
+#[cfg(test)]
+use mo_core::acp::{AcpToolCallLocation, AcpToolKind};
 
 const TOOL_RESULT_PREFIX: &str = "● ";
 const TOOL_RESULT_CONTINUATION_PREFIX: &str = "  ";
@@ -1534,7 +1534,7 @@ mod tests {
             ToolActivityRenderMode::Compact,
         );
         assert!(
-            item.set_acp_terminal_snapshot_for_test(mo_acp::AcpTerminalSnapshot {
+            item.set_acp_terminal_snapshot_for_test(mo_core::acp::AcpTerminalSnapshot {
                 terminal_id: "term-1".to_string(),
                 command: Some("cargo check".to_string()),
                 cwd: None,

@@ -11,7 +11,7 @@ use super::{
     response::{NativeAgentCompletion, NativeAgentResponse},
     tool_mapping::{genai_tools_for_registry, runtime_tool_call_from_genai},
 };
-use crate::{NativeLlmPerformanceMetrics, NativeLlmProgress};
+use crate::{NativeLlmPerformanceMetrics, NativeLlmProgress, llm::ChatMessageGenAiExt};
 use mo_core::{token_count::StreamingTokenProgress, tools::RuntimeToolCall};
 
 pub(crate) fn chat_request_for_agent(request: &NativeAgentRequest) -> ChatRequest {

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use ::mo_acp::{
+use mo_core::acp::{
     AcpToolCall, AcpToolCallContent, AcpToolCallRawValue, AcpToolCallStatus, AcpToolCallUpdate,
     AcpToolKind,
 };

@@ -7,37 +7,9 @@ use std::{
     },
 };
 
-use super::AcpToolCallUpdate;
-use mo_core::session::{
-    RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,
+pub use mo_core::acp::{
+    AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest, AcpToolCallUpdate,
 };
-
-/// `AcpPermissionRequest` 是传给 TUI 的 ACP 权限确认请求。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AcpPermissionRequest {
-    pub request_id: String,
-    pub title: Option<String>,
-    pub tool_call: AcpToolCallUpdate,
-    pub options: Vec<AcpPermissionOption>,
-}
-
-/// `AcpPermissionOption` 描述权限确认里用户可选择的一项。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AcpPermissionOption {
-    pub option_id: String,
-    pub name: String,
-    pub kind: AcpPermissionOptionKind,
-}
-
-/// `AcpPermissionOptionKind` 用于 TUI 选择默认允许/拒绝选项。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcpPermissionOptionKind {
-    AllowOnce,
-    AllowAlways,
-    RejectOnce,
-    RejectAlways,
-    Unknown,
-}
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct AcpPermissionRegistry {
@@ -119,38 +91,6 @@ pub(crate) fn acp_permission_request_from_sdk(
                 kind: acp_permission_option_kind(option.kind),
             })
             .collect(),
-    }
-}
-
-impl From<AcpPermissionRequest> for RuntimePermissionRequest {
-    fn from(request: AcpPermissionRequest) -> Self {
-        RuntimePermissionRequest::new(
-            request.request_id,
-            request.title,
-            request
-                .options
-                .into_iter()
-                .map(RuntimePermissionOption::from)
-                .collect(),
-        )
-    }
-}
-
-impl From<AcpPermissionOption> for RuntimePermissionOption {
-    fn from(option: AcpPermissionOption) -> Self {
-        RuntimePermissionOption::new(option.option_id, option.name, option.kind.into())
-    }
-}
-
-impl From<AcpPermissionOptionKind> for RuntimePermissionOptionKind {
-    fn from(kind: AcpPermissionOptionKind) -> Self {
-        match kind {
-            AcpPermissionOptionKind::AllowOnce => Self::AllowOnce,
-            AcpPermissionOptionKind::AllowAlways => Self::AllowAlways,
-            AcpPermissionOptionKind::RejectOnce => Self::RejectOnce,
-            AcpPermissionOptionKind::RejectAlways => Self::RejectAlways,
-            AcpPermissionOptionKind::Unknown => Self::Unknown,
-        }
     }
 }
 

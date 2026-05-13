@@ -57,11 +57,12 @@ pub use hero::{
 pub use model::{Model, ModelOptions, RequestMetrics};
 pub use reasoning_message::ReasoningDisplayMode;
 pub use runner::{
-    RuntimeOptions, run, run_with_options, run_with_runtime_options, run_with_style_mode,
+    AcpSessionStart, NativeAgentRuntimeEvent, NoopRuntimeDriver, RuntimeDriver, run,
+    run_with_options, run_with_runtime_driver, run_with_style_mode,
 };
 pub use sender::Sender;
 pub use status_line::StatusLineItem;
 pub use style_mode::StyleMode;
-pub use update::{AppEffect, AppEvent, STARTUP_PROBE_TIMEOUT};
+pub use update::{AcpPromptSubmission, AppEffect, AppEvent, STARTUP_PROBE_TIMEOUT};
 
 pub use mo_core::request_policy::RuntimeRequestPolicy;

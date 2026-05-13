@@ -1,20 +1,8 @@
-use std::time::Duration;
-
 use genai::chat::StreamEnd;
-
 use mo_core::tools::{RuntimeToolCall, RuntimeToolResult};
 
 use crate::NativeLlmPerformanceMetrics;
-
-/// `NativeAgentResponse` 保存 native agent 单轮输出。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct NativeAgentResponse {
-    pub content: String,
-    pub reasoning_content: Option<String>,
-    pub reasoning_duration: Option<Duration>,
-    pub tool_calls: Vec<RuntimeToolCall>,
-    pub tool_results: Vec<RuntimeToolResult>,
-}
+pub use mo_core::session::NativeAgentResponse;
 
 /// `NativeAgentProgress` 描述 native agent loop 期间的内部进度事件。
 #[derive(Debug, Clone, PartialEq, Eq)]

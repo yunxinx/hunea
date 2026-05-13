@@ -3,6 +3,7 @@ mod command;
 mod event;
 mod identity;
 mod metrics;
+mod native;
 mod permission;
 mod target;
 
@@ -11,6 +12,10 @@ pub use command::RuntimeCommand;
 pub use event::RuntimeEvent;
 pub use identity::RuntimeIdentity;
 pub use metrics::RuntimeRequestMetrics;
+pub use native::{
+    ChatMessage, ChatRole, NativeAgentEvent, NativeAgentRequest, NativeAgentResponse,
+    NativeLlmPerformanceMetrics, NativeLlmRequest,
+};
 pub use permission::{
     RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,
 };

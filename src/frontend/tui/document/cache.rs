@@ -128,6 +128,7 @@ impl DocumentLayout {
                         palette: crate::frontend::tui::theme::default_palette(),
                         lines: Rc::new(vec![Line::raw((*line).to_string())]),
                         projected_user: None,
+                        projected_assistant: None,
                         line_count: 1,
                         plain_line_byte_lens: Rc::new(vec![line.len()]),
                         anchors: CachedLineAnchors::Explicit(Rc::new(vec![ItemLineAnchor {

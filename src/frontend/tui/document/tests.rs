@@ -509,6 +509,7 @@ fn transcript_plain_text_len_for_range_avoids_plain_line_and_anchor_materializat
         palette: default_palette(),
         lines: Rc::new(vec![Line::raw("alpha".to_string())]),
         projected_user: None,
+        projected_assistant: None,
         line_count: 1,
         plain_line_byte_lens: Rc::new(vec![5]),
         anchors: CachedLineAnchors::Explicit(Rc::new(vec![ItemLineAnchor {
@@ -574,6 +575,7 @@ fn rendered_transcript_anchor_resolve_uses_direct_line_when_item_shape_is_stable
         palette: default_palette(),
         lines: Rc::new(lines),
         projected_user: None,
+        projected_assistant: None,
         line_count: LINE_COUNT,
         plain_line_byte_lens: Rc::new(plain_line_byte_lens),
         anchors: CachedLineAnchors::GeneratedRenderedLines,

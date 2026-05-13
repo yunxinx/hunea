@@ -556,6 +556,332 @@ fn projected_user_blocks_still_round_trip_plain_text_and_anchor_lookup() {
 }
 
 #[test]
+fn projected_assistant_markdown_avoids_eager_styled_line_materialization() {
+    let mut markdown = String::from("# Long Assistant Markdown\n\n");
+    for index in 0..32 {
+        markdown.push_str(&format!(
+            "## Section {index}\n\n- viewport rendering stays local\n- markdown lists remain active\n\n```rust\nfn section_{index}() -> &'static str {{\n    \"paged assistant markdown projection\"\n}}\n```\n\nFollow-up prose wraps through the document viewport without forcing full-message materialization.\n\n",
+        ));
+    }
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(80);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown.clone(),
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(80, default_palette());
+    let expected_plain_lines = expected_lines
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        block.lines.is_empty(),
+        "long assistant Markdown should use a lazy projection instead of caching every styled line"
+    );
+
+    let actual_plain_lines = (0..render.line_count)
+        .map(|index| {
+            render
+                .line_at(index)
+                .expect("projected assistant block should materialize every visible line")
+                .plain_line
+        })
+        .collect::<Vec<_>>();
+    let anchor = render
+        .line_at(10)
+        .expect("projected assistant block should expose anchors")
+        .anchor;
+
+    assert_eq!(actual_plain_lines, expected_plain_lines);
+    assert_eq!(render.lines_for_range(0, render.line_count), expected_lines);
+    assert_eq!(render.line_index_for_anchor(anchor), Some(10));
+}
+
+#[test]
+fn projected_assistant_fenced_code_page_matches_eager_inside_wrapped_line() {
+    let mut markdown = String::from("```rust\n");
+    for index in 0..40 {
+        markdown.push_str(&format!(
+            "let projected_value_{index} = \"this line is intentionally long enough to wrap across multiple terminal rows while keeping syntax state local to the same source line\";\n"
+        ));
+    }
+    markdown.push_str("```\n");
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(38);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(38, default_palette());
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        block.lines.is_empty(),
+        "ordinary fenced code should stay on the paged assistant projection path"
+    );
+    assert!(
+        render.line_count > 128,
+        "fixture should cross multiple projection pages: {}",
+        render.line_count
+    );
+    assert_eq!(
+        render.lines_for_range(64, 64),
+        expected_lines[64..128].to_vec(),
+        "a projection page starting inside a wrapped source code line must keep styled output equal to the eager renderer"
+    );
+}
+
+#[test]
+fn projected_assistant_ordered_lists_match_eager_renderer() {
+    let mut markdown = String::from("# Ordered assistant notes\n\n");
+    for index in 0..50 {
+        markdown.push_str(&format!(
+            "## Step group {index}\n\n1. Keep viewport work bounded\n2. Preserve Markdown list rendering\n3. Reuse the existing eager renderer for each projected snippet\n\n"
+        ));
+    }
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(76);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(76, default_palette());
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        block.lines.is_empty(),
+        "top-level ordered lists should stay on the assistant projection path"
+    );
+    assert_eq!(render.lines_for_range(0, render.line_count), expected_lines);
+}
+
+#[test]
+fn projected_assistant_fenced_code_does_not_close_on_info_text_line() {
+    let mut markdown = String::from("```rust\n");
+    for index in 0..80 {
+        markdown.push_str(&format!(
+            "let value_{index} = \"line before embedded fence marker\";\n"
+        ));
+        markdown.push_str("```not a closing fence because it has trailing info text\n");
+        markdown.push_str(&format!(
+            "let after_{index} = \"line after embedded fence marker\";\n"
+        ));
+    }
+    markdown.push_str("```\n");
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(70);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(70, default_palette());
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        block.lines.is_empty(),
+        "a code line with non-whitespace after the fence marker is not a closing fence"
+    );
+    assert_eq!(render.lines_for_range(0, render.line_count), expected_lines);
+}
+
+#[test]
+fn projected_assistant_fenced_code_accepts_longer_closing_fence() {
+    let mut markdown = String::new();
+    for index in 0..80 {
+        markdown.push_str("```rust\n");
+        markdown.push_str(&format!(
+            "let value_{index} = \"CommonMark allows a longer closing fence\";\n"
+        ));
+        markdown.push_str("````\n\n");
+    }
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(72);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(72, default_palette());
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        block.lines.is_empty(),
+        "a longer closing fence should not force eager rendering"
+    );
+    assert_eq!(render.lines_for_range(0, render.line_count), expected_lines);
+}
+
+#[test]
+fn assistant_projection_falls_back_for_empty_fenced_code_blocks() {
+    let mut markdown = String::new();
+    for index in 0..120 {
+        markdown.push_str(&format!(
+            "## Empty code section {index}\n\n```rust\n```\n\n"
+        ));
+    }
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(80);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(80, default_palette());
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        !block.lines.is_empty(),
+        "empty fenced code blocks should preserve existing eager Markdown rendering"
+    );
+    assert_eq!(render.lines_for_range(0, render.line_count), expected_lines);
+}
+
+#[test]
+fn assistant_projection_falls_back_for_indented_markdown_blocks() {
+    let mut markdown = String::new();
+    for index in 0..140 {
+        markdown.push_str(&format!(
+            "## Section {index}\n\n    # this is an indented code line, not a heading\n\n"
+        ));
+    }
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(80);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(80, default_palette());
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        !block.lines.is_empty(),
+        "indented block Markdown should fall back to the existing eager renderer"
+    );
+    assert_eq!(render.lines_for_range(0, render.line_count), expected_lines);
+}
+
+#[test]
+fn assistant_projection_falls_back_for_complex_markdown_blocks() {
+    let mut markdown = String::new();
+    for index in 0..120 {
+        markdown.push_str(&format!(
+            "## Complex section {index}\n\n- top level\n  - nested child that should use the existing Markdown renderer\n\n| Name | Status |\n| --- | --- |\n| alpha {index} | beta {index} |\n\n"
+        ));
+    }
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(80);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(80, default_palette());
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        !block.lines.is_empty(),
+        "nested lists and tables should fall back to the existing eager Markdown renderer"
+    );
+    assert_eq!(render.lines_for_range(0, render.line_count), expected_lines);
+}
+
+#[test]
+fn assistant_projection_falls_back_for_stateful_fenced_code_highlighting() {
+    let mut markdown = String::from("```rust\nfn main() {\n    /*\n");
+    for index in 0..180 {
+        markdown.push_str(&format!(
+            "     * multiline comment row {index} should keep syntax highlighting state from the opening delimiter\n"
+        ));
+    }
+    markdown.push_str("     */\n}\n```\n");
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(64);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(64, default_palette());
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        !block.lines.is_empty(),
+        "fenced code that depends on cross-line syntax state should preserve eager Markdown rendering"
+    );
+    assert_eq!(render.lines_for_range(0, render.line_count), expected_lines);
+}
+
+#[test]
 fn precomputed_render_cache_key_changes_with_message_content_and_style() {
     let assistant_one = TranscriptItem::Message(MessageItem::new(Sender::Assistant, "one"));
     let assistant_two = TranscriptItem::Message(MessageItem::new(Sender::Assistant, "two"));

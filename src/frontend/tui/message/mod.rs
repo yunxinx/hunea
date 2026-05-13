@@ -1,6 +1,7 @@
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    rc::Rc,
 };
 
 #[cfg(test)]
@@ -18,11 +19,13 @@ use super::{
 
 mod assistant;
 mod assistant_estimate;
+mod assistant_projection;
 mod user;
 mod user_estimate;
 mod user_projection;
 
 pub(crate) use self::assistant::assistant_message_visual_inset;
+pub(crate) use self::assistant_projection::AssistantMessageRenderProjection;
 #[cfg(test)]
 use self::user_estimate::{
     estimate_hard_wrap_line_count, estimate_hard_wrap_visible_text,
@@ -58,7 +61,7 @@ pub(super) struct UserMessageRenderLayout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageItem {
     sender: Sender,
-    content: String,
+    content: Rc<str>,
     style_mode: StyleMode,
     render_cache_key: u64,
 }
@@ -84,6 +87,7 @@ impl MessageItem {
         let style_mode = style_mode.normalized();
         let content = content.into();
         let render_cache_key = message_item_render_cache_key(sender, &content, style_mode);
+        let content = Rc::from(content);
         Self {
             sender,
             content,
@@ -96,9 +100,9 @@ impl MessageItem {
     pub fn render_lines(&self, width: u16, palette: TerminalPalette) -> Vec<Line<'static>> {
         match self.sender {
             Sender::User => {
-                render_user_message_lines(&self.content, width, palette, self.style_mode)
+                render_user_message_lines(self.content.as_ref(), width, palette, self.style_mode)
             }
-            Sender::Assistant => render_assistant_message(&self.content, width, palette),
+            Sender::Assistant => render_assistant_message(self.content.as_ref(), width, palette),
         }
     }
 
@@ -120,10 +124,12 @@ impl MessageItem {
     /// `render_plain_text` 返回不带 ANSI 的纯文本消息内容。
     pub fn render_plain_text(&self, width: u16, palette: TerminalPalette) -> String {
         match self.sender {
-            Sender::User => render_user_plain_text(&self.content, width, self.style_mode),
-            Sender::Assistant => {
-                lines_to_plain_text(&render_assistant_message(&self.content, width, palette))
-            }
+            Sender::User => render_user_plain_text(self.content.as_ref(), width, self.style_mode),
+            Sender::Assistant => lines_to_plain_text(&render_assistant_message(
+                self.content.as_ref(),
+                width,
+                palette,
+            )),
         }
     }
 
@@ -136,7 +142,7 @@ impl MessageItem {
     }
 
     pub(crate) fn source_content(&self) -> &str {
-        &self.content
+        self.content.as_ref()
     }
 
     pub(crate) fn render_cache_key(&self) -> u64 {
@@ -154,9 +160,11 @@ impl MessageItem {
     ) -> (usize, usize) {
         match self.sender {
             Sender::User => {
-                measure_user_message_metrics(&self.content, width, palette, self.style_mode)
+                measure_user_message_metrics(self.content.as_ref(), width, palette, self.style_mode)
             }
-            Sender::Assistant => render_assistant_message_metrics(&self.content, width, palette),
+            Sender::Assistant => {
+                render_assistant_message_metrics(self.content.as_ref(), width, palette)
+            }
         }
     }
 
@@ -170,14 +178,14 @@ impl MessageItem {
             previous_metrics.filter(|metrics| metrics.cache_key == self.render_cache_key);
         match self.sender {
             Sender::User => estimate_user_message_metrics_fast(
-                &self.content,
+                self.content.as_ref(),
                 width,
                 palette,
                 self.style_mode,
                 previous_metrics,
             ),
             Sender::Assistant => estimate_assistant_message_metrics_fast(
-                &self.content,
+                self.content.as_ref(),
                 width,
                 palette,
                 previous_metrics,
@@ -194,7 +202,12 @@ impl MessageItem {
             return Vec::new();
         }
 
-        user::render_user_message_line_anchors(&self.content, width, palette, self.style_mode)
+        user::render_user_message_line_anchors(
+            self.content.as_ref(),
+            width,
+            palette,
+            self.style_mode,
+        )
     }
 
     pub(crate) fn render_selectable_line_ranges(
@@ -207,7 +220,7 @@ impl MessageItem {
         }
 
         user_projection::render_user_message_selectable_line_ranges(
-            &self.content,
+            self.content.as_ref(),
             width,
             palette,
             self.style_mode,
@@ -221,12 +234,28 @@ impl MessageItem {
     ) -> Option<UserMessageRenderProjection> {
         (self.sender == Sender::User).then(|| {
             user_projection::render_user_message_projection(
-                &self.content,
+                self.content.as_ref(),
                 width,
                 palette,
                 self.style_mode,
             )
         })
+    }
+
+    pub(crate) fn render_assistant_projection(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+    ) -> Option<AssistantMessageRenderProjection> {
+        (self.sender == Sender::Assistant)
+            .then(|| {
+                assistant_projection::render_assistant_message_projection(
+                    Rc::clone(&self.content),
+                    width,
+                    palette,
+                )
+            })
+            .flatten()
     }
 
     #[cfg(test)]

@@ -91,10 +91,30 @@ pub(crate) fn materialize_transcript_item_render_block(
             palette,
             lines: Rc::new(Vec::new()),
             projected_user: Some(Rc::new(projection)),
+            projected_assistant: None,
             line_count,
             plain_text_char_len,
             plain_line_byte_lens: Rc::new(plain_line_byte_lens),
             anchors: CachedLineAnchors::Explicit(Rc::new(anchors)),
+        };
+    }
+
+    if let TranscriptItem::Message(message) = item
+        && let Some(projection) = message.render_assistant_projection(width, palette)
+    {
+        let line_count = projection.line_count();
+        let plain_text_char_len = projection.plain_text_char_len();
+        return CachedRenderBlock {
+            cache_key,
+            width,
+            palette,
+            lines: Rc::new(Vec::new()),
+            projected_user: None,
+            projected_assistant: Some(Rc::new(projection)),
+            line_count,
+            plain_text_char_len,
+            plain_line_byte_lens: Rc::new(Vec::new()),
+            anchors: CachedLineAnchors::GeneratedRenderedLines,
         };
     }
 
@@ -116,6 +136,7 @@ pub(crate) fn materialize_transcript_item_render_block(
         line_count: lines.len(),
         lines: Rc::new(lines),
         projected_user: None,
+        projected_assistant: None,
         plain_line_byte_lens: Rc::new(plain_line_byte_lens),
         anchors: if uses_explicit_anchors {
             CachedLineAnchors::Explicit(Rc::new(anchors))

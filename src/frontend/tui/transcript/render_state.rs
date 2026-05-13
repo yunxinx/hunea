@@ -466,6 +466,7 @@ mod tests {
             palette: crate::frontend::tui::theme::default_palette(),
             lines: Rc::new(vec![Line::raw(text.to_string()); anchors.len()]),
             projected_user: None,
+            projected_assistant: None,
             line_count: anchors.len(),
             plain_line_byte_lens: Rc::new(vec![text.len(); anchors.len()]),
             anchors: CachedLineAnchors::Explicit(Rc::new(anchors)),

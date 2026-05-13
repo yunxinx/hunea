@@ -6,7 +6,9 @@ use std::{
 
 use ratatui::text::Line;
 
-use crate::frontend::tui::message::UserMessageRenderProjection;
+use crate::frontend::tui::message::{
+    AssistantMessageRenderProjection, UserMessageRenderProjection,
+};
 use crate::frontend::tui::styled_text::line_to_plain_text;
 use crate::frontend::tui::theme::{TerminalPalette, default_palette};
 
@@ -55,6 +57,7 @@ pub(crate) struct CachedRenderBlock {
     pub(crate) palette: TerminalPalette,
     pub(crate) lines: Rc<Vec<Line<'static>>>,
     pub(crate) projected_user: Option<Rc<UserMessageRenderProjection>>,
+    pub(crate) projected_assistant: Option<Rc<AssistantMessageRenderProjection>>,
     pub(crate) line_count: usize,
     pub(crate) plain_line_byte_lens: Rc<Vec<usize>>,
     pub(crate) anchors: CachedLineAnchors,
@@ -69,6 +72,7 @@ impl Default for CachedRenderBlock {
             palette: default_palette(),
             lines: Rc::new(Vec::new()),
             projected_user: None,
+            projected_assistant: None,
             line_count: 0,
             plain_line_byte_lens: Rc::new(Vec::new()),
             anchors: CachedLineAnchors::default(),
@@ -284,6 +288,11 @@ impl CachedRenderBlock {
         self.projected_user
             .as_ref()
             .and_then(|projection| projection.line_at(index))
+            .or_else(|| {
+                self.projected_assistant
+                    .as_ref()
+                    .and_then(|projection| projection.line_at(index))
+            })
     }
 
     #[cfg(test)]
@@ -293,7 +302,7 @@ impl CachedRenderBlock {
         }
 
         let end = end.min(self.line_count());
-        if self.projected_user.is_none() {
+        if self.projected_user.is_none() && self.projected_assistant.is_none() {
             target.extend(self.lines[start..end].iter().cloned());
             return;
         }
@@ -319,10 +328,19 @@ impl CachedRenderBlock {
         self.projected_user
             .as_ref()
             .and_then(|projection| projection.plain_line_at(index))
+            .or_else(|| {
+                self.projected_assistant
+                    .as_ref()
+                    .and_then(|projection| projection.plain_line_at(index))
+            })
     }
 
     pub(crate) fn plain_line_len(&self, index: usize) -> Option<usize> {
-        self.plain_line_byte_lens.get(index).copied()
+        self.plain_line_byte_lens.get(index).copied().or_else(|| {
+            self.projected_assistant
+                .as_ref()
+                .and_then(|projection| projection.plain_line_len(index))
+        })
     }
 
     pub(crate) fn anchor_at(&self, index: usize) -> Option<ItemLineAnchor> {
@@ -335,7 +353,7 @@ impl CachedRenderBlock {
         match &self.anchors {
             CachedLineAnchors::Explicit(anchors) => anchors.get(index).copied(),
             CachedLineAnchors::GeneratedRenderedLines => {
-                self.lines.get(index).map(|_| ItemLineAnchor {
+                (index < self.line_count()).then_some(ItemLineAnchor {
                     kind: super::render_state::LineAnchorKind::RenderedLine,
                     rendered_line: index,
                     ..ItemLineAnchor::default()
@@ -363,6 +381,9 @@ impl CachedRenderBlock {
 
     pub(crate) fn estimated_render_ui_bytes(&self) -> usize {
         if let Some(projection) = &self.projected_user {
+            return std::mem::size_of_val(self) + projection.estimated_render_ui_bytes();
+        }
+        if let Some(projection) = &self.projected_assistant {
             return std::mem::size_of_val(self) + projection.estimated_render_ui_bytes();
         }
 

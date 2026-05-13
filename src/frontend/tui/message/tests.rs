@@ -225,6 +225,7 @@ fn user_render_projection_stays_smaller_than_eager_styled_line_cache_for_long_pr
         palette,
         lines: Rc::new(Vec::new()),
         projected_user: Some(Rc::new(projection)),
+        projected_assistant: None,
         line_count: eager_line_count,
         plain_line_byte_lens: Rc::new(Vec::new()),
         anchors: CachedLineAnchors::default(),
@@ -236,6 +237,7 @@ fn user_render_projection_stays_smaller_than_eager_styled_line_cache_for_long_pr
         palette,
         lines: Rc::new(eager_lines),
         projected_user: None,
+        projected_assistant: None,
         line_count: eager_line_count,
         plain_line_byte_lens: Rc::new(Vec::new()),
         anchors: CachedLineAnchors::default(),
@@ -245,6 +247,57 @@ fn user_render_projection_stays_smaller_than_eager_styled_line_cache_for_long_pr
     assert!(
         projected_block.estimated_render_ui_bytes() < eager_block.estimated_render_ui_bytes(),
         "projected user cache should stay smaller than the old eager styled-line cache for long prose messages"
+    );
+}
+
+#[test]
+fn assistant_render_projection_stays_smaller_than_eager_styled_line_cache_for_common_markdown() {
+    let palette = default_palette();
+    let width = 80;
+    let mut markdown = String::from("# Assistant projection\n\n");
+    for index in 0..40 {
+        markdown.push_str(&format!(
+            "## Section {index}\n\n- cached blocks keep only the index\n- styled lines materialize by projection page\n\n```rust\nlet section_{index} = \"ordinary fenced code\";\n```\n\nThe surrounding prose remains Markdown-rendered while avoiding a full eager styled-line cache.\n\n"
+        ));
+    }
+    let item = MessageItem::new(Sender::Assistant, markdown);
+
+    let projection = item
+        .render_assistant_projection(width, palette)
+        .expect("common long assistant Markdown should produce a render projection");
+    let eager_lines = item.render_lines(width, palette);
+    let eager_line_count = eager_lines.len();
+
+    let projected_block = CachedRenderBlock {
+        cache_key: 0,
+        width,
+        palette,
+        lines: Rc::new(Vec::new()),
+        projected_user: None,
+        projected_assistant: Some(Rc::new(projection)),
+        line_count: eager_line_count,
+        plain_line_byte_lens: Rc::new(Vec::new()),
+        anchors: CachedLineAnchors::default(),
+        plain_text_char_len: 0,
+    };
+    let eager_block = CachedRenderBlock {
+        cache_key: 0,
+        width,
+        palette,
+        lines: Rc::new(eager_lines),
+        projected_user: None,
+        projected_assistant: None,
+        line_count: eager_line_count,
+        plain_line_byte_lens: Rc::new(Vec::new()),
+        anchors: CachedLineAnchors::default(),
+        plain_text_char_len: 0,
+    };
+
+    assert!(
+        projected_block.estimated_render_ui_bytes() < eager_block.estimated_render_ui_bytes(),
+        "projected assistant cache should stay smaller than the old eager styled-line cache for common long Markdown: projected={}, eager={}",
+        projected_block.estimated_render_ui_bytes(),
+        eager_block.estimated_render_ui_bytes()
     );
 }
 

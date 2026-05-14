@@ -1,4 +1,5 @@
 use mo_core::session::{RuntimeEvent, RuntimePermissionOptionKind, RuntimePermissionRequest};
+use mo_core::tools::{RuntimeToolCall, RuntimeToolResult};
 
 use super::super::{AppEvent, Model, model::RequestMetrics};
 
@@ -29,6 +30,18 @@ impl RuntimeEventApply for Model {
             }
             RuntimeEvent::Thinking { is_thinking, .. } => {
                 self.set_stream_activity_thinking(is_thinking);
+            }
+            RuntimeEvent::Retrying { message, .. } => {
+                self.show_stream_activity_with_header(message);
+            }
+            RuntimeEvent::ToolExecutionStarted { call, .. } => {
+                self.show_stream_activity_with_header(format!(
+                    "Running {}",
+                    native_agent_tool_label(&call)
+                ));
+            }
+            RuntimeEvent::ToolExecutionFinished { call, result, .. } => {
+                append_native_agent_tool_result(self, &call, &result);
             }
             RuntimeEvent::PermissionRequested { request, .. } => {
                 show_runtime_permission_request(self, request);
@@ -80,6 +93,51 @@ impl RuntimeEventApply for Model {
             }
         }
     }
+}
+
+fn append_native_agent_tool_result(
+    model: &mut Model,
+    call: &RuntimeToolCall,
+    result: &RuntimeToolResult,
+) {
+    model.append_tool_result_from_runtime(
+        native_agent_tool_result_content(call, result),
+        crate::tool_result::ToolResultKind::Ran,
+    );
+}
+
+fn native_agent_tool_result_content(call: &RuntimeToolCall, result: &RuntimeToolResult) -> String {
+    let mut content = format!("Ran {}", native_agent_tool_label(call));
+    if result.is_error {
+        content.push_str(": failed");
+        if let Some(summary) = native_agent_tool_result_summary(&result.content) {
+            content.push_str(" - ");
+            content.push_str(&summary);
+        }
+    }
+    content
+}
+
+fn native_agent_tool_label(call: &RuntimeToolCall) -> String {
+    if let Some(path) = call
+        .arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+    {
+        return format!("{} {}", call.name, path);
+    }
+
+    call.name.clone()
+}
+
+fn native_agent_tool_result_summary(content: &str) -> Option<String> {
+    let first_line = content.lines().find(|line| !line.trim().is_empty())?.trim();
+    let mut summary = first_line.chars().take(120).collect::<String>();
+    if first_line.chars().count() > 120 {
+        summary.push_str("...");
+    }
+    Some(summary)
 }
 
 fn show_runtime_permission_request(model: &mut Model, request: RuntimePermissionRequest) {

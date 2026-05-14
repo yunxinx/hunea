@@ -1,23 +1,24 @@
 use color_eyre::eyre::Result;
+use mo_core::session::{RuntimeCommand, RuntimeCommandReceipt, RuntimeTarget};
 
 use crate::{AppEffect, Model};
 
-use super::RuntimeDriver;
+use super::RuntimeCoordinator;
 use super::acp_session::{
-    AcpRuntimeState, run_interrupt_acp_prompt_effect, run_respond_acp_permission_effect,
+    AcpSessionUiState, run_interrupt_acp_prompt_effect, run_respond_acp_permission_effect,
     run_send_acp_prompt_effect, run_set_acp_model_effect, run_start_acp_session_effect,
     run_stop_acp_background_terminals_effect,
 };
 use super::external_io::{run_copy_selection_effect, run_external_editor_effect};
 use super::model_refresh::{persist_selected_model, run_refresh_model_provider_effect};
-use super::native_agent::{run_interrupt_native_agent_effect, run_send_native_agent_effect};
+use super::native_agent::run_send_native_agent_effect;
 use super::terminal::TuiTerminal;
 
 pub(super) fn apply_effect_if_needed(
     terminal: &mut TuiTerminal,
     model: &mut Model,
-    acp_runtime: &mut AcpRuntimeState,
-    runtime_driver: &mut impl RuntimeDriver,
+    acp_ui_state: &mut AcpSessionUiState,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
     effect: Option<AppEffect>,
 ) -> Result<()> {
     let Some(effect) = effect else {
@@ -30,15 +31,15 @@ pub(super) fn apply_effect_if_needed(
         }
         AppEffect::CopySelection(text) => run_copy_selection_effect(terminal, model, &text),
         AppEffect::ResetRuntimeSession => {
-            reset_runtime_session_after_clear(acp_runtime, runtime_driver);
+            reset_runtime_session_after_clear(acp_ui_state, runtime_coordinator);
             Ok(())
         }
         AppEffect::StartAcpSession { agent_id } => {
-            run_start_acp_session_effect(model, acp_runtime, runtime_driver, &agent_id);
+            run_start_acp_session_effect(model, acp_ui_state, runtime_coordinator, &agent_id);
             Ok(())
         }
         AppEffect::SubmitAcpPrompt(submission) => {
-            run_send_acp_prompt_effect(model, acp_runtime, runtime_driver, submission);
+            run_send_acp_prompt_effect(model, acp_ui_state, runtime_coordinator, submission);
             Ok(())
         }
         AppEffect::RespondAcpPermission {
@@ -49,8 +50,8 @@ pub(super) fn apply_effect_if_needed(
         } => {
             run_respond_acp_permission_effect(
                 model,
-                acp_runtime,
-                runtime_driver,
+                acp_ui_state,
+                runtime_coordinator,
                 &request_id,
                 option_id,
                 is_rejection,
@@ -59,48 +60,56 @@ pub(super) fn apply_effect_if_needed(
             Ok(())
         }
         AppEffect::SetAcpModel { config_id, value } => {
-            run_set_acp_model_effect(model, runtime_driver, config_id, value);
+            run_set_acp_model_effect(model, runtime_coordinator, config_id, value);
             Ok(())
         }
         AppEffect::StopAcpBackgroundTerminals => {
-            run_stop_acp_background_terminals_effect(model, runtime_driver);
+            run_stop_acp_background_terminals_effect(model, runtime_coordinator);
             Ok(())
         }
         AppEffect::PersistSelectedModel { selection } => {
-            persist_selected_model(model, runtime_driver, &selection);
+            persist_selected_model(model, runtime_coordinator, &selection);
             Ok(())
         }
         AppEffect::RefreshModelProvider { request } => {
-            run_refresh_model_provider_effect(model, runtime_driver, request);
+            run_refresh_model_provider_effect(model, runtime_coordinator, request);
             Ok(())
         }
         AppEffect::SendNativeAgent { request } => {
-            run_send_native_agent_effect(model, runtime_driver, request);
+            run_send_native_agent_effect(model, runtime_coordinator, request);
             Ok(())
         }
         AppEffect::InterruptCurrentTurn => {
-            run_interrupt_current_turn_effect(model, acp_runtime, runtime_driver);
+            run_interrupt_current_turn_effect(model, acp_ui_state, runtime_coordinator);
             Ok(())
         }
     }
 }
 
 pub(super) fn reset_runtime_session_after_clear(
-    acp_runtime: &mut AcpRuntimeState,
-    runtime_driver: &mut impl RuntimeDriver,
+    acp_ui_state: &mut AcpSessionUiState,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
 ) {
-    acp_runtime.reset_after_clear();
-    runtime_driver.reset_runtime_session();
+    acp_ui_state.reset_after_clear();
+    let _ = runtime_coordinator.dispatch_runtime_command(RuntimeCommand::Reset);
 }
 
 pub(super) fn run_interrupt_current_turn_effect(
     model: &mut Model,
-    acp_runtime: &mut AcpRuntimeState,
-    runtime_driver: &mut impl RuntimeDriver,
+    acp_ui_state: &mut AcpSessionUiState,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
 ) {
-    if run_interrupt_native_agent_effect(model, runtime_driver) {
-        return;
+    match runtime_coordinator.dispatch_runtime_command(RuntimeCommand::interrupt_current()) {
+        Ok(RuntimeCommandReceipt::Interrupted {
+            target: Some(RuntimeTarget::NativeAgent(_)),
+        }) => {
+            model.clear_stream_activity();
+            model.append_system_message_from_runtime("Chat interrupted");
+        }
+        Ok(RuntimeCommandReceipt::Interrupted { .. }) => {
+            run_interrupt_acp_prompt_effect(model, acp_ui_state, runtime_coordinator, false);
+        }
+        Ok(_) => {}
+        Err(message) => model.show_transient_status_notice(&message),
     }
-
-    run_interrupt_acp_prompt_effect(model, acp_runtime, runtime_driver);
 }

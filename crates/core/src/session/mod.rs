@@ -8,7 +8,7 @@ mod permission;
 mod target;
 
 pub use capability::RuntimeCapability;
-pub use command::RuntimeCommand;
+pub use command::{RuntimeCommand, RuntimeCommandReceipt};
 pub use event::RuntimeEvent;
 pub use identity::RuntimeIdentity;
 pub use metrics::RuntimeRequestMetrics;

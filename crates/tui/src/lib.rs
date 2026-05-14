@@ -57,8 +57,8 @@ pub use hero::{
 pub use model::{Model, ModelOptions, RequestMetrics};
 pub use reasoning_message::ReasoningDisplayMode;
 pub use runner::{
-    AcpSessionStart, NativeAgentRuntimeEvent, NoopRuntimeDriver, RuntimeDriver, run,
-    run_with_options, run_with_runtime_driver, run_with_style_mode,
+    NoopRuntimeCoordinator, RuntimeCoordinator, run, run_with_options,
+    run_with_runtime_coordinator, run_with_style_mode,
 };
 pub use sender::Sender;
 pub use status_line::StatusLineItem;

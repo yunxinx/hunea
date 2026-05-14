@@ -1,3 +1,5 @@
+use crate::tools::{RuntimeToolCall, RuntimeToolResult};
+
 use super::{RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics, RuntimeTarget};
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
@@ -34,6 +36,19 @@ pub enum RuntimeEvent {
     Thinking {
         target: Option<RuntimeTarget>,
         is_thinking: bool,
+    },
+    Retrying {
+        target: Option<RuntimeTarget>,
+        message: String,
+    },
+    ToolExecutionStarted {
+        target: Option<RuntimeTarget>,
+        call: RuntimeToolCall,
+    },
+    ToolExecutionFinished {
+        target: Option<RuntimeTarget>,
+        call: RuntimeToolCall,
+        result: RuntimeToolResult,
     },
     PermissionRequested {
         target: RuntimeTarget,
@@ -79,6 +94,9 @@ impl RuntimeEvent {
             | Self::SystemMessage { target, .. }
             | Self::OutputTokenEstimate { target, .. }
             | Self::Thinking { target, .. }
+            | Self::Retrying { target, .. }
+            | Self::ToolExecutionStarted { target, .. }
+            | Self::ToolExecutionFinished { target, .. }
             | Self::Failed { target, .. }
             | Self::Interrupted { target, .. } => target.as_ref(),
         }

@@ -1,7 +1,7 @@
 use crate::Model;
 use mo_core::model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest};
 
-use super::RuntimeDriver;
+use super::RuntimeCoordinator;
 
 pub(super) fn apply_model_provider_refresh_event(
     model: &mut Model,
@@ -21,20 +21,20 @@ pub(super) fn apply_model_provider_refresh_event(
 
 pub(super) fn run_refresh_model_provider_effect(
     model: &mut Model,
-    runtime_driver: &mut impl RuntimeDriver,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
     request: ProviderSyncRequest,
 ) {
-    if let Err(message) = runtime_driver.refresh_model_provider(request) {
+    if let Err(message) = runtime_coordinator.refresh_model_provider(request) {
         model.show_transient_status_notice(&message);
     }
 }
 
 pub(super) fn persist_selected_model(
     model: &mut Model,
-    runtime_driver: &mut impl RuntimeDriver,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
     selection: &ModelSelection,
 ) {
-    if let Err(message) = runtime_driver.persist_selected_model(selection) {
+    if let Err(message) = runtime_coordinator.persist_selected_model(selection) {
         model.show_transient_status_notice(&message);
     }
 }

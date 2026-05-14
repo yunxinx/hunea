@@ -2,7 +2,7 @@ use std::{path::PathBuf, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use mo_core::{
-    acp::AcpAgentIdentity,
+    acp::AcpPromptRequest,
     model_catalog::{ModelSelection, ProviderSyncRequest},
     session::{ChatMessage, NativeAgentRequest},
 };
@@ -50,13 +50,7 @@ pub enum AppEffect {
 }
 
 /// `AcpPromptSubmission` 保存消费层提交给 ACP runtime 的原始输入。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AcpPromptSubmission {
-    pub agent_id: String,
-    pub text: String,
-    pub current_dir: PathBuf,
-    pub identity: Box<AcpAgentIdentity>,
-}
+pub type AcpPromptSubmission = AcpPromptRequest;
 
 /// `AppEvent` 描述 TUI 模型可处理的外部事件。
 #[derive(Debug, Clone, PartialEq, Eq)]

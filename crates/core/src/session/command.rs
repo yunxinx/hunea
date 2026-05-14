@@ -1,4 +1,6 @@
-use super::RuntimeTarget;
+use crate::acp::AcpPromptRequest;
+
+use super::{NativeAgentRequest, RuntimeTarget};
 
 /// `RuntimeCommand` 描述 TUI 向交互式 runtime 发出的统一命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,6 +12,14 @@ pub enum RuntimeCommand {
         target: RuntimeTarget,
         prompt: String,
     },
+    SubmitAcpPrompt {
+        target: RuntimeTarget,
+        prompt: AcpPromptRequest,
+    },
+    SubmitNativeAgent {
+        target: RuntimeTarget,
+        request: NativeAgentRequest,
+    },
     Interrupt {
         target: Option<RuntimeTarget>,
     },
@@ -20,8 +30,11 @@ pub enum RuntimeCommand {
     },
     SetConfigOption {
         target: Option<RuntimeTarget>,
-        config_id: String,
+        config_id: Option<String>,
         value: String,
+    },
+    StopBackgroundTerminals {
+        target: Option<RuntimeTarget>,
     },
     Reset,
 }
@@ -37,6 +50,22 @@ impl RuntimeCommand {
         Self::SubmitPrompt {
             target,
             prompt: prompt.into(),
+        }
+    }
+
+    /// `submit_acp_prompt` 创建 ACP prompt 提交命令。
+    pub fn submit_acp_prompt(prompt: AcpPromptRequest) -> Self {
+        Self::SubmitAcpPrompt {
+            target: RuntimeTarget::acp_agent(prompt.agent_id.clone()),
+            prompt,
+        }
+    }
+
+    /// `submit_native_agent` 创建 native agent 提交命令。
+    pub fn submit_native_agent(request: NativeAgentRequest) -> Self {
+        Self::SubmitNativeAgent {
+            target: request.target(),
+            request,
         }
     }
 
@@ -66,9 +95,14 @@ impl RuntimeCommand {
     ) -> Self {
         Self::SetConfigOption {
             target: Some(target),
-            config_id: config_id.into(),
+            config_id: Some(config_id.into()),
             value: value.into(),
         }
+    }
+
+    /// `stop_background_terminals` 创建停止后台 terminal 的命令。
+    pub fn stop_background_terminals(target: Option<RuntimeTarget>) -> Self {
+        Self::StopBackgroundTerminals { target }
     }
 
     /// `target` 返回命令关联的 runtime 目标。
@@ -76,6 +110,8 @@ impl RuntimeCommand {
         match self {
             Self::Start { target }
             | Self::SubmitPrompt { target, .. }
+            | Self::SubmitAcpPrompt { target, .. }
+            | Self::SubmitNativeAgent { target, .. }
             | Self::Interrupt {
                 target: Some(target),
             }
@@ -86,11 +122,24 @@ impl RuntimeCommand {
             | Self::SetConfigOption {
                 target: Some(target),
                 ..
+            }
+            | Self::StopBackgroundTerminals {
+                target: Some(target),
             } => Some(target),
             Self::Interrupt { target: None }
             | Self::RespondPermission { target: None, .. }
             | Self::SetConfigOption { target: None, .. }
+            | Self::StopBackgroundTerminals { target: None }
             | Self::Reset => None,
         }
     }
+}
+
+/// `RuntimeCommandReceipt` 描述 runtime coordinator 接受命令后的同步结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeCommandReceipt {
+    Accepted,
+    AcpSessionStarted { default_model: Option<String> },
+    NativeAgentStarted { activity_label: String },
+    Interrupted { target: Option<RuntimeTarget> },
 }

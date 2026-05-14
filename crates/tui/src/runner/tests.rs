@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use super::acp_session::{
-    AcpRuntimeState, acp_reject_option_id_for_stale_discard, apply_acp_session_event,
+    AcpSessionUiState, acp_reject_option_id_for_stale_discard, apply_acp_session_event,
     run_interrupt_acp_prompt_effect, run_respond_acp_permission_effect, run_set_acp_model_effect,
 };
 use super::effects::{reset_runtime_session_after_clear, run_interrupt_current_turn_effect};
@@ -24,49 +24,65 @@ use mo_core::provider::ProviderKind;
 use mo_core::request_policy::RuntimeRequestPolicy;
 use mo_core::session::{
     NativeAgentEvent, NativeAgentRequest, NativeAgentResponse, NativeLlmPerformanceMetrics,
-    RuntimeTarget,
+    RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
 };
 use mo_core::tools::{RuntimeToolCall, RuntimeToolResult};
 
 #[derive(Default)]
-struct TestRuntimeDriver {
-    native_events: Vec<NativeAgentRuntimeEvent>,
+struct TestRuntimeCoordinator {
+    runtime_events: Vec<RuntimeEvent>,
     native_running: bool,
     native_interrupted: bool,
     native_request: Option<NativeAgentRequest>,
     reset_count: usize,
 }
 
-impl RuntimeDriver for TestRuntimeDriver {
-    fn drain_native_agent_events(&mut self) -> Vec<NativeAgentRuntimeEvent> {
-        std::mem::take(&mut self.native_events)
+impl RuntimeCoordinator for TestRuntimeCoordinator {
+    fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
+        std::mem::take(&mut self.runtime_events)
     }
 
-    fn reset_runtime_session(&mut self) {
-        self.native_events.clear();
-        self.native_running = false;
-        self.reset_count += 1;
-    }
+    fn dispatch_runtime_command(
+        &mut self,
+        command: RuntimeCommand,
+    ) -> Result<RuntimeCommandReceipt, String> {
+        match command {
+            RuntimeCommand::Reset => {
+                self.runtime_events.clear();
+                self.native_running = false;
+                self.reset_count += 1;
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
+            RuntimeCommand::SubmitNativeAgent { request, .. } => {
+                if self.native_running {
+                    return Err("Chat request is already running".to_string());
+                }
 
-    fn send_native_agent(&mut self, request: NativeAgentRequest) -> Result<String, String> {
-        if self.native_running {
-            return Err("Chat request is already running".to_string());
+                let activity_label = request.llm_request().model_id.clone();
+                self.native_running = true;
+                self.native_request = Some(request);
+                Ok(RuntimeCommandReceipt::NativeAgentStarted { activity_label })
+            }
+            RuntimeCommand::Interrupt { target } => {
+                if !self.native_running {
+                    return Ok(RuntimeCommandReceipt::Accepted);
+                }
+
+                self.native_running = false;
+                self.native_interrupted = true;
+                Ok(RuntimeCommandReceipt::Interrupted {
+                    target: target.or_else(|| Some(RuntimeTarget::native_agent("local", "qwen3"))),
+                })
+            }
+            RuntimeCommand::Start { .. } => Ok(RuntimeCommandReceipt::AcpSessionStarted {
+                default_model: None,
+            }),
+            RuntimeCommand::SubmitPrompt { .. }
+            | RuntimeCommand::SubmitAcpPrompt { .. }
+            | RuntimeCommand::RespondPermission { .. }
+            | RuntimeCommand::StopBackgroundTerminals { .. } => Ok(RuntimeCommandReceipt::Accepted),
+            RuntimeCommand::SetConfigOption { .. } => Err("ACP session is not ready".to_string()),
         }
-
-        let activity_label = request.llm_request().model_id.clone();
-        self.native_running = true;
-        self.native_request = Some(request);
-        Ok(activity_label)
-    }
-
-    fn interrupt_native_agent(&mut self) -> bool {
-        if !self.native_running {
-            return false;
-        }
-
-        self.native_running = false;
-        self.native_interrupted = true;
-        true
     }
 
     fn refresh_model_provider(&mut self, _request: ProviderSyncRequest) -> Result<(), String> {
@@ -78,18 +94,18 @@ impl RuntimeDriver for TestRuntimeDriver {
 fn acp_chunks_buffer_until_prompt_response() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: "你好".to_string(),
@@ -97,7 +113,7 @@ fn acp_chunks_buffer_until_prompt_response() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: "！我是 Kimi Code CLI".to_string(),
@@ -109,7 +125,7 @@ fn acp_chunks_buffer_until_prompt_response() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptResponse {
             agent_id: "Kimi Code CLI".to_string(),
             content: String::new(),
@@ -128,11 +144,11 @@ fn acp_chunks_buffer_until_prompt_response() {
 fn acp_system_message_event_appends_runtime_system_message() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::SystemMessage {
             agent_id: "kimi".to_string(),
             message: mo_core::acp::debug_protocol_version_system_message(),
@@ -152,18 +168,18 @@ fn acp_system_message_event_appends_runtime_system_message() {
 fn acp_tool_call_update_replaces_same_transcript_item() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -190,7 +206,7 @@ fn acp_tool_call_update_replaces_same_transcript_item() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCallUpdate {
             agent_id: "Kimi Code CLI".to_string(),
             update: AcpToolCallUpdate {
@@ -222,18 +238,18 @@ fn acp_tool_call_update_replaces_same_transcript_item() {
 fn acp_tool_call_update_without_create_appends_transcript_item() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCallUpdate {
             agent_id: "Kimi Code CLI".to_string(),
             update: AcpToolCallUpdate {
@@ -261,18 +277,18 @@ fn acp_tool_call_update_without_create_appends_transcript_item() {
 fn acp_tool_call_create_after_update_updates_existing_item() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCallUpdate {
             agent_id: "Kimi Code CLI".to_string(),
             update: AcpToolCallUpdate {
@@ -289,7 +305,7 @@ fn acp_tool_call_create_after_update_updates_existing_item() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -328,18 +344,18 @@ fn acp_tool_call_create_after_update_updates_existing_item() {
 fn acp_late_tool_call_update_after_completion_updates_existing_item() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -356,7 +372,7 @@ fn acp_late_tool_call_update_after_completion_updates_existing_item() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCallUpdate {
             agent_id: "Kimi Code CLI".to_string(),
             update: AcpToolCallUpdate {
@@ -373,7 +389,7 @@ fn acp_late_tool_call_update_after_completion_updates_existing_item() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCallUpdate {
             agent_id: "Kimi Code CLI".to_string(),
             update: AcpToolCallUpdate {
@@ -405,18 +421,18 @@ fn acp_late_tool_call_update_after_completion_updates_existing_item() {
 fn acp_execute_tool_call_lifecycle_defers_content_until_completed() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -447,7 +463,7 @@ fn acp_execute_tool_call_lifecycle_defers_content_until_completed() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCallUpdate {
             agent_id: "Kimi Code CLI".to_string(),
             update: AcpToolCallUpdate {
@@ -478,7 +494,7 @@ fn acp_execute_tool_call_lifecycle_defers_content_until_completed() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCallUpdate {
             agent_id: "Kimi Code CLI".to_string(),
             update: AcpToolCallUpdate {
@@ -512,18 +528,18 @@ fn acp_execute_tool_call_lifecycle_defers_content_until_completed() {
 fn acp_execute_tool_call_failed_reveals_final_output_without_input() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCallUpdate {
             agent_id: "Kimi Code CLI".to_string(),
             update: AcpToolCallUpdate {
@@ -542,7 +558,7 @@ fn acp_execute_tool_call_failed_reveals_final_output_without_input() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCallUpdate {
             agent_id: "Kimi Code CLI".to_string(),
             update: AcpToolCallUpdate {
@@ -580,18 +596,18 @@ fn acp_execute_tool_call_failed_reveals_final_output_without_input() {
 fn acp_write_tool_call_stream_updates_token_activity() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -625,18 +641,18 @@ fn acp_write_tool_call_stream_updates_token_activity() {
 fn acp_interrupt_marks_active_tool_calls_failed() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -654,8 +670,9 @@ fn acp_interrupt_marks_active_tool_calls_failed() {
 
     run_interrupt_acp_prompt_effect(
         &mut model,
-        &mut acp_runtime,
-        &mut TestRuntimeDriver::default(),
+        &mut acp_ui_state,
+        &mut TestRuntimeCoordinator::default(),
+        true,
     );
 
     let plain = model.transcript_plain_items().join("\n");
@@ -668,18 +685,18 @@ fn acp_interrupt_marks_active_tool_calls_failed() {
 fn acp_prompt_failed_marks_active_tool_calls_failed() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -697,7 +714,7 @@ fn acp_prompt_failed_marks_active_tool_calls_failed() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptFailed {
             agent_id: "Kimi Code CLI".to_string(),
             message: "transport closed".to_string(),
@@ -723,18 +740,18 @@ fn acp_prompt_failed_marks_active_tool_calls_failed() {
 fn acp_prompt_interrupted_event_marks_active_tool_calls_failed() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -752,7 +769,7 @@ fn acp_prompt_interrupted_event_marks_active_tool_calls_failed() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptInterrupted {
             agent_id: "Kimi Code CLI".to_string(),
         },
@@ -774,18 +791,18 @@ fn acp_prompt_interrupted_event_marks_active_tool_calls_failed() {
 fn acp_prompt_response_marks_unfinished_tool_calls_without_final_status() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -803,7 +820,7 @@ fn acp_prompt_response_marks_unfinished_tool_calls_without_final_status() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptResponse {
             agent_id: "Kimi Code CLI".to_string(),
             content: String::new(),
@@ -830,18 +847,18 @@ fn acp_prompt_response_marks_unfinished_tool_calls_without_final_status() {
 fn acp_stopped_marks_active_tool_calls_failed() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -859,7 +876,7 @@ fn acp_stopped_marks_active_tool_calls_failed() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::Stopped {
             agent_id: "Kimi Code CLI".to_string(),
             message: None,
@@ -891,11 +908,11 @@ fn acp_started_uses_agent_title_and_version_in_current_model_status_line() {
         },
     );
     model.selected_acp_agent = Some("kimi".to_string());
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::Started {
             agent_id: "kimi".to_string(),
             session_id: "test-session".to_string(),
@@ -940,11 +957,11 @@ fn acp_started_without_agent_info_keeps_configured_agent_label_in_status_line() 
         },
     );
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::Started {
             agent_id: "Kimi Code CLI".to_string(),
             session_id: "test-session".to_string(),
@@ -975,18 +992,18 @@ fn acp_started_without_agent_info_keeps_configured_agent_label_in_status_line() 
 fn acp_permission_request_flushes_buffered_agent_text() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: "需要先确认".to_string(),
@@ -994,7 +1011,7 @@ fn acp_permission_request_flushes_buffered_agent_text() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
             request: mo_core::acp::AcpPermissionRequest {
@@ -1026,7 +1043,7 @@ fn acp_permission_request_flushes_buffered_agent_text() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: "确认后继续".to_string(),
@@ -1034,7 +1051,7 @@ fn acp_permission_request_flushes_buffered_agent_text() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptResponse {
             agent_id: "Kimi Code CLI".to_string(),
             content: String::new(),
@@ -1052,11 +1069,11 @@ fn acp_permission_request_flushes_buffered_agent_text() {
 fn acp_terminal_update_renders_embedded_terminal_output() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -1075,7 +1092,7 @@ fn acp_terminal_update_renders_embedded_terminal_output() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::TerminalUpdated {
             agent_id: "Kimi Code CLI".to_string(),
             snapshot: AcpTerminalSnapshot {
@@ -1105,11 +1122,11 @@ fn acp_terminal_update_renders_embedded_terminal_output() {
 fn acp_prompt_response_keeps_running_terminal_tool_call_active() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -1128,7 +1145,7 @@ fn acp_prompt_response_keeps_running_terminal_tool_call_active() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::TerminalUpdated {
             agent_id: "Kimi Code CLI".to_string(),
             snapshot: AcpTerminalSnapshot {
@@ -1144,7 +1161,7 @@ fn acp_prompt_response_keeps_running_terminal_tool_call_active() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptResponse {
             agent_id: "Kimi Code CLI".to_string(),
             content: String::new(),
@@ -1167,7 +1184,7 @@ fn acp_prompt_response_keeps_running_terminal_tool_call_active() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::TerminalUpdated {
             agent_id: "Kimi Code CLI".to_string(),
             snapshot: AcpTerminalSnapshot {
@@ -1197,11 +1214,11 @@ fn acp_prompt_response_keeps_running_terminal_tool_call_active() {
 fn acp_prompt_response_keeps_terminal_tool_call_active_before_first_snapshot() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -1220,7 +1237,7 @@ fn acp_prompt_response_keeps_terminal_tool_call_active_before_first_snapshot() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptResponse {
             agent_id: "Kimi Code CLI".to_string(),
             content: String::new(),
@@ -1242,7 +1259,7 @@ fn acp_prompt_response_keeps_terminal_tool_call_active_before_first_snapshot() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::TerminalUpdated {
             agent_id: "Kimi Code CLI".to_string(),
             snapshot: AcpTerminalSnapshot {
@@ -1273,18 +1290,18 @@ fn acp_permission_request_without_prior_tool_call_appends_transcript_item() {
     let mut model = Model::new(HeroOptions::default());
     model.set_window(80, 12);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
             request: mo_core::acp::AcpPermissionRequest {
@@ -1330,18 +1347,18 @@ fn acp_permission_request_content_renders_waiting_instead_of_approval_text() {
     let mut model = Model::new(HeroOptions::default());
     model.set_window(80, 12);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
             request: mo_core::acp::AcpPermissionRequest {
@@ -1400,18 +1417,18 @@ fn acp_permission_request_in_progress_command_renders_waiting_instead_of_approva
     let mut model = Model::new(HeroOptions::default());
     model.set_window(80, 12);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
             request: mo_core::acp::AcpPermissionRequest {
@@ -1467,18 +1484,18 @@ fn acp_command_permission_request_does_not_replay_approval_text_after_completion
     let mut model = Model::new(HeroOptions::default());
     model.set_window(80, 12);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
             request: mo_core::acp::AcpPermissionRequest {
@@ -1502,7 +1519,7 @@ fn acp_command_permission_request_does_not_replay_approval_text_after_completion
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCallUpdate {
             agent_id: "Kimi Code CLI".to_string(),
             update: AcpToolCallUpdate {
@@ -1534,18 +1551,18 @@ fn acp_rejected_permission_internal_agent_notice_is_not_shown() {
     let mut model = Model::new(HeroOptions::default());
     model.set_window(80, 12);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
             request: mo_core::acp::AcpPermissionRequest {
@@ -1594,8 +1611,8 @@ fn acp_rejected_permission_internal_agent_notice_is_not_shown() {
     {
         run_respond_acp_permission_effect(
             &mut model,
-            &mut acp_runtime,
-            &mut TestRuntimeDriver::default(),
+            &mut acp_ui_state,
+            &mut TestRuntimeCoordinator::default(),
             &request_id,
             option_id,
             is_rejection,
@@ -1605,7 +1622,7 @@ fn acp_rejected_permission_internal_agent_notice_is_not_shown() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: concat!(
@@ -1617,7 +1634,7 @@ fn acp_rejected_permission_internal_agent_notice_is_not_shown() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptResponse {
             agent_id: "Kimi Code CLI".to_string(),
             content: String::new(),
@@ -1647,18 +1664,18 @@ fn acp_rejected_permission_tool_call_update_hides_internal_notice_and_skips_reje
     let mut model = Model::new(HeroOptions::default());
     model.set_window(80, 12);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
             request: mo_core::acp::AcpPermissionRequest {
@@ -1707,8 +1724,8 @@ fn acp_rejected_permission_tool_call_update_hides_internal_notice_and_skips_reje
     {
         run_respond_acp_permission_effect(
             &mut model,
-            &mut acp_runtime,
-            &mut TestRuntimeDriver::default(),
+            &mut acp_ui_state,
+            &mut TestRuntimeCoordinator::default(),
             &request_id,
             option_id,
             is_rejection,
@@ -1718,7 +1735,7 @@ fn acp_rejected_permission_tool_call_update_hides_internal_notice_and_skips_reje
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCallUpdate {
             agent_id: "Kimi Code CLI".to_string(),
             update: AcpToolCallUpdate {
@@ -1741,7 +1758,7 @@ fn acp_rejected_permission_tool_call_update_hides_internal_notice_and_skips_reje
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptResponse {
             agent_id: "Kimi Code CLI".to_string(),
             content: String::new(),
@@ -1775,18 +1792,18 @@ fn acp_file_preview_permission_without_prior_tool_call_restores_upserted_item_af
     let mut model = Model::new(HeroOptions::default());
     model.set_window(80, 12);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
             request: mo_core::acp::AcpPermissionRequest {
@@ -1857,11 +1874,11 @@ fn acp_permission_request_renders_file_preview_and_pauses_activity() {
     let mut model = Model::new(HeroOptions::default());
     model.set_window(80, 12);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
@@ -1870,7 +1887,7 @@ fn acp_permission_request_renders_file_preview_and_pauses_activity() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
             request: mo_core::acp::AcpPermissionRequest {
@@ -1944,11 +1961,11 @@ fn acp_permission_choice_restores_paused_stream_activity() {
     let mut model = Model::new(HeroOptions::default());
     model.set_window(80, 12);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
@@ -1957,7 +1974,7 @@ fn acp_permission_choice_restores_paused_stream_activity() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
             request: mo_core::acp::AcpPermissionRequest {
@@ -2023,18 +2040,18 @@ fn acp_file_preview_permission_hides_active_write_tool_call_until_choice() {
     let mut model = Model::new(HeroOptions::default());
     model.set_window(80, 12);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ToolCall {
             agent_id: "Kimi Code CLI".to_string(),
             call: AcpToolCall {
@@ -2059,7 +2076,7 @@ fn acp_file_preview_permission_hides_active_write_tool_call_until_choice() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
             request: mo_core::acp::AcpPermissionRequest {
@@ -2128,18 +2145,18 @@ fn acp_agent_chunks_update_token_activity_without_flushing_transcript() {
     let mut model = Model::new(HeroOptions::default());
     model.set_window(80, 6);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: "hello from acp".to_string(),
@@ -2169,11 +2186,11 @@ fn acp_prompt_started_keeps_submitted_activity_status_line() {
     model.set_window(80, 6);
     model.show_stream_activity("Kimi Code CLI");
     let before = model.current_stream_activity_render_result().plain_line;
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
@@ -2193,18 +2210,18 @@ fn acp_prompt_response_updates_last_request_metrics() {
             ..ModelOptions::default()
         },
     );
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: "hello".to_string(),
@@ -2212,7 +2229,7 @@ fn acp_prompt_response_updates_last_request_metrics() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptResponse {
             agent_id: "Kimi Code CLI".to_string(),
             content: String::new(),
@@ -2238,18 +2255,18 @@ fn acp_thought_chunks_append_reasoning_and_toggle_activity() {
     );
     model.set_window(80, 8);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentThoughtChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: "先分析".to_string(),
@@ -2265,7 +2282,7 @@ fn acp_thought_chunks_append_reasoning_and_toggle_activity() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: "结论".to_string(),
@@ -2273,7 +2290,7 @@ fn acp_thought_chunks_append_reasoning_and_toggle_activity() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptResponse {
             agent_id: "Kimi Code CLI".to_string(),
             content: String::new(),
@@ -2299,18 +2316,18 @@ fn acp_thought_chunks_update_token_activity_like_native_reasoning() {
     let mut model = Model::new(HeroOptions::default());
     model.set_window(80, 8);
     model.transcript_mut().clear();
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentThoughtChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: "先分析这个问题的约束和实现路径。".to_string(),
@@ -2337,11 +2354,11 @@ fn acp_model_config_changed_updates_current_model_status_line_and_models_panel()
         },
     );
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ModelConfigChanged {
             agent_id: "Kimi Code CLI".to_string(),
             config: mo_core::acp::AcpModelConfig {
@@ -2381,11 +2398,11 @@ fn acp_model_config_change_failed_rolls_back_selected_model_and_status_line() {
         },
     );
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ModelConfigChanged {
             agent_id: "Kimi Code CLI".to_string(),
             config: mo_core::acp::AcpModelConfig {
@@ -2428,7 +2445,7 @@ fn acp_model_config_change_failed_rolls_back_selected_model_and_status_line() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ConfigChangeFailed {
             agent_id: "Kimi Code CLI".to_string(),
             message: "boom".to_string(),
@@ -2455,11 +2472,11 @@ fn acp_model_selection_effect_failure_rolls_back_selected_model_and_status_line(
         },
     );
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ModelConfigChanged {
             agent_id: "Kimi Code CLI".to_string(),
             config: mo_core::acp::AcpModelConfig {
@@ -2505,7 +2522,7 @@ fn acp_model_selection_effect_failure_rolls_back_selected_model_and_status_line(
 
     run_set_acp_model_effect(
         &mut model,
-        &mut TestRuntimeDriver::default(),
+        &mut TestRuntimeCoordinator::default(),
         None,
         "kimi-for-coding(thinking)".to_string(),
     );
@@ -2530,11 +2547,11 @@ fn acp_model_config_change_succeeded_commits_selected_model_and_status_line() {
         },
     );
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ModelConfigChanged {
             agent_id: "Kimi Code CLI".to_string(),
             config: mo_core::acp::AcpModelConfig {
@@ -2569,14 +2586,14 @@ fn acp_model_config_change_succeeded_commits_selected_model_and_status_line() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ConfigChangeSucceeded {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::ConfigChangeFailed {
             agent_id: "Kimi Code CLI".to_string(),
             message: "stale failure".to_string(),
@@ -2600,11 +2617,11 @@ fn acp_model_config_change_succeeded_commits_selected_model_and_status_line() {
 fn acp_available_commands_are_saved_and_cleared_with_session_lifecycle() {
     let mut model = Model::new(HeroOptions::default());
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::Started {
             agent_id: "Kimi Code CLI".to_string(),
             session_id: "test-session".to_string(),
@@ -2621,7 +2638,7 @@ fn acp_available_commands_are_saved_and_cleared_with_session_lifecycle() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AvailableCommandsChanged {
             agent_id: "Kimi Code CLI".to_string(),
             commands: vec![
@@ -2656,7 +2673,7 @@ fn acp_available_commands_are_saved_and_cleared_with_session_lifecycle() {
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::Stopped {
             agent_id: "Kimi Code CLI".to_string(),
             message: None,
@@ -2671,27 +2688,22 @@ fn clear_runtime_discards_stale_native_agent_event() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
     model.show_stream_activity("qwen3");
-    let mut acp_runtime = AcpRuntimeState::default();
-    let mut runtime_driver = TestRuntimeDriver {
-        native_events: vec![NativeAgentRuntimeEvent {
+    let mut acp_ui_state = AcpSessionUiState::default();
+    let mut runtime_coordinator = TestRuntimeCoordinator {
+        runtime_events: vec![RuntimeEvent::MessageFinished {
             target: Some(RuntimeTarget::native_agent("local", "qwen3")),
-            event: NativeAgentEvent::Finished {
-                response: NativeAgentResponse {
-                    content: "stale response".to_string(),
-                    reasoning_content: None,
-                    reasoning_duration: None,
-                    ..Default::default()
-                },
-                metrics: None,
-            },
+            content: "stale response".to_string(),
+            reasoning_content: None,
+            reasoning_duration: None,
+            metrics: None,
         }],
         native_running: true,
-        ..TestRuntimeDriver::default()
+        ..TestRuntimeCoordinator::default()
     };
 
     model.reset_to_initial_tui_state();
-    reset_runtime_session_after_clear(&mut acp_runtime, &mut runtime_driver);
-    drain_runtime_driver_events(&mut model, &mut acp_runtime, &mut runtime_driver);
+    reset_runtime_session_after_clear(&mut acp_ui_state, &mut runtime_coordinator);
+    drain_runtime_coordinator_events(&mut model, &mut acp_ui_state, &mut runtime_coordinator);
 
     assert!(
         model
@@ -2700,7 +2712,7 @@ fn clear_runtime_discards_stale_native_agent_event() {
             .all(|item| !item.contains("stale response"))
     );
     assert!(!model.current_stream_activity_render_result().has_content);
-    assert_eq!(runtime_driver.reset_count, 1);
+    assert_eq!(runtime_coordinator.reset_count, 1);
 }
 
 #[test]
@@ -2708,19 +2720,19 @@ fn clear_runtime_discards_stale_acp_prompt_output_without_exiting_acp_mode() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    let mut acp_runtime = AcpRuntimeState::default();
-    let mut runtime_driver = TestRuntimeDriver::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: "old partial".to_string(),
@@ -2728,10 +2740,10 @@ fn clear_runtime_discards_stale_acp_prompt_output_without_exiting_acp_mode() {
     );
 
     model.reset_to_initial_tui_state();
-    reset_runtime_session_after_clear(&mut acp_runtime, &mut runtime_driver);
+    reset_runtime_session_after_clear(&mut acp_ui_state, &mut runtime_coordinator);
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: " stale response".to_string(),
@@ -2739,7 +2751,7 @@ fn clear_runtime_discards_stale_acp_prompt_output_without_exiting_acp_mode() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptResponse {
             agent_id: "Kimi Code CLI".to_string(),
             content: " tail".to_string(),
@@ -2762,15 +2774,15 @@ fn clear_runtime_discards_stale_acp_prompt_start_activity() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    let mut acp_runtime = AcpRuntimeState::default();
-    let mut runtime_driver = TestRuntimeDriver::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
 
-    acp_runtime.mark_prompt_submitted();
+    acp_ui_state.mark_prompt_submitted();
     model.reset_to_initial_tui_state();
-    reset_runtime_session_after_clear(&mut acp_runtime, &mut runtime_driver);
+    reset_runtime_session_after_clear(&mut acp_ui_state, &mut runtime_coordinator);
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
@@ -2785,19 +2797,19 @@ fn clear_runtime_discards_stale_acp_permission_request() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    let mut acp_runtime = AcpRuntimeState::default();
-    let mut runtime_driver = TestRuntimeDriver::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: "旧请求需要权限".to_string(),
@@ -2805,10 +2817,10 @@ fn clear_runtime_discards_stale_acp_permission_request() {
     );
 
     model.reset_to_initial_tui_state();
-    reset_runtime_session_after_clear(&mut acp_runtime, &mut runtime_driver);
+    reset_runtime_session_after_clear(&mut acp_ui_state, &mut runtime_coordinator);
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PermissionRequested {
             agent_id: "Kimi Code CLI".to_string(),
             request: mo_core::acp::AcpPermissionRequest {
@@ -2842,15 +2854,16 @@ fn clear_runtime_discards_stale_acp_permission_request() {
 #[test]
 fn cancelled_acp_prompt_cancels_late_permission_request() {
     let mut model = Model::new(HeroOptions::default());
-    let mut acp_runtime = AcpRuntimeState::default();
-    acp_runtime.mark_prompt_submitted();
+    let mut acp_ui_state = AcpSessionUiState::default();
+    acp_ui_state.mark_prompt_submitted();
     run_interrupt_acp_prompt_effect(
         &mut model,
-        &mut acp_runtime,
-        &mut TestRuntimeDriver::default(),
+        &mut acp_ui_state,
+        &mut TestRuntimeCoordinator::default(),
+        true,
     );
 
-    let option_id = acp_runtime
+    let option_id = acp_ui_state
         .permission_option_id_for_discarded_prompt(&acp_permission_request_with_reject_always());
 
     assert_eq!(
@@ -2861,11 +2874,11 @@ fn cancelled_acp_prompt_cancels_late_permission_request() {
 
 #[test]
 fn stale_acp_permission_reject_fallback_uses_reject_always() {
-    let mut acp_runtime = AcpRuntimeState::default();
-    acp_runtime.mark_prompt_submitted();
-    acp_runtime.reset_after_clear();
+    let mut acp_ui_state = AcpSessionUiState::default();
+    acp_ui_state.mark_prompt_submitted();
+    acp_ui_state.reset_after_clear();
 
-    let option_id = acp_runtime
+    let option_id = acp_ui_state
         .permission_option_id_for_discarded_prompt(&acp_permission_request_with_reject_always());
 
     assert_eq!(option_id, Some("reject-always".to_string()));
@@ -3411,7 +3424,7 @@ fn native_agent_tool_finished_appends_transcript_only_result() {
 #[test]
 fn native_agent_send_effect_starts_native_agent_target() {
     let mut model = Model::new(HeroOptions::default());
-    let mut runtime_driver = TestRuntimeDriver::default();
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
     let request = NativeAgentRequest::new(
         "local",
         ProviderKind::OpenAiCompatible,
@@ -3422,10 +3435,10 @@ fn native_agent_send_effect_starts_native_agent_target() {
         vec![],
     );
 
-    run_send_native_agent_effect(&mut model, &mut runtime_driver, request);
+    run_send_native_agent_effect(&mut model, &mut runtime_coordinator, request);
 
     assert_eq!(
-        runtime_driver
+        runtime_coordinator
             .native_request
             .as_ref()
             .map(NativeAgentRequest::target),
@@ -3454,9 +3467,9 @@ fn native_agent_request_keeps_runtime_target_in_core_dto() {
 
 #[test]
 fn interrupt_native_agent_clears_runtime_and_appends_system_message() {
-    let mut runtime_driver = TestRuntimeDriver {
+    let mut runtime_coordinator = TestRuntimeCoordinator {
         native_running: true,
-        ..TestRuntimeDriver::default()
+        ..TestRuntimeCoordinator::default()
     };
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
@@ -3464,11 +3477,11 @@ fn interrupt_native_agent_clears_runtime_and_appends_system_message() {
 
     apply_effect_if_needed_for_test(
         &mut model,
-        &mut runtime_driver,
+        &mut runtime_coordinator,
         Some(AppEffect::InterruptCurrentTurn),
     );
 
-    assert!(runtime_driver.native_interrupted);
+    assert!(runtime_coordinator.native_interrupted);
     assert!(!model.current_stream_activity_render_result().has_content);
     assert_eq!(
         model.transcript_plain_items(),
@@ -3481,18 +3494,18 @@ fn interrupt_acp_prompt_discards_stale_output_and_keeps_session_selected() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    let mut acp_runtime = AcpRuntimeState::default();
+    let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptStarted {
             agent_id: "Kimi Code CLI".to_string(),
         },
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: "partial before interrupt".to_string(),
@@ -3501,13 +3514,14 @@ fn interrupt_acp_prompt_discards_stale_output_and_keeps_session_selected() {
 
     run_interrupt_acp_prompt_effect(
         &mut model,
-        &mut acp_runtime,
-        &mut TestRuntimeDriver::default(),
+        &mut acp_ui_state,
+        &mut TestRuntimeCoordinator::default(),
+        true,
     );
 
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::AgentMessageChunk {
             agent_id: "Kimi Code CLI".to_string(),
             content: " stale response".to_string(),
@@ -3515,7 +3529,7 @@ fn interrupt_acp_prompt_discards_stale_output_and_keeps_session_selected() {
     );
     apply_acp_session_event(
         &mut model,
-        &mut acp_runtime,
+        &mut acp_ui_state,
         AcpSessionEvent::PromptResponse {
             agent_id: "Kimi Code CLI".to_string(),
             content: " tail".to_string(),
@@ -3564,10 +3578,14 @@ fn ready_input_batch_coalesces_wheel_burst_before_key() {
 
 fn apply_effect_if_needed_for_test(
     model: &mut Model,
-    runtime_driver: &mut TestRuntimeDriver,
+    runtime_coordinator: &mut TestRuntimeCoordinator,
     effect: Option<AppEffect>,
 ) {
     if let Some(AppEffect::InterruptCurrentTurn) = effect {
-        run_interrupt_current_turn_effect(model, &mut AcpRuntimeState::default(), runtime_driver);
+        run_interrupt_current_turn_effect(
+            model,
+            &mut AcpSessionUiState::default(),
+            runtime_coordinator,
+        );
     }
 }

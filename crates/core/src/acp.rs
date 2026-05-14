@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -408,6 +410,15 @@ impl AcpAgentIdentity {
             None => name,
         }
     }
+}
+
+/// `AcpPromptRequest` 保存一次提交给 ACP runtime 的原始输入。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpPromptRequest {
+    pub agent_id: String,
+    pub text: String,
+    pub current_dir: PathBuf,
+    pub identity: Box<AcpAgentIdentity>,
 }
 
 /// `agent_display_name` 返回 initialize 结果的面向用户展示名。

@@ -9,9 +9,9 @@ use crate::{
     theme::TerminalPalette,
     transcript::markdown_highlight::HighlightChunk,
 };
-use mo_core::acp::{
-    AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent, AcpToolCallLocation, AcpToolCallStatus,
-    AcpToolKind,
+use mo_core::session::{
+    RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
+    RuntimeToolActivityLocation, RuntimeToolActivityStatus, RuntimeToolKind,
 };
 
 use super::{
@@ -58,10 +58,10 @@ struct AcpDiffSummary {
 }
 
 pub(super) fn acp_tool_call_detail_blocks(
-    call: &AcpToolCall,
+    call: &RuntimeToolActivity,
     render_mode: ToolActivityRenderMode,
     permission_waiting: bool,
-    terminal_snapshots: &BTreeMap<String, AcpTerminalSnapshot>,
+    terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
 ) -> Vec<AcpToolCallDetailBlock> {
     if should_collapse_acp_read_tool_call(call) {
         return Vec::new();
@@ -105,10 +105,10 @@ pub(super) fn acp_tool_call_detail_blocks(
 }
 
 fn execute_tool_call_detail_blocks(
-    call: &AcpToolCall,
+    call: &RuntimeToolActivity,
     render_mode: ToolActivityRenderMode,
     permission_waiting: bool,
-    terminal_snapshots: &BTreeMap<String, AcpTerminalSnapshot>,
+    terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
 ) -> Vec<AcpToolCallDetailBlock> {
     if should_defer_active_execute_details(call, permission_waiting) {
         let terminal_blocks = active_execute_terminal_blocks(call, render_mode, terminal_snapshots);
@@ -141,32 +141,35 @@ fn execute_tool_call_detail_blocks(
     blocks
 }
 
-fn should_defer_active_execute_details(call: &AcpToolCall, permission_waiting: bool) -> bool {
+fn should_defer_active_execute_details(
+    call: &RuntimeToolActivity,
+    permission_waiting: bool,
+) -> bool {
     is_active_tool_call_status(call.status)
         && (permission_waiting || is_execute_like_tool_call(call))
 }
 
 fn active_execute_terminal_blocks(
-    call: &AcpToolCall,
+    call: &RuntimeToolActivity,
     render_mode: ToolActivityRenderMode,
-    terminal_snapshots: &BTreeMap<String, AcpTerminalSnapshot>,
+    terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
 ) -> Vec<AcpToolCallDetailBlock> {
     call.content
         .iter()
-        .filter(|content| matches!(content, AcpToolCallContent::Terminal { .. }))
+        .filter(|content| matches!(content, RuntimeToolActivityContent::Terminal { .. }))
         .flat_map(|content| acp_tool_call_content_blocks(content, render_mode, terminal_snapshots))
         .collect()
 }
 
-fn is_active_tool_call_status(status: AcpToolCallStatus) -> bool {
+fn is_active_tool_call_status(status: RuntimeToolActivityStatus) -> bool {
     matches!(
         status,
-        AcpToolCallStatus::Pending | AcpToolCallStatus::InProgress
+        RuntimeToolActivityStatus::Pending | RuntimeToolActivityStatus::InProgress
     )
 }
 
-fn is_execute_like_tool_call(call: &AcpToolCall) -> bool {
-    call.kind == AcpToolKind::Execute
+fn is_execute_like_tool_call(call: &RuntimeToolActivity) -> bool {
+    call.kind == RuntimeToolKind::Execute
         || call.title.trim_start().starts_with("Shell:")
         || call.title.trim_start().starts_with("Run ")
         || call
@@ -176,10 +179,10 @@ fn is_execute_like_tool_call(call: &AcpToolCall) -> bool {
             .is_some()
 }
 
-fn should_hide_execute_text_content(content: &AcpToolCallContent) -> bool {
+fn should_hide_execute_text_content(content: &RuntimeToolActivityContent) -> bool {
     matches!(
         content,
-        AcpToolCallContent::Text(text) if is_execute_protocol_copy_text(text)
+        RuntimeToolActivityContent::Text(text) if is_execute_protocol_copy_text(text)
     )
 }
 
@@ -192,29 +195,29 @@ fn is_execute_protocol_copy_text(text: &str) -> bool {
 }
 
 fn acp_tool_call_content_blocks(
-    content: &AcpToolCallContent,
+    content: &RuntimeToolActivityContent,
     render_mode: ToolActivityRenderMode,
-    terminal_snapshots: &BTreeMap<String, AcpTerminalSnapshot>,
+    terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
 ) -> Vec<AcpToolCallDetailBlock> {
     match content {
-        AcpToolCallContent::Text(text) => {
+        RuntimeToolActivityContent::Text(text) => {
             vec![AcpToolCallDetailBlock::Text(truncate_detail_block(
                 text_lines(text),
                 render_mode,
             ))]
         }
-        AcpToolCallContent::Image { mime_type, uri } => {
+        RuntimeToolActivityContent::Image { mime_type, uri } => {
             vec![AcpToolCallDetailBlock::Text(vec![match uri {
                 Some(uri) => format!("Image: {mime_type} {uri}"),
                 None => format!("Image: {mime_type}"),
             }])]
         }
-        AcpToolCallContent::Audio { mime_type } => {
+        RuntimeToolActivityContent::Audio { mime_type } => {
             vec![AcpToolCallDetailBlock::Text(vec![format!(
                 "Audio: {mime_type}"
             )])]
         }
-        AcpToolCallContent::ResourceLink { uri, name, title } => {
+        RuntimeToolActivityContent::ResourceLink { uri, name, title } => {
             vec![AcpToolCallDetailBlock::Text(vec![match title {
                 Some(title) if !title.is_empty() => {
                     format!("Resource: {title} ({name}) {uri}")
@@ -222,7 +225,7 @@ fn acp_tool_call_content_blocks(
                 _ => format!("Resource: {name} {uri}"),
             }])]
         }
-        AcpToolCallContent::Resource {
+        RuntimeToolActivityContent::Resource {
             uri,
             mime_type,
             text,
@@ -241,7 +244,7 @@ fn acp_tool_call_content_blocks(
                 render_mode,
             ))]
         }
-        AcpToolCallContent::Diff {
+        RuntimeToolActivityContent::Diff {
             path: _,
             old_text,
             new_text,
@@ -249,14 +252,16 @@ fn acp_tool_call_content_blocks(
             diff_detail_lines(old_text.as_deref(), new_text),
             render_mode,
         ))],
-        AcpToolCallContent::Terminal { terminal_id } => {
+        RuntimeToolActivityContent::Terminal { terminal_id } => {
             vec![AcpToolCallDetailBlock::SecondaryText(
                 terminal_detail_lines(terminal_snapshots.get(terminal_id), render_mode),
             )]
         }
-        AcpToolCallContent::Unknown(label) => vec![AcpToolCallDetailBlock::Text(vec![format!(
-            "Unknown content: {label}"
-        )])],
+        RuntimeToolActivityContent::Unknown(label) => {
+            vec![AcpToolCallDetailBlock::Text(vec![format!(
+                "Unknown content: {label}"
+            )])]
+        }
     }
 }
 
@@ -275,7 +280,7 @@ fn labeled_detail_block(
 }
 
 fn terminal_detail_lines(
-    snapshot: Option<&AcpTerminalSnapshot>,
+    snapshot: Option<&RuntimeTerminalSnapshot>,
     render_mode: ToolActivityRenderMode,
 ) -> Vec<String> {
     let Some(snapshot) = snapshot else {
@@ -431,7 +436,7 @@ fn line_count(text: &str) -> usize {
 }
 
 pub(super) fn acp_tool_call_diff_header_chunks(
-    call: &AcpToolCall,
+    call: &RuntimeToolActivity,
     palette: TerminalPalette,
 ) -> Option<Vec<HighlightChunk>> {
     let summaries = call
@@ -479,8 +484,8 @@ pub(super) fn acp_tool_call_diff_header_chunks(
     Some(chunks)
 }
 
-fn acp_diff_summary(content: &AcpToolCallContent) -> Option<AcpDiffSummary> {
-    let AcpToolCallContent::Diff {
+fn acp_diff_summary(content: &RuntimeToolActivityContent) -> Option<AcpDiffSummary> {
+    let RuntimeToolActivityContent::Diff {
         path,
         old_text,
         new_text,
@@ -560,10 +565,10 @@ fn acp_diff_count_chunks(
     ]
 }
 
-pub(super) fn acp_tool_call_has_diff_content(call: &AcpToolCall) -> bool {
+pub(super) fn acp_tool_call_has_diff_content(call: &RuntimeToolActivity) -> bool {
     call.content
         .iter()
-        .any(|content| matches!(content, AcpToolCallContent::Diff { .. }))
+        .any(|content| matches!(content, RuntimeToolActivityContent::Diff { .. }))
 }
 
 pub(super) fn acp_diff_line_prefix(
@@ -586,7 +591,9 @@ pub(super) fn acp_diff_line_prefix(
     }
 }
 
-pub(super) fn acp_tool_call_location_suffix(locations: &[AcpToolCallLocation]) -> Option<String> {
+pub(super) fn acp_tool_call_location_suffix(
+    locations: &[RuntimeToolActivityLocation],
+) -> Option<String> {
     if locations.is_empty() {
         return None;
     }
@@ -603,7 +610,7 @@ pub(super) fn acp_tool_call_location_suffix(locations: &[AcpToolCallLocation]) -
     )
 }
 
-pub(super) fn acp_tool_call_display_title(call: &AcpToolCall) -> String {
+pub(super) fn acp_tool_call_display_title(call: &RuntimeToolActivity) -> String {
     let title = call.title.trim();
     // ACP 标题常带有 `Shell:` 一类传输前缀，紧凑头部只显示真正命令。
     let title = title
@@ -618,7 +625,7 @@ pub(super) fn acp_tool_call_display_title(call: &AcpToolCall) -> String {
     }
 }
 
-pub(super) fn acp_read_tool_call_title_chunks(call: &AcpToolCall) -> Vec<HighlightChunk> {
+pub(super) fn acp_read_tool_call_title_chunks(call: &RuntimeToolActivity) -> Vec<HighlightChunk> {
     let title_style = Style::new().add_modifier(Modifier::BOLD);
     let Some(target) = acp_read_tool_call_target(call) else {
         return vec![HighlightChunk {
@@ -639,7 +646,7 @@ pub(super) fn acp_read_tool_call_title_chunks(call: &AcpToolCall) -> Vec<Highlig
     ]
 }
 
-pub(super) fn acp_write_tool_call_title_chunks(call: &AcpToolCall) -> Vec<HighlightChunk> {
+pub(super) fn acp_write_tool_call_title_chunks(call: &RuntimeToolActivity) -> Vec<HighlightChunk> {
     let title_style = Style::new().add_modifier(Modifier::BOLD);
     let Some(target) = acp_write_tool_call_target(call) else {
         return vec![HighlightChunk {
@@ -660,8 +667,8 @@ pub(super) fn acp_write_tool_call_title_chunks(call: &AcpToolCall) -> Vec<Highli
     ]
 }
 
-fn acp_read_tool_call_target(call: &AcpToolCall) -> Option<String> {
-    if call.kind == AcpToolKind::Read
+fn acp_read_tool_call_target(call: &RuntimeToolActivity) -> Option<String> {
+    if call.kind == RuntimeToolKind::Read
         && let [location] = call.locations.as_slice()
         && !location.path.trim().is_empty()
     {
@@ -685,12 +692,12 @@ fn acp_tool_call_title_target(title: &str, prefixes: &[&str]) -> Option<String> 
     })
 }
 
-pub(super) fn is_acp_read_tool_call(call: &AcpToolCall) -> bool {
-    call.kind == AcpToolKind::Read || acp_read_tool_call_title_target(&call.title).is_some()
+pub(super) fn is_acp_read_tool_call(call: &RuntimeToolActivity) -> bool {
+    call.kind == RuntimeToolKind::Read || acp_read_tool_call_title_target(&call.title).is_some()
 }
 
-fn should_collapse_acp_read_tool_call(call: &AcpToolCall) -> bool {
-    is_acp_read_tool_call(call) && call.status != AcpToolCallStatus::Failed
+fn should_collapse_acp_read_tool_call(call: &RuntimeToolActivity) -> bool {
+    is_acp_read_tool_call(call) && call.status != RuntimeToolActivityStatus::Failed
 }
 
 pub(super) fn acp_tool_call_diff_line_style(
@@ -752,30 +759,30 @@ fn palette_main_is_light_text(palette: TerminalPalette) -> bool {
     }
 }
 
-fn acp_tool_kind_label(kind: AcpToolKind) -> &'static str {
+fn acp_tool_kind_label(kind: RuntimeToolKind) -> &'static str {
     match kind {
-        AcpToolKind::Read => "Read",
-        AcpToolKind::Edit => "Edit",
-        AcpToolKind::Delete => "Delete",
-        AcpToolKind::Move => "Move",
-        AcpToolKind::Search => "Search",
-        AcpToolKind::Execute => "Execute",
-        AcpToolKind::Think => "Think",
-        AcpToolKind::Fetch => "Fetch",
-        AcpToolKind::SwitchMode => "SwitchMode",
-        AcpToolKind::Other => "Other",
+        RuntimeToolKind::Read => "Read",
+        RuntimeToolKind::Edit => "Edit",
+        RuntimeToolKind::Delete => "Delete",
+        RuntimeToolKind::Move => "Move",
+        RuntimeToolKind::Search => "Search",
+        RuntimeToolKind::Execute => "Execute",
+        RuntimeToolKind::Think => "Think",
+        RuntimeToolKind::Fetch => "Fetch",
+        RuntimeToolKind::SwitchMode => "SwitchMode",
+        RuntimeToolKind::Other => "Other",
     }
 }
 
 pub(super) fn acp_tool_call_status_color(
-    status: AcpToolCallStatus,
+    status: RuntimeToolActivityStatus,
     palette: TerminalPalette,
 ) -> Color {
     match status {
-        AcpToolCallStatus::Pending => palette.tertiary,
-        AcpToolCallStatus::InProgress => palette.accent,
-        AcpToolCallStatus::Completed => palette.quote,
-        AcpToolCallStatus::Failed => palette.system_error,
+        RuntimeToolActivityStatus::Pending => palette.tertiary,
+        RuntimeToolActivityStatus::InProgress => palette.accent,
+        RuntimeToolActivityStatus::Completed => palette.quote,
+        RuntimeToolActivityStatus::Failed => palette.system_error,
     }
 }
 
@@ -798,17 +805,17 @@ pub(super) fn active_marker_visible_at(started_at: Instant, now: Instant) -> boo
     active_marker_frame_index(started_at, now).is_multiple_of(2)
 }
 
-pub(super) fn acp_tool_call_content_byte_len(content: &AcpToolCallContent) -> usize {
+pub(super) fn acp_tool_call_content_byte_len(content: &RuntimeToolActivityContent) -> usize {
     match content {
-        AcpToolCallContent::Text(text) => text.len(),
-        AcpToolCallContent::Image { mime_type, uri } => {
+        RuntimeToolActivityContent::Text(text) => text.len(),
+        RuntimeToolActivityContent::Image { mime_type, uri } => {
             mime_type.len() + uri.as_deref().map(str::len).unwrap_or(0)
         }
-        AcpToolCallContent::Audio { mime_type } => mime_type.len(),
-        AcpToolCallContent::ResourceLink { uri, name, title } => {
+        RuntimeToolActivityContent::Audio { mime_type } => mime_type.len(),
+        RuntimeToolActivityContent::ResourceLink { uri, name, title } => {
             uri.len() + name.len() + title.as_deref().map(str::len).unwrap_or(0)
         }
-        AcpToolCallContent::Resource {
+        RuntimeToolActivityContent::Resource {
             uri,
             mime_type,
             text,
@@ -817,12 +824,12 @@ pub(super) fn acp_tool_call_content_byte_len(content: &AcpToolCallContent) -> us
                 + mime_type.as_deref().map(str::len).unwrap_or(0)
                 + text.as_deref().map(str::len).unwrap_or(0)
         }
-        AcpToolCallContent::Diff {
+        RuntimeToolActivityContent::Diff {
             path,
             old_text,
             new_text,
         } => path.len() + old_text.as_deref().map(str::len).unwrap_or(0) + new_text.len(),
-        AcpToolCallContent::Terminal { terminal_id } => terminal_id.len(),
-        AcpToolCallContent::Unknown(label) => label.len(),
+        RuntimeToolActivityContent::Terminal { terminal_id } => terminal_id.len(),
+        RuntimeToolActivityContent::Unknown(label) => label.len(),
     }
 }

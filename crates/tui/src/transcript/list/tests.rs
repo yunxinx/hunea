@@ -141,7 +141,7 @@ fn tool_result_is_display_only_and_not_assistant_message() {
 #[test]
 fn tool_activity_uses_compact_and_detailed_rendering_modes() {
     let mut transcript = Transcript::new(default_palette());
-    transcript.append_acp_tool_call(AcpToolCall {
+    transcript.append_runtime_tool_activity(AcpToolCall {
         tool_call_id: "call-1".to_string(),
         title: "Shell: cargo check".to_string(),
         kind: AcpToolKind::Other,

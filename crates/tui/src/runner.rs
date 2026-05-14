@@ -2,7 +2,6 @@ use std::time::Instant;
 
 use color_eyre::eyre::Result;
 use mo_core::{
-    acp::AcpSessionEvent,
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     session::{RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent},
 };
@@ -18,20 +17,14 @@ mod model_refresh;
 mod native_agent;
 mod terminal;
 
-use acp_session::{AcpSessionUiState, apply_acp_session_event_with_coordinator};
+use acp_session::{AcpSessionUiState, apply_runtime_event_with_coordinator};
 use effects::apply_effect_if_needed;
 use input::{TerminalInputAction, coalesced_input_actions, read_ready_terminal_events};
 use model_refresh::apply_model_provider_refresh_event;
 use terminal::{TerminalMouseMode, TerminalSession, apply_mouse_mode, wait_for_terminal_event};
 
-use crate::runtime::RuntimeEventApply;
-
 /// `RuntimeCoordinator` 是 TUI runner 与具体 agent runtime 之间的最小边界。
 pub trait RuntimeCoordinator {
-    fn drain_acp_events(&mut self) -> Vec<AcpSessionEvent> {
-        Vec::new()
-    }
-
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         Vec::new()
     }
@@ -225,13 +218,8 @@ fn drain_runtime_coordinator_events(
 ) -> bool {
     let mut changed = false;
 
-    for event in runtime_coordinator.drain_acp_events() {
-        apply_acp_session_event_with_coordinator(model, acp_ui_state, runtime_coordinator, event);
-        changed = true;
-    }
-
     for event in runtime_coordinator.drain_runtime_events() {
-        model.apply_runtime_event(event);
+        apply_runtime_event_with_coordinator(model, acp_ui_state, runtime_coordinator, event);
         changed = true;
     }
 

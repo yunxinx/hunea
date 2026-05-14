@@ -13,3 +13,17 @@ fn tui_has_no_runtime_crate_dependencies() {
         );
     }
 }
+
+#[test]
+fn tui_runner_consumes_runtime_events_not_acp_session_events() {
+    let runner = include_str!("../src/runner.rs");
+
+    assert!(
+        !runner.contains("AcpSessionEvent"),
+        "mo-tui runner should consume ACP activity through RuntimeEvent, not AcpSessionEvent"
+    );
+    assert!(
+        !runner.contains("drain_acp_events"),
+        "mo-tui runner should not expose a separate ACP event drain path"
+    );
+}

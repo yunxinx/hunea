@@ -33,7 +33,7 @@ use crate::{
     theme::TerminalPalette,
     tool_result::{ToolActivityRenderMode, ToolResultItem, ToolResultKind},
 };
-use mo_core::acp::{AcpTerminalSnapshot, AcpToolCall, AcpToolCallUpdate};
+use mo_core::session::{RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate};
 
 mod block_materialize;
 mod metrics_exactize;
@@ -245,17 +245,21 @@ impl Transcript {
         self.push_item(TranscriptItem::ToolResult(item));
     }
 
-    /// `append_acp_tool_call` 追加一条可更新的 ACP tool call 展示项。
-    pub(crate) fn append_acp_tool_call(&mut self, call: AcpToolCall) -> usize {
+    /// `append_runtime_tool_activity` 追加一条可更新的 runtime tool activity 展示项。
+    pub(crate) fn append_runtime_tool_activity(
+        &mut self,
+        call: impl Into<RuntimeToolActivity>,
+    ) -> usize {
+        let call = call.into();
         let index = self.items.len();
         self.push_item(TranscriptItem::ToolResult(
-            ToolResultItem::from_acp_tool_call(call, self.tool_activity_render_mode),
+            ToolResultItem::from_runtime_tool_activity(call, self.tool_activity_render_mode),
         ));
         index
     }
 
-    /// `acp_tool_call_index` 返回最近一条匹配 `toolCallId` 的 ACP tool call 展示项。
-    pub(crate) fn acp_tool_call_index(&self, tool_call_id: &str) -> Option<usize> {
+    /// `runtime_tool_activity_index` 返回最近一条匹配 activity id 的 tool activity 展示项。
+    pub(crate) fn runtime_tool_activity_index(&self, tool_call_id: &str) -> Option<usize> {
         self.items
             .iter()
             .enumerate()
@@ -265,18 +269,19 @@ impl Transcript {
                     return None;
                 };
                 tool_result
-                    .acp_tool_call_id()
+                    .runtime_tool_activity_id()
                     .is_some_and(|id| id == tool_call_id)
                     .then_some(index)
             })
     }
 
-    /// `update_acp_tool_call` 用 ACP 增量事件替换已有 tool call 项。
-    pub(crate) fn update_acp_tool_call(
+    /// `update_runtime_tool_activity` 用 runtime 增量事件替换已有 tool activity 项。
+    pub(crate) fn update_runtime_tool_activity(
         &mut self,
         item_index: usize,
-        update: AcpToolCallUpdate,
+        update: impl Into<RuntimeToolActivityUpdate>,
     ) -> bool {
+        let update = update.into();
         let Some(item) = self.items.get(item_index) else {
             return false;
         };
@@ -285,7 +290,7 @@ impl Transcript {
         };
 
         let mut tool_result = tool_result.clone();
-        if !tool_result.update_acp_tool_call(update) {
+        if !tool_result.update_runtime_tool_activity(update) {
             return false;
         }
         self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
@@ -334,8 +339,12 @@ impl Transcript {
         true
     }
 
-    /// `set_acp_terminal_snapshot` 刷新引用指定 terminal 的 tool call 展示项。
-    pub(crate) fn set_acp_terminal_snapshot(&mut self, snapshot: AcpTerminalSnapshot) -> bool {
+    /// `set_runtime_terminal_snapshot` 刷新引用指定 terminal 的 tool activity 展示项。
+    pub(crate) fn set_runtime_terminal_snapshot(
+        &mut self,
+        snapshot: impl Into<RuntimeTerminalSnapshot>,
+    ) -> bool {
+        let snapshot = snapshot.into();
         let mut first_dirty: Option<usize> = None;
         let mut items = self.items.as_ref().clone();
         for (item_index, item) in items.iter_mut().enumerate() {
@@ -343,7 +352,7 @@ impl Transcript {
                 continue;
             };
             let mut tool_result = tool_result.clone();
-            if !tool_result.set_acp_terminal_snapshot(snapshot.clone()) {
+            if !tool_result.set_runtime_terminal_snapshot(snapshot.clone()) {
                 continue;
             }
             *item = Rc::new(TranscriptItem::ToolResult(tool_result));

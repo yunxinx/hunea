@@ -31,11 +31,12 @@ use acp::{
     acp_tool_call_status_color, acp_write_tool_call_title_chunks, active_marker_visible_at,
     is_acp_read_tool_call, style_for_color,
 };
-use mo_core::acp::{
-    AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolCallUpdate,
+use mo_core::session::{
+    RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
+    RuntimeToolActivityStatus, RuntimeToolActivityUpdate,
 };
 #[cfg(test)]
-use mo_core::acp::{AcpToolCallLocation, AcpToolKind};
+use mo_core::session::{RuntimeToolActivityLocation, RuntimeToolKind};
 
 const TOOL_RESULT_PREFIX: &str = "● ";
 const TOOL_RESULT_CONTINUATION_PREFIX: &str = "  ";
@@ -66,7 +67,7 @@ enum ToolResultBody {
         content: String,
         kind: ToolResultKind,
     },
-    AcpToolCall(AcpToolCall),
+    RuntimeToolActivity(RuntimeToolActivity),
 }
 
 /// `ToolResultItem` 表示只用于 TUI 展示的工具活动，不参与模型上下文。
@@ -78,7 +79,7 @@ pub(crate) struct ToolResultItem {
     active_marker_started_at: Option<Instant>,
     approval_suspended: bool,
     permission_waiting: bool,
-    terminal_snapshots: BTreeMap<String, AcpTerminalSnapshot>,
+    terminal_snapshots: BTreeMap<String, RuntimeTerminalSnapshot>,
 }
 
 impl ToolResultItem {
@@ -91,12 +92,13 @@ impl ToolResultItem {
         )
     }
 
-    /// `from_acp_tool_call` 创建一条 ACP tool call 展示项。
-    pub(crate) fn from_acp_tool_call(
-        call: AcpToolCall,
+    /// `from_runtime_tool_activity` 创建一条 runtime tool activity 展示项。
+    pub(crate) fn from_runtime_tool_activity(
+        call: impl Into<RuntimeToolActivity>,
         render_mode: ToolActivityRenderMode,
     ) -> Self {
-        Self::from_body(ToolResultBody::AcpToolCall(call), render_mode)
+        let call = call.into();
+        Self::from_body(ToolResultBody::RuntimeToolActivity(call), render_mode)
     }
 
     fn from_body(body: ToolResultBody, render_mode: ToolActivityRenderMode) -> Self {
@@ -141,9 +143,9 @@ impl ToolResultItem {
         self.active_marker_started_at.is_some() && !self.is_compact_approval_suspended()
     }
 
-    pub(crate) fn acp_tool_call_id(&self) -> Option<&str> {
+    pub(crate) fn runtime_tool_activity_id(&self) -> Option<&str> {
         match &self.body {
-            ToolResultBody::AcpToolCall(call) => Some(call.tool_call_id.as_str()),
+            ToolResultBody::RuntimeToolActivity(call) => Some(call.activity_id.as_str()),
             ToolResultBody::Approval { .. } => None,
         }
     }
@@ -179,7 +181,7 @@ impl ToolResultItem {
             ToolResultBody::Approval { content, .. } => {
                 self.approval_wrapped_styled_lines(content, width, palette)
             }
-            ToolResultBody::AcpToolCall(call) => {
+            ToolResultBody::RuntimeToolActivity(call) => {
                 self.acp_tool_call_styled_lines_at(call, width, palette, now)
             }
         }
@@ -212,7 +214,7 @@ impl ToolResultItem {
     pub(crate) fn source_text_byte_len(&self) -> usize {
         match &self.body {
             ToolResultBody::Approval { content, .. } => content.len(),
-            ToolResultBody::AcpToolCall(call) => {
+            ToolResultBody::RuntimeToolActivity(call) => {
                 call.title.len()
                     + call
                         .raw_input
@@ -300,7 +302,7 @@ impl ToolResultItem {
     }
 
     pub(crate) fn set_approval_suspended(&mut self, suspended: bool) -> bool {
-        if !matches!(self.body, ToolResultBody::AcpToolCall(_)) {
+        if !matches!(self.body, ToolResultBody::RuntimeToolActivity(_)) {
             return false;
         }
         if self.approval_suspended == suspended {
@@ -313,7 +315,7 @@ impl ToolResultItem {
     }
 
     pub(crate) fn set_permission_waiting(&mut self, waiting: bool) -> bool {
-        if !matches!(self.body, ToolResultBody::AcpToolCall(_)) {
+        if !matches!(self.body, ToolResultBody::RuntimeToolActivity(_)) {
             return false;
         }
         if self.permission_waiting == waiting {
@@ -325,12 +327,16 @@ impl ToolResultItem {
         true
     }
 
-    pub(crate) fn set_acp_terminal_snapshot(&mut self, snapshot: AcpTerminalSnapshot) -> bool {
-        let ToolResultBody::AcpToolCall(call) = &self.body else {
+    pub(crate) fn set_runtime_terminal_snapshot(
+        &mut self,
+        snapshot: impl Into<RuntimeTerminalSnapshot>,
+    ) -> bool {
+        let snapshot = snapshot.into();
+        let ToolResultBody::RuntimeToolActivity(call) = &self.body else {
             return false;
         };
         if !call.content.iter().any(|content| {
-            matches!(content, AcpToolCallContent::Terminal { terminal_id } if terminal_id == &snapshot.terminal_id)
+            matches!(content, RuntimeToolActivityContent::Terminal { terminal_id } if terminal_id == &snapshot.terminal_id)
         }) {
             return false;
         }
@@ -351,15 +357,22 @@ impl ToolResultItem {
     }
 
     #[cfg(test)]
-    fn set_acp_terminal_snapshot_for_test(&mut self, snapshot: AcpTerminalSnapshot) -> bool {
-        self.set_acp_terminal_snapshot(snapshot)
+    fn set_runtime_terminal_snapshot_for_test(
+        &mut self,
+        snapshot: impl Into<RuntimeTerminalSnapshot>,
+    ) -> bool {
+        self.set_runtime_terminal_snapshot(snapshot)
     }
 
-    pub(crate) fn update_acp_tool_call(&mut self, update: AcpToolCallUpdate) -> bool {
-        let ToolResultBody::AcpToolCall(call) = &mut self.body else {
+    pub(crate) fn update_runtime_tool_activity(
+        &mut self,
+        update: impl Into<RuntimeToolActivityUpdate>,
+    ) -> bool {
+        let update = update.into();
+        let ToolResultBody::RuntimeToolActivity(call) = &mut self.body else {
             return false;
         };
-        if call.tool_call_id != update.tool_call_id {
+        if call.activity_id != update.activity_id {
             return false;
         }
 
@@ -371,7 +384,7 @@ impl ToolResultItem {
         }
         if let Some(status) = update.status {
             call.status = status;
-            if status != AcpToolCallStatus::Pending {
+            if status != RuntimeToolActivityStatus::Pending {
                 self.permission_waiting = false;
             }
         }
@@ -379,7 +392,7 @@ impl ToolResultItem {
             call.content = content;
             self.terminal_snapshots.retain(|terminal_id, _| {
                 call.content.iter().any(|content| {
-                    matches!(content, AcpToolCallContent::Terminal { terminal_id: content_terminal_id } if content_terminal_id == terminal_id)
+                    matches!(content, RuntimeToolActivityContent::Terminal { terminal_id: content_terminal_id } if content_terminal_id == terminal_id)
                 })
             });
         }
@@ -398,18 +411,18 @@ impl ToolResultItem {
     }
 
     pub(crate) fn mark_acp_tool_call_failed(&mut self, message: impl Into<String>) -> bool {
-        let ToolResultBody::AcpToolCall(call) = &mut self.body else {
+        let ToolResultBody::RuntimeToolActivity(call) = &mut self.body else {
             return false;
         };
         if matches!(
             call.status,
-            AcpToolCallStatus::Completed | AcpToolCallStatus::Failed
+            RuntimeToolActivityStatus::Completed | RuntimeToolActivityStatus::Failed
         ) {
             return false;
         }
 
-        call.status = AcpToolCallStatus::Failed;
-        call.content = vec![AcpToolCallContent::Text(message.into())];
+        call.status = RuntimeToolActivityStatus::Failed;
+        call.content = vec![RuntimeToolActivityContent::Text(message.into())];
         self.permission_waiting = false;
         self.active_marker_started_at = None;
         self.refresh_render_cache_key();
@@ -423,17 +436,17 @@ impl ToolResultItem {
     }
 
     pub(crate) fn mark_acp_tool_call_rejected(&mut self) -> bool {
-        let ToolResultBody::AcpToolCall(call) = &mut self.body else {
+        let ToolResultBody::RuntimeToolActivity(call) = &mut self.body else {
             return false;
         };
-        if call.status == AcpToolCallStatus::Failed
+        if call.status == RuntimeToolActivityStatus::Failed
             && call.content.is_empty()
             && !self.permission_waiting
         {
             return false;
         }
 
-        call.status = AcpToolCallStatus::Failed;
+        call.status = RuntimeToolActivityStatus::Failed;
         call.content.clear();
         call.raw_input = None;
         call.raw_output = None;
@@ -578,7 +591,7 @@ impl ToolResultItem {
 
     fn acp_tool_call_styled_lines_at(
         &self,
-        call: &AcpToolCall,
+        call: &RuntimeToolActivity,
         width: u16,
         palette: TerminalPalette,
         now: Instant,
@@ -598,7 +611,7 @@ impl ToolResultItem {
 
     fn acp_tool_call_header_lines_at(
         &self,
-        call: &AcpToolCall,
+        call: &RuntimeToolActivity,
         width: usize,
         palette: TerminalPalette,
         now: Instant,
@@ -606,7 +619,7 @@ impl ToolResultItem {
         let active_started_at = self.active_marker_started_at.filter(|_| {
             matches!(
                 call.status,
-                AcpToolCallStatus::Pending | AcpToolCallStatus::InProgress
+                RuntimeToolActivityStatus::Pending | RuntimeToolActivityStatus::InProgress
             )
         });
         let marker_visible = active_started_at
@@ -648,7 +661,7 @@ impl ToolResultItem {
 
     fn acp_tool_call_title_chunks(
         &self,
-        call: &AcpToolCall,
+        call: &RuntimeToolActivity,
         palette: TerminalPalette,
     ) -> Vec<HighlightChunk> {
         if let Some(chunks) = acp_tool_call_diff_header_chunks(call, palette) {
@@ -852,7 +865,9 @@ impl ToolResultItem {
                 kind: ToolResultKind::Rejected,
                 ..
             } => palette.approval_rejected,
-            ToolResultBody::AcpToolCall(call) => acp_tool_call_status_color(call.status, palette),
+            ToolResultBody::RuntimeToolActivity(call) => {
+                acp_tool_call_status_color(call.status, palette)
+            }
         };
 
         if color == Color::Reset {
@@ -987,14 +1002,14 @@ fn split_first_word(line: &str) -> Option<(&str, &str)> {
 
 fn active_marker_started_at_for_body(
     body: &ToolResultBody,
-    terminal_snapshots: &BTreeMap<String, AcpTerminalSnapshot>,
+    terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
 ) -> bool {
-    let ToolResultBody::AcpToolCall(call) = body else {
+    let ToolResultBody::RuntimeToolActivity(call) = body else {
         return false;
     };
     if !matches!(
         call.status,
-        AcpToolCallStatus::Pending | AcpToolCallStatus::InProgress
+        RuntimeToolActivityStatus::Pending | RuntimeToolActivityStatus::InProgress
     ) {
         return false;
     }
@@ -1002,7 +1017,7 @@ fn active_marker_started_at_for_body(
         .content
         .iter()
         .filter_map(|content| match content {
-            AcpToolCallContent::Terminal { terminal_id } => Some(terminal_id),
+            RuntimeToolActivityContent::Terminal { terminal_id } => Some(terminal_id),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1021,7 +1036,7 @@ fn tool_result_render_cache_key(
     render_mode: ToolActivityRenderMode,
     approval_suspended: bool,
     permission_waiting: bool,
-    terminal_snapshots: &BTreeMap<String, AcpTerminalSnapshot>,
+    terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     "tool_result".hash(&mut hasher);
@@ -1134,12 +1149,12 @@ mod tests {
     #[test]
     fn acp_tool_call_header_uses_title_only_and_strips_shell_prefix() {
         let palette = default_palette();
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "Shell: cargo check".to_string(),
-                kind: AcpToolKind::Other,
-                status: AcpToolCallStatus::Completed,
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::Completed,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: None,
@@ -1180,12 +1195,12 @@ mod tests {
     #[test]
     fn acp_tool_call_header_highlights_shell_titles() {
         let palette = default_palette();
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "Shell: cargo check".to_string(),
-                kind: AcpToolKind::Other,
-                status: AcpToolCallStatus::Completed,
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::Completed,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: None,
@@ -1209,12 +1224,12 @@ mod tests {
 
     #[test]
     fn pending_execute_tool_call_renders_waiting_detail() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-approval".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-approval".to_string(),
                 title: "Shell: cargo check".to_string(),
-                kind: AcpToolKind::Execute,
-                status: AcpToolCallStatus::Pending,
+                kind: RuntimeToolKind::Execute,
+                status: RuntimeToolActivityStatus::Pending,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: None,
@@ -1242,13 +1257,13 @@ mod tests {
 
     #[test]
     fn active_execute_tool_call_defers_streamed_content_until_finished() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-exec".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-exec".to_string(),
                 title: "Shell: cargo check".to_string(),
-                kind: AcpToolKind::Execute,
-                status: AcpToolCallStatus::InProgress,
-                content: vec![AcpToolCallContent::Text(
+                kind: RuntimeToolKind::Execute,
+                status: RuntimeToolActivityStatus::InProgress,
+                content: vec![RuntimeToolActivityContent::Text(
                     "Requesting approval to perform: Run command `cargo check`".to_string(),
                 )],
                 locations: Vec::new(),
@@ -1279,12 +1294,12 @@ mod tests {
 
     #[test]
     fn completed_execute_tool_call_renders_deferred_content() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-exec".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-exec".to_string(),
                 title: "Shell: cargo check".to_string(),
-                kind: AcpToolKind::Execute,
-                status: AcpToolCallStatus::Completed,
+                kind: RuntimeToolKind::Execute,
+                status: RuntimeToolActivityStatus::Completed,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: None,
@@ -1309,13 +1324,13 @@ mod tests {
 
     #[test]
     fn completed_execute_tool_call_prefers_raw_output_and_hides_permission_copy_content() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-exec".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-exec".to_string(),
                 title: "Shell: cargo check".to_string(),
-                kind: AcpToolKind::Execute,
-                status: AcpToolCallStatus::Completed,
-                content: vec![AcpToolCallContent::Text(
+                kind: RuntimeToolKind::Execute,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Text(
                     "Requesting approval to perform: Run command `cargo check`".to_string(),
                 )],
                 locations: Vec::new(),
@@ -1349,12 +1364,12 @@ mod tests {
 
     #[test]
     fn failed_execute_tool_call_renders_final_output_without_raw_input() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-exec".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-exec".to_string(),
                 title: "Shell: cargo check".to_string(),
-                kind: AcpToolKind::Execute,
-                status: AcpToolCallStatus::Failed,
+                kind: RuntimeToolKind::Execute,
+                status: RuntimeToolActivityStatus::Failed,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: Some(r#"{"command":"cargo check"}"#.into()),
@@ -1385,13 +1400,15 @@ mod tests {
 
     #[test]
     fn completed_non_execute_tool_call_still_renders_text_content() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-fetch".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-fetch".to_string(),
                 title: "Fetch package metadata".to_string(),
-                kind: AcpToolKind::Fetch,
-                status: AcpToolCallStatus::Completed,
-                content: vec![AcpToolCallContent::Text("Found 3 releases".to_string())],
+                kind: RuntimeToolKind::Fetch,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Text(
+                    "Found 3 releases".to_string(),
+                )],
                 locations: Vec::new(),
                 raw_input: None,
                 raw_output: None,
@@ -1416,12 +1433,12 @@ mod tests {
     #[test]
     fn acp_tool_call_raw_output_trailing_newline_does_not_render_blank_line() {
         let palette = default_palette();
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "Shell: cargo check".to_string(),
-                kind: AcpToolKind::Other,
-                status: AcpToolCallStatus::Completed,
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::Completed,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: None,
@@ -1449,13 +1466,13 @@ mod tests {
 
     #[test]
     fn acp_pending_text_content_is_not_approval_waiting_without_permission_state() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "Check policy".to_string(),
-                kind: AcpToolKind::Other,
-                status: AcpToolCallStatus::Pending,
-                content: vec![AcpToolCallContent::Text(
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::Pending,
+                content: vec![RuntimeToolActivityContent::Text(
                     "This result requires approval from the project owner.".to_string(),
                 )],
                 locations: Vec::new(),
@@ -1487,12 +1504,12 @@ mod tests {
     #[test]
     fn acp_tool_call_multi_line_raw_output_uses_four_space_continuation_prefix() {
         let palette = default_palette();
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "Shell: git log --oneline -5".to_string(),
-                kind: AcpToolKind::Other,
-                status: AcpToolCallStatus::Completed,
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::Completed,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: None,
@@ -1518,13 +1535,13 @@ mod tests {
 
     #[test]
     fn acp_tool_call_terminal_content_renders_live_snapshot() {
-        let mut item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-terminal".to_string(),
+        let mut item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-terminal".to_string(),
                 title: "Run tests".to_string(),
-                kind: AcpToolKind::Execute,
-                status: AcpToolCallStatus::InProgress,
-                content: vec![AcpToolCallContent::Terminal {
+                kind: RuntimeToolKind::Execute,
+                status: RuntimeToolActivityStatus::InProgress,
+                content: vec![RuntimeToolActivityContent::Terminal {
                     terminal_id: "term-1".to_string(),
                 }],
                 locations: Vec::new(),
@@ -1533,8 +1550,8 @@ mod tests {
             },
             ToolActivityRenderMode::Compact,
         );
-        assert!(
-            item.set_acp_terminal_snapshot_for_test(mo_core::acp::AcpTerminalSnapshot {
+        assert!(item.set_runtime_terminal_snapshot_for_test(
+            mo_core::session::RuntimeTerminalSnapshot {
                 terminal_id: "term-1".to_string(),
                 command: Some("cargo check".to_string()),
                 cwd: None,
@@ -1542,8 +1559,8 @@ mod tests {
                 truncated: false,
                 exit_status: None,
                 released: false,
-            },)
-        );
+            },
+        ));
 
         let plain = item
             .render_lines(80, default_palette())
@@ -1562,12 +1579,12 @@ mod tests {
     #[test]
     fn acp_tool_call_raw_output_uses_secondary_color_and_codex_like_alignment() {
         let palette = default_palette();
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "Shell: cargo check".to_string(),
-                kind: AcpToolKind::Other,
-                status: AcpToolCallStatus::Completed,
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::Completed,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: None,
@@ -1603,16 +1620,16 @@ mod tests {
 
     #[test]
     fn acp_read_tool_call_renders_compact_summary_without_content_details() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "ReadFile: Temp.md".to_string(),
-                kind: AcpToolKind::Read,
-                status: AcpToolCallStatus::Completed,
-                content: vec![AcpToolCallContent::Text(
+                kind: RuntimeToolKind::Read,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Text(
                     "     1  # 临时文件\n     2\n     3  body".to_string(),
                 )],
-                locations: vec![AcpToolCallLocation {
+                locations: vec![RuntimeToolActivityLocation {
                     path: "Temp.md".to_string(),
                     line: Some(1),
                 }],
@@ -1632,13 +1649,13 @@ mod tests {
 
     #[test]
     fn acp_readfile_title_fallback_renders_compact_summary_even_without_read_kind() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "ReadFile: Temp.md".to_string(),
-                kind: AcpToolKind::Other,
-                status: AcpToolCallStatus::Completed,
-                content: vec![AcpToolCallContent::Text(
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Text(
                     "     1  # 临时文件\n     2\n     3  body".to_string(),
                 )],
                 locations: Vec::new(),
@@ -1658,12 +1675,12 @@ mod tests {
 
     #[test]
     fn acp_writefile_in_progress_suppresses_raw_input_and_uses_compact_title() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "WriteFile: TEMP.md".to_string(),
-                kind: AcpToolKind::Other,
-                status: AcpToolCallStatus::InProgress,
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::InProgress,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: Some(
@@ -1692,12 +1709,12 @@ mod tests {
 
     #[test]
     fn active_acp_write_marker_blinks_by_disappearing_with_main_text_color() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "WriteFile: TEMP.md".to_string(),
-                kind: AcpToolKind::Other,
-                status: AcpToolCallStatus::InProgress,
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::InProgress,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
@@ -1731,13 +1748,13 @@ mod tests {
     #[test]
     fn acp_tool_call_diff_context_lines_keep_default_style() {
         let palette = default_palette();
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "WriteFile: src/lib.rs".to_string(),
-                kind: AcpToolKind::Edit,
-                status: AcpToolCallStatus::Completed,
-                content: vec![AcpToolCallContent::Diff {
+                kind: RuntimeToolKind::Edit,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Diff {
                     path: "src/lib.rs".to_string(),
                     old_text: Some("one\nold\ntail\n".to_string()),
                     new_text: "one\nnew\ntail\n".to_string(),
@@ -1786,13 +1803,13 @@ mod tests {
             .map(|line| format!("line {line}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "WriteFile: temp.md".to_string(),
-                kind: AcpToolKind::Edit,
-                status: AcpToolCallStatus::Completed,
-                content: vec![AcpToolCallContent::Diff {
+                kind: RuntimeToolKind::Edit,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Diff {
                     path: absolute_path,
                     old_text: None,
                     new_text,
@@ -1841,13 +1858,13 @@ mod tests {
 
     #[test]
     fn acp_tool_call_detailed_diff_keeps_all_rows() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "WriteFile: temp.md".to_string(),
-                kind: AcpToolKind::Edit,
-                status: AcpToolCallStatus::Completed,
-                content: vec![AcpToolCallContent::Diff {
+                kind: RuntimeToolKind::Edit,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Diff {
                     path: "temp.md".to_string(),
                     old_text: None,
                     new_text: (1..=25)
@@ -1883,13 +1900,13 @@ mod tests {
 
     #[test]
     fn acp_tool_call_updated_diff_renders_delete_and_insert_line_numbers() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "WriteFile: src/lib.rs".to_string(),
-                kind: AcpToolKind::Edit,
-                status: AcpToolCallStatus::Completed,
-                content: vec![AcpToolCallContent::Diff {
+                kind: RuntimeToolKind::Edit,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Diff {
                     path: "src/lib.rs".to_string(),
                     old_text: Some("one\nold\ntail\n".to_string()),
                     new_text: "one\nnew\ntail\n".to_string(),
@@ -1929,13 +1946,13 @@ mod tests {
 
     #[test]
     fn acp_tool_call_diff_right_aligns_three_digit_line_numbers_in_fixed_gutter() {
-        let item = ToolResultItem::from_acp_tool_call(
-            AcpToolCall {
-                tool_call_id: "call-1".to_string(),
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
                 title: "WriteFile: temp.md".to_string(),
-                kind: AcpToolKind::Edit,
-                status: AcpToolCallStatus::Completed,
-                content: vec![AcpToolCallContent::Diff {
+                kind: RuntimeToolKind::Edit,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Diff {
                     path: "temp.md".to_string(),
                     old_text: None,
                     new_text: (1..=267)

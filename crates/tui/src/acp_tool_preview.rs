@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use mo_core::acp::{
-    AcpToolCall, AcpToolCallContent, AcpToolCallRawValue, AcpToolCallStatus, AcpToolCallUpdate,
-    AcpToolKind,
+use mo_core::session::{
+    RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityRawValue,
+    RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
 };
 
 /// `ToolApprovalPreview` 表示审批面板中可直接展示的工具变更预览。
@@ -28,7 +28,9 @@ impl ToolApprovalPreview {
         }
     }
 
-    pub(crate) fn from_acp_tool_call_update(update: &AcpToolCallUpdate) -> Option<Self> {
+    pub(crate) fn from_runtime_tool_activity_update(
+        update: &RuntimeToolActivityUpdate,
+    ) -> Option<Self> {
         update
             .content
             .as_deref()
@@ -83,30 +85,30 @@ pub(crate) fn acp_display_path(path: &str) -> String {
     path_ref.display().to_string()
 }
 
-pub(crate) fn is_acp_write_tool_call(call: &AcpToolCall) -> bool {
+pub(crate) fn is_acp_write_tool_call(call: &RuntimeToolActivity) -> bool {
     acp_write_tool_call_title_target(&call.title).is_some()
-        || (call.kind == AcpToolKind::Edit
+        || (call.kind == RuntimeToolKind::Edit
             && call.raw_input.as_ref().is_some_and(|raw_input| {
                 raw_input_path(raw_input).is_some() && raw_input_content(raw_input).is_some()
             }))
 }
 
-pub(crate) fn should_collapse_acp_write_tool_call(call: &AcpToolCall) -> bool {
+pub(crate) fn should_collapse_acp_write_tool_call(call: &RuntimeToolActivity) -> bool {
     is_acp_write_tool_call(call)
-        && call.status != AcpToolCallStatus::Failed
+        && call.status != RuntimeToolActivityStatus::Failed
         && !call
             .content
             .iter()
-            .any(|content| matches!(content, AcpToolCallContent::Diff { .. }))
+            .any(|content| matches!(content, RuntimeToolActivityContent::Diff { .. }))
 }
 
-pub(crate) fn acp_write_tool_call_target(call: &AcpToolCall) -> Option<String> {
+pub(crate) fn acp_write_tool_call_target(call: &RuntimeToolActivity) -> Option<String> {
     acp_write_tool_call_title_target(&call.title)
         .or_else(|| call.raw_input.as_ref().and_then(raw_input_path))
         .map(|path| acp_display_path(&path))
 }
 
-fn acp_write_tool_call_update_target(update: &AcpToolCallUpdate) -> Option<String> {
+fn acp_write_tool_call_update_target(update: &RuntimeToolActivityUpdate) -> Option<String> {
     update
         .title
         .as_deref()
@@ -127,9 +129,11 @@ fn acp_write_tool_call_title_target(title: &str) -> Option<String> {
         })
 }
 
-fn file_preview_from_acp_content(content: &[AcpToolCallContent]) -> Option<ToolApprovalPreview> {
+fn file_preview_from_acp_content(
+    content: &[RuntimeToolActivityContent],
+) -> Option<ToolApprovalPreview> {
     content.iter().find_map(|content| {
-        let AcpToolCallContent::Diff {
+        let RuntimeToolActivityContent::Diff {
             path,
             old_text,
             new_text,
@@ -157,15 +161,18 @@ fn file_preview_from_acp_content(content: &[AcpToolCallContent]) -> Option<ToolA
     })
 }
 
-fn raw_input_path(raw_input: &AcpToolCallRawValue) -> Option<String> {
+fn raw_input_path(raw_input: &RuntimeToolActivityRawValue) -> Option<String> {
     raw_input_string_field(raw_input, &["path", "file_path", "filePath"])
         .filter(|path| !path.trim().is_empty())
 }
 
-fn raw_input_content(raw_input: &AcpToolCallRawValue) -> Option<String> {
+fn raw_input_content(raw_input: &RuntimeToolActivityRawValue) -> Option<String> {
     raw_input_string_field(raw_input, &["content", "new_text", "newText", "text"])
 }
 
-fn raw_input_string_field(raw_input: &AcpToolCallRawValue, keys: &[&str]) -> Option<String> {
+fn raw_input_string_field(
+    raw_input: &RuntimeToolActivityRawValue,
+    keys: &[&str],
+) -> Option<String> {
     raw_input.string_field(keys)
 }

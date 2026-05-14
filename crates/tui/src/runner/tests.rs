@@ -24,7 +24,9 @@ use mo_core::provider::ProviderKind;
 use mo_core::request_policy::RuntimeRequestPolicy;
 use mo_core::session::{
     NativeAgentEvent, NativeAgentRequest, NativeAgentResponse, NativeLlmPerformanceMetrics,
-    RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
+    RuntimeAvailableCommandInput, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent,
+    RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityContent,
+    RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
 };
 use mo_core::tools::{RuntimeToolCall, RuntimeToolResult};
 
@@ -138,6 +140,35 @@ fn acp_chunks_buffer_until_prompt_response() {
         vec!["你好！我是 Kimi Code CLI".to_string()]
     );
     assert!(!model.current_stream_activity_render_result().has_content);
+}
+
+#[test]
+fn acp_prompt_response_reports_non_end_turn_finish_reason() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    let mut acp_ui_state = AcpSessionUiState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_ui_state,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_ui_state,
+        AcpSessionEvent::PromptResponse {
+            agent_id: "Kimi Code CLI".to_string(),
+            content: String::new(),
+            stop_reason: "Cancelled".to_string(),
+        },
+    );
+
+    assert_eq!(
+        model.current_status_notice_text(),
+        "ACP prompt finished: Cancelled"
+    );
 }
 
 #[test]
@@ -2668,7 +2699,7 @@ fn acp_available_commands_are_saved_and_cleared_with_session_lifecycle() {
     );
     assert!(matches!(
         commands[0].input,
-        Some(AcpAvailableCommandInput::Unstructured { ref hint }) if hint == "query to search for"
+        Some(RuntimeAvailableCommandInput::Unstructured { ref hint }) if hint == "query to search for"
     ));
 
     apply_acp_session_event(
@@ -2695,6 +2726,7 @@ fn clear_runtime_discards_stale_native_agent_event() {
             content: "stale response".to_string(),
             reasoning_content: None,
             reasoning_duration: None,
+            finish_reason: None,
             metrics: None,
         }],
         native_running: true,
@@ -2713,6 +2745,50 @@ fn clear_runtime_discards_stale_native_agent_event() {
     );
     assert!(!model.current_stream_activity_render_result().has_content);
     assert_eq!(runtime_coordinator.reset_count, 1);
+}
+
+#[test]
+fn generic_runtime_tool_activity_events_render_without_acp_target() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    let mut acp_ui_state = AcpSessionUiState::default();
+    let target = RuntimeTarget::native_agent("rig", "qwen3");
+    let mut runtime_coordinator = TestRuntimeCoordinator {
+        runtime_events: vec![
+            RuntimeEvent::ToolActivityStarted {
+                target: target.clone(),
+                activity: RuntimeToolActivity {
+                    activity_id: "tool-1".to_string(),
+                    title: "Shell: cargo check".to_string(),
+                    kind: RuntimeToolKind::Execute,
+                    status: RuntimeToolActivityStatus::InProgress,
+                    content: vec![RuntimeToolActivityContent::Text("checking".to_string())],
+                    locations: Vec::new(),
+                    raw_input: None,
+                    raw_output: None,
+                },
+            },
+            RuntimeEvent::ToolActivityUpdated {
+                target,
+                update: RuntimeToolActivityUpdate {
+                    activity_id: "tool-1".to_string(),
+                    title: Some("Shell: cargo test".to_string()),
+                    status: Some(RuntimeToolActivityStatus::Completed),
+                    content: Some(vec![RuntimeToolActivityContent::Text(
+                        "finished".to_string(),
+                    )]),
+                    ..RuntimeToolActivityUpdate::default()
+                },
+            },
+        ],
+        ..TestRuntimeCoordinator::default()
+    };
+
+    drain_runtime_coordinator_events(&mut model, &mut acp_ui_state, &mut runtime_coordinator);
+
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(transcript.contains("cargo test"));
+    assert!(!transcript.contains("cargo check"));
 }
 
 #[test]
@@ -2892,7 +2968,7 @@ fn acp_permission_stale_reject_fallback_prefers_reject_always() {
     assert_eq!(option_id, Some("reject-always".to_string()));
 }
 
-fn acp_permission_request_with_reject_always() -> mo_core::acp::AcpPermissionRequest {
+fn acp_permission_request_with_reject_always() -> RuntimePermissionRequest {
     use mo_core::acp::{AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest};
 
     AcpPermissionRequest {
@@ -2914,6 +2990,7 @@ fn acp_permission_request_with_reject_always() -> mo_core::acp::AcpPermissionReq
             kind: AcpPermissionOptionKind::RejectAlways,
         }],
     }
+    .into()
 }
 
 #[test]

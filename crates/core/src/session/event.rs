@@ -1,6 +1,10 @@
 use crate::tools::{RuntimeToolCall, RuntimeToolResult};
 
-use super::{RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics, RuntimeTarget};
+use super::{
+    RuntimeAvailableCommand, RuntimeIdentity, RuntimeModelConfig, RuntimePermissionRequest,
+    RuntimeRequestMetrics, RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity,
+    RuntimeToolActivityUpdate,
+};
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +54,33 @@ pub enum RuntimeEvent {
         call: RuntimeToolCall,
         result: RuntimeToolResult,
     },
+    ToolActivityStarted {
+        target: RuntimeTarget,
+        activity: RuntimeToolActivity,
+    },
+    ToolActivityUpdated {
+        target: RuntimeTarget,
+        update: RuntimeToolActivityUpdate,
+    },
+    TerminalUpdated {
+        target: RuntimeTarget,
+        snapshot: RuntimeTerminalSnapshot,
+    },
+    ModelConfigChanged {
+        target: RuntimeTarget,
+        config: RuntimeModelConfig,
+    },
+    AvailableCommandsChanged {
+        target: RuntimeTarget,
+        commands: Vec<RuntimeAvailableCommand>,
+    },
+    ConfigChangeSucceeded {
+        target: RuntimeTarget,
+    },
+    ConfigChangeFailed {
+        target: RuntimeTarget,
+        message: String,
+    },
     PermissionRequested {
         target: RuntimeTarget,
         request: RuntimePermissionRequest,
@@ -63,6 +94,7 @@ pub enum RuntimeEvent {
         content: String,
         reasoning_content: Option<String>,
         reasoning_duration: Option<std::time::Duration>,
+        finish_reason: Option<String>,
         metrics: Option<RuntimeRequestMetrics>,
     },
     Failed {
@@ -86,6 +118,13 @@ impl RuntimeEvent {
             | Self::TurnStarted { target, .. }
             | Self::AssistantDelta { target, .. }
             | Self::ReasoningDelta { target, .. }
+            | Self::ToolActivityStarted { target, .. }
+            | Self::ToolActivityUpdated { target, .. }
+            | Self::TerminalUpdated { target, .. }
+            | Self::ModelConfigChanged { target, .. }
+            | Self::AvailableCommandsChanged { target, .. }
+            | Self::ConfigChangeSucceeded { target }
+            | Self::ConfigChangeFailed { target, .. }
             | Self::PermissionRequested { target, .. }
             | Self::PermissionCancelled { target, .. }
             | Self::Stopped { target, .. } => Some(target),

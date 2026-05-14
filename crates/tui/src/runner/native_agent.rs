@@ -40,6 +40,7 @@ pub(super) fn apply_native_agent_event(
             content: response.content,
             reasoning_content: response.reasoning_content,
             reasoning_duration: response.reasoning_duration,
+            finish_reason: None,
             metrics: metrics.map(|metrics| {
                 RuntimeRequestMetrics::new(metrics.latency, metrics.output_tokens, metrics.duration)
             }),

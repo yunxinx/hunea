@@ -3,8 +3,14 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::session::RuntimeEvent;
 use crate::session::{
-    RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,
+    RuntimeAgentCapabilities, RuntimeAvailableCommand, RuntimeAvailableCommandInput,
+    RuntimeIdentity, RuntimeModelConfig, RuntimeModelOption, RuntimePermissionOption,
+    RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimePromptCapabilities,
+    RuntimeTarget, RuntimeTerminalExitStatus, RuntimeTerminalSnapshot, RuntimeToolActivity,
+    RuntimeToolActivityContent, RuntimeToolActivityLocation, RuntimeToolActivityRawValue,
+    RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
 };
 
 /// `SUPPORTED_ACP_PROTOCOL_VERSION` 是 Lumos 当前消费的 ACP 协议版本。
@@ -306,6 +312,7 @@ impl From<AcpPermissionRequest> for RuntimePermissionRequest {
                 .map(RuntimePermissionOption::from)
                 .collect(),
         )
+        .with_tool_activity(request.tool_call.into())
     }
 }
 
@@ -323,6 +330,44 @@ impl From<AcpPermissionOptionKind> for RuntimePermissionOptionKind {
             AcpPermissionOptionKind::RejectOnce => Self::RejectOnce,
             AcpPermissionOptionKind::RejectAlways => Self::RejectAlways,
             AcpPermissionOptionKind::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<AcpPromptCapabilities> for RuntimePromptCapabilities {
+    fn from(capabilities: AcpPromptCapabilities) -> Self {
+        Self {
+            image: capabilities.image,
+            audio: capabilities.audio,
+            embedded_context: capabilities.embedded_context,
+        }
+    }
+}
+
+impl From<AcpAgentCapabilities> for RuntimeAgentCapabilities {
+    fn from(capabilities: AcpAgentCapabilities) -> Self {
+        Self {
+            load_session: capabilities.load_session,
+            prompt_capabilities: capabilities.prompt_capabilities.into(),
+        }
+    }
+}
+
+impl From<RuntimePromptCapabilities> for AcpPromptCapabilities {
+    fn from(capabilities: RuntimePromptCapabilities) -> Self {
+        Self {
+            image: capabilities.image,
+            audio: capabilities.audio,
+            embedded_context: capabilities.embedded_context,
+        }
+    }
+}
+
+impl From<RuntimeAgentCapabilities> for AcpAgentCapabilities {
+    fn from(capabilities: RuntimeAgentCapabilities) -> Self {
+        Self {
+            load_session: capabilities.load_session,
+            prompt_capabilities: capabilities.prompt_capabilities.into(),
         }
     }
 }
@@ -409,6 +454,58 @@ impl AcpAgentIdentity {
             Some(version) => format!("{name} ({version})"),
             None => name,
         }
+    }
+
+    /// `from_runtime_identity` 从通用 runtime identity 还原 ACP prompt 所需身份摘要。
+    pub fn from_runtime_identity(identity: &RuntimeIdentity) -> Self {
+        let (name, title, version) = if identity.has_agent_info {
+            (
+                None,
+                Some(identity.label.clone()),
+                identity
+                    .version
+                    .clone()
+                    .filter(|version| !version.trim().is_empty()),
+            )
+        } else {
+            (None, None, None)
+        };
+
+        Self {
+            name,
+            title,
+            version,
+            agent_capabilities: identity
+                .agent_capabilities
+                .clone()
+                .map(AcpAgentCapabilities::from)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+impl From<&AcpAgentIdentity> for RuntimeIdentity {
+    fn from(identity: &AcpAgentIdentity) -> Self {
+        let mut runtime_identity = RuntimeIdentity::new(identity.display_name())
+            .with_agent_capabilities(identity.agent_capabilities.clone().into());
+        if let Some(version) = identity
+            .version
+            .as_deref()
+            .filter(|version| !version.trim().is_empty())
+        {
+            runtime_identity = runtime_identity.with_version(version);
+        }
+        if !identity.has_agent_info() {
+            runtime_identity = runtime_identity.without_agent_info();
+        }
+        runtime_identity
+    }
+}
+
+impl From<&AcpInitializeOutcome> for RuntimeIdentity {
+    fn from(outcome: &AcpInitializeOutcome) -> Self {
+        let identity = AcpAgentIdentity::from_initialize_outcome(outcome);
+        RuntimeIdentity::from(&identity)
     }
 }
 
@@ -503,4 +600,292 @@ pub enum AcpSessionEvent {
         agent_id: String,
         message: Option<String>,
     },
+}
+
+impl From<AcpAvailableCommandInput> for RuntimeAvailableCommandInput {
+    fn from(input: AcpAvailableCommandInput) -> Self {
+        match input {
+            AcpAvailableCommandInput::Unstructured { hint } => Self::Unstructured { hint },
+            AcpAvailableCommandInput::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<AcpAvailableCommand> for RuntimeAvailableCommand {
+    fn from(command: AcpAvailableCommand) -> Self {
+        Self {
+            name: command.name,
+            description: command.description,
+            input: command.input.map(RuntimeAvailableCommandInput::from),
+        }
+    }
+}
+
+impl From<AcpModelOption> for RuntimeModelOption {
+    fn from(option: AcpModelOption) -> Self {
+        Self {
+            value: option.value,
+            name: option.name,
+        }
+    }
+}
+
+impl From<AcpModelConfig> for RuntimeModelConfig {
+    fn from(config: AcpModelConfig) -> Self {
+        Self {
+            config_id: config.config_id,
+            current_value: config.current_value,
+            current_name: config.current_name,
+            options: config
+                .options
+                .into_iter()
+                .map(RuntimeModelOption::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<AcpToolKind> for RuntimeToolKind {
+    fn from(kind: AcpToolKind) -> Self {
+        match kind {
+            AcpToolKind::Read => Self::Read,
+            AcpToolKind::Edit => Self::Edit,
+            AcpToolKind::Delete => Self::Delete,
+            AcpToolKind::Move => Self::Move,
+            AcpToolKind::Search => Self::Search,
+            AcpToolKind::Execute => Self::Execute,
+            AcpToolKind::Think => Self::Think,
+            AcpToolKind::Fetch => Self::Fetch,
+            AcpToolKind::SwitchMode => Self::SwitchMode,
+            AcpToolKind::Other => Self::Other,
+        }
+    }
+}
+
+impl From<AcpToolCallStatus> for RuntimeToolActivityStatus {
+    fn from(status: AcpToolCallStatus) -> Self {
+        match status {
+            AcpToolCallStatus::Pending => Self::Pending,
+            AcpToolCallStatus::InProgress => Self::InProgress,
+            AcpToolCallStatus::Completed => Self::Completed,
+            AcpToolCallStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<AcpToolCallLocation> for RuntimeToolActivityLocation {
+    fn from(location: AcpToolCallLocation) -> Self {
+        Self {
+            path: location.path,
+            line: location.line,
+        }
+    }
+}
+
+impl From<AcpToolCallContent> for RuntimeToolActivityContent {
+    fn from(content: AcpToolCallContent) -> Self {
+        match content {
+            AcpToolCallContent::Text(text) => Self::Text(text),
+            AcpToolCallContent::Image { mime_type, uri } => Self::Image { mime_type, uri },
+            AcpToolCallContent::Audio { mime_type } => Self::Audio { mime_type },
+            AcpToolCallContent::ResourceLink { uri, name, title } => {
+                Self::ResourceLink { uri, name, title }
+            }
+            AcpToolCallContent::Resource {
+                uri,
+                mime_type,
+                text,
+            } => Self::Resource {
+                uri,
+                mime_type,
+                text,
+            },
+            AcpToolCallContent::Diff {
+                path,
+                old_text,
+                new_text,
+            } => Self::Diff {
+                path,
+                old_text,
+                new_text,
+            },
+            AcpToolCallContent::Terminal { terminal_id } => Self::Terminal { terminal_id },
+            AcpToolCallContent::Unknown(label) => Self::Unknown(label),
+        }
+    }
+}
+
+impl From<AcpToolCallRawValue> for RuntimeToolActivityRawValue {
+    fn from(raw_value: AcpToolCallRawValue) -> Self {
+        Self::new(raw_value.as_json().clone())
+    }
+}
+
+impl From<AcpToolCall> for RuntimeToolActivity {
+    fn from(call: AcpToolCall) -> Self {
+        Self {
+            activity_id: call.tool_call_id,
+            title: call.title,
+            kind: call.kind.into(),
+            status: call.status.into(),
+            content: call
+                .content
+                .into_iter()
+                .map(RuntimeToolActivityContent::from)
+                .collect(),
+            locations: call
+                .locations
+                .into_iter()
+                .map(RuntimeToolActivityLocation::from)
+                .collect(),
+            raw_input: call.raw_input.map(RuntimeToolActivityRawValue::from),
+            raw_output: call.raw_output.map(RuntimeToolActivityRawValue::from),
+        }
+    }
+}
+
+impl From<AcpToolCallUpdate> for RuntimeToolActivityUpdate {
+    fn from(update: AcpToolCallUpdate) -> Self {
+        Self {
+            activity_id: update.tool_call_id,
+            title: update.title,
+            kind: update.kind.map(RuntimeToolKind::from),
+            status: update.status.map(RuntimeToolActivityStatus::from),
+            content: update.content.map(|content| {
+                content
+                    .into_iter()
+                    .map(RuntimeToolActivityContent::from)
+                    .collect()
+            }),
+            locations: update.locations.map(|locations| {
+                locations
+                    .into_iter()
+                    .map(RuntimeToolActivityLocation::from)
+                    .collect()
+            }),
+            raw_input: update.raw_input.map(RuntimeToolActivityRawValue::from),
+            raw_output: update.raw_output.map(RuntimeToolActivityRawValue::from),
+        }
+    }
+}
+
+impl From<AcpTerminalExitStatus> for RuntimeTerminalExitStatus {
+    fn from(status: AcpTerminalExitStatus) -> Self {
+        Self {
+            exit_code: status.exit_code,
+            signal: status.signal,
+        }
+    }
+}
+
+impl From<AcpTerminalSnapshot> for RuntimeTerminalSnapshot {
+    fn from(snapshot: AcpTerminalSnapshot) -> Self {
+        Self {
+            terminal_id: snapshot.terminal_id,
+            command: snapshot.command,
+            cwd: snapshot.cwd,
+            output: snapshot.output,
+            truncated: snapshot.truncated,
+            exit_status: snapshot.exit_status.map(RuntimeTerminalExitStatus::from),
+            released: snapshot.released,
+        }
+    }
+}
+
+impl AcpSessionEvent {
+    /// `into_runtime_event` 将 ACP worker 事件收敛到通用 runtime surface。
+    pub fn into_runtime_event(self) -> RuntimeEvent {
+        match self {
+            Self::Started {
+                agent_id, outcome, ..
+            } => RuntimeEvent::Started {
+                target: RuntimeTarget::acp_agent(agent_id),
+                identity: RuntimeIdentity::from(&outcome),
+            },
+            Self::StartFailed { agent_id, message } => RuntimeEvent::StartFailed {
+                target: Some(RuntimeTarget::acp_agent(agent_id)),
+                message,
+            },
+            Self::SystemMessage { agent_id, message } => RuntimeEvent::SystemMessage {
+                target: Some(RuntimeTarget::acp_agent(agent_id)),
+                message,
+            },
+            Self::PromptStarted { agent_id } => RuntimeEvent::TurnStarted {
+                target: RuntimeTarget::acp_agent(agent_id.clone()),
+                label: agent_id,
+            },
+            Self::AgentMessageChunk { agent_id, content } => RuntimeEvent::AssistantDelta {
+                target: RuntimeTarget::acp_agent(agent_id),
+                content,
+            },
+            Self::AgentThoughtChunk { agent_id, content } => RuntimeEvent::ReasoningDelta {
+                target: RuntimeTarget::acp_agent(agent_id),
+                content,
+            },
+            Self::ToolCall { agent_id, call } => RuntimeEvent::ToolActivityStarted {
+                target: RuntimeTarget::acp_agent(agent_id),
+                activity: call.into(),
+            },
+            Self::ToolCallUpdate { agent_id, update } => RuntimeEvent::ToolActivityUpdated {
+                target: RuntimeTarget::acp_agent(agent_id),
+                update: update.into(),
+            },
+            Self::ModelConfigChanged { agent_id, config } => RuntimeEvent::ModelConfigChanged {
+                target: RuntimeTarget::acp_agent(agent_id),
+                config: config.into(),
+            },
+            Self::AvailableCommandsChanged { agent_id, commands } => {
+                RuntimeEvent::AvailableCommandsChanged {
+                    target: RuntimeTarget::acp_agent(agent_id),
+                    commands: commands
+                        .into_iter()
+                        .map(RuntimeAvailableCommand::from)
+                        .collect(),
+                }
+            }
+            Self::ConfigChangeSucceeded { agent_id } => RuntimeEvent::ConfigChangeSucceeded {
+                target: RuntimeTarget::acp_agent(agent_id),
+            },
+            Self::ConfigChangeFailed { agent_id, message } => RuntimeEvent::ConfigChangeFailed {
+                target: RuntimeTarget::acp_agent(agent_id),
+                message,
+            },
+            Self::PromptResponse {
+                agent_id,
+                content,
+                stop_reason,
+            } => RuntimeEvent::MessageFinished {
+                target: Some(RuntimeTarget::acp_agent(agent_id)),
+                content,
+                reasoning_content: None,
+                reasoning_duration: None,
+                finish_reason: (!stop_reason.trim().is_empty() && stop_reason != "EndTurn")
+                    .then_some(stop_reason),
+                metrics: None,
+            },
+            Self::PromptFailed { agent_id, message } => RuntimeEvent::Failed {
+                target: Some(RuntimeTarget::acp_agent(agent_id)),
+                message,
+            },
+            Self::PromptInterrupted { agent_id } => RuntimeEvent::Interrupted {
+                target: Some(RuntimeTarget::acp_agent(agent_id)),
+            },
+            Self::PermissionRequested { agent_id, request } => RuntimeEvent::PermissionRequested {
+                target: RuntimeTarget::acp_agent(agent_id),
+                request: request.into(),
+            },
+            Self::TerminalUpdated { agent_id, snapshot } => RuntimeEvent::TerminalUpdated {
+                target: RuntimeTarget::acp_agent(agent_id),
+                snapshot: snapshot.into(),
+            },
+            Self::PermissionRequestCancelled { agent_id } => RuntimeEvent::PermissionCancelled {
+                target: RuntimeTarget::acp_agent(agent_id),
+                request_id: None,
+            },
+            Self::Stopped { agent_id, message } => RuntimeEvent::Stopped {
+                target: RuntimeTarget::acp_agent(agent_id),
+                message,
+            },
+        }
+    }
 }

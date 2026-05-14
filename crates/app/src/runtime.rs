@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use mo_acp::{AcpSessionCatalog, AcpSessionWorker, build_acp_prompt_from_composer_text};
 use mo_core::{
-    acp::AcpSessionEvent,
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     request_policy::RuntimeRequestPolicy,
     session::{
@@ -263,20 +262,13 @@ impl AppRuntimeCoordinator {
 }
 
 impl RuntimeCoordinator for AppRuntimeCoordinator {
-    fn drain_acp_events(&mut self) -> Vec<AcpSessionEvent> {
-        let Some(worker) = self.acp_worker.as_ref() else {
-            return Vec::new();
-        };
-
-        let mut events = Vec::new();
-        while let Some(event) = worker.try_recv_event() {
-            events.push(event);
-        }
-        events
-    }
-
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         let mut events = Vec::new();
+        if let Some(worker) = self.acp_worker.as_ref() {
+            while let Some(event) = worker.try_recv_event() {
+                events.push(event.into_runtime_event());
+            }
+        }
         loop {
             let target = self.native_agent.current_target().cloned();
             let Some(event) = self.native_agent.try_recv_event() else {
@@ -360,6 +352,7 @@ fn runtime_event_from_native_agent_event(
             content: response.content,
             reasoning_content: response.reasoning_content,
             reasoning_duration: response.reasoning_duration,
+            finish_reason: None,
             metrics: metrics.map(|metrics| {
                 RuntimeRequestMetrics::new(metrics.latency, metrics.output_tokens, metrics.duration)
             }),

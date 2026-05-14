@@ -1,8 +1,11 @@
+use super::RuntimeToolActivityUpdate;
+
 /// `RuntimePermissionRequest` 是 runtime 向 TUI 发出的通用权限确认请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePermissionRequest {
     pub request_id: String,
     pub title: Option<String>,
+    pub tool_activity: Option<RuntimeToolActivityUpdate>,
     pub options: Vec<RuntimePermissionOption>,
 }
 
@@ -16,8 +19,15 @@ impl RuntimePermissionRequest {
         Self {
             request_id: request_id.into(),
             title,
+            tool_activity: None,
             options,
         }
+    }
+
+    /// `with_tool_activity` 附加发起权限请求的 tool activity 预览信息。
+    pub fn with_tool_activity(mut self, tool_activity: RuntimeToolActivityUpdate) -> Self {
+        self.tool_activity = Some(tool_activity);
+        self
     }
 
     /// `option_id_for` 返回指定类型的第一个 option id。

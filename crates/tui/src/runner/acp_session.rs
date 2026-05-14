@@ -7,12 +7,15 @@ use crate::{
     AcpPromptSubmission, Model, RequestMetrics, acp::AcpPermissionPanelRequest,
     acp_tool_preview::ToolApprovalPreview, runtime::RuntimeEventApply,
 };
-use mo_core::acp::{
-    AcpAgentIdentity, AcpPermissionOptionKind, AcpPermissionRequest, AcpSessionEvent,
-    AcpTerminalSnapshot, AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolCallUpdate,
-    AcpToolKind,
+use mo_core::acp::AcpAgentIdentity;
+#[cfg(test)]
+use mo_core::acp::AcpSessionEvent;
+use mo_core::session::{
+    RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimePermissionOptionKind,
+    RuntimePermissionRequest, RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity,
+    RuntimeToolActivityContent, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
+    RuntimeToolActivityUpdate, RuntimeToolKind,
 };
-use mo_core::session::{RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget};
 use mo_core::token_count::StreamingTokenProgress;
 
 #[cfg(test)]
@@ -216,7 +219,7 @@ impl AcpSessionUiState {
 
     pub(super) fn permission_option_id_for_discarded_prompt(
         &self,
-        request: &AcpPermissionRequest,
+        request: &RuntimePermissionRequest,
     ) -> Option<String> {
         match self.discard_in_flight_prompt {
             Some(PromptDiscardReason::Cancelled) => None,
@@ -278,7 +281,7 @@ impl AcpSessionUiState {
     fn track_tool_call_terminal_content(
         &mut self,
         tool_call_id: &str,
-        content: Option<&[AcpToolCallContent]>,
+        content: Option<&[RuntimeToolActivityContent]>,
     ) {
         let Some(content) = content else {
             return;
@@ -286,7 +289,7 @@ impl AcpSessionUiState {
         let terminal_ids = content
             .iter()
             .filter_map(|content| match content {
-                AcpToolCallContent::Terminal { terminal_id } => Some(terminal_id.clone()),
+                RuntimeToolActivityContent::Terminal { terminal_id } => Some(terminal_id.clone()),
                 _ => None,
             })
             .collect::<HashSet<_>>();
@@ -298,7 +301,7 @@ impl AcpSessionUiState {
         }
     }
 
-    fn observe_terminal_snapshot(&mut self, snapshot: &AcpTerminalSnapshot) {
+    fn observe_terminal_snapshot(&mut self, snapshot: &RuntimeTerminalSnapshot) {
         self.terminal_active_states.insert(
             snapshot.terminal_id.clone(),
             snapshot.exit_status.is_none() && !snapshot.released,
@@ -362,7 +365,7 @@ fn is_agent_facing_permission_rejection_notice_prefix(content: &str) -> bool {
 }
 
 fn sanitize_rejected_permission_tool_call_update(
-    update: &mut AcpToolCallUpdate,
+    update: &mut RuntimeToolActivityUpdate,
     should_sanitize: bool,
 ) {
     if !should_sanitize {
@@ -394,13 +397,11 @@ fn sanitize_rejected_permission_tool_call_update(
     }
 }
 
-fn is_agent_facing_permission_rejection_tool_content(content: &AcpToolCallContent) -> bool {
-    matches!(content, AcpToolCallContent::Text(text) if is_agent_facing_permission_rejection_notice(text))
+fn is_agent_facing_permission_rejection_tool_content(content: &RuntimeToolActivityContent) -> bool {
+    matches!(content, RuntimeToolActivityContent::Text(text) if is_agent_facing_permission_rejection_notice(text))
 }
 
-fn is_agent_facing_permission_rejection_raw_value(
-    raw_value: &mo_core::acp::AcpToolCallRawValue,
-) -> bool {
+fn is_agent_facing_permission_rejection_raw_value(raw_value: &RuntimeToolActivityRawValue) -> bool {
     raw_value
         .display_text()
         .is_some_and(|text| is_agent_facing_permission_rejection_notice(&text))
@@ -413,35 +414,48 @@ pub(super) fn apply_acp_session_event(
     event: AcpSessionEvent,
 ) {
     let mut runtime_coordinator = NoopRuntimeCoordinator;
-    apply_acp_session_event_with_coordinator(model, acp_ui_state, &mut runtime_coordinator, event);
+    apply_runtime_event_with_coordinator(
+        model,
+        acp_ui_state,
+        &mut runtime_coordinator,
+        event.into_runtime_event(),
+    );
 }
 
-pub(super) fn apply_acp_session_event_with_coordinator(
+pub(super) fn apply_runtime_event_with_coordinator(
     model: &mut Model,
     acp_ui_state: &mut AcpSessionUiState,
     runtime_coordinator: &mut impl RuntimeCoordinator,
-    event: AcpSessionEvent,
+    event: RuntimeEvent,
 ) {
     match event {
-        AcpSessionEvent::Started {
-            agent_id, outcome, ..
+        RuntimeEvent::Started {
+            target: RuntimeTarget::AcpAgent { agent_id },
+            identity,
         } => {
+            let display_name = identity.label.clone();
             model.apply_acp_agent_identity(
                 agent_id,
-                AcpAgentIdentity::from_initialize_outcome(&outcome),
+                AcpAgentIdentity::from_runtime_identity(&identity),
             );
-            model.show_transient_status_notice(&format!(
-                "ACP session ready: {}",
-                mo_core::acp::agent_display_name(&outcome)
-            ));
+            model.show_transient_status_notice(&format!("ACP session ready: {display_name}"));
         }
-        AcpSessionEvent::StartFailed { message, .. } => {
+        RuntimeEvent::StartFailed {
+            target: Some(RuntimeTarget::AcpAgent { .. }),
+            message,
+        } => {
             model.show_transient_status_notice(&format!("ACP start failed: {message}"));
         }
-        AcpSessionEvent::SystemMessage { message, .. } => {
+        RuntimeEvent::SystemMessage {
+            target: Some(RuntimeTarget::AcpAgent { .. }),
+            message,
+        } => {
             model.append_system_message_from_runtime(message);
         }
-        AcpSessionEvent::PromptStarted { agent_id } => {
+        RuntimeEvent::TurnStarted {
+            target: RuntimeTarget::AcpAgent { agent_id },
+            label,
+        } => {
             acp_ui_state.reset_response_buffer();
             acp_ui_state.mark_prompt_started();
             if acp_ui_state.should_discard_prompt_output() {
@@ -454,10 +468,13 @@ pub(super) fn apply_acp_session_event_with_coordinator(
                     .unwrap_or_else(|| agent_id.clone()),
             );
             if model.stream_activity.is_none() {
-                model.show_stream_activity(agent_id);
+                model.show_stream_activity(label);
             }
         }
-        AcpSessionEvent::AgentThoughtChunk { content, .. } => {
+        RuntimeEvent::ReasoningDelta {
+            target: RuntimeTarget::AcpAgent { .. },
+            content,
+        } => {
             if acp_ui_state.should_discard_prompt_output() {
                 return;
             }
@@ -467,7 +484,10 @@ pub(super) fn apply_acp_session_event_with_coordinator(
                 model.set_stream_activity_output_tokens(total_tokens);
             }
         }
-        AcpSessionEvent::AgentMessageChunk { content, .. } => {
+        RuntimeEvent::AssistantDelta {
+            target: RuntimeTarget::AcpAgent { .. },
+            content,
+        } => {
             if acp_ui_state.should_discard_prompt_output() {
                 return;
             }
@@ -477,12 +497,15 @@ pub(super) fn apply_acp_session_event_with_coordinator(
                 model.set_stream_activity_output_tokens(total_tokens);
             }
         }
-        AcpSessionEvent::ToolCall { call, .. } => {
+        RuntimeEvent::ToolActivityStarted {
+            target: RuntimeTarget::AcpAgent { .. },
+            activity: call,
+        } => {
             if acp_ui_state.should_discard_prompt_output() {
                 return;
             }
             flush_acp_response_buffer(model, acp_ui_state);
-            let tool_call_id = call.tool_call_id.clone();
+            let tool_call_id = call.activity_id.clone();
             if let Some(total_tokens) = acp_ui_state
                 .observe_tool_call_tokens(&tool_call_id, acp_tool_call_token_text(&call))
             {
@@ -491,12 +514,15 @@ pub(super) fn apply_acp_session_event_with_coordinator(
             upsert_acp_tool_call(model, acp_ui_state, call);
             model.set_stream_activity_thinking(false);
         }
-        AcpSessionEvent::ToolCallUpdate { mut update, .. } => {
+        RuntimeEvent::ToolActivityUpdated {
+            target: RuntimeTarget::AcpAgent { .. },
+            mut update,
+        } => {
             if acp_ui_state.should_discard_prompt_output() {
                 return;
             }
             flush_acp_response_buffer(model, acp_ui_state);
-            let tool_call_id = update.tool_call_id.clone();
+            let tool_call_id = update.activity_id.clone();
             sanitize_rejected_permission_tool_call_update(
                 &mut update,
                 acp_ui_state.should_sanitize_rejected_permission_tool_update(&tool_call_id),
@@ -509,22 +535,34 @@ pub(super) fn apply_acp_session_event_with_coordinator(
             upsert_acp_tool_call_update(model, acp_ui_state, update, None);
             model.set_stream_activity_thinking(false);
         }
-        AcpSessionEvent::ModelConfigChanged { agent_id, config } => {
+        RuntimeEvent::ModelConfigChanged {
+            target: RuntimeTarget::AcpAgent { agent_id },
+            config,
+        } => {
             model.apply_acp_model_config(&agent_id, config);
         }
-        AcpSessionEvent::AvailableCommandsChanged { agent_id, commands } => {
+        RuntimeEvent::AvailableCommandsChanged {
+            target: RuntimeTarget::AcpAgent { agent_id },
+            commands,
+        } => {
             model.apply_acp_available_commands(agent_id, commands);
         }
-        AcpSessionEvent::ConfigChangeSucceeded { agent_id } => {
+        RuntimeEvent::ConfigChangeSucceeded {
+            target: RuntimeTarget::AcpAgent { agent_id },
+        } => {
             model.commit_pending_acp_model_change(&agent_id);
         }
-        AcpSessionEvent::ConfigChangeFailed { agent_id, message } => {
+        RuntimeEvent::ConfigChangeFailed {
+            target: RuntimeTarget::AcpAgent { agent_id },
+            message,
+        } => {
             model.rollback_pending_acp_model_change(&agent_id);
             model.show_transient_status_notice(&format!("ACP config change failed: {message}"));
         }
-        AcpSessionEvent::PromptResponse {
+        RuntimeEvent::MessageFinished {
+            target: Some(RuntimeTarget::AcpAgent { .. }),
             content,
-            stop_reason,
+            finish_reason,
             ..
         } => {
             if acp_ui_state.should_discard_prompt_output() {
@@ -554,11 +592,15 @@ pub(super) fn apply_acp_session_event_with_coordinator(
             );
             acp_ui_state.mark_prompt_finished();
             model.clear_stream_activity();
-            if stop_reason != "EndTurn" {
-                model.show_transient_status_notice(&format!("ACP prompt finished: {stop_reason}"));
+            if let Some(finish_reason) = finish_reason {
+                model
+                    .show_transient_status_notice(&format!("ACP prompt finished: {finish_reason}"));
             }
         }
-        AcpSessionEvent::PromptFailed { message, .. } => {
+        RuntimeEvent::Failed {
+            target: Some(RuntimeTarget::AcpAgent { .. }),
+            message,
+        } => {
             if acp_ui_state.should_discard_prompt_output() {
                 acp_ui_state.mark_prompt_finished();
                 model.clear_stream_activity();
@@ -578,12 +620,17 @@ pub(super) fn apply_acp_session_event_with_coordinator(
             model.clear_stream_activity();
             model.show_transient_status_notice(&format!("ACP prompt failed: {message}"));
         }
-        AcpSessionEvent::PromptInterrupted { .. } => {
+        RuntimeEvent::Interrupted {
+            target: Some(RuntimeTarget::AcpAgent { .. }),
+        } => {
             fail_tracked_acp_tool_calls(model, acp_ui_state, "Interrupted");
             acp_ui_state.mark_prompt_finished();
             model.clear_stream_activity();
         }
-        AcpSessionEvent::PermissionRequested { agent_id, request } => {
+        RuntimeEvent::PermissionRequested {
+            target: RuntimeTarget::AcpAgent { agent_id },
+            request,
+        } => {
             if acp_ui_state.should_discard_prompt_output() {
                 let _ = runtime_coordinator.dispatch_runtime_command(
                     RuntimeCommand::RespondPermission {
@@ -600,72 +647,82 @@ pub(super) fn apply_acp_session_event_with_coordinator(
             model.set_stream_activity_thinking(false);
             flush_acp_response_buffer(model, acp_ui_state);
             let transcript_tool_call = acp_permission_transcript_tool_call_update(&request);
-            let permission_tool_call_item_index = {
-                let tool_call_id = transcript_tool_call.tool_call_id.clone();
+            let permission_tool_call_item_index = transcript_tool_call.as_ref().map(|update| {
+                let tool_call_id = update.activity_id.clone();
                 if let Some(total_tokens) = acp_ui_state.observe_tool_call_tokens(
                     &tool_call_id,
-                    acp_tool_call_update_token_text(&transcript_tool_call),
+                    acp_tool_call_update_token_text(update),
                 ) {
                     model.set_stream_activity_output_tokens(total_tokens);
                 }
                 upsert_acp_tool_call_update(
                     model,
                     acp_ui_state,
-                    transcript_tool_call.clone(),
+                    update.clone(),
                     request.title.clone(),
                 )
-            };
-            let preview = ToolApprovalPreview::from_acp_tool_call_update(&transcript_tool_call);
+            });
+            let preview = transcript_tool_call
+                .as_ref()
+                .and_then(ToolApprovalPreview::from_runtime_tool_activity_update);
             let suspended_tool_call_item_index =
-                preview.as_ref().map(|_| permission_tool_call_item_index);
-            model.set_acp_tool_call_permission_waiting_from_runtime(
-                permission_tool_call_item_index,
-                true,
-            );
+                preview.as_ref().and(permission_tool_call_item_index);
+            if let Some(item_index) = permission_tool_call_item_index {
+                model.set_acp_tool_call_permission_waiting_from_runtime(item_index, true);
+            }
             model.show_acp_permission_request_with_preview(AcpPermissionPanelRequest {
                 request_id: request.request_id.clone(),
-                tool_call_id: Some(transcript_tool_call.tool_call_id.clone()),
+                tool_call_id: transcript_tool_call
+                    .as_ref()
+                    .map(|update| update.activity_id.clone()),
                 title: request.title.clone(),
                 allow_option_id: acp_permission_option_id_for(
                     &request,
-                    AcpPermissionOptionKind::AllowOnce,
+                    RuntimePermissionOptionKind::AllowOnce,
                 ),
                 allow_always_option_id: acp_permission_option_id_for(
                     &request,
-                    AcpPermissionOptionKind::AllowAlways,
+                    RuntimePermissionOptionKind::AllowAlways,
                 ),
                 reject_option_id: acp_permission_option_id_for(
                     &request,
-                    AcpPermissionOptionKind::RejectOnce,
+                    RuntimePermissionOptionKind::RejectOnce,
                 ),
                 reject_always_option_id: acp_permission_option_id_for(
                     &request,
-                    AcpPermissionOptionKind::RejectAlways,
+                    RuntimePermissionOptionKind::RejectAlways,
                 ),
                 preview,
-                tool_call_item_index: Some(permission_tool_call_item_index),
+                tool_call_item_index: permission_tool_call_item_index,
             });
             if let Some(item_index) = suspended_tool_call_item_index {
                 model.suspend_acp_tool_call_for_approval_panel(item_index);
             }
         }
-        AcpSessionEvent::TerminalUpdated { snapshot, .. } => {
+        RuntimeEvent::TerminalUpdated {
+            target: RuntimeTarget::AcpAgent { .. },
+            snapshot,
+        } => {
             acp_ui_state.observe_terminal_snapshot(&snapshot);
             if acp_ui_state.should_discard_prompt_output() {
                 return;
             }
-            let _ = model.apply_acp_terminal_snapshot_from_runtime(snapshot);
+            let _ = model.apply_runtime_terminal_snapshot_from_runtime(snapshot);
         }
-        AcpSessionEvent::PermissionRequestCancelled { agent_id } => {
+        RuntimeEvent::PermissionCancelled {
+            target: RuntimeTarget::AcpAgent { .. },
+            ..
+        } => {
             if acp_ui_state.should_discard_prompt_output() {
                 return;
             }
-            model.apply_runtime_event(RuntimeEvent::PermissionCancelled {
-                target: RuntimeTarget::acp_agent(agent_id),
-                request_id: None,
-            });
+            model.close_tool_approval_panel();
+            model.show_transient_status_notice("ACP permission request cancelled");
         }
-        AcpSessionEvent::Stopped { agent_id, message } => {
+        RuntimeEvent::Stopped {
+            target: RuntimeTarget::AcpAgent { agent_id },
+            message,
+        } => {
             model.clear_acp_available_commands(&agent_id);
             if acp_ui_state.should_discard_prompt_output() {
                 acp_ui_state.mark_prompt_finished();
@@ -684,27 +741,30 @@ pub(super) fn apply_acp_session_event_with_coordinator(
                 model.show_transient_status_notice(&format!("ACP session stopped: {message}"));
             }
         }
+        event => model.apply_runtime_event(event),
     }
 }
 
-fn acp_permission_transcript_tool_call_update(request: &AcpPermissionRequest) -> AcpToolCallUpdate {
-    let mut update = request.tool_call.clone();
+fn acp_permission_transcript_tool_call_update(
+    request: &RuntimePermissionRequest,
+) -> Option<RuntimeToolActivityUpdate> {
+    let mut update = request.tool_activity.clone()?;
     if is_execute_like_tool_call_update(&update, request.title.as_deref()) {
         update.content = update.content.map(|content| {
             content
                 .into_iter()
-                .filter(|content| !matches!(content, AcpToolCallContent::Text(_)))
+                .filter(|content| !matches!(content, RuntimeToolActivityContent::Text(_)))
                 .collect()
         });
     }
-    update
+    Some(update)
 }
 
 fn is_execute_like_tool_call_update(
-    update: &AcpToolCallUpdate,
+    update: &RuntimeToolActivityUpdate,
     fallback_title: Option<&str>,
 ) -> bool {
-    update.kind == Some(AcpToolKind::Execute)
+    update.kind == Some(RuntimeToolKind::Execute)
         || update
             .title
             .as_deref()
@@ -723,8 +783,8 @@ fn is_execute_like_tool_title(title: &str) -> bool {
 }
 
 fn acp_permission_option_id_for(
-    request: &AcpPermissionRequest,
-    kind: AcpPermissionOptionKind,
+    request: &RuntimePermissionRequest,
+    kind: RuntimePermissionOptionKind,
 ) -> Option<String> {
     request
         .options
@@ -733,7 +793,7 @@ fn acp_permission_option_id_for(
         .map(|option| option.option_id.clone())
 }
 
-fn acp_tool_call_token_text(call: &AcpToolCall) -> Option<String> {
+fn acp_tool_call_token_text(call: &RuntimeToolActivity) -> Option<String> {
     acp_tool_call_projected_token_text(
         call.raw_input.as_ref().and_then(|raw| raw.token_text()),
         Some(call.content.as_slice()),
@@ -741,7 +801,7 @@ fn acp_tool_call_token_text(call: &AcpToolCall) -> Option<String> {
     )
 }
 
-fn acp_tool_call_update_token_text(update: &AcpToolCallUpdate) -> Option<String> {
+fn acp_tool_call_update_token_text(update: &RuntimeToolActivityUpdate) -> Option<String> {
     acp_tool_call_projected_token_text(
         update.raw_input.as_ref().and_then(|raw| raw.token_text()),
         update.content.as_deref(),
@@ -751,7 +811,7 @@ fn acp_tool_call_update_token_text(update: &AcpToolCallUpdate) -> Option<String>
 
 fn acp_tool_call_projected_token_text(
     raw_input: Option<String>,
-    content: Option<&[AcpToolCallContent]>,
+    content: Option<&[RuntimeToolActivityContent]>,
     raw_output: Option<String>,
 ) -> Option<String> {
     if let Some(raw_input) = raw_input.filter(|text| !text.is_empty()) {
@@ -774,13 +834,16 @@ fn acp_tool_call_projected_token_text(
     (!text.is_empty()).then_some(text)
 }
 
-fn append_acp_tool_call_content_token_text(text: &mut String, content: &AcpToolCallContent) {
+fn append_acp_tool_call_content_token_text(
+    text: &mut String,
+    content: &RuntimeToolActivityContent,
+) {
     match content {
-        AcpToolCallContent::Text(value) => append_token_text_segment(text, value),
-        AcpToolCallContent::Resource {
+        RuntimeToolActivityContent::Text(value) => append_token_text_segment(text, value),
+        RuntimeToolActivityContent::Resource {
             text: Some(value), ..
         } => append_token_text_segment(text, value),
-        AcpToolCallContent::Diff {
+        RuntimeToolActivityContent::Diff {
             path,
             old_text,
             new_text,
@@ -791,24 +854,27 @@ fn append_acp_tool_call_content_token_text(text: &mut String, content: &AcpToolC
             }
             append_token_text_segment(text, new_text);
         }
-        AcpToolCallContent::Image { mime_type, uri } => {
+        RuntimeToolActivityContent::Image { mime_type, uri } => {
             append_token_text_segment(text, mime_type);
             if let Some(uri) = uri {
                 append_token_text_segment(text, uri);
             }
         }
-        AcpToolCallContent::Audio { mime_type } => append_token_text_segment(text, mime_type),
-        AcpToolCallContent::ResourceLink { uri, name, title } => {
+        RuntimeToolActivityContent::Audio { mime_type } => {
+            append_token_text_segment(text, mime_type)
+        }
+        RuntimeToolActivityContent::ResourceLink { uri, name, title } => {
             append_token_text_segment(text, uri);
             append_token_text_segment(text, name);
             if let Some(title) = title {
                 append_token_text_segment(text, title);
             }
         }
-        AcpToolCallContent::Terminal { terminal_id } => {
+        RuntimeToolActivityContent::Terminal { terminal_id } => {
             append_token_text_segment(text, terminal_id)
         }
-        AcpToolCallContent::Resource { text: None, .. } | AcpToolCallContent::Unknown(_) => {}
+        RuntimeToolActivityContent::Resource { text: None, .. }
+        | RuntimeToolActivityContent::Unknown(_) => {}
     }
 }
 
@@ -825,17 +891,17 @@ fn append_token_text_segment(text: &mut String, segment: &str) {
 fn upsert_acp_tool_call(
     model: &mut Model,
     acp_ui_state: &mut AcpSessionUiState,
-    call: AcpToolCall,
+    call: RuntimeToolActivity,
 ) -> usize {
-    let tool_call_id = call.tool_call_id.clone();
+    let tool_call_id = call.activity_id.clone();
     acp_ui_state.track_tool_call_terminal_content(&tool_call_id, Some(call.content.as_slice()));
-    let item_index = match model.acp_tool_call_item_index_from_runtime(&tool_call_id) {
+    let item_index = match model.runtime_tool_activity_item_index_from_runtime(&tool_call_id) {
         Some(item_index) => {
             let update = acp_tool_call_update_from_call(call);
-            model.update_acp_tool_call_from_runtime(item_index, update);
+            model.update_runtime_tool_activity_from_runtime(item_index, update);
             item_index
         }
-        None => model.append_acp_tool_call_from_runtime(call),
+        None => model.append_runtime_tool_activity_from_runtime(call),
     };
     acp_ui_state.track_tool_call(tool_call_id, item_index);
     item_index
@@ -844,30 +910,32 @@ fn upsert_acp_tool_call(
 fn upsert_acp_tool_call_update(
     model: &mut Model,
     acp_ui_state: &mut AcpSessionUiState,
-    update: AcpToolCallUpdate,
+    update: RuntimeToolActivityUpdate,
     fallback_title: Option<String>,
 ) -> usize {
-    let tool_call_id = update.tool_call_id.clone();
+    let tool_call_id = update.activity_id.clone();
     acp_ui_state.track_tool_call_terminal_content(&tool_call_id, update.content.as_deref());
     let item_index = acp_ui_state
         .tool_call_item_index(&tool_call_id)
-        .or_else(|| model.acp_tool_call_item_index_from_runtime(&tool_call_id));
+        .or_else(|| model.runtime_tool_activity_item_index_from_runtime(&tool_call_id));
 
     let item_index = match item_index {
         Some(item_index) => {
-            model.update_acp_tool_call_from_runtime(item_index, update);
+            model.update_runtime_tool_activity_from_runtime(item_index, update);
             item_index
         }
-        None => model
-            .append_acp_tool_call_from_runtime(acp_tool_call_from_update(update, fallback_title)),
+        None => model.append_runtime_tool_activity_from_runtime(acp_tool_call_from_update(
+            update,
+            fallback_title,
+        )),
     };
     acp_ui_state.track_tool_call(tool_call_id, item_index);
     item_index
 }
 
-fn acp_tool_call_update_from_call(call: AcpToolCall) -> AcpToolCallUpdate {
-    AcpToolCallUpdate {
-        tool_call_id: call.tool_call_id,
+fn acp_tool_call_update_from_call(call: RuntimeToolActivity) -> RuntimeToolActivityUpdate {
+    RuntimeToolActivityUpdate {
+        activity_id: call.activity_id,
         title: Some(call.title),
         kind: Some(call.kind),
         status: Some(call.status),
@@ -879,18 +947,19 @@ fn acp_tool_call_update_from_call(call: AcpToolCall) -> AcpToolCallUpdate {
 }
 
 fn acp_tool_call_from_update(
-    update: AcpToolCallUpdate,
+    update: RuntimeToolActivityUpdate,
     fallback_title: Option<String>,
-) -> AcpToolCall {
-    let tool_call_id = update.tool_call_id;
-    AcpToolCall {
-        title: update
-            .title
-            .or(fallback_title)
-            .unwrap_or_else(|| format!("Tool call {tool_call_id}")),
-        tool_call_id,
-        kind: update.kind.unwrap_or(AcpToolKind::Other),
-        status: update.status.unwrap_or(AcpToolCallStatus::Pending),
+) -> RuntimeToolActivity {
+    let tool_call_id = update.activity_id;
+    let title = update
+        .title
+        .or(fallback_title)
+        .unwrap_or_else(|| format!("Tool call {tool_call_id}"));
+    RuntimeToolActivity {
+        activity_id: tool_call_id,
+        title,
+        kind: update.kind.unwrap_or(RuntimeToolKind::Other),
+        status: update.status.unwrap_or(RuntimeToolActivityStatus::Pending),
         content: update.content.unwrap_or_default(),
         locations: update.locations.unwrap_or_default(),
         raw_input: update.raw_input,
@@ -1061,19 +1130,17 @@ pub(super) fn run_interrupt_acp_prompt_effect(
 }
 
 pub(super) fn acp_reject_option_id_for_stale_discard(
-    request: &mo_core::acp::AcpPermissionRequest,
+    request: &RuntimePermissionRequest,
 ) -> Option<String> {
-    use mo_core::acp::AcpPermissionOptionKind;
-
     request
         .options
         .iter()
-        .find(|option| option.kind == AcpPermissionOptionKind::RejectOnce)
+        .find(|option| option.kind == RuntimePermissionOptionKind::RejectOnce)
         .or_else(|| {
             request
                 .options
                 .iter()
-                .find(|option| option.kind == AcpPermissionOptionKind::RejectAlways)
+                .find(|option| option.kind == RuntimePermissionOptionKind::RejectAlways)
         })
         .map(|option| option.option_id.clone())
 }

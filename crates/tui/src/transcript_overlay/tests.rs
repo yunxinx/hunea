@@ -110,22 +110,24 @@ fn transcript_overlay_switches_tool_activity_detail_mode() {
     model.set_window(40, 10);
     model.set_palette(default_palette(), true);
     model.transcript_mut().clear();
-    model.transcript_mut().append_acp_tool_call(AcpToolCall {
-        tool_call_id: "call-1".to_string(),
-        title: "Run tests".to_string(),
-        kind: AcpToolKind::Execute,
-        status: AcpToolCallStatus::Completed,
-        content: vec![AcpToolCallContent::Text("summary".to_string())],
-        locations: Vec::new(),
-        raw_input: None,
-        raw_output: Some(
-            (1..=14)
-                .map(|line| format!("line {line}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-                .into(),
-        ),
-    });
+    model
+        .transcript_mut()
+        .append_runtime_tool_activity(AcpToolCall {
+            tool_call_id: "call-1".to_string(),
+            title: "Run tests".to_string(),
+            kind: AcpToolKind::Execute,
+            status: AcpToolCallStatus::Completed,
+            content: vec![AcpToolCallContent::Text("summary".to_string())],
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: Some(
+                (1..=14)
+                    .map(|line| format!("line {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into(),
+            ),
+        });
 
     let compact = model.transcript_plain_items().join("\n");
     assert_contains_transcript_hint(&compact);
@@ -206,20 +208,22 @@ fn overlay_diff_line_background_fills_the_rendered_row() {
     model.set_window(48, 8);
     model.set_palette(default_palette(), true);
     model.transcript_mut().clear();
-    model.transcript_mut().append_acp_tool_call(AcpToolCall {
-        tool_call_id: "call-1".to_string(),
-        title: "WriteFile: src/lib.rs".to_string(),
-        kind: AcpToolKind::Edit,
-        status: AcpToolCallStatus::Completed,
-        content: vec![AcpToolCallContent::Diff {
-            path: "src/lib.rs".to_string(),
-            old_text: Some("one\nold\ntail\n".to_string()),
-            new_text: "one\nnew\ntail\n".to_string(),
-        }],
-        locations: Vec::new(),
-        raw_input: None,
-        raw_output: None,
-    });
+    model
+        .transcript_mut()
+        .append_runtime_tool_activity(AcpToolCall {
+            tool_call_id: "call-1".to_string(),
+            title: "WriteFile: src/lib.rs".to_string(),
+            kind: AcpToolKind::Edit,
+            status: AcpToolCallStatus::Completed,
+            content: vec![AcpToolCallContent::Diff {
+                path: "src/lib.rs".to_string(),
+                old_text: Some("one\nold\ntail\n".to_string()),
+                new_text: "one\nnew\ntail\n".to_string(),
+            }],
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: None,
+        });
     model.sync_transcript_render();
     model.open_transcript_overlay();
 

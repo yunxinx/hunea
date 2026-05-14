@@ -657,9 +657,9 @@ fn wrapping_index(current: usize, len: usize, delta: isize) -> usize {
 mod tests {
     use super::*;
     use crate::{AppEvent, HeroOptions, ModelOptions};
-    use mo_core::acp::{AcpModelConfig, AcpModelOption};
     use mo_core::model_catalog::{ModelCatalog, ModelProvider, ModelSource};
     use mo_core::provider::ProviderKind;
+    use mo_core::session::{RuntimeModelConfig, RuntimeModelOption};
 
     #[test]
     fn provider_refresh_success_replaces_models_and_drops_stale_selection() {
@@ -729,16 +729,16 @@ mod tests {
         model.selected_acp_agent = Some("Kimi Code CLI".to_string());
         model.apply_acp_model_config(
             "Kimi Code CLI",
-            AcpModelConfig {
+            RuntimeModelConfig {
                 config_id: Some("model".to_string()),
                 current_value: "kimi-k2".to_string(),
                 current_name: "Kimi K2".to_string(),
                 options: vec![
-                    AcpModelOption {
+                    RuntimeModelOption {
                         value: "kimi-k2".to_string(),
                         name: "Kimi K2".to_string(),
                     },
-                    AcpModelOption {
+                    RuntimeModelOption {
                         value: "kimi-k1.5".to_string(),
                         name: "Kimi K1.5".to_string(),
                     },
@@ -792,16 +792,16 @@ mod tests {
         model.selected_acp_agent = Some("Kimi Code CLI".to_string());
         model.apply_acp_model_config(
             "Kimi Code CLI",
-            AcpModelConfig {
+            RuntimeModelConfig {
                 config_id: None,
                 current_value: "kimi-for-coding".to_string(),
                 current_name: "Kimi for Coding".to_string(),
                 options: vec![
-                    AcpModelOption {
+                    RuntimeModelOption {
                         value: "kimi-for-coding".to_string(),
                         name: "Kimi for Coding".to_string(),
                     },
-                    AcpModelOption {
+                    RuntimeModelOption {
                         value: "kimi-for-coding(thinking)".to_string(),
                         name: "Kimi for Coding (thinking)".to_string(),
                     },
@@ -853,16 +853,16 @@ mod tests {
         model.selected_acp_agent = Some("Kimi Code CLI".to_string());
         model.apply_acp_model_config(
             "Kimi Code CLI",
-            AcpModelConfig {
+            RuntimeModelConfig {
                 config_id: Some("models".to_string()),
                 current_value: "kimi-code/kimi-for-coding".to_string(),
                 current_name: "kimi-for-coding".to_string(),
                 options: vec![
-                    AcpModelOption {
+                    RuntimeModelOption {
                         value: "kimi-code/kimi-for-coding".to_string(),
                         name: "Kimi for Coding".to_string(),
                     },
-                    AcpModelOption {
+                    RuntimeModelOption {
                         value: "kimi-code/kimi-for-coding,thinking".to_string(),
                         name: String::new(),
                     },

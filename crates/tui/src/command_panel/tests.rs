@@ -181,7 +181,7 @@ fn acp_command_tab_completion_keeps_trailing_space() {
 fn background_terminal_commands_show_when_acp_terminal_is_active() {
     let mut model = Model::new(HeroOptions::default());
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    model.apply_acp_terminal_snapshot_from_runtime(mo_core::acp::AcpTerminalSnapshot {
+    model.apply_runtime_terminal_snapshot_from_runtime(mo_core::acp::AcpTerminalSnapshot {
         terminal_id: "term-1".to_string(),
         command: Some("npm run dev".to_string()),
         cwd: Some("/tmp/project".to_string()),
@@ -206,7 +206,7 @@ fn ps_command_appends_background_terminal_summary() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    model.apply_acp_terminal_snapshot_from_runtime(mo_core::acp::AcpTerminalSnapshot {
+    model.apply_runtime_terminal_snapshot_from_runtime(mo_core::acp::AcpTerminalSnapshot {
         terminal_id: "term-1".to_string(),
         command: Some("npm run dev".to_string()),
         cwd: Some("/tmp/project".to_string()),
@@ -239,7 +239,7 @@ fn stop_command_requests_background_terminal_stop() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
     model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-    model.apply_acp_terminal_snapshot_from_runtime(mo_core::acp::AcpTerminalSnapshot {
+    model.apply_runtime_terminal_snapshot_from_runtime(mo_core::acp::AcpTerminalSnapshot {
         terminal_id: "term-1".to_string(),
         command: Some("npm run dev".to_string()),
         cwd: None,

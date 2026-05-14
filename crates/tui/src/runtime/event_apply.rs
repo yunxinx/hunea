@@ -1,4 +1,7 @@
-use mo_core::session::{RuntimeEvent, RuntimePermissionOptionKind, RuntimePermissionRequest};
+use mo_core::session::{
+    RuntimeEvent, RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeToolActivity,
+    RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
+};
 use mo_core::tools::{RuntimeToolCall, RuntimeToolResult};
 
 use super::super::{AppEvent, Model, model::RequestMetrics};
@@ -43,6 +46,21 @@ impl RuntimeEventApply for Model {
             RuntimeEvent::ToolExecutionFinished { call, result, .. } => {
                 append_native_agent_tool_result(self, &call, &result);
             }
+            RuntimeEvent::ToolActivityStarted { activity, .. } => {
+                self.append_runtime_tool_activity_from_runtime(activity);
+                self.set_stream_activity_thinking(false);
+            }
+            RuntimeEvent::ToolActivityUpdated { update, .. } => {
+                upsert_runtime_tool_activity(self, update);
+                self.set_stream_activity_thinking(false);
+            }
+            RuntimeEvent::TerminalUpdated { snapshot, .. } => {
+                let _ = self.apply_runtime_terminal_snapshot_from_runtime(snapshot);
+            }
+            RuntimeEvent::ModelConfigChanged { .. }
+            | RuntimeEvent::AvailableCommandsChanged { .. }
+            | RuntimeEvent::ConfigChangeSucceeded { .. }
+            | RuntimeEvent::ConfigChangeFailed { .. } => {}
             RuntimeEvent::PermissionRequested { request, .. } => {
                 show_runtime_permission_request(self, request);
             }
@@ -92,6 +110,37 @@ impl RuntimeEventApply for Model {
                 }
             }
         }
+    }
+}
+
+fn upsert_runtime_tool_activity(model: &mut Model, update: RuntimeToolActivityUpdate) {
+    let activity_id = update.activity_id.clone();
+    match model.runtime_tool_activity_item_index_from_runtime(&activity_id) {
+        Some(item_index) => {
+            model.update_runtime_tool_activity_from_runtime(item_index, update);
+        }
+        None => {
+            model.append_runtime_tool_activity_from_runtime(runtime_tool_activity_from_update(
+                update,
+            ));
+        }
+    }
+}
+
+fn runtime_tool_activity_from_update(update: RuntimeToolActivityUpdate) -> RuntimeToolActivity {
+    let activity_id = update.activity_id;
+    let title = update
+        .title
+        .unwrap_or_else(|| format!("Tool activity {activity_id}"));
+    RuntimeToolActivity {
+        activity_id,
+        title,
+        kind: update.kind.unwrap_or(RuntimeToolKind::Other),
+        status: update.status.unwrap_or(RuntimeToolActivityStatus::Pending),
+        content: update.content.unwrap_or_default(),
+        locations: update.locations.unwrap_or_default(),
+        raw_input: update.raw_input,
+        raw_output: update.raw_output,
     }
 }
 

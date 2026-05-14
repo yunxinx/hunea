@@ -2,11 +2,15 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 use std::{collections::BTreeMap, rc::Rc};
 
-use mo_core::acp::{AcpAgentIdentity, AcpAvailableCommand, AcpModelConfig, AcpTerminalSnapshot};
 use mo_core::{
+    acp::AcpAgentIdentity,
     envinfo,
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
     phrases::StatusPhraseOrder,
+    session::{
+        RuntimeAvailableCommand, RuntimeModelConfig, RuntimeTerminalSnapshot, RuntimeToolActivity,
+        RuntimeToolActivityUpdate,
+    },
 };
 use ratatui::Frame;
 
@@ -53,7 +57,7 @@ pub struct Model {
     pub(super) acp_current_model: Option<String>,
     pub(super) acp_model_config_id: Option<String>,
     pub(super) pending_acp_model_rollback: Option<AcpModelSelectionRollback>,
-    pub(super) acp_available_commands_by_agent: BTreeMap<String, Vec<AcpAvailableCommand>>,
+    pub(super) acp_available_commands_by_agent: BTreeMap<String, Vec<RuntimeAvailableCommand>>,
     pub(super) acp_panel: AcpPanelState,
     pub(super) acp_debug_panel: AcpDebugPanelState,
     pub(super) model_catalog: ModelCatalog,
@@ -65,7 +69,7 @@ pub struct Model {
     pub(super) transcript_overlay: Option<crate::transcript_overlay::TranscriptOverlayState>,
     pub(super) backtrack: BacktrackState,
     pub(super) pending_acp_permission: Option<PendingAcpPermission>,
-    pub(super) acp_terminal_snapshots: BTreeMap<String, AcpTerminalSnapshot>,
+    pub(super) acp_terminal_snapshots: BTreeMap<String, RuntimeTerminalSnapshot>,
     pub(super) stream_activity: Option<StreamActivityState>,
     pub(super) status_phrase_selector: StatusPhraseSelector,
     pub(super) command_panel_selected: usize,
@@ -439,12 +443,15 @@ impl Model {
     }
 
     /// `apply_acp_available_commands` 记录当前 ACP session 上报的动态斜杠命令。
-    pub(crate) fn apply_acp_available_commands(
+    pub(crate) fn apply_acp_available_commands<C>(
         &mut self,
         agent_id: impl Into<String>,
-        commands: Vec<AcpAvailableCommand>,
-    ) {
+        commands: impl IntoIterator<Item = C>,
+    ) where
+        C: Into<RuntimeAvailableCommand>,
+    {
         let agent_id = agent_id.into();
+        let commands = commands.into_iter().map(Into::into).collect::<Vec<_>>();
         if commands.is_empty() {
             self.acp_available_commands_by_agent.remove(&agent_id);
         } else {
@@ -461,7 +468,7 @@ impl Model {
     }
 
     /// `selected_acp_available_commands` 返回当前活跃 ACP session 的动态命令。
-    pub(crate) fn selected_acp_available_commands(&self) -> &[AcpAvailableCommand] {
+    pub(crate) fn selected_acp_available_commands(&self) -> &[RuntimeAvailableCommand] {
         self.selected_acp_agent
             .as_deref()
             .and_then(|agent_id| self.acp_available_commands_by_agent.get(agent_id))
@@ -722,7 +729,7 @@ impl Model {
         self.sync_model_panel_to_selection();
     }
 
-    pub(crate) fn apply_acp_model_config(&mut self, agent_id: &str, config: AcpModelConfig) {
+    pub(crate) fn apply_acp_model_config(&mut self, agent_id: &str, config: RuntimeModelConfig) {
         let provider_id = acp_model_provider_id(agent_id);
         let display_name = format!("ACP: {agent_id}");
         let mut entries = config
@@ -881,19 +888,22 @@ impl Model {
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
     }
 
-    pub(crate) fn append_acp_tool_call_from_runtime(
+    pub(crate) fn append_runtime_tool_activity_from_runtime(
         &mut self,
-        call: mo_core::acp::AcpToolCall,
+        call: impl Into<RuntimeToolActivity>,
     ) -> usize {
+        let call = call.into();
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
-        let item_index = self.transcript_mut().append_acp_tool_call(call);
+        let item_index = self.transcript_mut().append_runtime_tool_activity(call);
         for snapshot in self
             .acp_terminal_snapshots
             .values()
             .cloned()
             .collect::<Vec<_>>()
         {
-            let _ = self.transcript_mut().set_acp_terminal_snapshot(snapshot);
+            let _ = self
+                .transcript_mut()
+                .set_runtime_terminal_snapshot(snapshot);
         }
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
@@ -902,22 +912,23 @@ impl Model {
         item_index
     }
 
-    pub(crate) fn acp_tool_call_item_index_from_runtime(
+    pub(crate) fn runtime_tool_activity_item_index_from_runtime(
         &self,
         tool_call_id: &str,
     ) -> Option<usize> {
-        self.transcript.acp_tool_call_index(tool_call_id)
+        self.transcript.runtime_tool_activity_index(tool_call_id)
     }
 
-    pub(crate) fn update_acp_tool_call_from_runtime(
+    pub(crate) fn update_runtime_tool_activity_from_runtime(
         &mut self,
         item_index: usize,
-        update: mo_core::acp::AcpToolCallUpdate,
+        update: impl Into<RuntimeToolActivityUpdate>,
     ) -> bool {
+        let update = update.into();
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         if !self
             .transcript_mut()
-            .update_acp_tool_call(item_index, update)
+            .update_runtime_tool_activity(item_index, update)
         {
             return false;
         }
@@ -927,7 +938,9 @@ impl Model {
             .cloned()
             .collect::<Vec<_>>()
         {
-            let _ = self.transcript_mut().set_acp_terminal_snapshot(snapshot);
+            let _ = self
+                .transcript_mut()
+                .set_runtime_terminal_snapshot(snapshot);
         }
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
@@ -936,14 +949,18 @@ impl Model {
         true
     }
 
-    pub(crate) fn apply_acp_terminal_snapshot_from_runtime(
+    pub(crate) fn apply_runtime_terminal_snapshot_from_runtime(
         &mut self,
-        snapshot: AcpTerminalSnapshot,
+        snapshot: impl Into<RuntimeTerminalSnapshot>,
     ) -> bool {
+        let snapshot = snapshot.into();
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         self.acp_terminal_snapshots
             .insert(snapshot.terminal_id.clone(), snapshot.clone());
-        if !self.transcript_mut().set_acp_terminal_snapshot(snapshot) {
+        if !self
+            .transcript_mut()
+            .set_runtime_terminal_snapshot(snapshot)
+        {
             return false;
         }
         self.refresh_status_line_after_transcript_change();
@@ -1385,7 +1402,7 @@ fn resolve_initial_current_dir(
     }
 }
 
-fn is_active_acp_terminal_snapshot(snapshot: &AcpTerminalSnapshot) -> bool {
+fn is_active_acp_terminal_snapshot(snapshot: &RuntimeTerminalSnapshot) -> bool {
     snapshot.exit_status.is_none() && !snapshot.released
 }
 

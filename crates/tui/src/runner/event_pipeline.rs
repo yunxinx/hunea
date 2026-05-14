@@ -180,16 +180,18 @@ mod tests {
     fn active_tool_activity_deadline_requests_render_on_timeout() {
         let mut model = Model::new(HeroOptions::default());
         model.update(crate::AppEvent::StartupReadyTimeout);
-        model.transcript_mut().append_acp_tool_call(AcpToolCall {
-            tool_call_id: "tool-1".to_string(),
-            title: "WriteFile: TEMP.md".to_string(),
-            kind: AcpToolKind::Other,
-            status: AcpToolCallStatus::InProgress,
-            content: Vec::new(),
-            locations: Vec::new(),
-            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
-            raw_output: None,
-        });
+        model
+            .transcript_mut()
+            .append_runtime_tool_activity(AcpToolCall {
+                tool_call_id: "tool-1".to_string(),
+                title: "WriteFile: TEMP.md".to_string(),
+                kind: AcpToolKind::Other,
+                status: AcpToolCallStatus::InProgress,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
+                raw_output: None,
+            });
         model.sync_transcript_render();
         let now = model
             .transcript_mut()
@@ -209,16 +211,18 @@ mod tests {
     fn active_tool_activity_background_poll_still_requests_render_on_timeout() {
         let mut model = Model::new(HeroOptions::default());
         model.update(crate::AppEvent::StartupReadyTimeout);
-        model.transcript_mut().append_acp_tool_call(AcpToolCall {
-            tool_call_id: "tool-1".to_string(),
-            title: "WriteFile: TEMP.md".to_string(),
-            kind: AcpToolKind::Other,
-            status: AcpToolCallStatus::InProgress,
-            content: Vec::new(),
-            locations: Vec::new(),
-            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
-            raw_output: None,
-        });
+        model
+            .transcript_mut()
+            .append_runtime_tool_activity(AcpToolCall {
+                tool_call_id: "tool-1".to_string(),
+                title: "WriteFile: TEMP.md".to_string(),
+                kind: AcpToolKind::Other,
+                status: AcpToolCallStatus::InProgress,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
+                raw_output: None,
+            });
         model.sync_transcript_render();
         let now = Instant::now();
 
@@ -235,16 +239,18 @@ mod tests {
     fn active_tool_activity_uses_absolute_next_frame_deadline() {
         let mut model = Model::new(HeroOptions::default());
         model.update(crate::AppEvent::StartupReadyTimeout);
-        model.transcript_mut().append_acp_tool_call(AcpToolCall {
-            tool_call_id: "tool-1".to_string(),
-            title: "WriteFile: TEMP.md".to_string(),
-            kind: AcpToolKind::Other,
-            status: AcpToolCallStatus::InProgress,
-            content: Vec::new(),
-            locations: Vec::new(),
-            raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
-            raw_output: None,
-        });
+        model
+            .transcript_mut()
+            .append_runtime_tool_activity(AcpToolCall {
+                tool_call_id: "tool-1".to_string(),
+                title: "WriteFile: TEMP.md".to_string(),
+                kind: AcpToolKind::Other,
+                status: AcpToolCallStatus::InProgress,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
+                raw_output: None,
+            });
         model.sync_transcript_render();
         let started_at = model
             .transcript_mut()

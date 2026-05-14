@@ -243,7 +243,7 @@ mod tests {
         model.transcript_mut().clear();
         model.set_window(48, 8);
         model.set_palette(default_palette(), true);
-        model.append_acp_tool_call_from_runtime(AcpToolCall {
+        model.append_runtime_tool_activity_from_runtime(AcpToolCall {
             tool_call_id: "call-1".to_string(),
             title: "WriteFile: src/lib.rs".to_string(),
             kind: AcpToolKind::Edit,

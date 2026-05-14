@@ -108,8 +108,8 @@ api_key = "sk-test-direct"
 }
 
 #[test]
-fn models_config_accepts_native_genai_provider_kinds() {
-    let working_dir = temp_test_dir("native-genai-provider-kinds");
+fn models_config_accepts_native_provider_kinds() {
+    let working_dir = temp_test_dir("native-provider-kinds");
     fs::write(
         working_dir.join("models.toml"),
         r#"

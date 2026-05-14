@@ -43,9 +43,3 @@ impl From<NativeLlmError> for NativeAgentError {
         }
     }
 }
-
-impl From<genai::Error> for NativeAgentError {
-    fn from(source: genai::Error) -> Self {
-        Self::Llm(NativeLlmError::from(source))
-    }
-}

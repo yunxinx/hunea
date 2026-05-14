@@ -6,20 +6,17 @@ use std::{
 };
 
 use directories::ProjectDirs;
-use genai::{
-    Client as GenAiClient, ModelIden,
-    resolver::{AuthData, AuthResolver},
-};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
-use crate::provider_kind::ProviderKindGenAiExt;
+use crate::{NativeLlmError, list_native_provider_models};
 use mo_core::{
     model_catalog::{
         ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderSyncRequest,
     },
     provider::{ProviderApiKey, ProviderKind},
+    session::NativeLlmRequest,
 };
 
 const MODELS_FILE_NAME: &str = "models.toml";
@@ -403,52 +400,28 @@ fn sync_provider_models(request: &ProviderSyncRequest) -> ModelSyncResult {
         ));
     }
 
-    sync_genai_models(request)
+    sync_native_provider_models(request)
 }
 
-fn sync_genai_models(request: &ProviderSyncRequest) -> ModelSyncResult {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|source| format!("start model sync runtime: {source}"))?;
-
-    runtime.block_on(async {
-        tokio::time::timeout(MODEL_SYNC_TIMEOUT, async {
-            let client = genai_client_for_sync(request);
-            client
-                .all_model_names(request.kind.adapter_kind())
-                .await
-                .map_err(|source| source.to_string())
-        })
-        .await
-        .map_err(|_| "model sync timed out".to_string())?
-    })
-}
-
-fn genai_client_for_sync(request: &ProviderSyncRequest) -> GenAiClient {
-    let Some(auth_data) = sync_auth_data(request) else {
-        return GenAiClient::default();
-    };
-
-    let auth_resolver = AuthResolver::from_resolver_fn(
-        move |_model_iden: ModelIden| -> Result<Option<AuthData>, genai::resolver::Error> {
-            Ok(Some(auth_data.clone()))
-        },
+fn sync_native_provider_models(request: &ProviderSyncRequest) -> ModelSyncResult {
+    let request = NativeLlmRequest::new(
+        request.provider_id.clone(),
+        request.kind,
+        "__model_sync__",
+        request.base_url.clone(),
+        request.api_key.clone(),
+        request.api_key_env.clone(),
+        Vec::new(),
     );
-    GenAiClient::builder()
-        .with_auth_resolver(auth_resolver)
-        .build()
-}
-
-fn sync_auth_data(request: &ProviderSyncRequest) -> Option<AuthData> {
-    if let Some(api_key) = request.api_key.as_ref() {
-        return Some(AuthData::from_single(api_key.as_str().to_string()));
-    }
-    request
-        .api_key_env
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-        .map(|api_key_env| AuthData::from_env(api_key_env.clone()))
+    list_native_provider_models(&request).map_err(|error| match error {
+        NativeLlmError::UnsupportedProvider { .. } => {
+            format!(
+                "model sync for {} is not supported; configure models = [...]",
+                request.provider_kind
+            )
+        }
+        error => error.to_string(),
+    })
 }
 
 fn sync_openai_compatible_models(request: &ProviderSyncRequest) -> ModelSyncResult {

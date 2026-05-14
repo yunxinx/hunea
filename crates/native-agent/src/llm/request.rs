@@ -1,16 +1,10 @@
-use genai::chat::ChatMessage as GenAiChatMessage;
+use rig_core::message::Message as RigMessage;
 
 pub use mo_core::session::{ChatMessage, ChatRole, NativeLlmRequest};
 
-pub(crate) trait ChatMessageGenAiExt {
-    fn into_genai(self) -> GenAiChatMessage;
-}
-
-impl ChatMessageGenAiExt for ChatMessage {
-    fn into_genai(self) -> GenAiChatMessage {
-        match self.role {
-            ChatRole::User => GenAiChatMessage::user(self.content),
-            ChatRole::Assistant => GenAiChatMessage::assistant(self.content),
-        }
+pub(crate) fn rig_message_from_chat_message(message: ChatMessage) -> RigMessage {
+    match message.role {
+        ChatRole::User => RigMessage::user(message.content),
+        ChatRole::Assistant => RigMessage::assistant(message.content),
     }
 }

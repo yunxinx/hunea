@@ -1,4 +1,3 @@
-use genai::chat::StreamEnd;
 use mo_core::tools::{RuntimeToolCall, RuntimeToolResult};
 
 use crate::NativeLlmPerformanceMetrics;
@@ -26,18 +25,12 @@ pub(crate) enum NativeAgentProgress {
 pub(crate) struct NativeAgentCompletion {
     pub(crate) response: NativeAgentResponse,
     pub(crate) metrics: Option<NativeLlmPerformanceMetrics>,
-    pub(crate) stream_end: Option<StreamEnd>,
 }
 
 impl NativeAgentCompletion {
     pub(crate) fn into_response(self) -> NativeAgentResponse {
-        let Self {
-            response,
-            metrics,
-            stream_end,
-        } = self;
+        let Self { response, metrics } = self;
         let _ = metrics;
-        let _ = stream_end;
         response
     }
 }

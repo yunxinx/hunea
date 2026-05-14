@@ -1,5 +1,8 @@
 use std::{
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver},
+    },
     thread,
 };
 
@@ -13,7 +16,7 @@ use mo_core::{
 
 use super::{
     NativeAgentError, NativeAgentRequest, response::NativeAgentProgress,
-    tool_loop::send_agent_loop_with_cancellation_and_progress,
+    turn::send_agent_loop_with_cancellation_and_progress,
 };
 
 /// `NativeAgentRuntimeState` 管理内置 native agent 请求的后台 worker 与取消状态。
@@ -120,13 +123,14 @@ pub(crate) async fn run_native_agent_worker(
     cancellation: CancellationToken,
     sender: mpsc::Sender<NativeAgentEvent>,
 ) {
+    let executor: Arc<dyn mo_core::tools::RuntimeToolExecutor> = Arc::new(executor);
     for attempt in 0..=request_policy.attempts() {
         let progress_sender = sender.clone();
         let attempt_result = tokio::time::timeout(
             request_policy.timeout(),
             send_agent_loop_with_cancellation_and_progress(
                 &request,
-                &executor,
+                Arc::clone(&executor),
                 &cancellation,
                 move |progress| {
                     let event = native_agent_event_from_progress(progress);

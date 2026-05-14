@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use mo_core::{
     session::RuntimeTarget,
     tools::{
@@ -98,8 +100,8 @@ async fn native_agent_loop_respects_pre_cancelled_token_before_network_request()
     let cancellation = CancellationToken::default();
     cancellation.cancel();
 
-    let executor = RuntimeToolExecutorRegistry::new();
-    let error = send_agent_loop_with_cancellation(&request, &executor, &cancellation)
+    let executor = Arc::new(RuntimeToolExecutorRegistry::new());
+    let error = send_agent_loop_with_cancellation(&request, executor, &cancellation)
         .await
         .expect_err("pre-cancelled request should stop before sending");
 
@@ -123,8 +125,8 @@ async fn native_agent_loop_respects_pre_cancelled_token_when_tools_are_registere
     let cancellation = CancellationToken::default();
     cancellation.cancel();
 
-    let executor = RuntimeToolExecutorRegistry::new();
-    let error = send_agent_loop_with_cancellation(&request, &executor, &cancellation)
+    let executor = Arc::new(RuntimeToolExecutorRegistry::new());
+    let error = send_agent_loop_with_cancellation(&request, executor, &cancellation)
         .await
         .expect_err("pre-cancelled tool request should stop before sending");
 

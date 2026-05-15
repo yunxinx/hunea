@@ -1,18 +1,17 @@
 use std::{
-    sync::Arc,
+    collections::HashMap,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use futures_util::StreamExt as _;
-use mo_core::{
-    session::NativeLlmRequest,
-    token_count::StreamingTokenProgress,
-    tools::{RuntimeToolCall, RuntimeToolExecutor, RuntimeToolResult},
-};
+use mo_core::session::NativeLlmRequest;
+use mo_core::token_count::StreamingTokenProgress;
+use mo_tools::{ToolExecutorRegistry, ToolRegistry, rig::RigToolServer};
 use rig_core::{
     agent::{AgentBuilder, MultiTurnStreamItem},
     completion::{CompletionModel, GetTokenUsage},
-    message::Message as RigMessage,
+    message::{Message as RigMessage, ToolFunction},
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
 use tokio_util::sync::CancellationToken;
@@ -23,8 +22,8 @@ use crate::{
     llm::{
         NativeLlmError, rig_message_from_chat_message,
         tools::{
-            RigToolExecutionState, RigToolProgressHook, build_rig_tools_for_request,
-            runtime_tool_call_from_rig, tool_result_text,
+            runtime_tool_activity_from_rig_call, runtime_tool_activity_update_from_rig_result,
+            tool_result_text,
         },
     },
 };
@@ -38,13 +37,16 @@ pub(crate) enum NativeLlmProgress {
     Thinking { is_thinking: bool },
 }
 
-const MAX_AGENT_TOOL_ROUNDS: usize = 8;
+// Rig 的 `multi_turn` 以 `usize` 表示上限；这里用最大安全值表达 Lumos 默认不设上限，
+// 同时避开 Rig 内部 `max_turns + 1` 的溢出风险。
+const RIG_UNBOUNDED_TOOL_TURNS: usize = usize::MAX - 1;
 
 pub(super) async fn run_rig_agent<M, F>(
     model: M,
     request: &NativeAgentRequest,
-    executor: Arc<dyn RuntimeToolExecutor>,
+    executor: ToolExecutorRegistry,
     cancellation: &CancellationToken,
+    tool_max_turns: Option<usize>,
     on_progress: &mut F,
 ) -> Result<NativeAgentCompletion, NativeAgentError>
 where
@@ -53,28 +55,23 @@ where
     F: FnMut(NativeAgentProgress),
 {
     let (prompt, history) = prompt_and_history_for_request(request.llm_request())?;
-    let tool_state = Arc::new(RigToolExecutionState::default());
-    let rig_tools = build_rig_tools_for_request(
-        request,
-        executor,
-        cancellation.clone(),
-        Arc::clone(&tool_state),
-    );
-    let hook = RigToolProgressHook::new(Arc::clone(&tool_state));
-    let agent = if rig_tools.is_empty() {
-        AgentBuilder::new(model).build()
-    } else {
-        AgentBuilder::new(model).tools(rig_tools).build()
-    };
+    let tool_server = RigToolServer::from_executor(executor, cancellation.clone())
+        .await
+        .map_err(|error| NativeLlmError::Provider(error.to_string()))?;
+    let tool_definitions = tool_server.definitions();
+    let agent = AgentBuilder::new(model)
+        .tool_server_handle(tool_server.handle().clone())
+        .build();
+    let tool_calls = Arc::new(StreamedToolCallIndex::default());
     let mut accumulator = RigAgentAccumulator::new(request.llm_request().model_id.clone());
     let request_started_at = Instant::now();
+    let max_turns = rig_tool_turn_limit(tool_max_turns);
 
     let mut stream = tokio::select! {
         _ = cancellation.cancelled() => return Err(NativeAgentError::Cancelled),
         stream = agent
             .stream_chat(prompt, history)
-            .multi_turn(MAX_AGENT_TOOL_ROUNDS)
-            .with_hook(hook) => stream,
+            .multi_turn(max_turns) => stream,
     };
 
     accumulator.mark_request_started(request_started_at);
@@ -92,7 +89,8 @@ where
             MultiTurnStreamItem::StreamAssistantItem(content) => {
                 handle_streamed_assistant_content(
                     content,
-                    Arc::clone(&tool_state),
+                    &tool_definitions,
+                    Arc::clone(&tool_calls),
                     &mut accumulator,
                     on_progress,
                 );
@@ -100,8 +98,8 @@ where
             MultiTurnStreamItem::StreamUserItem(content) => {
                 handle_streamed_user_content(
                     content,
-                    Arc::clone(&tool_state),
-                    &mut accumulator,
+                    &tool_definitions,
+                    Arc::clone(&tool_calls),
                     on_progress,
                 );
             }
@@ -124,7 +122,8 @@ where
 
 fn handle_streamed_assistant_content<F>(
     content: StreamedAssistantContent<impl Clone + Unpin + GetTokenUsage>,
-    tool_state: Arc<RigToolExecutionState>,
+    tool_definitions: &ToolRegistry,
+    tool_calls: Arc<StreamedToolCallIndex>,
     accumulator: &mut RigAgentAccumulator,
     on_progress: &mut F,
 ) where
@@ -138,10 +137,15 @@ fn handle_streamed_assistant_content<F>(
             tool_call,
             internal_call_id,
         } => {
-            let runtime_call = runtime_tool_call_from_rig(tool_call);
-            tool_state.register_streamed_tool_call(internal_call_id, runtime_call.clone());
-            accumulator.tool_calls.push(runtime_call.clone());
-            on_progress(NativeAgentProgress::ToolExecutionStarted { call: runtime_call });
+            let runtime_activity = runtime_tool_activity_from_rig_call(
+                &tool_call,
+                &internal_call_id,
+                tool_definitions,
+            );
+            tool_calls.insert(internal_call_id.clone(), tool_call);
+            on_progress(NativeAgentProgress::ToolActivityStarted {
+                activity: runtime_activity,
+            });
         }
         StreamedAssistantContent::ToolCallDelta { .. } => {}
         StreamedAssistantContent::Reasoning(reasoning) => {
@@ -164,8 +168,8 @@ fn handle_streamed_assistant_content<F>(
 
 fn handle_streamed_user_content<F>(
     content: StreamedUserContent,
-    tool_state: Arc<RigToolExecutionState>,
-    accumulator: &mut RigAgentAccumulator,
+    tool_definitions: &ToolRegistry,
+    tool_calls: Arc<StreamedToolCallIndex>,
     on_progress: &mut F,
 ) where
     F: FnMut(NativeAgentProgress),
@@ -174,28 +178,18 @@ fn handle_streamed_user_content<F>(
         tool_result,
         internal_call_id,
     } = content;
-    let fallback_call = RuntimeToolCall::new(
-        tool_result
-            .call_id
-            .clone()
-            .unwrap_or_else(|| tool_result.id.clone()),
-        "tool",
-        serde_json::json!({}),
+    let tool_call = tool_calls
+        .remove(&internal_call_id)
+        .unwrap_or_else(|| fallback_tool_call_from_result(&tool_result));
+    let result_text = tool_result_text(&tool_result.content);
+    let update = runtime_tool_activity_update_from_rig_result(
+        &internal_call_id,
+        &tool_call,
+        &result_text,
+        tool_definitions,
     );
-    let result = tool_state
-        .take_completed_tool_result(&internal_call_id)
-        .unwrap_or_else(|| {
-            RuntimeToolResult::success(
-                fallback_call.call_id.clone(),
-                tool_result_text(&tool_result.content),
-            )
-        });
-    let call = tool_state
-        .take_streamed_tool_call(&internal_call_id)
-        .unwrap_or(fallback_call);
 
-    accumulator.tool_results.push(result.clone());
-    on_progress(NativeAgentProgress::ToolExecutionFinished { call, result });
+    on_progress(NativeAgentProgress::ToolActivityUpdated { update });
 }
 
 fn prompt_and_history_for_request(
@@ -213,12 +207,50 @@ fn prompt_and_history_for_request(
     Ok((prompt, messages))
 }
 
+fn rig_tool_turn_limit(tool_max_turns: Option<usize>) -> usize {
+    tool_max_turns.unwrap_or(RIG_UNBOUNDED_TOOL_TURNS)
+}
+
+#[derive(Default)]
+struct StreamedToolCallIndex {
+    streamed_calls: Mutex<HashMap<String, rig_core::message::ToolCall>>,
+}
+
+impl StreamedToolCallIndex {
+    fn insert(&self, internal_call_id: String, call: rig_core::message::ToolCall) {
+        self.streamed_calls
+            .lock()
+            .expect("rig tool state lock should not be poisoned")
+            .insert(internal_call_id, call);
+    }
+
+    fn remove(&self, internal_call_id: &str) -> Option<rig_core::message::ToolCall> {
+        self.streamed_calls
+            .lock()
+            .expect("rig tool state lock should not be poisoned")
+            .remove(internal_call_id)
+    }
+}
+
+fn fallback_tool_call_from_result(
+    tool_result: &rig_core::message::ToolResult,
+) -> rig_core::message::ToolCall {
+    rig_core::message::ToolCall::new(
+        tool_result.id.clone(),
+        ToolFunction::new("tool".to_string(), serde_json::json!({})),
+    )
+    .with_call_id(
+        tool_result
+            .call_id
+            .clone()
+            .unwrap_or_else(|| tool_result.id.clone()),
+    )
+}
+
 struct RigAgentAccumulator {
     content: String,
     final_content: Option<String>,
     reasoning_content: String,
-    tool_calls: Vec<RuntimeToolCall>,
-    tool_results: Vec<RuntimeToolResult>,
     progress: StreamingTokenProgress,
     is_thinking: bool,
     reasoning_started_at: Option<Instant>,
@@ -234,8 +266,6 @@ impl RigAgentAccumulator {
             content: String::new(),
             final_content: None,
             reasoning_content: String::new(),
-            tool_calls: Vec::new(),
-            tool_results: Vec::new(),
             progress: StreamingTokenProgress::new(model_id),
             is_thinking: false,
             reasoning_started_at: None,
@@ -319,8 +349,6 @@ impl RigAgentAccumulator {
                 content,
                 reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
                 reasoning_duration,
-                tool_calls: self.tool_calls,
-                tool_results: self.tool_results,
             },
             metrics,
         }
@@ -364,4 +392,19 @@ fn trim_outer_blank_lines(content: &str) -> String {
 
 fn rig_streaming_error(source: rig_core::agent::StreamingError) -> NativeAgentError {
     NativeLlmError::Provider(source.to_string()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RIG_UNBOUNDED_TOOL_TURNS, rig_tool_turn_limit};
+
+    #[test]
+    fn rig_tool_turn_limit_defaults_to_effectively_unbounded() {
+        assert_eq!(rig_tool_turn_limit(None), RIG_UNBOUNDED_TOOL_TURNS);
+    }
+
+    #[test]
+    fn rig_tool_turn_limit_uses_configured_limit() {
+        assert_eq!(rig_tool_turn_limit(Some(11)), 11);
+    }
 }

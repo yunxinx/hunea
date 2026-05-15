@@ -1,5 +1,3 @@
-use crate::tools::{RuntimeToolCall, RuntimeToolResult};
-
 use super::{
     RuntimeAvailableCommand, RuntimeIdentity, RuntimeModelConfig, RuntimePermissionRequest,
     RuntimeRequestMetrics, RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity,
@@ -44,15 +42,6 @@ pub enum RuntimeEvent {
     Retrying {
         target: Option<RuntimeTarget>,
         message: String,
-    },
-    ToolExecutionStarted {
-        target: Option<RuntimeTarget>,
-        call: RuntimeToolCall,
-    },
-    ToolExecutionFinished {
-        target: Option<RuntimeTarget>,
-        call: RuntimeToolCall,
-        result: RuntimeToolResult,
     },
     ToolActivityStarted {
         target: RuntimeTarget,
@@ -134,8 +123,6 @@ impl RuntimeEvent {
             | Self::OutputTokenEstimate { target, .. }
             | Self::Thinking { target, .. }
             | Self::Retrying { target, .. }
-            | Self::ToolExecutionStarted { target, .. }
-            | Self::ToolExecutionFinished { target, .. }
             | Self::Failed { target, .. }
             | Self::Interrupted { target, .. } => target.as_ref(),
         }

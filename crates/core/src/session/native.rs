@@ -1,17 +1,13 @@
-use crate::{
-    provider::{ProviderApiKey, ProviderKind},
-    tools::{RuntimeToolCall, RuntimeToolRegistry, RuntimeToolResult},
-};
+use crate::provider::{ProviderApiKey, ProviderKind};
 
 use std::time::Duration;
 
-use super::RuntimeTarget;
+use super::{RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityUpdate};
 
 /// `NativeAgentRequest` 描述一次内置 native agent turn。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeAgentRequest {
     llm_request: NativeLlmRequest,
-    tools: RuntimeToolRegistry,
 }
 
 impl NativeAgentRequest {
@@ -35,14 +31,7 @@ impl NativeAgentRequest {
                 api_key_env,
                 messages,
             ),
-            tools: RuntimeToolRegistry::new(),
         }
-    }
-
-    /// `with_tools` 附加可供 agent 使用的工具注册表。
-    pub fn with_tools(mut self, tools: RuntimeToolRegistry) -> Self {
-        self.tools = tools;
-        self
     }
 
     /// `target` 返回该请求对应的统一 runtime 目标。
@@ -56,11 +45,6 @@ impl NativeAgentRequest {
     /// `llm_request` 返回底层模型请求参数。
     pub fn llm_request(&self) -> &NativeLlmRequest {
         &self.llm_request
-    }
-
-    /// `tools` 返回 agent 可见的工具定义。
-    pub fn tools(&self) -> &RuntimeToolRegistry {
-        &self.tools
     }
 }
 
@@ -147,8 +131,6 @@ pub struct NativeAgentResponse {
     pub content: String,
     pub reasoning_content: Option<String>,
     pub reasoning_duration: Option<Duration>,
-    pub tool_calls: Vec<RuntimeToolCall>,
-    pub tool_results: Vec<RuntimeToolResult>,
 }
 
 /// `NativeLlmPerformanceMetrics` 记录一次成功请求的输出性能指标。
@@ -171,12 +153,11 @@ pub enum NativeAgentEvent {
     Thinking {
         is_thinking: bool,
     },
-    ToolExecutionStarted {
-        call: RuntimeToolCall,
+    ToolActivityStarted {
+        activity: RuntimeToolActivity,
     },
-    ToolExecutionFinished {
-        call: RuntimeToolCall,
-        result: RuntimeToolResult,
+    ToolActivityUpdated {
+        update: RuntimeToolActivityUpdate,
     },
     Finished {
         response: NativeAgentResponse,

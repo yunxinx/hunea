@@ -8,11 +8,11 @@ use mo_core::{
         NativeAgentEvent, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent,
         RuntimeRequestMetrics, RuntimeTarget,
     },
-    tools::{RuntimeToolExecutorRegistry, builtin::workspace_readonly_tool_registry},
 };
 use mo_native_agent::{
     ModelProviderRefreshRuntimeState, NativeAgentRuntimeState, models as native_models,
 };
+use mo_tools::{ToolExecutorRegistry, builtin::workspace_readonly_tool_registry};
 use mo_tui::RuntimeCoordinator;
 
 /// `AppRuntimeOptions` 保存 app 层运行 agent runtime 所需的配置。
@@ -190,7 +190,6 @@ impl AppRuntimeCoordinator {
 
         let activity_label = request.llm_request().model_id.clone();
         let tools = native_agent_workspace_tools();
-        let request = request.with_tools(tools.definitions());
         self.native_agent
             .start(request, tools, self.options.runtime_request_policy.clone());
         Ok(RuntimeCommandReceipt::NativeAgentStarted { activity_label })
@@ -316,7 +315,7 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
     }
 }
 
-fn native_agent_workspace_tools() -> RuntimeToolExecutorRegistry {
+fn native_agent_workspace_tools() -> ToolExecutorRegistry {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     workspace_readonly_tool_registry(root)
 }
@@ -337,16 +336,14 @@ fn runtime_event_from_native_agent_event(
             target,
             is_thinking,
         },
-        NativeAgentEvent::ToolExecutionStarted { call } => {
-            RuntimeEvent::ToolExecutionStarted { target, call }
-        }
-        NativeAgentEvent::ToolExecutionFinished { call, result } => {
-            RuntimeEvent::ToolExecutionFinished {
-                target,
-                call,
-                result,
-            }
-        }
+        NativeAgentEvent::ToolActivityStarted { activity } => RuntimeEvent::ToolActivityStarted {
+            target: target.expect("native agent target should be available for tool activity"),
+            activity,
+        },
+        NativeAgentEvent::ToolActivityUpdated { update } => RuntimeEvent::ToolActivityUpdated {
+            target: target.expect("native agent target should be available for tool activity"),
+            update,
+        },
         NativeAgentEvent::Finished { response, metrics } => RuntimeEvent::MessageFinished {
             target,
             content: response.content,

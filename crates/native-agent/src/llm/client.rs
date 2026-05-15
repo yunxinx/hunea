@@ -1,6 +1,5 @@
-use std::sync::Arc;
-
-use mo_core::{provider::ProviderKind, tools::RuntimeToolExecutor};
+use mo_core::provider::ProviderKind;
+use mo_tools::ToolExecutorRegistry;
 use rig_core::client::CompletionClient;
 use tokio_util::sync::CancellationToken;
 
@@ -23,8 +22,9 @@ use crate::{
 /// `execute_rig_agent_for_request` 使用 Rig agent/streaming/multi-turn 执行一次 native turn。
 pub(crate) async fn execute_rig_agent_for_request<F>(
     request: &NativeAgentRequest,
-    executor: Arc<dyn RuntimeToolExecutor>,
+    executor: ToolExecutorRegistry,
     cancellation: &CancellationToken,
+    tool_max_turns: Option<usize>,
     on_progress: &mut F,
 ) -> Result<NativeAgentCompletion, NativeAgentError>
 where
@@ -37,7 +37,15 @@ where
     match request.llm_request().provider_kind {
         ProviderKind::OpenAiCompatible => {
             let model = openai_compatible_model_for_request(request.llm_request())?;
-            run_rig_agent(model, request, executor, cancellation, on_progress).await
+            run_rig_agent(
+                model,
+                request,
+                executor,
+                cancellation,
+                tool_max_turns,
+                on_progress,
+            )
+            .await
         }
         ProviderKind::OpenAi => {
             let client = openai_completions_client_for_request(request.llm_request())?;
@@ -46,6 +54,7 @@ where
                 request,
                 executor,
                 cancellation,
+                tool_max_turns,
                 on_progress,
             )
             .await
@@ -57,6 +66,7 @@ where
                 request,
                 executor,
                 cancellation,
+                tool_max_turns,
                 on_progress,
             )
             .await
@@ -68,6 +78,7 @@ where
                 request,
                 executor,
                 cancellation,
+                tool_max_turns,
                 on_progress,
             )
             .await
@@ -79,6 +90,7 @@ where
                 request,
                 executor,
                 cancellation,
+                tool_max_turns,
                 on_progress,
             )
             .await
@@ -90,6 +102,7 @@ where
                 request,
                 executor,
                 cancellation,
+                tool_max_turns,
                 on_progress,
             )
             .await
@@ -101,6 +114,7 @@ where
                 request,
                 executor,
                 cancellation,
+                tool_max_turns,
                 on_progress,
             )
             .await
@@ -112,6 +126,7 @@ where
                 request,
                 executor,
                 cancellation,
+                tool_max_turns,
                 on_progress,
             )
             .await
@@ -123,6 +138,7 @@ where
                 request,
                 executor,
                 cancellation,
+                tool_max_turns,
                 on_progress,
             )
             .await
@@ -134,6 +150,7 @@ where
                 request,
                 executor,
                 cancellation,
+                tool_max_turns,
                 on_progress,
             )
             .await
@@ -145,6 +162,7 @@ where
                 request,
                 executor,
                 cancellation,
+                tool_max_turns,
                 on_progress,
             )
             .await
@@ -156,6 +174,7 @@ where
                 request,
                 executor,
                 cancellation,
+                tool_max_turns,
                 on_progress,
             )
             .await
@@ -167,6 +186,7 @@ where
                 request,
                 executor,
                 cancellation,
+                tool_max_turns,
                 on_progress,
             )
             .await

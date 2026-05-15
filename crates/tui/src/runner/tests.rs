@@ -28,7 +28,6 @@ use mo_core::session::{
     RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityContent,
     RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
 };
-use mo_core::tools::{RuntimeToolCall, RuntimeToolResult};
 
 #[derive(Default)]
 struct TestRuntimeCoordinator {
@@ -3007,7 +3006,6 @@ fn native_agent_completion_appends_assistant_message_after_request_finishes() {
                 content: "你好，我是本地模型".to_string(),
                 reasoning_content: None,
                 reasoning_duration: None,
-                ..Default::default()
             },
             metrics: None,
         },
@@ -3038,7 +3036,6 @@ fn native_agent_completion_updates_last_request_metrics() {
                 content: "完成".to_string(),
                 reasoning_content: None,
                 reasoning_duration: None,
-                ..Default::default()
             },
             metrics: Some(NativeLlmPerformanceMetrics {
                 latency: std::time::Duration::from_millis(250),
@@ -3074,7 +3071,6 @@ fn native_agent_completion_collapses_reasoning_by_default() {
                 content: "结论".to_string(),
                 reasoning_content: Some("先分析".to_string()),
                 reasoning_duration: Some(std::time::Duration::from_secs(3)),
-                ..Default::default()
             },
             metrics: None,
         },
@@ -3115,7 +3111,6 @@ fn native_agent_completion_keeps_reasoning_body_gap_to_one_line() {
                 content: "结论".to_string(),
                 reasoning_content: Some("先分析".to_string()),
                 reasoning_duration: Some(std::time::Duration::from_secs(3)),
-                ..Default::default()
             },
             metrics: None,
         },
@@ -3150,7 +3145,6 @@ fn native_agent_reasoning_header_click_toggles_visibility_without_changing_sourc
                 content: "结论".to_string(),
                 reasoning_content: Some("先分析".to_string()),
                 reasoning_duration: Some(std::time::Duration::from_secs(3)),
-                ..Default::default()
             },
             metrics: None,
         },
@@ -3217,7 +3211,6 @@ fn native_agent_reasoning_header_drag_does_not_toggle() {
                 content: "结论".to_string(),
                 reasoning_content: Some("先分析".to_string()),
                 reasoning_duration: Some(std::time::Duration::from_secs(3)),
-                ..Default::default()
             },
             metrics: None,
         },
@@ -3281,7 +3274,6 @@ fn native_agent_reasoning_header_click_outside_label_does_not_toggle() {
                 content: "结论".to_string(),
                 reasoning_content: Some("先分析".to_string()),
                 reasoning_duration: Some(std::time::Duration::from_secs(3)),
-                ..Default::default()
             },
             metrics: None,
         },
@@ -3329,7 +3321,6 @@ fn native_agent_completion_hides_reasoning_when_configured_off() {
                 content: "结论".to_string(),
                 reasoning_content: Some("先分析".to_string()),
                 reasoning_duration: Some(std::time::Duration::from_secs(3)),
-                ..Default::default()
             },
             metrics: None,
         },
@@ -3449,7 +3440,7 @@ fn native_agent_token_estimate_updates_activity_without_finishing_request() {
 }
 
 #[test]
-fn native_agent_tool_started_updates_activity_header() {
+fn native_agent_tool_started_appends_runtime_tool_activity() {
     let mut model = Model::new(HeroOptions::default());
     model.set_window(70, 6);
     model.transcript_mut().clear();
@@ -3458,22 +3449,29 @@ fn native_agent_tool_started_updates_activity_header() {
     apply_native_agent_event(
         &mut model,
         Some(RuntimeTarget::native_agent("local", "qwen3")),
-        NativeAgentEvent::ToolExecutionStarted {
-            call: RuntimeToolCall::new(
-                "call-1",
-                "file_read",
-                serde_json::json!({ "path": "Cargo.toml" }),
-            ),
+        NativeAgentEvent::ToolActivityStarted {
+            activity: RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
+                title: "Read Cargo.toml".to_string(),
+                kind: RuntimeToolKind::Read,
+                status: RuntimeToolActivityStatus::InProgress,
+                content: vec![RuntimeToolActivityContent::Text(
+                    r#"{ "path": "Cargo.toml" }"#.to_string(),
+                )],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
         },
     );
 
-    let activity = model.current_stream_activity_render_result().plain_line;
-    assert!(activity.contains("Running file_read Cargo.toml"));
-    assert!(model.transcript_plain_items().is_empty());
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(transcript.contains("Read Cargo.toml"));
+    assert!(model.transcript_mut().source_messages().is_empty());
 }
 
 #[test]
-fn native_agent_tool_finished_appends_transcript_only_result() {
+fn native_agent_tool_finished_updates_runtime_tool_activity() {
     let mut model = Model::new(HeroOptions::default());
     model.set_window(70, 6);
     model.transcript_mut().clear();
@@ -3482,19 +3480,44 @@ fn native_agent_tool_finished_appends_transcript_only_result() {
     apply_native_agent_event(
         &mut model,
         Some(RuntimeTarget::native_agent("local", "qwen3")),
-        NativeAgentEvent::ToolExecutionFinished {
-            call: RuntimeToolCall::new(
-                "call-1",
-                "file_read",
-                serde_json::json!({ "path": "Cargo.toml" }),
-            ),
-            result: RuntimeToolResult::success("call-1", "1\t[package]"),
+        NativeAgentEvent::ToolActivityStarted {
+            activity: RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
+                title: "Read Cargo.toml".to_string(),
+                kind: RuntimeToolKind::Read,
+                status: RuntimeToolActivityStatus::InProgress,
+                content: vec![RuntimeToolActivityContent::Text(
+                    r#"{ "path": "Cargo.toml" }"#.to_string(),
+                )],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+        },
+    );
+    apply_native_agent_event(
+        &mut model,
+        Some(RuntimeTarget::native_agent("local", "qwen3")),
+        NativeAgentEvent::ToolActivityUpdated {
+            update: RuntimeToolActivityUpdate {
+                activity_id: "call-1".to_string(),
+                status: Some(RuntimeToolActivityStatus::Completed),
+                content: Some(vec![RuntimeToolActivityContent::Text(
+                    "1\t[package]".to_string(),
+                )]),
+                ..RuntimeToolActivityUpdate::default()
+            },
         },
     );
 
-    let transcript = model.transcript_plain_items();
-    assert_eq!(transcript.len(), 1);
-    assert!(transcript[0].contains("file_read Cargo.toml"));
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(transcript.contains("Read Cargo.toml"));
+    assert!(!transcript.contains("[package]"));
+    assert!(
+        model
+            .runtime_tool_activity_item_index_from_runtime("call-1")
+            .is_some()
+    );
     assert!(model.transcript_mut().source_messages().is_empty());
 }
 

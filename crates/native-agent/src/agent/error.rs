@@ -7,8 +7,6 @@ use crate::NativeLlmError;
 pub enum NativeAgentError {
     Llm(NativeLlmError),
     Cancelled,
-    MissingToolCallCapture,
-    ToolLoopLimitExceeded { max_tool_rounds: usize },
 }
 
 impl fmt::Display for NativeAgentError {
@@ -16,10 +14,6 @@ impl fmt::Display for NativeAgentError {
         match self {
             Self::Llm(source) => write!(f, "{source}"),
             Self::Cancelled => write!(f, "agent turn cancelled"),
-            Self::MissingToolCallCapture => write!(f, "agent tool call capture missing"),
-            Self::ToolLoopLimitExceeded { max_tool_rounds } => {
-                write!(f, "agent exceeded maximum tool rounds ({max_tool_rounds})")
-            }
         }
     }
 }
@@ -28,9 +22,7 @@ impl std::error::Error for NativeAgentError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Llm(source) => Some(source),
-            Self::Cancelled | Self::MissingToolCallCapture | Self::ToolLoopLimitExceeded { .. } => {
-                None
-            }
+            Self::Cancelled => None,
         }
     }
 }

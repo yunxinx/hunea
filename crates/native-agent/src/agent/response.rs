@@ -1,5 +1,3 @@
-use mo_core::tools::{RuntimeToolCall, RuntimeToolResult};
-
 use crate::NativeLlmPerformanceMetrics;
 pub use mo_core::session::NativeAgentResponse;
 
@@ -12,12 +10,11 @@ pub(crate) enum NativeAgentProgress {
     Thinking {
         is_thinking: bool,
     },
-    ToolExecutionStarted {
-        call: RuntimeToolCall,
+    ToolActivityStarted {
+        activity: mo_core::session::RuntimeToolActivity,
     },
-    ToolExecutionFinished {
-        call: RuntimeToolCall,
-        result: RuntimeToolResult,
+    ToolActivityUpdated {
+        update: mo_core::session::RuntimeToolActivityUpdate,
     },
 }
 

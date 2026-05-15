@@ -1,7 +1,3 @@
-use mo_core::tools::{
-    RuntimeTool, RuntimeToolCall, RuntimeToolDefinition, RuntimeToolExecutionFuture,
-    RuntimeToolExecutor, RuntimeToolExecutorRegistry, RuntimeToolResult, ToolPermissionPolicy,
-};
 use mo_core::{
     acp::{AcpAgentIdentity, AcpPromptRequest},
     provider::ProviderKind,
@@ -14,7 +10,6 @@ use mo_core::{
         RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
     },
 };
-use tokio_util::sync::CancellationToken;
 
 #[test]
 fn runtime_permission_request_selects_cancel_reject_fallback() {
@@ -191,85 +186,8 @@ fn native_agent_capability_matches_current_tool_surface() {
 }
 
 #[test]
-fn runtime_tool_definition_keeps_schema_and_permission_policy() {
-    let schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "command": { "type": "string" }
-        },
-        "required": ["command"]
-    });
+fn runtime_request_policy_defaults_to_unbounded_tool_turns() {
+    let policy = mo_core::request_policy::RuntimeRequestPolicy::default();
 
-    let definition = RuntimeToolDefinition::new("shell")
-        .with_label("Shell")
-        .with_description("Run a shell command")
-        .with_input_schema(schema.clone())
-        .with_permission_policy(ToolPermissionPolicy::Ask);
-
-    assert_eq!(definition.name, "shell");
-    assert_eq!(definition.label.as_deref(), Some("Shell"));
-    assert_eq!(definition.input_schema.as_ref(), Some(&schema));
-    assert_eq!(definition.permission_policy, ToolPermissionPolicy::Ask);
-}
-
-struct EchoRuntimeTool;
-
-impl RuntimeTool for EchoRuntimeTool {
-    fn definition(&self) -> RuntimeToolDefinition {
-        RuntimeToolDefinition::new("echo")
-            .with_label("Echo")
-            .with_description("Return the provided value")
-    }
-
-    fn execute<'a>(
-        &'a self,
-        call: RuntimeToolCall,
-        _cancellation: &'a CancellationToken,
-    ) -> RuntimeToolExecutionFuture<'a> {
-        Box::pin(async move {
-            let value = call
-                .arguments
-                .get("value")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            RuntimeToolResult::success(call.call_id, value)
-        })
-    }
-}
-
-#[tokio::test]
-async fn runtime_tool_executor_registry_exposes_definitions_and_executes_by_name() {
-    let mut registry = RuntimeToolExecutorRegistry::new();
-    registry.insert(EchoRuntimeTool);
-
-    let definitions = registry.definitions();
-    let echo = definitions
-        .definition("echo")
-        .expect("registered tool should expose its definition");
-    assert_eq!(echo.label.as_deref(), Some("Echo"));
-
-    let result = registry
-        .execute_tool(
-            RuntimeToolCall::new("call-1", "echo", serde_json::json!({ "value": "hello" })),
-            &CancellationToken::new(),
-        )
-        .await;
-
-    assert_eq!(result, RuntimeToolResult::success("call-1", "hello"));
-}
-
-#[tokio::test]
-async fn runtime_tool_executor_registry_returns_model_visible_unknown_tool_error() {
-    let registry = RuntimeToolExecutorRegistry::new();
-
-    let result = registry
-        .execute_tool(
-            RuntimeToolCall::new("call-1", "missing", serde_json::json!({})),
-            &CancellationToken::new(),
-        )
-        .await;
-
-    assert!(result.is_error);
-    assert_eq!(result.call_id, "call-1");
-    assert!(result.content.contains("missing"));
+    assert_eq!(policy.tool_max_turns(), None);
 }

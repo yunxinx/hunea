@@ -1,27 +1,27 @@
 use serde_json::Value;
 use std::fmt;
 
-/// `RuntimeToolSchema` 包装工具参数 JSON Schema。
+/// `ToolSchema` 包装工具参数 JSON Schema。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeToolSchema {
+pub struct ToolSchema {
     pub value: Value,
 }
 
-impl RuntimeToolSchema {
+impl ToolSchema {
     /// `new` 创建工具参数 schema。
     pub fn new(value: Value) -> Self {
         Self { value }
     }
 }
 
-/// `RuntimeToolSchemaError` 描述工具参数不符合 JSON Schema 的原因。
+/// `ToolSchemaError` 描述工具参数不符合 JSON Schema 的原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeToolSchemaError {
+pub struct ToolSchemaError {
     path: String,
     message: String,
 }
 
-impl RuntimeToolSchemaError {
+impl ToolSchemaError {
     fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             path: path.into(),
@@ -30,28 +30,28 @@ impl RuntimeToolSchemaError {
     }
 }
 
-impl fmt::Display for RuntimeToolSchemaError {
+impl fmt::Display for ToolSchemaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", self.path, self.message)
     }
 }
 
-impl std::error::Error for RuntimeToolSchemaError {}
+impl std::error::Error for ToolSchemaError {}
 
 pub(crate) fn validate_tool_arguments(
     schema: &Value,
     arguments: &Value,
-) -> Result<(), RuntimeToolSchemaError> {
+) -> Result<(), ToolSchemaError> {
     validate_value(schema, arguments, "$")
 }
 
-fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<(), RuntimeToolSchemaError> {
+fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<(), ToolSchemaError> {
     if let Some(types) = schema_types(schema)
         && !types
             .iter()
             .any(|expected| value_matches_type(value, expected))
     {
-        return Err(RuntimeToolSchemaError::new(
+        return Err(ToolSchemaError::new(
             path,
             format!("must match type {}", types.join(" or ")),
         ));
@@ -93,7 +93,7 @@ fn validate_object_keywords(
     schema: &Value,
     value: &Value,
     path: &str,
-) -> Result<(), RuntimeToolSchemaError> {
+) -> Result<(), ToolSchemaError> {
     let has_object_keywords = schema.get("properties").is_some()
         || schema.get("required").is_some()
         || schema.get("additionalProperties").is_some();
@@ -109,7 +109,7 @@ fn validate_object_keywords(
     if let Some(required) = schema.get("required").and_then(Value::as_array) {
         for required_key in required.iter().filter_map(Value::as_str) {
             if !object.contains_key(required_key) {
-                return Err(RuntimeToolSchemaError::new(
+                return Err(ToolSchemaError::new(
                     child_path(path, required_key),
                     "is required",
                 ));
@@ -120,7 +120,7 @@ fn validate_object_keywords(
     if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
         for key in object.keys() {
             if properties.is_none_or(|properties| !properties.contains_key(key)) {
-                return Err(RuntimeToolSchemaError::new(
+                return Err(ToolSchemaError::new(
                     child_path(path, key),
                     "is not allowed by additionalProperties",
                 ));
@@ -143,7 +143,7 @@ fn validate_numeric_keywords(
     schema: &Value,
     value: &Value,
     path: &str,
-) -> Result<(), RuntimeToolSchemaError> {
+) -> Result<(), ToolSchemaError> {
     let Some(number) = value.as_f64() else {
         return Ok(());
     };
@@ -151,7 +151,7 @@ fn validate_numeric_keywords(
     if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64)
         && number < minimum
     {
-        return Err(RuntimeToolSchemaError::new(
+        return Err(ToolSchemaError::new(
             path,
             format!("must be greater than or equal to minimum {minimum}"),
         ));

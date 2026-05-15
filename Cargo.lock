@@ -1978,6 +1978,7 @@ dependencies = [
  "mo-config",
  "mo-core",
  "mo-native-agent",
+ "mo-tools",
  "mo-tui",
 ]
 
@@ -2023,6 +2024,7 @@ dependencies = [
  "futures-util",
  "http",
  "mo-core",
+ "mo-tools",
  "reqwest",
  "rig-core",
  "serde",
@@ -2031,6 +2033,17 @@ dependencies = [
  "tokio-util",
  "toml",
  "toml_edit 0.25.11+spec-1.1.0",
+]
+
+[[package]]
+name = "mo-tools"
+version = "0.1.0"
+dependencies = [
+ "rig-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

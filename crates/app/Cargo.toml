@@ -9,6 +9,7 @@ mo-acp.workspace = true
 mo-config.workspace = true
 mo-core.workspace = true
 mo-native-agent.workspace = true
+mo-tools.workspace = true
 mo-tui.workspace = true
 
 [dev-dependencies]

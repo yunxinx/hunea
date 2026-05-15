@@ -4,9 +4,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use mo_core::tools::{
-    RuntimeToolCall, RuntimeToolExecutor, RuntimeToolResult,
-    builtin::workspace_readonly_tool_registry,
+use mo_tools::{
+    ToolCall, ToolExecutor, ToolExecutorRegistry, ToolKind, ToolPermissionPolicy, ToolResult,
+    builtin::{file_read_tool, list_dir_tool, workspace_readonly_tool_registry},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -18,49 +18,90 @@ fn builtin_workspace_readonly_registry_exposes_file_tools() {
 
     assert!(definitions.definition("file_read").is_some());
     assert!(definitions.definition("list_dir").is_some());
+    assert_eq!(
+        definitions
+            .definition("file_read")
+            .map(|definition| definition.kind),
+        Some(ToolKind::Read)
+    );
+    assert_eq!(
+        definitions
+            .definition("list_dir")
+            .map(|definition| definition.kind),
+        Some(ToolKind::Search)
+    );
+
+    cleanup(&root);
+}
+
+#[test]
+fn builtin_readonly_file_tools_are_approved_by_default() {
+    let root = temp_root("builtin-permissions");
+    let registry = workspace_readonly_tool_registry(&root);
+    let definitions = registry.definitions();
+
+    assert_eq!(
+        definitions
+            .definition("file_read")
+            .map(|definition| definition.permission_policy),
+        Some(ToolPermissionPolicy::Always)
+    );
+    assert_eq!(
+        definitions
+            .definition("list_dir")
+            .map(|definition| definition.permission_policy),
+        Some(ToolPermissionPolicy::Always)
+    );
 
     cleanup(&root);
 }
 
 #[tokio::test]
-async fn builtin_file_read_reads_requested_line_range() {
+async fn builtin_file_read_tool_can_be_registered_independently() {
     let root = temp_root("builtin-file-read");
     fs::write(root.join("notes.txt"), "one\ntwo\nthree\n").expect("write fixture");
-    let registry = workspace_readonly_tool_registry(&root);
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(file_read_tool(&root));
+    let definitions = registry.definitions();
+
+    assert!(definitions.definition("file_read").is_some());
+    assert!(definitions.definition("list_dir").is_none());
 
     let result = registry
         .execute_tool(
-            RuntimeToolCall::new(
+            ToolCall::new(
                 "call-1",
                 "file_read",
                 serde_json::json!({
                     "path": "notes.txt",
-                    "start_line": 2,
-                    "end_line": 3
+                    "offset": 2,
+                    "limit": 2
                 }),
             ),
             &CancellationToken::new(),
         )
         .await;
 
-    assert_eq!(
-        result,
-        RuntimeToolResult::success("call-1", "2\ttwo\n3\tthree")
-    );
+    assert_eq!(result, ToolResult::success("call-1", "2\ttwo\n3\tthree"));
     cleanup(&root);
 }
 
 #[tokio::test]
-async fn builtin_list_dir_lists_workspace_relative_entries() {
+async fn builtin_list_dir_tool_can_be_registered_independently() {
     let root = temp_root("builtin-list-dir");
     fs::create_dir(root.join("src")).expect("create src dir");
     fs::write(root.join("Cargo.toml"), "[package]\n").expect("write fixture");
     fs::write(root.join(".hidden"), "hidden\n").expect("write hidden fixture");
-    let registry = workspace_readonly_tool_registry(&root);
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(list_dir_tool(&root));
+    let definitions = registry.definitions();
+
+    assert!(definitions.definition("list_dir").is_some());
+    assert!(definitions.definition("file_read").is_none());
 
     let result = registry
         .execute_tool(
-            RuntimeToolCall::new("call-1", "list_dir", serde_json::json!({ "path": "." })),
+            ToolCall::new("call-1", "list_dir", serde_json::json!({})),
             &CancellationToken::new(),
         )
         .await;
@@ -68,7 +109,7 @@ async fn builtin_list_dir_lists_workspace_relative_entries() {
     assert!(!result.is_error);
     assert!(result.content.contains("Cargo.toml"));
     assert!(result.content.contains("src/"));
-    assert!(!result.content.contains(".hidden"));
+    assert!(result.content.contains(".hidden"));
     cleanup(&root);
 }
 
@@ -80,7 +121,7 @@ async fn builtin_list_dir_rejects_arguments_outside_schema_before_execution() {
 
     let result = registry
         .execute_tool(
-            RuntimeToolCall::new(
+            ToolCall::new(
                 "call-1",
                 "list_dir",
                 serde_json::json!({
@@ -99,19 +140,19 @@ async fn builtin_list_dir_rejects_arguments_outside_schema_before_execution() {
 }
 
 #[tokio::test]
-async fn builtin_file_read_rejects_line_number_below_schema_minimum() {
+async fn builtin_file_read_rejects_offset_below_schema_minimum() {
     let root = temp_root("builtin-file-read-schema-minimum");
     fs::write(root.join("notes.txt"), "one\ntwo\n").expect("write fixture");
     let registry = workspace_readonly_tool_registry(&root);
 
     let result = registry
         .execute_tool(
-            RuntimeToolCall::new(
+            ToolCall::new(
                 "call-1",
                 "file_read",
                 serde_json::json!({
                     "path": "notes.txt",
-                    "start_line": 0
+                    "offset": 0
                 }),
             ),
             &CancellationToken::new(),
@@ -120,8 +161,38 @@ async fn builtin_file_read_rejects_line_number_below_schema_minimum() {
 
     assert!(result.is_error);
     assert!(result.content.contains("arguments do not match schema"));
-    assert!(result.content.contains("start_line"));
+    assert!(result.content.contains("offset"));
     assert!(result.content.contains("minimum"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_list_dir_limits_output_entries() {
+    let root = temp_root("builtin-list-dir-limit");
+    fs::write(root.join("a.txt"), "a\n").expect("write fixture");
+    fs::write(root.join("b.txt"), "b\n").expect("write fixture");
+    fs::write(root.join("c.txt"), "c\n").expect("write fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "list_dir",
+                serde_json::json!({
+                    "path": ".",
+                    "limit": 2
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("a.txt"));
+    assert!(result.content.contains("b.txt"));
+    assert!(!result.content.contains("c.txt"));
+    assert!(result.content.contains("Truncated"));
     cleanup(&root);
 }
 
@@ -134,7 +205,7 @@ async fn builtin_file_read_rejects_paths_outside_workspace_root() {
 
     let result = registry
         .execute_tool(
-            RuntimeToolCall::new(
+            ToolCall::new(
                 "call-1",
                 "file_read",
                 serde_json::json!({ "path": outside.join("secret.txt") }),

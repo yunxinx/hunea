@@ -119,6 +119,10 @@ request_retry_delays = [1, 2, 3]
 # 可选值为 1..7200；默认 120。
 request_timeout_seconds = 120
 
+# `tool_max_turns` 控制 agent multi-turn 工具调用轮次上限。
+# 默认不限制；设置为正整数后，超过该轮次会终止本次请求。
+# tool_max_turns = 32
+
 [debug]
 # `enabled` 控制是否显示仅用于本地调试 TUI 效果的斜杠命令。
 # 默认关闭；开启后会显示 `/tool-debug` 等临时调试入口。

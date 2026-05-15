@@ -543,6 +543,7 @@ fn load_defaults_runtime_request_policy() {
     assert_eq!(config.runtime.request_retry_attempts, 3);
     assert_eq!(config.runtime.request_retry_delays, vec![1, 2, 3]);
     assert_eq!(config.runtime.request_timeout_seconds, 120);
+    assert_eq!(config.runtime.tool_max_turns, None);
 }
 
 #[test]
@@ -550,7 +551,7 @@ fn load_accepts_configured_runtime_request_policy() {
     let working_dir = temp_test_dir("load-runtime-retry-working");
     write_config(
         &working_dir.join(".lumos").join("config.toml"),
-        "[runtime]\nrequest_retry_attempts = 5\nrequest_retry_delays = [1, 3]\nrequest_timeout_seconds = 240\n",
+        "[runtime]\nrequest_retry_attempts = 5\nrequest_retry_delays = [1, 3]\nrequest_timeout_seconds = 240\ntool_max_turns = 11\n",
     );
 
     let config = load_from_paths(Some(working_dir.as_path()), None)
@@ -559,6 +560,26 @@ fn load_accepts_configured_runtime_request_policy() {
     assert_eq!(config.runtime.request_retry_attempts, 5);
     assert_eq!(config.runtime.request_retry_delays, vec![1, 3, 3, 3, 3]);
     assert_eq!(config.runtime.request_timeout_seconds, 240);
+    assert_eq!(config.runtime.tool_max_turns, Some(11));
+}
+
+#[test]
+fn load_rejects_zero_runtime_tool_max_turns() {
+    let working_dir = temp_test_dir("load-runtime-tool-max-turns-zero-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[runtime]\ntool_max_turns = 0\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("runtime tool_max_turns should reject zero");
+
+    assert!(
+        error
+            .to_string()
+            .contains("runtime.tool_max_turns must be at least 1 when configured"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

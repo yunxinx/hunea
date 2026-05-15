@@ -25,16 +25,14 @@ pub(super) fn apply_native_agent_event(
             target,
             is_thinking,
         },
-        NativeAgentEvent::ToolExecutionStarted { call } => {
-            RuntimeEvent::ToolExecutionStarted { target, call }
-        }
-        NativeAgentEvent::ToolExecutionFinished { call, result } => {
-            RuntimeEvent::ToolExecutionFinished {
-                target,
-                call,
-                result,
-            }
-        }
+        NativeAgentEvent::ToolActivityStarted { activity } => RuntimeEvent::ToolActivityStarted {
+            target: target.expect("native agent target should be available for tool activity"),
+            activity,
+        },
+        NativeAgentEvent::ToolActivityUpdated { update } => RuntimeEvent::ToolActivityUpdated {
+            target: target.expect("native agent target should be available for tool activity"),
+            update,
+        },
         NativeAgentEvent::Finished { response, metrics } => RuntimeEvent::MessageFinished {
             target,
             content: response.content,

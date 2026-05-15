@@ -5,6 +5,7 @@ members = [
     "crates/config",
     "crates/tui",
     "crates/core",
+    "crates/tools",
     "crates/acp",
     "crates/native-agent",
 ]
@@ -32,6 +33,7 @@ mo-app = { path = "crates/app" }
 mo-config = { path = "crates/config" }
 mo-core = { path = "crates/core" }
 mo-native-agent = { path = "crates/native-agent" }
+mo-tools = { path = "crates/tools" }
 mo-tui = { path = "crates/tui" }
 percent-encoding = "2"
 portable-pty = "0.9.0"

@@ -1,16 +1,9 @@
-use std::sync::Arc;
-
-use mo_core::{
-    session::RuntimeTarget,
-    tools::{
-        RuntimeToolDefinition, RuntimeToolExecutorRegistry, RuntimeToolRegistry,
-        ToolPermissionPolicy,
-    },
-};
+use mo_core::session::RuntimeTarget;
 use mo_native_agent::{
     CancellationToken, ChatMessage, NativeAgentRequest, NativeLlmError, NativeLlmRequest,
     ProviderKind, send_agent_loop_with_cancellation,
 };
+use mo_tools::ToolExecutorRegistry;
 
 #[test]
 fn native_llm_request_carries_provider_kind_and_messages() {
@@ -43,22 +36,7 @@ fn runtime_exposes_native_as_named_boundary() {
 }
 
 #[test]
-fn native_agent_request_keeps_model_request_and_tools_separate() {
-    let mut tools = RuntimeToolRegistry::new();
-    tools.insert(
-        RuntimeToolDefinition::new("read_file")
-            .with_label("Read file")
-            .with_description("Read a UTF-8 text file from the workspace")
-            .with_input_schema(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" }
-                },
-                "required": ["path"]
-            }))
-            .with_permission_policy(ToolPermissionPolicy::Ask),
-    );
-
+fn native_agent_request_keeps_model_request_separate_from_tools() {
     let request = NativeAgentRequest::new(
         "local",
         ProviderKind::OpenAiCompatible,
@@ -67,8 +45,7 @@ fn native_agent_request_keeps_model_request_and_tools_separate() {
         None,
         None,
         vec![ChatMessage::user("summarize src/main.rs".to_string())],
-    )
-    .with_tools(tools);
+    );
 
     assert_eq!(
         request.target(),
@@ -76,14 +53,6 @@ fn native_agent_request_keeps_model_request_and_tools_separate() {
     );
     assert_eq!(request.llm_request().provider_id, "local");
     assert_eq!(request.llm_request().messages.len(), 1);
-    assert_eq!(
-        request
-            .tools()
-            .definition("read_file")
-            .expect("tool should be registered")
-            .permission_policy,
-        ToolPermissionPolicy::Ask
-    );
 }
 
 #[tokio::test]
@@ -100,7 +69,7 @@ async fn native_agent_loop_respects_pre_cancelled_token_before_network_request()
     let cancellation = CancellationToken::default();
     cancellation.cancel();
 
-    let executor = Arc::new(RuntimeToolExecutorRegistry::new());
+    let executor = ToolExecutorRegistry::new();
     let error = send_agent_loop_with_cancellation(&request, executor, &cancellation)
         .await
         .expect_err("pre-cancelled request should stop before sending");
@@ -110,8 +79,6 @@ async fn native_agent_loop_respects_pre_cancelled_token_before_network_request()
 
 #[tokio::test]
 async fn native_agent_loop_respects_pre_cancelled_token_when_tools_are_registered() {
-    let mut tools = RuntimeToolRegistry::new();
-    tools.insert(RuntimeToolDefinition::new("read_file"));
     let request = NativeAgentRequest::new(
         "local",
         ProviderKind::OpenAiCompatible,
@@ -120,12 +87,11 @@ async fn native_agent_loop_respects_pre_cancelled_token_when_tools_are_registere
         None,
         None,
         vec![ChatMessage::user("read Cargo.toml".to_string())],
-    )
-    .with_tools(tools);
+    );
     let cancellation = CancellationToken::default();
     cancellation.cancel();
 
-    let executor = Arc::new(RuntimeToolExecutorRegistry::new());
+    let executor = ToolExecutorRegistry::new();
     let error = send_agent_loop_with_cancellation(&request, executor, &cancellation)
         .await
         .expect_err("pre-cancelled tool request should stop before sending");

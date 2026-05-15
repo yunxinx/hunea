@@ -1,4 +1,4 @@
-/// `ToolPermissionPolicy` 描述工具调用前是否需要用户确认。
+/// `ToolPermissionPolicy` 描述工具调用的默认许可策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolPermissionPolicy {
     #[default]

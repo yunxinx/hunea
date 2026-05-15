@@ -1,23 +1,25 @@
 use serde_json::Value;
 
-use super::ToolPermissionPolicy;
+use super::{ToolKind, ToolPermissionPolicy};
 
-/// `RuntimeToolDefinition` 描述可暴露给 runtime/agent 的工具元数据。
+/// `ToolDefinition` 描述可暴露给 runtime/agent 的工具元数据。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeToolDefinition {
+pub struct ToolDefinition {
     pub name: String,
     pub label: Option<String>,
+    pub kind: ToolKind,
     pub description: Option<String>,
     pub input_schema: Option<Value>,
     pub permission_policy: ToolPermissionPolicy,
 }
 
-impl RuntimeToolDefinition {
+impl ToolDefinition {
     /// `new` 创建一个工具定义。
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             label: None,
+            kind: ToolKind::Other,
             description: None,
             input_schema: None,
             permission_policy: ToolPermissionPolicy::Never,
@@ -27,6 +29,12 @@ impl RuntimeToolDefinition {
     /// `with_label` 设置适合 TUI 展示的工具名称。
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// `with_kind` 设置工具的 runtime activity 语义分类。
+    pub const fn with_kind(mut self, kind: ToolKind) -> Self {
+        self.kind = kind;
         self
     }
 

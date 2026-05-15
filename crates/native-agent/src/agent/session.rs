@@ -1,8 +1,5 @@
 use std::{
-    sync::{
-        Arc,
-        mpsc::{self, Receiver},
-    },
+    sync::mpsc::{self, Receiver},
     thread,
 };
 
@@ -11,8 +8,8 @@ use tokio_util::sync::CancellationToken;
 use mo_core::{
     request_policy::RuntimeRequestPolicy,
     session::{NativeAgentEvent, RuntimeTarget},
-    tools::RuntimeToolExecutorRegistry,
 };
+use mo_tools::ToolExecutorRegistry;
 
 use super::{
     NativeAgentError, NativeAgentRequest, response::NativeAgentProgress,
@@ -31,7 +28,7 @@ impl NativeAgentRuntimeState {
     pub fn start(
         &mut self,
         request: NativeAgentRequest,
-        executor: RuntimeToolExecutorRegistry,
+        executor: ToolExecutorRegistry,
         request_policy: RuntimeRequestPolicy,
     ) {
         let (sender, receiver) = mpsc::channel();
@@ -118,20 +115,20 @@ impl NativeAgentRuntimeState {
 
 pub(crate) async fn run_native_agent_worker(
     request: NativeAgentRequest,
-    executor: RuntimeToolExecutorRegistry,
+    executor: ToolExecutorRegistry,
     request_policy: RuntimeRequestPolicy,
     cancellation: CancellationToken,
     sender: mpsc::Sender<NativeAgentEvent>,
 ) {
-    let executor: Arc<dyn mo_core::tools::RuntimeToolExecutor> = Arc::new(executor);
     for attempt in 0..=request_policy.attempts() {
         let progress_sender = sender.clone();
         let attempt_result = tokio::time::timeout(
             request_policy.timeout(),
             send_agent_loop_with_cancellation_and_progress(
                 &request,
-                Arc::clone(&executor),
+                executor.clone(),
                 &cancellation,
+                request_policy.tool_max_turns(),
                 move |progress| {
                     let event = native_agent_event_from_progress(progress);
                     let _ = progress_sender.send(event);
@@ -201,11 +198,11 @@ fn native_agent_event_from_progress(progress: NativeAgentProgress) -> NativeAgen
             NativeAgentEvent::OutputTokenEstimate { total_tokens }
         }
         NativeAgentProgress::Thinking { is_thinking } => NativeAgentEvent::Thinking { is_thinking },
-        NativeAgentProgress::ToolExecutionStarted { call } => {
-            NativeAgentEvent::ToolExecutionStarted { call }
+        NativeAgentProgress::ToolActivityStarted { activity } => {
+            NativeAgentEvent::ToolActivityStarted { activity }
         }
-        NativeAgentProgress::ToolExecutionFinished { call, result } => {
-            NativeAgentEvent::ToolExecutionFinished { call, result }
+        NativeAgentProgress::ToolActivityUpdated { update } => {
+            NativeAgentEvent::ToolActivityUpdated { update }
         }
     }
 }
@@ -234,10 +231,8 @@ mod tests {
     use std::sync::mpsc;
 
     use crate::{ChatMessage, NativeAgentRequest, NativeAgentResponse, ProviderKind};
-    use mo_core::{
-        request_policy::RuntimeRequestPolicy, session::RuntimeTarget,
-        tools::RuntimeToolExecutorRegistry,
-    };
+    use mo_core::{request_policy::RuntimeRequestPolicy, session::RuntimeTarget};
+    use mo_tools::ToolExecutorRegistry;
     use tokio_util::sync::CancellationToken;
 
     use super::{NativeAgentEvent, NativeAgentRuntimeState};
@@ -291,7 +286,6 @@ mod tests {
                     content: "完成".to_string(),
                     reasoning_content: None,
                     reasoning_duration: None,
-                    ..Default::default()
                 },
                 metrics: None,
             })
@@ -304,7 +298,6 @@ mod tests {
                     content: "完成".to_string(),
                     reasoning_content: None,
                     reasoning_duration: None,
-                    ..Default::default()
                 },
                 metrics: None,
             })
@@ -343,7 +336,7 @@ mod tests {
             None,
             vec![ChatMessage::user("hello".to_string())],
         );
-        let executor = RuntimeToolExecutorRegistry::new();
+        let executor = ToolExecutorRegistry::new();
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         let (sender, receiver) = mpsc::channel();

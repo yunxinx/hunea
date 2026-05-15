@@ -78,6 +78,7 @@ pub struct RuntimeConfig {
     pub request_retry_attempts: usize,
     pub request_retry_delays: Vec<u64>,
     pub request_timeout_seconds: u64,
+    pub tool_max_turns: Option<usize>,
 }
 
 /// `AcpConfig` 表示 ACP 层的启动配置。
@@ -228,6 +229,7 @@ struct FileRuntimeConfig {
     request_retry_attempts: Option<usize>,
     request_retry_delays: Option<Vec<u64>>,
     request_timeout_seconds: Option<u64>,
+    tool_max_turns: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -285,6 +287,7 @@ impl Config {
                 request_retry_attempts: 3,
                 request_retry_delays: vec![1, 2, 3],
                 request_timeout_seconds: 120,
+                tool_max_turns: None,
             },
             debug: DebugConfig { enabled: false },
             acp: AcpConfig {
@@ -812,6 +815,7 @@ fn merge_runtime_config(
     if file_config.request_retry_attempts.is_none()
         && file_config.request_retry_delays.is_none()
         && file_config.request_timeout_seconds.is_none()
+        && file_config.tool_max_turns.is_none()
     {
         return Ok(());
     }
@@ -837,9 +841,15 @@ fn merge_runtime_config(
         .unwrap_or(config.request_timeout_seconds);
     validate_request_timeout_seconds(timeout_seconds, path)?;
 
+    let tool_max_turns = file_config.tool_max_turns.or(config.tool_max_turns);
+    if let Some(tool_max_turns) = tool_max_turns {
+        validate_tool_max_turns(tool_max_turns, path)?;
+    }
+
     config.request_retry_attempts = attempts;
     config.request_retry_delays = delays;
     config.request_timeout_seconds = timeout_seconds;
+    config.tool_max_turns = tool_max_turns;
     Ok(())
 }
 
@@ -880,6 +890,17 @@ fn validate_request_timeout_seconds(
         reason: format!(
             "runtime.request_timeout_seconds must be between 1 and 7200, got {timeout_seconds}"
         ),
+    })
+}
+
+fn validate_tool_max_turns(tool_max_turns: usize, path: &Path) -> Result<(), AppConfigError> {
+    if tool_max_turns > 0 {
+        return Ok(());
+    }
+
+    Err(AppConfigError::InvalidRuntimeRequestPolicy {
+        path: Some(path.to_path_buf()),
+        reason: "runtime.tool_max_turns must be at least 1 when configured".to_string(),
     })
 }
 

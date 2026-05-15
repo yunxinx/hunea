@@ -220,6 +220,7 @@ fn runtime_request_policy_from_config(config: &RuntimeConfig) -> RuntimeRequestP
         config.request_retry_delays.clone(),
         config.request_timeout_seconds,
     )
+    .with_tool_max_turns(config.tool_max_turns)
 }
 
 fn model_options_from_configs(
@@ -640,6 +641,7 @@ mod tests {
                 request_retry_attempts: 4,
                 request_retry_delays: vec![1, 3, 3, 3],
                 request_timeout_seconds: 240,
+                tool_max_turns: Some(11),
             },
             debug: DebugConfig { enabled: false },
             acp: AcpConfig {
@@ -664,6 +666,7 @@ mod tests {
             options.runtime_request_policy.timeout(),
             std::time::Duration::from_secs(240)
         );
+        assert_eq!(options.runtime_request_policy.tool_max_turns(), Some(11));
     }
 
     #[test]
@@ -741,6 +744,7 @@ mod tests {
             request_retry_attempts: 3,
             request_retry_delays: vec![1, 2, 3],
             request_timeout_seconds: 120,
+            tool_max_turns: None,
         }
     }
 

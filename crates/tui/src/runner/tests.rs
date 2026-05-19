@@ -3761,7 +3761,31 @@ fn native_agent_failure_appends_system_message_in_transcript() {
 
     assert_eq!(
         model.transcript_plain_items(),
-        vec!["■ Chat failed: request /v1/chat/completions: connection refused".to_string()]
+        vec!["■ request /v1/chat/completions: connection refused".to_string()]
+    );
+    assert!(model.current_status_notice_text().is_empty());
+    assert!(!model.current_stream_activity_render_result().has_content);
+}
+
+#[test]
+fn native_agent_failure_formats_framework_wrapped_json_error() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    apply_native_agent_event(
+        &mut model,
+        None,
+        NativeAgentEvent::Failed {
+            message: "CompletionError: ProviderError: Invalid status code 401 Unauthorized with message:\n{\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}".to_string(),
+        },
+    );
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec![
+            "■ Invalid status code 401 Unauthorized with message:\n  {\n    \"error\": {\n      \"message\": \"Insufficient balance...\",\n      \"type\": \"CreditsError\"\n    },\n    \"type\": \"error\"\n  }".to_string()
+        ]
     );
     assert!(model.current_status_notice_text().is_empty());
     assert!(!model.current_stream_activity_render_result().has_content);

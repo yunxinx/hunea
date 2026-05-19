@@ -168,7 +168,7 @@ fn native_agent_request_excludes_runtime_system_messages() {
         },
     );
     model.transcript_mut().clear();
-    model.append_system_message_from_runtime("Chat failed: connection refused");
+    model.append_system_message_from_runtime("connection refused");
 
     for character in "hello".chars() {
         model.update(AppEvent::Key(crossterm::event::KeyEvent::from(
@@ -191,10 +191,7 @@ fn native_agent_request_excludes_runtime_system_messages() {
     assert_eq!(roles_and_content, vec![("user", "hello")]);
     assert_eq!(
         model.transcript_plain_items(),
-        vec![
-            "■ Chat failed: connection refused".to_string(),
-            "› hello".to_string()
-        ]
+        vec!["■ connection refused".to_string(), "› hello".to_string()]
     );
 }
 

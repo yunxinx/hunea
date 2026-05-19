@@ -168,14 +168,11 @@ impl SystemMessageItem {
             if index + 1 == content_lines.len()
                 && let Some(json_lines) = formatted_json_body_lines(content_line)
             {
-                lines.push(SystemMessageDisplayLine {
-                    prefix,
-                    text: "Body:".to_string(),
-                });
-                lines.extend(json_lines.into_iter().map(|line| SystemMessageDisplayLine {
-                    prefix: SYSTEM_MESSAGE_CONTINUATION_PREFIX,
-                    text: line,
-                }));
+                lines.extend(
+                    json_lines
+                        .into_iter()
+                        .map(|line| SystemMessageDisplayLine { prefix, text: line }),
+                );
                 continue;
             }
 
@@ -218,12 +215,12 @@ mod tests {
     #[test]
     fn system_message_renders_prefix_and_error_color() {
         let palette = default_palette();
-        let item = SystemMessageItem::new("Chat failed: connection refused");
+        let item = SystemMessageItem::new("connection refused");
         let lines = item.render_lines(80, palette);
 
         assert_eq!(
             lines.iter().map(line_to_plain_text).collect::<Vec<_>>(),
-            vec!["■ Chat failed: connection refused".to_string()]
+            vec!["■ connection refused".to_string()]
         );
         assert_eq!(lines[0].style, system_error_text_style(palette));
     }
@@ -231,15 +228,14 @@ mod tests {
     #[test]
     fn system_message_indents_multiline_details_under_prefix() {
         let palette = default_palette();
-        let item = SystemMessageItem::new(
-            "Chat failed: HTTP error.\nCause: bad request\nStatus: 400 Bad Request",
-        );
+        let item =
+            SystemMessageItem::new("HTTP error.\nCause: bad request\nStatus: 400 Bad Request");
         let lines = item.render_lines(80, palette);
 
         assert_eq!(
             lines.iter().map(line_to_plain_text).collect::<Vec<_>>(),
             vec![
-                "■ Chat failed: HTTP error.".to_string(),
+                "■ HTTP error.".to_string(),
                 "  Cause: bad request".to_string(),
                 "  Status: 400 Bad Request".to_string(),
             ]
@@ -250,17 +246,14 @@ mod tests {
     fn system_message_formats_json_body_as_indented_block() {
         let palette = default_palette();
         let item = SystemMessageItem::new(
-            "Chat failed: Web stream error.\nCause: HTTP error.\nStatus: 400 Bad Request\nBody: {\"error\":{\"code\":\"400\",\"message\":\"Param Incorrect\"}}",
+            "Invalid status code 400 Bad Request with message:\nBody: {\"error\":{\"code\":\"400\",\"message\":\"Param Incorrect\"}}",
         );
         let lines = item.render_lines(120, palette);
 
         assert_eq!(
             lines.iter().map(line_to_plain_text).collect::<Vec<_>>(),
             vec![
-                "■ Chat failed: Web stream error.".to_string(),
-                "  Cause: HTTP error.".to_string(),
-                "  Status: 400 Bad Request".to_string(),
-                "  Body:".to_string(),
+                "■ Invalid status code 400 Bad Request with message:".to_string(),
                 "  {".to_string(),
                 "    \"error\": {".to_string(),
                 "      \"code\": \"400\",".to_string(),

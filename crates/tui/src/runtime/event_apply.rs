@@ -5,6 +5,9 @@ use mo_core::session::{
 
 use super::super::{AppEvent, Model, model::RequestMetrics};
 
+const FRAMEWORK_ERROR_PREFIXES: &[&str] = &["CompletionError", "ProviderError"];
+const FALLBACK_CHAT_FAILURE_MESSAGE: &str = "Unknown error";
+
 pub(crate) trait RuntimeEventApply {
     fn apply_runtime_event(&mut self, event: RuntimeEvent);
 }
@@ -102,7 +105,7 @@ impl RuntimeEventApply for Model {
             RuntimeEvent::Failed { message, .. } => {
                 self.flush_runtime_response_buffer();
                 self.clear_stream_activity();
-                self.append_system_message_from_runtime(format!("Chat failed: {message}"));
+                self.append_system_message_from_runtime(normalize_chat_failure_message(&message));
             }
             RuntimeEvent::Interrupted { .. } => {
                 self.flush_runtime_response_buffer();
@@ -118,6 +121,109 @@ impl RuntimeEventApply for Model {
             }
         }
     }
+}
+
+fn normalize_chat_failure_message(message: &str) -> String {
+    let normalized_message = message.trim();
+    if normalized_message.is_empty() {
+        return FALLBACK_CHAT_FAILURE_MESSAGE.to_string();
+    }
+
+    let (description, json_body) = split_error_description_and_json_body(normalized_message);
+    let description = normalize_error_description(&description);
+
+    match (description.is_empty(), json_body) {
+        (true, Some(body)) => format!("{FALLBACK_CHAT_FAILURE_MESSAGE}\nBody: {body}"),
+        (true, None) => FALLBACK_CHAT_FAILURE_MESSAGE.to_string(),
+        (false, Some(body)) => format!("{description}\nBody: {body}"),
+        (false, None) => description,
+    }
+}
+
+fn split_error_description_and_json_body(message: &str) -> (String, Option<String>) {
+    let message_lines = message.lines().collect::<Vec<_>>();
+    let Some(last_non_empty_line_index) = message_lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+    else {
+        return (String::new(), None);
+    };
+
+    let last_non_empty_line = message_lines[last_non_empty_line_index].trim();
+    if let Some(body) = last_non_empty_line
+        .strip_prefix("Body:")
+        .map(str::trim)
+        .filter(|body| is_json_body(body))
+    {
+        let description = message_lines[..last_non_empty_line_index].join("\n");
+        return (description, Some(body.to_string()));
+    }
+
+    if is_json_body(last_non_empty_line) {
+        let description = message_lines[..last_non_empty_line_index].join("\n");
+        return (description, Some(last_non_empty_line.to_string()));
+    }
+
+    if let Some((description_suffix, body)) = split_inline_json_body(last_non_empty_line) {
+        let mut description_lines = message_lines[..last_non_empty_line_index]
+            .iter()
+            .map(|line| (*line).to_string())
+            .collect::<Vec<_>>();
+        description_lines.push(description_suffix.to_string());
+        return (description_lines.join("\n"), Some(body.to_string()));
+    }
+
+    (message.to_string(), None)
+}
+
+fn split_inline_json_body(line: &str) -> Option<(&str, &str)> {
+    for (index, character) in line.char_indices() {
+        if !matches!(character, '{' | '[') {
+            continue;
+        }
+
+        let body = line[index..].trim();
+        if is_json_body(body) {
+            return Some((line[..index].trim_end(), body));
+        }
+    }
+
+    None
+}
+
+fn is_json_body(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body).is_ok()
+}
+
+fn normalize_error_description(description: &str) -> String {
+    let mut lines = description.lines();
+    let Some(first_line) = lines.next() else {
+        return String::new();
+    };
+
+    let mut normalized_lines = vec![strip_framework_error_prefixes(first_line).to_string()];
+    normalized_lines.extend(
+        lines
+            .map(str::trim_end)
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_string),
+    );
+    normalized_lines.join("\n")
+}
+
+fn strip_framework_error_prefixes(message: &str) -> &str {
+    let mut remainder = message.trim();
+
+    while let Some(stripped) = FRAMEWORK_ERROR_PREFIXES.iter().find_map(|prefix| {
+        remainder
+            .strip_prefix(prefix)
+            .and_then(|tail| tail.strip_prefix(':'))
+            .map(str::trim_start)
+    }) {
+        remainder = stripped;
+    }
+
+    remainder
 }
 
 fn upsert_runtime_tool_activity(model: &mut Model, update: RuntimeToolActivityUpdate) {
@@ -176,4 +282,39 @@ fn option_id_for(
         .iter()
         .find(|option| option.kind == kind)
         .map(|option| option.option_id.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_chat_failure_message;
+
+    #[test]
+    fn chat_failure_message_strips_framework_wrappers_and_marks_json_body() {
+        let message = "CompletionError: ProviderError: Invalid status code 401 Unauthorized with message:\n{\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}";
+
+        assert_eq!(
+            normalize_chat_failure_message(message),
+            "Invalid status code 401 Unauthorized with message:\nBody: {\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}"
+        );
+    }
+
+    #[test]
+    fn chat_failure_message_extracts_inline_json_body() {
+        let message = "CompletionError: ProviderError: Invalid status code 401 Unauthorized with message: {\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}";
+
+        assert_eq!(
+            normalize_chat_failure_message(message),
+            "Invalid status code 401 Unauthorized with message:\nBody: {\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}"
+        );
+    }
+
+    #[test]
+    fn chat_failure_message_preserves_non_json_details() {
+        let message = "CompletionError: ProviderError: HTTP error.\nStatus: 400 Bad Request\nCause: bad request";
+
+        assert_eq!(
+            normalize_chat_failure_message(message),
+            "HTTP error.\nStatus: 400 Bad Request\nCause: bad request"
+        );
+    }
 }

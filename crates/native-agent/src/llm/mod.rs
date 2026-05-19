@@ -3,6 +3,7 @@ mod error;
 mod provider;
 mod request;
 mod stream;
+mod tool_errors;
 mod tools;
 
 pub use error::NativeLlmError;

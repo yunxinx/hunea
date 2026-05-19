@@ -286,7 +286,7 @@ fn acp_first_agent_chunk_finalizes_failed_exploration_marker() {
 
     assert_eq!(
         first_tool_result_marker_color(&mut model),
-        Some(palette.main)
+        Some(palette.system_error)
     );
 
     apply_acp_session_event(
@@ -300,16 +300,16 @@ fn acp_first_agent_chunk_finalizes_failed_exploration_marker() {
 
     let transcript = model.transcript_plain_items().join("\n");
     assert!(
-        transcript.contains("● Explored\n  └ Read Cargo.toml"),
-        "expected completed exploration summary to remain visible: {transcript}"
+        transcript.contains("● Read Cargo.toml\n  └ Failed: read failed"),
+        "expected failed exploration call to render as a standalone row: {transcript}"
     );
     assert!(
-        transcript.contains("read failed"),
-        "expected failed detail to remain visible after finalization: {transcript}"
+        !transcript.contains("Input:") && !transcript.contains("Toolset error"),
+        "failed exploration call should not expose transport details: {transcript}"
     );
     assert_eq!(
         first_tool_result_marker_color(&mut model),
-        Some(palette.approval_rejected)
+        Some(palette.system_error)
     );
 }
 

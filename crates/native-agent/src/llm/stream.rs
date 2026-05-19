@@ -21,6 +21,7 @@ use crate::{
     agent::{NativeAgentCompletion, NativeAgentProgress},
     llm::{
         NativeLlmError, rig_message_from_chat_message,
+        tool_errors::NativeAgentToolErrorFormatter,
         tools::{
             runtime_tool_activity_from_rig_call, runtime_tool_activity_update_from_rig_result,
             tool_result_text,
@@ -55,9 +56,13 @@ where
     F: FnMut(NativeAgentProgress),
 {
     let (prompt, history) = prompt_and_history_for_request(request.llm_request())?;
-    let tool_server = RigToolServer::from_executor(executor, cancellation.clone())
-        .await
-        .map_err(|error| NativeLlmError::Provider(error.to_string()))?;
+    let tool_server = RigToolServer::from_executor_with_error_formatter(
+        executor,
+        cancellation.clone(),
+        Arc::new(NativeAgentToolErrorFormatter),
+    )
+    .await
+    .map_err(|error| NativeLlmError::Provider(error.to_string()))?;
     let tool_definitions = tool_server.definitions();
     let agent = AgentBuilder::new(model)
         .tool_server_handle(tool_server.handle().clone())

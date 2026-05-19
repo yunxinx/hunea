@@ -539,62 +539,60 @@ impl ToolResultItem {
         let width = usize::from(width.max(1));
         let mut display_lines = exploration_display_lines(calls);
         coalesce_adjacent_target_display_lines(&mut display_lines);
-        if display_lines.is_empty() {
-            return Vec::new();
-        }
+        let mut lines = Vec::new();
 
-        let active_started_at = self.active_marker_started_at.filter(|_| {
-            calls.iter().any(|call| {
-                matches!(
-                    call.status,
-                    RuntimeToolActivityStatus::Pending | RuntimeToolActivityStatus::InProgress
-                )
-            })
-        });
-        let marker_visible = active_started_at
-            .map(|started_at| active_marker_visible_at(started_at, now))
-            .unwrap_or(true);
-        let has_failed = calls
-            .iter()
-            .any(|call| call.status == RuntimeToolActivityStatus::Failed);
-        let marker_color = if active_started_at.is_some() || self.exploration_open {
-            palette.main
-        } else if has_failed {
-            palette.approval_rejected
-        } else {
-            palette.quote
-        };
-        let marker_style = style_for_color(marker_color).add_modifier(Modifier::BOLD);
-        let title = if active_started_at.is_some() {
-            "Exploring"
-        } else {
-            "Explored"
-        };
-        let marker_text = if marker_visible {
-            TOOL_EXPLORATION_PREFIX
-        } else {
-            TOOL_RESULT_CONTINUATION_PREFIX
-        };
-        let mut lines = vec![Line::from(vec![
-            Span::styled(marker_text, marker_style),
-            Span::styled(title, Style::new().add_modifier(Modifier::BOLD)),
-        ])];
-
-        for (index, display_line) in display_lines.iter().enumerate() {
-            let line_prefix = if index == 0 {
-                TOOL_EXPLORATION_BRANCH_PREFIX
+        if !display_lines.is_empty() {
+            let active_started_at = self.active_marker_started_at.filter(|_| {
+                calls.iter().any(|call| {
+                    call.status != RuntimeToolActivityStatus::Failed
+                        && matches!(
+                            call.status,
+                            RuntimeToolActivityStatus::Pending
+                                | RuntimeToolActivityStatus::InProgress
+                        )
+                })
+            });
+            let marker_visible = active_started_at
+                .map(|started_at| active_marker_visible_at(started_at, now))
+                .unwrap_or(true);
+            let marker_color = if active_started_at.is_some() || self.exploration_open {
+                palette.main
             } else {
-                TOOL_EXPLORATION_CHILD_PREFIX
+                palette.quote
             };
-            lines.extend(wrap_exploration_display_line(
-                display_line,
-                line_prefix,
-                TOOL_EXPLORATION_CHILD_PREFIX,
-                width,
-                palette,
-            ));
+            let marker_style = style_for_color(marker_color).add_modifier(Modifier::BOLD);
+            let title = if active_started_at.is_some() {
+                "Exploring"
+            } else {
+                "Explored"
+            };
+            let marker_text = if marker_visible {
+                TOOL_EXPLORATION_PREFIX
+            } else {
+                TOOL_RESULT_CONTINUATION_PREFIX
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker_text, marker_style),
+                Span::styled(title, Style::new().add_modifier(Modifier::BOLD)),
+            ]));
+
+            for (index, display_line) in display_lines.iter().enumerate() {
+                let line_prefix = if index == 0 {
+                    TOOL_EXPLORATION_BRANCH_PREFIX
+                } else {
+                    TOOL_EXPLORATION_CHILD_PREFIX
+                };
+                lines.extend(wrap_exploration_display_line(
+                    display_line,
+                    line_prefix,
+                    TOOL_EXPLORATION_CHILD_PREFIX,
+                    width,
+                    palette,
+                ));
+            }
         }
-        lines.extend(self.failed_exploration_detail_lines(calls, width, palette));
+
+        lines.extend(self.failed_exploration_detail_lines(calls, width, palette, now));
 
         lines
     }
@@ -604,27 +602,29 @@ impl ToolResultItem {
         calls: &[RuntimeToolActivity],
         width: usize,
         palette: TerminalPalette,
+        now: Instant,
     ) -> Vec<Line<'static>> {
-        let prefix_width = UnicodeWidthStr::width(TOOL_EXPLORATION_CHILD_PREFIX);
-        let detail_width = width.saturating_sub(prefix_width).max(1);
         calls
             .iter()
             .filter(|call| call.status == RuntimeToolActivityStatus::Failed)
-            .flat_map(|call| {
-                acp_tool_call_detail_blocks(
-                    call,
-                    self.render_mode,
-                    self.permission_waiting,
-                    &self.terminal_snapshots,
-                )
-            })
-            .flat_map(|block| self.wrap_acp_detail_block(&block, detail_width, palette))
-            .map(|mut line| {
-                line.spans
-                    .insert(0, Span::raw(TOOL_EXPLORATION_CHILD_PREFIX));
-                line
-            })
+            .flat_map(|call| self.failed_exploration_tool_call_lines_at(call, width, palette, now))
             .collect()
+    }
+
+    fn failed_exploration_tool_call_lines_at(
+        &self,
+        call: &RuntimeToolActivity,
+        width: usize,
+        palette: TerminalPalette,
+        now: Instant,
+    ) -> Vec<Line<'static>> {
+        let mut lines = self.acp_tool_call_header_lines_at(call, width, palette, now);
+        lines.extend(wrap_failed_exploration_detail_line(
+            &failed_tool_call_detail_text(call),
+            width,
+            palette,
+        ));
+        lines
     }
 
     fn wrap_logical_line(
@@ -1187,6 +1187,7 @@ fn is_groupable_exploration_tool_call(call: &RuntimeToolActivity) -> bool {
 fn exploration_display_lines(calls: &[RuntimeToolActivity]) -> Vec<ExplorationDisplayLine> {
     calls
         .iter()
+        .filter(|call| call.status != RuntimeToolActivityStatus::Failed)
         .filter_map(exploration_display_line_for_call)
         .collect()
 }
@@ -1273,6 +1274,97 @@ fn coalesce_adjacent_target_display_lines(lines: &mut Vec<ExplorationDisplayLine
 
 fn is_target_list_action(action: &str) -> bool {
     matches!(action, "Read" | "List")
+}
+
+fn failed_tool_call_detail_text(call: &RuntimeToolActivity) -> String {
+    let reason = call
+        .content
+        .iter()
+        .find_map(|content| match content {
+            RuntimeToolActivityContent::Text(text) => text.lines().find_map(|line| {
+                let line = line.trim();
+                (!line.is_empty()).then_some(line)
+            }),
+            _ => None,
+        })
+        .unwrap_or("Failed");
+
+    let reason = reason
+        .strip_prefix("Failed:")
+        .map(str::trim)
+        .unwrap_or(reason);
+    let reason = compact_failed_tool_call_reason(reason);
+    if reason.is_empty() {
+        "Failed".to_string()
+    } else {
+        format!("Failed: {reason}")
+    }
+}
+
+fn compact_failed_tool_call_reason(reason: &str) -> &str {
+    let Some((message, target)) = reason.split_once(": ") else {
+        return reason;
+    };
+    if target.trim().is_empty() {
+        return reason;
+    }
+
+    if [
+        "File not found",
+        "Directory not found",
+        "Path is a directory",
+        "Path is not a regular file",
+        "Path is a file",
+        "Path is outside workspace",
+        "Could not inspect path",
+        "Could not read file",
+        "Could not list directory",
+    ]
+    .contains(&message)
+    {
+        return message;
+    }
+
+    reason
+}
+
+fn wrap_failed_exploration_detail_line(
+    detail_text: &str,
+    width: usize,
+    palette: TerminalPalette,
+) -> Vec<Line<'static>> {
+    let prefix_width = UnicodeWidthStr::width(TOOL_EXPLORATION_BRANCH_PREFIX);
+    let content_width = width.saturating_sub(prefix_width).max(1);
+    let wrapped = wrap_highlight_chunks(
+        &[vec![HighlightChunk {
+            text: detail_text.to_string(),
+            style: secondary_text_style(palette),
+        }]],
+        content_width,
+    );
+
+    if wrapped.is_empty() {
+        return vec![Line::from(vec![Span::styled(
+            TOOL_EXPLORATION_BRANCH_PREFIX,
+            style_for_color(palette.tertiary),
+        )])];
+    }
+
+    wrapped
+        .into_iter()
+        .enumerate()
+        .map(|(index, content_spans)| {
+            let prefix = if index == 0 {
+                TOOL_EXPLORATION_BRANCH_PREFIX
+            } else {
+                TOOL_EXPLORATION_CHILD_PREFIX
+            };
+            let mut spans = Vec::with_capacity(content_spans.len() + 1);
+            spans.push(Span::styled(prefix, style_for_color(palette.tertiary)));
+            spans.extend(content_spans);
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn wrap_exploration_display_line(
@@ -2253,6 +2345,132 @@ mod tests {
         assert!(item.mark_exploration_complete());
         let completed_lines = item.render_lines(80, palette);
         assert_eq!(completed_lines[0].spans[0].style.fg, Some(palette.quote));
+    }
+
+    #[test]
+    fn failed_exploration_tool_call_renders_as_standalone_failed_row() {
+        let palette = default_palette();
+        let mut item = ToolResultItem::from_exploration_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-read".to_string(),
+                title: "Read AGENTS.md".to_string(),
+                kind: RuntimeToolKind::Read,
+                status: RuntimeToolActivityStatus::InProgress,
+                content: Vec::new(),
+                locations: vec![RuntimeToolActivityLocation {
+                    path: "AGENTS.md".to_string(),
+                    line: None,
+                }],
+                raw_input: Some(serde_json::json!({ "path": "AGENTS.md" }).into()),
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Compact,
+        )
+        .expect("read should be an exploration tool activity");
+
+        assert!(
+            item.update_runtime_tool_activity(RuntimeToolActivityUpdate {
+                activity_id: "call-read".to_string(),
+                status: Some(RuntimeToolActivityStatus::Failed),
+                content: Some(vec![RuntimeToolActivityContent::Text(
+                    "Failed: File not found: AGENTS.md".to_string(),
+                )]),
+                raw_output: Some("Toolset error: ToolCallError: File not found: AGENTS.md".into(),),
+                ..RuntimeToolActivityUpdate::default()
+            })
+        );
+
+        let lines = item.render_lines(80, palette);
+        let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec![
+                "● Read AGENTS.md".to_string(),
+                "  └ Failed: File not found".to_string(),
+            ]
+        );
+        assert_eq!(lines[0].spans[0].style.fg, Some(palette.system_error));
+        assert_eq!(lines[1].spans[0].style.fg, Some(palette.tertiary));
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .skip(1)
+                .all(|span| span.style.fg == Some(palette.secondary)),
+            "failed reason should use secondary text, not the error color: {:?}",
+            lines[1].spans
+        );
+        assert!(
+            rendered_plain.iter().all(|line| {
+                !line.contains("Explored")
+                    && !line.contains("Input:")
+                    && !line.contains("Toolset error")
+                    && !line.contains(r#""path""#)
+            }),
+            "failed exploration rows should not expose grouped detail blocks: {rendered_plain:?}"
+        );
+    }
+
+    #[test]
+    fn failed_exploration_tool_call_is_filtered_from_group_summary() {
+        let mut item = ToolResultItem::from_exploration_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-cargo".to_string(),
+                title: "Read Cargo.toml".to_string(),
+                kind: RuntimeToolKind::Read,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Text("[package]".to_string())],
+                locations: vec![RuntimeToolActivityLocation {
+                    path: "Cargo.toml".to_string(),
+                    line: None,
+                }],
+                raw_input: Some(serde_json::json!({ "path": "Cargo.toml" }).into()),
+                raw_output: Some("[package]".into()),
+            },
+            ToolActivityRenderMode::Compact,
+        )
+        .expect("read should be an exploration tool activity");
+        assert!(item.append_exploration_tool_activity(RuntimeToolActivity {
+            activity_id: "call-agents".to_string(),
+            title: "Read AGENTS.md".to_string(),
+            kind: RuntimeToolKind::Read,
+            status: RuntimeToolActivityStatus::InProgress,
+            content: Vec::new(),
+            locations: vec![RuntimeToolActivityLocation {
+                path: "AGENTS.md".to_string(),
+                line: None,
+            }],
+            raw_input: Some(serde_json::json!({ "path": "AGENTS.md" }).into()),
+            raw_output: None,
+        }));
+        assert!(
+            item.update_runtime_tool_activity(RuntimeToolActivityUpdate {
+                activity_id: "call-agents".to_string(),
+                status: Some(RuntimeToolActivityStatus::Failed),
+                content: Some(vec![RuntimeToolActivityContent::Text(
+                    "File not found: AGENTS.md".to_string(),
+                )]),
+                ..RuntimeToolActivityUpdate::default()
+            })
+        );
+        assert!(item.mark_exploration_complete());
+
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec![
+                "● Explored".to_string(),
+                "  └ Read Cargo.toml".to_string(),
+                "● Read AGENTS.md".to_string(),
+                "  └ Failed: File not found".to_string(),
+            ]
+        );
     }
 
     #[test]

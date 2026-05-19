@@ -10,7 +10,10 @@ use rig_core::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{Tool, ToolCall, ToolDefinition, ToolExecutor, ToolExecutorRegistry, ToolRegistry};
+use crate::{
+    SharedToolErrorFormatter, Tool, ToolCall, ToolDefinition, ToolExecutor, ToolExecutorRegistry,
+    ToolRegistry, tool_error::default_tool_error_formatter,
+};
 
 /// `RigToolServer` 负责把 Lumos 内部工具注册到 Rig 的 `ToolServerHandle`。
 ///
@@ -21,6 +24,7 @@ pub struct RigToolServer {
     handle: ToolServerHandle,
     executor: ToolExecutorRegistry,
     cancellation: CancellationToken,
+    error_formatter: SharedToolErrorFormatter,
 }
 
 impl RigToolServer {
@@ -29,11 +33,26 @@ impl RigToolServer {
         executor: ToolExecutorRegistry,
         cancellation: CancellationToken,
     ) -> Result<Self, RigToolServerError> {
+        Self::from_executor_with_error_formatter(
+            executor,
+            cancellation,
+            default_tool_error_formatter(),
+        )
+        .await
+    }
+
+    /// `from_executor_with_error_formatter` 使用自定义错误 formatter 构建 Rig 工具服务器。
+    pub async fn from_executor_with_error_formatter(
+        executor: ToolExecutorRegistry,
+        cancellation: CancellationToken,
+        error_formatter: SharedToolErrorFormatter,
+    ) -> Result<Self, RigToolServerError> {
         let handle = ToolServer::new().run();
         let server = Self {
             handle,
             executor,
             cancellation,
+            error_formatter,
         };
 
         for tool in server.executor.tools() {
@@ -111,6 +130,7 @@ impl RigToolServer {
                 definition,
                 executor,
                 cancellation: self.cancellation.clone(),
+                error_formatter: Arc::clone(&self.error_formatter),
             })
             .await
     }
@@ -148,6 +168,7 @@ struct RigToolAdapter {
     definition: ToolDefinition,
     executor: ToolExecutorRegistry,
     cancellation: CancellationToken,
+    error_formatter: SharedToolErrorFormatter,
 }
 
 impl ToolDyn for RigToolAdapter {
@@ -172,35 +193,24 @@ impl ToolDyn for RigToolAdapter {
         let executor = self.executor.clone();
         let cancellation = self.cancellation.clone();
         let tool_name = self.definition.name.clone();
+        let error_formatter = Arc::clone(&self.error_formatter);
         Box::pin(async move {
             if cancellation.is_cancelled() {
                 return Err(ToolError::ToolCallError(Box::new(RigToolCancelled)));
             }
 
             let arguments = serde_json::from_str(&args).map_err(ToolError::JsonError)?;
-            let call = ToolCall::new(tool_name.clone(), tool_name, arguments);
+            let call = ToolCall::new(tool_name.clone(), tool_name.clone(), arguments);
             let result = executor.execute_tool(call, &cancellation).await;
             if result.is_error {
-                Err(ToolError::ToolCallError(Box::new(RigToolExecutionError(
-                    result.content,
-                ))))
+                let processed = error_formatter.format_tool_error(&tool_name, &result.content);
+                Ok(processed.assistant_message)
             } else {
                 Ok(result.content)
             }
         })
     }
 }
-
-#[derive(Debug)]
-struct RigToolExecutionError(String);
-
-impl fmt::Display for RigToolExecutionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for RigToolExecutionError {}
 
 #[derive(Debug)]
 struct RigToolCancelled;

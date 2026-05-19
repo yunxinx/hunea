@@ -8,6 +8,8 @@ struct EchoTool;
 
 struct EchoReplacementTool;
 
+struct FailingTool;
+
 impl Tool for EchoTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new("echo")
@@ -53,6 +55,23 @@ impl Tool for EchoReplacementTool {
                 .unwrap_or("");
             ToolResult::success(call.call_id, format!("replacement:{value}"))
         })
+    }
+}
+
+impl Tool for FailingTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new("failing")
+            .with_label("Failing")
+            .with_kind(ToolKind::Other)
+            .with_description("Return a tool error")
+    }
+
+    fn execute<'a>(
+        &'a self,
+        call: ToolCall,
+        _cancellation: &'a CancellationToken,
+    ) -> ToolExecutionFuture<'a> {
+        Box::pin(async move { ToolResult::error(call.call_id, "raw failure (os error 2)") })
     }
 }
 
@@ -106,6 +125,31 @@ async fn rig_tool_server_registers_executes_and_updates_tools_dynamically() {
         .await
         .expect("re-added tool should execute");
     assert_eq!(output, "again");
+}
+
+#[tokio::test]
+async fn rig_tool_server_formats_tool_errors_as_clean_tool_results() {
+    let mut executor = ToolExecutorRegistry::new();
+    executor.insert(FailingTool);
+
+    let cancellation = CancellationToken::new();
+    let server = RigToolServer::from_executor(executor, cancellation)
+        .await
+        .expect("rig tool server should build");
+
+    let output = server
+        .handle()
+        .call_tool("failing", "{}")
+        .await
+        .expect("tool business errors should be returned as model-visible results");
+
+    assert_eq!(
+        output,
+        "Tool failed: raw failure. Hint: Check the tool input and try again."
+    );
+    assert!(!output.contains("Toolset error"));
+    assert!(!output.contains("ToolCallError"));
+    assert!(!output.contains("os error"));
 }
 
 #[tokio::test]

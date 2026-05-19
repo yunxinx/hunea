@@ -8,3 +8,4 @@ AGENTS.md
 .agents/
 .claude/
 .trellis/
+skills-lock.json

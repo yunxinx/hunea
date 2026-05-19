@@ -97,17 +97,19 @@ pub(super) fn acp_tool_call_detail_blocks(
             terminal_snapshots,
         ));
     }
-    if let Some(raw_input) = call.raw_input.as_ref().and_then(|raw| raw.display_text()) {
-        blocks.push(AcpToolCallDetailBlock::Text(labeled_detail_block(
-            "Input",
-            &raw_input,
-            render_mode,
-        )));
-    }
-    if let Some(raw_output) = call.raw_output.as_ref().and_then(|raw| raw.display_text()) {
-        blocks.push(AcpToolCallDetailBlock::SecondaryText(
-            truncate_detail_block(text_lines(&raw_output), render_mode),
-        ));
+    if call.status != RuntimeToolActivityStatus::Failed {
+        if let Some(raw_input) = call.raw_input.as_ref().and_then(|raw| raw.display_text()) {
+            blocks.push(AcpToolCallDetailBlock::Text(labeled_detail_block(
+                "Input",
+                &raw_input,
+                render_mode,
+            )));
+        }
+        if let Some(raw_output) = call.raw_output.as_ref().and_then(|raw| raw.display_text()) {
+            blocks.push(AcpToolCallDetailBlock::SecondaryText(
+                truncate_detail_block(text_lines(&raw_output), render_mode),
+            ));
+        }
     }
 
     blocks

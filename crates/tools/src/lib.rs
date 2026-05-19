@@ -8,6 +8,7 @@ mod kind;
 mod permission;
 mod registry;
 mod schema;
+mod tool_error;
 
 pub use definition::ToolDefinition;
 pub use execution::{ToolCall, ToolResult};
@@ -16,3 +17,6 @@ pub use kind::ToolKind;
 pub use permission::ToolPermissionPolicy;
 pub use registry::ToolRegistry;
 pub use schema::{ToolSchema, ToolSchemaError};
+pub use tool_error::{
+    DefaultToolErrorFormatter, ProcessedToolError, SharedToolErrorFormatter, ToolErrorFormatter,
+};

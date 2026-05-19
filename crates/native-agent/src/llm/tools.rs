@@ -10,6 +10,8 @@ use rig_core::{
 };
 use serde_json::Value;
 
+use super::tool_errors::parse_rig_error_text;
+
 pub(crate) fn runtime_tool_activity_from_rig_call(
     tool_call: &RigToolCall,
     internal_call_id: &str,
@@ -51,23 +53,32 @@ pub(crate) fn runtime_tool_activity_update_from_rig_result(
         definition,
         &tool_call.function.arguments,
     ));
-    let status = Some(if tool_result_is_error(result) {
+    let error_reason = parse_rig_error_text(result);
+    let status = Some(if error_reason.is_some() {
         RuntimeToolActivityStatus::Failed
     } else {
         RuntimeToolActivityStatus::Completed
     });
+    let content = match error_reason.as_ref() {
+        Some(reason) => RuntimeToolActivityContent::Text(format!("Failed: {reason}")),
+        None => RuntimeToolActivityContent::Text(result.to_string()),
+    };
+    let raw_input = error_reason
+        .is_none()
+        .then(|| RuntimeToolActivityRawValue::from(tool_call.function.arguments.clone()));
+    let raw_output = error_reason
+        .is_none()
+        .then(|| RuntimeToolActivityRawValue::from(result));
 
     RuntimeToolActivityUpdate {
         activity_id: internal_call_id.to_string(),
         title,
         kind,
         status,
-        content: Some(vec![RuntimeToolActivityContent::Text(result.to_string())]),
+        content: Some(vec![content]),
         locations: Some(tool_locations_for(&tool_call.function.arguments)),
-        raw_input: Some(RuntimeToolActivityRawValue::from(
-            tool_call.function.arguments.clone(),
-        )),
-        raw_output: Some(RuntimeToolActivityRawValue::from(result)),
+        raw_input,
+        raw_output,
     }
 }
 
@@ -151,16 +162,11 @@ fn tool_input_summary(arguments: &Value) -> String {
     serde_json::to_string_pretty(arguments).unwrap_or_else(|_| arguments.to_string())
 }
 
-fn tool_result_is_error(result: &str) -> bool {
-    result.starts_with("ToolCallError: ")
-        || result.starts_with("JsonError: ")
-        || result.contains("Toolset error: ToolCallError: ")
-        || result.contains("Tool call interrupted")
-}
-
 #[cfg(test)]
 mod tests {
-    use mo_core::session::{RuntimeToolActivityStatus, RuntimeToolKind};
+    use mo_core::session::{
+        RuntimeToolActivityContent, RuntimeToolActivityStatus, RuntimeToolKind,
+    };
     use mo_tools::{ToolDefinition, ToolKind, ToolRegistry};
     use rig_core::message::{ToolCall as RigToolCall, ToolFunction};
 
@@ -222,7 +228,47 @@ mod tests {
 
         assert_eq!(update.activity_id, "internal-1");
         assert_eq!(update.status, Some(RuntimeToolActivityStatus::Failed));
-        assert!(update.raw_output.is_some());
+        assert_eq!(
+            update.content,
+            Some(vec![RuntimeToolActivityContent::Text(
+                "Failed: not found".to_string()
+            )])
+        );
+        assert!(update.raw_input.is_none());
+        assert!(update.raw_output.is_none());
+    }
+
+    #[test]
+    fn runtime_tool_activity_update_marks_formatted_tool_errors_failed() {
+        let mut registry = ToolRegistry::new();
+        registry.insert(ToolDefinition::new("file_read").with_label("Read"));
+        let tool_call = RigToolCall {
+            id: "rig-call".to_string(),
+            call_id: Some("call-1".to_string()),
+            function: ToolFunction::new(
+                "file_read".to_string(),
+                serde_json::json!({ "path": "AGENTS.md" }),
+            ),
+            signature: None,
+            additional_params: None,
+        };
+
+        let update = runtime_tool_activity_update_from_rig_result(
+            "internal-1",
+            &tool_call,
+            "File not found: AGENTS.md. Hint: Use list_dir to verify the file exists before reading.",
+            &registry,
+        );
+
+        assert_eq!(update.status, Some(RuntimeToolActivityStatus::Failed));
+        assert_eq!(
+            update.content,
+            Some(vec![RuntimeToolActivityContent::Text(
+                "Failed: File not found: AGENTS.md".to_string()
+            )])
+        );
+        assert!(update.raw_input.is_none());
+        assert!(update.raw_output.is_none());
     }
 
     #[test]

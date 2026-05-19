@@ -45,6 +45,7 @@ mod transcript;
 mod transcript_overlay;
 mod update;
 mod view;
+mod work_duration_message;
 
 pub mod theme;
 

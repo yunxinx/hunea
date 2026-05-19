@@ -33,6 +33,7 @@ pub enum ReasoningDisplayMode {
 pub struct ReasoningMessageItem {
     content: String,
     display_mode: ReasoningDisplayMode,
+    has_toggle_header: bool,
     duration: Option<Duration>,
     render_cache_key: u64,
 }
@@ -49,11 +50,14 @@ impl ReasoningMessageItem {
         } else {
             content.into()
         };
-        let render_cache_key = reasoning_message_render_cache_key(&content, display_mode, duration);
+        let has_toggle_header = matches!(display_mode, ReasoningDisplayMode::Collapsed);
+        let render_cache_key =
+            reasoning_message_render_cache_key(&content, display_mode, has_toggle_header, duration);
 
         Self {
             content,
             display_mode,
+            has_toggle_header,
             duration,
             render_cache_key,
         }
@@ -62,20 +66,11 @@ impl ReasoningMessageItem {
     /// `render_lines` 将思维链渲染为淡色斜体文本行。
     pub fn render_lines(&self, width: u16, palette: TerminalPalette) -> Vec<Line<'static>> {
         let style = tertiary_text_style(palette).italic();
-        let mut lines = vec![Line::from(Span::styled(self.header_label(), style))];
-        if matches!(
-            self.display_mode,
-            ReasoningDisplayMode::Collapsed | ReasoningDisplayMode::Snippet
-        ) {
-            return lines;
-        }
 
-        lines.extend(
-            self.wrapped_lines(width)
-                .into_iter()
-                .map(|line| Line::from(Span::styled(line, style))),
-        );
-        lines
+        self.plain_lines(width)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, style)))
+            .collect()
     }
 
     pub(crate) fn is_header_line(&self, line_index: usize) -> bool {
@@ -87,17 +82,29 @@ impl ReasoningMessageItem {
     }
 
     pub(crate) fn header_display_width(&self) -> usize {
-        self.header_label().width()
+        if self.is_toggleable() {
+            self.header_label().width()
+        } else {
+            0
+        }
     }
 
     pub(crate) fn toggle(&mut self) {
+        if !self.is_toggleable() {
+            return;
+        }
+
         self.display_mode = match self.display_mode {
             ReasoningDisplayMode::Collapsed => ReasoningDisplayMode::Expanded,
             ReasoningDisplayMode::Expanded => ReasoningDisplayMode::Collapsed,
             ReasoningDisplayMode::Snippet => return,
         };
-        self.render_cache_key =
-            reasoning_message_render_cache_key(&self.content, self.display_mode, self.duration);
+        self.render_cache_key = reasoning_message_render_cache_key(
+            &self.content,
+            self.display_mode,
+            self.has_toggle_header,
+            self.duration,
+        );
     }
 
     /// `render_for_terminal_replay` 返回适合退出 AltScreen 后回放到终端的文本。
@@ -176,16 +183,22 @@ impl ReasoningMessageItem {
         Vec::new()
     }
 
-    fn wrapped_lines(&self, width: u16) -> Vec<String> {
-        wrap_assistant_text(&self.content, usize::from(width.max(1)), 0)
+    fn plain_lines(&self, width: u16) -> Vec<String> {
+        match self.display_mode {
+            ReasoningDisplayMode::Collapsed | ReasoningDisplayMode::Snippet => {
+                vec![self.header_label()]
+            }
+            ReasoningDisplayMode::Expanded if self.has_toggle_header => {
+                let mut lines = vec![self.header_label()];
+                lines.extend(self.wrapped_lines(width));
+                lines
+            }
+            ReasoningDisplayMode::Expanded => self.wrapped_lines(width),
+        }
     }
 
-    fn plain_lines(&self, width: u16) -> Vec<String> {
-        let mut lines = vec![self.header_label()];
-        if matches!(self.display_mode, ReasoningDisplayMode::Expanded) {
-            lines.extend(self.wrapped_lines(width));
-        }
-        lines
+    fn wrapped_lines(&self, width: u16) -> Vec<String> {
+        wrap_assistant_text(&self.content, usize::from(width.max(1)), 0)
     }
 
     fn header_label(&self) -> String {
@@ -211,21 +224,20 @@ impl ReasoningMessageItem {
     }
 
     fn is_toggleable(&self) -> bool {
-        matches!(
-            self.display_mode,
-            ReasoningDisplayMode::Collapsed | ReasoningDisplayMode::Expanded
-        )
+        self.has_toggle_header
     }
 }
 
 fn reasoning_message_render_cache_key(
     content: &str,
     display_mode: ReasoningDisplayMode,
+    has_toggle_header: bool,
     duration: Option<Duration>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     "reasoning_message".hash(&mut hasher);
     display_mode.hash(&mut hasher);
+    has_toggle_header.hash(&mut hasher);
     duration.hash(&mut hasher);
     if !matches!(display_mode, ReasoningDisplayMode::Snippet) {
         content.hash(&mut hasher);
@@ -264,14 +276,14 @@ mod tests {
     };
 
     #[test]
-    fn reasoning_message_renders_dim_italic_text() {
+    fn reasoning_message_renders_expanded_content_without_header() {
         let palette = default_palette();
         let item = ReasoningMessageItem::new("先分析", ReasoningDisplayMode::Expanded, None);
         let lines = item.render_lines(80, palette);
 
         assert_eq!(
             lines.iter().map(line_to_plain_text).collect::<Vec<_>>(),
-            vec!["[Hide reasoning]".to_string(), "先分析".to_string()]
+            vec!["先分析".to_string()]
         );
         assert_eq!(lines[0].spans[0].style.fg, tertiary_text_style(palette).fg);
         assert!(
@@ -280,6 +292,8 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::ITALIC)
         );
+        assert!(!item.is_header_line(0));
+        assert_eq!(item.header_display_width(), 0);
     }
 
     #[test]
@@ -330,12 +344,14 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_message_header_uses_subsecond_duration_label() {
-        let item = ReasoningMessageItem::new(
+    fn toggled_reasoning_message_header_uses_subsecond_duration_label() {
+        let mut item = ReasoningMessageItem::new(
             "先分析",
-            ReasoningDisplayMode::Expanded,
+            ReasoningDisplayMode::Collapsed,
             Some(Duration::from_millis(120)),
         );
+
+        item.toggle();
 
         assert_eq!(
             item.render_lines(80, default_palette())
@@ -365,7 +381,7 @@ mod tests {
             vec!["• thoughts 16s".to_string()]
         );
         assert_eq!(item.source_text_byte_len(), 0);
-        assert_eq!(item.header_display_width(), "• thoughts 16s".width());
+        assert_eq!(item.header_display_width(), 0);
     }
 
     #[test]

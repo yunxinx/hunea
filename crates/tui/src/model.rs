@@ -1053,6 +1053,15 @@ impl Model {
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
     }
 
+    pub(crate) fn append_work_duration_from_runtime(&mut self, duration: Duration) {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        self.transcript_mut().append_work_duration_message(duration);
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+    }
+
     pub(crate) fn append_tool_result_from_runtime(
         &mut self,
         content: impl Into<String>,

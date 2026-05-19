@@ -604,7 +604,7 @@ pub(super) fn apply_runtime_event_with_coordinator(
                 "Tool call ended without final status",
             );
             acp_ui_state.mark_prompt_finished();
-            model.clear_stream_activity();
+            model.finish_stream_activity_with_work_summary();
             if let Some(finish_reason) = finish_reason {
                 model
                     .show_transient_status_notice(&format!("ACP prompt finished: {finish_reason}"));
@@ -630,7 +630,7 @@ pub(super) fn apply_runtime_event_with_coordinator(
                 "Tool call ended because the ACP prompt failed",
             );
             acp_ui_state.mark_prompt_finished();
-            model.clear_stream_activity();
+            model.finish_stream_activity_with_work_summary();
             model.show_transient_status_notice(&format!("ACP prompt failed: {message}"));
         }
         RuntimeEvent::Interrupted {
@@ -638,7 +638,7 @@ pub(super) fn apply_runtime_event_with_coordinator(
         } => {
             fail_tracked_acp_tool_calls(model, acp_ui_state, "Interrupted");
             acp_ui_state.mark_prompt_finished();
-            model.clear_stream_activity();
+            model.finish_stream_activity_with_work_summary();
         }
         RuntimeEvent::PermissionRequested {
             target: RuntimeTarget::AcpAgent { agent_id },
@@ -749,7 +749,7 @@ pub(super) fn apply_runtime_event_with_coordinator(
                 "Tool call ended because the ACP session stopped",
             );
             acp_ui_state.mark_prompt_finished();
-            model.clear_stream_activity();
+            model.finish_stream_activity_with_work_summary();
             if let Some(message) = message {
                 model.show_transient_status_notice(&format!("ACP session stopped: {message}"));
             }
@@ -1138,8 +1138,8 @@ pub(super) fn run_interrupt_acp_prompt_effect(
         model.close_tool_approval_panel();
     }
     fail_tracked_acp_tool_calls(model, acp_ui_state, "Interrupted");
-    model.clear_stream_activity();
     model.append_system_message_from_runtime("Chat interrupted");
+    model.finish_stream_activity_with_work_summary();
 }
 
 pub(super) fn acp_reject_option_id_for_stale_discard(

@@ -2449,10 +2449,7 @@ fn acp_thought_chunks_append_reasoning_and_toggle_activity() {
 
     assert_eq!(
         model.transcript_plain_items(),
-        vec![
-            "[Hide reasoning · thoughts <1s]\n先分析".to_string(),
-            "结论".to_string()
-        ]
+        vec!["先分析".to_string(), "结论".to_string(),]
     );
     assert_eq!(
         model.transcript_mut().source_messages(),
@@ -3178,14 +3175,7 @@ fn runtime_deltas_flush_before_native_tool_activity() {
 
     let items = model.transcript_plain_items();
     assert_eq!(items.len(), 3, "{items:#?}");
-    assert!(
-        items[0].starts_with("[Hide reasoning"),
-        "expected expanded reasoning header, got {items:#?}"
-    );
-    assert!(
-        items[0].contains("先分析目录结构"),
-        "expected reasoning body before tool activity, got {items:#?}"
-    );
+    assert_eq!(items[0], "先分析目录结构");
     assert_eq!(items[1], "我先看一下 src。");
     assert_eq!(items[2], "● Exploring\n  └ List src");
 }
@@ -3292,10 +3282,7 @@ fn runtime_final_response_extends_buffered_delta_without_losing_tail() {
 
     assert_eq!(
         model.transcript_plain_items(),
-        vec![
-            "[Hide reasoning · thoughts 2s]\n先分析完整".to_string(),
-            "最终结论".to_string(),
-        ]
+        vec!["先分析完整".to_string(), "最终结论".to_string(),]
     );
     assert!(!model.current_stream_activity_render_result().has_content);
 }
@@ -3462,7 +3449,7 @@ fn native_agent_completion_collapses_reasoning_by_default() {
         model.transcript_plain_items(),
         vec![
             "[Show reasoning · thoughts 3s]".to_string(),
-            "结论".to_string()
+            "结论".to_string(),
         ]
     );
     assert_eq!(
@@ -3500,10 +3487,7 @@ fn native_agent_completion_keeps_reasoning_body_gap_to_one_line() {
 
     let render = model.transcript_mut().render();
 
-    assert_eq!(
-        render.all_plain_lines(),
-        vec!["[Hide reasoning · thoughts 3s]", "先分析", "", "结论"]
-    );
+    assert_eq!(render.all_plain_lines(), vec!["先分析", "", "结论"]);
 }
 
 #[test]
@@ -3761,7 +3745,7 @@ fn native_agent_failure_appends_system_message_in_transcript() {
 
     assert_eq!(
         model.transcript_plain_items(),
-        vec!["■ request /v1/chat/completions: connection refused".to_string()]
+        vec!["■ request /v1/chat/completions: connection refused".to_string(),]
     );
     assert!(model.current_status_notice_text().is_empty());
     assert!(!model.current_stream_activity_render_result().has_content);
@@ -3784,7 +3768,7 @@ fn native_agent_failure_formats_framework_wrapped_json_error() {
     assert_eq!(
         model.transcript_plain_items(),
         vec![
-            "■ Invalid status code 401 Unauthorized with message:\n  {\n    \"error\": {\n      \"message\": \"Insufficient balance...\",\n      \"type\": \"CreditsError\"\n    },\n    \"type\": \"error\"\n  }".to_string()
+            "■ Invalid status code 401 Unauthorized with message:\n  {\n    \"error\": {\n      \"message\": \"Insufficient balance...\",\n      \"type\": \"CreditsError\"\n    },\n    \"type\": \"error\"\n  }".to_string(),
         ]
     );
     assert!(model.current_status_notice_text().is_empty());

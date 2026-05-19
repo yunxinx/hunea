@@ -181,7 +181,8 @@ impl Model {
             | TranscriptItem::Message(_)
             | TranscriptItem::Reasoning(_)
             | TranscriptItem::System(_)
-            | TranscriptItem::ToolResult(_) => None,
+            | TranscriptItem::ToolResult(_)
+            | TranscriptItem::WorkDuration(_) => None,
         }
     }
 
@@ -226,7 +227,8 @@ impl Model {
                 | TranscriptItem::Message(_)
                 | TranscriptItem::Reasoning(_)
                 | TranscriptItem::System(_)
-                | TranscriptItem::ToolResult(_) => None,
+                | TranscriptItem::ToolResult(_)
+                | TranscriptItem::WorkDuration(_) => None,
             })
             .collect()
     }

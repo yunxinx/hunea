@@ -103,8 +103,8 @@ pub(super) fn run_interrupt_current_turn_effect(
         Ok(RuntimeCommandReceipt::Interrupted {
             target: Some(RuntimeTarget::NativeAgent(_)),
         }) => {
-            model.clear_stream_activity();
             model.append_system_message_from_runtime("Chat interrupted");
+            model.finish_stream_activity_with_work_summary();
         }
         Ok(RuntimeCommandReceipt::Interrupted { .. }) => {
             run_interrupt_acp_prompt_effect(model, acp_ui_state, runtime_coordinator, false);

@@ -21,6 +21,7 @@ const STREAM_ACTIVITY_TOKEN_TICK_INTERVAL: Duration = Duration::from_millis(33);
 const STREAM_ACTIVITY_GLYPH: &str = "•";
 const TOKEN_TWEEN_DURATION: Duration = Duration::from_millis(120);
 const TOKEN_STALE_THRESHOLD: Duration = Duration::from_millis(360);
+const WORK_DURATION_SUMMARY_MIN_ELAPSED_SECS: u64 = 30;
 
 /// `StreamActivityState` 保存一次模型 turn 运行中显示在输入框上方的状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +114,25 @@ impl Model {
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
         }
+    }
+
+    pub(crate) fn finish_stream_activity_with_work_summary(&mut self) {
+        self.finish_stream_activity_with_work_summary_at(Instant::now());
+    }
+
+    fn finish_stream_activity_with_work_summary_at(&mut self, now: Instant) {
+        let duration = self.stream_activity_duration_at(now);
+        self.clear_stream_activity();
+        if let Some(duration) =
+            duration.filter(|duration| should_append_work_duration_summary(*duration))
+        {
+            self.append_work_duration_from_runtime(duration);
+        }
+    }
+
+    fn stream_activity_duration_at(&self, now: Instant) -> Option<Duration> {
+        let activity = self.stream_activity.as_ref()?;
+        Some(activity.elapsed_at(activity.active_now(now)))
     }
 
     pub(crate) fn pause_stream_activity(&mut self) {
@@ -576,7 +596,7 @@ fn secondary_ellipsis_style(spans: &[Span<'static>]) -> Style {
     spans.last().map(|span| span.style).unwrap_or_default()
 }
 
-fn format_elapsed_compact(elapsed_secs: u64) -> String {
+pub(crate) fn format_elapsed_compact(elapsed_secs: u64) -> String {
     if elapsed_secs < 60 {
         return format!("{elapsed_secs}s");
     }
@@ -589,6 +609,10 @@ fn format_elapsed_compact(elapsed_secs: u64) -> String {
     let minutes = (elapsed_secs % 3600) / 60;
     let seconds = elapsed_secs % 60;
     format!("{hours}h {minutes:02}m {seconds:02}s")
+}
+
+fn should_append_work_duration_summary(duration: Duration) -> bool {
+    duration.as_secs() > WORK_DURATION_SUMMARY_MIN_ELAPSED_SECS
 }
 
 fn format_token_count(tokens: usize) -> String {
@@ -714,6 +738,36 @@ mod tests {
             first_tool_result_marker_color(&mut model),
             Some(palette.quote)
         );
+    }
+
+    #[test]
+    fn finish_stream_activity_skips_work_duration_until_timer_exceeds_thirty_seconds() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.show_stream_activity_with_header("Working");
+
+        let started_at = model.stream_activity.as_ref().unwrap().started_at;
+        model.finish_stream_activity_with_work_summary_at(started_at + Duration::from_secs(30));
+
+        assert!(model.transcript_plain_items().is_empty());
+        assert!(!model.current_stream_activity_render_result().has_content);
+    }
+
+    #[test]
+    fn finish_stream_activity_appends_work_duration_after_thirty_seconds() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.set_window(32, 6);
+        model.show_stream_activity_with_header("Working");
+
+        let started_at = model.stream_activity.as_ref().unwrap().started_at;
+        model.finish_stream_activity_with_work_summary_at(started_at + Duration::from_secs(31));
+
+        assert_eq!(
+            model.transcript_plain_items(),
+            vec!["─ Worked for 31s ───────────────".to_string()]
+        );
+        assert!(!model.current_stream_activity_render_result().has_content);
     }
 
     fn first_tool_result_marker_color(model: &mut Model) -> Option<ratatui::style::Color> {

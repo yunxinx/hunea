@@ -27,7 +27,9 @@ where
             NativeAgentProgress::Thinking { is_thinking } => {
                 on_progress(NativeLlmProgress::Thinking { is_thinking });
             }
-            NativeAgentProgress::ToolActivityStarted { .. }
+            NativeAgentProgress::AssistantDelta { .. }
+            | NativeAgentProgress::ReasoningDelta { .. }
+            | NativeAgentProgress::ToolActivityStarted { .. }
             | NativeAgentProgress::ToolActivityUpdated { .. } => {}
         },
     )

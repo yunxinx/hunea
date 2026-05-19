@@ -8,7 +8,10 @@ use super::effects::{reset_runtime_session_after_clear, run_interrupt_current_tu
 use super::input::{TerminalInputAction, coalesced_input_actions};
 use super::native_agent::{apply_native_agent_event, run_send_native_agent_effect};
 use super::*;
-use crate::{AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem};
+use crate::{
+    AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem, runtime::RuntimeEventApply,
+    theme::default_palette, transcript::TranscriptItem,
+};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -28,6 +31,7 @@ use mo_core::session::{
     RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityContent,
     RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
 };
+use ratatui::style::Color;
 
 #[derive(Default)]
 struct TestRuntimeCoordinator {
@@ -195,6 +199,121 @@ fn acp_system_message_event_appends_runtime_system_message() {
 }
 
 #[test]
+fn acp_system_message_flushes_buffered_delta_in_order() {
+    let mut model = Model::new(HeroOptions::default());
+    model.transcript_mut().clear();
+    let mut acp_ui_state = AcpSessionUiState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_ui_state,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "kimi".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_ui_state,
+        AcpSessionEvent::AgentMessageChunk {
+            agent_id: "kimi".to_string(),
+            content: "先输出的 ACP 片段".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_ui_state,
+        AcpSessionEvent::SystemMessage {
+            agent_id: "kimi".to_string(),
+            message: "运行时提示".to_string(),
+        },
+    );
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["先输出的 ACP 片段".to_string(), "■ 运行时提示".to_string(),]
+    );
+}
+
+#[test]
+fn acp_first_agent_chunk_finalizes_failed_exploration_marker() {
+    let palette = default_palette();
+    let mut model = Model::new(HeroOptions::default());
+    model.set_palette(palette, true);
+    model.transcript_mut().clear();
+    let mut acp_ui_state = AcpSessionUiState::default();
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_ui_state,
+        AcpSessionEvent::PromptStarted {
+            agent_id: "Kimi Code CLI".to_string(),
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_ui_state,
+        AcpSessionEvent::ToolCall {
+            agent_id: "Kimi Code CLI".to_string(),
+            call: AcpToolCall {
+                tool_call_id: "call-1".to_string(),
+                title: "Read Cargo.toml".to_string(),
+                kind: AcpToolKind::Read,
+                status: AcpToolCallStatus::InProgress,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: Some("{\"path\":\"Cargo.toml\"}".into()),
+                raw_output: None,
+            },
+        },
+    );
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_ui_state,
+        AcpSessionEvent::ToolCallUpdate {
+            agent_id: "Kimi Code CLI".to_string(),
+            update: AcpToolCallUpdate {
+                tool_call_id: "call-1".to_string(),
+                title: None,
+                kind: None,
+                status: Some(AcpToolCallStatus::Failed),
+                content: Some(vec![AcpToolCallContent::Text("read failed".to_string())]),
+                locations: None,
+                raw_input: None,
+                raw_output: Some("read failed".into()),
+            },
+        },
+    );
+
+    assert_eq!(
+        first_tool_result_marker_color(&mut model),
+        Some(palette.main)
+    );
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_ui_state,
+        AcpSessionEvent::AgentMessageChunk {
+            agent_id: "Kimi Code CLI".to_string(),
+            content: "我改用别的路径继续。".to_string(),
+        },
+    );
+
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(
+        transcript.contains("● Explored\n  └ Read Cargo.toml"),
+        "expected completed exploration summary to remain visible: {transcript}"
+    );
+    assert!(
+        transcript.contains("read failed"),
+        "expected failed detail to remain visible after finalization: {transcript}"
+    );
+    assert_eq!(
+        first_tool_result_marker_color(&mut model),
+        Some(palette.approval_rejected)
+    );
+}
+
+#[test]
 fn acp_tool_call_update_replaces_same_transcript_item() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
@@ -231,7 +350,7 @@ fn acp_tool_call_update_replaces_same_transcript_item() {
     assert_eq!(model.transcript_mut().len(), 1);
     assert_eq!(
         model.transcript_plain_items(),
-        vec!["● Read Cargo.toml".to_string()]
+        vec!["● Exploring\n  └ Read Cargo.toml".to_string()]
     );
 
     apply_acp_session_event(
@@ -258,7 +377,7 @@ fn acp_tool_call_update_replaces_same_transcript_item() {
         "tool_call_update should replace the existing item instead of appending"
     );
     let plain = model.transcript_plain_items().join("\n");
-    assert_eq!(plain, "● Read Cargo.toml");
+    assert_eq!(plain, "● Explored\n  └ Read Cargo.toml");
     assert!(!plain.contains("read complete"));
     assert!(!plain.contains("{\"ok\":true}"));
     assert!(!plain.contains("Pending [Read]"));
@@ -3019,6 +3138,256 @@ fn native_agent_completion_appends_assistant_message_after_request_finishes() {
 }
 
 #[test]
+fn runtime_deltas_flush_before_native_tool_activity() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            show_reasoning_content: true,
+            reasoning_display_mode: ReasoningDisplayMode::Expanded,
+            ..ModelOptions::default()
+        },
+    );
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    model.apply_runtime_event(RuntimeEvent::ReasoningDelta {
+        target: target.clone(),
+        content: "先分析目录结构".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::AssistantDelta {
+        target: target.clone(),
+        content: "我先看一下 src。".to_string(),
+    });
+
+    assert!(model.transcript_plain_items().is_empty());
+
+    model.apply_runtime_event(RuntimeEvent::ToolActivityStarted {
+        target,
+        activity: RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "List Directory src".to_string(),
+            kind: RuntimeToolKind::Search,
+            status: RuntimeToolActivityStatus::InProgress,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: None,
+        },
+    });
+
+    let items = model.transcript_plain_items();
+    assert_eq!(items.len(), 3, "{items:#?}");
+    assert!(
+        items[0].starts_with("[Hide reasoning"),
+        "expected expanded reasoning header, got {items:#?}"
+    );
+    assert!(
+        items[0].contains("先分析目录结构"),
+        "expected reasoning body before tool activity, got {items:#?}"
+    );
+    assert_eq!(items[1], "我先看一下 src。");
+    assert_eq!(items[2], "● Exploring\n  └ List src");
+}
+
+#[test]
+fn runtime_first_assistant_delta_finalizes_completed_exploration_marker() {
+    let palette = default_palette();
+    let mut model = Model::new(HeroOptions::default());
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    model.set_palette(palette, true);
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    model.apply_runtime_event(RuntimeEvent::ToolActivityStarted {
+        target: target.clone(),
+        activity: RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "List Directory src".to_string(),
+            kind: RuntimeToolKind::Search,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Text(
+                "main.rs\nlib.rs".to_string(),
+            )],
+            locations: Vec::new(),
+            raw_input: Some(serde_json::json!({ "path": "src" }).into()),
+            raw_output: Some("main.rs\nlib.rs".into()),
+        },
+    });
+
+    assert_eq!(
+        first_tool_result_marker_color(&mut model),
+        Some(palette.main)
+    );
+
+    model.apply_runtime_event(RuntimeEvent::AssistantDelta {
+        target,
+        content: "继续检查实现细节。".to_string(),
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["● Explored\n  └ List src".to_string()]
+    );
+    assert_eq!(
+        first_tool_result_marker_color(&mut model),
+        Some(palette.quote)
+    );
+}
+
+#[test]
+fn runtime_final_response_does_not_duplicate_buffered_delta() {
+    let mut model = Model::new(HeroOptions::default());
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    model.apply_runtime_event(RuntimeEvent::AssistantDelta {
+        target: target.clone(),
+        content: "最终结论".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(target),
+        content: "最终结论".to_string(),
+        reasoning_content: None,
+        reasoning_duration: None,
+        finish_reason: None,
+        metrics: None,
+    });
+
+    assert_eq!(model.transcript_plain_items(), vec!["最终结论".to_string()]);
+    assert!(!model.current_stream_activity_render_result().has_content);
+}
+
+#[test]
+fn runtime_final_response_extends_buffered_delta_without_losing_tail() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            show_reasoning_content: true,
+            reasoning_display_mode: ReasoningDisplayMode::Expanded,
+            ..ModelOptions::default()
+        },
+    );
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    model.apply_runtime_event(RuntimeEvent::ReasoningDelta {
+        target: target.clone(),
+        content: "先".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::AssistantDelta {
+        target: target.clone(),
+        content: "最终".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(target),
+        content: "最终结论".to_string(),
+        reasoning_content: Some("先分析完整".to_string()),
+        reasoning_duration: Some(Duration::from_secs(2)),
+        finish_reason: None,
+        metrics: None,
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec![
+            "[Hide reasoning · thoughts 2s]\n先分析完整".to_string(),
+            "最终结论".to_string(),
+        ]
+    );
+    assert!(!model.current_stream_activity_render_result().has_content);
+}
+
+#[test]
+fn runtime_system_message_flushes_buffered_delta_in_order() {
+    let mut model = Model::new(HeroOptions::default());
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    model.apply_runtime_event(RuntimeEvent::AssistantDelta {
+        target,
+        content: "先输出的片段".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::SystemMessage {
+        target: None,
+        message: "运行时提示".to_string(),
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["先输出的片段".to_string(), "■ 运行时提示".to_string(),]
+    );
+}
+
+#[test]
+fn runtime_interruption_flushes_buffered_delta_before_notice() {
+    let mut model = Model::new(HeroOptions::default());
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    model.apply_runtime_event(RuntimeEvent::AssistantDelta {
+        target: target.clone(),
+        content: "已输出的片段".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::Interrupted {
+        target: Some(target),
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["已输出的片段".to_string(), "■ Chat interrupted".to_string(),]
+    );
+    assert!(!model.current_stream_activity_render_result().has_content);
+}
+
+#[test]
+fn native_agent_delta_event_uses_runtime_boundary_buffer() {
+    let mut model = Model::new(HeroOptions::default());
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    apply_native_agent_event(
+        &mut model,
+        Some(target.clone()),
+        NativeAgentEvent::AssistantDelta {
+            content: "我先看一下 src。".to_string(),
+        },
+    );
+
+    assert!(model.transcript_plain_items().is_empty());
+
+    apply_native_agent_event(
+        &mut model,
+        Some(target),
+        NativeAgentEvent::ToolActivityStarted {
+            activity: RuntimeToolActivity {
+                activity_id: "call-1".to_string(),
+                title: "List Directory src".to_string(),
+                kind: RuntimeToolKind::Search,
+                status: RuntimeToolActivityStatus::InProgress,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+        },
+    );
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec![
+            "我先看一下 src。".to_string(),
+            "● Exploring\n  └ List src".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn native_agent_completion_updates_last_request_metrics() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
@@ -3049,6 +3418,19 @@ fn native_agent_completion_updates_last_request_metrics() {
         model.current_status_line_parts(),
         vec!["40tps".to_string(), "0.25s".to_string()]
     );
+}
+
+fn first_tool_result_marker_color(model: &mut Model) -> Option<Color> {
+    let palette = model.palette;
+    let items = model.transcript_mut().items_snapshot();
+    let item = items.iter().find_map(|item| match item.as_ref() {
+        TranscriptItem::ToolResult(item) => Some(item),
+        _ => None,
+    })?;
+    item.render_lines(80, palette)
+        .first()
+        .and_then(|line| line.spans.first())
+        .and_then(|span| span.style.fg)
 }
 
 #[test]

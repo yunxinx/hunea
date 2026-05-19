@@ -19,14 +19,23 @@ impl RuntimeEventApply for Model {
                 self.show_transient_status_notice(&format!("Runtime start failed: {message}"));
             }
             RuntimeEvent::SystemMessage { message, .. } => {
+                self.flush_runtime_response_buffer();
                 self.append_system_message_from_runtime(message);
             }
             RuntimeEvent::TurnStarted { label, .. } => {
+                self.clear_runtime_response_buffer();
                 if self.stream_activity.is_none() {
                     self.show_stream_activity(label);
                 }
             }
-            RuntimeEvent::AssistantDelta { .. } | RuntimeEvent::ReasoningDelta { .. } => {}
+            RuntimeEvent::AssistantDelta { content, .. } => {
+                self.push_runtime_assistant_delta(&content);
+                self.set_stream_activity_thinking(false);
+            }
+            RuntimeEvent::ReasoningDelta { content, .. } => {
+                self.push_runtime_reasoning_delta(&content);
+                self.set_stream_activity_thinking(true);
+            }
             RuntimeEvent::OutputTokenEstimate { total_tokens, .. } => {
                 self.set_stream_activity_output_tokens(total_tokens);
             }
@@ -34,13 +43,16 @@ impl RuntimeEventApply for Model {
                 self.set_stream_activity_thinking(is_thinking);
             }
             RuntimeEvent::Retrying { message, .. } => {
+                self.clear_runtime_response_buffer();
                 self.show_stream_activity_with_header(message);
             }
             RuntimeEvent::ToolActivityStarted { activity, .. } => {
+                self.flush_runtime_response_buffer();
                 self.append_runtime_tool_activity_from_runtime(activity);
                 self.set_stream_activity_thinking(false);
             }
             RuntimeEvent::ToolActivityUpdated { update, .. } => {
+                self.flush_runtime_response_buffer();
                 upsert_runtime_tool_activity(self, update);
                 self.set_stream_activity_thinking(false);
             }
@@ -52,6 +64,7 @@ impl RuntimeEventApply for Model {
             | RuntimeEvent::ConfigChangeSucceeded { .. }
             | RuntimeEvent::ConfigChangeFailed { .. } => {}
             RuntimeEvent::PermissionRequested { request, .. } => {
+                self.flush_runtime_response_buffer();
                 show_runtime_permission_request(self, request);
             }
             RuntimeEvent::PermissionCancelled { target, .. } => {
@@ -78,22 +91,26 @@ impl RuntimeEventApply for Model {
                         metrics.duration,
                     )));
                 }
-                self.clear_stream_activity();
-                self.append_runtime_response_from_runtime(
+                self.set_stream_activity_thinking(false);
+                self.flush_runtime_response_buffer_with_final(
                     content,
                     reasoning_content,
                     reasoning_duration,
                 );
+                self.clear_stream_activity();
             }
             RuntimeEvent::Failed { message, .. } => {
+                self.flush_runtime_response_buffer();
                 self.clear_stream_activity();
                 self.append_system_message_from_runtime(format!("Chat failed: {message}"));
             }
             RuntimeEvent::Interrupted { .. } => {
+                self.flush_runtime_response_buffer();
                 self.clear_stream_activity();
                 self.append_system_message_from_runtime("Chat interrupted");
             }
             RuntimeEvent::Stopped { message, .. } => {
+                self.flush_runtime_response_buffer();
                 self.clear_stream_activity();
                 if let Some(message) = message {
                     self.show_transient_status_notice(&format!("Runtime stopped: {message}"));

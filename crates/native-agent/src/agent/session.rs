@@ -198,6 +198,12 @@ fn native_agent_event_from_progress(progress: NativeAgentProgress) -> NativeAgen
             NativeAgentEvent::OutputTokenEstimate { total_tokens }
         }
         NativeAgentProgress::Thinking { is_thinking } => NativeAgentEvent::Thinking { is_thinking },
+        NativeAgentProgress::AssistantDelta { content } => {
+            NativeAgentEvent::AssistantDelta { content }
+        }
+        NativeAgentProgress::ReasoningDelta { content } => {
+            NativeAgentEvent::ReasoningDelta { content }
+        }
         NativeAgentProgress::ToolActivityStarted { activity } => {
             NativeAgentEvent::ToolActivityStarted { activity }
         }
@@ -321,6 +327,30 @@ mod tests {
         assert_eq!(
             runtime.try_recv_event(),
             Some(NativeAgentEvent::OutputTokenEstimate { total_tokens: 12 })
+        );
+        assert!(runtime.is_running());
+    }
+
+    #[test]
+    fn native_agent_runtime_keeps_receiver_after_text_delta_event() {
+        let (sender, receiver) = mpsc::channel();
+        let mut runtime = NativeAgentRuntimeState {
+            receiver: Some(receiver),
+            cancellation: Some(CancellationToken::new()),
+            target: Some(RuntimeTarget::native_agent("provider", "model")),
+        };
+
+        sender
+            .send(NativeAgentEvent::AssistantDelta {
+                content: "partial".to_string(),
+            })
+            .expect("assistant delta event should be queued");
+
+        assert_eq!(
+            runtime.try_recv_event(),
+            Some(NativeAgentEvent::AssistantDelta {
+                content: "partial".to_string(),
+            })
         );
         assert!(runtime.is_running());
     }

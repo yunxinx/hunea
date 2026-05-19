@@ -153,6 +153,12 @@ pub enum NativeAgentEvent {
     Thinking {
         is_thinking: bool,
     },
+    AssistantDelta {
+        content: String,
+    },
+    ReasoningDelta {
+        content: String,
+    },
     ToolActivityStarted {
         activity: RuntimeToolActivity,
     },

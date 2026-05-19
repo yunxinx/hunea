@@ -27,6 +27,7 @@ diffy = "0.5.0"
 directories = "6"
 futures-util = "0.3.31"
 http = "1.4.0"
+ignore = "0.4.25"
 libc = "0.2"
 mo-acp = { path = "crates/acp" }
 mo-app = { path = "crates/app" }

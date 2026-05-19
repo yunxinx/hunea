@@ -71,6 +71,7 @@ pub struct Model {
     pub(super) pending_acp_permission: Option<PendingAcpPermission>,
     pub(super) acp_terminal_snapshots: BTreeMap<String, RuntimeTerminalSnapshot>,
     pub(super) stream_activity: Option<StreamActivityState>,
+    pub(super) runtime_response_buffer: RuntimeResponseBuffer,
     pub(super) status_phrase_selector: StatusPhraseSelector,
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
@@ -127,6 +128,133 @@ impl RequestMetrics {
             duration,
         }
     }
+}
+
+/// `RuntimeResponseBuffer` 暂存非 ACP runtime 的流式文本，直到工具调用等语义边界出现。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RuntimeResponseBuffer {
+    content: String,
+    reasoning_content: String,
+    reasoning_started_at: Option<Instant>,
+}
+
+impl RuntimeResponseBuffer {
+    fn is_empty(&self) -> bool {
+        self.content.is_empty() && self.reasoning_content.is_empty()
+    }
+
+    fn push_content(&mut self, content: &str) {
+        self.content.push_str(content);
+    }
+
+    fn push_reasoning_content(&mut self, content: &str) {
+        if content.is_empty() {
+            return;
+        }
+        self.reasoning_started_at.get_or_insert_with(Instant::now);
+        self.reasoning_content.push_str(content);
+    }
+
+    fn clear(&mut self) {
+        self.content.clear();
+        self.reasoning_content.clear();
+        self.reasoning_started_at = None;
+    }
+
+    fn take(&mut self) -> Option<BufferedRuntimeResponse> {
+        let content = std::mem::take(&mut self.content);
+        let reasoning_content = if self.reasoning_content.is_empty() {
+            self.reasoning_started_at = None;
+            None
+        } else {
+            Some(std::mem::take(&mut self.reasoning_content))
+        };
+        let reasoning_duration = reasoning_content
+            .as_ref()
+            .and_then(|_| self.reasoning_started_at.take())
+            .map(|started_at| Instant::now().saturating_duration_since(started_at));
+
+        if content.is_empty() && reasoning_content.is_none() {
+            return None;
+        }
+
+        Some(BufferedRuntimeResponse {
+            content,
+            reasoning_content,
+            reasoning_duration,
+        })
+    }
+
+    fn take_with_final(
+        &mut self,
+        final_content: String,
+        final_reasoning_content: Option<String>,
+        final_reasoning_duration: Option<Duration>,
+    ) -> Option<BufferedRuntimeResponse> {
+        let mut response = self.take().unwrap_or_else(|| BufferedRuntimeResponse {
+            content: String::new(),
+            reasoning_content: None,
+            reasoning_duration: None,
+        });
+
+        response.content = reconcile_buffered_text_with_final(response.content, final_content);
+        let (reasoning_content, reasoning_duration) = reconcile_buffered_reasoning_with_final(
+            response.reasoning_content,
+            response.reasoning_duration,
+            final_reasoning_content,
+            final_reasoning_duration,
+        );
+        response.reasoning_content = reasoning_content;
+        response.reasoning_duration = reasoning_duration;
+
+        if response.content.is_empty() && response.reasoning_content.is_none() {
+            return None;
+        }
+
+        Some(response)
+    }
+}
+
+fn reconcile_buffered_text_with_final(buffered: String, final_content: String) -> String {
+    if buffered.is_empty() {
+        return final_content;
+    }
+    if final_content.is_empty() {
+        return buffered;
+    }
+    if final_content.starts_with(&buffered) {
+        return final_content;
+    }
+
+    buffered
+}
+
+fn reconcile_buffered_reasoning_with_final(
+    buffered: Option<String>,
+    buffered_duration: Option<Duration>,
+    final_content: Option<String>,
+    final_duration: Option<Duration>,
+) -> (Option<String>, Option<Duration>) {
+    match (buffered, final_content) {
+        (None, None) => (None, None),
+        (None, Some(content)) => (Some(content), final_duration),
+        (Some(content), None) => (Some(content), buffered_duration),
+        (Some(buffered), Some(final_content)) => {
+            if final_content.is_empty() {
+                return (Some(buffered), buffered_duration);
+            }
+            if final_content.starts_with(&buffered) {
+                return (Some(final_content), final_duration.or(buffered_duration));
+            }
+            (Some(buffered), buffered_duration)
+        }
+    }
+}
+
+struct BufferedRuntimeResponse {
+    content: String,
+    reasoning_content: Option<String>,
+    reasoning_duration: Option<Duration>,
 }
 
 /// `AcpModelSelectionRollback` 保存 ACP 模型切换请求确认前的本地选择状态。
@@ -342,6 +470,7 @@ impl Model {
             pending_acp_permission: None,
             acp_terminal_snapshots: BTreeMap::new(),
             stream_activity: None,
+            runtime_response_buffer: RuntimeResponseBuffer::default(),
             status_phrase_selector: StatusPhraseSelector::new(
                 options.status_phrases,
                 options.status_phrase_order,
@@ -596,6 +725,7 @@ impl Model {
         self.pending_acp_permission = None;
         self.acp_terminal_snapshots.clear();
         self.stream_activity = None;
+        self.runtime_response_buffer.clear();
         self.command_panel_selected = 0;
         self.command_panel_scroll = 0;
         self.file_picker = None;
@@ -712,6 +842,59 @@ impl Model {
         }
 
         self.append_assistant_message_from_runtime(content);
+    }
+
+    pub(crate) fn push_runtime_assistant_delta(&mut self, content: &str) {
+        if content.is_empty() {
+            return;
+        }
+        if self.runtime_response_buffer.is_empty() {
+            let _ = self.mark_exploration_tool_activities_complete_from_runtime();
+        }
+        self.runtime_response_buffer.push_content(content);
+    }
+
+    pub(crate) fn push_runtime_reasoning_delta(&mut self, content: &str) {
+        if content.is_empty() {
+            return;
+        }
+        if self.runtime_response_buffer.is_empty() {
+            let _ = self.mark_exploration_tool_activities_complete_from_runtime();
+        }
+        self.runtime_response_buffer.push_reasoning_content(content);
+    }
+
+    pub(crate) fn flush_runtime_response_buffer(&mut self) {
+        if let Some(response) = self.runtime_response_buffer.take() {
+            self.append_runtime_response_from_runtime(
+                response.content,
+                response.reasoning_content,
+                response.reasoning_duration,
+            );
+        }
+    }
+
+    pub(crate) fn flush_runtime_response_buffer_with_final(
+        &mut self,
+        final_content: String,
+        final_reasoning_content: Option<String>,
+        final_reasoning_duration: Option<Duration>,
+    ) {
+        if let Some(response) = self.runtime_response_buffer.take_with_final(
+            final_content,
+            final_reasoning_content,
+            final_reasoning_duration,
+        ) {
+            self.append_runtime_response_from_runtime(
+                response.content,
+                response.reasoning_content,
+                response.reasoning_duration,
+            );
+        }
+    }
+
+    pub(crate) fn clear_runtime_response_buffer(&mut self) {
+        self.runtime_response_buffer.clear();
     }
 
     pub(crate) fn activate_acp_model_scope(&mut self, agent_id: &str) {
@@ -910,6 +1093,21 @@ impl Model {
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         item_index
+    }
+
+    pub(crate) fn mark_exploration_tool_activities_complete_from_runtime(&mut self) -> bool {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        if !self
+            .transcript_mut()
+            .mark_exploration_tool_activities_complete()
+        {
+            return false;
+        }
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        true
     }
 
     pub(crate) fn runtime_tool_activity_item_index_from_runtime(

@@ -251,6 +251,25 @@ impl Transcript {
         call: impl Into<RuntimeToolActivity>,
     ) -> usize {
         let call = call.into();
+        if let Some(exploration) = ToolResultItem::from_exploration_tool_activity(
+            call.clone(),
+            self.tool_activity_render_mode,
+        ) {
+            if let Some((last_index, last_item)) = self.items.iter().enumerate().next_back()
+                && let TranscriptItem::ToolResult(tool_result) = last_item.as_ref()
+            {
+                let mut tool_result = tool_result.clone();
+                if tool_result.append_exploration_tool_activity(call) {
+                    self.replace_item(last_index, TranscriptItem::ToolResult(tool_result));
+                    return last_index;
+                }
+            }
+
+            let index = self.items.len();
+            self.push_item(TranscriptItem::ToolResult(exploration));
+            return index;
+        }
+
         let index = self.items.len();
         self.push_item(TranscriptItem::ToolResult(
             ToolResultItem::from_runtime_tool_activity(call, self.tool_activity_render_mode),
@@ -269,8 +288,7 @@ impl Transcript {
                     return None;
                 };
                 tool_result
-                    .runtime_tool_activity_id()
-                    .is_some_and(|id| id == tool_call_id)
+                    .has_runtime_tool_activity_id(tool_call_id)
                     .then_some(index)
             })
     }
@@ -454,6 +472,31 @@ impl Transcript {
             .min()
     }
 
+    pub(crate) fn mark_exploration_tool_activities_complete(&mut self) -> bool {
+        let mut first_dirty: Option<usize> = None;
+        let mut items = self.items.as_ref().clone();
+        for (item_index, item) in items.iter_mut().enumerate() {
+            let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+                continue;
+            };
+            let mut tool_result = tool_result.clone();
+            if !tool_result.mark_exploration_complete() {
+                continue;
+            }
+            *item = Rc::new(TranscriptItem::ToolResult(tool_result));
+            first_dirty = Some(first_dirty.map_or(item_index, |dirty| dirty.min(item_index)));
+        }
+
+        let Some(first_dirty) = first_dirty else {
+            return false;
+        };
+        self.items = Rc::new(items);
+        self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.mark_metrics_dirty_from(first_dirty);
+        self.screen_cache.mark_dirty_from(first_dirty);
+        true
+    }
+
     /// `len` 返回 transcript 项数量。
     pub(crate) fn len(&self) -> usize {
         self.items.len()
@@ -626,6 +669,8 @@ impl Transcript {
     }
 
     fn push_item(&mut self, item: TranscriptItem) {
+        // 一旦开始追加新的 transcript 项，之前的 exploration 组就不应再继续保留“待定”颜色。
+        let _ = self.mark_exploration_tool_activities_complete();
         let len_before_append = self.items.len();
         Rc::make_mut(&mut self.items).push(Rc::new(item));
         self.items_version = self.items_version.saturating_add(1);

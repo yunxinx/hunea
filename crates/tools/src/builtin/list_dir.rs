@@ -3,6 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ignore::{
+    Match,
+    gitignore::{Gitignore, GitignoreBuilder},
+};
 use serde::Deserialize;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -35,7 +39,7 @@ impl Tool for ListDirTool {
             .with_label("List Directory")
             .with_kind(ToolKind::Search)
             .with_description(
-                "List immediate entries of a directory inside the current workspace. Entries are sorted alphabetically, include dotfiles, and directories end with '/'.",
+                "List immediate entries of a directory inside the current workspace. Entries are sorted alphabetically, include dotfiles unless gitignored, and directories end with '/'.",
             )
             .with_input_schema(json!({
                 "type": "object",
@@ -109,19 +113,26 @@ fn execute_list_dir(root: PathBuf, call: ToolCall) -> ToolResult {
         .limit
         .unwrap_or(LIST_DIR_DEFAULT_ENTRY_LIMIT)
         .clamp(1, LIST_DIR_MAX_ENTRY_LIMIT);
-    match list_directory_entries(&path, limit) {
+    match list_directory_entries(&root, &path, limit) {
         Ok(content) => ToolResult::success(call.call_id, content),
         Err(message) => ToolResult::error(call.call_id, message),
     }
 }
 
-fn list_directory_entries(path: &Path, limit: usize) -> Result<String, String> {
+fn list_directory_entries(root: &Path, path: &Path, limit: usize) -> Result<String, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("workspace root is unavailable: {error}"))?;
+    let gitignore = gitignore_matcher(&root, path);
     let mut entries = fs::read_dir(path)
         .map_err(|error| format!("read directory failed for '{}': {error}", path.display()))?
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
             let file_type = entry.file_type().ok()?;
+            if is_gitignored(&gitignore, &entry.path(), file_type.is_dir()) {
+                return None;
+            }
             let display = if file_type.is_dir() {
                 format!("{name}/")
             } else {
@@ -155,4 +166,40 @@ fn list_directory_entries(path: &Path, limit: usize) -> Result<String, String> {
         }
     }
     Ok(content)
+}
+
+fn gitignore_matcher(root: &Path, path: &Path) -> Gitignore {
+    let mut builder = GitignoreBuilder::new(root);
+    for directory in gitignore_directories(root, path) {
+        let gitignore = directory.join(".gitignore");
+        if gitignore.exists() {
+            let _ = builder.add(gitignore);
+        }
+    }
+    builder.build().unwrap_or_else(|_| {
+        GitignoreBuilder::new(root)
+            .build()
+            .expect("empty gitignore matcher should build")
+    })
+}
+
+fn gitignore_directories(root: &Path, path: &Path) -> Vec<PathBuf> {
+    let mut directories = vec![root.to_path_buf()];
+    let Ok(relative) = path.strip_prefix(root) else {
+        return directories;
+    };
+
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        directories.push(current.clone());
+    }
+    directories
+}
+
+fn is_gitignored(gitignore: &Gitignore, path: &Path, is_dir: bool) -> bool {
+    matches!(
+        gitignore.matched_path_or_any_parents(path, is_dir),
+        Match::Ignore(_)
+    )
 }

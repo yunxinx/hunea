@@ -29,17 +29,20 @@ use acp::{
     acp_tool_call_diff_header_chunks, acp_tool_call_diff_line_style, acp_tool_call_diff_row_style,
     acp_tool_call_display_title, acp_tool_call_has_diff_content, acp_tool_call_location_suffix,
     acp_tool_call_status_color, acp_write_tool_call_title_chunks, active_marker_visible_at,
-    is_acp_read_tool_call, style_for_color,
-};
-use mo_core::session::{
-    RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
-    RuntimeToolActivityStatus, RuntimeToolActivityUpdate,
+    is_acp_read_tool_call, is_list_dir_tool_call, list_dir_tool_call_title_chunks, style_for_color,
 };
 #[cfg(test)]
-use mo_core::session::{RuntimeToolActivityLocation, RuntimeToolKind};
+use mo_core::session::RuntimeToolActivityLocation;
+use mo_core::session::{
+    RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
+    RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
+};
 
 const TOOL_RESULT_PREFIX: &str = "● ";
 const TOOL_RESULT_CONTINUATION_PREFIX: &str = "  ";
+const TOOL_EXPLORATION_PREFIX: &str = "● ";
+const TOOL_EXPLORATION_BRANCH_PREFIX: &str = "  └ ";
+const TOOL_EXPLORATION_CHILD_PREFIX: &str = "    ";
 const TOOL_ACTIVITY_DETAIL_PREFIX: &str = "  └─ ";
 const TOOL_ACTIVITY_DETAIL_CONTINUATION_PREFIX: &str = "    ";
 pub(crate) const TOOL_ACTIVITY_LINE_NUMBER_WIDTH: usize = 7;
@@ -68,6 +71,7 @@ enum ToolResultBody {
         kind: ToolResultKind,
     },
     RuntimeToolActivity(RuntimeToolActivity),
+    Exploration(Vec<RuntimeToolActivity>),
 }
 
 /// `ToolResultItem` 表示只用于 TUI 展示的工具活动，不参与模型上下文。
@@ -77,6 +81,7 @@ pub(crate) struct ToolResultItem {
     render_mode: ToolActivityRenderMode,
     render_cache_key: u64,
     active_marker_started_at: Option<Instant>,
+    exploration_open: bool,
     approval_suspended: bool,
     permission_waiting: bool,
     terminal_snapshots: BTreeMap<String, RuntimeTerminalSnapshot>,
@@ -101,13 +106,24 @@ impl ToolResultItem {
         Self::from_body(ToolResultBody::RuntimeToolActivity(call), render_mode)
     }
 
+    pub(crate) fn from_exploration_tool_activity(
+        call: impl Into<RuntimeToolActivity>,
+        render_mode: ToolActivityRenderMode,
+    ) -> Option<Self> {
+        let call = call.into();
+        is_groupable_exploration_tool_call(&call)
+            .then(|| Self::from_body(ToolResultBody::Exploration(vec![call]), render_mode))
+    }
+
     fn from_body(body: ToolResultBody, render_mode: ToolActivityRenderMode) -> Self {
         let approval_suspended = false;
         let permission_waiting = false;
         let terminal_snapshots = BTreeMap::new();
+        let exploration_open = matches!(body, ToolResultBody::Exploration(_));
         let render_cache_key = tool_result_render_cache_key(
             &body,
             render_mode,
+            exploration_open,
             approval_suspended,
             permission_waiting,
             &terminal_snapshots,
@@ -119,6 +135,7 @@ impl ToolResultItem {
             render_mode,
             render_cache_key,
             active_marker_started_at,
+            exploration_open,
             approval_suspended,
             permission_waiting,
             terminal_snapshots,
@@ -143,11 +160,34 @@ impl ToolResultItem {
         self.active_marker_started_at.is_some() && !self.is_compact_approval_suspended()
     }
 
-    pub(crate) fn runtime_tool_activity_id(&self) -> Option<&str> {
+    pub(crate) fn has_runtime_tool_activity_id(&self, tool_call_id: &str) -> bool {
         match &self.body {
-            ToolResultBody::RuntimeToolActivity(call) => Some(call.activity_id.as_str()),
-            ToolResultBody::Approval { .. } => None,
+            ToolResultBody::RuntimeToolActivity(call) => call.activity_id == tool_call_id,
+            ToolResultBody::Exploration(calls) => calls
+                .iter()
+                .any(|call| call.activity_id.as_str() == tool_call_id),
+            ToolResultBody::Approval { .. } => false,
         }
+    }
+
+    pub(crate) fn append_exploration_tool_activity(
+        &mut self,
+        call: impl Into<RuntimeToolActivity>,
+    ) -> bool {
+        let call = call.into();
+        if !is_groupable_exploration_tool_call(&call) {
+            return false;
+        }
+
+        let ToolResultBody::Exploration(calls) = &mut self.body else {
+            return false;
+        };
+
+        calls.push(call);
+        self.exploration_open = true;
+        self.refresh_active_marker_started_at();
+        self.refresh_render_cache_key();
+        true
     }
 
     pub(crate) fn active_marker_started_at(&self) -> Option<Instant> {
@@ -184,6 +224,9 @@ impl ToolResultItem {
             ToolResultBody::RuntimeToolActivity(call) => {
                 self.acp_tool_call_styled_lines_at(call, width, palette, now)
             }
+            ToolResultBody::Exploration(calls) => {
+                self.exploration_styled_lines_at(calls, width, palette, now)
+            }
         }
     }
 
@@ -215,28 +258,17 @@ impl ToolResultItem {
         match &self.body {
             ToolResultBody::Approval { content, .. } => content.len(),
             ToolResultBody::RuntimeToolActivity(call) => {
-                call.title.len()
-                    + call
-                        .raw_input
-                        .as_ref()
-                        .map(|raw_input| raw_input.display_byte_len())
-                        .unwrap_or(0)
-                    + call
-                        .raw_output
-                        .as_ref()
-                        .map(|raw_output| raw_output.display_byte_len())
-                        .unwrap_or(0)
-                    + call
-                        .content
-                        .iter()
-                        .map(acp_tool_call_content_byte_len)
-                        .sum::<usize>()
+                runtime_tool_activity_source_byte_len(call)
                     + self
                         .terminal_snapshots
                         .values()
                         .map(|snapshot| snapshot.output.len())
                         .sum::<usize>()
             }
+            ToolResultBody::Exploration(calls) => calls
+                .iter()
+                .map(runtime_tool_activity_source_byte_len)
+                .sum(),
         }
     }
 
@@ -297,6 +329,16 @@ impl ToolResultItem {
         }
 
         self.render_mode = render_mode;
+        self.refresh_render_cache_key();
+        true
+    }
+
+    pub(crate) fn mark_exploration_complete(&mut self) -> bool {
+        if !matches!(self.body, ToolResultBody::Exploration(_)) || !self.exploration_open {
+            return false;
+        }
+
+        self.exploration_open = false;
         self.refresh_render_cache_key();
         true
     }
@@ -369,41 +411,35 @@ impl ToolResultItem {
         update: impl Into<RuntimeToolActivityUpdate>,
     ) -> bool {
         let update = update.into();
-        let ToolResultBody::RuntimeToolActivity(call) = &mut self.body else {
-            return false;
-        };
-        if call.activity_id != update.activity_id {
-            return false;
-        }
-
-        if let Some(title) = update.title {
-            call.title = title;
-        }
-        if let Some(kind) = update.kind {
-            call.kind = kind;
-        }
-        if let Some(status) = update.status {
-            call.status = status;
-            if status != RuntimeToolActivityStatus::Pending {
-                self.permission_waiting = false;
+        match &mut self.body {
+            ToolResultBody::RuntimeToolActivity(call) => {
+                if call.activity_id != update.activity_id {
+                    return false;
+                }
+                apply_runtime_tool_activity_update(
+                    call,
+                    update,
+                    &mut self.permission_waiting,
+                    &mut self.terminal_snapshots,
+                );
             }
-        }
-        if let Some(content) = update.content {
-            call.content = content;
-            self.terminal_snapshots.retain(|terminal_id, _| {
-                call.content.iter().any(|content| {
-                    matches!(content, RuntimeToolActivityContent::Terminal { terminal_id: content_terminal_id } if content_terminal_id == terminal_id)
-                })
-            });
-        }
-        if let Some(locations) = update.locations {
-            call.locations = locations;
-        }
-        if let Some(raw_input) = update.raw_input {
-            call.raw_input = Some(raw_input);
-        }
-        if let Some(raw_output) = update.raw_output {
-            call.raw_output = Some(raw_output);
+            ToolResultBody::Exploration(calls) => {
+                let Some(call) = calls
+                    .iter_mut()
+                    .find(|call| call.activity_id == update.activity_id)
+                else {
+                    return false;
+                };
+                let mut permission_waiting = false;
+                let mut terminal_snapshots = BTreeMap::new();
+                apply_runtime_tool_activity_update(
+                    call,
+                    update,
+                    &mut permission_waiting,
+                    &mut terminal_snapshots,
+                );
+            }
+            ToolResultBody::Approval { .. } => return false,
         }
         self.refresh_active_marker_started_at();
         self.refresh_render_cache_key();
@@ -411,19 +447,40 @@ impl ToolResultItem {
     }
 
     pub(crate) fn mark_acp_tool_call_failed(&mut self, message: impl Into<String>) -> bool {
-        let ToolResultBody::RuntimeToolActivity(call) = &mut self.body else {
-            return false;
-        };
-        if matches!(
-            call.status,
-            RuntimeToolActivityStatus::Completed | RuntimeToolActivityStatus::Failed
-        ) {
-            return false;
-        }
+        let message = message.into();
+        match &mut self.body {
+            ToolResultBody::RuntimeToolActivity(call) => {
+                if matches!(
+                    call.status,
+                    RuntimeToolActivityStatus::Completed | RuntimeToolActivityStatus::Failed
+                ) {
+                    return false;
+                }
 
-        call.status = RuntimeToolActivityStatus::Failed;
-        call.content = vec![RuntimeToolActivityContent::Text(message.into())];
-        self.permission_waiting = false;
+                call.status = RuntimeToolActivityStatus::Failed;
+                call.content = vec![RuntimeToolActivityContent::Text(message)];
+                self.permission_waiting = false;
+            }
+            ToolResultBody::Exploration(calls) => {
+                let mut changed = false;
+                for call in calls.iter_mut() {
+                    if matches!(
+                        call.status,
+                        RuntimeToolActivityStatus::Completed | RuntimeToolActivityStatus::Failed
+                    ) {
+                        continue;
+                    }
+
+                    call.status = RuntimeToolActivityStatus::Failed;
+                    call.content = vec![RuntimeToolActivityContent::Text(message.clone())];
+                    changed = true;
+                }
+                if !changed {
+                    return false;
+                }
+            }
+            ToolResultBody::Approval { .. } => return false,
+        }
         self.active_marker_started_at = None;
         self.refresh_render_cache_key();
         true
@@ -468,6 +525,104 @@ impl ToolResultItem {
             .enumerate()
             .flat_map(|(logical_line, content_line)| {
                 self.wrap_logical_line(content_line, logical_line, width, palette)
+            })
+            .collect()
+    }
+
+    fn exploration_styled_lines_at(
+        &self,
+        calls: &[RuntimeToolActivity],
+        width: u16,
+        palette: TerminalPalette,
+        now: Instant,
+    ) -> Vec<Line<'static>> {
+        let width = usize::from(width.max(1));
+        let mut display_lines = exploration_display_lines(calls);
+        coalesce_adjacent_target_display_lines(&mut display_lines);
+        if display_lines.is_empty() {
+            return Vec::new();
+        }
+
+        let active_started_at = self.active_marker_started_at.filter(|_| {
+            calls.iter().any(|call| {
+                matches!(
+                    call.status,
+                    RuntimeToolActivityStatus::Pending | RuntimeToolActivityStatus::InProgress
+                )
+            })
+        });
+        let marker_visible = active_started_at
+            .map(|started_at| active_marker_visible_at(started_at, now))
+            .unwrap_or(true);
+        let has_failed = calls
+            .iter()
+            .any(|call| call.status == RuntimeToolActivityStatus::Failed);
+        let marker_color = if active_started_at.is_some() || self.exploration_open {
+            palette.main
+        } else if has_failed {
+            palette.approval_rejected
+        } else {
+            palette.quote
+        };
+        let marker_style = style_for_color(marker_color).add_modifier(Modifier::BOLD);
+        let title = if active_started_at.is_some() {
+            "Exploring"
+        } else {
+            "Explored"
+        };
+        let marker_text = if marker_visible {
+            TOOL_EXPLORATION_PREFIX
+        } else {
+            TOOL_RESULT_CONTINUATION_PREFIX
+        };
+        let mut lines = vec![Line::from(vec![
+            Span::styled(marker_text, marker_style),
+            Span::styled(title, Style::new().add_modifier(Modifier::BOLD)),
+        ])];
+
+        for (index, display_line) in display_lines.iter().enumerate() {
+            let line_prefix = if index == 0 {
+                TOOL_EXPLORATION_BRANCH_PREFIX
+            } else {
+                TOOL_EXPLORATION_CHILD_PREFIX
+            };
+            lines.extend(wrap_exploration_display_line(
+                display_line,
+                line_prefix,
+                TOOL_EXPLORATION_CHILD_PREFIX,
+                width,
+                palette,
+            ));
+        }
+        lines.extend(self.failed_exploration_detail_lines(calls, width, palette));
+
+        lines
+    }
+
+    fn failed_exploration_detail_lines(
+        &self,
+        calls: &[RuntimeToolActivity],
+        width: usize,
+        palette: TerminalPalette,
+    ) -> Vec<Line<'static>> {
+        let prefix_width = UnicodeWidthStr::width(TOOL_EXPLORATION_CHILD_PREFIX);
+        let detail_width = width.saturating_sub(prefix_width).max(1);
+        calls
+            .iter()
+            .filter(|call| call.status == RuntimeToolActivityStatus::Failed)
+            .flat_map(|call| {
+                acp_tool_call_detail_blocks(
+                    call,
+                    self.render_mode,
+                    self.permission_waiting,
+                    &self.terminal_snapshots,
+                )
+            })
+            .flat_map(|block| self.wrap_acp_detail_block(&block, detail_width, palette))
+            .map(|mut line| {
+                line.spans
+                    .insert(0, Span::raw(TOOL_EXPLORATION_CHILD_PREFIX));
+                line
             })
             .collect()
     }
@@ -644,6 +799,7 @@ impl ToolResultItem {
         chunks.extend(self.acp_tool_call_title_chunks(call, palette));
 
         if !is_acp_read_tool_call(call)
+            && !is_list_dir_tool_call(call)
             && !acp_tool_call_has_diff_content(call)
             && let Some(locations) = acp_tool_call_location_suffix(&call.locations)
         {
@@ -674,6 +830,10 @@ impl ToolResultItem {
 
         if is_acp_write_tool_call(call) {
             return acp_write_tool_call_title_chunks(call);
+        }
+
+        if is_list_dir_tool_call(call) {
+            return list_dir_tool_call_title_chunks(call);
         }
 
         let title = acp_tool_call_display_title(call);
@@ -868,6 +1028,18 @@ impl ToolResultItem {
             ToolResultBody::RuntimeToolActivity(call) => {
                 acp_tool_call_status_color(call.status, palette)
             }
+            ToolResultBody::Exploration(calls) => {
+                if self.exploration_open {
+                    palette.main
+                } else if calls
+                    .iter()
+                    .any(|call| call.status == RuntimeToolActivityStatus::Failed)
+                {
+                    palette.approval_rejected
+                } else {
+                    palette.quote
+                }
+            }
         };
 
         if color == Color::Reset {
@@ -881,6 +1053,7 @@ impl ToolResultItem {
         self.render_cache_key = tool_result_render_cache_key(
             &self.body,
             self.render_mode,
+            self.exploration_open,
             self.approval_suspended,
             self.permission_waiting,
             &self.terminal_snapshots,
@@ -1000,13 +1173,232 @@ fn split_first_word(line: &str) -> Option<(&str, &str)> {
     Some((&line[..index], &line[index..]))
 }
 
+#[derive(Debug, Clone)]
+struct ExplorationDisplayLine {
+    action: &'static str,
+    chunks: Vec<HighlightChunk>,
+}
+
+fn is_groupable_exploration_tool_call(call: &RuntimeToolActivity) -> bool {
+    call.status != RuntimeToolActivityStatus::Failed
+        && exploration_display_line_for_call(call).is_some()
+}
+
+fn exploration_display_lines(calls: &[RuntimeToolActivity]) -> Vec<ExplorationDisplayLine> {
+    calls
+        .iter()
+        .filter_map(exploration_display_line_for_call)
+        .collect()
+}
+
+fn exploration_display_line_for_call(call: &RuntimeToolActivity) -> Option<ExplorationDisplayLine> {
+    if is_acp_read_tool_call(call) {
+        return Some(ExplorationDisplayLine {
+            action: "Read",
+            chunks: title_detail_chunks(acp_read_tool_call_title_chunks(call), "Read"),
+        });
+    }
+
+    if is_list_dir_tool_call(call) {
+        return Some(ExplorationDisplayLine {
+            action: "List",
+            chunks: title_detail_chunks(list_dir_tool_call_title_chunks(call), "List"),
+        });
+    }
+
+    if call.kind == RuntimeToolKind::Search {
+        return Some(ExplorationDisplayLine {
+            action: "Search",
+            chunks: search_tool_call_detail_chunks(call),
+        });
+    }
+
+    None
+}
+
+fn title_detail_chunks(
+    mut title_chunks: Vec<HighlightChunk>,
+    action: &'static str,
+) -> Vec<HighlightChunk> {
+    if title_chunks
+        .first()
+        .is_some_and(|chunk| chunk.text.as_str() == action)
+    {
+        title_chunks.remove(0);
+    }
+    if let Some(first) = title_chunks.first_mut() {
+        first.text = first.text.trim_start().to_string();
+    }
+    title_chunks.retain(|chunk| !chunk.text.is_empty());
+    title_chunks
+}
+
+fn search_tool_call_detail_chunks(call: &RuntimeToolActivity) -> Vec<HighlightChunk> {
+    let title = acp_tool_call_display_title(call);
+    let detail = title
+        .strip_prefix("Search:")
+        .or_else(|| title.strip_prefix("Search "))
+        .map(str::trim)
+        .unwrap_or_else(|| title.trim());
+    if detail.is_empty() || detail == "Search" {
+        return Vec::new();
+    }
+
+    vec![HighlightChunk {
+        text: detail.to_string(),
+        style: Style::new(),
+    }]
+}
+
+fn coalesce_adjacent_target_display_lines(lines: &mut Vec<ExplorationDisplayLine>) {
+    let mut coalesced: Vec<ExplorationDisplayLine> = Vec::with_capacity(lines.len());
+    for line in lines.drain(..) {
+        if is_target_list_action(line.action)
+            && let Some(previous) = coalesced.last_mut()
+            && previous.action == line.action
+        {
+            previous.chunks.push(HighlightChunk {
+                text: ", ".to_string(),
+                style: Style::new(),
+            });
+            previous.chunks.extend(line.chunks);
+            continue;
+        }
+
+        coalesced.push(line);
+    }
+
+    *lines = coalesced;
+}
+
+fn is_target_list_action(action: &str) -> bool {
+    matches!(action, "Read" | "List")
+}
+
+fn wrap_exploration_display_line(
+    display_line: &ExplorationDisplayLine,
+    line_prefix: &'static str,
+    continuation_prefix: &'static str,
+    width: usize,
+    palette: TerminalPalette,
+) -> Vec<Line<'static>> {
+    let prefix_width = UnicodeWidthStr::width(line_prefix);
+    let content_width = width.saturating_sub(prefix_width).max(1);
+    let mut chunks = vec![HighlightChunk {
+        text: display_line.action.to_string(),
+        style: style_for_color(palette.command_accent).add_modifier(Modifier::BOLD),
+    }];
+    if !display_line.chunks.is_empty() {
+        chunks.push(HighlightChunk {
+            text: " ".to_string(),
+            style: Style::new(),
+        });
+        chunks.extend(display_line.chunks.clone());
+    }
+
+    let wrapped = wrap_highlight_chunks(&[chunks], content_width);
+    if wrapped.is_empty() {
+        return vec![Line::from(vec![Span::styled(
+            line_prefix,
+            style_for_color(palette.tertiary),
+        )])];
+    }
+
+    wrapped
+        .into_iter()
+        .enumerate()
+        .map(|(index, content_spans)| {
+            let prefix = if index == 0 {
+                line_prefix
+            } else {
+                continuation_prefix
+            };
+            let mut spans = Vec::with_capacity(content_spans.len() + 1);
+            spans.push(Span::styled(prefix, style_for_color(palette.tertiary)));
+            spans.extend(content_spans);
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn runtime_tool_activity_source_byte_len(call: &RuntimeToolActivity) -> usize {
+    call.title.len()
+        + call
+            .raw_input
+            .as_ref()
+            .map(|raw_input| raw_input.display_byte_len())
+            .unwrap_or(0)
+        + call
+            .raw_output
+            .as_ref()
+            .map(|raw_output| raw_output.display_byte_len())
+            .unwrap_or(0)
+        + call
+            .content
+            .iter()
+            .map(acp_tool_call_content_byte_len)
+            .sum::<usize>()
+}
+
+fn apply_runtime_tool_activity_update(
+    call: &mut RuntimeToolActivity,
+    update: RuntimeToolActivityUpdate,
+    permission_waiting: &mut bool,
+    terminal_snapshots: &mut BTreeMap<String, RuntimeTerminalSnapshot>,
+) {
+    if let Some(title) = update.title {
+        call.title = title;
+    }
+    if let Some(kind) = update.kind {
+        call.kind = kind;
+    }
+    if let Some(status) = update.status {
+        call.status = status;
+        if status != RuntimeToolActivityStatus::Pending {
+            *permission_waiting = false;
+        }
+    }
+    if let Some(content) = update.content {
+        call.content = content;
+        terminal_snapshots.retain(|terminal_id, _| {
+            call.content.iter().any(|content| {
+                matches!(content, RuntimeToolActivityContent::Terminal { terminal_id: content_terminal_id } if content_terminal_id == terminal_id)
+            })
+        });
+    }
+    if let Some(locations) = update.locations {
+        call.locations = locations;
+    }
+    if let Some(raw_input) = update.raw_input {
+        call.raw_input = Some(raw_input);
+    }
+    if let Some(raw_output) = update.raw_output {
+        call.raw_output = Some(raw_output);
+    }
+}
+
 fn active_marker_started_at_for_body(
     body: &ToolResultBody,
     terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
 ) -> bool {
-    let ToolResultBody::RuntimeToolActivity(call) = body else {
-        return false;
-    };
+    match body {
+        ToolResultBody::RuntimeToolActivity(call) => {
+            active_marker_started_at_for_call(call, terminal_snapshots)
+        }
+        ToolResultBody::Exploration(calls) => calls.iter().any(|call| {
+            matches!(
+                call.status,
+                RuntimeToolActivityStatus::Pending | RuntimeToolActivityStatus::InProgress
+            )
+        }),
+        ToolResultBody::Approval { .. } => false,
+    }
+}
+
+fn active_marker_started_at_for_call(
+    call: &RuntimeToolActivity,
+    terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
+) -> bool {
     if !matches!(
         call.status,
         RuntimeToolActivityStatus::Pending | RuntimeToolActivityStatus::InProgress
@@ -1034,6 +1426,7 @@ fn active_marker_started_at_for_body(
 fn tool_result_render_cache_key(
     body: &ToolResultBody,
     render_mode: ToolActivityRenderMode,
+    exploration_open: bool,
     approval_suspended: bool,
     permission_waiting: bool,
     terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
@@ -1041,6 +1434,7 @@ fn tool_result_render_cache_key(
     let mut hasher = DefaultHasher::new();
     "tool_result".hash(&mut hasher);
     render_mode.hash(&mut hasher);
+    exploration_open.hash(&mut hasher);
     approval_suspended.hash(&mut hasher);
     permission_waiting.hash(&mut hasher);
     terminal_snapshots.hash(&mut hasher);
@@ -1671,6 +2065,194 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(rendered_plain, vec!["● Read Temp.md".to_string()]);
+    }
+
+    #[test]
+    fn list_dir_root_renders_compact_summary_without_content_details() {
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-list".to_string(),
+                title: "List Directory".to_string(),
+                kind: RuntimeToolKind::Search,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Text(
+                    "Cargo.toml\ncrates/\nsrc/".to_string(),
+                )],
+                locations: Vec::new(),
+                raw_input: Some(serde_json::json!({ "path": "." }).into()),
+                raw_output: Some("Cargo.toml\ncrates/\nsrc/".into()),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered_plain, vec!["● List .".to_string()]);
+    }
+
+    #[test]
+    fn list_dir_subpath_renders_without_dot_slash_prefix() {
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-list".to_string(),
+                title: "List Directory ./src".to_string(),
+                kind: RuntimeToolKind::Search,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Text(
+                    "lib.rs\ntool_result.rs".to_string(),
+                )],
+                locations: vec![RuntimeToolActivityLocation {
+                    path: "./src".to_string(),
+                    line: None,
+                }],
+                raw_input: Some(serde_json::json!({ "path": "./src" }).into()),
+                raw_output: Some("lib.rs\ntool_result.rs".into()),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered_plain, vec!["● List src".to_string()]);
+    }
+
+    #[test]
+    fn list_dir_absolute_subpath_renders_relative_to_current_dir() {
+        let absolute_path = std::env::current_dir()
+            .expect("test should run inside the workspace")
+            .join("src");
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-list".to_string(),
+                title: format!("List Directory {}", absolute_path.display()),
+                kind: RuntimeToolKind::Search,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Text(
+                    "lib.rs\ntool_result.rs".to_string(),
+                )],
+                locations: vec![RuntimeToolActivityLocation {
+                    path: absolute_path.display().to_string(),
+                    line: None,
+                }],
+                raw_input: Some(serde_json::json!({ "path": absolute_path }).into()),
+                raw_output: Some("lib.rs\ntool_result.rs".into()),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered_plain, vec!["● List src".to_string()]);
+    }
+
+    #[test]
+    fn list_dir_absolute_path_outside_current_dir_shortens_home_prefix() {
+        let Some(home_dir) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let absolute_path = home_dir.join("other-project");
+        if std::env::current_dir()
+            .ok()
+            .is_some_and(|cwd| absolute_path.starts_with(cwd))
+        {
+            return;
+        }
+
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-list".to_string(),
+                title: format!("List Directory {}", absolute_path.display()),
+                kind: RuntimeToolKind::Search,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Text("README.md".to_string())],
+                locations: vec![RuntimeToolActivityLocation {
+                    path: absolute_path.display().to_string(),
+                    line: None,
+                }],
+                raw_input: Some(serde_json::json!({ "path": absolute_path }).into()),
+                raw_output: Some("README.md".into()),
+            },
+            ToolActivityRenderMode::Compact,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec![format!(
+                "● List ~{}other-project",
+                std::path::MAIN_SEPARATOR
+            )]
+        );
+    }
+
+    #[test]
+    fn list_dir_detailed_mode_keeps_transcript_summary_compact() {
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-list".to_string(),
+                title: "List Directory src".to_string(),
+                kind: RuntimeToolKind::Search,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Text(
+                    "lib.rs\ntool_result.rs".to_string(),
+                )],
+                locations: vec![RuntimeToolActivityLocation {
+                    path: "src".to_string(),
+                    line: None,
+                }],
+                raw_input: Some(serde_json::json!({ "path": "src" }).into()),
+                raw_output: Some("lib.rs\ntool_result.rs".into()),
+            },
+            ToolActivityRenderMode::Detailed,
+        );
+        let rendered_plain = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered_plain, vec!["● List src".to_string()]);
+    }
+
+    #[test]
+    fn completed_open_exploration_group_uses_main_marker_color() {
+        let palette = default_palette();
+        let mut item = ToolResultItem::from_exploration_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-list".to_string(),
+                title: "List Directory crates".to_string(),
+                kind: RuntimeToolKind::Search,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Text("tui/".to_string())],
+                locations: Vec::new(),
+                raw_input: Some(serde_json::json!({ "path": "crates" }).into()),
+                raw_output: Some("tui/".into()),
+            },
+            ToolActivityRenderMode::Compact,
+        )
+        .expect("list_dir should be an exploration tool activity");
+
+        let lines = item.render_lines(80, palette);
+
+        assert_eq!(line_to_plain_text(&lines[0]), "● Explored");
+        assert_eq!(lines[0].spans[0].style.fg, Some(palette.main));
+
+        assert!(item.mark_exploration_complete());
+        let completed_lines = item.render_lines(80, palette);
+        assert_eq!(completed_lines[0].spans[0].style.fg, Some(palette.quote));
     }
 
     #[test]

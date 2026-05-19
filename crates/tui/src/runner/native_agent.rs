@@ -25,6 +25,14 @@ pub(super) fn apply_native_agent_event(
             target,
             is_thinking,
         },
+        NativeAgentEvent::AssistantDelta { content } => RuntimeEvent::AssistantDelta {
+            target: target.expect("native agent target should be available for assistant delta"),
+            content,
+        },
+        NativeAgentEvent::ReasoningDelta { content } => RuntimeEvent::ReasoningDelta {
+            target: target.expect("native agent target should be available for reasoning delta"),
+            content,
+        },
         NativeAgentEvent::ToolActivityStarted { activity } => RuntimeEvent::ToolActivityStarted {
             target: target.expect("native agent target should be available for tool activity"),
             activity,

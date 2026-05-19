@@ -114,6 +114,31 @@ async fn builtin_list_dir_tool_can_be_registered_independently() {
 }
 
 #[tokio::test]
+async fn builtin_list_dir_omits_gitignored_entries_by_default() {
+    let root = temp_root("builtin-list-dir-gitignore");
+    fs::write(root.join(".gitignore"), "target/\n*.tmp\n").expect("write gitignore");
+    fs::create_dir(root.join("src")).expect("create src dir");
+    fs::create_dir(root.join("target")).expect("create ignored target dir");
+    fs::write(root.join(".hidden"), "hidden\n").expect("write hidden fixture");
+    fs::write(root.join("scratch.tmp"), "ignored\n").expect("write ignored tmp fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new("call-1", "list_dir", serde_json::json!({ "path": "." })),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error);
+    assert!(result.content.contains(".hidden"));
+    assert!(result.content.contains("src/"));
+    assert!(!result.content.contains("target/"));
+    assert!(!result.content.contains("scratch.tmp"));
+    cleanup(&root);
+}
+
+#[tokio::test]
 async fn builtin_list_dir_rejects_arguments_outside_schema_before_execution() {
     let root = temp_root("builtin-list-dir-schema-extra");
     fs::write(root.join("Cargo.toml"), "[package]\n").expect("write fixture");

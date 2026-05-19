@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::BTreeMap,
+    env,
+    path::{Component, Path, PathBuf},
+    time::Instant,
+};
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -9,6 +14,7 @@ use crate::{
     theme::TerminalPalette,
     transcript::markdown_highlight::HighlightChunk,
 };
+use mo_core::envinfo::shorten_home_prefix;
 use mo_core::session::{
     RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
     RuntimeToolActivityLocation, RuntimeToolActivityStatus, RuntimeToolKind,
@@ -67,6 +73,9 @@ pub(super) fn acp_tool_call_detail_blocks(
         return Vec::new();
     }
     if should_collapse_acp_write_tool_call(call) {
+        return Vec::new();
+    }
+    if should_collapse_list_dir_tool_call(call) {
         return Vec::new();
     }
 
@@ -667,6 +676,20 @@ pub(super) fn acp_write_tool_call_title_chunks(call: &RuntimeToolActivity) -> Ve
     ]
 }
 
+pub(super) fn list_dir_tool_call_title_chunks(call: &RuntimeToolActivity) -> Vec<HighlightChunk> {
+    let title_style = Style::new().add_modifier(Modifier::BOLD);
+    vec![
+        HighlightChunk {
+            text: "List".to_string(),
+            style: title_style,
+        },
+        HighlightChunk {
+            text: format!(" {}", list_dir_tool_call_target(call)),
+            style: Style::new(),
+        },
+    ]
+}
+
 fn acp_read_tool_call_target(call: &RuntimeToolActivity) -> Option<String> {
     if call.kind == RuntimeToolKind::Read
         && let [location] = call.locations.as_slice()
@@ -696,8 +719,100 @@ pub(super) fn is_acp_read_tool_call(call: &RuntimeToolActivity) -> bool {
     call.kind == RuntimeToolKind::Read || acp_read_tool_call_title_target(&call.title).is_some()
 }
 
+pub(super) fn is_list_dir_tool_call(call: &RuntimeToolActivity) -> bool {
+    let title = call.title.trim();
+    call.kind == RuntimeToolKind::Search
+        && (title == "List Directory" || title.starts_with("List Directory "))
+}
+
 fn should_collapse_acp_read_tool_call(call: &RuntimeToolActivity) -> bool {
     is_acp_read_tool_call(call) && call.status != RuntimeToolActivityStatus::Failed
+}
+
+fn should_collapse_list_dir_tool_call(call: &RuntimeToolActivity) -> bool {
+    is_list_dir_tool_call(call) && call.status != RuntimeToolActivityStatus::Failed
+}
+
+fn list_dir_tool_call_target(call: &RuntimeToolActivity) -> String {
+    let target = call
+        .raw_input
+        .as_ref()
+        .and_then(|raw_input| raw_input.string_field(&["path"]))
+        .or_else(|| {
+            let title = call.title.trim();
+            title
+                .strip_prefix("List Directory ")
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            let [location] = call.locations.as_slice() else {
+                return None;
+            };
+            (!location.path.trim().is_empty()).then(|| location.path.clone())
+        })
+        .unwrap_or_else(|| ".".to_string());
+
+    list_dir_display_path(&target)
+}
+
+fn list_dir_display_path(path: &str) -> String {
+    let path = path.trim();
+    if path.is_empty() || path == "." {
+        return ".".to_string();
+    }
+
+    let path_ref = Path::new(path);
+    if !path_ref.is_absolute() {
+        return relative_display_path(path_ref);
+    }
+
+    if let Ok(cwd) = env::current_dir() {
+        if path_ref == cwd {
+            return ".".to_string();
+        }
+        if let Ok(stripped) = path_ref.strip_prefix(cwd)
+            && !stripped.as_os_str().is_empty()
+        {
+            return relative_display_path(stripped);
+        }
+    }
+
+    detect_home_dir()
+        .map(|home_dir| shorten_home_prefix(path_ref, &home_dir))
+        .unwrap_or_else(|| path_ref.display().to_string())
+}
+
+fn relative_display_path(path: &Path) -> String {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => normalized.push(".."),
+            Component::RootDir | Component::Prefix(_) => normalized.push(component.as_os_str()),
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        normalized.display().to_string()
+    }
+}
+
+fn detect_home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+        .or_else(|| {
+            let home_drive = env::var_os("HOMEDRIVE")?;
+            let home_path = env::var_os("HOMEPATH")?;
+            let mut path = PathBuf::from(home_drive);
+            path.push(home_path);
+            Some(path)
+        })
 }
 
 pub(super) fn acp_tool_call_diff_line_style(

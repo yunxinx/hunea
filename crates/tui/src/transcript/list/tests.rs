@@ -14,6 +14,11 @@ use crate::{
     theme::{default_palette, terminal_default_palette},
 };
 use mo_core::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
+use mo_core::session::{
+    RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityStatus,
+    RuntimeToolActivityUpdate, RuntimeToolKind,
+};
+use ratatui::style::Color;
 
 #[test]
 fn render_returns_content_lines_and_line_count() {
@@ -172,6 +177,248 @@ fn tool_activity_uses_compact_and_detailed_rendering_modes() {
     let detailed = transcript.plain_items().join("\n");
     assert!(detailed.contains("line 7"));
     assert!(!detailed.contains("ctrl + t to view transcript"));
+}
+
+#[test]
+fn exploration_tool_activities_coalesce_into_single_transcript_item() {
+    let mut transcript = Transcript::new(default_palette());
+
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-list-root".to_string(),
+        title: "List Directory".to_string(),
+        kind: RuntimeToolKind::Search,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text(
+            "Cargo.toml\ncrates/\ndocs/".to_string(),
+        )],
+        locations: Vec::new(),
+        raw_input: Some(serde_json::json!({ "path": "." }).into()),
+        raw_output: Some("Cargo.toml\ncrates/\ndocs/".into()),
+    });
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-read-cargo".to_string(),
+        title: "Read Cargo.toml".to_string(),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text(
+            "[package]\nname = \"lumos\"".to_string(),
+        )],
+        locations: Vec::new(),
+        raw_input: Some(serde_json::json!({ "path": "Cargo.toml" }).into()),
+        raw_output: Some("[package]\nname = \"lumos\"".into()),
+    });
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-list-crates".to_string(),
+        title: "List Directory ./crates".to_string(),
+        kind: RuntimeToolKind::Search,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text(
+            "app/\ncore/\ntui/".to_string(),
+        )],
+        locations: Vec::new(),
+        raw_input: Some(serde_json::json!({ "path": "./crates" }).into()),
+        raw_output: Some("app/\ncore/\ntui/".into()),
+    });
+
+    assert_eq!(
+        transcript.plain_items(),
+        vec!["● Explored\n  └ List .\n    Read Cargo.toml\n    List crates".to_string()]
+    );
+    assert_eq!(transcript.item_metrics_index().line_count, 4);
+}
+
+#[test]
+fn exploration_group_keeps_activity_ids_and_coalesces_adjacent_reads() {
+    let mut transcript = Transcript::new(default_palette());
+
+    let search_index = transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-search".to_string(),
+        title: "Search shimmer_spans in crates/tui".to_string(),
+        kind: RuntimeToolKind::Search,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text(
+            "crates/tui/src/shimmer.rs:12:shimmer_spans".to_string(),
+        )],
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: Some("crates/tui/src/shimmer.rs:12:shimmer_spans".into()),
+    });
+    let first_read_index = transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-read-shimmer".to_string(),
+        title: "Read shimmer.rs".to_string(),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text(
+            "pub fn shimmer() {}".to_string(),
+        )],
+        locations: Vec::new(),
+        raw_input: Some(serde_json::json!({ "path": "shimmer.rs" }).into()),
+        raw_output: Some("pub fn shimmer() {}".into()),
+    });
+    let second_read_index = transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-read-status".to_string(),
+        title: "Read status_indicator_widget.rs".to_string(),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text(
+            "pub fn status_indicator() {}".to_string(),
+        )],
+        locations: Vec::new(),
+        raw_input: Some(serde_json::json!({ "path": "status_indicator_widget.rs" }).into()),
+        raw_output: Some("pub fn status_indicator() {}".into()),
+    });
+
+    assert_eq!(search_index, 0);
+    assert_eq!(first_read_index, 0);
+    assert_eq!(second_read_index, 0);
+    assert_eq!(
+        transcript.runtime_tool_activity_index("call-read-status"),
+        Some(0)
+    );
+
+    transcript.update_runtime_tool_activity(
+        0,
+        RuntimeToolActivityUpdate {
+            activity_id: "call-read-status".to_string(),
+            title: Some("Read status.rs".to_string()),
+            raw_input: Some(serde_json::json!({ "path": "status.rs" }).into()),
+            ..RuntimeToolActivityUpdate::default()
+        },
+    );
+
+    assert_eq!(
+        transcript.plain_items(),
+        vec![
+            "● Explored\n  └ Search shimmer_spans in crates/tui\n    Read shimmer.rs, status.rs"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn exploration_group_coalesces_adjacent_lists() {
+    let mut transcript = Transcript::new(default_palette());
+
+    for path in ["crates", "docs", ".docs", ".agents", ".lumos"] {
+        transcript.append_runtime_tool_activity(RuntimeToolActivity {
+            activity_id: format!("call-list-{path}"),
+            title: format!("List Directory {path}"),
+            kind: RuntimeToolKind::Search,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Text("entry".to_string())],
+            locations: Vec::new(),
+            raw_input: Some(serde_json::json!({ "path": path }).into()),
+            raw_output: Some("entry".into()),
+        });
+    }
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-read-cargo".to_string(),
+        title: "Read Cargo.toml".to_string(),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text("[package]".to_string())],
+        locations: Vec::new(),
+        raw_input: Some(serde_json::json!({ "path": "Cargo.toml" }).into()),
+        raw_output: Some("[package]".into()),
+    });
+    for path in ["crates/core", "crates/core/src"] {
+        transcript.append_runtime_tool_activity(RuntimeToolActivity {
+            activity_id: format!("call-list-{path}"),
+            title: format!("List Directory {path}"),
+            kind: RuntimeToolKind::Search,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Text("entry".to_string())],
+            locations: Vec::new(),
+            raw_input: Some(serde_json::json!({ "path": path }).into()),
+            raw_output: Some("entry".into()),
+        });
+    }
+
+    assert_eq!(
+        transcript.plain_items(),
+        vec![
+            "● Explored\n  └ List crates, docs, .docs, .agents, .lumos\n    Read Cargo.toml\n    List crates/core, crates/core/src"
+                .to_string()
+        ]
+    );
+    assert_eq!(transcript.item_metrics_index().line_count, 4);
+}
+
+#[test]
+fn appending_message_closes_completed_exploration_group() {
+    let palette = default_palette();
+    let mut transcript = Transcript::new(palette);
+
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-list-src".to_string(),
+        title: "List Directory src".to_string(),
+        kind: RuntimeToolKind::Search,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text(
+            "main.rs\nlib.rs".to_string(),
+        )],
+        locations: Vec::new(),
+        raw_input: Some(serde_json::json!({ "path": "src" }).into()),
+        raw_output: Some("main.rs\nlib.rs".into()),
+    });
+
+    assert_eq!(tool_result_marker_color(&transcript, 0), Some(palette.main));
+
+    transcript.append_message(Sender::Assistant, "接着分析。");
+
+    assert_eq!(
+        tool_result_marker_color(&transcript, 0),
+        Some(palette.quote)
+    );
+}
+
+#[test]
+fn appending_non_exploration_tool_activity_closes_previous_exploration_group() {
+    let palette = default_palette();
+    let mut transcript = Transcript::new(palette);
+
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-read-cargo".to_string(),
+        title: "Read Cargo.toml".to_string(),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text("[package]".to_string())],
+        locations: Vec::new(),
+        raw_input: Some(serde_json::json!({ "path": "Cargo.toml" }).into()),
+        raw_output: Some("[package]".into()),
+    });
+
+    assert_eq!(tool_result_marker_color(&transcript, 0), Some(palette.main));
+
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-shell".to_string(),
+        title: "Shell: cargo check".to_string(),
+        kind: RuntimeToolKind::Other,
+        status: RuntimeToolActivityStatus::InProgress,
+        content: Vec::new(),
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+    });
+
+    assert_eq!(
+        tool_result_marker_color(&transcript, 0),
+        Some(palette.quote)
+    );
+}
+
+fn tool_result_marker_color(transcript: &Transcript, item_index: usize) -> Option<Color> {
+    let palette = default_palette();
+    let items = transcript.items_snapshot();
+    let item = items.get(item_index)?;
+    let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+        return None;
+    };
+    tool_result
+        .render_lines(80, palette)
+        .first()
+        .and_then(|line| line.spans.first())
+        .and_then(|span| span.style.fg)
 }
 
 #[test]

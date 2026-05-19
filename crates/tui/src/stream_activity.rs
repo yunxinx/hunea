@@ -101,6 +101,12 @@ impl Model {
         }
 
         self.stream_activity = None;
+        if self
+            .transcript_mut()
+            .mark_exploration_tool_activities_complete()
+        {
+            self.sync_transcript_render();
+        }
         self.reset_chat_interrupt_esc_count();
         self.bump_status_line_revision();
         self.sync_composer_height();
@@ -605,7 +611,10 @@ mod tests {
     use ratatui::style::Modifier;
 
     use super::*;
-    use crate::{HeroOptions, theme::default_palette};
+    use crate::{HeroOptions, theme::default_palette, transcript::TranscriptItem};
+    use mo_core::session::{
+        RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityStatus, RuntimeToolKind,
+    };
 
     #[test]
     fn stream_activity_tail_cache_key_changes_when_elapsed_text_changes() {
@@ -675,6 +684,49 @@ mod tests {
                 .collect::<Vec<_>>(),
             "shimmer styles should advance while the visible text stays stable"
         );
+    }
+
+    #[test]
+    fn clear_stream_activity_completes_open_exploration_marker() {
+        let palette = default_palette();
+        let mut model = Model::new(HeroOptions::default());
+        model.set_palette(palette, true);
+        model.show_stream_activity_with_header("Working");
+        model.append_runtime_tool_activity_from_runtime(RuntimeToolActivity {
+            activity_id: "call-list".to_string(),
+            title: "List Directory crates".to_string(),
+            kind: RuntimeToolKind::Search,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Text("tui/".to_string())],
+            locations: Vec::new(),
+            raw_input: Some(serde_json::json!({ "path": "crates" }).into()),
+            raw_output: Some("tui/".into()),
+        });
+
+        assert_eq!(
+            first_tool_result_marker_color(&mut model),
+            Some(palette.main)
+        );
+
+        model.clear_stream_activity();
+
+        assert_eq!(
+            first_tool_result_marker_color(&mut model),
+            Some(palette.quote)
+        );
+    }
+
+    fn first_tool_result_marker_color(model: &mut Model) -> Option<ratatui::style::Color> {
+        let palette = model.palette;
+        let items = model.transcript_mut().items_snapshot();
+        let item = items.iter().find_map(|item| match item.as_ref() {
+            TranscriptItem::ToolResult(item) => Some(item),
+            _ => None,
+        })?;
+        item.render_lines(80, palette)
+            .first()
+            .and_then(|line| line.spans.first())
+            .and_then(|span| span.style.fg)
     }
 
     #[test]

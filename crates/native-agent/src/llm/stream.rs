@@ -296,6 +296,9 @@ impl RigAgentAccumulator {
             on_progress(NativeAgentProgress::Thinking { is_thinking: false });
         }
         self.content.push_str(content);
+        on_progress(NativeAgentProgress::AssistantDelta {
+            content: content.to_string(),
+        });
         self.observe_token_delta(content, now, on_progress);
     }
 
@@ -316,6 +319,9 @@ impl RigAgentAccumulator {
         }
         self.reasoning_finished_at = Some(now);
         self.reasoning_content.push_str(content);
+        on_progress(NativeAgentProgress::ReasoningDelta {
+            content: content.to_string(),
+        });
         self.observe_token_delta(content, now, on_progress);
     }
 

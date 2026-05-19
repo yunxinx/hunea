@@ -90,6 +90,10 @@ impl AcpSessionUiState {
         self.reasoning_buffer.push_str(content);
     }
 
+    fn response_buffers_empty(&self) -> bool {
+        self.response_buffer.is_empty() && self.reasoning_buffer.is_empty()
+    }
+
     fn take_response_buffer(&mut self) -> Option<String> {
         if self.response_buffer.is_empty() {
             return None;
@@ -450,6 +454,9 @@ pub(super) fn apply_runtime_event_with_coordinator(
             target: Some(RuntimeTarget::AcpAgent { .. }),
             message,
         } => {
+            if !acp_ui_state.should_discard_prompt_output() {
+                flush_acp_response_buffer(model, acp_ui_state);
+            }
             model.append_system_message_from_runtime(message);
         }
         RuntimeEvent::TurnStarted {
@@ -478,6 +485,9 @@ pub(super) fn apply_runtime_event_with_coordinator(
             if acp_ui_state.should_discard_prompt_output() {
                 return;
             }
+            if !content.is_empty() && acp_ui_state.response_buffers_empty() {
+                let _ = model.mark_exploration_tool_activities_complete_from_runtime();
+            }
             acp_ui_state.push_reasoning_chunk(&content);
             model.set_stream_activity_thinking(true);
             if let Some(total_tokens) = acp_ui_state.observe_output_tokens(&content) {
@@ -490,6 +500,9 @@ pub(super) fn apply_runtime_event_with_coordinator(
         } => {
             if acp_ui_state.should_discard_prompt_output() {
                 return;
+            }
+            if !content.is_empty() && acp_ui_state.response_buffers_empty() {
+                let _ = model.mark_exploration_tool_activities_complete_from_runtime();
             }
             model.set_stream_activity_thinking(false);
             acp_ui_state.push_response_chunk(&content);

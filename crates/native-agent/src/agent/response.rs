@@ -10,6 +10,12 @@ pub(crate) enum NativeAgentProgress {
     Thinking {
         is_thinking: bool,
     },
+    AssistantDelta {
+        content: String,
+    },
+    ReasoningDelta {
+        content: String,
+    },
     ToolActivityStarted {
         activity: mo_core::session::RuntimeToolActivity,
     },

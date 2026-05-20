@@ -350,7 +350,7 @@ fn acp_tool_call_update_replaces_same_transcript_item() {
     assert_eq!(model.transcript_mut().len(), 1);
     assert_eq!(
         model.transcript_plain_items(),
-        vec!["● Exploring\n  └ Read Cargo.toml".to_string()]
+        vec!["● Read Cargo.toml".to_string()]
     );
 
     apply_acp_session_event(
@@ -377,7 +377,7 @@ fn acp_tool_call_update_replaces_same_transcript_item() {
         "tool_call_update should replace the existing item instead of appending"
     );
     let plain = model.transcript_plain_items().join("\n");
-    assert_eq!(plain, "● Explored\n  └ Read Cargo.toml");
+    assert_eq!(plain, "● Read Cargo.toml");
     assert!(!plain.contains("read complete"));
     assert!(!plain.contains("{\"ok\":true}"));
     assert!(!plain.contains("Pending [Read]"));
@@ -3183,7 +3183,7 @@ fn runtime_deltas_flush_before_native_tool_activity() {
     assert_eq!(items.len(), 3, "{items:#?}");
     assert_eq!(items[0], "先分析目录结构");
     assert_eq!(items[1], "我先看一下 src。");
-    assert_eq!(items[2], "● Exploring\n  └ List src");
+    assert_eq!(items[2], "● List src");
 }
 
 #[test]
@@ -3266,7 +3266,7 @@ fn runtime_first_assistant_delta_finalizes_completed_exploration_marker() {
 
     assert_eq!(
         model.transcript_plain_items(),
-        vec!["● Explored\n  └ List src".to_string()]
+        vec!["● List src".to_string()]
     );
     assert_eq!(
         first_tool_result_marker_color(&mut model),
@@ -3416,10 +3416,7 @@ fn native_agent_delta_event_uses_runtime_boundary_buffer() {
 
     assert_eq!(
         model.transcript_plain_items(),
-        vec![
-            "我先看一下 src。".to_string(),
-            "● Exploring\n  └ List src".to_string(),
-        ]
+        vec!["我先看一下 src。".to_string(), "● List src".to_string(),]
     );
 }
 

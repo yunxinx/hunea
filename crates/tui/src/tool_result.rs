@@ -536,6 +536,10 @@ impl ToolResultItem {
         palette: TerminalPalette,
         now: Instant,
     ) -> Vec<Line<'static>> {
+        if let Some(call) = standalone_exploration_tool_call(calls) {
+            return self.single_exploration_tool_call_lines_at(call, width, palette, now);
+        }
+
         let width = usize::from(width.max(1));
         let mut display_lines = exploration_display_lines(calls);
         coalesce_adjacent_target_display_lines(&mut display_lines);
@@ -597,6 +601,17 @@ impl ToolResultItem {
         lines
     }
 
+    fn single_exploration_tool_call_lines_at(
+        &self,
+        call: &RuntimeToolActivity,
+        width: u16,
+        palette: TerminalPalette,
+        now: Instant,
+    ) -> Vec<Line<'static>> {
+        let width = usize::from(width.max(1));
+        self.acp_tool_call_header_lines_at(call, width, palette, now, self.exploration_open)
+    }
+
     fn failed_exploration_detail_lines(
         &self,
         calls: &[RuntimeToolActivity],
@@ -618,7 +633,7 @@ impl ToolResultItem {
         palette: TerminalPalette,
         now: Instant,
     ) -> Vec<Line<'static>> {
-        let mut lines = self.acp_tool_call_header_lines_at(call, width, palette, now);
+        let mut lines = self.acp_tool_call_header_lines_at(call, width, palette, now, false);
         lines.extend(wrap_failed_exploration_detail_line(
             &failed_tool_call_detail_text(call),
             width,
@@ -752,7 +767,7 @@ impl ToolResultItem {
         now: Instant,
     ) -> Vec<Line<'static>> {
         let width = usize::from(width.max(1));
-        let mut lines = self.acp_tool_call_header_lines_at(call, width, palette, now);
+        let mut lines = self.acp_tool_call_header_lines_at(call, width, palette, now, false);
         for block in acp_tool_call_detail_blocks(
             call,
             self.render_mode,
@@ -770,6 +785,7 @@ impl ToolResultItem {
         width: usize,
         palette: TerminalPalette,
         now: Instant,
+        use_open_marker_color: bool,
     ) -> Vec<Line<'static>> {
         let active_started_at = self.active_marker_started_at.filter(|_| {
             matches!(
@@ -785,7 +801,7 @@ impl ToolResultItem {
         } else {
             TOOL_RESULT_CONTINUATION_PREFIX
         };
-        let marker_color = if active_started_at.is_some() {
+        let marker_color = if active_started_at.is_some() || use_open_marker_color {
             palette.main
         } else {
             acp_tool_call_status_color(call.status, palette)
@@ -1182,6 +1198,13 @@ struct ExplorationDisplayLine {
 fn is_groupable_exploration_tool_call(call: &RuntimeToolActivity) -> bool {
     call.status != RuntimeToolActivityStatus::Failed
         && exploration_display_line_for_call(call).is_some()
+}
+
+fn standalone_exploration_tool_call(calls: &[RuntimeToolActivity]) -> Option<&RuntimeToolActivity> {
+    match calls {
+        [call] if is_groupable_exploration_tool_call(call) => Some(call),
+        _ => None,
+    }
 }
 
 fn exploration_display_lines(calls: &[RuntimeToolActivity]) -> Vec<ExplorationDisplayLine> {
@@ -2336,6 +2359,19 @@ mod tests {
             ToolActivityRenderMode::Compact,
         )
         .expect("list_dir should be an exploration tool activity");
+        assert!(item.append_exploration_tool_activity(RuntimeToolActivity {
+            activity_id: "call-read".to_string(),
+            title: "Read Cargo.toml".to_string(),
+            kind: RuntimeToolKind::Read,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Text("[package]".to_string())],
+            locations: vec![RuntimeToolActivityLocation {
+                path: "Cargo.toml".to_string(),
+                line: None,
+            }],
+            raw_input: Some(serde_json::json!({ "path": "Cargo.toml" }).into()),
+            raw_output: Some("[package]".into()),
+        }));
 
         let lines = item.render_lines(80, palette);
 
@@ -2344,6 +2380,41 @@ mod tests {
 
         assert!(item.mark_exploration_complete());
         let completed_lines = item.render_lines(80, palette);
+        assert_eq!(completed_lines[0].spans[0].style.fg, Some(palette.quote));
+    }
+
+    #[test]
+    fn single_exploration_tool_call_renders_as_standalone_row() {
+        let palette = default_palette();
+        let mut item = ToolResultItem::from_exploration_tool_activity(
+            RuntimeToolActivity {
+                activity_id: "call-list".to_string(),
+                title: "List Directory crates".to_string(),
+                kind: RuntimeToolKind::Search,
+                status: RuntimeToolActivityStatus::Completed,
+                content: vec![RuntimeToolActivityContent::Text("tui/".to_string())],
+                locations: Vec::new(),
+                raw_input: Some(serde_json::json!({ "path": "crates" }).into()),
+                raw_output: Some("tui/".into()),
+            },
+            ToolActivityRenderMode::Compact,
+        )
+        .expect("list_dir should be an exploration tool activity");
+
+        let lines = item.render_lines(80, palette);
+        let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered_plain, vec!["● List crates".to_string()]);
+        assert_eq!(lines[0].spans[0].style.fg, Some(palette.main));
+
+        assert!(item.mark_exploration_complete());
+        let completed_lines = item.render_lines(80, palette);
+        let completed_plain = completed_lines
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(completed_plain, vec!["● List crates".to_string()]);
         assert_eq!(completed_lines[0].spans[0].style.fg, Some(palette.quote));
     }
 

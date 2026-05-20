@@ -180,6 +180,27 @@ fn tool_activity_uses_compact_and_detailed_rendering_modes() {
 }
 
 #[test]
+fn single_exploration_tool_activity_renders_as_standalone_transcript_item() {
+    let mut transcript = Transcript::new(default_palette());
+
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-list-root".to_string(),
+        title: "List Directory".to_string(),
+        kind: RuntimeToolKind::Search,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text(
+            "Cargo.toml\ncrates/\ndocs/".to_string(),
+        )],
+        locations: Vec::new(),
+        raw_input: Some(serde_json::json!({ "path": "." }).into()),
+        raw_output: Some("Cargo.toml\ncrates/\ndocs/".into()),
+    });
+
+    assert_eq!(transcript.plain_items(), vec!["● List .".to_string()]);
+    assert_eq!(transcript.item_metrics_index().line_count, 1);
+}
+
+#[test]
 fn exploration_tool_activities_coalesce_into_single_transcript_item() {
     let mut transcript = Transcript::new(default_palette());
 

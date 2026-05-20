@@ -72,7 +72,7 @@ pub struct Model {
     pub(super) acp_terminal_snapshots: BTreeMap<String, RuntimeTerminalSnapshot>,
     pub(super) stream_activity: Option<StreamActivityState>,
     pub(super) runtime_response_buffer: RuntimeResponseBuffer,
-    pub(super) streamed_runtime_reasoning: Option<StreamedRuntimeReasoning>,
+    pub(super) streamed_runtime_reasoning: StreamedRuntimeReasoning,
     pub(super) status_phrase_selector: StatusPhraseSelector,
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
@@ -137,12 +137,15 @@ pub(super) struct RuntimeResponseBuffer {
     content: String,
     reasoning_content: String,
     reasoning_started_at: Option<Instant>,
-    streamed_reasoning_content: String,
 }
 
 impl RuntimeResponseBuffer {
     fn is_empty(&self) -> bool {
         self.content.is_empty() && self.reasoning_content.is_empty()
+    }
+
+    fn has_reasoning_content(&self) -> bool {
+        !self.reasoning_content.is_empty()
     }
 
     fn push_content(&mut self, content: &str) {
@@ -161,7 +164,6 @@ impl RuntimeResponseBuffer {
         self.content.clear();
         self.reasoning_content.clear();
         self.reasoning_started_at = None;
-        self.streamed_reasoning_content.clear();
     }
 
     fn take(&mut self) -> Option<BufferedRuntimeResponse> {
@@ -199,7 +201,6 @@ impl RuntimeResponseBuffer {
             .reasoning_started_at
             .take()
             .map(|started_at| Instant::now().saturating_duration_since(started_at));
-        self.streamed_reasoning_content.push_str(&content);
 
         Some(BufferedReasoningFragment { content, duration })
     }
@@ -210,21 +211,15 @@ impl RuntimeResponseBuffer {
         final_reasoning_content: Option<String>,
         final_reasoning_duration: Option<Duration>,
     ) -> Option<BufferedRuntimeResponse> {
-        let mut response = self.take().unwrap_or_else(|| BufferedRuntimeResponse {
-            content: String::new(),
-            reasoning_content: None,
-            reasoning_duration: None,
-        });
+        let final_reasoning_content =
+            final_reasoning_content.filter(|content| !content.trim().is_empty());
+        let mut response = self.take().unwrap_or_default();
 
         response.content = reconcile_buffered_text_with_final(response.content, final_content);
-        let streamed_reasoning_content = std::mem::take(&mut self.streamed_reasoning_content);
         let (reasoning_content, reasoning_duration) = reconcile_buffered_reasoning_with_final(
             response.reasoning_content,
             response.reasoning_duration,
-            strip_streamed_reasoning_prefix(
-                final_reasoning_content,
-                (!streamed_reasoning_content.is_empty()).then_some(streamed_reasoning_content),
-            ),
+            final_reasoning_content,
             final_reasoning_duration,
         );
         response.reasoning_content = reasoning_content;
@@ -258,38 +253,27 @@ fn reconcile_buffered_reasoning_with_final(
     final_content: Option<String>,
     final_duration: Option<Duration>,
 ) -> (Option<String>, Option<Duration>) {
-    match (buffered, final_content) {
-        (None, None) => (None, None),
-        (None, Some(content)) => (Some(content), final_duration),
-        (Some(content), None) => (Some(content), buffered_duration),
-        (Some(buffered), Some(final_content)) => {
-            if final_content.is_empty() {
-                return (Some(buffered), buffered_duration);
-            }
-            if final_content.starts_with(&buffered) {
-                return (Some(final_content), final_duration.or(buffered_duration));
-            }
-            (Some(buffered), buffered_duration)
-        }
+    match final_content {
+        Some(content) => (Some(content), final_duration.or(buffered_duration)),
+        None => (buffered, buffered_duration),
     }
 }
 
-fn strip_streamed_reasoning_prefix(
+fn strip_displayed_reasoning_prefix(
     final_content: Option<String>,
-    streamed_reasoning_content: Option<String>,
+    displayed_content: &str,
 ) -> Option<String> {
     let final_content = final_content?;
-    let Some(streamed_reasoning_content) = streamed_reasoning_content else {
+    if displayed_content.is_empty() {
         return Some(final_content);
-    };
-
-    if let Some(suffix) = final_content.strip_prefix(&streamed_reasoning_content) {
-        return (!suffix.is_empty()).then(|| suffix.to_string());
     }
 
-    Some(final_content)
+    final_content
+        .strip_prefix(displayed_content)
+        .and_then(|tail| (!tail.is_empty()).then(|| tail.to_string()))
 }
 
+#[derive(Default)]
 struct BufferedRuntimeResponse {
     content: String,
     reasoning_content: Option<String>,
@@ -301,10 +285,10 @@ struct BufferedReasoningFragment {
     duration: Option<Duration>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct StreamedRuntimeReasoning {
-    item_index: usize,
-    content: String,
+    item_indices: Vec<usize>,
+    displayed_content: String,
 }
 
 /// `AcpModelSelectionRollback` 保存 ACP 模型切换请求确认前的本地选择状态。
@@ -521,7 +505,10 @@ impl Model {
             acp_terminal_snapshots: BTreeMap::new(),
             stream_activity: None,
             runtime_response_buffer: RuntimeResponseBuffer::default(),
-            streamed_runtime_reasoning: None,
+            streamed_runtime_reasoning: StreamedRuntimeReasoning {
+                item_indices: Vec::new(),
+                displayed_content: String::new(),
+            },
             status_phrase_selector: StatusPhraseSelector::new(
                 options.status_phrases,
                 options.status_phrase_order,
@@ -918,13 +905,11 @@ impl Model {
 
     pub(crate) fn flush_runtime_response_buffer(&mut self) {
         if let Some(response) = self.runtime_response_buffer.take() {
-            self.append_runtime_response_from_runtime(
-                response.content,
-                response.reasoning_content,
-                response.reasoning_duration,
+            self.append_buffered_runtime_response_from_runtime(
+                response,
+                self.streams_reasoning_into_transcript_during_response(),
             );
         }
-        self.clear_streamed_runtime_reasoning_marker();
     }
 
     pub(crate) fn flush_runtime_response_buffer_with_final(
@@ -933,24 +918,44 @@ impl Model {
         final_reasoning_content: Option<String>,
         final_reasoning_duration: Option<Duration>,
     ) {
-        if let Some(response) = self.runtime_response_buffer.take_with_final(
-            final_content,
-            final_reasoning_content,
-            final_reasoning_duration,
-        ) {
-            let response = self.reconcile_streamed_runtime_reasoning_with_final(response);
+        // Expanded reasoning that already crossed a text/tool boundary is
+        // committed display state. The final native `reasoning_content`
+        // should only supplement the still-buffered tail that has not been
+        // rendered yet.
+        let displayed_reasoning_content = self.streamed_runtime_reasoning.displayed_content.clone();
+        let buffered_response = if displayed_reasoning_content.is_empty() {
+            self.runtime_response_buffer.take_with_final(
+                final_content,
+                final_reasoning_content,
+                final_reasoning_duration,
+            )
+        } else if self.runtime_response_buffer.has_reasoning_content() {
+            self.runtime_response_buffer.take_with_final(
+                final_content,
+                strip_displayed_reasoning_prefix(
+                    final_reasoning_content,
+                    &displayed_reasoning_content,
+                ),
+                final_reasoning_duration,
+            )
+        } else {
+            self.runtime_response_buffer
+                .take_with_final(final_content, None, None)
+        };
+
+        if let Some(response) = buffered_response {
             self.append_runtime_response_from_runtime(
                 response.content,
                 response.reasoning_content,
                 response.reasoning_duration,
             );
         }
-        self.clear_streamed_runtime_reasoning_marker();
+        self.accept_streamed_runtime_reasoning_from_runtime();
     }
 
     pub(crate) fn clear_runtime_response_buffer(&mut self) {
         self.runtime_response_buffer.clear();
-        self.discard_streamed_runtime_reasoning_if_latest();
+        self.discard_streamed_runtime_reasoning_from_runtime();
     }
 
     pub(crate) fn streams_reasoning_into_transcript_during_response(&self) -> bool {
@@ -969,67 +974,64 @@ impl Model {
         else {
             return;
         };
-        let item_index = self.transcript.len();
-        let reasoning_content = reasoning.content.clone();
-        self.append_runtime_response_from_runtime("", Some(reasoning.content), reasoning.duration);
-        self.streamed_runtime_reasoning = self
-            .transcript
-            .len()
-            .checked_sub(1)
-            .filter(|last_index| *last_index == item_index)
-            .map(|_| StreamedRuntimeReasoning {
-                item_index,
-                content: reasoning_content,
-            });
+        self.append_buffered_runtime_response_from_runtime(
+            BufferedRuntimeResponse {
+                content: String::new(),
+                reasoning_content: Some(reasoning.content),
+                reasoning_duration: reasoning.duration,
+            },
+            true,
+        );
     }
 
-    fn reconcile_streamed_runtime_reasoning_with_final(
+    pub(crate) fn accept_streamed_runtime_reasoning_from_runtime(&mut self) {
+        self.streamed_runtime_reasoning.item_indices.clear();
+        self.streamed_runtime_reasoning.displayed_content.clear();
+    }
+
+    fn append_buffered_runtime_response_from_runtime(
         &mut self,
-        mut response: BufferedRuntimeResponse,
-    ) -> BufferedRuntimeResponse {
-        let Some(streamed_reasoning) = self.streamed_runtime_reasoning.clone() else {
-            return response;
-        };
-        let Some(reasoning_tail) = response.reasoning_content.as_ref() else {
-            return response;
-        };
-        if reasoning_tail.is_empty() || self.transcript.len() != streamed_reasoning.item_index + 1 {
-            return response;
+        response: BufferedRuntimeResponse,
+        track_streamed_reasoning: bool,
+    ) {
+        let tracked_reasoning_content = track_streamed_reasoning
+            .then_some(response.reasoning_content.as_deref())
+            .flatten()
+            .map(str::to_owned);
+        let reasoning_item_index = track_streamed_reasoning
+            .then_some(response.reasoning_content.as_ref())
+            .flatten()
+            .map(|_| self.transcript.len());
+
+        self.append_runtime_response_from_runtime(
+            response.content,
+            response.reasoning_content,
+            response.reasoning_duration,
+        );
+
+        if let Some(item_index) = reasoning_item_index
+            && self.transcript.len() > item_index
+        {
+            self.streamed_runtime_reasoning
+                .item_indices
+                .push(item_index);
+        }
+
+        if let Some(reasoning_content) = tracked_reasoning_content {
+            self.streamed_runtime_reasoning
+                .displayed_content
+                .push_str(&reasoning_content);
+        }
+    }
+
+    fn discard_streamed_runtime_reasoning_from_runtime(&mut self) {
+        let item_indices = std::mem::take(&mut self.streamed_runtime_reasoning.item_indices);
+        if item_indices.is_empty() {
+            return;
         }
 
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
-        if !self
-            .transcript_mut()
-            .truncate_before_item(streamed_reasoning.item_index)
-        {
-            return response;
-        }
-        self.refresh_status_line_after_transcript_change();
-        self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-        response.reasoning_content =
-            Some(format!("{}{reasoning_tail}", streamed_reasoning.content));
-        response
-    }
-
-    fn clear_streamed_runtime_reasoning_marker(&mut self) {
-        self.streamed_runtime_reasoning = None;
-    }
-
-    fn discard_streamed_runtime_reasoning_if_latest(&mut self) {
-        let Some(streamed_reasoning) = self.streamed_runtime_reasoning.take() else {
-            return;
-        };
-        if self.transcript.len() != streamed_reasoning.item_index + 1 {
-            return;
-        }
-
-        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
-        if !self
-            .transcript_mut()
-            .truncate_before_item(streamed_reasoning.item_index)
-        {
+        if !self.transcript_mut().remove_items(&item_indices) {
             return;
         }
         self.refresh_status_line_after_transcript_change();

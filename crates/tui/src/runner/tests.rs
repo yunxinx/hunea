@@ -3230,6 +3230,144 @@ fn runtime_expanded_reasoning_flushes_before_message_finish() {
 }
 
 #[test]
+fn runtime_final_response_keeps_streamed_reasoning_flushed_across_tool_boundaries() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            show_reasoning_content: true,
+            reasoning_display_mode: ReasoningDisplayMode::Expanded,
+            ..ModelOptions::default()
+        },
+    );
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    model.apply_runtime_event(RuntimeEvent::ReasoningDelta {
+        target: target.clone(),
+        content: "我需要先查看当前目录内容，然后再整理回复。".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::ToolActivityStarted {
+        target: target.clone(),
+        activity: RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "List Directory".to_string(),
+            kind: RuntimeToolKind::Search,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Text(
+                "Cargo.toml\ncrates/\n".to_string(),
+            )],
+            locations: Vec::new(),
+            raw_input: Some(serde_json::json!({ "path": "." }).into()),
+            raw_output: Some("Cargo.toml\ncrates/\n".into()),
+        },
+    });
+    model.apply_runtime_event(RuntimeEvent::ReasoningDelta {
+        target: target.clone(),
+        content: "我已经拿到目录结果，现在只保留最终回复前需要展示的推理。".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::AssistantDelta {
+        target: target.clone(),
+        content: "当前目录包含 Cargo.toml 和 crates/。".to_string(),
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec![
+            "我需要先查看当前目录内容，然后再整理回复。".to_string(),
+            "● List .".to_string(),
+            "我已经拿到目录结果，现在只保留最终回复前需要展示的推理。".to_string(),
+        ]
+    );
+
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(target),
+        content: "当前目录包含 Cargo.toml 和 crates/。".to_string(),
+        reasoning_content: Some(
+            "我已经拿到目录结果，现在只保留最终回复前需要展示的推理。".to_string(),
+        ),
+        reasoning_duration: Some(Duration::from_secs(2)),
+        finish_reason: None,
+        metrics: None,
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec![
+            "我需要先查看当前目录内容，然后再整理回复。".to_string(),
+            "● List .".to_string(),
+            "我已经拿到目录结果，现在只保留最终回复前需要展示的推理。".to_string(),
+            "当前目录包含 Cargo.toml 和 crates/。".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn runtime_final_response_extends_buffered_reasoning_tail_after_earlier_tool_boundary() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            show_reasoning_content: true,
+            reasoning_display_mode: ReasoningDisplayMode::Expanded,
+            ..ModelOptions::default()
+        },
+    );
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    model.apply_runtime_event(RuntimeEvent::ReasoningDelta {
+        target: target.clone(),
+        content: "我需要先查看当前目录。".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::ToolActivityStarted {
+        target: target.clone(),
+        activity: RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "List Directory".to_string(),
+            kind: RuntimeToolKind::Search,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Text(
+                "Cargo.toml\ncrates/\n".to_string(),
+            )],
+            locations: Vec::new(),
+            raw_input: Some(serde_json::json!({ "path": "." }).into()),
+            raw_output: Some("Cargo.toml\ncrates/\n".into()),
+        },
+    });
+    model.apply_runtime_event(RuntimeEvent::ReasoningDelta {
+        target: target.clone(),
+        content: "我已经拿到目录结果，接下来整".to_string(),
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["我需要先查看当前目录。".to_string(), "● List .".to_string(),]
+    );
+
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(target),
+        content: "当前目录包含 Cargo.toml 和 crates/。".to_string(),
+        reasoning_content: Some(
+            "我需要先查看当前目录。我已经拿到目录结果，接下来整理回复。".to_string(),
+        ),
+        reasoning_duration: Some(Duration::from_secs(2)),
+        finish_reason: None,
+        metrics: None,
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec![
+            "我需要先查看当前目录。".to_string(),
+            "● List .".to_string(),
+            "我已经拿到目录结果，接下来整理回复。".to_string(),
+            "当前目录包含 Cargo.toml 和 crates/。".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn runtime_first_assistant_delta_finalizes_completed_exploration_marker() {
     let palette = default_palette();
     let mut model = Model::new(HeroOptions::default());
@@ -3299,7 +3437,7 @@ fn runtime_final_response_does_not_duplicate_buffered_delta() {
 }
 
 #[test]
-fn runtime_final_response_extends_buffered_delta_without_losing_tail() {
+fn runtime_final_response_does_not_overwrite_flushed_streamed_reasoning() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -3319,6 +3457,40 @@ fn runtime_final_response_extends_buffered_delta_without_losing_tail() {
     model.apply_runtime_event(RuntimeEvent::AssistantDelta {
         target: target.clone(),
         content: "最终".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(target),
+        content: "最终结论".to_string(),
+        reasoning_content: Some("先分析完整".to_string()),
+        reasoning_duration: Some(Duration::from_secs(2)),
+        finish_reason: None,
+        metrics: None,
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["先".to_string(), "最终结论".to_string(),]
+    );
+    assert!(!model.current_stream_activity_render_result().has_content);
+}
+
+#[test]
+fn runtime_final_response_uses_final_reasoning_when_no_boundary_arrives() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            show_reasoning_content: true,
+            reasoning_display_mode: ReasoningDisplayMode::Expanded,
+            ..ModelOptions::default()
+        },
+    );
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    model.apply_runtime_event(RuntimeEvent::ReasoningDelta {
+        target: target.clone(),
+        content: "先分析".to_string(),
     });
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),

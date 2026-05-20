@@ -104,16 +104,19 @@ impl RuntimeEventApply for Model {
             }
             RuntimeEvent::Failed { message, .. } => {
                 self.flush_runtime_response_buffer();
+                self.accept_streamed_runtime_reasoning_from_runtime();
                 self.append_system_message_from_runtime(normalize_chat_failure_message(&message));
                 self.finish_stream_activity_with_work_summary();
             }
             RuntimeEvent::Interrupted { .. } => {
                 self.flush_runtime_response_buffer();
+                self.accept_streamed_runtime_reasoning_from_runtime();
                 self.append_system_message_from_runtime("Chat interrupted");
                 self.finish_stream_activity_with_work_summary();
             }
             RuntimeEvent::Stopped { message, .. } => {
                 self.flush_runtime_response_buffer();
+                self.accept_streamed_runtime_reasoning_from_runtime();
                 self.finish_stream_activity_with_work_summary();
                 if let Some(message) = message {
                     self.show_transient_status_notice(&format!("Runtime stopped: {message}"));

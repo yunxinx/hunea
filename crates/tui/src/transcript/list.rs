@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -547,6 +547,33 @@ impl Transcript {
         self.items_version = self.items_version.saturating_add(1);
         self.metrics_cache.reset();
         self.screen_cache.reset();
+        true
+    }
+
+    /// `remove_items` 删除指定索引处的 transcript 项并保留其余顺序。
+    pub(crate) fn remove_items(&mut self, item_indices: &[usize]) -> bool {
+        let item_count = self.items.len();
+        let remove_indices = item_indices
+            .iter()
+            .copied()
+            .filter(|index| *index < item_count)
+            .collect::<BTreeSet<_>>();
+        let Some(first_dirty) = remove_indices.first().copied() else {
+            return false;
+        };
+
+        let retained_items = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !remove_indices.contains(index))
+            .map(|(_, item)| Rc::clone(item))
+            .collect::<Vec<_>>();
+
+        self.items = Rc::new(retained_items);
+        self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.mark_metrics_dirty_from(first_dirty);
+        self.screen_cache.mark_dirty_from(first_dirty);
         true
     }
 

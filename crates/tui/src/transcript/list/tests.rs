@@ -511,6 +511,29 @@ fn truncate_before_item_removes_selected_and_later_history() {
 }
 
 #[test]
+fn remove_items_deletes_selected_history_and_keeps_order() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.append_message(Sender::User, "first question");
+    transcript.append_message(Sender::Assistant, "first answer");
+    transcript.append_message(Sender::User, "second question");
+    transcript.append_message(Sender::Assistant, "second answer");
+    let _ = transcript.render();
+
+    assert!(transcript.remove_items(&[1, 3]));
+
+    assert_eq!(transcript.len(), 2);
+    assert_eq!(
+        transcript.source_messages(),
+        vec![
+            (Sender::User, "first question".to_string()),
+            (Sender::User, "second question".to_string()),
+        ]
+    );
+    assert_eq!(transcript.item_metrics_index().metrics.len(), 2);
+    assert!(!transcript.remove_items(&[4]));
+}
+
+#[test]
 fn item_metrics_index_tracks_invalidation_boundaries() {
     let mut transcript = Transcript::new(default_palette());
     transcript.items = Rc::new(vec![

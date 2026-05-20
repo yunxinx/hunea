@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -9,13 +9,17 @@ use ignore::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use tokio::{task, task::JoinError};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     Tool, ToolCall, ToolDefinition, ToolExecutionFuture, ToolKind, ToolPermissionPolicy, ToolResult,
 };
 
-use super::workspace::resolve_workspace_path;
+use super::{
+    workspace::resolve_workspace_path,
+    workspace_access::{SharedWorkspaceAccess, local_workspace_access},
+};
 
 const LIST_DIR_TOOL_NAME: &str = "list_dir";
 const LIST_DIR_DEFAULT_ENTRY_LIMIT: usize = 500;
@@ -23,14 +27,31 @@ const LIST_DIR_MAX_ENTRY_LIMIT: usize = 2_000;
 
 /// `list_dir_tool` 创建只读 workspace 目录列举工具。
 pub fn list_dir_tool(root: impl AsRef<Path>) -> impl Tool + 'static {
+    list_dir_tool_with_access(root, local_workspace_access())
+}
+
+pub(crate) fn list_dir_tool_with_access(
+    root: impl AsRef<Path>,
+    access: SharedWorkspaceAccess,
+) -> impl Tool + 'static {
     ListDirTool {
         root: root.as_ref().to_path_buf(),
+        access,
     }
 }
 
-#[derive(Debug, Clone)]
 struct ListDirTool {
     root: PathBuf,
+    access: SharedWorkspaceAccess,
+}
+
+impl std::fmt::Debug for ListDirTool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ListDirTool")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Tool for ListDirTool {
@@ -66,7 +87,14 @@ impl Tool for ListDirTool {
         _cancellation: &'a CancellationToken,
     ) -> ToolExecutionFuture<'a> {
         let root = self.root.clone();
-        Box::pin(async move { execute_list_dir(root, call) })
+        let access = self.access.clone();
+        let call_id = call.call_id.clone();
+        Box::pin(async move {
+            match task::spawn_blocking(move || execute_list_dir(root, access, call)).await {
+                Ok(result) => result,
+                Err(error) => join_error_result(call_id, error),
+            }
+        })
     }
 }
 
@@ -76,7 +104,11 @@ struct ListDirArguments {
     limit: Option<usize>,
 }
 
-fn execute_list_dir(root: PathBuf, call: ToolCall) -> ToolResult {
+fn join_error_result(call_id: String, error: JoinError) -> ToolResult {
+    ToolResult::error(call_id, format!("list_dir task failed: {error}"))
+}
+
+fn execute_list_dir(root: PathBuf, access: SharedWorkspaceAccess, call: ToolCall) -> ToolResult {
     let arguments = match serde_json::from_value::<ListDirArguments>(call.arguments) {
         Ok(arguments) => arguments,
         Err(error) => {
@@ -88,12 +120,12 @@ fn execute_list_dir(root: PathBuf, call: ToolCall) -> ToolResult {
     };
     let requested_path = arguments.path.as_deref().unwrap_or(".");
 
-    let path = match resolve_workspace_path(&root, requested_path) {
+    let path = match resolve_workspace_path(access.as_ref(), &root, requested_path) {
         Ok(path) => path,
         Err(message) => return ToolResult::error(call.call_id, message),
     };
 
-    let metadata = match fs::metadata(&path) {
+    let metadata = match access.metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) => {
             return ToolResult::error(
@@ -102,10 +134,10 @@ fn execute_list_dir(root: PathBuf, call: ToolCall) -> ToolResult {
             );
         }
     };
-    if !metadata.is_dir() {
+    if !metadata.is_dir {
         return ToolResult::error(
             call.call_id,
-            format!("'{requested_path}' is a file, use file_read instead"),
+            format!("'{requested_path}' is a file, use read instead"),
         );
     }
 
@@ -113,30 +145,34 @@ fn execute_list_dir(root: PathBuf, call: ToolCall) -> ToolResult {
         .limit
         .unwrap_or(LIST_DIR_DEFAULT_ENTRY_LIMIT)
         .clamp(1, LIST_DIR_MAX_ENTRY_LIMIT);
-    match list_directory_entries(&root, &path, limit) {
+    match list_directory_entries(&root, access.as_ref(), &path, limit) {
         Ok(content) => ToolResult::success(call.call_id, content),
         Err(message) => ToolResult::error(call.call_id, message),
     }
 }
 
-fn list_directory_entries(root: &Path, path: &Path, limit: usize) -> Result<String, String> {
-    let root = root
-        .canonicalize()
+fn list_directory_entries(
+    root: &Path,
+    access: &dyn super::workspace_access::WorkspaceAccess,
+    path: &Path,
+    limit: usize,
+) -> Result<String, String> {
+    let root = access
+        .canonicalize(root)
         .map_err(|error| format!("workspace root is unavailable: {error}"))?;
-    let gitignore = gitignore_matcher(&root, path);
-    let mut entries = fs::read_dir(path)
+    let gitignore = gitignore_matcher(access, &root, path)?;
+    let mut entries = access
+        .read_dir(path)
         .map_err(|error| format!("read directory failed for '{}': {error}", path.display()))?
-        .filter_map(Result::ok)
+        .into_iter()
         .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let file_type = entry.file_type().ok()?;
-            if is_gitignored(&gitignore, &entry.path(), file_type.is_dir()) {
+            if is_gitignored(&gitignore, &entry.path, entry.is_dir) {
                 return None;
             }
-            let display = if file_type.is_dir() {
-                format!("{name}/")
+            let display = if entry.is_dir {
+                format!("{}/", entry.name)
             } else {
-                name
+                entry.name
             };
             Some(display)
         })
@@ -168,19 +204,61 @@ fn list_directory_entries(root: &Path, path: &Path, limit: usize) -> Result<Stri
     Ok(content)
 }
 
-fn gitignore_matcher(root: &Path, path: &Path) -> Gitignore {
+fn gitignore_matcher(
+    access: &dyn super::workspace_access::WorkspaceAccess,
+    root: &Path,
+    path: &Path,
+) -> Result<Gitignore, String> {
     let mut builder = GitignoreBuilder::new(root);
     for directory in gitignore_directories(root, path) {
         let gitignore = directory.join(".gitignore");
-        if gitignore.exists() {
-            let _ = builder.add(gitignore);
+        let Some(content) = read_optional_text_file(access, &gitignore)? else {
+            continue;
+        };
+        for (index, line) in content.lines().enumerate() {
+            let line = if index == 0 {
+                line.trim_start_matches('\u{feff}')
+            } else {
+                line
+            };
+            builder
+                .add_line(Some(gitignore.clone()), line)
+                .map_err(|error| {
+                    format!("invalid .gitignore '{}': {error}", gitignore.display())
+                })?;
         }
     }
-    builder.build().unwrap_or_else(|_| {
-        GitignoreBuilder::new(root)
-            .build()
-            .expect("empty gitignore matcher should build")
+    builder.build().map_err(|error| {
+        format!(
+            "invalid gitignore matcher for '{}': {error}",
+            root.display()
+        )
     })
+}
+
+fn read_optional_text_file(
+    access: &dyn super::workspace_access::WorkspaceAccess,
+    path: &Path,
+) -> Result<Option<String>, String> {
+    let metadata = match access.metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!("stat failed for '{}': {error}", path.display()));
+        }
+    };
+    if !metadata.is_file {
+        return Ok(None);
+    }
+
+    let mut reader = access
+        .open_reader(path)
+        .map_err(|error| format!("read failed for '{}': {error}", path.display()))?;
+    let mut content = String::new();
+    reader
+        .read_to_string(&mut content)
+        .map_err(|error| format!("read failed for '{}': {error}", path.display()))?;
+    Ok(Some(content))
 }
 
 fn gitignore_directories(root: &Path, path: &Path) -> Vec<PathBuf> {
@@ -202,4 +280,144 @@ fn is_gitignored(gitignore: &Gitignore, path: &Path, is_dir: bool) -> bool {
         gitignore.matched_path_or_any_parents(path, is_dir),
         Match::Ignore(_)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap,
+        io::{self, Cursor, Read},
+        path::{Path, PathBuf},
+    };
+
+    use super::list_directory_entries;
+    use crate::builtin::workspace_access::{
+        WorkspaceAccess, WorkspaceDirectoryEntry, WorkspaceMetadata,
+    };
+
+    struct FakeWorkspaceAccess {
+        canonical_paths: HashMap<PathBuf, PathBuf>,
+        metadata_by_path: HashMap<PathBuf, WorkspaceMetadata>,
+        file_contents: HashMap<PathBuf, Vec<u8>>,
+        directories: HashMap<PathBuf, Vec<WorkspaceDirectoryEntry>>,
+    }
+
+    impl WorkspaceAccess for FakeWorkspaceAccess {
+        fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            self.canonical_paths
+                .get(path)
+                .cloned()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing canonical path"))
+        }
+
+        fn metadata(&self, path: &Path) -> io::Result<WorkspaceMetadata> {
+            self.metadata_by_path
+                .get(path)
+                .cloned()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing metadata"))
+        }
+
+        fn open_reader(&self, path: &Path) -> io::Result<Box<dyn Read + Send>> {
+            self.file_contents
+                .get(path)
+                .cloned()
+                .map(|content| Box::new(Cursor::new(content)) as Box<dyn Read + Send>)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing file content"))
+        }
+
+        fn read_dir(&self, path: &Path) -> io::Result<Vec<WorkspaceDirectoryEntry>> {
+            self.directories
+                .get(path)
+                .cloned()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing directory"))
+        }
+    }
+
+    #[test]
+    fn list_directory_entries_reads_gitignore_through_workspace_access() {
+        let access = FakeWorkspaceAccess {
+            canonical_paths: HashMap::from([(
+                PathBuf::from("/workspace-link"),
+                PathBuf::from("/srv/workspace"),
+            )]),
+            metadata_by_path: HashMap::from([(
+                PathBuf::from("/srv/workspace/src/.gitignore"),
+                WorkspaceMetadata {
+                    is_dir: false,
+                    is_file: true,
+                    len: 6,
+                },
+            )]),
+            file_contents: HashMap::from([(
+                PathBuf::from("/srv/workspace/src/.gitignore"),
+                b"*.log\n".to_vec(),
+            )]),
+            directories: HashMap::from([(
+                PathBuf::from("/srv/workspace/src"),
+                vec![
+                    WorkspaceDirectoryEntry {
+                        path: PathBuf::from("/srv/workspace/src/keep.rs"),
+                        name: "keep.rs".to_string(),
+                        is_dir: false,
+                    },
+                    WorkspaceDirectoryEntry {
+                        path: PathBuf::from("/srv/workspace/src/debug.log"),
+                        name: "debug.log".to_string(),
+                        is_dir: false,
+                    },
+                ],
+            )]),
+        };
+
+        let content = list_directory_entries(
+            Path::new("/workspace-link"),
+            &access,
+            Path::new("/srv/workspace/src"),
+            10,
+        )
+        .expect("directory listing should succeed");
+
+        assert_eq!(content, "keep.rs");
+    }
+
+    #[test]
+    fn list_directory_entries_reports_invalid_gitignore_patterns() {
+        let access = FakeWorkspaceAccess {
+            canonical_paths: HashMap::from([(
+                PathBuf::from("/workspace-link"),
+                PathBuf::from("/srv/workspace"),
+            )]),
+            metadata_by_path: HashMap::from([(
+                PathBuf::from("/srv/workspace/src/.gitignore"),
+                WorkspaceMetadata {
+                    is_dir: false,
+                    is_file: true,
+                    len: 2,
+                },
+            )]),
+            file_contents: HashMap::from([(
+                PathBuf::from("/srv/workspace/src/.gitignore"),
+                b"{foo\n".to_vec(),
+            )]),
+            directories: HashMap::from([(
+                PathBuf::from("/srv/workspace/src"),
+                vec![WorkspaceDirectoryEntry {
+                    path: PathBuf::from("/srv/workspace/src/keep.rs"),
+                    name: "keep.rs".to_string(),
+                    is_dir: false,
+                }],
+            )]),
+        };
+
+        let error = list_directory_entries(
+            Path::new("/workspace-link"),
+            &access,
+            Path::new("/srv/workspace/src"),
+            10,
+        )
+        .expect_err("invalid .gitignore should surface as an error");
+
+        assert!(error.contains("invalid .gitignore"));
+        assert!(error.contains("/srv/workspace/src/.gitignore"));
+    }
 }

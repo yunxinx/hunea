@@ -83,19 +83,48 @@ impl NativeLlmRequest {
     }
 }
 
+/// `ChatMessageBlock` 描述一条用户消息中的结构化输入块。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatMessageBlock {
+    Text(String),
+    Image {
+        data_base64: String,
+        mime_type: String,
+        uri: Option<String>,
+    },
+    Audio {
+        data_base64: String,
+        mime_type: String,
+        uri: Option<String>,
+    },
+    Document {
+        data_base64: String,
+        mime_type: String,
+        filename: Option<String>,
+        uri: Option<String>,
+    },
+}
+
 /// `ChatMessage` 是 Lumos transcript 到 native LLM 请求之间的稳定消息形状。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+    pub blocks: Option<Vec<ChatMessageBlock>>,
 }
 
 impl ChatMessage {
     /// `user` 创建用户消息。
     pub fn user(content: String) -> Self {
+        Self::user_with_blocks(content, None)
+    }
+
+    /// `user_with_blocks` 创建带结构化内容块的用户消息。
+    pub fn user_with_blocks(content: String, blocks: Option<Vec<ChatMessageBlock>>) -> Self {
         Self {
             role: ChatRole::User,
             content,
+            blocks,
         }
     }
 
@@ -104,6 +133,7 @@ impl ChatMessage {
         Self {
             role: ChatRole::Assistant,
             content,
+            blocks: None,
         }
     }
 }

@@ -8,6 +8,7 @@ use mo_core::model_catalog::{
 };
 use mo_core::phrases::StatusPhraseOrder;
 use mo_core::provider::ProviderKind;
+use mo_core::session::ChatMessageBlock;
 use ratatui::{Terminal, backend::TestBackend};
 use std::path::{Path, PathBuf};
 
@@ -47,6 +48,29 @@ fn idle_refinement_fixture() -> Model {
         .set_text_for_test("draft line one\ndraft line two\ndraft line three");
     model.composer_mut().move_to_begin_for_test();
     model.sync_composer_height();
+    model
+}
+
+fn native_test_model() -> Model {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            model_catalog: ModelCatalog::new(vec![ModelProvider::native(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            )]),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
     model
 }
 
@@ -193,6 +217,84 @@ fn native_agent_request_excludes_runtime_system_messages() {
         model.transcript_plain_items(),
         vec!["■ connection refused".to_string(), "› hello".to_string()]
     );
+}
+
+#[test]
+fn native_agent_request_embeds_explicit_file_blocks() {
+    let root = TempFileTree::new("native-structured-prompt");
+    root.write_file_with_content("assets/sample.png", &[0x89, b'P', b'N', b'G']);
+    root.write_file_with_content("src/code.py", b"print('hi')\n");
+
+    let mut model = native_test_model();
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model
+        .composer_mut()
+        .insert_text("review @assets/sample.png @src/code.py");
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    let Some(AppEffect::SendNativeAgent { request }) = effect else {
+        panic!("expected native agent effect");
+    };
+
+    let message = request
+        .llm_request()
+        .messages
+        .last()
+        .expect("request should include current user prompt");
+    assert_eq!(message.content, "review @assets/sample.png @src/code.py");
+    let blocks = message
+        .blocks
+        .as_ref()
+        .expect("native request should preserve structured blocks");
+    assert!(matches!(&blocks[0], ChatMessageBlock::Text(text) if text == "review "));
+    assert!(matches!(
+        &blocks[1],
+        ChatMessageBlock::Image { mime_type, data_base64, .. }
+            if mime_type == "image/png" && data_base64 == "iVBORw=="
+    ));
+    assert!(matches!(&blocks[2], ChatMessageBlock::Text(text) if text == " "));
+    assert!(matches!(
+        &blocks[3],
+        ChatMessageBlock::Text(text)
+            if text.contains("[Attached file: src/code.py (text/x-python)]")
+                && text.contains("print('hi')")
+    ));
+}
+
+#[test]
+fn native_agent_request_preserves_structured_user_history() {
+    let root = TempFileTree::new("native-structured-history");
+    root.write_file_with_content("assets/sample.png", &[0x89, b'P', b'N', b'G']);
+
+    let mut model = native_test_model();
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model
+        .composer_mut()
+        .insert_text("inspect @assets/sample.png");
+    let first = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    assert!(matches!(first, Some(AppEffect::SendNativeAgent { .. })));
+
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "first answer");
+    model.composer_mut().insert_text("follow up");
+    let second = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    let Some(AppEffect::SendNativeAgent { request }) = second else {
+        panic!("expected native agent effect");
+    };
+
+    let history = &request.llm_request().messages;
+    assert_eq!(history.len(), 3);
+    let first_message_blocks = history[0]
+        .blocks
+        .as_ref()
+        .expect("first user message should keep structured attachments");
+    assert!(matches!(
+        &first_message_blocks[1],
+        ChatMessageBlock::Image { mime_type, .. } if mime_type == "image/png"
+    ));
 }
 
 #[test]
@@ -371,6 +473,47 @@ fn at_file_picker_down_then_enter_inserts_the_selected_path() {
 }
 
 #[test]
+fn at_file_picker_enter_on_exact_visible_path_submits_prompt() {
+    let root = TempFileTree::new("enter-exact-visible");
+    root.write_file_with_content("src/lib.rs", b"pub fn demo() {}\n");
+
+    let mut model = native_test_model();
+    model.current_dir = root.path().display().to_string();
+    type_text(&mut model, "@src/lib.rs");
+
+    assert!(model.file_picker_active());
+    assert!(
+        model
+            .current_file_picker_render_result()
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("lib.rs"))
+    );
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    let Some(AppEffect::SendNativeAgent { request }) = effect else {
+        panic!("expected native send effect, got {effect:?}");
+    };
+    let message = request
+        .llm_request()
+        .messages
+        .last()
+        .expect("request should include current user prompt");
+    assert_eq!(message.content, "@src/lib.rs");
+    let blocks = message
+        .blocks
+        .as_ref()
+        .expect("exact visible file should still attach directly");
+    assert!(matches!(
+        &blocks[0],
+        ChatMessageBlock::Text(text)
+            if text.contains("[Attached file: src/lib.rs (text/plain)]")
+                && text.contains("pub fn demo() {}")
+    ));
+}
+
+#[test]
 fn at_file_picker_enter_on_empty_results_does_not_send_composer() {
     let root = TempFileTree::new("enter-empty-results");
     root.write_file("src/lib.rs");
@@ -411,6 +554,96 @@ fn at_file_picker_enter_on_empty_results_does_not_send_composer() {
             .any(|item| item.contains("@does-not-exist")),
         "enter in an empty file picker must not submit the draft"
     );
+}
+
+#[test]
+fn at_file_picker_enter_on_explicit_gitignored_file_submits_prompt() {
+    let root = TempFileTree::new("enter-explicit-gitignored");
+    root.write_file(".git/HEAD");
+    root.write_file_with_content(".gitignore", b"target/\n");
+    root.write_file_with_content("target/debug.log", b"hidden log\n");
+
+    let mut model = native_test_model();
+    model.current_dir = root.path().display().to_string();
+    type_text(&mut model, "@target/debug.log");
+
+    assert!(model.file_picker_active());
+    assert!(
+        model
+            .current_file_picker_render_result()
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("No files"))
+    );
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    let Some(AppEffect::SendNativeAgent { request }) = effect else {
+        panic!("expected native send effect, got {effect:?}");
+    };
+    let message = request
+        .llm_request()
+        .messages
+        .last()
+        .expect("request should include current user prompt");
+    assert_eq!(message.content, "@target/debug.log");
+    let blocks = message
+        .blocks
+        .as_ref()
+        .expect("ignored explicit file should still attach");
+    assert!(matches!(
+        &blocks[0],
+        ChatMessageBlock::Text(text)
+            if text.contains("[Attached file: target/debug.log (text/plain)]")
+                && text.contains("hidden log")
+    ));
+}
+
+#[test]
+fn at_file_picker_enter_on_explicit_absolute_file_submits_prompt() {
+    let root = TempFileTree::new("enter-explicit-absolute");
+    root.write_file(".git/HEAD");
+    root.write_file("src/lib.rs");
+
+    let outside = TempFileTree::new("explicit-absolute-target");
+    outside.write_file_with_content("outside.txt", b"outside text\n");
+    let outside_path = outside.path().join("outside.txt");
+
+    let mut model = native_test_model();
+    model.current_dir = root.path().display().to_string();
+    type_text(&mut model, &format!("@{}", outside_path.display()));
+
+    assert!(model.file_picker_active());
+    assert!(
+        model
+            .current_file_picker_render_result()
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("No files"))
+    );
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    let Some(AppEffect::SendNativeAgent { request }) = effect else {
+        panic!("expected native send effect, got {effect:?}");
+    };
+    let message = request
+        .llm_request()
+        .messages
+        .last()
+        .expect("request should include current user prompt");
+    assert_eq!(message.content, format!("@{}", outside_path.display()));
+    let blocks = message
+        .blocks
+        .as_ref()
+        .expect("absolute explicit file should still attach");
+    assert!(matches!(
+        &blocks[0],
+        ChatMessageBlock::Text(text)
+            if text.contains("[Attached file:")
+                && text.contains("outside.txt")
+                && text.contains("outside text")
+    ));
 }
 
 #[test]

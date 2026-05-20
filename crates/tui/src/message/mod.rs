@@ -7,6 +7,7 @@ use std::{
 #[cfg(test)]
 use std::cell::Cell;
 
+use mo_core::session::ChatMessage;
 use ratatui::text::Line;
 
 use super::{
@@ -62,6 +63,7 @@ pub(super) struct UserMessageRenderLayout {
 pub struct MessageItem {
     sender: Sender,
     content: Rc<str>,
+    source_message: Option<ChatMessage>,
     style_mode: StyleMode,
     render_cache_key: u64,
 }
@@ -79,10 +81,21 @@ impl MessageItem {
     }
 
     /// `new_with_style_mode` 创建一条带指定样式模式的消息项。
+    #[cfg(test)]
     pub fn new_with_style_mode(
         sender: Sender,
         content: impl Into<String>,
         style_mode: StyleMode,
+    ) -> Self {
+        Self::new_with_style_mode_and_source(sender, content, style_mode, None)
+    }
+
+    /// `new_with_style_mode_and_source` 创建一条带指定源消息的消息项。
+    pub fn new_with_style_mode_and_source(
+        sender: Sender,
+        content: impl Into<String>,
+        style_mode: StyleMode,
+        source_message: Option<ChatMessage>,
     ) -> Self {
         let style_mode = style_mode.normalized();
         let content = content.into();
@@ -91,6 +104,7 @@ impl MessageItem {
         Self {
             sender,
             content,
+            source_message,
             style_mode,
             render_cache_key,
         }
@@ -143,6 +157,15 @@ impl MessageItem {
 
     pub(crate) fn source_content(&self) -> &str {
         self.content.as_ref()
+    }
+
+    pub(crate) fn source_chat_message(&self) -> ChatMessage {
+        self.source_message
+            .clone()
+            .unwrap_or_else(|| match self.sender {
+                Sender::User => ChatMessage::user(self.content.as_ref().to_string()),
+                Sender::Assistant => ChatMessage::assistant(self.content.as_ref().to_string()),
+            })
     }
 
     pub(crate) fn render_cache_key(&self) -> u64 {

@@ -5,8 +5,8 @@ use std::{
 };
 
 use mo_tools::{
-    ToolCall, ToolExecutor, ToolExecutorRegistry, ToolKind, ToolPermissionPolicy, ToolResult,
-    builtin::{file_read_tool, list_dir_tool, workspace_readonly_tool_registry},
+    ToolCall, ToolExecutor, ToolExecutorRegistry, ToolKind, ToolPermissionPolicy,
+    builtin::{list_dir_tool, read_tool, workspace_readonly_tool_registry},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -16,11 +16,11 @@ fn builtin_workspace_readonly_registry_exposes_file_tools() {
     let registry = workspace_readonly_tool_registry(&root);
     let definitions = registry.definitions();
 
-    assert!(definitions.definition("file_read").is_some());
+    assert!(definitions.definition("read").is_some());
     assert!(definitions.definition("list_dir").is_some());
     assert_eq!(
         definitions
-            .definition("file_read")
+            .definition("read")
             .map(|definition| definition.kind),
         Some(ToolKind::Read)
     );
@@ -42,7 +42,7 @@ fn builtin_readonly_file_tools_are_approved_by_default() {
 
     assert_eq!(
         definitions
-            .definition("file_read")
+            .definition("read")
             .map(|definition| definition.permission_policy),
         Some(ToolPermissionPolicy::Always)
     );
@@ -57,21 +57,21 @@ fn builtin_readonly_file_tools_are_approved_by_default() {
 }
 
 #[tokio::test]
-async fn builtin_file_read_tool_can_be_registered_independently() {
-    let root = temp_root("builtin-file-read");
+async fn builtin_read_tool_can_be_registered_independently() {
+    let root = temp_root("builtin-read");
     fs::write(root.join("notes.txt"), "one\ntwo\nthree\n").expect("write fixture");
     let mut registry = ToolExecutorRegistry::new();
-    registry.insert(file_read_tool(&root));
+    registry.insert(read_tool(&root));
     let definitions = registry.definitions();
 
-    assert!(definitions.definition("file_read").is_some());
+    assert!(definitions.definition("read").is_some());
     assert!(definitions.definition("list_dir").is_none());
 
     let result = registry
         .execute_tool(
             ToolCall::new(
                 "call-1",
-                "file_read",
+                "read",
                 serde_json::json!({
                     "path": "notes.txt",
                     "offset": 2,
@@ -82,7 +82,8 @@ async fn builtin_file_read_tool_can_be_registered_independently() {
         )
         .await;
 
-    assert_eq!(result, ToolResult::success("call-1", "2\ttwo\n3\tthree"));
+    assert!(!result.is_error);
+    assert_eq!(result.content, "2\ttwo\n3\tthree");
     cleanup(&root);
 }
 
@@ -97,7 +98,7 @@ async fn builtin_list_dir_tool_can_be_registered_independently() {
     let definitions = registry.definitions();
 
     assert!(definitions.definition("list_dir").is_some());
-    assert!(definitions.definition("file_read").is_none());
+    assert!(definitions.definition("read").is_none());
 
     let result = registry
         .execute_tool(
@@ -165,8 +166,8 @@ async fn builtin_list_dir_rejects_arguments_outside_schema_before_execution() {
 }
 
 #[tokio::test]
-async fn builtin_file_read_rejects_offset_below_schema_minimum() {
-    let root = temp_root("builtin-file-read-schema-minimum");
+async fn builtin_read_rejects_offset_below_schema_minimum() {
+    let root = temp_root("builtin-read-schema-minimum");
     fs::write(root.join("notes.txt"), "one\ntwo\n").expect("write fixture");
     let registry = workspace_readonly_tool_registry(&root);
 
@@ -174,7 +175,7 @@ async fn builtin_file_read_rejects_offset_below_schema_minimum() {
         .execute_tool(
             ToolCall::new(
                 "call-1",
-                "file_read",
+                "read",
                 serde_json::json!({
                     "path": "notes.txt",
                     "offset": 0
@@ -222,7 +223,7 @@ async fn builtin_list_dir_limits_output_entries() {
 }
 
 #[tokio::test]
-async fn builtin_file_read_rejects_paths_outside_workspace_root() {
+async fn builtin_read_rejects_paths_outside_workspace_root() {
     let root = temp_root("builtin-outside-root");
     let outside = temp_root("builtin-outside-target");
     fs::write(outside.join("secret.txt"), "secret\n").expect("write outside fixture");
@@ -232,7 +233,7 @@ async fn builtin_file_read_rejects_paths_outside_workspace_root() {
         .execute_tool(
             ToolCall::new(
                 "call-1",
-                "file_read",
+                "read",
                 serde_json::json!({ "path": outside.join("secret.txt") }),
             ),
             &CancellationToken::new(),
@@ -242,6 +243,79 @@ async fn builtin_file_read_rejects_paths_outside_workspace_root() {
     assert!(result.is_error);
     assert!(result.content.contains("outside workspace"));
     cleanup(&outside);
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_read_rejects_explicit_attachment_formats() {
+    let root = temp_root("builtin-read-image");
+    fs::write(
+        root.join("pixel.png"),
+        [
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H',
+            b'D', b'R',
+        ],
+    )
+    .expect("write image fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new("call-1", "read", serde_json::json!({ "path": "pixel.png" })),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(
+        result
+            .content
+            .contains("image/png files must be attached explicitly")
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_read_rejects_binary_text_fallback() {
+    let root = temp_root("builtin-read-binary");
+    fs::write(
+        root.join("blob.dat"),
+        [0x66, 0x6f, 0x6f, 0x00, 0x62, 0x61, 0x72],
+    )
+    .expect("write binary fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new("call-1", "read", serde_json::json!({ "path": "blob.dat" })),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("not valid UTF-8 text"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_read_rejects_control_character_binary_payload() {
+    let root = temp_root("builtin-read-control-bytes");
+    fs::write(root.join("archive.zip"), [0x50, 0x4b, 0x03, 0x04]).expect("write zip fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "read",
+                serde_json::json!({ "path": "archive.zip" }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("not valid UTF-8 text"));
     cleanup(&root);
 }
 

@@ -34,6 +34,7 @@ use crate::{
     tool_result::{ToolActivityRenderMode, ToolResultItem, ToolResultKind},
     work_duration_message::WorkDurationMessageItem,
 };
+use mo_core::session::ChatMessage;
 use mo_core::session::{RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate};
 
 mod block_materialize;
@@ -147,9 +148,25 @@ impl Transcript {
         content: impl Into<String>,
         style_mode: StyleMode,
     ) {
-        self.push_item(TranscriptItem::Message(MessageItem::new_with_style_mode(
-            sender, content, style_mode,
-        )));
+        self.append_message_with_style_mode_and_source(sender, content, style_mode, None);
+    }
+
+    /// `append_message_with_style_mode_and_source` 追加一条带样式和源消息的消息项。
+    pub(crate) fn append_message_with_style_mode_and_source(
+        &mut self,
+        sender: Sender,
+        content: impl Into<String>,
+        style_mode: StyleMode,
+        source_message: Option<ChatMessage>,
+    ) {
+        self.push_item(TranscriptItem::Message(
+            MessageItem::new_with_style_mode_and_source(
+                sender,
+                content,
+                style_mode,
+                source_message,
+            ),
+        ));
     }
 
     /// `append_assistant_message_with_reasoning` 追加带 reasoning 展示段的助手消息。
@@ -562,6 +579,7 @@ impl Transcript {
     }
 
     /// `source_messages` 返回 transcript 中可发送给模型的原始对话消息。
+    #[cfg(test)]
     pub(crate) fn source_messages(&self) -> Vec<(Sender, String)> {
         self.items
             .iter()
@@ -569,6 +587,21 @@ impl Transcript {
                 TranscriptItem::Message(message) => {
                     Some((message.sender(), message.source_content().to_string()))
                 }
+                TranscriptItem::Hero(_)
+                | TranscriptItem::Reasoning(_)
+                | TranscriptItem::System(_)
+                | TranscriptItem::ToolResult(_)
+                | TranscriptItem::WorkDuration(_) => None,
+            })
+            .collect()
+    }
+
+    /// `source_chat_messages` 返回 transcript 中可直接提交给 native agent 的源消息。
+    pub(crate) fn source_chat_messages(&self) -> Vec<ChatMessage> {
+        self.items
+            .iter()
+            .filter_map(|item| match item.as_ref() {
+                TranscriptItem::Message(message) => Some(message.source_chat_message()),
                 TranscriptItem::Hero(_)
                 | TranscriptItem::Reasoning(_)
                 | TranscriptItem::System(_)

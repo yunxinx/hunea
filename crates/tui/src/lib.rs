@@ -27,6 +27,8 @@ mod inline_panel;
 mod message;
 mod model;
 mod model_panel;
+mod native_prompt;
+mod path_resolve;
 mod reasoning_message;
 mod runner;
 mod runtime;

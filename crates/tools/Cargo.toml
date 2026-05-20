@@ -8,6 +8,7 @@ ignore.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 rig-core.workspace = true
+tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]

@@ -71,6 +71,7 @@ fn looks_like_processed_tool_error(reason: &str, full_text: &str) -> bool {
     full_text.contains(TOOL_ERROR_HINT_SEPARATOR)
         && (reason.starts_with("File not found:")
             || reason.starts_with("Directory not found:")
+            || reason.starts_with("File requires explicit attachment:")
             || reason.starts_with("Path is ")
             || reason.starts_with("Path ")
             || reason.starts_with("Invalid arguments")
@@ -105,6 +106,11 @@ fn tool_error_display_reason(tool_name: &str, raw_error: &str) -> String {
     }
 
     if let Some(path) = quoted_target(raw_error, "read failed for ") {
+        if raw_error
+            .contains("must be attached explicitly in the user prompt instead of using read")
+        {
+            return format!("File requires explicit attachment: {path}");
+        }
         if raw_error.contains("No such file or directory") {
             return format!("File not found: {path}");
         }
@@ -136,11 +142,11 @@ fn tool_error_display_reason(tool_name: &str, raw_error: &str) -> String {
         return format!("Path is not a regular file: {path}");
     }
 
-    if let Some(path) = quoted_subject_with_suffix(raw_error, " is a file, use file_read instead") {
+    if let Some(path) = quoted_subject_with_suffix(raw_error, " is a file, use read instead") {
         return format!("Path is a file: {path}");
     }
 
-    if raw_error.starts_with("file_read arguments are invalid:")
+    if raw_error.starts_with("read arguments are invalid:")
         || raw_error.starts_with("list_dir arguments are invalid:")
         || raw_error.contains("arguments do not match schema:")
     {
@@ -158,6 +164,9 @@ fn tool_error_hint(tool_name: &str, display_reason: &str) -> &'static str {
     if display_reason.starts_with("File not found:") {
         return "Use list_dir to verify the file exists before reading.";
     }
+    if display_reason.starts_with("File requires explicit attachment:") {
+        return "Ask the user to attach the file explicitly instead of using read.";
+    }
     if display_reason.starts_with("Directory not found:") {
         return "Use list_dir on the nearest existing parent directory.";
     }
@@ -165,7 +174,7 @@ fn tool_error_hint(tool_name: &str, display_reason: &str) -> &'static str {
         return "Use list_dir to inspect the directory before reading a file.";
     }
     if display_reason.starts_with("Path is a file:") {
-        return "Use file_read to read file contents.";
+        return "Use read to read file contents.";
     }
     if display_reason.starts_with("Path is outside workspace:") {
         return "Use a path inside the current workspace.";
@@ -178,7 +187,7 @@ fn tool_error_hint(tool_name: &str, display_reason: &str) -> &'static str {
     }
 
     match tool_name {
-        "file_read" => "Use list_dir to verify the path, then retry file_read.",
+        "read" => "Use list_dir to verify the path, then retry read.",
         "list_dir" => "Verify the path is a directory inside the workspace.",
         _ => "Check the tool input and try again.",
     }
@@ -232,7 +241,7 @@ mod tests {
 
         let cases = [
             Case {
-                tool_name: "file_read",
+                tool_name: "read",
                 raw_error: "path not found: AGENTS.md: No such file or directory (os error 2)",
                 display_reason: "File not found: AGENTS.md",
                 hint: "Use list_dir to verify the file exists before reading.",
@@ -244,16 +253,22 @@ mod tests {
                 hint: "Use list_dir on the nearest existing parent directory.",
             },
             Case {
-                tool_name: "file_read",
+                tool_name: "read",
                 raw_error: "stat failed for 'secret.txt': Permission denied (os error 13)",
                 display_reason: "Could not inspect path: secret.txt",
-                hint: "Use list_dir to verify the path, then retry file_read.",
+                hint: "Use list_dir to verify the path, then retry read.",
             },
             Case {
-                tool_name: "file_read",
+                tool_name: "read",
                 raw_error: "read failed for '/workspace/unreadable.txt': Permission denied (os error 13)",
                 display_reason: "Could not read file: /workspace/unreadable.txt",
-                hint: "Use list_dir to verify the path, then retry file_read.",
+                hint: "Use list_dir to verify the path, then retry read.",
+            },
+            Case {
+                tool_name: "read",
+                raw_error: "read failed for '/workspace/assets/sample.png': image/png files must be attached explicitly in the user prompt instead of using read",
+                display_reason: "File requires explicit attachment: /workspace/assets/sample.png",
+                hint: "Ask the user to attach the file explicitly instead of using read.",
             },
             Case {
                 tool_name: "list_dir",
@@ -262,39 +277,39 @@ mod tests {
                 hint: "Verify the path is a directory inside the workspace.",
             },
             Case {
-                tool_name: "file_read",
+                tool_name: "read",
                 raw_error: "path is outside workspace: ../secret.txt",
                 display_reason: "Path is outside workspace: ../secret.txt",
                 hint: "Use a path inside the current workspace.",
             },
             Case {
-                tool_name: "file_read",
+                tool_name: "read",
                 raw_error: "'path' is required",
                 display_reason: "Path is required",
                 hint: "Provide a workspace-relative path.",
             },
             Case {
-                tool_name: "file_read",
+                tool_name: "read",
                 raw_error: "'src' is a directory, use list_dir instead",
                 display_reason: "Path is a directory: src",
                 hint: "Use list_dir to inspect the directory before reading a file.",
             },
             Case {
-                tool_name: "file_read",
+                tool_name: "read",
                 raw_error: "'socket' is not a regular file",
                 display_reason: "Path is not a regular file: socket",
-                hint: "Use list_dir to verify the path, then retry file_read.",
+                hint: "Use list_dir to verify the path, then retry read.",
             },
             Case {
                 tool_name: "list_dir",
-                raw_error: "'Cargo.toml' is a file, use file_read instead",
+                raw_error: "'Cargo.toml' is a file, use read instead",
                 display_reason: "Path is a file: Cargo.toml",
-                hint: "Use file_read to read file contents.",
+                hint: "Use read to read file contents.",
             },
             Case {
-                tool_name: "file_read",
-                raw_error: "file_read arguments are invalid: invalid type",
-                display_reason: "Invalid arguments for file_read",
+                tool_name: "read",
+                raw_error: "read arguments are invalid: invalid type",
+                display_reason: "Invalid arguments for read",
                 hint: "Check the tool schema and retry with valid arguments.",
             },
             Case {

@@ -2096,6 +2096,7 @@ dependencies = [
  "criterion",
  "crossterm",
  "diffy",
+ "ignore",
  "mo-core",
  "percent-encoding",
  "pulldown-cmark",

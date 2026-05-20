@@ -178,7 +178,7 @@ mod tests {
     fn runtime_tool_activity_titles_include_paths() {
         let mut registry = ToolRegistry::new();
         registry.insert(
-            ToolDefinition::new("file_read")
+            ToolDefinition::new("read")
                 .with_label("Read")
                 .with_kind(ToolKind::Read),
         );
@@ -186,7 +186,7 @@ mod tests {
             id: "rig-call".to_string(),
             call_id: Some("call-1".to_string()),
             function: ToolFunction::new(
-                "file_read".to_string(),
+                "read".to_string(),
                 serde_json::json!({ "path": "Cargo.toml" }),
             ),
             signature: None,
@@ -207,12 +207,12 @@ mod tests {
     #[test]
     fn runtime_tool_activity_update_marks_tool_errors_failed() {
         let mut registry = ToolRegistry::new();
-        registry.insert(ToolDefinition::new("file_read").with_label("Read"));
+        registry.insert(ToolDefinition::new("read").with_label("Read"));
         let tool_call = RigToolCall {
             id: "rig-call".to_string(),
             call_id: Some("call-1".to_string()),
             function: ToolFunction::new(
-                "file_read".to_string(),
+                "read".to_string(),
                 serde_json::json!({ "path": "Cargo.toml" }),
             ),
             signature: None,
@@ -241,12 +241,12 @@ mod tests {
     #[test]
     fn runtime_tool_activity_update_marks_formatted_tool_errors_failed() {
         let mut registry = ToolRegistry::new();
-        registry.insert(ToolDefinition::new("file_read").with_label("Read"));
+        registry.insert(ToolDefinition::new("read").with_label("Read"));
         let tool_call = RigToolCall {
             id: "rig-call".to_string(),
             call_id: Some("call-1".to_string()),
             function: ToolFunction::new(
-                "file_read".to_string(),
+                "read".to_string(),
                 serde_json::json!({ "path": "AGENTS.md" }),
             ),
             signature: None,

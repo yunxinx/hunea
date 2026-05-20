@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
@@ -8,6 +8,7 @@ use super::{
     AppEffect, Model,
     file_search::{FileSearchMatch, common_path_completion_prefix},
     inline_panel::InlinePanelRenderResult,
+    path_resolve::{resolve_configured_current_dir, resolve_path_token},
     selection::{SelectableLineRange, selectable_range_for_plain_line},
     status_line::truncate_display_width_with_ellipsis,
     theme::{command_accent_text_style, secondary_text_style, tertiary_text_style},
@@ -116,6 +117,11 @@ impl Model {
                 Some(None)
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
+                if self.current_file_picker_query_resolves_to_file() {
+                    self.close_file_picker();
+                    self.dismissed_file_picker_token = None;
+                    return None;
+                }
                 if self.insert_selected_file_picker_path() {
                     return Some(None);
                 }
@@ -296,13 +302,24 @@ impl Model {
     }
 
     fn file_search_root(&self) -> PathBuf {
-        if let Some(path) = expand_configured_current_dir(&self.current_dir)
-            && path.is_dir()
-        {
+        let path = resolve_configured_current_dir(&self.current_dir);
+        if path.is_dir() {
             return path;
         }
 
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    }
+
+    fn current_file_picker_query_resolves_to_file(&self) -> bool {
+        let Some(state) = self.file_picker.as_ref() else {
+            return false;
+        };
+        if state.query.trim().is_empty() {
+            return false;
+        }
+
+        let root = resolve_configured_current_dir(&self.current_dir);
+        resolve_path_token(&root, &state.query).is_file()
     }
 }
 
@@ -356,31 +373,4 @@ fn completed_directory_prefix(query: &str) -> &str {
         .rfind('/')
         .map(|index| &query[..=index])
         .unwrap_or_default()
-}
-
-fn expand_configured_current_dir(value: &str) -> Option<PathBuf> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if trimmed == "~" {
-        return home_dir();
-    }
-    if let Some(rest) = trimmed.strip_prefix("~/") {
-        return home_dir().map(|home| home.join(rest));
-    }
-
-    let path = Path::new(trimmed);
-    if path.is_absolute() {
-        return Some(path.to_path_buf());
-    }
-
-    std::env::current_dir().ok().map(|cwd| cwd.join(path))
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
 }

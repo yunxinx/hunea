@@ -1,7 +1,6 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+use ignore::{DirEntry, WalkBuilder};
 
 const MAX_SCAN_FILES: usize = 8_000;
 const MAX_SCAN_DEPTH: usize = 20;
@@ -155,49 +154,38 @@ fn fuzzy_subsequence_score(path: &str, query: &str) -> Option<usize> {
 
 fn scan_files(root: &Path) -> Vec<String> {
     let mut files = Vec::new();
-    scan_dir(root, root, 0, &mut files);
-    files.sort();
-    files.dedup();
-    files
-}
+    let mut walker = WalkBuilder::new(root);
+    walker
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(false)
+        .parents(true)
+        .require_git(false)
+        .follow_links(false)
+        // 旧实现限制的是目录递归深度，因此这里给文件条目保留一层。
+        .max_depth(Some(MAX_SCAN_DEPTH + 1))
+        .sort_by_file_path(|left, right| left.cmp(right))
+        .filter_entry(should_include_search_entry);
 
-fn scan_dir(root: &Path, dir: &Path, depth: usize, files: &mut Vec<String>) {
-    if files.len() >= MAX_SCAN_FILES || depth > MAX_SCAN_DEPTH {
-        return;
-    }
-
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by(|left, right| {
-        entry_name(left)
-            .cmp(&entry_name(right))
-            .then_with(|| entry_path(left).cmp(&entry_path(right)))
-    });
-
-    for entry in entries {
+    for entry in walker.build() {
         if files.len() >= MAX_SCAN_FILES {
-            return;
+            break;
         }
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
+
+        let Ok(entry) = entry else {
             continue;
         };
-
-        if file_type.is_dir() {
-            if should_skip_dir(&path) {
-                continue;
-            }
-            scan_dir(root, &path, depth + 1, files);
+        if entry.depth() == 0
+            || !entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_file())
+        {
             continue;
         }
 
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let Ok(relative) = path.strip_prefix(root) else {
+        let Ok(relative) = entry.path().strip_prefix(root) else {
             continue;
         };
         let Some(relative) = relative_path_string(relative) else {
@@ -205,6 +193,25 @@ fn scan_dir(root: &Path, dir: &Path, depth: usize, files: &mut Vec<String>) {
         };
         files.push(relative);
     }
+
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn should_include_search_entry(entry: &DirEntry) -> bool {
+    if entry.depth() == 0 {
+        return true;
+    }
+
+    let Some(file_type) = entry.file_type() else {
+        return true;
+    };
+    if !file_type.is_dir() {
+        return true;
+    }
+
+    !should_skip_dir(entry.path())
 }
 
 fn should_skip_dir(path: &Path) -> bool {
@@ -238,14 +245,6 @@ fn common_char_prefix(left: &str, right: &str) -> String {
         .collect()
 }
 
-fn entry_name(entry: &fs::DirEntry) -> String {
-    entry.file_name().to_string_lossy().to_string()
-}
-
-fn entry_path(entry: &fs::DirEntry) -> PathBuf {
-    entry.path()
-}
-
 #[cfg(test)]
 fn search_paths_for_test(paths: &[String], query: &str) -> Vec<FileSearchMatch> {
     search_paths(paths, query)
@@ -253,6 +252,12 @@ fn search_paths_for_test(paths: &[String], query: &str) -> Vec<FileSearchMatch> 
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use super::*;
 
     #[test]
@@ -294,7 +299,42 @@ mod tests {
         assert_eq!(common_path_completion_prefix(&paths, "s"), "src/dir1/");
     }
 
+    #[test]
+    fn search_omits_gitignored_entries_from_results() {
+        let root = temp_root("gitignore-search");
+        fs::create_dir(root.join("target")).expect("create ignored dir");
+        fs::write(root.join(".gitignore"), "target/\n*.tmp\n").expect("write gitignore");
+        fs::write(root.join("src/lib.rs"), b"").expect("write visible file");
+        fs::write(root.join("target/debug.log"), b"").expect("write ignored file");
+        fs::write(root.join("scratch.tmp"), b"").expect("write ignored tmp");
+
+        let mut cache = FileSearchCache::default();
+        let results = cache.search(&root, "");
+
+        assert!(result_paths(&results).contains(&"src/lib.rs"));
+        assert!(!result_paths(&results).contains(&"target/debug.log"));
+        assert!(!result_paths(&results).contains(&"scratch.tmp"));
+        cleanup(&root);
+    }
+
     fn result_paths(results: &[FileSearchMatch]) -> Vec<&str> {
         results.iter().map(|item| item.path.as_str()).collect()
+    }
+
+    fn temp_root(prefix: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "lumos-file-search-{prefix}-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("src")).expect("create temp root");
+        root
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = fs::remove_dir_all(path);
     }
 }

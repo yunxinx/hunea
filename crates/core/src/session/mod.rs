@@ -20,8 +20,8 @@ pub use event::RuntimeEvent;
 pub use identity::{RuntimeAgentCapabilities, RuntimeIdentity, RuntimePromptCapabilities};
 pub use metrics::RuntimeRequestMetrics;
 pub use native::{
-    ChatMessage, ChatRole, NativeAgentEvent, NativeAgentRequest, NativeAgentResponse,
-    NativeLlmPerformanceMetrics, NativeLlmRequest,
+    ChatMessage, ChatMessageBlock, ChatRole, NativeAgentEvent, NativeAgentRequest,
+    NativeAgentResponse, NativeLlmPerformanceMetrics, NativeLlmRequest,
 };
 pub use permission::{
     RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,

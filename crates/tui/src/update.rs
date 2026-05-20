@@ -10,6 +10,8 @@ use mo_core::{
 use super::{
     ExternalEditorLaunch, Model, Sender,
     exit_confirmation::EXIT_CONFIRMATION_PROMPT,
+    native_prompt::build_native_chat_message_from_composer_text,
+    path_resolve::resolve_configured_current_dir,
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},
 };
 
@@ -527,11 +529,15 @@ impl Model {
 
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let style_mode = self.style_mode;
-        self.transcript_mut().append_message_with_style_mode(
-            Sender::User,
-            content.clone(),
-            style_mode,
-        );
+        let source_message =
+            build_native_chat_message_from_composer_text(&content, self.prompt_root());
+        self.transcript_mut()
+            .append_message_with_style_mode_and_source(
+                Sender::User,
+                content.clone(),
+                style_mode,
+                Some(source_message),
+            );
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
         self.composer_mut().clear();
@@ -555,7 +561,7 @@ impl Model {
             return Some(AppEffect::SubmitAcpPrompt(AcpPromptSubmission {
                 agent_id,
                 text: content,
-                current_dir: self.acp_prompt_root(),
+                current_dir: self.prompt_root(),
                 identity: Box::new(identity),
             }));
         }
@@ -565,28 +571,8 @@ impl Model {
             .map(|request| AppEffect::SendNativeAgent { request })
     }
 
-    fn acp_prompt_root(&self) -> PathBuf {
-        let trimmed = self.current_dir.trim();
-        if trimmed.is_empty() {
-            return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        }
-        if trimmed == "~" {
-            return home_dir().unwrap_or_else(|| PathBuf::from("."));
-        }
-        if let Some(rest) = trimmed.strip_prefix("~/") {
-            return home_dir()
-                .map(|home| home.join(rest))
-                .unwrap_or_else(|| PathBuf::from(trimmed));
-        }
-
-        let path = PathBuf::from(trimmed);
-        if path.is_absolute() {
-            path
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(path))
-                .unwrap_or_else(|_| PathBuf::from(trimmed))
-        }
+    fn prompt_root(&self) -> PathBuf {
+        resolve_configured_current_dir(&self.current_dir)
     }
 
     fn handle_resize(&mut self, width: u16, height: u16) {
@@ -668,14 +654,7 @@ impl Model {
     }
 
     fn agent_messages_from_transcript(&self) -> Vec<ChatMessage> {
-        self.transcript
-            .source_messages()
-            .into_iter()
-            .map(|(sender, content)| match sender {
-                Sender::User => ChatMessage::user(content),
-                Sender::Assistant => ChatMessage::assistant(content),
-            })
-            .collect()
+        self.transcript.source_chat_messages()
     }
 }
 
@@ -696,10 +675,4 @@ fn normalize_pasted_text(text: &str) -> String {
     }
 
     normalized
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
 }

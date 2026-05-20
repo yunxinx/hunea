@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::{
+    message::assistant_message_content_width,
     styled_text::{lines_to_ansi_text, lines_to_plain_text},
     theme::{TerminalPalette, tertiary_text_style},
     transcript::{
@@ -198,7 +199,7 @@ impl ReasoningMessageItem {
     }
 
     fn wrapped_lines(&self, width: u16) -> Vec<String> {
-        wrap_assistant_text(&self.content, usize::from(width.max(1)), 0)
+        wrap_assistant_text(&self.content, assistant_message_content_width(width), 0)
     }
 
     fn header_label(&self) -> String {

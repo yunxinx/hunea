@@ -238,6 +238,33 @@ mod tests {
     }
 
     #[test]
+    fn expanded_reasoning_wraps_before_visual_inset_clips_content() {
+        let mut model = Model::new(HeroOptions::default());
+        model.transcript_mut().clear();
+        model.set_window(20, 8);
+        model.set_palette(default_palette(), true);
+        model.transcript_mut().append_reasoning_message(
+            "abcdefghijklmnopqrstuvwxyz",
+            ReasoningDisplayMode::Expanded,
+            None,
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        terminal.draw(|frame| model.render(frame)).unwrap();
+
+        let rows = rendered_rows(terminal.backend().buffer());
+
+        assert!(
+            rows.iter().any(|row| row == "  abcdefghijklmnop  "),
+            "first reasoning row should fit the inset content width: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row == "  qrstuvwxyz        "),
+            "reasoning overflow should wrap to the next row instead of being clipped: {rows:?}"
+        );
+    }
+
+    #[test]
     fn diff_line_background_fills_the_rendered_row() {
         let mut model = Model::new(HeroOptions::default());
         model.transcript_mut().clear();

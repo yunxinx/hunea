@@ -24,7 +24,7 @@ mod user;
 mod user_estimate;
 mod user_projection;
 
-pub(crate) use self::assistant::assistant_message_visual_inset;
+pub(crate) use self::assistant::{assistant_message_content_width, assistant_message_visual_inset};
 pub(crate) use self::assistant_projection::AssistantMessageRenderProjection;
 #[cfg(test)]
 use self::user_estimate::{

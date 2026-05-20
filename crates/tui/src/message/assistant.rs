@@ -108,7 +108,7 @@ pub(crate) fn assistant_message_visual_inset(width: u16) -> u16 {
     u16::try_from(ASSISTANT_MESSAGE_INSET_WIDTH).unwrap_or(u16::MAX)
 }
 
-pub(super) fn assistant_message_content_width(width: u16) -> usize {
+pub(crate) fn assistant_message_content_width(width: u16) -> usize {
     let full_width = assistant_message_width(width);
     let inset = usize::from(assistant_message_visual_inset(width));
 

@@ -505,6 +505,16 @@ pub(super) fn apply_runtime_event_with_coordinator(
                 let _ = model.mark_exploration_tool_activities_complete_from_runtime();
             }
             model.set_stream_activity_thinking(false);
+            if model.streams_reasoning_into_transcript_during_response() {
+                let (reasoning_content, reasoning_duration) = acp_ui_state.take_reasoning_buffer();
+                if reasoning_content.is_some() {
+                    model.append_acp_response_from_runtime(
+                        String::new(),
+                        reasoning_content,
+                        reasoning_duration,
+                    );
+                }
+            }
             acp_ui_state.push_response_chunk(&content);
             if let Some(total_tokens) = acp_ui_state.observe_output_tokens(&content) {
                 model.set_stream_activity_output_tokens(total_tokens);

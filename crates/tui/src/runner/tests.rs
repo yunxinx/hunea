@@ -2437,6 +2437,9 @@ fn acp_thought_chunks_append_reasoning_and_toggle_activity() {
             content: "结论".to_string(),
         },
     );
+
+    assert_eq!(model.transcript_plain_items(), vec!["先分析".to_string()]);
+
     apply_acp_session_event(
         &mut model,
         &mut acp_ui_state,
@@ -3157,7 +3160,10 @@ fn runtime_deltas_flush_before_native_tool_activity() {
         content: "我先看一下 src。".to_string(),
     });
 
-    assert!(model.transcript_plain_items().is_empty());
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["先分析目录结构".to_string()]
+    );
 
     model.apply_runtime_event(RuntimeEvent::ToolActivityStarted {
         target,
@@ -3178,6 +3184,49 @@ fn runtime_deltas_flush_before_native_tool_activity() {
     assert_eq!(items[0], "先分析目录结构");
     assert_eq!(items[1], "我先看一下 src。");
     assert_eq!(items[2], "● Exploring\n  └ List src");
+}
+
+#[test]
+fn runtime_expanded_reasoning_flushes_before_message_finish() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            show_reasoning_content: true,
+            reasoning_display_mode: ReasoningDisplayMode::Expanded,
+            ..ModelOptions::default()
+        },
+    );
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    model.apply_runtime_event(RuntimeEvent::ReasoningDelta {
+        target: target.clone(),
+        content: "先分析目录结构".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::AssistantDelta {
+        target: target.clone(),
+        content: "我先看一下 src。".to_string(),
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["先分析目录结构".to_string()]
+    );
+
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(target),
+        content: "我先看一下 src。".to_string(),
+        reasoning_content: Some("先分析目录结构".to_string()),
+        reasoning_duration: Some(Duration::from_secs(2)),
+        finish_reason: None,
+        metrics: None,
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["先分析目录结构".to_string(), "我先看一下 src。".to_string()]
+    );
 }
 
 #[test]
@@ -3780,6 +3829,44 @@ fn native_agent_retry_event_shows_reconnecting_activity() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
     model.show_stream_activity("qwen3");
+
+    apply_native_agent_event(
+        &mut model,
+        None,
+        NativeAgentEvent::Retrying {
+            message: "Reconnecting... 1/3".to_string(),
+        },
+    );
+
+    let activity = model.current_stream_activity_render_result().plain_line;
+    assert!(activity.contains("Reconnecting... 1/3"));
+    assert!(model.transcript_plain_items().is_empty());
+}
+
+#[test]
+fn native_agent_retry_discards_streamed_expanded_reasoning_from_failed_attempt() {
+    let mut model = Model::new_with_options(
+        HeroOptions::default(),
+        ModelOptions {
+            show_reasoning_content: true,
+            reasoning_display_mode: ReasoningDisplayMode::Expanded,
+            ..ModelOptions::default()
+        },
+    );
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    model.apply_runtime_event(RuntimeEvent::ReasoningDelta {
+        target: target.clone(),
+        content: "先分析".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::AssistantDelta {
+        target,
+        content: "先给结论".to_string(),
+    });
+
+    assert_eq!(model.transcript_plain_items(), vec!["先分析".to_string()]);
 
     apply_native_agent_event(
         &mut model,

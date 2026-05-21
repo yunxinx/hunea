@@ -349,7 +349,7 @@ fn status_line_falls_back_to_whole_line_ellipsis_when_only_one_cell_remains() {
 
     assert_eq!(
         render_trimmed_rows(&mut model, 10, 4),
-        vec!["", "› Enter to", "", "  main..."]
+        vec!["", "› Enter", "", "  main..."]
     );
 
     env::set_current_dir(original_dir).expect("should restore original directory");

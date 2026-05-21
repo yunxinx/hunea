@@ -1,8 +1,8 @@
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::wrap::{
-    is_space_cluster, leading_space_count, measure_width, render_cluster_for_display,
-    split_short_indent, split_text_to_width,
+    leading_space_count, measure_width, render_cluster_for_display, should_start_new_wrap_segment,
+    split_short_indent, split_text_to_width, wrap_segment_kind,
 };
 
 #[cfg(test)]
@@ -507,7 +507,7 @@ fn tokenize_detailed_segments(text: &str) -> Vec<DetailedWrapSegment> {
     let mut current_width = 0;
     let mut current_chars = 0;
     let mut current_start_char = 0;
-    let mut current_is_space = false;
+    let mut current_kind = super::wrap::WrapSegmentKind::Word;
     let mut has_current = false;
     let mut chars_consumed = 0;
 
@@ -516,7 +516,7 @@ fn tokenize_detailed_segments(text: &str) -> Vec<DetailedWrapSegment> {
                          current_width: &mut usize,
                          current_chars: &mut usize,
                          current_start_char: usize,
-                         current_is_space: bool,
+                         current_kind: super::wrap::WrapSegmentKind,
                          has_current: &mut bool| {
         if !*has_current {
             return;
@@ -527,7 +527,7 @@ fn tokenize_detailed_segments(text: &str) -> Vec<DetailedWrapSegment> {
             width: *current_width,
             start_char: current_start_char,
             char_count: *current_chars,
-            is_space: current_is_space,
+            is_space: current_kind == super::wrap::WrapSegmentKind::Space,
         });
         *current_width = 0;
         *current_chars = 0;
@@ -537,24 +537,24 @@ fn tokenize_detailed_segments(text: &str) -> Vec<DetailedWrapSegment> {
     for cluster in UnicodeSegmentation::graphemes(text, true) {
         let cluster_width = measure_width(cluster);
         let cluster_chars = cluster.chars().count();
-        let cluster_is_space = is_space_cluster(cluster);
+        let cluster_kind = wrap_segment_kind(cluster);
 
         if !has_current {
             current_start_char = chars_consumed;
-            current_is_space = cluster_is_space;
+            current_kind = cluster_kind;
             has_current = true;
-        } else if current_is_space != cluster_is_space {
+        } else if should_start_new_wrap_segment(current_kind, cluster_kind) {
             flush_current(
                 &mut segments,
                 &mut current,
                 &mut current_width,
                 &mut current_chars,
                 current_start_char,
-                current_is_space,
+                current_kind,
                 &mut has_current,
             );
             current_start_char = chars_consumed;
-            current_is_space = cluster_is_space;
+            current_kind = cluster_kind;
             has_current = true;
         }
 
@@ -570,7 +570,7 @@ fn tokenize_detailed_segments(text: &str) -> Vec<DetailedWrapSegment> {
         &mut current_width,
         &mut current_chars,
         current_start_char,
-        current_is_space,
+        current_kind,
         &mut has_current,
     );
 
@@ -869,6 +869,19 @@ mod tests {
             column_offset_rebuild_call_count() <= 2,
             "column offsets should be maintained incrementally instead of rebuilding for every appended word block"
         );
+    }
+
+    #[test]
+    fn wrap_prompt_visual_lines_uses_cjk_breakpoints_without_leaving_large_gaps() {
+        let content = "你好，请你随意阅读一下当前目录下的目录和文件情况，不过最多读 10 个文件即可。我只是在测试我的工具，而不是关心你的分析结果内容";
+        let lines = wrap_prompt_visual_lines(content, 102, 0);
+
+        assert_eq!(
+            lines[0].text,
+            "你好，请你随意阅读一下当前目录下的目录和文件情况，不过最多读 10 个文件即可。我只是在测试我的工具，而不"
+        );
+        assert_eq!(measure_width(&lines[0].text), 102);
+        assert_eq!(lines[1].text, "是关心你的分析结果内容");
     }
 
     fn assert_prompt_wrap_invariants(value: &str, width: usize, line_prefix_width: usize) {

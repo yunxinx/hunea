@@ -6,7 +6,8 @@ use crate::{
     theme::TerminalPalette,
     transcript::{
         TranscriptEstimateKind, TranscriptEstimateSource, TranscriptFastEstimate,
-        TranscriptItemMetrics, display_tab_width,
+        TranscriptItemMetrics, WrapSegmentKind, display_tab_width, should_start_new_wrap_segment,
+        wrap_segment_kind,
     },
 };
 
@@ -249,22 +250,23 @@ fn estimate_prompt_prose_line_count(
     let mut segments = Vec::new();
     let mut current_start = 0usize;
     let mut current_width = 0usize;
-    let mut current_is_space = None;
+    let mut current_kind = None;
 
     for (start, cluster) in UnicodeSegmentation::grapheme_indices(text, true) {
-        let is_space = cluster.chars().all(char::is_whitespace);
-        if current_is_space.is_none() {
+        let kind = wrap_segment_kind(cluster);
+        if current_kind.is_none() {
             current_start = start;
-            current_is_space = Some(is_space);
-        } else if current_is_space != Some(is_space) {
+            current_kind = Some(kind);
+        } else if current_kind.is_some_and(|existing| should_start_new_wrap_segment(existing, kind))
+        {
             segments.push(Segment {
                 text: &text[current_start..start],
                 width: current_width,
-                is_space: current_is_space.unwrap_or(false),
+                is_space: current_kind == Some(WrapSegmentKind::Space),
             });
             current_start = start;
             current_width = 0;
-            current_is_space = Some(is_space);
+            current_kind = Some(kind);
         }
 
         current_width = current_width.saturating_add(match cluster {
@@ -274,11 +276,11 @@ fn estimate_prompt_prose_line_count(
         });
     }
 
-    if let Some(is_space) = current_is_space {
+    if let Some(kind) = current_kind {
         segments.push(Segment {
             text: &text[current_start..],
             width: current_width,
-            is_space,
+            is_space: kind == WrapSegmentKind::Space,
         });
     }
 

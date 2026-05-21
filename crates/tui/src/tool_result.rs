@@ -19,7 +19,9 @@ use super::{
     theme::{TerminalPalette, secondary_text_style},
     transcript::{
         ItemLineAnchor, TranscriptEstimateKind, TranscriptFastEstimate, TranscriptItemMetrics,
-        markdown_highlight::{highlight_code_chunks, wrap_highlight_chunks},
+        markdown_highlight::{
+            highlight_code_chunks, wrap_highlight_chunks, wrap_highlight_chunks_soft,
+        },
         wrap_prompt_visual_lines,
     },
 };
@@ -825,7 +827,7 @@ impl ToolResultItem {
             });
         }
 
-        wrap_highlight_chunks(&[chunks], width)
+        wrap_highlight_chunks_soft(&[chunks], width)
             .into_iter()
             .map(Line::from)
             .collect()
@@ -1358,7 +1360,7 @@ fn wrap_failed_exploration_detail_line(
 ) -> Vec<Line<'static>> {
     let prefix_width = UnicodeWidthStr::width(TOOL_EXPLORATION_BRANCH_PREFIX);
     let content_width = width.saturating_sub(prefix_width).max(1);
-    let wrapped = wrap_highlight_chunks(
+    let wrapped = wrap_highlight_chunks_soft(
         &[vec![HighlightChunk {
             text: detail_text.to_string(),
             style: secondary_text_style(palette),
@@ -1411,7 +1413,7 @@ fn wrap_exploration_display_line(
         chunks.extend(display_line.chunks.clone());
     }
 
-    let wrapped = wrap_highlight_chunks(&[chunks], content_width);
+    let wrapped = wrap_highlight_chunks_soft(&[chunks], content_width);
     if wrapped.is_empty() {
         return vec![Line::from(vec![Span::styled(
             line_prefix,
@@ -2384,6 +2386,43 @@ mod tests {
     }
 
     #[test]
+    fn exploration_group_wraps_target_lists_at_word_boundaries() {
+        let mut item = ToolResultItem::from_exploration_tool_activity(
+            completed_read_call("CLAUDE.md"),
+            ToolActivityRenderMode::Compact,
+        )
+        .expect("read should be an exploration tool activity");
+
+        for path in [
+            "config.example.toml",
+            "models.example.toml",
+            "Cargo.toml",
+            "phrases.example.toml",
+            ".gitignore",
+            "acp.example.toml",
+        ] {
+            assert!(item.append_exploration_tool_activity(completed_read_call(path)));
+        }
+        assert!(item.mark_exploration_complete());
+
+        let rendered_plain = item
+            .render_lines(122, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec![
+                "● Explored".to_string(),
+                "  └ Read CLAUDE.md, config.example.toml, models.example.toml, Cargo.toml, phrases.example.toml, .gitignore,"
+                    .to_string(),
+                "    acp.example.toml".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn single_exploration_tool_call_renders_as_standalone_row() {
         let palette = default_palette();
         let mut item = ToolResultItem::from_exploration_tool_activity(
@@ -2542,6 +2581,22 @@ mod tests {
                 "  └ Failed: File not found".to_string(),
             ]
         );
+    }
+
+    fn completed_read_call(path: &str) -> RuntimeToolActivity {
+        RuntimeToolActivity {
+            activity_id: format!("call-read-{path}"),
+            title: format!("Read {path}"),
+            kind: RuntimeToolKind::Read,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Text("content".to_string())],
+            locations: vec![RuntimeToolActivityLocation {
+                path: path.to_string(),
+                line: None,
+            }],
+            raw_input: Some(serde_json::json!({ "path": path }).into()),
+            raw_output: Some("content".into()),
+        }
     }
 
     #[test]

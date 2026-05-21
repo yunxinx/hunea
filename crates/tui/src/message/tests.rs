@@ -352,6 +352,16 @@ fn user_fast_estimate_stays_conservative_for_wide_grapheme_unbroken_tokens() {
 }
 
 #[test]
+fn user_fast_estimate_uses_cjk_breakpoints_in_mixed_prose() {
+    let content = "你好，请你随意阅读一下当前目录下的目录和文件情况，不过最多读 10 个文件即可。我只是在测试我的工具，而不是关心你的分析结果内容";
+    let exact_line_count = wrap_prompt_visual_lines(content, 102, 0).len();
+    let estimated_line_count = estimate_wrapped_line_count_by_display_width(content, 102, 0);
+
+    assert_eq!(exact_line_count, 2);
+    assert_eq!(estimated_line_count, exact_line_count);
+}
+
+#[test]
 fn user_fast_estimate_stays_conservative_for_tabbed_narrow_literal_wraps() {
     let palette = default_palette();
     let item = MessageItem::new_with_style_mode(Sender::User, "a\tb", StyleMode::Cx);

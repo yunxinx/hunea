@@ -35,6 +35,13 @@ struct WrapSegment {
     is_space: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WrapSegmentKind {
+    Space,
+    Word,
+    Breakable,
+}
+
 /// `wrap_prompt_text` 按 prompt transcript 的展示需求换行。
 pub(crate) fn wrap_prompt_text(
     value: impl AsRef<str>,
@@ -313,13 +320,13 @@ fn tokenize_wrap_segments(line: &str) -> Vec<WrapSegment> {
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut current_width = 0;
-    let mut current_is_space = false;
+    let mut current_kind = WrapSegmentKind::Word;
     let mut has_current = false;
 
     let flush_current = |segments: &mut Vec<WrapSegment>,
                          current: &mut String,
                          current_width: &mut usize,
-                         current_is_space: &mut bool,
+                         current_kind: &mut WrapSegmentKind,
                          has_current: &mut bool| {
         if !*has_current {
             return;
@@ -328,27 +335,27 @@ fn tokenize_wrap_segments(line: &str) -> Vec<WrapSegment> {
         segments.push(WrapSegment {
             text: std::mem::take(current),
             width: *current_width,
-            is_space: *current_is_space,
+            is_space: *current_kind == WrapSegmentKind::Space,
         });
         *current_width = 0;
         *has_current = false;
     };
 
     for cluster in UnicodeSegmentation::graphemes(line, true) {
-        let cluster_is_space = is_space_cluster(cluster);
+        let cluster_kind = wrap_segment_kind(cluster);
         if !has_current {
             has_current = true;
-            current_is_space = cluster_is_space;
-        } else if current_is_space != cluster_is_space {
+            current_kind = cluster_kind;
+        } else if should_start_new_wrap_segment(current_kind, cluster_kind) {
             flush_current(
                 &mut segments,
                 &mut current,
                 &mut current_width,
-                &mut current_is_space,
+                &mut current_kind,
                 &mut has_current,
             );
             has_current = true;
-            current_is_space = cluster_is_space;
+            current_kind = cluster_kind;
         }
 
         current.push_str(cluster);
@@ -359,7 +366,7 @@ fn tokenize_wrap_segments(line: &str) -> Vec<WrapSegment> {
         &mut segments,
         &mut current,
         &mut current_width,
-        &mut current_is_space,
+        &mut current_kind,
         &mut has_current,
     );
 
@@ -673,6 +680,25 @@ pub(super) fn is_space_cluster(cluster: &str) -> bool {
     !cluster.is_empty() && cluster.chars().all(char::is_whitespace)
 }
 
+pub(crate) fn wrap_segment_kind(cluster: &str) -> WrapSegmentKind {
+    if is_space_cluster(cluster) {
+        return WrapSegmentKind::Space;
+    }
+
+    if measure_width(cluster) > 1 {
+        return WrapSegmentKind::Breakable;
+    }
+
+    WrapSegmentKind::Word
+}
+
+pub(crate) fn should_start_new_wrap_segment(
+    current_kind: WrapSegmentKind,
+    next_kind: WrapSegmentKind,
+) -> bool {
+    current_kind != next_kind || next_kind == WrapSegmentKind::Breakable
+}
+
 pub(super) fn measure_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
@@ -739,6 +765,32 @@ mod tests {
     #[test]
     fn wrap_assistant_text_does_not_add_blank_line_before_wide_glyph() {
         assert_eq!(wrap_assistant_text("中", 1, 0), vec!["中"]);
+    }
+
+    #[test]
+    fn wrap_prompt_text_uses_cjk_breakpoints_in_mixed_prose() {
+        let content = "你好，请你随意阅读一下当前目录下的目录和文件情况，不过最多读 10 个文件即可。我只是在测试我的工具，而不是关心你的分析结果内容";
+
+        assert_eq!(
+            wrap_prompt_text(content, 102, 0),
+            vec![
+                "你好，请你随意阅读一下当前目录下的目录和文件情况，不过最多读 10 个文件即可。我只是在测试我的工具，而不",
+                "是关心你的分析结果内容",
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_assistant_text_uses_cjk_breakpoints_in_mixed_prose() {
+        let content = "你好，请你随意阅读一下当前目录下的目录和文件情况，不过最多读 10 个文件即可。我只是在测试我的工具，而不是关心你的分析结果内容";
+
+        assert_eq!(
+            wrap_assistant_text(content, 102, 0),
+            vec![
+                "你好，请你随意阅读一下当前目录下的目录和文件情况，不过最多读 10 个文件即可。我只是在测试我的工具，而不",
+                "是关心你的分析结果内容",
+            ]
+        );
     }
 
     #[test]

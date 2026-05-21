@@ -83,6 +83,14 @@ fn render_wraps_chinese_text_at_the_line_edge() {
 }
 
 #[test]
+fn content_width_reserves_two_cell_right_padding() {
+    let mut composer = Composer::new(StyleMode::Ms);
+    composer.set_width(12);
+
+    assert_eq!(composer.content_width(), 8);
+}
+
+#[test]
 fn render_shows_editable_boundary_space_on_continuation_line() {
     let composer = test_composer(7, 2, "hello ");
 
@@ -221,7 +229,8 @@ fn replace_current_at_token_keeps_surrounding_text_and_moves_cursor() {
 
 fn test_composer(width: u16, height: u16, value: &str) -> Composer {
     let mut composer = Composer::new(StyleMode::Ms);
-    composer.set_width(width);
+    // 测试里的 width 表达可编辑内容加 prompt 的旧视觉宽度；真实 frame 还要包含右侧留白。
+    composer.set_width(width.saturating_add(2));
     composer.set_height(height);
     composer.set_text_for_test(value);
     composer

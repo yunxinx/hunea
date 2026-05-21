@@ -12,6 +12,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use super::wrap::{WrapSegmentKind, should_start_new_wrap_segment, wrap_segment_kind};
 use crate::theme::{TerminalPalette, quote_text_style};
 use crate::transcript::markdown_highlight::highlight_code_chunks;
 use crate::transcript::markdown_links::render_local_link_target;
@@ -1263,22 +1264,22 @@ fn tokenize_chunks(chunks: &[StyledChunk]) -> Vec<StyledSegment> {
     for chunk in chunks {
         let mut current = String::new();
         let mut current_width = 0;
-        let mut current_is_space = None;
+        let mut current_kind = None;
 
         for grapheme in UnicodeSegmentation::graphemes(chunk.text.as_str(), true) {
-            let is_space = grapheme.chars().all(char::is_whitespace);
-            match current_is_space {
-                Some(existing) if existing != is_space => {
+            let kind = wrap_segment_kind(grapheme);
+            match current_kind {
+                Some(existing) if should_start_new_wrap_segment(existing, kind) => {
                     segments.push(StyledSegment {
                         text: std::mem::take(&mut current),
                         style: chunk.style,
                         width: current_width,
-                        is_space: existing,
+                        is_space: existing == WrapSegmentKind::Space,
                     });
                     current_width = 0;
-                    current_is_space = Some(is_space);
+                    current_kind = Some(kind);
                 }
-                None => current_is_space = Some(is_space),
+                None => current_kind = Some(kind),
                 _ => {}
             }
 
@@ -1286,12 +1287,12 @@ fn tokenize_chunks(chunks: &[StyledChunk]) -> Vec<StyledSegment> {
             current_width += grapheme.width();
         }
 
-        if let Some(is_space) = current_is_space {
+        if let Some(kind) = current_kind {
             segments.push(StyledSegment {
                 text: current,
                 style: chunk.style,
                 width: current_width,
-                is_space,
+                is_space: kind == WrapSegmentKind::Space,
             });
         }
     }
@@ -1876,6 +1877,17 @@ mod tests {
         let lines = render_markdown_lines("中", 1, default_palette());
         assert_eq!(lines_to_plain_text(&lines), "中");
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn render_markdown_uses_cjk_breakpoints_in_mixed_prose() {
+        let content = "你好，请你随意阅读一下当前目录下的目录和文件情况，不过最多读 10 个文件即可。我只是在测试我的工具，而不是关心你的分析结果内容";
+        let lines = render_markdown_lines(content, 102, default_palette());
+
+        assert_eq!(
+            lines_to_plain_text(&lines),
+            "你好，请你随意阅读一下当前目录下的目录和文件情况，不过最多读 10 个文件即可。我只是在测试我的工具，而不\n是关心你的分析结果内容"
+        );
     }
 
     #[test]

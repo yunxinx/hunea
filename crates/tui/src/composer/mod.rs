@@ -34,6 +34,7 @@ pub(crate) use self::{
 };
 
 const PLACEHOLDER: &str = "Enter to send Prompt";
+const COMPOSER_RIGHT_PADDING_WIDTH: u16 = 2;
 
 /// `Composer` 管理底部输入区的文本、光标和自定义 viewport。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,7 +222,7 @@ impl Composer {
     }
 
     pub(crate) fn content_width(&self) -> usize {
-        usize::from(self.width.saturating_sub(prompt_width())).max(1)
+        composer_content_width(self.width)
     }
 
     pub(crate) fn prompt(&self) -> &str {
@@ -337,7 +338,7 @@ impl Composer {
         }
 
         let prompt_width = usize::from(prompt_width());
-        let content_width = usize::from(width.saturating_sub(prompt_width as u16)).max(1);
+        let content_width = composer_content_width(width);
         let line_count = visual_line_count(value, content_width, prompt_width);
 
         u16::try_from(line_count.max(1)).unwrap_or(u16::MAX)
@@ -849,6 +850,15 @@ fn total_chars(value: &str) -> usize {
 
 fn prompt_width() -> u16 {
     u16::try_from(measure_width("┃ ")).unwrap_or(u16::MAX)
+}
+
+fn composer_content_width(frame_width: u16) -> usize {
+    usize::from(
+        frame_width
+            .saturating_sub(prompt_width())
+            .saturating_sub(COMPOSER_RIGHT_PADDING_WIDTH),
+    )
+    .max(1)
 }
 
 fn is_ctrl_only(modifiers: KeyModifiers) -> bool {

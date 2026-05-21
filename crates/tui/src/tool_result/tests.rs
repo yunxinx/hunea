@@ -597,6 +597,125 @@ fn acp_read_tool_call_renders_compact_summary_without_content_details() {
 }
 
 #[test]
+fn acp_read_tool_call_appends_completed_partial_line_range() {
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "Read Temp.md".to_string(),
+            kind: RuntimeToolKind::Read,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Text(
+                "200\tbody\n201\tmore".to_string(),
+            )],
+            locations: vec![RuntimeToolActivityLocation {
+                path: "Temp.md".to_string(),
+                line: None,
+            }],
+            raw_input: Some(
+                serde_json::json!({
+                    "path": "Temp.md",
+                    "offset": 200,
+                    "limit": 2
+                })
+                .into(),
+            ),
+            raw_output: Some(mo_core::session::RuntimeToolActivityRawValue::tool_result(
+                "200\tbody\n201\tmore",
+                Some(serde_json::json!({
+                    "path": "Temp.md",
+                    "kind": "text",
+                    "start_line": 200,
+                    "end_line": 201,
+                    "total_lines": 500,
+                    "next_offset": 202,
+                })),
+            )),
+        },
+        ToolActivityRenderMode::Compact,
+    );
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered_plain, vec!["● Read Temp.md(200~201)".to_string()]);
+}
+
+#[test]
+fn acp_read_tool_call_keeps_full_file_title_without_line_range() {
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "Read Temp.md".to_string(),
+            kind: RuntimeToolKind::Read,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Text("1\tbody".to_string())],
+            locations: vec![RuntimeToolActivityLocation {
+                path: "Temp.md".to_string(),
+                line: None,
+            }],
+            raw_input: Some(serde_json::json!({ "path": "Temp.md" }).into()),
+            raw_output: Some(mo_core::session::RuntimeToolActivityRawValue::tool_result(
+                "1\tbody",
+                Some(serde_json::json!({
+                    "path": "Temp.md",
+                    "kind": "text",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "total_lines": 1,
+                    "next_offset": null,
+                })),
+            )),
+        },
+        ToolActivityRenderMode::Compact,
+    );
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered_plain, vec!["● Read Temp.md".to_string()]);
+}
+
+#[test]
+fn acp_read_tool_call_does_not_infer_line_range_from_input_arguments() {
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "Read Temp.md".to_string(),
+            kind: RuntimeToolKind::Read,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Text(
+                "200\tbody\n201\tmore".to_string(),
+            )],
+            locations: vec![RuntimeToolActivityLocation {
+                path: "Temp.md".to_string(),
+                line: None,
+            }],
+            raw_input: Some(
+                serde_json::json!({
+                    "path": "Temp.md",
+                    "offset": 200,
+                    "limit": 2
+                })
+                .into(),
+            ),
+            raw_output: Some("200\tbody\n201\tmore".into()),
+        },
+        ToolActivityRenderMode::Compact,
+    );
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered_plain, vec!["● Read Temp.md".to_string()]);
+}
+
+#[test]
 fn acp_readfile_title_fallback_renders_compact_summary_even_without_read_kind() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {

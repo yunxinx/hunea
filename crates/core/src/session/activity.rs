@@ -1,5 +1,10 @@
 use serde_json::Value;
 
+const TOOL_RESULT_RAW_VALUE_MARKER: &str = "__lumos_tool_result";
+const TOOL_RESULT_RAW_VALUE_VERSION: &str = "v1";
+const TOOL_RESULT_RAW_VALUE_CONTENT: &str = "content";
+const TOOL_RESULT_RAW_VALUE_DETAILS: &str = "details";
+
 /// `RuntimeAvailableCommandInput` 表示 runtime 广告命令的输入要求。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeAvailableCommandInput {
@@ -108,13 +113,44 @@ impl RuntimeToolActivityRawValue {
         Self { value }
     }
 
+    /// `tool_result` 保留工具原始文本输出，同时附带内部 metadata。
+    pub fn tool_result(content: impl Into<String>, details: Option<Value>) -> Self {
+        let mut value = serde_json::Map::new();
+        value.insert(
+            TOOL_RESULT_RAW_VALUE_MARKER.to_string(),
+            Value::String(TOOL_RESULT_RAW_VALUE_VERSION.to_string()),
+        );
+        value.insert(
+            TOOL_RESULT_RAW_VALUE_CONTENT.to_string(),
+            Value::String(content.into()),
+        );
+        if let Some(details) = details {
+            value.insert(TOOL_RESULT_RAW_VALUE_DETAILS.to_string(), details);
+        }
+
+        Self::new(Value::Object(value))
+    }
+
     /// `as_json` 返回未格式化的原始 JSON value。
     pub fn as_json(&self) -> &Value {
         &self.value
     }
 
+    /// `tool_result_details` 返回工具结果携带的内部 metadata。
+    pub fn tool_result_details(&self) -> Option<&Value> {
+        if !self.is_tool_result_raw_value() {
+            return None;
+        }
+
+        self.value.get(TOOL_RESULT_RAW_VALUE_DETAILS)
+    }
+
     /// `display_text` 返回适合 transcript 展示的文本。
     pub fn display_text(&self) -> Option<String> {
+        if let Some(content) = self.tool_result_content() {
+            return (!content.is_empty()).then(|| content.to_string());
+        }
+
         match &self.value {
             Value::Null => None,
             Value::String(value) => (!value.is_empty()).then(|| value.clone()),
@@ -139,6 +175,23 @@ impl RuntimeToolActivityRawValue {
         keys.iter()
             .find_map(|key| self.value.get(*key).and_then(Value::as_str))
             .map(str::to_string)
+    }
+
+    fn tool_result_content(&self) -> Option<&str> {
+        if !self.is_tool_result_raw_value() {
+            return None;
+        }
+
+        self.value
+            .get(TOOL_RESULT_RAW_VALUE_CONTENT)
+            .and_then(Value::as_str)
+    }
+
+    fn is_tool_result_raw_value(&self) -> bool {
+        self.value
+            .get(TOOL_RESULT_RAW_VALUE_MARKER)
+            .and_then(Value::as_str)
+            == Some(TOOL_RESULT_RAW_VALUE_VERSION)
     }
 }
 

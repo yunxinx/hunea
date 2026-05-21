@@ -55,6 +55,12 @@ enum AcpDiffChangeKind {
     Deleted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReadToolLineRange {
+    start_line: usize,
+    end_line: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AcpDiffSummary {
     path: String,
@@ -693,14 +699,19 @@ pub(super) fn list_dir_tool_call_title_chunks(call: &RuntimeToolActivity) -> Vec
 }
 
 fn acp_read_tool_call_target(call: &RuntimeToolActivity) -> Option<String> {
+    let line_range = read_tool_line_range(call);
     if call.kind == RuntimeToolKind::Read
         && let [location] = call.locations.as_slice()
         && !location.path.trim().is_empty()
     {
-        return Some(acp_display_path(location.path.trim()));
+        return Some(read_tool_target_with_line_range(
+            acp_display_path(location.path.trim()),
+            line_range,
+        ));
     }
 
     acp_read_tool_call_title_target(&call.title)
+        .map(|target| read_tool_target_with_line_range(target, line_range))
 }
 
 fn acp_read_tool_call_title_target(title: &str) -> Option<String> {
@@ -719,6 +730,39 @@ fn acp_tool_call_title_target(title: &str, prefixes: &[&str]) -> Option<String> 
 
 pub(super) fn is_acp_read_tool_call(call: &RuntimeToolActivity) -> bool {
     call.kind == RuntimeToolKind::Read || acp_read_tool_call_title_target(&call.title).is_some()
+}
+
+fn read_tool_target_with_line_range(
+    mut target: String,
+    line_range: Option<ReadToolLineRange>,
+) -> String {
+    if let Some(line_range) = line_range {
+        target.push_str(&format!(
+            "({}~{})",
+            line_range.start_line, line_range.end_line
+        ));
+    }
+
+    target
+}
+
+fn read_tool_line_range(call: &RuntimeToolActivity) -> Option<ReadToolLineRange> {
+    let details = call.raw_output.as_ref()?.tool_result_details()?;
+    let start_line = usize::try_from(details.get("start_line")?.as_u64()?).ok()?;
+    let end_line = usize::try_from(details.get("end_line")?.as_u64()?).ok()?;
+    let total_lines = usize::try_from(details.get("total_lines")?.as_u64()?).ok()?;
+    if start_line == 0 || end_line < start_line || end_line > total_lines || total_lines == 0 {
+        return None;
+    }
+
+    let has_next_offset = details
+        .get("next_offset")
+        .is_some_and(|next_offset| !next_offset.is_null());
+    let covers_complete_file = start_line == 1 && end_line == total_lines && !has_next_offset;
+    (!covers_complete_file).then_some(ReadToolLineRange {
+        start_line,
+        end_line,
+    })
 }
 
 pub(super) fn is_list_dir_tool_call(call: &RuntimeToolActivity) -> bool {

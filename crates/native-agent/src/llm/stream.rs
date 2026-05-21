@@ -104,6 +104,7 @@ where
                 handle_streamed_user_content(
                     content,
                     &tool_definitions,
+                    &tool_server,
                     Arc::clone(&tool_calls),
                     on_progress,
                 );
@@ -174,6 +175,7 @@ fn handle_streamed_assistant_content<F>(
 fn handle_streamed_user_content<F>(
     content: StreamedUserContent,
     tool_definitions: &ToolRegistry,
+    tool_server: &RigToolServer,
     tool_calls: Arc<StreamedToolCallIndex>,
     on_progress: &mut F,
 ) where
@@ -187,10 +189,16 @@ fn handle_streamed_user_content<F>(
         .remove(&internal_call_id)
         .unwrap_or_else(|| fallback_tool_call_from_result(&tool_result));
     let result_text = tool_result_text(&tool_result.content);
+    let result_details = tool_server.take_tool_result_details(
+        &tool_call.function.name,
+        &tool_call.function.arguments,
+        &result_text,
+    );
     let update = runtime_tool_activity_update_from_rig_result(
         &internal_call_id,
         &tool_call,
         &result_text,
+        result_details,
         tool_definitions,
     );
 

@@ -43,6 +43,7 @@ pub(crate) fn runtime_tool_activity_update_from_rig_result(
     internal_call_id: &str,
     tool_call: &RigToolCall,
     result: &str,
+    result_details: Option<Value>,
     tool_definitions: &ToolRegistry,
 ) -> RuntimeToolActivityUpdate {
     let tool_name = &tool_call.function.name;
@@ -68,7 +69,7 @@ pub(crate) fn runtime_tool_activity_update_from_rig_result(
         .then(|| RuntimeToolActivityRawValue::from(tool_call.function.arguments.clone()));
     let raw_output = error_reason
         .is_none()
-        .then(|| RuntimeToolActivityRawValue::from(result));
+        .then(|| runtime_tool_raw_output(result, result_details));
 
     RuntimeToolActivityUpdate {
         activity_id: internal_call_id.to_string(),
@@ -79,6 +80,16 @@ pub(crate) fn runtime_tool_activity_update_from_rig_result(
         locations: Some(tool_locations_for(&tool_call.function.arguments)),
         raw_input,
         raw_output,
+    }
+}
+
+fn runtime_tool_raw_output(
+    result: &str,
+    result_details: Option<Value>,
+) -> RuntimeToolActivityRawValue {
+    match result_details {
+        Some(details) => RuntimeToolActivityRawValue::tool_result(result, Some(details)),
+        None => RuntimeToolActivityRawValue::from(result),
     }
 }
 
@@ -223,6 +234,7 @@ mod tests {
             "internal-1",
             &tool_call,
             "Toolset error: ToolCallError: not found",
+            None,
             &registry,
         );
 
@@ -257,6 +269,7 @@ mod tests {
             "internal-1",
             &tool_call,
             "File not found: AGENTS.md. Hint: Use list_dir to verify the file exists before reading.",
+            None,
             &registry,
         );
 
@@ -269,6 +282,51 @@ mod tests {
         );
         assert!(update.raw_input.is_none());
         assert!(update.raw_output.is_none());
+    }
+
+    #[test]
+    fn runtime_tool_activity_update_preserves_success_details_metadata() {
+        let mut registry = ToolRegistry::new();
+        registry.insert(
+            ToolDefinition::new("read")
+                .with_label("Read")
+                .with_kind(ToolKind::Read),
+        );
+        let tool_call = RigToolCall {
+            id: "rig-call".to_string(),
+            call_id: Some("call-1".to_string()),
+            function: ToolFunction::new(
+                "read".to_string(),
+                serde_json::json!({ "path": "Cargo.toml", "offset": 10, "limit": 3 }),
+            ),
+            signature: None,
+            additional_params: None,
+        };
+        let details = serde_json::json!({
+            "path": "Cargo.toml",
+            "kind": "text",
+            "start_line": 10,
+            "end_line": 12,
+            "total_lines": 100,
+            "next_offset": 13,
+        });
+
+        let update = runtime_tool_activity_update_from_rig_result(
+            "internal-1",
+            &tool_call,
+            "10\t[package]\n11\tname = \"lumos\"",
+            Some(details.clone()),
+            &registry,
+        );
+
+        let raw_output = update
+            .raw_output
+            .expect("successful tool update should keep raw output");
+        assert_eq!(
+            raw_output.display_text().as_deref(),
+            Some("10\t[package]\n11\tname = \"lumos\"")
+        );
+        assert_eq!(raw_output.tool_result_details(), Some(&details));
     }
 
     #[test]

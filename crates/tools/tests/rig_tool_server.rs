@@ -10,6 +10,8 @@ struct EchoReplacementTool;
 
 struct FailingTool;
 
+struct DetailedTool;
+
 impl Tool for EchoTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new("echo")
@@ -72,6 +74,33 @@ impl Tool for FailingTool {
         _cancellation: &'a CancellationToken,
     ) -> ToolExecutionFuture<'a> {
         Box::pin(async move { ToolResult::error(call.call_id, "raw failure (os error 2)") })
+    }
+}
+
+impl Tool for DetailedTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new("detailed")
+            .with_label("Detailed")
+            .with_kind(ToolKind::Read)
+            .with_description("Return output with result metadata")
+    }
+
+    fn execute<'a>(
+        &'a self,
+        call: ToolCall,
+        _cancellation: &'a CancellationToken,
+    ) -> ToolExecutionFuture<'a> {
+        Box::pin(async move {
+            let mut result = ToolResult::success(call.call_id, "line 10");
+            result.details = Some(serde_json::json!({
+                "kind": "text",
+                "start_line": 10,
+                "end_line": 10,
+                "total_lines": 20,
+                "next_offset": 11,
+            }));
+            result
+        })
     }
 }
 
@@ -150,6 +179,41 @@ async fn rig_tool_server_formats_tool_errors_as_clean_tool_results() {
     assert!(!output.contains("Toolset error"));
     assert!(!output.contains("ToolCallError"));
     assert!(!output.contains("os error"));
+}
+
+#[tokio::test]
+async fn rig_tool_server_exposes_success_result_details_out_of_band() {
+    let mut executor = ToolExecutorRegistry::new();
+    executor.insert(DetailedTool);
+
+    let cancellation = CancellationToken::new();
+    let server = RigToolServer::from_executor(executor, cancellation)
+        .await
+        .expect("rig tool server should build");
+    let arguments = serde_json::json!({ "path": "Cargo.toml", "offset": 10 });
+
+    let output = server
+        .handle()
+        .call_tool("detailed", &arguments.to_string())
+        .await
+        .expect("tool should execute");
+
+    assert_eq!(output, "line 10");
+    assert_eq!(
+        server.take_tool_result_details("detailed", &arguments, &output),
+        Some(serde_json::json!({
+            "kind": "text",
+            "start_line": 10,
+            "end_line": 10,
+            "total_lines": 20,
+            "next_offset": 11,
+        }))
+    );
+    assert_eq!(
+        server.take_tool_result_details("detailed", &arguments, &output),
+        None,
+        "details should be consumed after the matching runtime update"
+    );
 }
 
 #[tokio::test]

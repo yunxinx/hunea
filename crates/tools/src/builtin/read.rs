@@ -22,6 +22,7 @@ const READ_DEFAULT_LINE_COUNT: usize = 2_000;
 const READ_MAX_LINE_COUNT: usize = 5_000;
 const READ_MAX_LINE_CHARS: usize = 2_000;
 const READ_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const TOOL_CALL_INTERRUPTED: &str = "Tool call interrupted";
 
 /// `read_tool` 创建只读 workspace 内容读取工具。
 pub fn read_tool(root: impl AsRef<Path>) -> impl Tool + 'static {
@@ -89,13 +90,15 @@ impl Tool for ReadTool {
     fn execute<'a>(
         &'a self,
         call: ToolCall,
-        _cancellation: &'a CancellationToken,
+        cancellation: &'a CancellationToken,
     ) -> ToolExecutionFuture<'a> {
         let root = self.root.clone();
         let access = self.access.clone();
         let call_id = call.call_id.clone();
+        let cancellation = cancellation.clone();
         Box::pin(async move {
-            match task::spawn_blocking(move || execute_read(root, access, call)).await {
+            match task::spawn_blocking(move || execute_read(root, access, call, cancellation)).await
+            {
                 Ok(result) => result,
                 Err(error) => join_error_result(call_id, error),
             }
@@ -123,7 +126,12 @@ fn join_error_result(call_id: String, error: JoinError) -> ToolResult {
     ToolResult::error(call_id, format!("read task failed: {error}"))
 }
 
-fn execute_read(root: PathBuf, access: SharedWorkspaceAccess, call: ToolCall) -> ToolResult {
+fn execute_read(
+    root: PathBuf,
+    access: SharedWorkspaceAccess,
+    call: ToolCall,
+    cancellation: CancellationToken,
+) -> ToolResult {
     let arguments = match serde_json::from_value::<ReadArguments>(call.arguments) {
         Ok(arguments) => arguments,
         Err(error) => {
@@ -167,7 +175,13 @@ fn execute_read(root: PathBuf, access: SharedWorkspaceAccess, call: ToolCall) ->
         );
     }
 
-    match read_text_file_lines(access.as_ref(), &path, arguments.offset, arguments.limit) {
+    match read_text_file_lines(
+        access.as_ref(),
+        &path,
+        arguments.offset,
+        arguments.limit,
+        &cancellation,
+    ) {
         Ok(outcome) => {
             let mut result = ToolResult::success(call.call_id, outcome.output);
             result.details = Some(json!({
@@ -189,6 +203,7 @@ fn read_text_file_lines(
     path: &Path,
     offset: Option<usize>,
     limit: Option<usize>,
+    cancellation: &CancellationToken,
 ) -> Result<ReadTextOutcome, String> {
     let start_line = offset.unwrap_or(1).max(1);
     let line_limit = limit
@@ -207,6 +222,9 @@ fn read_text_file_lines(
     let mut truncated_by_bytes = false;
 
     loop {
+        if cancellation.is_cancelled() {
+            return Err(TOOL_CALL_INTERRUPTED.to_string());
+        }
         raw_line.clear();
         let bytes_read = reader
             .read_until(b'\n', &mut raw_line)

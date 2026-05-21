@@ -3,6 +3,7 @@ use std::{
     io::{self, Read},
     path::{Path, PathBuf},
     sync::Arc,
+    time::SystemTime,
 };
 
 /// `WorkspaceMetadata` 是 builtin 工具层使用的精简文件元信息。
@@ -11,6 +12,7 @@ pub(crate) struct WorkspaceMetadata {
     pub(crate) is_dir: bool,
     pub(crate) is_file: bool,
     pub(crate) len: u64,
+    pub(crate) modified_at: Option<SystemTime>,
 }
 
 /// `WorkspaceDirectoryEntry` 是可跨后端传递的目录项。
@@ -50,6 +52,7 @@ impl WorkspaceAccess for LocalWorkspaceAccess {
             is_dir: metadata.is_dir(),
             is_file: metadata.is_file(),
             len: metadata.len(),
+            modified_at: metadata.modified().ok(),
         })
     }
 

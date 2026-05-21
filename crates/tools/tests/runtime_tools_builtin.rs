@@ -223,6 +223,33 @@ async fn builtin_list_dir_limits_output_entries() {
 }
 
 #[tokio::test]
+async fn builtin_list_dir_can_show_entry_details() {
+    let root = temp_root("builtin-list-dir-details");
+    fs::create_dir(root.join("src")).expect("create src dir");
+    fs::write(root.join("Cargo.toml"), "[package]\n").expect("write fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "list_dir",
+                serde_json::json!({
+                    "path": ".",
+                    "show_details": true
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("\tCargo.toml"));
+    assert!(result.content.contains("\tsrc/"));
+    cleanup(&root);
+}
+
+#[tokio::test]
 async fn builtin_read_rejects_paths_outside_workspace_root() {
     let root = temp_root("builtin-outside-root");
     let outside = temp_root("builtin-outside-target");
@@ -316,6 +343,46 @@ async fn builtin_read_rejects_control_character_binary_payload() {
 
     assert!(result.is_error);
     assert!(result.content.contains("not valid UTF-8 text"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_read_returns_interrupted_when_cancellation_is_pre_triggered() {
+    let root = temp_root("builtin-read-cancelled");
+    fs::write(root.join("notes.txt"), "one\ntwo\n").expect("write fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new("call-1", "read", serde_json::json!({ "path": "notes.txt" })),
+            &cancellation,
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert_eq!(result.content, "Tool call interrupted");
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_list_dir_returns_interrupted_when_cancellation_is_pre_triggered() {
+    let root = temp_root("builtin-list-dir-cancelled");
+    fs::create_dir(root.join("src")).expect("create src dir");
+    let registry = workspace_readonly_tool_registry(&root);
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new("call-1", "list_dir", serde_json::json!({ "path": "." })),
+            &cancellation,
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert_eq!(result.content, "Tool call interrupted");
     cleanup(&root);
 }
 

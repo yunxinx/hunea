@@ -5,10 +5,10 @@ use std::{collections::BTreeMap, rc::Rc};
 use mo_core::{
     acp::AcpAgentIdentity,
     envinfo,
-    model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
+    model_catalog::{ModelCatalog, ModelSelection},
     phrases::StatusPhraseOrder,
     session::{
-        RuntimeAvailableCommand, RuntimeModelConfig, RuntimeTerminalSnapshot, RuntimeToolActivity,
+        RuntimeAvailableCommand, RuntimeTerminalSnapshot, RuntimeToolActivity,
         RuntimeToolActivityUpdate,
     },
 };
@@ -20,15 +20,11 @@ use super::{
     backtrack::BacktrackState,
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
-    document::{
-        LayoutCache, RestoreState, TailLayoutCache, TranscriptCache, ViewportCache, ViewportState,
-        offset_viewport_line_indices,
-    },
+    document::offset_viewport_line_indices,
     external_editor::ExternalEditorLaunch,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT, FilePickerState},
     file_search::FileSearchCache,
     model_panel::ModelPanelState,
-    selection::{AutoScrollDirection, MousePosition, SelectionClickState, SelectionState},
     status_line::{
         StatusLineItem, StatusLineRenderResult, status_line_gap_before, status_line_pair_height,
     },
@@ -40,6 +36,19 @@ use super::{
     transcript::{RenderResult, Transcript, TranscriptEstimateBreakdown, index_only_render_result},
     view,
 };
+
+mod acp_model;
+mod runtime_response;
+mod state;
+
+use acp_model::AcpModelSelectionRollback;
+pub(crate) use acp_model::acp_model_provider_id;
+use runtime_response::{
+    BufferedRuntimeResponse, RuntimeResponseBuffer, StreamedRuntimeReasoning,
+    strip_displayed_reasoning_prefix,
+};
+pub(crate) use state::PendingReasoningToggleClick;
+use state::{DocumentRuntimeState, NoticeState, SelectionRuntimeState};
 
 /// `Model` 表示交互式 TUI 应用的状态。
 #[derive(Debug, Clone)]
@@ -131,236 +140,6 @@ impl RequestMetrics {
     }
 }
 
-/// `RuntimeResponseBuffer` 暂存非 ACP runtime 的流式文本，直到工具调用等语义边界出现。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct RuntimeResponseBuffer {
-    content: String,
-    reasoning_content: String,
-    reasoning_started_at: Option<Instant>,
-}
-
-impl RuntimeResponseBuffer {
-    fn is_empty(&self) -> bool {
-        self.content.is_empty() && self.reasoning_content.is_empty()
-    }
-
-    fn has_reasoning_content(&self) -> bool {
-        !self.reasoning_content.is_empty()
-    }
-
-    fn push_content(&mut self, content: &str) {
-        self.content.push_str(content);
-    }
-
-    fn push_reasoning_content(&mut self, content: &str) {
-        if content.is_empty() {
-            return;
-        }
-        self.reasoning_started_at.get_or_insert_with(Instant::now);
-        self.reasoning_content.push_str(content);
-    }
-
-    fn clear(&mut self) {
-        self.content.clear();
-        self.reasoning_content.clear();
-        self.reasoning_started_at = None;
-    }
-
-    fn take(&mut self) -> Option<BufferedRuntimeResponse> {
-        let content = std::mem::take(&mut self.content);
-        let reasoning_content = if self.reasoning_content.is_empty() {
-            self.reasoning_started_at = None;
-            None
-        } else {
-            Some(std::mem::take(&mut self.reasoning_content))
-        };
-        let reasoning_duration = reasoning_content
-            .as_ref()
-            .and_then(|_| self.reasoning_started_at.take())
-            .map(|started_at| Instant::now().saturating_duration_since(started_at));
-
-        if content.is_empty() && reasoning_content.is_none() {
-            return None;
-        }
-
-        Some(BufferedRuntimeResponse {
-            content,
-            reasoning_content,
-            reasoning_duration,
-        })
-    }
-
-    fn take_reasoning_for_expanded_display(&mut self) -> Option<BufferedReasoningFragment> {
-        if self.reasoning_content.is_empty() {
-            self.reasoning_started_at = None;
-            return None;
-        }
-
-        let content = std::mem::take(&mut self.reasoning_content);
-        let duration = self
-            .reasoning_started_at
-            .take()
-            .map(|started_at| Instant::now().saturating_duration_since(started_at));
-
-        Some(BufferedReasoningFragment { content, duration })
-    }
-
-    fn take_with_final(
-        &mut self,
-        final_content: String,
-        final_reasoning_content: Option<String>,
-        final_reasoning_duration: Option<Duration>,
-    ) -> Option<BufferedRuntimeResponse> {
-        let final_reasoning_content =
-            final_reasoning_content.filter(|content| !content.trim().is_empty());
-        let mut response = self.take().unwrap_or_default();
-
-        response.content = reconcile_buffered_text_with_final(response.content, final_content);
-        let (reasoning_content, reasoning_duration) = reconcile_buffered_reasoning_with_final(
-            response.reasoning_content,
-            response.reasoning_duration,
-            final_reasoning_content,
-            final_reasoning_duration,
-        );
-        response.reasoning_content = reasoning_content;
-        response.reasoning_duration = reasoning_duration;
-
-        if response.content.is_empty() && response.reasoning_content.is_none() {
-            return None;
-        }
-
-        Some(response)
-    }
-}
-
-fn reconcile_buffered_text_with_final(buffered: String, final_content: String) -> String {
-    if buffered.is_empty() {
-        return final_content;
-    }
-    if final_content.is_empty() {
-        return buffered;
-    }
-    if final_content.starts_with(&buffered) {
-        return final_content;
-    }
-
-    buffered
-}
-
-fn reconcile_buffered_reasoning_with_final(
-    buffered: Option<String>,
-    buffered_duration: Option<Duration>,
-    final_content: Option<String>,
-    final_duration: Option<Duration>,
-) -> (Option<String>, Option<Duration>) {
-    match final_content {
-        Some(content) => (Some(content), final_duration.or(buffered_duration)),
-        None => (buffered, buffered_duration),
-    }
-}
-
-fn strip_displayed_reasoning_prefix(
-    final_content: Option<String>,
-    displayed_content: &str,
-) -> Option<String> {
-    let final_content = final_content?;
-    if displayed_content.is_empty() {
-        return Some(final_content);
-    }
-
-    final_content
-        .strip_prefix(displayed_content)
-        .and_then(|tail| (!tail.is_empty()).then(|| tail.to_string()))
-}
-
-#[derive(Default)]
-struct BufferedRuntimeResponse {
-    content: String,
-    reasoning_content: Option<String>,
-    reasoning_duration: Option<Duration>,
-}
-
-struct BufferedReasoningFragment {
-    content: String,
-    duration: Option<Duration>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct StreamedRuntimeReasoning {
-    item_indices: Vec<usize>,
-    displayed_content: String,
-}
-
-/// `AcpModelSelectionRollback` 保存 ACP 模型切换请求确认前的本地选择状态。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AcpModelSelectionRollback {
-    agent_id: String,
-    selected_model: Option<ModelSelection>,
-    acp_current_model: Option<String>,
-}
-
-/// `SelectionRuntimeState` 收口 selection 与拖拽自动滚动的运行态。
-#[derive(Debug, Clone)]
-pub(super) struct SelectionRuntimeState {
-    pub(super) selection: SelectionState,
-    pub(super) click: SelectionClickState,
-    pub(super) version: usize,
-    pub(super) auto_scroll_direction: AutoScrollDirection,
-    pub(super) auto_scroll_token: usize,
-    pub(super) auto_scroll_mouse: MousePosition,
-    pub(super) auto_scroll_deadline: Option<Instant>,
-}
-
-impl Default for SelectionRuntimeState {
-    fn default() -> Self {
-        Self {
-            selection: SelectionState::default(),
-            click: SelectionClickState::default(),
-            version: 0,
-            auto_scroll_direction: AutoScrollDirection::None,
-            auto_scroll_token: 0,
-            auto_scroll_mouse: MousePosition::default(),
-            auto_scroll_deadline: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) struct PendingReasoningToggleClick {
-    pub(super) item_index: usize,
-    pub(super) column: u16,
-    pub(super) row: u16,
-    pub(super) active: bool,
-}
-
-/// `DocumentRuntimeState` 收口统一文档 viewport、cache 与手动滚动状态。
-#[derive(Debug, Clone, Default)]
-pub(super) struct DocumentRuntimeState {
-    pub(super) viewport_y: usize,
-    pub(super) viewport_state: ViewportState,
-    pub(super) transcript_cache: TranscriptCache,
-    pub(super) tail_layout_cache: TailLayoutCache,
-    pub(super) layout_cache: LayoutCache,
-    pub(super) viewport_cache: ViewportCache,
-    pub(super) follow_bottom: bool,
-    pub(super) manual_scroll: bool,
-    pub(super) restore: RestoreState,
-}
-
-/// `NoticeState` 收口短暂提示、滚动提示、外部编辑器提示与退出确认。
-#[derive(Debug, Clone, Default)]
-pub(super) struct NoticeState {
-    pub(super) status_text: String,
-    pub(super) status_token: usize,
-    pub(super) status_deadline: Option<Instant>,
-    pub(super) history_scroll_indicator_token: usize,
-    pub(super) history_scroll_indicator_deadline: Option<Instant>,
-    pub(super) external_editor_helper_visible: bool,
-    pub(super) external_editor_helper_token: usize,
-    pub(super) external_editor_helper_deadline: Option<Instant>,
-    pub(super) exit_confirmation_deadline: Option<Instant>,
-}
-
 /// `ModelOptions` 表示创建 TUI 模型时可配置的样式与状态行选项。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelOptions {
@@ -413,24 +192,6 @@ impl Default for ModelOptions {
             status_phrase_order: StatusPhraseOrder::Random,
         }
     }
-}
-
-pub(crate) fn acp_model_provider_id(agent_id: &str) -> String {
-    format!("acp:{agent_id}")
-}
-
-fn acp_model_label(name: &str, value: &str) -> String {
-    let name = name.trim();
-    if name.is_empty() {
-        value.to_string()
-    } else {
-        name.to_string()
-    }
-}
-
-fn acp_model_entry_description(name: &str, value: &str) -> Option<String> {
-    let label = acp_model_label(name, value);
-    (label != value).then_some(label)
 }
 
 /// `TranscriptSyncProfile` 记录一次 transcript sync 在首帧前的关键耗时拆分。
@@ -1038,108 +799,6 @@ impl Model {
         self.sync_transcript_render();
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-    }
-
-    pub(crate) fn activate_acp_model_scope(&mut self, agent_id: &str) {
-        let provider_id = acp_model_provider_id(agent_id);
-        self.pending_acp_model_rollback = None;
-        self.model_catalog = ModelCatalog::new(vec![ModelProvider::acp(
-            provider_id,
-            format!("ACP: {agent_id}"),
-            Vec::new(),
-        )]);
-        self.selected_model = None;
-        self.acp_current_model = None;
-        self.acp_model_config_id = None;
-        self.bump_status_line_revision();
-        self.sync_model_panel_to_selection();
-    }
-
-    pub(crate) fn apply_acp_model_config(&mut self, agent_id: &str, config: RuntimeModelConfig) {
-        let provider_id = acp_model_provider_id(agent_id);
-        let display_name = format!("ACP: {agent_id}");
-        let mut entries = config
-            .options
-            .into_iter()
-            .filter_map(|option| {
-                let value = option.value.trim().to_string();
-                if value.is_empty() {
-                    return None;
-                }
-                let description = acp_model_entry_description(&option.name, &value);
-                Some(ModelEntry::new(value, description, ModelSource::Acp))
-            })
-            .collect::<Vec<_>>();
-        if entries.is_empty() {
-            entries.push(ModelEntry::new(
-                config.current_value.clone(),
-                acp_model_entry_description(&config.current_name, &config.current_value),
-                ModelSource::Acp,
-            ));
-        }
-        let current_label = acp_model_label(&config.current_name, &config.current_value);
-
-        self.model_catalog = ModelCatalog::new(vec![ModelProvider::acp(
-            provider_id.clone(),
-            display_name,
-            entries,
-        )]);
-        self.selected_model = Some(ModelSelection::new(provider_id, config.current_value));
-        self.set_acp_current_model(Some(current_label));
-        self.acp_model_config_id = config.config_id;
-        self.commit_pending_acp_model_change(agent_id);
-        self.sync_model_panel_to_selection();
-    }
-
-    /// `begin_pending_acp_model_change` 记录 ACP 模型切换乐观更新前的本地状态。
-    pub(crate) fn begin_pending_acp_model_change(&mut self, agent_id: &str) {
-        if self
-            .pending_acp_model_rollback
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.agent_id == agent_id)
-        {
-            return;
-        }
-
-        self.pending_acp_model_rollback = Some(AcpModelSelectionRollback {
-            agent_id: agent_id.to_string(),
-            selected_model: self.selected_model.clone(),
-            acp_current_model: self.acp_current_model.clone(),
-        });
-    }
-
-    /// `commit_pending_acp_model_change` 在 agent 确认切换成功后丢弃回滚快照。
-    pub(crate) fn commit_pending_acp_model_change(&mut self, agent_id: &str) {
-        if self
-            .pending_acp_model_rollback
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.agent_id == agent_id)
-        {
-            self.pending_acp_model_rollback = None;
-        }
-    }
-
-    /// `rollback_pending_acp_model_change` 在 ACP 模型切换失败后恢复旧选择。
-    pub(crate) fn rollback_pending_acp_model_change(&mut self, agent_id: &str) {
-        let Some(snapshot) = self.pending_acp_model_rollback.take() else {
-            return;
-        };
-        if snapshot.agent_id != agent_id {
-            self.pending_acp_model_rollback = Some(snapshot);
-            return;
-        }
-
-        let changed = self.selected_model != snapshot.selected_model
-            || self.acp_current_model != snapshot.acp_current_model;
-        self.selected_model = snapshot.selected_model;
-        self.acp_current_model = snapshot.acp_current_model;
-        if changed {
-            self.bump_status_line_revision();
-            if self.document_runtime.follow_bottom {
-                self.sync_document_viewport_to_bottom();
-            }
-        }
-        self.sync_model_panel_to_selection();
     }
 
     fn append_assistant_message_with_reasoning_from_runtime(

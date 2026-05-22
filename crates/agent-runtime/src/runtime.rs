@@ -26,6 +26,7 @@ const TOOL_PERMISSION_DENIED: &str = "Tool permission denied";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentRuntimeProgress {
     OutputTokens { total_tokens: usize },
+    InputTokens { total_tokens: usize },
     Thinking { is_thinking: bool },
     AssistantDelta { content: String },
     ReasoningDelta { content: String },
@@ -107,6 +108,7 @@ where
         {
             return Err(AgentRuntimeError::ToolTurnLimit { max_turns });
         }
+        state.mark_tool_call_turn();
         tool_turns = tool_turns.saturating_add(1);
         request.messages.push(provider_response.message);
 
@@ -129,12 +131,17 @@ where
                 &tool_definitions,
             );
             on_progress(AgentRuntimeProgress::ToolActivityUpdated { update });
-            request
-                .messages
-                .push(Message::tool_result(execution.provider_result));
             if execution.raw_result.terminate {
                 return Ok(state.finish_at(Instant::now()));
             }
+            state.observe_tool_result_input(
+                &execution.provider_result.content,
+                Instant::now(),
+                &mut on_progress,
+            );
+            request
+                .messages
+                .push(Message::tool_result(execution.provider_result));
         }
     }
 }
@@ -150,6 +157,7 @@ where
     C: ProviderClient + ?Sized,
     F: FnMut(AgentRuntimeProgress) + Send,
 {
+    state.mark_request_started(Instant::now());
     let mut provider_response = None;
     let result = {
         let mut sink = RuntimeStreamSink {
@@ -329,13 +337,15 @@ struct RuntimeTurnState {
     content: String,
     final_content: Option<String>,
     reasoning_content: String,
-    progress: StreamingTokenProgress,
+    output_progress: StreamingTokenProgress,
+    input_progress: StreamingTokenProgress,
     is_thinking: bool,
     reasoning_started_at: Option<Instant>,
     reasoning_finished_at: Option<Instant>,
     request_started_at: Option<Instant>,
     first_token_at: Option<Instant>,
     final_output_tokens: Option<usize>,
+    saw_tool_call_turn: bool,
 }
 
 impl RuntimeTurnState {
@@ -344,13 +354,15 @@ impl RuntimeTurnState {
             content: String::new(),
             final_content: None,
             reasoning_content: String::new(),
-            progress: StreamingTokenProgress::new(model_id),
+            output_progress: StreamingTokenProgress::new(model_id.clone()),
+            input_progress: StreamingTokenProgress::new(model_id),
             is_thinking: false,
             reasoning_started_at: None,
             reasoning_finished_at: None,
             request_started_at: None,
             first_token_at: None,
             final_output_tokens: None,
+            saw_tool_call_turn: false,
         }
     }
 
@@ -360,6 +372,10 @@ impl RuntimeTurnState {
 
     fn capture_turn_response(&mut self, response: &mo_ai_core::PromptResponse) {
         self.final_content = Some(response.message.text_content());
+    }
+
+    fn mark_tool_call_turn(&mut self) {
+        self.saw_tool_call_turn = true;
     }
 
     fn observe_content_chunk(
@@ -413,15 +429,31 @@ impl RuntimeTurnState {
         now: Instant,
         on_progress: &mut impl FnMut(AgentRuntimeProgress),
     ) {
-        if let Some(total_tokens) = self.progress.observe_delta(content, now) {
+        if let Some(total_tokens) = self.output_progress.observe_delta(content, now) {
             on_progress(AgentRuntimeProgress::OutputTokens { total_tokens });
         }
+    }
+
+    fn observe_tool_result_input(
+        &mut self,
+        content: &str,
+        now: Instant,
+        on_progress: &mut impl FnMut(AgentRuntimeProgress),
+    ) {
+        let Some(total_tokens) =
+            observe_complete_token_total(&mut self.input_progress, content, now)
+        else {
+            return;
+        };
+
+        on_progress(AgentRuntimeProgress::InputTokens { total_tokens });
     }
 
     fn finish_at(mut self, finished_at: Instant) -> AgentRuntimeCompletion {
         if self.is_thinking {
             self.is_thinking = false;
         }
+        let _ = self.output_progress.flush(finished_at);
         let metrics = self.performance_metrics(finished_at);
         let reasoning_content = trim_outer_blank_lines(&self.reasoning_content);
         let reasoning_duration = self.reasoning_duration();
@@ -445,9 +477,12 @@ impl RuntimeTurnState {
         let first_token_at = self.first_token_at?;
         Some(NativeLlmPerformanceMetrics {
             latency: first_token_at.saturating_duration_since(request_started_at),
-            output_tokens: self
-                .final_output_tokens
-                .unwrap_or_else(|| self.progress.total_tokens()),
+            output_tokens: if self.saw_tool_call_turn {
+                self.output_progress.total_tokens()
+            } else {
+                self.final_output_tokens
+                    .unwrap_or_else(|| self.output_progress.total_tokens())
+            },
             duration: finished_at.saturating_duration_since(request_started_at),
         })
     }
@@ -476,15 +511,31 @@ fn trim_outer_blank_lines(content: &str) -> String {
     lines[start..=end].join("\n")
 }
 
+fn observe_complete_token_total(
+    progress: &mut StreamingTokenProgress,
+    content: &str,
+    now: Instant,
+) -> Option<usize> {
+    if content.is_empty() {
+        return None;
+    }
+
+    progress
+        .observe_delta(content, now)
+        .or_else(|| progress.flush(now))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     use mo_ai_core::{
         Message, MessageRole, ModelDescriptor, PromptRequest, PromptResponse, ProviderCapabilities,
         ProviderClient, ProviderError, ProviderFuture, StreamEvent, StreamEventSink, TokenUsage,
         ToolCall,
     };
+    use mo_core::token_count::StreamingTokenProgress;
     use mo_tools::{
         Tool, ToolCall as RuntimeToolCall, ToolDefinition, ToolExecutionFuture,
         ToolExecutorRegistry, ToolKind, ToolPermissionPolicy, ToolResult,
@@ -588,6 +639,127 @@ mod tests {
         }
     }
 
+    struct DelayedFirstTokenProvider;
+
+    impl ProviderClient for DelayedFirstTokenProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            _request: PromptRequest,
+            sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                sink.emit(StreamEvent::MessageStarted);
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                sink.emit(StreamEvent::TextDelta("done".to_string()));
+                let response = PromptResponse::new(
+                    Message::text(MessageRole::Assistant, "done"),
+                    mo_ai_core::FinishReason::Stop,
+                    None,
+                    Vec::new(),
+                );
+                sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                Ok(response)
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    struct ToolLoopUsageProvider;
+
+    impl ProviderClient for ToolLoopUsageProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            request: PromptRequest,
+            sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+            Box::pin(async move {
+                let has_tool_result = request
+                    .messages
+                    .iter()
+                    .any(|message| message.first_tool_result().is_some());
+                sink.emit(StreamEvent::MessageStarted);
+                if !has_tool_result {
+                    let call = ToolCall::new("call-1", "echo", serde_json::json!({ "text": "hi" }));
+                    sink.emit(StreamEvent::TextDelta("hello world".to_string()));
+                    sink.emit(StreamEvent::UsageUpdated(TokenUsage::new(
+                        None,
+                        Some(20),
+                        None,
+                    )));
+                    let response = PromptResponse::new(
+                        Message::assistant_with_tool_calls(
+                            "hello world".to_string(),
+                            vec![call.clone()],
+                        ),
+                        mo_ai_core::FinishReason::ToolCalls,
+                        Some(TokenUsage::new(None, Some(20), None)),
+                        vec![call],
+                    );
+                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    Ok(response)
+                } else {
+                    sink.emit(StreamEvent::TextDelta("done".to_string()));
+                    sink.emit(StreamEvent::UsageUpdated(TokenUsage::new(
+                        None,
+                        Some(5),
+                        None,
+                    )));
+                    let response = PromptResponse::new(
+                        Message::text(MessageRole::Assistant, "done"),
+                        mo_ai_core::FinishReason::Stop,
+                        Some(TokenUsage::new(None, Some(5), None)),
+                        Vec::new(),
+                    );
+                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    Ok(response)
+                }
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    struct TerminatingTool;
+
+    impl Tool for TerminatingTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new("echo")
+                .with_label("Echo")
+                .with_kind(ToolKind::Other)
+                .with_permission_policy(ToolPermissionPolicy::Always)
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: RuntimeToolCall,
+            _cancellation: &'a CancellationToken,
+        ) -> ToolExecutionFuture<'a> {
+            Box::pin(async move {
+                let mut result = ToolResult::success(call.call_id, "terminate here");
+                result.terminate = true;
+                result
+            })
+        }
+    }
+
     struct EchoTool;
 
     impl Tool for EchoTool {
@@ -666,6 +838,185 @@ mod tests {
                 .expect("metrics should use provider usage")
                 .output_tokens,
             5
+        );
+    }
+
+    #[tokio::test]
+    async fn request_latency_starts_before_first_stream_frame() {
+        let provider = DelayedFirstTokenProvider;
+        let request = PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "hello")]);
+        let cancellation = CancellationToken::new();
+
+        let completion = run_agent_runtime(
+            &provider,
+            request,
+            ToolExecutorRegistry::new(),
+            &cancellation,
+            AgentRuntimeOptions::default(),
+            |_| {},
+        )
+        .await
+        .expect("runtime should complete");
+
+        let metrics = completion.metrics.expect("metrics should be recorded");
+        assert!(
+            metrics.latency >= Duration::from_millis(75),
+            "latency should include time before the first SSE frame arrives: {:?}",
+            metrics.latency
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_result_input_tokens_emit_progress() {
+        let provider = FakeProvider {
+            calls: Mutex::new(0),
+        };
+        let mut executor = ToolExecutorRegistry::new();
+        executor.insert(EchoTool);
+        let request =
+            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let cancellation = CancellationToken::new();
+        let mut events = Vec::new();
+
+        let _ = run_agent_runtime(
+            &provider,
+            request,
+            executor,
+            &cancellation,
+            AgentRuntimeOptions::default(),
+            |event| events.push(event),
+        )
+        .await
+        .expect("runtime should complete");
+
+        assert!(events.iter().any(|event| {
+            matches!(event, AgentRuntimeProgress::InputTokens { total_tokens } if *total_tokens > 0)
+        }));
+    }
+
+    #[tokio::test]
+    async fn final_metrics_flush_pending_output_tokens_without_provider_usage() {
+        struct SplitDeltaProvider;
+
+        impl ProviderClient for SplitDeltaProvider {
+            fn stream_prompt<'a>(
+                &'a self,
+                _request: PromptRequest,
+                sink: &'a mut (dyn StreamEventSink + Send),
+            ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+                Box::pin(async move {
+                    sink.emit(StreamEvent::MessageStarted);
+                    sink.emit(StreamEvent::TextDelta("hello".to_string()));
+                    sink.emit(StreamEvent::TextDelta(" world".to_string()));
+                    let response = PromptResponse::new(
+                        Message::text(MessageRole::Assistant, "hello world"),
+                        mo_ai_core::FinishReason::Stop,
+                        None,
+                        Vec::new(),
+                    );
+                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    Ok(response)
+                })
+            }
+
+            fn list_models<'a>(
+                &'a self,
+            ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+
+            fn capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities::chat_completions()
+            }
+        }
+
+        let provider = SplitDeltaProvider;
+        let request = PromptRequest::new("gpt-4o", vec![Message::text(MessageRole::User, "hello")]);
+        let cancellation = CancellationToken::new();
+
+        let completion = run_agent_runtime(
+            &provider,
+            request,
+            ToolExecutorRegistry::new(),
+            &cancellation,
+            AgentRuntimeOptions::default(),
+            |_| {},
+        )
+        .await
+        .expect("runtime should complete");
+
+        let metrics = completion.metrics.expect("metrics should be recorded");
+        assert!(
+            metrics.output_tokens >= 2,
+            "final metrics should include the last throttled output delta: {}",
+            metrics.output_tokens
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_loop_metrics_ignore_last_turn_usage_and_keep_cumulative_visible_output() {
+        let provider = ToolLoopUsageProvider;
+        let mut executor = ToolExecutorRegistry::new();
+        executor.insert(EchoTool);
+        let request = PromptRequest::new(
+            "gpt-4o",
+            vec![Message::text(MessageRole::User, "call echo")],
+        );
+        let cancellation = CancellationToken::new();
+
+        let completion = run_agent_runtime(
+            &provider,
+            request,
+            executor,
+            &cancellation,
+            AgentRuntimeOptions::default(),
+            |_| {},
+        )
+        .await
+        .expect("runtime should complete");
+
+        let metrics = completion.metrics.expect("metrics should be recorded");
+        let started_at = Instant::now();
+        let mut progress = StreamingTokenProgress::new("gpt-4o");
+        let _ = progress.observe_delta("hello world", started_at);
+        let _ = progress.observe_delta("done", started_at + Duration::from_millis(200));
+        let _ = progress.flush(started_at + Duration::from_millis(400));
+        let expected = progress.total_tokens();
+
+        assert_eq!(
+            metrics.output_tokens, expected,
+            "tool-loop throughput should use cumulative visible output instead of last-turn provider usage"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminating_tool_result_does_not_emit_input_tokens() {
+        let provider = FakeProvider {
+            calls: Mutex::new(0),
+        };
+        let mut executor = ToolExecutorRegistry::new();
+        executor.insert(TerminatingTool);
+        let request =
+            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let cancellation = CancellationToken::new();
+        let mut events = Vec::new();
+
+        let _ = run_agent_runtime(
+            &provider,
+            request,
+            executor,
+            &cancellation,
+            AgentRuntimeOptions::default(),
+            |event| events.push(event),
+        )
+        .await
+        .expect("runtime should complete");
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentRuntimeProgress::InputTokens { .. })),
+            "terminating tool results should not pretend to send provider-context input"
         );
     }
 

@@ -203,12 +203,7 @@ pub(super) fn apply_runtime_event_with_coordinator(
                 return;
             }
             flush_acp_response_buffer(model, acp_ui_state);
-            let tool_call_id = call.activity_id.clone();
-            if let Some(total_tokens) = acp_ui_state
-                .observe_tool_call_tokens(&tool_call_id, acp_tool_call_token_text(&call))
-            {
-                model.set_stream_activity_output_tokens(total_tokens);
-            }
+            acp_ui_state.track_tool_call_status(&call.activity_id, call.status);
             upsert_acp_tool_call(model, acp_ui_state, call);
             model.set_stream_activity_thinking(false);
         }
@@ -225,10 +220,17 @@ pub(super) fn apply_runtime_event_with_coordinator(
                 &mut update,
                 acp_ui_state.should_sanitize_rejected_permission_tool_update(&tool_call_id),
             );
-            if let Some(total_tokens) = acp_ui_state
-                .observe_tool_call_tokens(&tool_call_id, acp_tool_call_update_token_text(&update))
-            {
-                model.set_stream_activity_output_tokens(total_tokens);
+            let terminal_status = update
+                .status
+                .or_else(|| acp_ui_state.tool_call_status(&tool_call_id));
+            if let Some(total_tokens) = acp_ui_state.observe_tool_result_tokens(
+                &tool_call_id,
+                acp_tool_result_token_text(&update, terminal_status),
+            ) {
+                model.set_stream_activity_input_tokens(total_tokens);
+            }
+            if let Some(status) = update.status {
+                acp_ui_state.track_tool_call_status(&tool_call_id, status);
             }
             upsert_acp_tool_call_update(model, acp_ui_state, update, None);
             model.set_stream_activity_thinking(false);
@@ -346,13 +348,6 @@ pub(super) fn apply_runtime_event_with_coordinator(
             flush_acp_response_buffer(model, acp_ui_state);
             let transcript_tool_call = acp_permission_transcript_tool_call_update(&request);
             let permission_tool_call_item_index = transcript_tool_call.as_ref().map(|update| {
-                let tool_call_id = update.activity_id.clone();
-                if let Some(total_tokens) = acp_ui_state.observe_tool_call_tokens(
-                    &tool_call_id,
-                    acp_tool_call_update_token_text(update),
-                ) {
-                    model.set_stream_activity_output_tokens(total_tokens);
-                }
                 upsert_acp_tool_call_update(
                     model,
                     acp_ui_state,
@@ -491,42 +486,37 @@ fn acp_permission_option_id_for(
         .map(|option| option.option_id.clone())
 }
 
-fn acp_tool_call_token_text(call: &RuntimeToolActivity) -> Option<String> {
-    acp_tool_call_projected_token_text(
-        call.raw_input.as_ref().and_then(|raw| raw.token_text()),
-        Some(call.content.as_slice()),
-        call.raw_output.as_ref().and_then(|raw| raw.token_text()),
-    )
-}
-
-fn acp_tool_call_update_token_text(update: &RuntimeToolActivityUpdate) -> Option<String> {
-    acp_tool_call_projected_token_text(
-        update.raw_input.as_ref().and_then(|raw| raw.token_text()),
-        update.content.as_deref(),
-        update.raw_output.as_ref().and_then(|raw| raw.token_text()),
-    )
-}
-
-fn acp_tool_call_projected_token_text(
-    raw_input: Option<String>,
-    content: Option<&[RuntimeToolActivityContent]>,
-    raw_output: Option<String>,
+fn acp_tool_result_token_text(
+    update: &RuntimeToolActivityUpdate,
+    terminal_status: Option<RuntimeToolActivityStatus>,
 ) -> Option<String> {
-    if let Some(raw_input) = raw_input.filter(|text| !text.is_empty()) {
-        return Some(raw_input);
+    if !matches!(
+        terminal_status,
+        Some(RuntimeToolActivityStatus::Completed | RuntimeToolActivityStatus::Failed)
+    ) {
+        return None;
     }
 
+    if let Some(raw_output) = update
+        .raw_output
+        .as_ref()
+        .and_then(|raw| raw.token_text())
+        .filter(|text| !text.is_empty())
+    {
+        return Some(raw_output);
+    }
+
+    acp_tool_call_content_token_text(update.content.as_deref())
+}
+
+fn acp_tool_call_content_token_text(
+    content: Option<&[RuntimeToolActivityContent]>,
+) -> Option<String> {
     let mut text = String::new();
     if let Some(content) = content {
         for content in content {
             append_acp_tool_call_content_token_text(&mut text, content);
         }
-    }
-    if let Some(raw_output) = raw_output.filter(|text| !text.is_empty()) {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(&raw_output);
     }
 
     (!text.is_empty()).then_some(text)

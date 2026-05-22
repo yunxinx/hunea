@@ -7,6 +7,9 @@ pub(crate) enum NativeAgentProgress {
     OutputTokens {
         total_tokens: usize,
     },
+    InputTokens {
+        total_tokens: usize,
+    },
     Thinking {
         is_thinking: bool,
     },

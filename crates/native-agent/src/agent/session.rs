@@ -235,6 +235,9 @@ fn native_agent_event_from_progress(progress: NativeAgentProgress) -> NativeAgen
         NativeAgentProgress::OutputTokens { total_tokens } => {
             NativeAgentEvent::OutputTokenEstimate { total_tokens }
         }
+        NativeAgentProgress::InputTokens { total_tokens } => {
+            NativeAgentEvent::InputTokenEstimate { total_tokens }
+        }
         NativeAgentProgress::Thinking { is_thinking } => NativeAgentEvent::Thinking { is_thinking },
         NativeAgentProgress::AssistantDelta { content } => {
             NativeAgentEvent::AssistantDelta { content }

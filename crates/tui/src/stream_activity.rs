@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use ratatui::{
-    style::Style,
+    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -19,9 +19,12 @@ use super::{
 const STREAM_ACTIVITY_FRAME_INTERVAL: Duration = Duration::from_millis(80);
 const STREAM_ACTIVITY_TOKEN_TICK_INTERVAL: Duration = Duration::from_millis(33);
 const STREAM_ACTIVITY_GLYPH: &str = "•";
+const STREAM_ACTIVITY_GLYPH_BREATH_PERIOD_SECS: f32 = 1.6;
 const TOKEN_TWEEN_DURATION: Duration = Duration::from_millis(120);
 const TOKEN_STALE_THRESHOLD: Duration = Duration::from_millis(360);
 const WORK_DURATION_SUMMARY_MIN_ELAPSED_SECS: u64 = 30;
+
+type Rgb = (u8, u8, u8);
 
 /// `StreamActivityState` 保存一次模型 turn 运行中显示在输入框上方的状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,8 +50,6 @@ struct ActivityTokenProgress {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActivityTokenDirection {
     Down,
-    // 当前 OpenAI-compatible 流只会上报下行输出；工具结果回传接入后会使用上行方向。
-    #[cfg(test)]
     Up,
 }
 
@@ -186,6 +187,18 @@ impl Model {
         self.record_stream_activity_output_tokens_at(total_tokens, now);
     }
 
+    pub(crate) fn set_stream_activity_input_tokens(&mut self, total_tokens: usize) {
+        self.set_stream_activity_input_tokens_at(total_tokens, Instant::now());
+    }
+
+    pub(crate) fn set_stream_activity_input_tokens_at(
+        &mut self,
+        total_tokens: usize,
+        now: Instant,
+    ) {
+        self.record_stream_activity_input_tokens_at(total_tokens, now);
+    }
+
     pub(crate) fn set_stream_activity_thinking(&mut self, is_thinking: bool) {
         let Some(activity) = self.stream_activity.as_mut() else {
             return;
@@ -216,7 +229,18 @@ impl Model {
         let Some(activity) = self.stream_activity.as_mut() else {
             return;
         };
-        activity.record_input_tokens(token_delta, now);
+        activity.add_input_tokens(token_delta, now);
+        self.bump_status_line_revision();
+        if self.document_runtime.follow_bottom {
+            self.sync_document_viewport_to_bottom();
+        }
+    }
+
+    fn record_stream_activity_input_tokens_at(&mut self, total_tokens: usize, now: Instant) {
+        let Some(activity) = self.stream_activity.as_mut() else {
+            return;
+        };
+        activity.record_input_tokens(total_tokens, now);
         self.bump_status_line_revision();
         if self.document_runtime.follow_bottom {
             self.sync_document_viewport_to_bottom();
@@ -417,8 +441,21 @@ impl StreamActivityState {
     }
 
     #[cfg(test)]
-    fn record_input_tokens(&mut self, token_delta: usize, now: Instant) {
+    fn add_input_tokens(&mut self, token_delta: usize, now: Instant) {
         if token_delta == 0 {
+            return;
+        }
+        let input_total = self
+            .output_tokens
+            .as_ref()
+            .map(|progress| progress.input_total)
+            .unwrap_or(0)
+            .saturating_add(token_delta);
+        self.record_input_tokens(input_total, now);
+    }
+
+    fn record_input_tokens(&mut self, total_tokens: usize, now: Instant) {
+        if total_tokens == 0 {
             return;
         }
         let (output_total, input_total, target) = self
@@ -426,7 +463,7 @@ impl StreamActivityState {
             .as_ref()
             .map(|progress| (progress.output_total, progress.input_total, progress.target))
             .unwrap_or((0, 0, 0));
-        let input_total = input_total.saturating_add(token_delta);
+        let input_total = input_total.max(total_tokens);
         let target = target.max(output_total.saturating_add(input_total));
         self.replace_token_progress(
             output_total,
@@ -497,7 +534,6 @@ impl ActivityTokenDirection {
     fn glyph(self) -> &'static str {
         match self {
             Self::Down => "↓",
-            #[cfg(test)]
             Self::Up => "↑",
         }
     }
@@ -542,12 +578,7 @@ fn activity_content_spans(
     elapsed_text: String,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    spans.extend(shimmer_spans_at(
-        STREAM_ACTIVITY_GLYPH,
-        palette,
-        activity.started_at,
-        now,
-    ));
+    spans.push(activity_glyph_span_at(palette, activity.started_at, now));
     spans.push(Span::raw(" "));
     spans.extend(shimmer_spans_at(
         activity.header.as_str(),
@@ -590,6 +621,80 @@ fn truncate_activity_spans(spans: Vec<Span<'static>>, content_width: usize) -> V
 
     truncated.push(Span::styled("…", ellipsis_style));
     truncated
+}
+
+fn activity_glyph_span_at(
+    palette: TerminalPalette,
+    started_at: Instant,
+    now: Instant,
+) -> Span<'static> {
+    let intensity = activity_glyph_intensity(now.saturating_duration_since(started_at));
+    Span::styled(
+        STREAM_ACTIVITY_GLYPH,
+        activity_glyph_style_for_intensity(palette, intensity),
+    )
+}
+
+fn activity_glyph_intensity(elapsed: Duration) -> f32 {
+    let phase = (elapsed.as_secs_f32() % STREAM_ACTIVITY_GLYPH_BREATH_PERIOD_SECS)
+        / STREAM_ACTIVITY_GLYPH_BREATH_PERIOD_SECS;
+    0.5 * (1.0 - (phase * std::f32::consts::TAU).cos())
+}
+
+fn activity_glyph_style_for_intensity(palette: TerminalPalette, intensity: f32) -> Style {
+    let intensity = intensity.clamp(0.0, 1.0);
+    match activity_glyph_rgb_pair(palette) {
+        Some((base_color, highlight_color)) => {
+            let alpha = 0.2 + intensity * 0.8;
+            let (red, green, blue) = blend_rgb(highlight_color, base_color, alpha);
+            let style = Style::new().fg(Color::Rgb(red, green, blue));
+            if intensity >= 0.55 {
+                style.add_modifier(Modifier::BOLD)
+            } else if intensity <= 0.2 {
+                style.add_modifier(Modifier::DIM)
+            } else {
+                style
+            }
+        }
+        None => fallback_activity_glyph_style(intensity),
+    }
+}
+
+fn activity_glyph_rgb_pair(palette: TerminalPalette) -> Option<(Rgb, Rgb)> {
+    Some((
+        rgb_from_color(palette.tertiary)?,
+        rgb_from_color(palette.main)?,
+    ))
+}
+
+fn rgb_from_color(color: Color) -> Option<Rgb> {
+    match color {
+        Color::Rgb(red, green, blue) => Some((red, green, blue)),
+        _ => None,
+    }
+}
+
+fn blend_rgb(foreground: Rgb, background: Rgb, alpha: f32) -> Rgb {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let blend_channel = |foreground: u8, background: u8| {
+        (foreground as f32 * alpha + background as f32 * (1.0 - alpha)) as u8
+    };
+
+    (
+        blend_channel(foreground.0, background.0),
+        blend_channel(foreground.1, background.1),
+        blend_channel(foreground.2, background.2),
+    )
+}
+
+fn fallback_activity_glyph_style(intensity: f32) -> Style {
+    if intensity <= 0.2 {
+        Style::new().add_modifier(Modifier::DIM)
+    } else if intensity >= 0.55 {
+        Style::new().add_modifier(Modifier::BOLD)
+    } else {
+        Style::new()
+    }
 }
 
 fn secondary_ellipsis_style(spans: &[Span<'static>]) -> Style {

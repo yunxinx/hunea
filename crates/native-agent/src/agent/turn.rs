@@ -26,6 +26,7 @@ where
             NativeAgentProgress::OutputTokens { total_tokens } => {
                 on_progress(NativeLlmProgress::OutputTokens { total_tokens });
             }
+            NativeAgentProgress::InputTokens { .. } => {}
             NativeAgentProgress::Thinking { is_thinking } => {
                 on_progress(NativeLlmProgress::Thinking { is_thinking });
             }

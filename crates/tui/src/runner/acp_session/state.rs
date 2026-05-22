@@ -5,7 +5,10 @@ use std::{
 
 use crate::RequestMetrics;
 use mo_core::{
-    session::{RuntimePermissionRequest, RuntimeTerminalSnapshot, RuntimeToolActivityContent},
+    session::{
+        RuntimePermissionRequest, RuntimeTerminalSnapshot, RuntimeToolActivityContent,
+        RuntimeToolActivityStatus,
+    },
     token_count::StreamingTokenProgress,
 };
 
@@ -23,13 +26,15 @@ pub(in crate::runner) struct AcpSessionUiState {
     pending_rejected_permission_notice_suppression: bool,
     prompt_in_flight: bool,
     discard_in_flight_prompt: Option<PromptDiscardReason>,
-    token_progress: Option<StreamingTokenProgress>,
+    output_token_progress: Option<StreamingTokenProgress>,
+    input_token_progress: Option<StreamingTokenProgress>,
     prompt_started_at: Option<Instant>,
     first_token_at: Option<Instant>,
     tool_call_items: HashMap<String, usize>,
+    tool_call_statuses: HashMap<String, RuntimeToolActivityStatus>,
     tool_call_terminal_ids: HashMap<String, HashSet<String>>,
     terminal_active_states: HashMap<String, bool>,
-    tool_call_token_text: HashMap<String, String>,
+    tool_result_token_text: HashMap<String, String>,
     rejected_permission_tool_calls: HashSet<String>,
 }
 
@@ -47,13 +52,15 @@ impl AcpSessionUiState {
         self.pending_rejected_permission_notice_suppression = false;
         self.prompt_in_flight = false;
         self.discard_in_flight_prompt = None;
-        self.token_progress = None;
+        self.output_token_progress = None;
+        self.input_token_progress = None;
         self.prompt_started_at = None;
         self.first_token_at = None;
         self.tool_call_items.clear();
+        self.tool_call_statuses.clear();
         self.tool_call_terminal_ids.clear();
         self.terminal_active_states.clear();
-        self.tool_call_token_text.clear();
+        self.tool_result_token_text.clear();
         self.rejected_permission_tool_calls.clear();
     }
 
@@ -132,24 +139,27 @@ impl AcpSessionUiState {
         self.prompt_started_at = Some(Instant::now());
         self.first_token_at = None;
         self.tool_call_items.clear();
+        self.tool_call_statuses.clear();
         self.tool_call_terminal_ids.clear();
-        self.tool_call_token_text.clear();
+        self.tool_result_token_text.clear();
     }
 
     pub(in crate::runner) fn start_token_progress(&mut self, model_id: impl Into<String>) {
-        self.token_progress = Some(StreamingTokenProgress::new(model_id));
+        let model_id = model_id.into();
+        self.output_token_progress = Some(StreamingTokenProgress::new(model_id.clone()));
+        self.input_token_progress = Some(StreamingTokenProgress::new(model_id));
     }
 
     pub(in crate::runner) fn observe_output_tokens(&mut self, content: &str) -> Option<usize> {
         if !content.is_empty() {
             self.first_token_at.get_or_insert_with(Instant::now);
         }
-        self.token_progress
+        self.output_token_progress
             .as_mut()
             .and_then(|progress| progress.observe_delta(content, Instant::now()))
     }
 
-    pub(in crate::runner) fn observe_tool_call_tokens(
+    pub(in crate::runner) fn observe_tool_result_tokens(
         &mut self,
         tool_call_id: &str,
         projected_text: Option<String>,
@@ -160,7 +170,7 @@ impl AcpSessionUiState {
         }
 
         let previous = self
-            .tool_call_token_text
+            .tool_result_token_text
             .entry(tool_call_id.to_string())
             .or_default();
         let delta = if projected_text.starts_with(previous.as_str()) {
@@ -170,17 +180,17 @@ impl AcpSessionUiState {
         };
         *previous = projected_text;
 
-        self.observe_output_tokens(&delta)
+        self.observe_input_tokens(&delta)
     }
 
     pub(in crate::runner) fn flush_output_tokens(&mut self) -> Option<usize> {
-        self.token_progress
+        self.output_token_progress
             .as_mut()
             .and_then(|progress| progress.flush(Instant::now()))
     }
 
     pub(in crate::runner) fn total_output_tokens(&self) -> usize {
-        self.token_progress
+        self.output_token_progress
             .as_ref()
             .map(StreamingTokenProgress::total_tokens)
             .unwrap_or(0)
@@ -206,12 +216,14 @@ impl AcpSessionUiState {
         self.reasoning_buffer.clear();
         self.reasoning_started_at = None;
         self.pending_rejected_permission_notice_suppression = false;
-        self.token_progress = None;
+        self.output_token_progress = None;
+        self.input_token_progress = None;
         self.prompt_started_at = None;
         self.first_token_at = None;
         self.tool_call_items.clear();
+        self.tool_call_statuses.clear();
         self.tool_call_terminal_ids.clear();
-        self.tool_call_token_text.clear();
+        self.tool_result_token_text.clear();
     }
 
     pub(in crate::runner) fn should_discard_prompt_output(&self) -> bool {
@@ -256,11 +268,13 @@ impl AcpSessionUiState {
         self.reasoning_buffer.clear();
         self.reasoning_started_at = None;
         self.pending_rejected_permission_notice_suppression = false;
-        self.token_progress = None;
+        self.output_token_progress = None;
+        self.input_token_progress = None;
         self.prompt_started_at = None;
         self.first_token_at = None;
         self.discard_in_flight_prompt = Some(PromptDiscardReason::Cancelled);
-        self.tool_call_token_text.clear();
+        self.tool_call_statuses.clear();
+        self.tool_result_token_text.clear();
         true
     }
 
@@ -269,12 +283,14 @@ impl AcpSessionUiState {
         self.reasoning_buffer.clear();
         self.reasoning_started_at = None;
         self.pending_rejected_permission_notice_suppression = false;
-        self.token_progress = None;
+        self.output_token_progress = None;
+        self.input_token_progress = None;
         self.prompt_started_at = None;
         self.first_token_at = None;
         self.tool_call_items.clear();
+        self.tool_call_statuses.clear();
         self.tool_call_terminal_ids.clear();
-        self.tool_call_token_text.clear();
+        self.tool_result_token_text.clear();
         self.rejected_permission_tool_calls.clear();
         if self.prompt_in_flight && self.discard_in_flight_prompt.is_none() {
             self.discard_in_flight_prompt = Some(PromptDiscardReason::Stale);
@@ -283,6 +299,22 @@ impl AcpSessionUiState {
 
     pub(in crate::runner) fn track_tool_call(&mut self, tool_call_id: String, item_index: usize) {
         self.tool_call_items.insert(tool_call_id, item_index);
+    }
+
+    pub(in crate::runner) fn track_tool_call_status(
+        &mut self,
+        tool_call_id: &str,
+        status: RuntimeToolActivityStatus,
+    ) {
+        self.tool_call_statuses
+            .insert(tool_call_id.to_string(), status);
+    }
+
+    pub(in crate::runner) fn tool_call_status(
+        &self,
+        tool_call_id: &str,
+    ) -> Option<RuntimeToolActivityStatus> {
+        self.tool_call_statuses.get(tool_call_id).copied()
     }
 
     pub(in crate::runner) fn track_tool_call_terminal_content(
@@ -350,7 +382,29 @@ impl AcpSessionUiState {
 
     pub(in crate::runner) fn clear_tool_call_tracking(&mut self) {
         self.tool_call_items.clear();
+        self.tool_call_statuses.clear();
         self.tool_call_terminal_ids.clear();
-        self.tool_call_token_text.clear();
+        self.tool_result_token_text.clear();
     }
+}
+
+impl AcpSessionUiState {
+    fn observe_input_tokens(&mut self, content: &str) -> Option<usize> {
+        let progress = self.input_token_progress.as_mut()?;
+        observe_complete_token_total(progress, content, Instant::now())
+    }
+}
+
+fn observe_complete_token_total(
+    progress: &mut StreamingTokenProgress,
+    content: &str,
+    now: Instant,
+) -> Option<usize> {
+    if content.is_empty() {
+        return None;
+    }
+
+    progress
+        .observe_delta(content, now)
+        .or_else(|| progress.flush(now))
 }

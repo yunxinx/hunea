@@ -182,6 +182,9 @@ pub enum NativeAgentEvent {
     OutputTokenEstimate {
         total_tokens: usize,
     },
+    InputTokenEstimate {
+        total_tokens: usize,
+    },
     Thinking {
         is_thinking: bool,
     },

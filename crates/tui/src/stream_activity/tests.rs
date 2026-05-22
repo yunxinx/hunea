@@ -25,7 +25,7 @@ fn stream_activity_tail_cache_key_changes_when_elapsed_text_changes() {
 }
 
 #[test]
-fn stream_activity_line_uses_shimmer_spans_without_changing_plain_text() {
+fn stream_activity_line_animates_without_changing_plain_text() {
     let mut model = Model::new(HeroOptions::default());
     model.set_window(50, 6);
     model.set_palette(default_palette(), true);
@@ -45,9 +45,13 @@ fn stream_activity_line_uses_shimmer_spans_without_changing_plain_text() {
         Some(0)
     );
     assert_eq!(second.plain_line, first.plain_line);
+    assert_eq!(
+        first_line.spans.first().map(|span| span.content.as_ref()),
+        Some("•")
+    );
     assert!(
         first_line.spans.len() > 8,
-        "codex-style shimmer should style the running text per character"
+        "header shimmer should still style the running text per character"
     );
     assert!(
         first_line
@@ -73,6 +77,25 @@ fn stream_activity_line_uses_shimmer_spans_without_changing_plain_text() {
             .map(|span| span.style)
             .collect::<Vec<_>>(),
         "shimmer styles should advance while the visible text stays stable"
+    );
+}
+
+#[test]
+fn stream_activity_glyph_uses_breathing_style() {
+    let palette = default_palette();
+    let started_at = std::time::Instant::now();
+    let first = activity_glyph_span_at(palette, started_at, started_at);
+    let second = activity_glyph_span_at(
+        palette,
+        started_at,
+        started_at + std::time::Duration::from_millis(800),
+    );
+
+    assert_eq!(first.content.as_ref(), "•");
+    assert_eq!(second.content.as_ref(), "•");
+    assert_ne!(
+        first.style, second.style,
+        "glyph breathing should animate the marker independently from header shimmer"
     );
 }
 

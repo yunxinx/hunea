@@ -35,6 +35,10 @@ pub enum RuntimeEvent {
         target: Option<RuntimeTarget>,
         total_tokens: usize,
     },
+    InputTokenEstimate {
+        target: Option<RuntimeTarget>,
+        total_tokens: usize,
+    },
     Thinking {
         target: Option<RuntimeTarget>,
         is_thinking: bool,
@@ -121,6 +125,7 @@ impl RuntimeEvent {
             Self::StartFailed { target, .. }
             | Self::SystemMessage { target, .. }
             | Self::OutputTokenEstimate { target, .. }
+            | Self::InputTokenEstimate { target, .. }
             | Self::Thinking { target, .. }
             | Self::Retrying { target, .. }
             | Self::Failed { target, .. }

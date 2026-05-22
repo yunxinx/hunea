@@ -21,6 +21,10 @@ pub(super) fn apply_native_agent_event(
                 total_tokens,
             }
         }
+        NativeAgentEvent::InputTokenEstimate { total_tokens } => RuntimeEvent::InputTokenEstimate {
+            target,
+            total_tokens,
+        },
         NativeAgentEvent::Thinking { is_thinking } => RuntimeEvent::Thinking {
             target,
             is_thinking,

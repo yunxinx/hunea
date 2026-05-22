@@ -74,6 +74,9 @@ fn native_progress_from_runtime_progress(
         mo_agent_runtime::AgentRuntimeProgress::OutputTokens { total_tokens } => {
             NativeAgentProgress::OutputTokens { total_tokens }
         }
+        mo_agent_runtime::AgentRuntimeProgress::InputTokens { total_tokens } => {
+            NativeAgentProgress::InputTokens { total_tokens }
+        }
         mo_agent_runtime::AgentRuntimeProgress::Thinking { is_thinking } => {
             NativeAgentProgress::Thinking { is_thinking }
         }

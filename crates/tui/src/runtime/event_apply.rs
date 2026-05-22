@@ -44,6 +44,9 @@ impl RuntimeEventApply for Model {
             RuntimeEvent::OutputTokenEstimate { total_tokens, .. } => {
                 self.set_stream_activity_output_tokens(total_tokens);
             }
+            RuntimeEvent::InputTokenEstimate { total_tokens, .. } => {
+                self.set_stream_activity_input_tokens(total_tokens);
+            }
             RuntimeEvent::Thinking { is_thinking, .. } => {
                 self.set_stream_activity_thinking(is_thinking);
             }

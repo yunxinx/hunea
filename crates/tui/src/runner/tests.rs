@@ -492,7 +492,9 @@ fn acp_tool_call_create_after_update_updates_existing_item() {
 #[test]
 fn acp_late_tool_call_update_after_completion_updates_existing_item() {
     let mut model = Model::new(HeroOptions::default());
+    model.set_window(80, 6);
     model.transcript_mut().clear();
+    model.show_stream_activity("Kimi Code CLI");
     let mut acp_ui_state = AcpSessionUiState::default();
 
     apply_acp_session_event(
@@ -552,6 +554,16 @@ fn acp_late_tool_call_update_after_completion_updates_existing_item() {
                 raw_output: Some("test result arrived late".into()),
             },
         },
+    );
+
+    let activity = model
+        .current_stream_activity_render_result_at(
+            std::time::Instant::now() + Duration::from_millis(120),
+        )
+        .plain_line;
+    assert!(
+        activity.contains("↑") && activity.contains("tokens"),
+        "late raw_output after completed status should still update assistant-facing input tokens: {activity:?}"
     );
 
     assert_eq!(
@@ -742,8 +754,9 @@ fn acp_execute_tool_call_failed_reveals_final_output_without_input() {
 }
 
 #[test]
-fn acp_write_tool_call_stream_updates_token_activity() {
+fn acp_tool_result_updates_input_token_activity() {
     let mut model = Model::new(HeroOptions::default());
+    model.set_window(80, 6);
     model.transcript_mut().clear();
     let mut acp_ui_state = AcpSessionUiState::default();
 
@@ -775,14 +788,42 @@ fn acp_write_tool_call_stream_updates_token_activity() {
         },
     );
 
+    let before_result = model
+        .current_stream_activity_render_result_at(
+            std::time::Instant::now() + Duration::from_millis(120),
+        )
+        .plain_line;
+    assert!(
+        !before_result.contains("tokens"),
+        "tool call input should not count as assistant-facing token activity: {before_result:?}"
+    );
+
+    apply_acp_session_event(
+        &mut model,
+        &mut acp_ui_state,
+        AcpSessionEvent::ToolCallUpdate {
+            agent_id: "Kimi Code CLI".to_string(),
+            update: AcpToolCallUpdate {
+                tool_call_id: "write-1".to_string(),
+                title: None,
+                kind: None,
+                status: Some(AcpToolCallStatus::Completed),
+                content: Some(vec![AcpToolCallContent::Text("写入完成".to_string())]),
+                locations: None,
+                raw_input: None,
+                raw_output: Some("写入完成".into()),
+            },
+        },
+    );
+
     let activity = model
         .current_stream_activity_render_result_at(
             std::time::Instant::now() + Duration::from_millis(120),
         )
         .plain_line;
     assert!(
-        activity.contains("tokens"),
-        "streaming write tool content should update token activity: {activity:?}"
+        activity.contains("↑") && activity.contains("tokens"),
+        "tool result content sent back to the assistant should update input token activity: {activity:?}"
     );
 }
 
@@ -4081,6 +4122,34 @@ fn native_agent_token_estimate_updates_activity_without_finishing_request() {
         )
         .plain_line;
     assert!(activity.contains("↓ 32 tokens"));
+    assert!(model.current_stream_activity_render_result().has_content);
+    assert!(model.transcript_plain_items().is_empty());
+}
+
+#[test]
+fn native_agent_input_token_estimate_updates_activity_without_finishing_request() {
+    let mut model = Model::new(HeroOptions::default());
+    model.set_window(70, 6);
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    apply_native_agent_event(
+        &mut model,
+        None,
+        NativeAgentEvent::OutputTokenEstimate { total_tokens: 32 },
+    );
+    apply_native_agent_event(
+        &mut model,
+        None,
+        NativeAgentEvent::InputTokenEstimate { total_tokens: 12 },
+    );
+
+    let activity = model
+        .current_stream_activity_render_result_at(
+            std::time::Instant::now() + std::time::Duration::from_millis(120),
+        )
+        .plain_line;
+    assert!(activity.contains("↑ 44 tokens"));
     assert!(model.current_stream_activity_render_result().has_content);
     assert!(model.transcript_plain_items().is_empty());
 }

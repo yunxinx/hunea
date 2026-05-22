@@ -11,6 +11,7 @@ rig-core.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 time = { version = "0.3", features = ["formatting"] }
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

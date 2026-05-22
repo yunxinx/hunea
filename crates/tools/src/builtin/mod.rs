@@ -1,6 +1,7 @@
 //! Lumos 原生工具的公共命名空间。
 
 mod edit;
+mod edit_apply;
 mod file_state;
 mod list_dir;
 mod mutation;

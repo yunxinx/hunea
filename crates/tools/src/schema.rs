@@ -58,6 +58,7 @@ fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<(), ToolS
     }
 
     validate_object_keywords(schema, value, path)?;
+    validate_array_keywords(schema, value, path)?;
     validate_numeric_keywords(schema, value, path)?;
     Ok(())
 }
@@ -160,10 +161,106 @@ fn validate_numeric_keywords(
     Ok(())
 }
 
+fn validate_array_keywords(
+    schema: &Value,
+    value: &Value,
+    path: &str,
+) -> Result<(), ToolSchemaError> {
+    let Some(array) = value.as_array() else {
+        return Ok(());
+    };
+
+    let Some(item_schema) = schema.get("items") else {
+        return Ok(());
+    };
+
+    for (index, item) in array.iter().enumerate() {
+        validate_value(item_schema, item, &array_item_path(path, index))?;
+    }
+
+    Ok(())
+}
+
 fn child_path(parent: &str, key: &str) -> String {
     if parent == "$" {
         format!("$.{key}")
     } else {
         format!("{parent}.{key}")
+    }
+}
+
+fn array_item_path(parent: &str, index: usize) -> String {
+    format!("{parent}[{index}]")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::validate_tool_arguments;
+
+    fn edit_array_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": { "type": "string" },
+                            "new_string": { "type": "string" }
+                        },
+                        "required": ["old_string", "new_string"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["edits"],
+            "additionalProperties": false
+        })
+    }
+
+    #[test]
+    fn validate_tool_arguments_recurses_into_array_items() {
+        let schema = edit_array_schema();
+
+        let error = validate_tool_arguments(
+            &schema,
+            &json!({
+                "edits": [
+                    {
+                        "old_string": "old",
+                        "new_string": "new",
+                        "replace_all": true
+                    }
+                ]
+            }),
+        )
+        .expect_err("unknown fields inside array items should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "$.edits[0].replace_all is not allowed by additionalProperties"
+        );
+    }
+
+    #[test]
+    fn validate_tool_arguments_reports_missing_required_array_item_field() {
+        let schema = edit_array_schema();
+
+        let error = validate_tool_arguments(
+            &schema,
+            &json!({
+                "edits": [
+                    {
+                        "old_string": "old"
+                    }
+                ]
+            }),
+        )
+        .expect_err("missing fields inside array items should be rejected");
+
+        assert_eq!(error.to_string(), "$.edits[0].new_string is required");
     }
 }

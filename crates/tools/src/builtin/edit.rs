@@ -13,13 +13,14 @@ use crate::{
 };
 
 use super::{
+    edit_apply::{EditApplication, EditRequest, TextEdit, apply_edit},
     file_state::WorkspaceReadState,
     mutation::{
         TOOL_CALL_INTERRUPTED, ensure_existing_file_was_read, existing_file_metadata,
         record_written_text_snapshot,
     },
     workspace::resolve_workspace_write_path,
-    workspace_access::{SharedWorkspaceAccess, local_workspace_access},
+    workspace_access::{SharedWorkspaceAccess, WorkspaceAccess, local_workspace_access},
 };
 
 const EDIT_TOOL_NAME: &str = "edit";
@@ -67,7 +68,7 @@ impl Tool for EditTool {
             .with_label("Edit")
             .with_kind(ToolKind::Edit)
             .with_description(
-                "Edit a UTF-8 text file inside the current workspace by replacing exact text. Existing files must be read completely with read first. If old_string is empty and the file does not exist, edit creates the file with new_string.",
+                "Edit a UTF-8 text file inside the current workspace by replacing targeted text. Existing files must be read completely with read first. Use edits for multiple disjoint replacements in one call. If old_string is empty and the file does not exist, edit creates the file with new_string.",
             )
             .with_input_schema(json!({
                 "type": "object",
@@ -76,9 +77,29 @@ impl Tool for EditTool {
                         "type": "string",
                         "description": "Workspace-relative or workspace-contained absolute file path"
                     },
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "One or more targeted replacements. Each old_string is matched against the original file, must be unique after fuzzy normalization, and must not overlap another edit. Do not combine edits with old_string/new_string or replace_all.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": {
+                                    "type": "string",
+                                    "description": "Text to replace for this targeted edit. Must not be empty."
+                                },
+                                "new_string": {
+                                    "type": "string",
+                                    "description": "Replacement text for this targeted edit"
+                                }
+                            },
+                            "required": ["old_string", "new_string"],
+                            "additionalProperties": false
+                        }
+                    },
                     "old_string": {
                         "type": "string",
-                        "description": "Exact text to replace. Use an empty string only to create a missing file."
+                        "description": "Text to replace for a single replacement. Use an empty string only to create a missing file."
                     },
                     "new_string": {
                         "type": "string",
@@ -89,7 +110,7 @@ impl Tool for EditTool {
                         "description": "Whether to replace every occurrence of old_string; defaults to false"
                     }
                 },
-                "required": ["path", "old_string", "new_string"],
+                "required": ["path"],
                 "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Ask)
@@ -119,11 +140,73 @@ impl Tool for EditTool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EditArguments {
     path: String,
+    old_string: Option<String>,
+    new_string: Option<String>,
+    replace_all: Option<bool>,
+    edits: Option<Vec<EditItemArgument>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditItemArgument {
     old_string: String,
     new_string: String,
-    replace_all: Option<bool>,
+}
+
+impl EditArguments {
+    fn into_request(self) -> Result<(String, EditRequest), String> {
+        let has_single_edit = self.old_string.is_some() || self.new_string.is_some();
+        let has_edits = self.edits.is_some();
+
+        if has_single_edit && has_edits {
+            return Err("provide either edits or old_string/new_string, not both".to_string());
+        }
+
+        if let Some(edits) = self.edits {
+            if self.replace_all.is_some() {
+                return Err("replace_all is only supported with old_string/new_string".to_string());
+            }
+            if edits.is_empty() {
+                return Err("edits must contain at least one replacement".to_string());
+            }
+            let edits = edits
+                .into_iter()
+                .enumerate()
+                .map(|(index, edit)| {
+                    if edit.old_string.is_empty() {
+                        return Err(format!("edits[{index}].old_string must not be empty"));
+                    }
+                    Ok(TextEdit {
+                        old_string: edit.old_string,
+                        new_string: edit.new_string,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            return Ok((self.path, EditRequest::Multiple { edits }));
+        }
+
+        let old_string = self
+            .old_string
+            .ok_or_else(|| "old_string is required when edits is not provided".to_string())?;
+        let new_string = self
+            .new_string
+            .ok_or_else(|| "new_string is required when edits is not provided".to_string())?;
+
+        Ok((
+            self.path,
+            EditRequest::Single {
+                edit: TextEdit {
+                    old_string,
+                    new_string,
+                },
+                replace_all: self.replace_all.unwrap_or(false),
+            },
+        ))
+    }
 }
 
 fn join_error_result(call_id: String, error: JoinError) -> ToolResult {
@@ -144,31 +227,35 @@ fn execute_edit(
         }
     };
 
-    let path = match resolve_workspace_write_path(access.as_ref(), &root, &arguments.path) {
+    let (requested_path, request) = match arguments.into_request() {
+        Ok(request) => request,
+        Err(error) => {
+            return ToolResult::error(call.call_id, format!("edit arguments are invalid: {error}"));
+        }
+    };
+
+    let path = match resolve_workspace_write_path(access.as_ref(), &root, &requested_path) {
         Ok(path) => path,
         Err(message) => return ToolResult::error(call.call_id, message),
     };
 
-    let replace_all = arguments.replace_all.unwrap_or(false);
     match edit_text_file(EditTextFileOptions {
         access: access.as_ref(),
         read_state: &read_state,
         path: &path,
-        requested_path: &arguments.path,
-        old_string: &arguments.old_string,
-        new_string: &arguments.new_string,
-        replace_all,
+        requested_path: &requested_path,
+        request: &request,
         cancellation: &cancellation,
     }) {
         Ok(EditOutcome::Created) => ToolResult::success(
             call.call_id,
-            format!("File created successfully at: {}", arguments.path),
+            format!("File created successfully at: {requested_path}"),
         ),
         Ok(EditOutcome::Updated { replacements }) => ToolResult::success(
             call.call_id,
             format!(
                 "The file {} has been updated successfully. Replaced {replacements} occurrence(s).",
-                arguments.path
+                requested_path
             ),
         ),
         Err(message) => ToolResult::error(call.call_id, message),
@@ -182,13 +269,11 @@ enum EditOutcome {
 }
 
 struct EditTextFileOptions<'a> {
-    access: &'a dyn super::workspace_access::WorkspaceAccess,
+    access: &'a dyn WorkspaceAccess,
     read_state: &'a WorkspaceReadState,
     path: &'a Path,
     requested_path: &'a str,
-    old_string: &'a str,
-    new_string: &'a str,
-    replace_all: bool,
+    request: &'a EditRequest,
     cancellation: &'a CancellationToken,
 }
 
@@ -198,9 +283,7 @@ fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, Strin
         read_state,
         path,
         requested_path,
-        old_string,
-        new_string,
-        replace_all,
+        request,
         cancellation,
     } = options;
 
@@ -210,16 +293,27 @@ fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, Strin
 
     let metadata = existing_file_metadata(access, path, requested_path, "edit")?;
     let Some(metadata) = metadata else {
-        if !old_string.is_empty() {
-            return Err(format!(
-                "File does not exist. To create a new file with edit, set old_string to an empty string: {requested_path}"
-            ));
+        match request {
+            EditRequest::Single { edit, .. } if edit.old_string.is_empty() => {
+                write_new_file(access, read_state, path, &edit.new_string)?;
+                return Ok(EditOutcome::Created);
+            }
+            EditRequest::Single { .. } => {
+                return Err(format!(
+                    "File does not exist. To create a new file with edit, set old_string to an empty string: {requested_path}"
+                ));
+            }
+            EditRequest::Multiple { .. } => {
+                return Err(format!(
+                    "File does not exist. Use write to create a new file before applying edits: {requested_path}"
+                ));
+            }
         }
-        write_new_file(access, read_state, path, new_string)?;
-        return Ok(EditOutcome::Created);
     };
 
-    if old_string == new_string {
+    if let EditRequest::Single { edit, .. } = request
+        && edit.old_string == edit.new_string
+    {
         return Err(
             "No changes to make: old_string and new_string are exactly the same.".to_string(),
         );
@@ -230,13 +324,7 @@ fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, Strin
     let EditApplication {
         final_content,
         replacements,
-    } = apply_edit(
-        &original,
-        old_string,
-        new_string,
-        replace_all,
-        requested_path,
-    )?;
+    } = apply_edit(&original, request, requested_path)?;
 
     if cancellation.is_cancelled() {
         return Err(TOOL_CALL_INTERRUPTED.to_string());
@@ -250,7 +338,7 @@ fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, Strin
 }
 
 fn write_new_file(
-    access: &dyn super::workspace_access::WorkspaceAccess,
+    access: &dyn WorkspaceAccess,
     read_state: &WorkspaceReadState,
     path: &Path,
     content: &str,
@@ -270,10 +358,7 @@ fn write_new_file(
     Ok(())
 }
 
-fn read_existing_text_file(
-    access: &dyn super::workspace_access::WorkspaceAccess,
-    path: &Path,
-) -> Result<String, String> {
+fn read_existing_text_file(access: &dyn WorkspaceAccess, path: &Path) -> Result<String, String> {
     let mut reader = access
         .open_reader(path)
         .map_err(|error| format!("read failed for '{}': {error}", path.display()))?;
@@ -287,93 +372,4 @@ fn read_existing_text_file(
             path.display()
         )
     })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct EditApplication {
-    final_content: String,
-    replacements: usize,
-}
-
-fn apply_edit(
-    original: &str,
-    old_string: &str,
-    new_string: &str,
-    replace_all: bool,
-    requested_path: &str,
-) -> Result<EditApplication, String> {
-    let (bom, content_without_bom) = strip_utf8_bom(original);
-    let line_ending = detect_line_ending(content_without_bom);
-    let normalized_content = normalize_line_endings(content_without_bom);
-    let normalized_old = normalize_line_endings(old_string);
-    let normalized_new = normalize_line_endings(new_string);
-
-    if normalized_old.is_empty() {
-        if !normalized_content.is_empty() {
-            return Err("Cannot create new file - file already exists.".to_string());
-        }
-        return Ok(EditApplication {
-            final_content: format!(
-                "{bom}{}",
-                restore_line_endings(&normalized_new, line_ending)
-            ),
-            replacements: 1,
-        });
-    }
-
-    let matches = normalized_content.matches(&normalized_old).count();
-    if matches == 0 {
-        return Err(format!(
-            "String to replace not found in file.\nString: {old_string}"
-        ));
-    }
-    if matches > 1 && !replace_all {
-        return Err(format!(
-            "Found {matches} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, provide more context.\nString: {old_string}"
-        ));
-    }
-
-    let updated = if replace_all {
-        normalized_content.replace(&normalized_old, &normalized_new)
-    } else {
-        normalized_content.replacen(&normalized_old, &normalized_new, 1)
-    };
-    if updated == normalized_content {
-        return Err(format!("No changes made to {requested_path}."));
-    }
-
-    Ok(EditApplication {
-        final_content: format!("{bom}{}", restore_line_endings(&updated, line_ending)),
-        replacements: if replace_all { matches } else { 1 },
-    })
-}
-
-fn strip_utf8_bom(text: &str) -> (&str, &str) {
-    text.strip_prefix('\u{feff}')
-        .map(|rest| ("\u{feff}", rest))
-        .unwrap_or(("", text))
-}
-
-fn detect_line_ending(text: &str) -> LineEnding {
-    match (text.find("\r\n"), text.find('\n')) {
-        (Some(crlf), Some(lf)) if crlf < lf => LineEnding::CrLf,
-        _ => LineEnding::Lf,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LineEnding {
-    Lf,
-    CrLf,
-}
-
-fn normalize_line_endings(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
-}
-
-fn restore_line_endings(text: &str, line_ending: LineEnding) -> String {
-    match line_ending {
-        LineEnding::Lf => text.to_string(),
-        LineEnding::CrLf => text.replace('\n', "\r\n"),
-    }
 }

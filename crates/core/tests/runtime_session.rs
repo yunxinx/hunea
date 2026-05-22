@@ -181,7 +181,7 @@ fn native_agent_capability_matches_current_tool_surface() {
     let capability = RuntimeCapability::agent();
 
     assert!(capability.supports_tools);
-    assert!(!capability.supports_permissions);
+    assert!(capability.supports_permissions);
     assert!(!capability.supports_model_config);
 }
 

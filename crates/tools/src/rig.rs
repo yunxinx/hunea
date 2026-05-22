@@ -16,10 +16,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     SharedToolErrorFormatter, Tool, ToolCall, ToolDefinition, ToolExecutor, ToolExecutorRegistry,
-    ToolRegistry, tool_error::default_tool_error_formatter,
+    ToolPermissionDecision, ToolPermissionPolicy, ToolPermissionRequest, ToolRegistry,
+    tool_error::default_tool_error_formatter,
 };
 
 const TOOL_RESULT_DETAILS_RECORD_LIMIT: usize = 128;
+const TOOL_PERMISSION_DENIED: &str = "Tool permission denied";
 
 /// `RigToolServer` 负责把 Lumos 内部工具注册到 Rig 的 `ToolServerHandle`。
 ///
@@ -31,6 +33,7 @@ pub struct RigToolServer {
     executor: ToolExecutorRegistry,
     cancellation: CancellationToken,
     error_formatter: SharedToolErrorFormatter,
+    permission_handler: Option<crate::SharedToolPermissionHandler>,
     result_details: SharedRigToolResultDetails,
 }
 
@@ -54,6 +57,31 @@ impl RigToolServer {
         cancellation: CancellationToken,
         error_formatter: SharedToolErrorFormatter,
     ) -> Result<Self, RigToolServerError> {
+        Self::from_executor_with_options(executor, cancellation, error_formatter, None).await
+    }
+
+    /// `from_executor_with_permission_handler` 使用权限处理器构建 Rig 工具服务器。
+    pub async fn from_executor_with_permission_handler(
+        executor: ToolExecutorRegistry,
+        cancellation: CancellationToken,
+        error_formatter: SharedToolErrorFormatter,
+        permission_handler: crate::SharedToolPermissionHandler,
+    ) -> Result<Self, RigToolServerError> {
+        Self::from_executor_with_options(
+            executor,
+            cancellation,
+            error_formatter,
+            Some(permission_handler),
+        )
+        .await
+    }
+
+    async fn from_executor_with_options(
+        executor: ToolExecutorRegistry,
+        cancellation: CancellationToken,
+        error_formatter: SharedToolErrorFormatter,
+        permission_handler: Option<crate::SharedToolPermissionHandler>,
+    ) -> Result<Self, RigToolServerError> {
         let handle = ToolServer::new().run();
         let result_details = SharedRigToolResultDetails::default();
         let server = Self {
@@ -61,6 +89,7 @@ impl RigToolServer {
             executor,
             cancellation,
             error_formatter,
+            permission_handler,
             result_details,
         };
 
@@ -150,6 +179,7 @@ impl RigToolServer {
                 executor,
                 cancellation: self.cancellation.clone(),
                 error_formatter: Arc::clone(&self.error_formatter),
+                permission_handler: self.permission_handler.clone(),
                 result_details: self.result_details.clone(),
             })
             .await
@@ -189,6 +219,7 @@ struct RigToolAdapter {
     executor: ToolExecutorRegistry,
     cancellation: CancellationToken,
     error_formatter: SharedToolErrorFormatter,
+    permission_handler: Option<crate::SharedToolPermissionHandler>,
     result_details: SharedRigToolResultDetails,
 }
 
@@ -224,6 +255,17 @@ impl ToolDyn for RigToolAdapter {
             let arguments: serde_json::Value =
                 serde_json::from_str(&args).map_err(ToolError::JsonError)?;
             let call = ToolCall::new(tool_name.clone(), tool_name.clone(), arguments.clone());
+            if let Some(message) = authorize_tool_call(
+                &self.definition,
+                &call,
+                self.permission_handler.as_ref(),
+                &cancellation,
+            )
+            .await
+            {
+                let processed = error_formatter.format_tool_error(&tool_name, &message);
+                return Ok(processed.assistant_message);
+            }
             let result = executor.execute_tool(call, &cancellation).await;
             if result.is_error {
                 let processed = error_formatter.format_tool_error(&tool_name, &result.content);
@@ -236,6 +278,39 @@ impl ToolDyn for RigToolAdapter {
                 Ok(content)
             }
         })
+    }
+}
+
+async fn authorize_tool_call(
+    definition: &ToolDefinition,
+    call: &ToolCall,
+    permission_handler: Option<&crate::SharedToolPermissionHandler>,
+    cancellation: &CancellationToken,
+) -> Option<String> {
+    match definition.permission_policy {
+        ToolPermissionPolicy::Always => None,
+        ToolPermissionPolicy::Never => Some(format!(
+            "{TOOL_PERMISSION_DENIED}: {} is not allowed",
+            definition.name
+        )),
+        ToolPermissionPolicy::Ask => {
+            let Some(permission_handler) = permission_handler else {
+                return Some(format!(
+                    "{TOOL_PERMISSION_DENIED}: {} requires approval",
+                    definition.name
+                ));
+            };
+            match permission_handler
+                .request_permission(
+                    ToolPermissionRequest::new(call.clone(), definition.clone()),
+                    cancellation,
+                )
+                .await
+            {
+                ToolPermissionDecision::Allow => None,
+                ToolPermissionDecision::Deny { message } => Some(message),
+            }
+        }
     }
 }
 

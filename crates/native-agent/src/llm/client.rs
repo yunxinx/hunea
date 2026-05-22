@@ -1,5 +1,5 @@
 use mo_core::provider::ProviderKind;
-use mo_tools::ToolExecutorRegistry;
+use mo_tools::{SharedToolPermissionHandler, ToolExecutorRegistry};
 use rig_core::client::CompletionClient;
 use tokio_util::sync::CancellationToken;
 
@@ -25,6 +25,7 @@ pub(crate) async fn execute_rig_agent_for_request<F>(
     executor: ToolExecutorRegistry,
     cancellation: &CancellationToken,
     tool_max_turns: Option<usize>,
+    permission_handler: Option<SharedToolPermissionHandler>,
     on_progress: &mut F,
 ) -> Result<NativeAgentCompletion, NativeAgentError>
 where
@@ -43,6 +44,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await
@@ -55,6 +57,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await
@@ -67,6 +70,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await
@@ -79,6 +83,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await
@@ -91,6 +96,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await
@@ -103,6 +109,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await
@@ -115,6 +122,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await
@@ -127,6 +135,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await
@@ -139,6 +148,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await
@@ -151,6 +161,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await
@@ -163,6 +174,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await
@@ -175,6 +187,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await
@@ -187,6 +200,7 @@ where
                 executor,
                 cancellation,
                 tool_max_turns,
+                permission_handler,
                 on_progress,
             )
             .await

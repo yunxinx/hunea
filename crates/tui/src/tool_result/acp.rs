@@ -923,6 +923,7 @@ fn palette_main_is_light_text(palette: TerminalPalette) -> bool {
 fn acp_tool_kind_label(kind: RuntimeToolKind) -> &'static str {
     match kind {
         RuntimeToolKind::Read => "Read",
+        RuntimeToolKind::Write => "Write",
         RuntimeToolKind::Edit => "Edit",
         RuntimeToolKind::Delete => "Delete",
         RuntimeToolKind::Move => "Move",

@@ -14,7 +14,10 @@ pub use definition::ToolDefinition;
 pub use execution::{ToolCall, ToolResult};
 pub use executor::{Tool, ToolExecutionFuture, ToolExecutor, ToolExecutorRegistry};
 pub use kind::ToolKind;
-pub use permission::ToolPermissionPolicy;
+pub use permission::{
+    SharedToolPermissionHandler, ToolPermissionDecision, ToolPermissionFuture,
+    ToolPermissionHandler, ToolPermissionPolicy, ToolPermissionRequest,
+};
 pub use registry::ToolRegistry;
 pub use schema::{ToolSchema, ToolSchemaError};
 pub use tool_error::{

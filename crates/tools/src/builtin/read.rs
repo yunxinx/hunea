@@ -13,6 +13,9 @@ use crate::{
 };
 
 use super::{
+    file_state::{
+        TextFingerprint, TextFingerprintBuilder, WorkspaceFileSnapshot, WorkspaceReadState,
+    },
     workspace::resolve_workspace_path,
     workspace_access::{SharedWorkspaceAccess, WorkspaceAccess, local_workspace_access},
 };
@@ -26,16 +29,22 @@ const TOOL_CALL_INTERRUPTED: &str = "Tool call interrupted";
 
 /// `read_tool` 创建只读 workspace 内容读取工具。
 pub fn read_tool(root: impl AsRef<Path>) -> impl Tool + 'static {
-    read_tool_with_access(root, local_workspace_access())
+    read_tool_with_access(
+        root,
+        local_workspace_access(),
+        WorkspaceReadState::default(),
+    )
 }
 
 pub(crate) fn read_tool_with_access(
     root: impl AsRef<Path>,
     access: SharedWorkspaceAccess,
+    read_state: WorkspaceReadState,
 ) -> impl Tool + 'static {
     ReadTool {
         root: root.as_ref().to_path_buf(),
         access,
+        read_state,
     }
 }
 
@@ -43,6 +52,7 @@ pub(crate) fn read_tool_with_access(
 struct ReadTool {
     root: PathBuf,
     access: SharedWorkspaceAccess,
+    read_state: WorkspaceReadState,
 }
 
 impl std::fmt::Debug for ReadTool {
@@ -94,10 +104,14 @@ impl Tool for ReadTool {
     ) -> ToolExecutionFuture<'a> {
         let root = self.root.clone();
         let access = self.access.clone();
+        let read_state = self.read_state.clone();
         let call_id = call.call_id.clone();
         let cancellation = cancellation.clone();
         Box::pin(async move {
-            match task::spawn_blocking(move || execute_read(root, access, call, cancellation)).await
+            match task::spawn_blocking(move || {
+                execute_read(root, access, read_state, call, cancellation)
+            })
+            .await
             {
                 Ok(result) => result,
                 Err(error) => join_error_result(call_id, error),
@@ -120,6 +134,8 @@ struct ReadTextOutcome {
     end_line: usize,
     total_lines: usize,
     next_offset: Option<usize>,
+    fingerprint: TextFingerprint,
+    is_complete: bool,
 }
 
 fn join_error_result(call_id: String, error: JoinError) -> ToolResult {
@@ -129,6 +145,7 @@ fn join_error_result(call_id: String, error: JoinError) -> ToolResult {
 fn execute_read(
     root: PathBuf,
     access: SharedWorkspaceAccess,
+    read_state: WorkspaceReadState,
     call: ToolCall,
     cancellation: CancellationToken,
 ) -> ToolResult {
@@ -183,6 +200,14 @@ fn execute_read(
         &cancellation,
     ) {
         Ok(outcome) => {
+            read_state.record(
+                path.clone(),
+                WorkspaceFileSnapshot {
+                    fingerprint: outcome.fingerprint,
+                    modified_at: metadata.modified_at,
+                    is_complete: outcome.is_complete,
+                },
+            );
             let mut result = ToolResult::success(call.call_id, outcome.output);
             result.details = Some(json!({
                 "path": arguments.path,
@@ -220,6 +245,8 @@ fn read_text_file_lines(
     let mut total_lines = 0usize;
     let mut output_bytes = 0usize;
     let mut truncated_by_bytes = false;
+    let mut truncated_by_line = false;
+    let mut fingerprint = TextFingerprintBuilder::default();
 
     loop {
         if cancellation.is_cancelled() {
@@ -232,6 +259,7 @@ fn read_text_file_lines(
         if bytes_read == 0 {
             break;
         }
+        fingerprint.update(&raw_line);
 
         total_lines += 1;
 
@@ -256,10 +284,9 @@ fn read_text_file_lines(
         if total_lines < start_line || total_lines > end_line || truncated_by_bytes {
             continue;
         }
-        let rendered = format!(
-            "{total_lines}\t{}",
-            truncate_line(line, READ_MAX_LINE_CHARS)
-        );
+        let (rendered_line, is_line_truncated) = truncate_line(line, READ_MAX_LINE_CHARS);
+        truncated_by_line |= is_line_truncated;
+        let rendered = format!("{total_lines}\t{rendered_line}");
         let rendered_bytes = rendered.len() + usize::from(!selected.is_empty());
         if output_bytes + rendered_bytes > READ_MAX_OUTPUT_BYTES {
             truncated_by_bytes = true;
@@ -277,6 +304,8 @@ fn read_text_file_lines(
             end_line: 0,
             total_lines: 0,
             next_offset: None,
+            fingerprint: fingerprint.finish(),
+            is_complete: offset.is_none() && limit.is_none(),
         });
     }
 
@@ -290,6 +319,8 @@ fn read_text_file_lines(
     let rendered_start = start_line;
     let rendered_end = start_line + selected.len().saturating_sub(1);
     let next_offset = (total_lines > rendered_end).then_some(rendered_end + 1);
+    let is_complete =
+        offset.is_none() && limit.is_none() && next_offset.is_none() && !truncated_by_line;
     let mut output = selected.join("\n");
     if let Some(next_offset) = next_offset {
         if truncated_by_bytes {
@@ -309,6 +340,8 @@ fn read_text_file_lines(
         end_line: rendered_end,
         total_lines,
         next_offset,
+        fingerprint: fingerprint.finish(),
+        is_complete,
     })
 }
 
@@ -338,12 +371,12 @@ fn contains_disallowed_text_control_chars(text: &str) -> bool {
         .any(|ch| ch != '\n' && ch != '\r' && ch != '\t' && ch.is_control())
 }
 
-fn truncate_line(line: &str, max_chars: usize) -> String {
+fn truncate_line(line: &str, max_chars: usize) -> (String, bool) {
     let mut chars = line.chars();
     let truncated = chars.by_ref().take(max_chars).collect::<String>();
     if chars.next().is_some() {
-        format!("{truncated}...")
+        (format!("{truncated}..."), true)
     } else {
-        truncated
+        (truncated, false)
     }
 }

@@ -14,3 +14,4 @@ pub(crate) use provider::list_native_provider_models;
 pub(crate) use request::rig_message_from_chat_message;
 pub use stream::NativeLlmPerformanceMetrics;
 pub(crate) use stream::NativeLlmProgress;
+pub(crate) use tools::runtime_tool_activity_update_from_permission_request;

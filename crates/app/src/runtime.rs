@@ -12,7 +12,7 @@ use mo_core::{
 use mo_native_agent::{
     ModelProviderRefreshRuntimeState, NativeAgentRuntimeState, models as native_models,
 };
-use mo_tools::{ToolExecutorRegistry, builtin::workspace_readonly_tool_registry};
+use mo_tools::{ToolExecutorRegistry, builtin::workspace_tool_registry};
 use mo_tui::RuntimeCoordinator;
 
 /// `AppRuntimeOptions` 保存 app 层运行 agent runtime 所需的配置。
@@ -66,7 +66,7 @@ impl AppRuntimeCoordinator {
                 option_id,
                 ..
             } => {
-                self.respond_acp_permission(target.as_ref(), &request_id, option_id)?;
+                self.respond_permission(target.as_ref(), &request_id, option_id)?;
                 Ok(RuntimeCommandReceipt::Accepted)
             }
             RuntimeCommand::SetConfigOption {
@@ -146,6 +146,36 @@ impl AppRuntimeCoordinator {
         worker
             .respond_permission(request_id, option_id)
             .map_err(|error| error.to_string())
+    }
+
+    fn respond_native_permission(
+        &mut self,
+        target: Option<&RuntimeTarget>,
+        request_id: &str,
+        option_id: Option<String>,
+    ) -> Result<(), String> {
+        ensure_native_command_target(self.native_agent.current_target(), target)?;
+        self.native_agent.respond_permission(request_id, option_id)
+    }
+
+    fn respond_permission(
+        &mut self,
+        target: Option<&RuntimeTarget>,
+        request_id: &str,
+        option_id: Option<String>,
+    ) -> Result<(), String> {
+        match target {
+            Some(RuntimeTarget::NativeAgent(_)) => {
+                self.respond_native_permission(target, request_id, option_id)
+            }
+            Some(RuntimeTarget::AcpAgent { .. }) => {
+                self.respond_acp_permission(target, request_id, option_id)
+            }
+            None if self.native_agent.is_running() => {
+                self.respond_native_permission(None, request_id, option_id)
+            }
+            None => self.respond_acp_permission(None, request_id, option_id),
+        }
     }
 
     fn set_acp_model(
@@ -317,7 +347,7 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
 
 fn native_agent_workspace_tools() -> ToolExecutorRegistry {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    workspace_readonly_tool_registry(root)
+    workspace_tool_registry(root)
 }
 
 fn runtime_event_from_native_agent_event(
@@ -351,6 +381,10 @@ fn runtime_event_from_native_agent_event(
         NativeAgentEvent::ToolActivityUpdated { update } => RuntimeEvent::ToolActivityUpdated {
             target: target.expect("native agent target should be available for tool activity"),
             update,
+        },
+        NativeAgentEvent::PermissionRequested { request } => RuntimeEvent::PermissionRequested {
+            target: target.expect("native agent target should be available for permission request"),
+            request,
         },
         NativeAgentEvent::Finished { response, metrics } => RuntimeEvent::MessageFinished {
             target,

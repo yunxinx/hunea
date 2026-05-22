@@ -3,7 +3,9 @@ use mo_core::session::{
     RuntimeToolActivityRawValue, RuntimeToolActivityStatus, RuntimeToolActivityUpdate,
     RuntimeToolKind,
 };
-use mo_tools::{ToolDefinition as LumosToolDefinition, ToolKind, ToolRegistry};
+use mo_tools::{
+    ToolDefinition as LumosToolDefinition, ToolKind, ToolPermissionRequest, ToolRegistry,
+};
 use rig_core::{
     OneOrMany,
     message::{ToolCall as RigToolCall, ToolResultContent},
@@ -83,6 +85,30 @@ pub(crate) fn runtime_tool_activity_update_from_rig_result(
     }
 }
 
+pub(crate) fn runtime_tool_activity_update_from_permission_request(
+    activity_id: &str,
+    request: &ToolPermissionRequest,
+) -> RuntimeToolActivityUpdate {
+    let tool_name = &request.call.name;
+    let arguments = &request.call.arguments;
+    RuntimeToolActivityUpdate {
+        activity_id: activity_id.to_string(),
+        title: Some(tool_title_for(
+            tool_name,
+            Some(&request.definition),
+            arguments,
+        )),
+        kind: Some(runtime_kind_for(Some(&request.definition))),
+        status: Some(RuntimeToolActivityStatus::Pending),
+        content: Some(vec![RuntimeToolActivityContent::Text(tool_input_summary(
+            arguments,
+        ))]),
+        locations: Some(tool_locations_for(arguments)),
+        raw_input: Some(RuntimeToolActivityRawValue::from(arguments.clone())),
+        raw_output: None,
+    }
+}
+
 fn runtime_tool_raw_output(
     result: &str,
     result_details: Option<Value>,
@@ -107,6 +133,7 @@ pub(crate) fn tool_result_text(content: &OneOrMany<ToolResultContent>) -> String
 fn runtime_kind_for(definition: Option<&LumosToolDefinition>) -> RuntimeToolKind {
     match definition.map(|definition| definition.kind) {
         Some(ToolKind::Read) => RuntimeToolKind::Read,
+        Some(ToolKind::Write) => RuntimeToolKind::Write,
         Some(ToolKind::Edit) => RuntimeToolKind::Edit,
         Some(ToolKind::Delete) => RuntimeToolKind::Delete,
         Some(ToolKind::Move) => RuntimeToolKind::Move,

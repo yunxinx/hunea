@@ -1,16 +1,53 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Component, Path, PathBuf},
+};
 
 use crate::ToolExecutorRegistry;
 
-use super::workspace_access::{WorkspaceAccess, local_workspace_access};
+use super::{
+    file_state::WorkspaceReadState,
+    workspace_access::{WorkspaceAccess, local_workspace_access},
+};
 
 /// `workspace_readonly_tool_registry` 组合只读 workspace 工具注册表。
 pub fn workspace_readonly_tool_registry(root: impl AsRef<Path>) -> ToolExecutorRegistry {
     let root = root.as_ref().to_path_buf();
     let access = local_workspace_access();
+    let read_state = WorkspaceReadState::default();
     let mut registry = ToolExecutorRegistry::new();
-    registry.insert(super::read::read_tool_with_access(&root, access.clone()));
+    registry.insert(super::read::read_tool_with_access(
+        &root,
+        access.clone(),
+        read_state,
+    ));
     registry.insert(super::list_dir::list_dir_tool_with_access(&root, access));
+    registry
+}
+
+/// `workspace_tool_registry` 组合 workspace 读写工具注册表。
+pub fn workspace_tool_registry(root: impl AsRef<Path>) -> ToolExecutorRegistry {
+    let root = root.as_ref().to_path_buf();
+    let access = local_workspace_access();
+    let read_state = WorkspaceReadState::default();
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(super::read::read_tool_with_access(
+        &root,
+        access.clone(),
+        read_state.clone(),
+    ));
+    registry.insert(super::list_dir::list_dir_tool_with_access(
+        &root,
+        access.clone(),
+    ));
+    registry.insert(super::write::write_tool_with_access(
+        &root,
+        access.clone(),
+        read_state.clone(),
+    ));
+    registry.insert(super::edit::edit_tool_with_access(
+        &root, access, read_state,
+    ));
     registry
 }
 
@@ -40,6 +77,92 @@ pub(crate) fn resolve_workspace_path(
         return Err(format!("path is outside workspace: {requested}"));
     }
     Ok(candidate)
+}
+
+pub(crate) fn resolve_workspace_write_path(
+    access: &dyn WorkspaceAccess,
+    root: &Path,
+    requested: &str,
+) -> Result<PathBuf, String> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Err("'path' is required".to_string());
+    }
+
+    let root = access
+        .canonicalize(root)
+        .map_err(|error| format!("workspace root is unavailable: {error}"))?;
+    let requested_path = Path::new(requested);
+    let candidate = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        root.join(requested_path)
+    };
+
+    match access.canonicalize(&candidate) {
+        Ok(path) => {
+            if path.starts_with(&root) {
+                Ok(path)
+            } else {
+                Err(format!("path is outside workspace: {requested}"))
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            resolve_missing_workspace_path(access, &root, &candidate, requested)
+        }
+        Err(error) => Err(format!("path not found: {requested}: {error}")),
+    }
+}
+
+fn resolve_missing_workspace_path(
+    access: &dyn WorkspaceAccess,
+    root: &Path,
+    candidate: &Path,
+    requested: &str,
+) -> Result<PathBuf, String> {
+    reject_parent_components(requested)?;
+
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| format!("path is outside workspace: {requested}"))?;
+    let (raw_parent, canonical_parent) = nearest_existing_ancestor(access, parent, requested)?;
+    if !canonical_parent.starts_with(root) {
+        return Err(format!("path is outside workspace: {requested}"));
+    }
+
+    let suffix = candidate
+        .strip_prefix(&raw_parent)
+        .map_err(|_| format!("path is outside workspace: {requested}"))?;
+    Ok(canonical_parent.join(suffix))
+}
+
+fn nearest_existing_ancestor(
+    access: &dyn WorkspaceAccess,
+    path: &Path,
+    requested: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let mut current = path;
+    loop {
+        match access.canonicalize(current) {
+            Ok(path) => return Ok((current.to_path_buf(), path)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                current = current
+                    .parent()
+                    .ok_or_else(|| format!("path not found: {requested}: {error}"))?;
+            }
+            Err(error) => return Err(format!("path not found: {requested}: {error}")),
+        }
+    }
+}
+
+fn reject_parent_components(requested: &str) -> Result<(), String> {
+    let has_parent_component = Path::new(requested)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir));
+    if has_parent_component {
+        return Err(format!("path is outside workspace: {requested}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ impl RuntimeCapability {
     pub const fn agent() -> Self {
         Self {
             supports_tools: true,
-            supports_permissions: false,
+            supports_permissions: true,
             supports_model_config: false,
         }
     }

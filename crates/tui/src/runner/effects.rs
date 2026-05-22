@@ -59,6 +59,20 @@ pub(super) fn apply_effect_if_needed(
             );
             Ok(())
         }
+        AppEffect::RespondRuntimePermission {
+            target,
+            request_id,
+            option_id,
+        } => {
+            run_respond_runtime_permission_effect(
+                model,
+                runtime_coordinator,
+                target,
+                &request_id,
+                option_id,
+            );
+            Ok(())
+        }
         AppEffect::SetAcpModel { config_id, value } => {
             run_set_acp_model_effect(model, runtime_coordinator, config_id, value);
             Ok(())
@@ -83,6 +97,24 @@ pub(super) fn apply_effect_if_needed(
             run_interrupt_current_turn_effect(model, acp_ui_state, runtime_coordinator);
             Ok(())
         }
+    }
+}
+
+fn run_respond_runtime_permission_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+    target: RuntimeTarget,
+    request_id: &str,
+    option_id: Option<String>,
+) {
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::RespondPermission {
+            target: Some(target),
+            request_id: request_id.to_string(),
+            option_id,
+        })
+    {
+        model.show_transient_status_notice(&message);
     }
 }
 

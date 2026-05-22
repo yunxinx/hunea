@@ -103,6 +103,7 @@ pub struct AcpModelConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AcpToolKind {
     Read,
+    Write,
     Edit,
     Delete,
     Move,
@@ -649,6 +650,7 @@ impl From<AcpToolKind> for RuntimeToolKind {
     fn from(kind: AcpToolKind) -> Self {
         match kind {
             AcpToolKind::Read => Self::Read,
+            AcpToolKind::Write => Self::Write,
             AcpToolKind::Edit => Self::Edit,
             AcpToolKind::Delete => Self::Delete,
             AcpToolKind::Move => Self::Move,

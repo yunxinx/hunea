@@ -9,10 +9,10 @@ use mo_core::{
     request_policy::RuntimeRequestPolicy,
     session::{NativeAgentEvent, RuntimeTarget},
 };
-use mo_tools::ToolExecutorRegistry;
+use mo_tools::{SharedToolPermissionHandler, ToolExecutorRegistry};
 
 use super::{
-    NativeAgentError, NativeAgentRequest, response::NativeAgentProgress,
+    NativeAgentError, NativeAgentRequest, NativePermissionBroker, response::NativeAgentProgress,
     turn::send_agent_loop_with_cancellation_and_progress,
 };
 
@@ -22,6 +22,7 @@ pub struct NativeAgentRuntimeState {
     pub receiver: Option<Receiver<NativeAgentEvent>>,
     pub cancellation: Option<CancellationToken>,
     pub target: Option<RuntimeTarget>,
+    permission_broker: Option<NativePermissionBroker>,
 }
 
 impl NativeAgentRuntimeState {
@@ -35,6 +36,8 @@ impl NativeAgentRuntimeState {
         let cancellation = CancellationToken::default();
         let thread_cancellation = cancellation.clone();
         let target = request.target();
+        let permission_broker = NativePermissionBroker::default();
+        let thread_permission_broker = permission_broker.clone();
         thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -46,6 +49,7 @@ impl NativeAgentRuntimeState {
                         executor,
                         request_policy,
                         thread_cancellation,
+                        thread_permission_broker,
                         sender,
                     ));
                 }
@@ -59,6 +63,7 @@ impl NativeAgentRuntimeState {
         self.receiver = Some(receiver);
         self.cancellation = Some(cancellation);
         self.target = Some(target);
+        self.permission_broker = Some(permission_broker);
     }
 
     pub fn is_running(&self) -> bool {
@@ -68,6 +73,9 @@ impl NativeAgentRuntimeState {
     pub fn reset_after_clear(&mut self) {
         if let Some(cancellation) = self.cancellation.take() {
             cancellation.cancel();
+        }
+        if let Some(permission_broker) = self.permission_broker.take() {
+            permission_broker.cancel_all();
         }
         self.receiver = None;
         self.target = None;
@@ -80,9 +88,23 @@ impl NativeAgentRuntimeState {
         if let Some(cancellation) = self.cancellation.take() {
             cancellation.cancel();
         }
+        if let Some(permission_broker) = self.permission_broker.take() {
+            permission_broker.cancel_all();
+        }
         self.receiver = None;
         self.target = None;
         true
+    }
+
+    pub fn respond_permission(
+        &mut self,
+        request_id: &str,
+        option_id: Option<String>,
+    ) -> Result<(), String> {
+        let Some(permission_broker) = self.permission_broker.as_ref() else {
+            return Err("Native agent is not waiting for permission".to_string());
+        };
+        permission_broker.respond_permission(request_id, option_id)
     }
 
     pub fn current_target(&self) -> Option<&RuntimeTarget> {
@@ -97,6 +119,9 @@ impl NativeAgentRuntimeState {
                     self.receiver = None;
                     self.cancellation = None;
                     self.target = None;
+                    if let Some(permission_broker) = self.permission_broker.take() {
+                        permission_broker.cancel_all();
+                    }
                 }
                 Some(event)
             }
@@ -105,6 +130,9 @@ impl NativeAgentRuntimeState {
                 self.receiver = None;
                 self.cancellation = None;
                 self.target = None;
+                if let Some(permission_broker) = self.permission_broker.take() {
+                    permission_broker.cancel_all();
+                }
                 Some(NativeAgentEvent::Failed {
                     message: "agent request stopped before completion".to_string(),
                 })
@@ -118,10 +146,13 @@ pub(crate) async fn run_native_agent_worker(
     executor: ToolExecutorRegistry,
     request_policy: RuntimeRequestPolicy,
     cancellation: CancellationToken,
+    permission_broker: NativePermissionBroker,
     sender: mpsc::Sender<NativeAgentEvent>,
 ) {
     for attempt in 0..=request_policy.attempts() {
         let progress_sender = sender.clone();
+        let permission_handler: SharedToolPermissionHandler =
+            std::sync::Arc::new(permission_broker.handler(sender.clone()));
         let attempt_result = tokio::time::timeout(
             request_policy.timeout(),
             send_agent_loop_with_cancellation_and_progress(
@@ -129,6 +160,7 @@ pub(crate) async fn run_native_agent_worker(
                 executor.clone(),
                 &cancellation,
                 request_policy.tool_max_turns(),
+                Some(permission_handler),
                 move |progress| {
                     let event = native_agent_event_from_progress(progress);
                     let _ = progress_sender.send(event);
@@ -139,6 +171,7 @@ pub(crate) async fn run_native_agent_worker(
 
         match attempt_result {
             Err(_elapsed) if attempt < request_policy.attempts() => {
+                permission_broker.cancel_all();
                 if retry_native_agent_after_attempt(
                     attempt,
                     &request_policy,
@@ -151,6 +184,7 @@ pub(crate) async fn run_native_agent_worker(
                 }
             }
             Err(_elapsed) => {
+                permission_broker.cancel_all();
                 let _ = sender.send(NativeAgentEvent::Failed {
                     message: format!(
                         "Agent request timed out after {}s",
@@ -160,6 +194,7 @@ pub(crate) async fn run_native_agent_worker(
                 return;
             }
             Ok(Ok(completion)) => {
+                permission_broker.cancel_all();
                 let _ = sender.send(NativeAgentEvent::Finished {
                     response: completion.response,
                     metrics: completion.metrics,
@@ -167,10 +202,12 @@ pub(crate) async fn run_native_agent_worker(
                 return;
             }
             Ok(Err(NativeAgentError::Cancelled)) => {
+                permission_broker.cancel_all();
                 let _ = sender.send(NativeAgentEvent::Interrupted);
                 return;
             }
             Ok(Err(_error)) if attempt < request_policy.attempts() => {
+                permission_broker.cancel_all();
                 if retry_native_agent_after_attempt(
                     attempt,
                     &request_policy,
@@ -183,6 +220,7 @@ pub(crate) async fn run_native_agent_worker(
                 }
             }
             Ok(Err(error)) => {
+                permission_broker.cancel_all();
                 let _ = sender.send(NativeAgentEvent::Failed {
                     message: error.to_string(),
                 });
@@ -241,7 +279,7 @@ mod tests {
     use mo_tools::ToolExecutorRegistry;
     use tokio_util::sync::CancellationToken;
 
-    use super::{NativeAgentEvent, NativeAgentRuntimeState};
+    use super::{NativeAgentEvent, NativeAgentRuntimeState, NativePermissionBroker};
 
     #[test]
     fn native_agent_runtime_clears_receiver_after_terminal_event() {
@@ -253,6 +291,7 @@ mod tests {
             receiver: Some(receiver),
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::native_agent("provider", "model")),
+            permission_broker: None,
         };
 
         assert_eq!(
@@ -270,6 +309,7 @@ mod tests {
             receiver: Some(receiver),
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::native_agent("provider", "model")),
+            permission_broker: None,
         };
 
         sender
@@ -318,6 +358,7 @@ mod tests {
             receiver: Some(receiver),
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::native_agent("provider", "model")),
+            permission_broker: None,
         };
 
         sender
@@ -338,6 +379,7 @@ mod tests {
             receiver: Some(receiver),
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::native_agent("provider", "model")),
+            permission_broker: None,
         };
 
         sender
@@ -376,6 +418,7 @@ mod tests {
             executor,
             RuntimeRequestPolicy::default(),
             cancellation,
+            NativePermissionBroker::default(),
             sender,
         )
         .await;

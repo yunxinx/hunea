@@ -7,7 +7,9 @@ use std::{
 use futures_util::StreamExt as _;
 use mo_core::session::NativeLlmRequest;
 use mo_core::token_count::StreamingTokenProgress;
-use mo_tools::{ToolExecutorRegistry, ToolRegistry, rig::RigToolServer};
+use mo_tools::{
+    SharedToolPermissionHandler, ToolExecutorRegistry, ToolRegistry, rig::RigToolServer,
+};
 use rig_core::{
     agent::{AgentBuilder, MultiTurnStreamItem},
     completion::{CompletionModel, GetTokenUsage},
@@ -48,6 +50,7 @@ pub(super) async fn run_rig_agent<M, F>(
     executor: ToolExecutorRegistry,
     cancellation: &CancellationToken,
     tool_max_turns: Option<usize>,
+    permission_handler: Option<SharedToolPermissionHandler>,
     on_progress: &mut F,
 ) -> Result<NativeAgentCompletion, NativeAgentError>
 where
@@ -56,12 +59,26 @@ where
     F: FnMut(NativeAgentProgress),
 {
     let (prompt, history) = prompt_and_history_for_request(request.llm_request())?;
-    let tool_server = RigToolServer::from_executor_with_error_formatter(
-        executor,
-        cancellation.clone(),
-        Arc::new(NativeAgentToolErrorFormatter),
-    )
-    .await
+    let error_formatter = Arc::new(NativeAgentToolErrorFormatter);
+    let tool_server = match permission_handler {
+        Some(permission_handler) => {
+            RigToolServer::from_executor_with_permission_handler(
+                executor,
+                cancellation.clone(),
+                error_formatter,
+                permission_handler,
+            )
+            .await
+        }
+        None => {
+            RigToolServer::from_executor_with_error_formatter(
+                executor,
+                cancellation.clone(),
+                error_formatter,
+            )
+            .await
+        }
+    }
     .map_err(|error| NativeLlmError::Provider(error.to_string()))?;
     let tool_definitions = tool_server.definitions();
     let agent = AgentBuilder::new(model)

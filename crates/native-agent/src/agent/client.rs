@@ -15,6 +15,7 @@ pub async fn send_agent_loop_with_cancellation(
         executor,
         cancellation,
         None,
+        None,
         |_| {},
     )
     .await?;

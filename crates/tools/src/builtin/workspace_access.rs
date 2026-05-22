@@ -29,6 +29,22 @@ pub(crate) trait WorkspaceAccess: Send + Sync {
     fn metadata(&self, path: &Path) -> io::Result<WorkspaceMetadata>;
     fn open_reader(&self, path: &Path) -> io::Result<Box<dyn Read + Send>>;
     fn read_dir(&self, path: &Path) -> io::Result<Vec<WorkspaceDirectoryEntry>>;
+
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "workspace backend does not support directory creation",
+        ))
+    }
+
+    fn write_text_file(&self, path: &Path, content: &str) -> io::Result<()> {
+        let _ = (path, content);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "workspace backend does not support file writing",
+        ))
+    }
 }
 
 pub(crate) type SharedWorkspaceAccess = Arc<dyn WorkspaceAccess>;
@@ -72,5 +88,13 @@ impl WorkspaceAccess for LocalWorkspaceAccess {
                 })
             })
             .collect()
+    }
+
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        fs::create_dir_all(path)
+    }
+
+    fn write_text_file(&self, path: &Path, content: &str) -> io::Result<()> {
+        fs::write(path, content)
     }
 }

@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use mo_core::{
     acp::AcpPromptRequest,
     model_catalog::{ModelSelection, ProviderSyncRequest},
-    session::{ChatMessage, NativeAgentRequest},
+    session::{ChatMessage, NativeAgentRequest, RuntimeTarget},
 };
 
 use super::{
@@ -33,6 +33,11 @@ pub enum AppEffect {
         option_id: Option<String>,
         is_rejection: bool,
         rejected_tool_call_id: Option<String>,
+    },
+    RespondRuntimePermission {
+        target: RuntimeTarget,
+        request_id: String,
+        option_id: Option<String>,
     },
     SetAcpModel {
         config_id: Option<String>,

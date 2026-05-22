@@ -2,7 +2,9 @@ use crate::provider::{ProviderApiKey, ProviderKind};
 
 use std::time::Duration;
 
-use super::{RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityUpdate};
+use super::{
+    RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityUpdate,
+};
 
 /// `NativeAgentRequest` 描述一次内置 native agent turn。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +196,9 @@ pub enum NativeAgentEvent {
     },
     ToolActivityUpdated {
         update: RuntimeToolActivityUpdate,
+    },
+    PermissionRequested {
+        request: RuntimePermissionRequest,
     },
     Finished {
         response: NativeAgentResponse,

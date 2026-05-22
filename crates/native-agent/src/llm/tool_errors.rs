@@ -72,9 +72,12 @@ fn looks_like_processed_tool_error(reason: &str, full_text: &str) -> bool {
         && (reason.starts_with("File not found:")
             || reason.starts_with("Directory not found:")
             || reason.starts_with("File requires explicit attachment:")
+            || reason.starts_with("File must be read before writing")
+            || reason.starts_with("File changed after read")
             || reason.starts_with("Path is ")
             || reason.starts_with("Path ")
             || reason.starts_with("Invalid arguments")
+            || reason.starts_with("Permission denied")
             || reason.starts_with("Workspace root is unavailable")
             || reason.starts_with("Tool failed:")
             || reason.starts_with("Could not ")
@@ -124,6 +127,18 @@ fn tool_error_display_reason(tool_name: &str, raw_error: &str) -> String {
         return format!("Could not list directory: {path}");
     }
 
+    if let Some(path) = quoted_target(raw_error, "write failed for ") {
+        return format!("Could not write file: {path}");
+    }
+
+    if let Some(path) = quoted_target(raw_error, "edit failed for ") {
+        return format!("Could not edit file: {path}");
+    }
+
+    if let Some(path) = quoted_target(raw_error, "create parent directory failed for ") {
+        return format!("Could not create parent directory: {path}");
+    }
+
     if let Some(path) = raw_error.strip_prefix("path is outside workspace: ") {
         return format!("Path is outside workspace: {}", path.trim());
     }
@@ -148,9 +163,25 @@ fn tool_error_display_reason(tool_name: &str, raw_error: &str) -> String {
 
     if raw_error.starts_with("read arguments are invalid:")
         || raw_error.starts_with("list_dir arguments are invalid:")
+        || raw_error.starts_with("write arguments are invalid:")
+        || raw_error.starts_with("edit arguments are invalid:")
         || raw_error.contains("arguments do not match schema:")
     {
         return format!("Invalid arguments for {tool_name}");
+    }
+
+    if raw_error == "File has not been read yet. Read it first before writing to it." {
+        return "File must be read before writing".to_string();
+    }
+
+    if raw_error
+        == "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it."
+    {
+        return "File changed after read".to_string();
+    }
+
+    if raw_error.starts_with("Tool permission denied:") {
+        return format!("Permission denied for {tool_name}");
     }
 
     if raw_error.starts_with("workspace root is unavailable:") {
@@ -166,6 +197,12 @@ fn tool_error_hint(tool_name: &str, display_reason: &str) -> &'static str {
     }
     if display_reason.starts_with("File requires explicit attachment:") {
         return "Ask the user to attach the file explicitly instead of using read.";
+    }
+    if display_reason == "File must be read before writing" {
+        return "Use read without offset or limit to read the complete file, then retry.";
+    }
+    if display_reason == "File changed after read" {
+        return "Use read again to refresh the file snapshot, then retry.";
     }
     if display_reason.starts_with("Directory not found:") {
         return "Use list_dir on the nearest existing parent directory.";
@@ -185,10 +222,15 @@ fn tool_error_hint(tool_name: &str, display_reason: &str) -> &'static str {
     if display_reason.starts_with("Invalid arguments") {
         return "Check the tool schema and retry with valid arguments.";
     }
+    if display_reason.starts_with("Permission denied") {
+        return "Ask the user for approval before retrying the tool.";
+    }
 
     match tool_name {
         "read" => "Use list_dir to verify the path, then retry read.",
         "list_dir" => "Verify the path is a directory inside the workspace.",
+        "write" => "Use read first for existing files, then retry write.",
+        "edit" => "Use read first for existing files, then retry edit.",
         _ => "Check the tool input and try again.",
     }
 }

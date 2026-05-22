@@ -3,7 +3,10 @@ use mo_core::session::{
     RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
 };
 
-use super::super::{AppEvent, Model, model::RequestMetrics};
+use super::super::{
+    Model, acp_tool_preview::ToolApprovalPreview, model::RequestMetrics,
+    tool_approval_panel::ToolApprovalSource,
+};
 
 const FRAMEWORK_ERROR_PREFIXES: &[&str] = &["CompletionError", "ProviderError"];
 const FALLBACK_CHAT_FAILURE_MESSAGE: &str = "Unknown error";
@@ -46,6 +49,7 @@ impl RuntimeEventApply for Model {
                 self.set_stream_activity_thinking(is_thinking);
             }
             RuntimeEvent::Retrying { message, .. } => {
+                self.close_runtime_permission_approval_panel();
                 self.clear_runtime_response_buffer();
                 self.show_stream_activity_with_header(message);
             }
@@ -66,9 +70,9 @@ impl RuntimeEventApply for Model {
             | RuntimeEvent::AvailableCommandsChanged { .. }
             | RuntimeEvent::ConfigChangeSucceeded { .. }
             | RuntimeEvent::ConfigChangeFailed { .. } => {}
-            RuntimeEvent::PermissionRequested { request, .. } => {
+            RuntimeEvent::PermissionRequested { target, request } => {
                 self.flush_runtime_response_buffer();
-                show_runtime_permission_request(self, request);
+                show_runtime_permission_request(self, target, request);
             }
             RuntimeEvent::PermissionCancelled { target, .. } => {
                 self.close_tool_approval_panel();
@@ -87,6 +91,7 @@ impl RuntimeEventApply for Model {
                 metrics,
                 ..
             } => {
+                self.close_runtime_permission_approval_panel();
                 if let Some(metrics) = metrics {
                     self.set_last_request_metrics(Some(RequestMetrics::new(
                         metrics.latency,
@@ -103,18 +108,21 @@ impl RuntimeEventApply for Model {
                 self.finish_stream_activity_with_work_summary();
             }
             RuntimeEvent::Failed { message, .. } => {
+                self.close_runtime_permission_approval_panel();
                 self.flush_runtime_response_buffer();
                 self.accept_streamed_runtime_reasoning_from_runtime();
                 self.append_system_message_from_runtime(normalize_chat_failure_message(&message));
                 self.finish_stream_activity_with_work_summary();
             }
             RuntimeEvent::Interrupted { .. } => {
+                self.close_runtime_permission_approval_panel();
                 self.flush_runtime_response_buffer();
                 self.accept_streamed_runtime_reasoning_from_runtime();
                 self.append_system_message_from_runtime("Chat interrupted");
                 self.finish_stream_activity_with_work_summary();
             }
             RuntimeEvent::Stopped { message, .. } => {
+                self.close_runtime_permission_approval_panel();
                 self.flush_runtime_response_buffer();
                 self.accept_streamed_runtime_reasoning_from_runtime();
                 self.finish_stream_activity_with_work_summary();
@@ -260,21 +268,42 @@ fn runtime_tool_activity_from_update(update: RuntimeToolActivityUpdate) -> Runti
     }
 }
 
-fn show_runtime_permission_request(model: &mut Model, request: RuntimePermissionRequest) {
-    model.update(AppEvent::AcpPermissionRequested {
-        request_id: request.request_id,
-        title: request.title,
-        allow_option_id: option_id_for(&request.options, RuntimePermissionOptionKind::AllowOnce),
-        allow_always_option_id: option_id_for(
-            &request.options,
-            RuntimePermissionOptionKind::AllowAlways,
-        ),
-        reject_option_id: option_id_for(&request.options, RuntimePermissionOptionKind::RejectOnce),
-        reject_always_option_id: option_id_for(
-            &request.options,
-            RuntimePermissionOptionKind::RejectAlways,
-        ),
-    });
+fn show_runtime_permission_request(
+    model: &mut Model,
+    target: mo_core::session::RuntimeTarget,
+    request: RuntimePermissionRequest,
+) {
+    let preview = request
+        .tool_activity
+        .as_ref()
+        .and_then(ToolApprovalPreview::from_runtime_tool_activity_update);
+    let title = request.title.as_deref().unwrap_or("");
+    model.clear_status_notice();
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target,
+            request_id: request.request_id,
+            allow_option_id: option_id_for(
+                &request.options,
+                RuntimePermissionOptionKind::AllowOnce,
+            ),
+            allow_always_option_id: option_id_for(
+                &request.options,
+                RuntimePermissionOptionKind::AllowAlways,
+            ),
+            reject_option_id: option_id_for(
+                &request.options,
+                RuntimePermissionOptionKind::RejectOnce,
+            ),
+            reject_always_option_id: option_id_for(
+                &request.options,
+                RuntimePermissionOptionKind::RejectAlways,
+            ),
+        },
+        title.to_string(),
+        Vec::new(),
+        preview,
+    );
 }
 
 fn option_id_for(

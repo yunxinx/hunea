@@ -41,6 +41,10 @@ pub(super) fn apply_native_agent_event(
             target: target.expect("native agent target should be available for tool activity"),
             update,
         },
+        NativeAgentEvent::PermissionRequested { request } => RuntimeEvent::PermissionRequested {
+            target: target.expect("native agent target should be available for permission request"),
+            request,
+        },
         NativeAgentEvent::Finished { response, metrics } => RuntimeEvent::MessageFinished {
             target,
             content: response.content,

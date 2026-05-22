@@ -18,6 +18,7 @@ use super::{
     transcript::markdown_highlight::{highlight_code_chunks, wrap_highlight_chunks},
 };
 use file_preview::build_file_preview_panel_lines;
+use mo_core::session::RuntimeTarget;
 
 /// `ToolApprovalPanelState` 保存通用工具审批面板的展示与导航状态。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -35,6 +36,14 @@ pub(super) struct ToolApprovalPanelState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ToolApprovalSource {
     AcpPermission {
+        request_id: String,
+        allow_option_id: Option<String>,
+        allow_always_option_id: Option<String>,
+        reject_option_id: Option<String>,
+        reject_always_option_id: Option<String>,
+    },
+    RuntimePermission {
+        target: RuntimeTarget,
         request_id: String,
         allow_option_id: Option<String>,
         allow_always_option_id: Option<String>,
@@ -144,6 +153,15 @@ impl Model {
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.sync_composer_height();
         self.sync_document_viewport_for_composer_cursor();
+    }
+
+    pub(crate) fn close_runtime_permission_approval_panel(&mut self) {
+        if matches!(
+            self.tool_approval_panel.source,
+            Some(ToolApprovalSource::RuntimePermission { .. })
+        ) {
+            self.close_tool_approval_panel();
+        }
     }
 
     pub(crate) fn suspend_acp_tool_call_for_approval_panel(&mut self, item_index: usize) {
@@ -304,6 +322,26 @@ impl Model {
                         .flatten(),
                 })
             }
+            ToolApprovalSource::RuntimePermission {
+                target,
+                request_id,
+                allow_option_id,
+                allow_always_option_id,
+                reject_option_id,
+                reject_always_option_id,
+            } => {
+                let option_id = match choice {
+                    ToolApprovalChoice::Allow => allow_option_id,
+                    ToolApprovalChoice::AllowInSession => allow_always_option_id,
+                    ToolApprovalChoice::Deny => reject_option_id,
+                    ToolApprovalChoice::DenyInSession => reject_always_option_id,
+                };
+                Some(AppEffect::RespondRuntimePermission {
+                    target,
+                    request_id,
+                    option_id,
+                })
+            }
             ToolApprovalSource::Preview => {
                 self.append_tool_result_from_runtime(
                     approval_result_content(choice, &title),
@@ -327,6 +365,13 @@ impl Model {
                     rejected_tool_call_id: None,
                 })
             }
+            Some(ToolApprovalSource::RuntimePermission {
+                target, request_id, ..
+            }) => Some(AppEffect::RespondRuntimePermission {
+                target,
+                request_id,
+                option_id: None,
+            }),
             Some(ToolApprovalSource::Preview) | None => None,
         }
     }
@@ -490,6 +535,13 @@ pub(super) fn approval_choice_line(
 fn tool_approval_choices(state: &ToolApprovalPanelState) -> Vec<ToolApprovalChoice> {
     match state.source.as_ref() {
         Some(ToolApprovalSource::AcpPermission {
+            allow_option_id,
+            allow_always_option_id,
+            reject_option_id,
+            reject_always_option_id,
+            ..
+        })
+        | Some(ToolApprovalSource::RuntimePermission {
             allow_option_id,
             allow_always_option_id,
             reject_option_id,

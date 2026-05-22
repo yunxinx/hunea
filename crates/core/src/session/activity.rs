@@ -42,6 +42,7 @@ pub struct RuntimeModelConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeToolKind {
     Read,
+    Write,
     Edit,
     Delete,
     Move,

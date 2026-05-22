@@ -1,6 +1,12 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 use mo_tools::{
     Tool, ToolCall, ToolDefinition, ToolExecutionFuture, ToolExecutorRegistry, ToolKind,
-    ToolResult, rig::RigToolServer,
+    ToolPermissionDecision, ToolPermissionFuture, ToolPermissionHandler, ToolPermissionPolicy,
+    ToolPermissionRequest, ToolResult, rig::RigToolServer,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -12,12 +18,21 @@ struct FailingTool;
 
 struct DetailedTool;
 
+struct AskTool {
+    execution_count: Arc<AtomicUsize>,
+}
+
+struct FixedPermissionHandler {
+    decision: ToolPermissionDecision,
+}
+
 impl Tool for EchoTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new("echo")
             .with_label("Echo")
             .with_kind(ToolKind::Other)
             .with_description("Return the provided value")
+            .with_permission_policy(ToolPermissionPolicy::Always)
     }
 
     fn execute<'a>(
@@ -42,6 +57,7 @@ impl Tool for EchoReplacementTool {
             .with_label("Echo Replacement")
             .with_kind(ToolKind::Other)
             .with_description("Return the provided value with a replacement marker")
+            .with_permission_policy(ToolPermissionPolicy::Always)
     }
 
     fn execute<'a>(
@@ -66,6 +82,7 @@ impl Tool for FailingTool {
             .with_label("Failing")
             .with_kind(ToolKind::Other)
             .with_description("Return a tool error")
+            .with_permission_policy(ToolPermissionPolicy::Always)
     }
 
     fn execute<'a>(
@@ -83,6 +100,7 @@ impl Tool for DetailedTool {
             .with_label("Detailed")
             .with_kind(ToolKind::Read)
             .with_description("Return output with result metadata")
+            .with_permission_policy(ToolPermissionPolicy::Always)
     }
 
     fn execute<'a>(
@@ -101,6 +119,39 @@ impl Tool for DetailedTool {
             }));
             result
         })
+    }
+}
+
+impl Tool for AskTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new("ask")
+            .with_label("Ask")
+            .with_kind(ToolKind::Other)
+            .with_description("Return a value after approval")
+            .with_permission_policy(ToolPermissionPolicy::Ask)
+    }
+
+    fn execute<'a>(
+        &'a self,
+        call: ToolCall,
+        _cancellation: &'a CancellationToken,
+    ) -> ToolExecutionFuture<'a> {
+        let execution_count = Arc::clone(&self.execution_count);
+        Box::pin(async move {
+            execution_count.fetch_add(1, Ordering::SeqCst);
+            ToolResult::success(call.call_id, "approved")
+        })
+    }
+}
+
+impl ToolPermissionHandler for FixedPermissionHandler {
+    fn request_permission<'a>(
+        &'a self,
+        request: ToolPermissionRequest,
+        _cancellation: &'a CancellationToken,
+    ) -> ToolPermissionFuture<'a> {
+        assert_eq!(request.call.name, "ask");
+        Box::pin(async move { self.decision.clone() })
     }
 }
 
@@ -249,4 +300,72 @@ async fn rig_tool_server_replaces_tools_without_duplicate_definitions() {
         .await
         .expect("replacement tool should execute");
     assert_eq!(output, "replacement:hello");
+}
+
+#[tokio::test]
+async fn rig_tool_server_ask_policy_requires_permission_handler_decision() {
+    let execution_count = Arc::new(AtomicUsize::new(0));
+    let mut executor = ToolExecutorRegistry::new();
+    executor.insert(AskTool {
+        execution_count: Arc::clone(&execution_count),
+    });
+
+    let cancellation = CancellationToken::new();
+    let handler = Arc::new(FixedPermissionHandler {
+        decision: ToolPermissionDecision::Deny {
+            message: "approval rejected by test".to_string(),
+        },
+    });
+    let server = RigToolServer::from_executor_with_permission_handler(
+        executor,
+        cancellation,
+        Arc::new(mo_tools::DefaultToolErrorFormatter),
+        handler,
+    )
+    .await
+    .expect("rig tool server should build with permission handler");
+
+    let output = server
+        .handle()
+        .call_tool("ask", "{}")
+        .await
+        .expect("permission denial should be returned as model-visible output");
+
+    assert!(output.contains("approval rejected by test"));
+    assert_eq!(
+        execution_count.load(Ordering::SeqCst),
+        0,
+        "denied Ask tools must not execute"
+    );
+}
+
+#[tokio::test]
+async fn rig_tool_server_ask_policy_executes_after_permission_allow() {
+    let execution_count = Arc::new(AtomicUsize::new(0));
+    let mut executor = ToolExecutorRegistry::new();
+    executor.insert(AskTool {
+        execution_count: Arc::clone(&execution_count),
+    });
+
+    let cancellation = CancellationToken::new();
+    let handler = Arc::new(FixedPermissionHandler {
+        decision: ToolPermissionDecision::Allow,
+    });
+    let server = RigToolServer::from_executor_with_permission_handler(
+        executor,
+        cancellation,
+        Arc::new(mo_tools::DefaultToolErrorFormatter),
+        handler,
+    )
+    .await
+    .expect("rig tool server should build with permission handler");
+
+    let output = server
+        .handle()
+        .call_tool("ask", "{}")
+        .await
+        .expect("approved Ask tool should execute");
+
+    assert_eq!(output, "approved");
+    assert_eq!(execution_count.load(Ordering::SeqCst), 1);
 }

@@ -6,7 +6,9 @@ use std::{
 
 use mo_tools::{
     ToolCall, ToolExecutor, ToolExecutorRegistry, ToolKind, ToolPermissionPolicy,
-    builtin::{list_dir_tool, read_tool, workspace_readonly_tool_registry},
+    builtin::{
+        list_dir_tool, read_tool, workspace_readonly_tool_registry, workspace_tool_registry,
+    },
 };
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +37,42 @@ fn builtin_workspace_readonly_registry_exposes_file_tools() {
 }
 
 #[test]
+fn builtin_workspace_registry_exposes_read_write_and_edit_tools() {
+    let root = temp_root("builtin-writable-definitions");
+    let registry = workspace_tool_registry(&root);
+    let definitions = registry.definitions();
+
+    assert!(definitions.definition("read").is_some());
+    assert!(definitions.definition("list_dir").is_some());
+    assert_eq!(
+        definitions
+            .definition("write")
+            .map(|definition| definition.kind),
+        Some(ToolKind::Write)
+    );
+    assert_eq!(
+        definitions
+            .definition("edit")
+            .map(|definition| definition.kind),
+        Some(ToolKind::Edit)
+    );
+
+    cleanup(&root);
+}
+
+#[test]
+fn builtin_readonly_registry_does_not_expose_write_tools() {
+    let root = temp_root("builtin-readonly-no-write");
+    let registry = workspace_readonly_tool_registry(&root);
+    let definitions = registry.definitions();
+
+    assert!(definitions.definition("write").is_none());
+    assert!(definitions.definition("edit").is_none());
+
+    cleanup(&root);
+}
+
+#[test]
 fn builtin_readonly_file_tools_are_approved_by_default() {
     let root = temp_root("builtin-permissions");
     let registry = workspace_readonly_tool_registry(&root);
@@ -51,6 +89,28 @@ fn builtin_readonly_file_tools_are_approved_by_default() {
             .definition("list_dir")
             .map(|definition| definition.permission_policy),
         Some(ToolPermissionPolicy::Always)
+    );
+
+    cleanup(&root);
+}
+
+#[test]
+fn builtin_write_tools_require_ask_permission_by_default() {
+    let root = temp_root("builtin-write-permissions");
+    let registry = workspace_tool_registry(&root);
+    let definitions = registry.definitions();
+
+    assert_eq!(
+        definitions
+            .definition("write")
+            .map(|definition| definition.permission_policy),
+        Some(ToolPermissionPolicy::Ask)
+    );
+    assert_eq!(
+        definitions
+            .definition("edit")
+            .map(|definition| definition.permission_policy),
+        Some(ToolPermissionPolicy::Ask)
     );
 
     cleanup(&root);
@@ -111,6 +171,442 @@ async fn builtin_list_dir_tool_can_be_registered_independently() {
     assert!(result.content.contains("Cargo.toml"));
     assert!(result.content.contains("src/"));
     assert!(result.content.contains(".hidden"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_write_creates_missing_file_without_prior_read() {
+    let root = temp_root("builtin-write-create");
+    let registry = workspace_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "write",
+                serde_json::json!({
+                    "path": "nested/notes.txt",
+                    "content": "one\ntwo\n"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(
+        !result.is_error,
+        "write should create missing files: {result:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("nested/notes.txt")).expect("read created file"),
+        "one\ntwo\n"
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_write_rejects_missing_paths_outside_workspace() {
+    let root = temp_root("builtin-write-outside-root");
+    let outside = temp_root("builtin-write-outside-target");
+    let registry = workspace_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "write",
+                serde_json::json!({
+                    "path": outside.join("created.txt"),
+                    "content": "secret\n"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("outside workspace"));
+    assert!(!outside.join("created.txt").exists());
+    cleanup(&outside);
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_write_existing_file_requires_complete_prior_read() {
+    let root = temp_root("builtin-write-requires-read");
+    fs::write(root.join("notes.txt"), "old\n").expect("write fixture");
+    let registry = workspace_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "write",
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "content": "new\n"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("has not been read"));
+    assert_eq!(
+        fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
+        "old\n"
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_write_rejects_partial_read_snapshot() {
+    let root = temp_root("builtin-write-partial-read");
+    fs::write(root.join("notes.txt"), "one\ntwo\nthree\n").expect("write fixture");
+    let registry = workspace_tool_registry(&root);
+
+    let read_result = registry
+        .execute_tool(
+            ToolCall::new(
+                "read-1",
+                "read",
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "offset": 1,
+                    "limit": 2
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!read_result.is_error);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "write-1",
+                "write",
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "content": "replacement\n"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("has not been read"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_write_rejects_read_snapshot_with_truncated_line() {
+    let root = temp_root("builtin-write-truncated-line-read");
+    let original = format!("{}\n", "a".repeat(2_100));
+    fs::write(root.join("notes.txt"), &original).expect("write fixture");
+    let registry = workspace_tool_registry(&root);
+
+    let read_result = registry
+        .execute_tool(
+            ToolCall::new("read-1", "read", serde_json::json!({ "path": "notes.txt" })),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!read_result.is_error);
+    assert!(
+        read_result.content.ends_with("..."),
+        "long line should be visibly truncated: {}",
+        read_result.content
+    );
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "write-1",
+                "write",
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "content": "replacement\n"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("has not been read"));
+    assert_eq!(
+        fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
+        original
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_write_existing_file_succeeds_after_complete_read() {
+    let root = temp_root("builtin-write-after-read");
+    fs::write(root.join("notes.txt"), "old\n").expect("write fixture");
+    let registry = workspace_tool_registry(&root);
+
+    let read_result = registry
+        .execute_tool(
+            ToolCall::new("read-1", "read", serde_json::json!({ "path": "notes.txt" })),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!read_result.is_error);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "write-1",
+                "write",
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "content": "new\n"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(
+        !result.is_error,
+        "write after read should succeed: {result:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("notes.txt")).expect("read updated fixture"),
+        "new\n"
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_write_rejects_file_changed_after_read() {
+    let root = temp_root("builtin-write-stale");
+    fs::write(root.join("notes.txt"), "old\n").expect("write fixture");
+    let registry = workspace_tool_registry(&root);
+
+    let read_result = registry
+        .execute_tool(
+            ToolCall::new("read-1", "read", serde_json::json!({ "path": "notes.txt" })),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!read_result.is_error);
+    fs::write(root.join("notes.txt"), "external\n").expect("modify fixture outside tool");
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "write-1",
+                "write",
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "content": "new\n"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("modified since read"));
+    assert_eq!(
+        fs::read_to_string(root.join("notes.txt")).expect("read stale fixture"),
+        "external\n"
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_edit_creates_missing_file_when_old_string_is_empty() {
+    let root = temp_root("builtin-edit-create");
+    let registry = workspace_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "edit-1",
+                "edit",
+                serde_json::json!({
+                    "path": "created.txt",
+                    "old_string": "",
+                    "new_string": "created\n"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(
+        !result.is_error,
+        "edit should create missing file: {result:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("created.txt")).expect("read created file"),
+        "created\n"
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_edit_can_create_empty_missing_file() {
+    let root = temp_root("builtin-edit-create-empty");
+    let registry = workspace_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "edit-1",
+                "edit",
+                serde_json::json!({
+                    "path": "empty.txt",
+                    "old_string": "",
+                    "new_string": ""
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(
+        !result.is_error,
+        "edit should create empty file: {result:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("empty.txt")).expect("read created file"),
+        ""
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_edit_existing_file_requires_complete_prior_read() {
+    let root = temp_root("builtin-edit-requires-read");
+    fs::write(root.join("notes.txt"), "old\n").expect("write fixture");
+    let registry = workspace_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "edit-1",
+                "edit",
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "old_string": "old",
+                    "new_string": "new"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("has not been read"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_edit_rejects_file_changed_after_read() {
+    let root = temp_root("builtin-edit-stale");
+    fs::write(root.join("notes.txt"), "old\n").expect("write fixture");
+    let registry = workspace_tool_registry(&root);
+
+    let read_result = registry
+        .execute_tool(
+            ToolCall::new("read-1", "read", serde_json::json!({ "path": "notes.txt" })),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!read_result.is_error);
+    fs::write(root.join("notes.txt"), "external\n").expect("modify fixture outside tool");
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "edit-1",
+                "edit",
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "old_string": "old",
+                    "new_string": "new"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("modified since read"));
+    assert_eq!(
+        fs::read_to_string(root.join("notes.txt")).expect("read stale fixture"),
+        "external\n"
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_edit_replace_all_controls_multiple_matches() {
+    let root = temp_root("builtin-edit-replace-all");
+    fs::write(root.join("notes.txt"), "apple\napple\n").expect("write fixture");
+    let registry = workspace_tool_registry(&root);
+
+    let read_result = registry
+        .execute_tool(
+            ToolCall::new("read-1", "read", serde_json::json!({ "path": "notes.txt" })),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(!read_result.is_error);
+
+    let duplicate_result = registry
+        .execute_tool(
+            ToolCall::new(
+                "edit-1",
+                "edit",
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "old_string": "apple",
+                    "new_string": "orange"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(duplicate_result.is_error);
+    assert!(
+        duplicate_result.content.contains("Found 2 matches"),
+        "unexpected duplicate-match error: {}",
+        duplicate_result.content
+    );
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "edit-2",
+                "edit",
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "old_string": "apple",
+                    "new_string": "orange",
+                    "replace_all": true
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(
+        !result.is_error,
+        "replace_all edit should succeed: {result:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("notes.txt")).expect("read edited fixture"),
+        "orange\norange\n"
+    );
     cleanup(&root);
 }
 

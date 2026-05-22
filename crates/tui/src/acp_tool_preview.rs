@@ -87,6 +87,7 @@ pub(crate) fn acp_display_path(path: &str) -> String {
 
 pub(crate) fn is_acp_write_tool_call(call: &RuntimeToolActivity) -> bool {
     acp_write_tool_call_title_target(&call.title).is_some()
+        || call.kind == RuntimeToolKind::Write
         || (call.kind == RuntimeToolKind::Edit
             && call.raw_input.as_ref().is_some_and(|raw_input| {
                 raw_input_path(raw_input).is_some() && raw_input_content(raw_input).is_some()
@@ -167,7 +168,17 @@ fn raw_input_path(raw_input: &RuntimeToolActivityRawValue) -> Option<String> {
 }
 
 fn raw_input_content(raw_input: &RuntimeToolActivityRawValue) -> Option<String> {
-    raw_input_string_field(raw_input, &["content", "new_text", "newText", "text"])
+    raw_input_string_field(
+        raw_input,
+        &[
+            "content",
+            "new_string",
+            "newString",
+            "new_text",
+            "newText",
+            "text",
+        ],
+    )
 }
 
 fn raw_input_string_field(

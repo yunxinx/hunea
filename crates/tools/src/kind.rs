@@ -2,6 +2,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ToolKind {
     Read,
+    Write,
     Edit,
     Delete,
     Move,

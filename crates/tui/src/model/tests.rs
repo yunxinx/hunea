@@ -2054,6 +2054,152 @@ fn acp_permission_shortcuts_use_session_options_when_once_options_are_absent() {
 }
 
 #[test]
+fn runtime_permission_accept_key_preserves_target_identity() {
+    use crate::runtime::RuntimeEventApply;
+    use mo_core::session::{
+        RuntimeEvent, RuntimePermissionOption, RuntimePermissionOptionKind,
+        RuntimePermissionRequest, RuntimeTarget,
+    };
+
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    let mut model = Model::new(HeroOptions::default());
+    model.apply_runtime_event(RuntimeEvent::PermissionRequested {
+        target: target.clone(),
+        request: RuntimePermissionRequest::new(
+            "native-permission-1",
+            Some("Write TEMP.md".to_string()),
+            vec![
+                RuntimePermissionOption::new(
+                    "allow_once",
+                    "Yes",
+                    RuntimePermissionOptionKind::AllowOnce,
+                ),
+                RuntimePermissionOption::new(
+                    "reject_once",
+                    "No",
+                    RuntimePermissionOptionKind::RejectOnce,
+                ),
+            ],
+        ),
+    });
+
+    assert!(model.tool_approval_panel_active());
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('y'))));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondRuntimePermission {
+            target,
+            request_id: "native-permission-1".to_string(),
+            option_id: Some("allow_once".to_string()),
+        })
+    );
+    assert!(!model.tool_approval_panel_active());
+}
+
+#[test]
+fn runtime_permission_reject_key_preserves_target_identity() {
+    use crate::runtime::RuntimeEventApply;
+    use mo_core::session::{
+        RuntimeEvent, RuntimePermissionOption, RuntimePermissionOptionKind,
+        RuntimePermissionRequest, RuntimeTarget,
+    };
+
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    let mut model = Model::new(HeroOptions::default());
+    model.apply_runtime_event(RuntimeEvent::PermissionRequested {
+        target: target.clone(),
+        request: RuntimePermissionRequest::new(
+            "native-permission-2",
+            Some("Edit TEMP.md".to_string()),
+            vec![
+                RuntimePermissionOption::new(
+                    "allow_once",
+                    "Yes",
+                    RuntimePermissionOptionKind::AllowOnce,
+                ),
+                RuntimePermissionOption::new(
+                    "reject_once",
+                    "No",
+                    RuntimePermissionOptionKind::RejectOnce,
+                ),
+            ],
+        ),
+    });
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('n'))));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RespondRuntimePermission {
+            target,
+            request_id: "native-permission-2".to_string(),
+            option_id: Some("reject_once".to_string()),
+        })
+    );
+    assert!(!model.tool_approval_panel_active());
+}
+
+#[test]
+fn runtime_permission_panel_closes_when_runtime_retries_or_fails() {
+    use crate::runtime::RuntimeEventApply;
+    use mo_core::session::{
+        RuntimeEvent, RuntimePermissionOption, RuntimePermissionOptionKind,
+        RuntimePermissionRequest, RuntimeTarget,
+    };
+
+    let target = RuntimeTarget::native_agent("local", "qwen3");
+    let mut model = Model::new(HeroOptions::default());
+    model.apply_runtime_event(RuntimeEvent::PermissionRequested {
+        target: target.clone(),
+        request: RuntimePermissionRequest::new(
+            "native-permission-3",
+            Some("Write TEMP.md".to_string()),
+            vec![
+                RuntimePermissionOption::new(
+                    "allow_once",
+                    "Yes",
+                    RuntimePermissionOptionKind::AllowOnce,
+                ),
+                RuntimePermissionOption::new(
+                    "reject_once",
+                    "No",
+                    RuntimePermissionOptionKind::RejectOnce,
+                ),
+            ],
+        ),
+    });
+    assert!(model.tool_approval_panel_active());
+
+    model.apply_runtime_event(RuntimeEvent::Retrying {
+        target: Some(target.clone()),
+        message: "Reconnecting... 1/2".to_string(),
+    });
+    assert!(!model.tool_approval_panel_active());
+
+    model.apply_runtime_event(RuntimeEvent::PermissionRequested {
+        target: target.clone(),
+        request: RuntimePermissionRequest::new(
+            "native-permission-4",
+            Some("Edit TEMP.md".to_string()),
+            vec![RuntimePermissionOption::new(
+                "reject_once",
+                "No",
+                RuntimePermissionOptionKind::RejectOnce,
+            )],
+        ),
+    });
+    assert!(model.tool_approval_panel_active());
+
+    model.apply_runtime_event(RuntimeEvent::Failed {
+        target: Some(target),
+        message: "request failed".to_string(),
+    });
+    assert!(!model.tool_approval_panel_active());
+}
+
+#[test]
 fn stream_activity_line_uses_dynamic_codex_style_indicator() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),

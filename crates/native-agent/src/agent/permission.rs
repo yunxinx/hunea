@@ -17,7 +17,7 @@ use mo_tools::{
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::llm::runtime_tool_activity_update_from_permission_request;
+use mo_agent_runtime::runtime_tool_activity_update_from_permission_request;
 
 const NATIVE_PERMISSION_REQUEST_PREFIX: &str = "native-permission";
 const ALLOW_ONCE_OPTION_ID: &str = "allow_once";

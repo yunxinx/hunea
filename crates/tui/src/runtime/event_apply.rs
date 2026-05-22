@@ -8,7 +8,6 @@ use super::super::{
     tool_approval_panel::ToolApprovalSource,
 };
 
-const FRAMEWORK_ERROR_PREFIXES: &[&str] = &["CompletionError", "ProviderError"];
 const FALLBACK_CHAT_FAILURE_MESSAGE: &str = "Unknown error";
 
 pub(crate) trait RuntimeEventApply {
@@ -212,7 +211,7 @@ fn normalize_error_description(description: &str) -> String {
         return String::new();
     };
 
-    let mut normalized_lines = vec![strip_framework_error_prefixes(first_line).to_string()];
+    let mut normalized_lines = vec![first_line.trim().to_string()];
     normalized_lines.extend(
         lines
             .map(str::trim_end)
@@ -220,21 +219,6 @@ fn normalize_error_description(description: &str) -> String {
             .map(str::to_string),
     );
     normalized_lines.join("\n")
-}
-
-fn strip_framework_error_prefixes(message: &str) -> &str {
-    let mut remainder = message.trim();
-
-    while let Some(stripped) = FRAMEWORK_ERROR_PREFIXES.iter().find_map(|prefix| {
-        remainder
-            .strip_prefix(prefix)
-            .and_then(|tail| tail.strip_prefix(':'))
-            .map(str::trim_start)
-    }) {
-        remainder = stripped;
-    }
-
-    remainder
 }
 
 fn upsert_runtime_tool_activity(model: &mut Model, update: RuntimeToolActivityUpdate) {
@@ -321,32 +305,33 @@ mod tests {
     use super::normalize_chat_failure_message;
 
     #[test]
-    fn chat_failure_message_strips_framework_wrappers_and_marks_json_body() {
-        let message = "CompletionError: ProviderError: Invalid status code 401 Unauthorized with message:\n{\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}";
+    fn chat_failure_message_marks_json_body() {
+        let message = "provider error HTTP 401: Invalid status code 401 Unauthorized with message:\n{\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}";
 
         assert_eq!(
             normalize_chat_failure_message(message),
-            "Invalid status code 401 Unauthorized with message:\nBody: {\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}"
+            "provider error HTTP 401: Invalid status code 401 Unauthorized with message:\nBody: {\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}"
         );
     }
 
     #[test]
     fn chat_failure_message_extracts_inline_json_body() {
-        let message = "CompletionError: ProviderError: Invalid status code 401 Unauthorized with message: {\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}";
+        let message = "provider error HTTP 401: Invalid status code 401 Unauthorized with message: {\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}";
 
         assert_eq!(
             normalize_chat_failure_message(message),
-            "Invalid status code 401 Unauthorized with message:\nBody: {\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}"
+            "provider error HTTP 401: Invalid status code 401 Unauthorized with message:\nBody: {\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}"
         );
     }
 
     #[test]
     fn chat_failure_message_preserves_non_json_details() {
-        let message = "CompletionError: ProviderError: HTTP error.\nStatus: 400 Bad Request\nCause: bad request";
+        let message =
+            "provider error HTTP 400: HTTP error.\nStatus: 400 Bad Request\nCause: bad request";
 
         assert_eq!(
             normalize_chat_failure_message(message),
-            "HTTP error.\nStatus: 400 Bad Request\nCause: bad request"
+            "provider error HTTP 400: HTTP error.\nStatus: 400 Bad Request\nCause: bad request"
         );
     }
 }

@@ -2870,7 +2870,7 @@ fn generic_runtime_tool_activity_events_render_without_acp_target() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
     let mut acp_ui_state = AcpSessionUiState::default();
-    let target = RuntimeTarget::native_agent("rig", "qwen3");
+    let target = RuntimeTarget::native_agent("local", "qwen3");
     let mut runtime_coordinator = TestRuntimeCoordinator {
         runtime_events: vec![
             RuntimeEvent::ToolActivityStarted {
@@ -3970,7 +3970,7 @@ fn native_agent_failure_appends_system_message_in_transcript() {
 }
 
 #[test]
-fn native_agent_failure_formats_framework_wrapped_json_error() {
+fn native_agent_failure_formats_provider_json_error() {
     let mut model = Model::new(HeroOptions::default());
     model.transcript_mut().clear();
     model.show_stream_activity("qwen3");
@@ -3979,14 +3979,14 @@ fn native_agent_failure_formats_framework_wrapped_json_error() {
         &mut model,
         None,
         NativeAgentEvent::Failed {
-            message: "CompletionError: ProviderError: Invalid status code 401 Unauthorized with message:\n{\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}".to_string(),
+            message: "provider error HTTP 401: Invalid status code 401 Unauthorized with message:\n{\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance...\"}}".to_string(),
         },
     );
 
     assert_eq!(
         model.transcript_plain_items(),
         vec![
-            "■ Invalid status code 401 Unauthorized with message:\n  {\n    \"error\": {\n      \"message\": \"Insufficient balance...\",\n      \"type\": \"CreditsError\"\n    },\n    \"type\": \"error\"\n  }".to_string(),
+            "■ provider error HTTP 401: Invalid status code 401 Unauthorized with message:\n  {\n    \"error\": {\n      \"message\": \"Insufficient balance...\",\n      \"type\": \"CreditsError\"\n    },\n    \"type\": \"error\"\n  }".to_string(),
         ]
     );
     assert!(model.current_status_notice_text().is_empty());

@@ -1,5 +1,4 @@
 pub mod builtin;
-pub mod rig;
 
 mod definition;
 mod execution;

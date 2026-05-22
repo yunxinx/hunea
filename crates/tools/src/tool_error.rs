@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-/// `ProcessedToolError` 是工具失败跨 Rig 边界前的统一文本契约。
+/// `ProcessedToolError` 是工具失败跨 provider 回灌前的统一文本契约。
 ///
 /// `assistant_message` 会进入模型上下文，`display_reason` 保留给 UI 层使用。
-/// 当前 Rig 流式接口只能传递文本，因此 UI 层会从 `assistant_message` 中解析原因。
+/// Lumos runtime 在工具执行处保留两个文本，避免 provider 适配层承担业务语义。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessedToolError {
     pub assistant_message: String,
@@ -26,7 +26,7 @@ pub trait ToolErrorFormatter: Send + Sync {
     fn format_tool_error(&self, tool_name: &str, raw_error: &str) -> ProcessedToolError;
 }
 
-/// `SharedToolErrorFormatter` 是 Rig tool adapter 可克隆持有的 formatter。
+/// `SharedToolErrorFormatter` 是 runtime tool loop 可克隆持有的 formatter。
 pub type SharedToolErrorFormatter = Arc<dyn ToolErrorFormatter>;
 
 /// `DefaultToolErrorFormatter` 提供通用保底清洗，业务层可注入更具体的实现。
@@ -41,10 +41,6 @@ impl ToolErrorFormatter for DefaultToolErrorFormatter {
             display_reason,
         )
     }
-}
-
-pub(crate) fn default_tool_error_formatter() -> SharedToolErrorFormatter {
-    Arc::new(DefaultToolErrorFormatter)
 }
 
 fn default_display_reason(tool_name: &str, raw_error: &str) -> String {

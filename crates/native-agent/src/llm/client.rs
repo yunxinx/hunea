@@ -1,26 +1,18 @@
-use mo_core::provider::ProviderKind;
+use mo_agent_runtime::{AgentRuntimeOptions, run_agent_runtime};
 use mo_tools::{SharedToolPermissionHandler, ToolExecutorRegistry};
-use rig_core::client::CompletionClient;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     NativeAgentError, NativeAgentRequest,
     agent::{NativeAgentCompletion, NativeAgentProgress},
     llm::{
-        NativeLlmError,
-        provider::{
-            anthropic_client_for_request, cohere_client_for_request, copilot_client_for_request,
-            deepseek_client_for_request, gemini_client_for_request, groq_client_for_request,
-            ollama_client_for_request, openai_compatible_model_for_request,
-            openai_completions_client_for_request, together_client_for_request,
-            xai_client_for_request, xiaomi_mimo_client_for_request, zai_client_for_request,
-        },
-        stream::run_rig_agent,
+        NativeAgentToolErrorFormatter, NativeLlmError, openai_client_for_request,
+        prompt_request_from_native_llm_request,
     },
 };
 
-/// `execute_rig_agent_for_request` 使用 Rig agent/streaming/multi-turn 执行一次 native turn。
-pub(crate) async fn execute_rig_agent_for_request<F>(
+/// `execute_native_agent_for_request` runs one native turn through Lumos AI runtime.
+pub(crate) async fn execute_native_agent_for_request<F>(
     request: &NativeAgentRequest,
     executor: ToolExecutorRegistry,
     cancellation: &CancellationToken,
@@ -29,191 +21,73 @@ pub(crate) async fn execute_rig_agent_for_request<F>(
     on_progress: &mut F,
 ) -> Result<NativeAgentCompletion, NativeAgentError>
 where
-    F: FnMut(NativeAgentProgress),
+    F: FnMut(NativeAgentProgress) + Send,
 {
     if cancellation.is_cancelled() {
         return Err(NativeAgentError::Cancelled);
     }
 
-    match request.llm_request().provider_kind {
-        ProviderKind::OpenAiCompatible => {
-            let model = openai_compatible_model_for_request(request.llm_request())?;
-            run_rig_agent(
-                model,
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
+    let client = openai_client_for_request(request.llm_request())?;
+    let prompt_request = prompt_request_from_native_llm_request(request.llm_request())?;
+    let completion = run_agent_runtime(
+        &client,
+        prompt_request,
+        executor,
+        cancellation,
+        AgentRuntimeOptions {
+            tool_max_turns,
+            permission_handler,
+            error_formatter: std::sync::Arc::new(NativeAgentToolErrorFormatter),
+        },
+        |progress| on_progress(native_progress_from_runtime_progress(progress)),
+    )
+    .await
+    .map_err(|error| match error {
+        mo_agent_runtime::AgentRuntimeError::Cancelled => NativeAgentError::Cancelled,
+        mo_agent_runtime::AgentRuntimeError::Provider(source) => {
+            NativeAgentError::from(NativeLlmError::from(source))
         }
-        ProviderKind::OpenAi => {
-            let client = openai_completions_client_for_request(request.llm_request())?;
-            run_rig_agent(
-                client.completion_model(request.llm_request().model_id.clone()),
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
+        mo_agent_runtime::AgentRuntimeError::EmptyPrompt => {
+            NativeAgentError::from(NativeLlmError::EmptyPrompt {
+                provider_id: request.llm_request().provider_id.clone(),
+            })
         }
-        ProviderKind::Anthropic => {
-            let client = anthropic_client_for_request(request.llm_request())?;
-            run_rig_agent(
-                client.completion_model(request.llm_request().model_id.clone()),
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
+        mo_agent_runtime::AgentRuntimeError::ToolTurnLimit { max_turns } => NativeAgentError::from(
+            NativeLlmError::Provider(format!("agent reached tool turn limit ({max_turns})")),
+        ),
+    })?;
+
+    Ok(NativeAgentCompletion {
+        response: mo_core::session::NativeAgentResponse {
+            content: completion.response.content,
+            reasoning_content: completion.response.reasoning_content,
+            reasoning_duration: completion.response.reasoning_duration,
+        },
+        metrics: completion.metrics,
+    })
+}
+
+fn native_progress_from_runtime_progress(
+    progress: mo_agent_runtime::AgentRuntimeProgress,
+) -> NativeAgentProgress {
+    match progress {
+        mo_agent_runtime::AgentRuntimeProgress::OutputTokens { total_tokens } => {
+            NativeAgentProgress::OutputTokens { total_tokens }
         }
-        ProviderKind::Gemini => {
-            let client = gemini_client_for_request(request.llm_request())?;
-            run_rig_agent(
-                client.completion_model(request.llm_request().model_id.clone()),
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
+        mo_agent_runtime::AgentRuntimeProgress::Thinking { is_thinking } => {
+            NativeAgentProgress::Thinking { is_thinking }
         }
-        ProviderKind::DeepSeek => {
-            let client = deepseek_client_for_request(request.llm_request())?;
-            run_rig_agent(
-                client.completion_model(request.llm_request().model_id.clone()),
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
+        mo_agent_runtime::AgentRuntimeProgress::AssistantDelta { content } => {
+            NativeAgentProgress::AssistantDelta { content }
         }
-        ProviderKind::Together => {
-            let client = together_client_for_request(request.llm_request())?;
-            run_rig_agent(
-                client.completion_model(request.llm_request().model_id.clone()),
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
+        mo_agent_runtime::AgentRuntimeProgress::ReasoningDelta { content } => {
+            NativeAgentProgress::ReasoningDelta { content }
         }
-        ProviderKind::Groq => {
-            let client = groq_client_for_request(request.llm_request())?;
-            run_rig_agent(
-                client.completion_model(request.llm_request().model_id.clone()),
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
+        mo_agent_runtime::AgentRuntimeProgress::ToolActivityStarted { activity } => {
+            NativeAgentProgress::ToolActivityStarted { activity }
         }
-        ProviderKind::Xai => {
-            let client = xai_client_for_request(request.llm_request())?;
-            run_rig_agent(
-                client.completion_model(request.llm_request().model_id.clone()),
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
+        mo_agent_runtime::AgentRuntimeProgress::ToolActivityUpdated { update } => {
+            NativeAgentProgress::ToolActivityUpdated { update }
         }
-        ProviderKind::Ollama => {
-            let client = ollama_client_for_request(request.llm_request())?;
-            run_rig_agent(
-                client.completion_model(request.llm_request().model_id.clone()),
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
-        }
-        ProviderKind::Cohere => {
-            let client = cohere_client_for_request(request.llm_request())?;
-            run_rig_agent(
-                client.completion_model(request.llm_request().model_id.clone()),
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
-        }
-        ProviderKind::Zai => {
-            let client = zai_client_for_request(request.llm_request())?;
-            run_rig_agent(
-                client.completion_model(request.llm_request().model_id.clone()),
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
-        }
-        ProviderKind::Mimo => {
-            let client = xiaomi_mimo_client_for_request(request.llm_request())?;
-            run_rig_agent(
-                client.completion_model(request.llm_request().model_id.clone()),
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
-        }
-        ProviderKind::GithubCopilot => {
-            let client = copilot_client_for_request(request.llm_request())?;
-            run_rig_agent(
-                client.completion_model(request.llm_request().model_id.clone()),
-                request,
-                executor,
-                cancellation,
-                tool_max_turns,
-                permission_handler,
-                on_progress,
-            )
-            .await
-        }
-        ProviderKind::Fireworks
-        | ProviderKind::OllamaCloud
-        | ProviderKind::BigModel
-        | ProviderKind::Aliyun
-        | ProviderKind::Nebius
-        | ProviderKind::Vertex => Err(NativeLlmError::UnsupportedProvider {
-            provider_id: request.llm_request().provider_id.clone(),
-            provider_kind: request.llm_request().provider_kind,
-        }
-        .into()),
     }
 }

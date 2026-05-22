@@ -1,4 +1,4 @@
-//! Rig 驱动的 Lumos native agent runtime。
+//! Lumos native agent runtime。
 
 mod client;
 mod error;

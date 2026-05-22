@@ -1,19 +1,13 @@
 [package]
-name = "mo-native-agent"
+name = "mo-agent-runtime"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-directories.workspace = true
-mo-agent-runtime.workspace = true
 mo-ai-core.workspace = true
-mo-ai-openai.workspace = true
 mo-core.workspace = true
 mo-tools.workspace = true
-reqwest.workspace = true
-serde = { workspace = true }
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-toml.workspace = true
-toml_edit.workspace = true

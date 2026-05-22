@@ -81,7 +81,7 @@ impl ToolExecutorRegistry {
         registry
     }
 
-    /// `tools` 返回当前注册的工具，供 Rig 适配层按名称注册。
+    /// `tools` 返回当前注册的工具，供 runtime 按名称注册或检查。
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
         self.tools
             .read()

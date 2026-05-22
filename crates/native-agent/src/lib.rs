@@ -9,7 +9,7 @@ pub use agent::{NativeAgentEvent, NativeAgentRuntimeState};
 pub use llm::NativeLlmPerformanceMetrics;
 pub use llm::{ChatMessage, ChatRole, NativeLlmError, NativeLlmRequest};
 pub(crate) use llm::{
-    NativeLlmProgress, execute_rig_agent_for_request, list_native_provider_models,
+    NativeLlmProgress, execute_native_agent_for_request, list_native_provider_models,
 };
 pub use mo_core::provider::{ProviderApiKey, ProviderKind};
 pub use models::{ModelProviderRefreshEvent, ModelProviderRefreshRuntimeState};

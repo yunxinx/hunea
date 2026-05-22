@@ -2,7 +2,7 @@ use super::{
     NativeAgentError, NativeAgentRequest,
     response::{NativeAgentCompletion, NativeAgentProgress},
 };
-use crate::{NativeLlmProgress, execute_rig_agent_for_request};
+use crate::{NativeLlmProgress, execute_native_agent_for_request};
 use mo_tools::{SharedToolPermissionHandler, ToolExecutorRegistry};
 
 pub(crate) async fn send_agent_loop_with_cancellation_and_token_progress<F>(
@@ -14,7 +14,7 @@ pub(crate) async fn send_agent_loop_with_cancellation_and_token_progress<F>(
     mut on_progress: F,
 ) -> Result<NativeAgentCompletion, NativeAgentError>
 where
-    F: FnMut(NativeLlmProgress),
+    F: FnMut(NativeLlmProgress) + Send,
 {
     send_agent_loop_with_cancellation_and_progress(
         request,
@@ -47,9 +47,9 @@ pub(crate) async fn send_agent_loop_with_cancellation_and_progress<F>(
     mut on_progress: F,
 ) -> Result<NativeAgentCompletion, NativeAgentError>
 where
-    F: FnMut(NativeAgentProgress),
+    F: FnMut(NativeAgentProgress) + Send,
 {
-    execute_rig_agent_for_request(
+    execute_native_agent_for_request(
         request,
         executor,
         cancellation,

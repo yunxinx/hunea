@@ -1,110 +1,121 @@
-use rig_core::{
-    OneOrMany,
-    message::{
-        Audio, AudioMediaType, Document, DocumentMediaType, DocumentSourceKind, Image, ImageDetail,
-        ImageMediaType, Message as RigMessage, MimeType, Text, UserContent,
-    },
-};
+use mo_ai_core::{Message, MessageContent, MessageRole, PromptRequest};
 
 pub use mo_core::session::{ChatMessage, ChatMessageBlock, ChatRole, NativeLlmRequest};
 
-pub(crate) fn rig_message_from_chat_message(message: ChatMessage) -> RigMessage {
-    match message.role {
-        ChatRole::User => match message.blocks {
-            Some(blocks) if !blocks.is_empty() => rig_user_message_from_blocks(blocks),
-            _ => RigMessage::user(message.content),
-        },
-        ChatRole::Assistant => RigMessage::assistant(message.content),
+use crate::llm::NativeLlmError;
+
+pub(crate) fn prompt_request_from_native_llm_request(
+    request: &NativeLlmRequest,
+) -> Result<PromptRequest, NativeLlmError> {
+    if request.messages.is_empty() {
+        return Err(NativeLlmError::EmptyPrompt {
+            provider_id: request.provider_id.clone(),
+        });
     }
+
+    Ok(PromptRequest::new(
+        request.model_id.clone(),
+        request
+            .messages
+            .iter()
+            .cloned()
+            .map(message_from_chat_message)
+            .collect(),
+    ))
 }
 
-fn rig_user_message_from_blocks(blocks: Vec<ChatMessageBlock>) -> RigMessage {
-    let mut blocks = blocks.into_iter().map(rig_user_content_from_block);
-    let first = blocks.next().expect("caller ensures blocks are non-empty");
-    let remaining = blocks.collect::<Vec<_>>();
-    let content = if remaining.is_empty() {
-        OneOrMany::one(first)
-    } else {
-        let mut items = Vec::with_capacity(remaining.len() + 1);
-        items.push(first);
-        items.extend(remaining);
-        OneOrMany::many(items).expect("first item guarantees non-empty content")
+fn message_from_chat_message(message: ChatMessage) -> Message {
+    let role = match message.role {
+        ChatRole::User => MessageRole::User,
+        ChatRole::Assistant => MessageRole::Assistant,
+    };
+    let content = match message.blocks {
+        Some(blocks) if !blocks.is_empty() => {
+            blocks.into_iter().map(content_from_chat_block).collect()
+        }
+        _ => vec![MessageContent::Text(message.content)],
     };
 
-    RigMessage::User { content }
+    Message::new(role, content)
 }
 
-fn rig_user_content_from_block(block: ChatMessageBlock) -> UserContent {
+fn content_from_chat_block(block: ChatMessageBlock) -> MessageContent {
     match block {
-        ChatMessageBlock::Text(text) => UserContent::Text(Text { text }),
+        ChatMessageBlock::Text(text) => MessageContent::Text(text),
         ChatMessageBlock::Image {
             data_base64,
             mime_type,
-            ..
-        } => UserContent::Image(Image {
-            data: DocumentSourceKind::Base64(data_base64),
-            media_type: ImageMediaType::from_mime_type(&mime_type),
-            detail: Some(ImageDetail::Auto),
-            additional_params: None,
-        }),
+            uri,
+        } => MessageContent::Image {
+            data_base64,
+            mime_type,
+            uri,
+        },
         ChatMessageBlock::Audio {
             data_base64,
             mime_type,
-            ..
-        } => UserContent::Audio(Audio {
-            data: DocumentSourceKind::Base64(data_base64),
-            media_type: AudioMediaType::from_mime_type(&mime_type),
-            additional_params: None,
-        }),
+            uri,
+        } => MessageContent::Audio {
+            data_base64,
+            mime_type,
+            uri,
+        },
         ChatMessageBlock::Document {
             data_base64,
             mime_type,
             filename,
-            ..
-        } => UserContent::Document(Document {
-            data: DocumentSourceKind::Base64(data_base64),
-            media_type: DocumentMediaType::from_mime_type(&mime_type),
-            additional_params: filename.map(|filename| serde_json::json!({ "filename": filename })),
-        }),
+            uri,
+        } => MessageContent::Document {
+            data_base64,
+            mime_type,
+            filename,
+            uri,
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use rig_core::message::{DocumentSourceKind, Message, UserContent};
+    use mo_ai_core::{MessageContent, MessageRole};
 
-    use super::{ChatMessage, ChatMessageBlock, rig_message_from_chat_message};
+    use super::{
+        ChatMessage, ChatMessageBlock, NativeLlmRequest, prompt_request_from_native_llm_request,
+    };
+    use crate::ProviderKind;
 
     #[test]
-    fn rig_message_from_chat_message_keeps_structured_user_blocks() {
-        let message = ChatMessage::user_with_blocks(
-            "review @assets/sample.png".to_string(),
-            Some(vec![
-                ChatMessageBlock::Text("review ".to_string()),
-                ChatMessageBlock::Image {
-                    data_base64: "iVBORw==".to_string(),
-                    mime_type: "image/png".to_string(),
-                    uri: None,
-                },
-            ]),
-        );
-
-        let message = rig_message_from_chat_message(message);
-        let Message::User { content } = message else {
-            panic!("expected user message");
+    fn prompt_request_keeps_structured_user_blocks() {
+        let request = NativeLlmRequest {
+            provider_id: "local".to_string(),
+            provider_kind: ProviderKind::OpenAiCompatible,
+            model_id: "qwen3".to_string(),
+            base_url: Some("http://127.0.0.1:1234/v1".to_string()),
+            api_key: None,
+            api_key_env: None,
+            messages: vec![ChatMessage::user_with_blocks(
+                "review @assets/sample.png".to_string(),
+                Some(vec![
+                    ChatMessageBlock::Text("review ".to_string()),
+                    ChatMessageBlock::Image {
+                        data_base64: "iVBORw==".to_string(),
+                        mime_type: "image/png".to_string(),
+                        uri: None,
+                    },
+                ]),
+            )],
         };
-        let mut items = content.iter();
+
+        let request =
+            prompt_request_from_native_llm_request(&request).expect("prompt should build");
+        assert_eq!(request.messages[0].role, MessageRole::User);
         assert!(matches!(
-            items.next(),
-            Some(UserContent::Text(text)) if text.text == "review "
+            &request.messages[0].content[0],
+            MessageContent::Text(text) if text == "review "
         ));
-        match items.next() {
-            Some(UserContent::Image(image)) => {
-                assert!(
-                    matches!(image.data, DocumentSourceKind::Base64(ref data) if data == "iVBORw==")
-                );
-            }
-            other => panic!("expected image block, got {other:?}"),
-        }
+        assert!(matches!(
+            &request.messages[0].content[1],
+            MessageContent::Image { data_base64, mime_type, .. }
+                if data_base64 == "iVBORw==" && mime_type == "image/png"
+        ));
     }
 }

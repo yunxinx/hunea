@@ -2,15 +2,13 @@ use std::{
     collections::BTreeMap,
     env, fmt, fs, io,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use directories::ProjectDirs;
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
-use crate::{NativeLlmError, list_native_provider_models};
+use crate::list_native_provider_models;
 use mo_core::{
     model_catalog::{
         ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderSyncRequest,
@@ -20,7 +18,6 @@ use mo_core::{
 };
 
 const MODELS_FILE_NAME: &str = "models.toml";
-const MODEL_SYNC_TIMEOUT: Duration = Duration::from_secs(3);
 type ModelSyncResult = Result<Vec<String>, String>;
 
 /// `LoadedModelCatalog` 是从 `models.toml` 得到的 TUI 模型目录与默认选择。
@@ -82,16 +79,6 @@ struct FileModelProviderConfig {
 struct MergedModelsConfig {
     default: Option<String>,
     providers: BTreeMap<String, FileModelProviderConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiModelsResponse {
-    data: Vec<OpenAiModel>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiModel {
-    id: String,
 }
 
 impl fmt::Display for ModelsConfigError {
@@ -379,31 +366,13 @@ fn selection_from_default(default: Option<&str>, catalog: &ModelCatalog) -> Opti
 }
 
 fn sync_provider_models(request: &ProviderSyncRequest) -> ModelSyncResult {
-    if request.kind.uses_openai_compatible_endpoint()
-        || request.kind == ProviderKind::OpenAi
-            && request
-                .base_url
-                .as_ref()
-                .is_some_and(|value| !value.trim().is_empty())
-    {
-        return sync_openai_compatible_models(request);
-    }
-
-    if request
-        .base_url
-        .as_ref()
-        .is_some_and(|value| !value.trim().is_empty())
-    {
+    if !request.kind.uses_openai_compatible_endpoint() && request.kind != ProviderKind::OpenAi {
         return Err(format!(
-            "model sync for custom {} base_url is not supported; configure models = [...]",
+            "model sync for {} is not supported; configure models = [...]",
             request.kind
         ));
     }
 
-    sync_native_provider_models(request)
-}
-
-fn sync_native_provider_models(request: &ProviderSyncRequest) -> ModelSyncResult {
     let request = NativeLlmRequest::new(
         request.provider_id.clone(),
         request.kind,
@@ -413,59 +382,7 @@ fn sync_native_provider_models(request: &ProviderSyncRequest) -> ModelSyncResult
         request.api_key_env.clone(),
         Vec::new(),
     );
-    list_native_provider_models(&request).map_err(|error| match error {
-        NativeLlmError::UnsupportedProvider { .. } => {
-            format!(
-                "model sync for {} is not supported; configure models = [...]",
-                request.provider_kind
-            )
-        }
-        error => error.to_string(),
-    })
-}
-
-fn sync_openai_compatible_models(request: &ProviderSyncRequest) -> ModelSyncResult {
-    let Some(base_url) = request
-        .base_url
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Err("base_url is not configured".to_string());
-    };
-    let client = Client::builder()
-        .timeout(MODEL_SYNC_TIMEOUT)
-        .build()
-        .map_err(|source| format!("create HTTP client: {source}"))?;
-    let endpoint = format!("{}/models", base_url.trim_end_matches('/'));
-    let mut builder = client.get(&endpoint);
-    if let Some(api_key) = sync_bearer_token(request) {
-        builder = builder.bearer_auth(api_key);
-    }
-
-    let response = builder
-        .send()
-        .map_err(|_| format!("cannot reach {endpoint}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("HTTP {status} from {endpoint}"));
-    }
-    let body = response
-        .json::<OpenAiModelsResponse>()
-        .map_err(|_| format!("invalid response from {endpoint}"))?;
-
-    Ok(body.data.into_iter().map(|model| model.id).collect())
-}
-
-fn sync_bearer_token(request: &ProviderSyncRequest) -> Option<String> {
-    if let Some(api_key) = request.api_key.as_ref() {
-        return Some(api_key.as_str().to_string());
-    }
-    request
-        .api_key_env
-        .as_deref()
-        .and_then(|name| env::var(name).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    list_native_provider_models(&request).map_err(|error| error.to_string())
 }
 
 fn user_config_directory() -> Option<PathBuf> {
@@ -477,7 +394,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_provider_custom_base_url_requires_configured_model_allowlist_for_sync() {
+    fn non_openai_provider_requires_configured_model_allowlist_for_sync() {
         let request = ProviderSyncRequest {
             provider_id: "anthropic_proxy".to_string(),
             kind: ProviderKind::Anthropic,
@@ -492,7 +409,7 @@ mod tests {
 
         assert_eq!(
             error,
-            "model sync for custom anthropic base_url is not supported; configure models = [...]"
+            "model sync for anthropic is not supported; configure models = [...]"
         );
     }
 
@@ -503,13 +420,13 @@ mod tests {
             kind: ProviderKind::OpenAi,
             display_name: "OpenAI Proxy".to_string(),
             base_url: Some("http://127.0.0.1:9/v1".to_string()),
-            api_key: None,
+            api_key: Some(ProviderApiKey::new("test-key")),
             api_key_env: Some("OPENAI_API_KEY".to_string()),
         };
 
         let error = sync_provider_models(&request)
             .expect_err("unreachable endpoint should fail after choosing /models sync");
 
-        assert_eq!(error, "cannot reach http://127.0.0.1:9/v1/models");
+        assert!(error.contains("transport error"));
     }
 }

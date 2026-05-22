@@ -1,5 +1,6 @@
 use std::fmt;
 
+use mo_ai_core::ProviderError;
 use mo_core::provider::ProviderKind;
 
 /// `NativeLlmError` 描述原生 LLM backend 调用失败。
@@ -74,5 +75,11 @@ impl fmt::Display for NativeLlmError {
 impl std::error::Error for NativeLlmError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         None
+    }
+}
+
+impl From<ProviderError> for NativeLlmError {
+    fn from(source: ProviderError) -> Self {
+        Self::Provider(source.to_string())
     }
 }

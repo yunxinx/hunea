@@ -1,17 +1,9 @@
 use mo_tools::{ProcessedToolError, ToolErrorFormatter};
 
 const TOOL_ERROR_HINT_SEPARATOR: &str = ". Hint: ";
-const RIG_ERROR_PREFIXES: &[&str] = &[
-    "Toolset error:",
-    "ToolServerError:",
-    "ToolSetError:",
-    "ToolCallError:",
-    "CallError:",
-    "JsonError:",
-];
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct NativeAgentToolErrorFormatter;
+pub(crate) struct NativeAgentToolErrorFormatter;
 
 impl ToolErrorFormatter for NativeAgentToolErrorFormatter {
     fn format_tool_error(&self, tool_name: &str, raw_error: &str) -> ProcessedToolError {
@@ -22,67 +14,6 @@ impl ToolErrorFormatter for NativeAgentToolErrorFormatter {
             display_reason,
         )
     }
-}
-
-pub(super) fn parse_rig_error_text(result: &str) -> Option<String> {
-    if result.contains("Tool call interrupted") {
-        return Some("Tool call interrupted".to_string());
-    }
-
-    let (unwrapped, had_rig_wrapper) = strip_rig_error_wrappers(result);
-    let unwrapped = unwrapped.trim();
-    if unwrapped.is_empty() {
-        return None;
-    }
-
-    let reason = unwrapped
-        .rsplit_once(TOOL_ERROR_HINT_SEPARATOR)
-        .map(|(reason, _)| reason)
-        .unwrap_or(unwrapped)
-        .trim()
-        .trim_end_matches('.');
-
-    if had_rig_wrapper || looks_like_processed_tool_error(reason, unwrapped) {
-        Some(reason.to_string())
-    } else {
-        None
-    }
-}
-
-fn strip_rig_error_wrappers(result: &str) -> (&str, bool) {
-    let mut text = result.trim();
-    let mut stripped = false;
-
-    while let Some(rest) = strip_any_prefix(text, RIG_ERROR_PREFIXES) {
-        text = rest.trim_start();
-        stripped = true;
-    }
-
-    (text, stripped)
-}
-
-fn strip_any_prefix<'a>(text: &'a str, prefixes: &[&str]) -> Option<&'a str> {
-    prefixes
-        .iter()
-        .find_map(|prefix| text.strip_prefix(prefix).map(str::trim_start))
-}
-
-fn looks_like_processed_tool_error(reason: &str, full_text: &str) -> bool {
-    full_text.contains(TOOL_ERROR_HINT_SEPARATOR)
-        && (reason.starts_with("File not found:")
-            || reason.starts_with("Directory not found:")
-            || reason.starts_with("File requires explicit attachment:")
-            || reason.starts_with("File must be read before writing")
-            || reason.starts_with("File changed after read")
-            || reason.starts_with("Path is ")
-            || reason.starts_with("Path ")
-            || reason.starts_with("Invalid arguments")
-            || reason.starts_with("Permission denied")
-            || reason.starts_with("Workspace root is unavailable")
-            || reason.starts_with("Tool failed:")
-            || reason.starts_with("Could not ")
-            || reason.starts_with("Read failed")
-            || reason.starts_with("List directory failed"))
 }
 
 fn tool_error_display_reason(tool_name: &str, raw_error: &str) -> String {
@@ -270,7 +201,7 @@ fn strip_os_error_suffix(text: &str) -> &str {
 mod tests {
     use mo_tools::ToolErrorFormatter;
 
-    use super::{NativeAgentToolErrorFormatter, parse_rig_error_text};
+    use super::NativeAgentToolErrorFormatter;
 
     #[test]
     fn native_tool_error_formatter_cleans_common_builtin_tool_errors() {
@@ -374,30 +305,5 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_rig_error_text_strips_legacy_prefixes_and_hints() {
-        assert_eq!(
-            parse_rig_error_text(
-                "Toolset error: ToolCallError: ToolCallError: File not found: AGENTS.md. Hint: Use list_dir to verify the file exists before reading."
-            ),
-            Some("File not found: AGENTS.md".to_string())
-        );
-        assert_eq!(
-            parse_rig_error_text(
-                "File not found: AGENTS.md. Hint: Use list_dir to verify the file exists before reading."
-            ),
-            Some("File not found: AGENTS.md".to_string())
-        );
-        assert_eq!(parse_rig_error_text("normal tool output"), None);
-    }
-
-    #[test]
-    fn parse_rig_error_text_removes_the_trailing_formatter_hint_only() {
-        assert_eq!(
-            parse_rig_error_text(
-                "Tool failed: path contains . Hint: literal text. Hint: Check the tool input and try again."
-            ),
-            Some("Tool failed: path contains . Hint: literal text".to_string())
-        );
-    }
+    // Lumos tool loop owns business-error normalization before provider context.
 }

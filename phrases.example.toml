@@ -1,9 +1,9 @@
-# mode = "append" keeps built-in phrases and adds yours.
-# mode = "override" uses only phrases listed below.
+# mode = "append" 保留内置短语并追加自定义短语。
+# mode = "override" 仅使用下方列出的短语。
 mode = "append"
 
-# order = "random" chooses one phrase for each request.
-# order = "cycle" walks through phrases in order.
+# order = "random" 每次请求随机选择一条短语。
+# order = "cycle" 按顺序依次循环使用短语。
 order = "random"
 
 phrases = [

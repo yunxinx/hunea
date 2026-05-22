@@ -4,3 +4,8 @@ target/
 .lumos/
 .planning/
 docs/
+AGENTS.md
+.agents/
+.claude/
+.trellis/
+skills-lock.json

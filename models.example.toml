@@ -1,19 +1,19 @@
-# Lumos native model configuration example.
+# Lumos 原生模型配置示例。
 #
-# Copy this file to `models.toml` and adjust providers for your local model
-# server, OpenAI-compatible service, or native genai-backed provider. `base_url`
-# should include the `/v1` prefix for OpenAI-compatible APIs.
+# 将此文件复制为 `models.toml`，并根据你的本地模型服务器、
+# OpenAI 兼容服务或原生 provider 进行调整。`base_url`
+# 对于 OpenAI 兼容 API 需要包含 `/v1` 前缀。
 #
-# If `models` is present, it is treated as the provider's allowlist. If
-# `models` is omitted, OpenAI-compatible providers sync from `{base_url}/models`,
-# and native providers use genai's default provider model listing.
+# 如果设置了 `models`，它将作为该 provider 的模型白名单。如果
+# 省略 `models`，OpenAI 兼容 provider 会从 `{base_url}/models` 同步模型列表，
+# 原生 provider 则在可用时使用其自身的模型列表接口。
 #
-# Native providers can also set `base_url` for third-party native-compatible
-# endpoints. In that case, configure `models = [...]` explicitly; automatic
-# model sync for custom native endpoints is not supported yet.
+# 原生 provider 也可以设置 `base_url` 指向第三方原生兼容端点。
+# 这种情况下需要显式配置 `models = [...]`；自定义原生端点
+# 尚不支持自动模型同步。
 
-# Empty means Lumos starts with no selected model. When you choose a model from
-# /models, Lumos writes the last selected model back here as `provider/model`.
+# 留空表示 Lumos 启动时不选择任何模型。当你从 /models 选择模型后，
+# Lumos 会将最后选择的模型以 `provider/model` 格式写回此处。
 default = ""
 
 [providers.local]
@@ -21,10 +21,9 @@ enabled = true
 kind = "openai_compatible"
 display_name = "Local"
 base_url = "http://127.0.0.1:1234/v1"
-# Local model servers often do not require Authorization.
-# Use `api_key` when you want to keep the token directly in this file, or
-# `api_key_env` when you prefer reading it from an environment variable. If both
-# are present, `api_key` is used.
+# 本地模型服务器通常不需要授权。
+# 使用 `api_key` 可以将 token 直接写在此文件中，
+# 使用 `api_key_env` 则从环境变量读取。如果两者都存在，优先使用 `api_key`。
 # api_key = "local-secret"
 # api_key_env = "LOCAL_OPENAI_API_KEY"
 models = ["qwen3", "deepseek-r1-distill"]
@@ -50,8 +49,8 @@ display_name = "Anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 models = ["claude-sonnet-4-5"]
 
-# Example: a third-party endpoint that speaks Anthropic's native API shape.
-# Automatic model sync is disabled by the explicit allowlist.
+# 示例：使用 Anthropic 原生 API 协议的第三方端点。
+# 显式白名单会禁用自动模型同步。
 # [providers.anthropic_proxy]
 # enabled = false
 # kind = "anthropic"
@@ -74,4 +73,4 @@ display_name = "Auto Sync Provider"
 base_url = "https://api.example.com/v1"
 api_key = "replace-with-provider-token"
 # api_key_env = "EXAMPLE_OPENAI_API_KEY"
-# Omit `models` to sync from `/v1/models`.
+# 省略 `models` 以从 `/v1/models` 自动同步。

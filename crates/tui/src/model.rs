@@ -1,22 +1,16 @@
-use std::fmt::Write as _;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
-use std::{collections::BTreeMap, rc::Rc};
 
 use mo_core::{
-    acp::AcpAgentIdentity,
     envinfo,
     model_catalog::{ModelCatalog, ModelSelection},
     phrases::StatusPhraseOrder,
-    session::{
-        RuntimeAvailableCommand, RuntimeTerminalSnapshot, RuntimeToolActivity,
-        RuntimeToolActivityUpdate,
-    },
+    session::{RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate},
 };
 use ratatui::Frame;
 
 use super::{
     HeroOptions, ReasoningDisplayMode, Sender,
-    acp::{AcpDebugPanelState, AcpPanelState, PendingAcpPermission},
     backtrack::BacktrackState,
     composer::Composer,
     composer_mouse::PendingComposerCursorClick,
@@ -37,12 +31,9 @@ use super::{
     view,
 };
 
-mod acp_model;
 mod runtime_response;
 mod state;
 
-use acp_model::AcpModelSelectionRollback;
-pub(crate) use acp_model::acp_model_provider_id;
 use runtime_response::{
     BufferedRuntimeResponse, RuntimeResponseBuffer, StreamedRuntimeReasoning,
     strip_displayed_reasoning_prefix,
@@ -60,15 +51,6 @@ pub struct Model {
     pub(super) external_editor: Vec<String>,
     pub(super) external_editor_hint: String,
     pub(super) external_editor_helper_enabled: bool,
-    pub(super) acp_agent_servers: Vec<String>,
-    pub(super) acp_agent_identities: BTreeMap<String, AcpAgentIdentity>,
-    pub(super) selected_acp_agent: Option<String>,
-    pub(super) acp_current_model: Option<String>,
-    pub(super) acp_model_config_id: Option<String>,
-    pub(super) pending_acp_model_rollback: Option<AcpModelSelectionRollback>,
-    pub(super) acp_available_commands_by_agent: BTreeMap<String, Vec<RuntimeAvailableCommand>>,
-    pub(super) acp_panel: AcpPanelState,
-    pub(super) acp_debug_panel: AcpDebugPanelState,
     pub(super) model_catalog: ModelCatalog,
     pub(super) selected_model: Option<ModelSelection>,
     pub(super) requires_model_selection: bool,
@@ -77,8 +59,7 @@ pub struct Model {
     pub(super) tool_approval_panel_revision: usize,
     pub(super) transcript_overlay: Option<crate::transcript_overlay::TranscriptOverlayState>,
     pub(super) backtrack: BacktrackState,
-    pub(super) pending_acp_permission: Option<PendingAcpPermission>,
-    pub(super) acp_terminal_snapshots: BTreeMap<String, RuntimeTerminalSnapshot>,
+    pub(super) runtime_terminal_snapshots: Vec<RuntimeTerminalSnapshot>,
     pub(super) stream_activity: Option<StreamActivityState>,
     pub(super) runtime_response_buffer: RuntimeResponseBuffer,
     pub(super) streamed_runtime_reasoning: StreamedRuntimeReasoning,
@@ -158,7 +139,6 @@ pub struct ModelOptions {
     pub show_reasoning_content: bool,
     pub reasoning_display_mode: ReasoningDisplayMode,
     pub debug_commands_enabled: bool,
-    pub acp_agent_servers: Vec<String>,
     pub model_catalog: ModelCatalog,
     pub selected_model: Option<ModelSelection>,
     pub requires_model_selection: bool,
@@ -184,7 +164,6 @@ impl Default for ModelOptions {
             show_reasoning_content: false,
             reasoning_display_mode: ReasoningDisplayMode::Collapsed,
             debug_commands_enabled: false,
-            acp_agent_servers: Vec::new(),
             model_catalog: ModelCatalog::default(),
             selected_model: None,
             requires_model_selection: false,
@@ -245,15 +224,6 @@ impl Model {
             external_editor: options.external_editor,
             external_editor_hint: options.external_editor_hint,
             external_editor_helper_enabled: options.show_external_editor_helper,
-            acp_agent_servers: options.acp_agent_servers,
-            acp_agent_identities: BTreeMap::new(),
-            selected_acp_agent: None,
-            acp_current_model: None,
-            acp_model_config_id: None,
-            pending_acp_model_rollback: None,
-            acp_available_commands_by_agent: BTreeMap::new(),
-            acp_panel: AcpPanelState::default(),
-            acp_debug_panel: AcpDebugPanelState::default(),
             model_catalog: options.model_catalog,
             selected_model,
             requires_model_selection: options.requires_model_selection,
@@ -262,8 +232,7 @@ impl Model {
             tool_approval_panel_revision: 1,
             transcript_overlay: None,
             backtrack: BacktrackState::default(),
-            pending_acp_permission: None,
-            acp_terminal_snapshots: BTreeMap::new(),
+            runtime_terminal_snapshots: Vec::new(),
             stream_activity: None,
             runtime_response_buffer: RuntimeResponseBuffer::default(),
             streamed_runtime_reasoning: StreamedRuntimeReasoning {
@@ -341,67 +310,6 @@ impl Model {
     /// `is_quitting` 返回是否正在退出。
     pub fn is_quitting(&self) -> bool {
         self.quitting
-    }
-
-    /// `selected_acp_agent` 返回本次 TUI 会话中用户选择的 ACP Agent。
-    pub fn selected_acp_agent(&self) -> Option<&str> {
-        self.selected_acp_agent.as_deref()
-    }
-
-    /// `apply_acp_agent_identity` 记录 ACP agent 初始化后上报的展示信息。
-    pub(crate) fn apply_acp_agent_identity(
-        &mut self,
-        agent_id: impl Into<String>,
-        identity: AcpAgentIdentity,
-    ) {
-        let agent_id = agent_id.into();
-        self.acp_agent_identities.insert(agent_id, identity);
-        self.bump_status_line_revision();
-        if self.document_runtime.follow_bottom {
-            self.sync_document_viewport_to_bottom();
-        }
-    }
-
-    pub(crate) fn acp_agent_display_label(&self, agent_id: &str) -> String {
-        self.acp_agent_identities
-            .get(agent_id)
-            .filter(|identity| identity.has_agent_info())
-            .map(AcpAgentIdentity::display_label)
-            .unwrap_or_else(|| agent_id.to_string())
-    }
-
-    /// `apply_acp_available_commands` 记录当前 ACP session 上报的动态斜杠命令。
-    pub(crate) fn apply_acp_available_commands<C>(
-        &mut self,
-        agent_id: impl Into<String>,
-        commands: impl IntoIterator<Item = C>,
-    ) where
-        C: Into<RuntimeAvailableCommand>,
-    {
-        let agent_id = agent_id.into();
-        let commands = commands.into_iter().map(Into::into).collect::<Vec<_>>();
-        if commands.is_empty() {
-            self.acp_available_commands_by_agent.remove(&agent_id);
-        } else {
-            self.acp_available_commands_by_agent
-                .insert(agent_id, commands);
-        }
-        self.sync_command_panel_navigation();
-    }
-
-    /// `clear_acp_available_commands` 清理指定 ACP agent 的动态斜杠命令。
-    pub(crate) fn clear_acp_available_commands(&mut self, agent_id: &str) {
-        self.acp_available_commands_by_agent.remove(agent_id);
-        self.sync_command_panel_navigation();
-    }
-
-    /// `selected_acp_available_commands` 返回当前活跃 ACP session 的动态命令。
-    pub(crate) fn selected_acp_available_commands(&self) -> &[RuntimeAvailableCommand] {
-        self.selected_acp_agent
-            .as_deref()
-            .and_then(|agent_id| self.acp_available_commands_by_agent.get(agent_id))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
     }
 
     pub(super) fn model_selection_display_name(&self, provider_id: &str, model_id: &str) -> String {
@@ -515,14 +423,11 @@ impl Model {
         transcript.append_hero(self.hero_options.clone());
         self.transcript = transcript;
         self.composer.clear();
-        self.acp_panel = AcpPanelState::default();
-        self.acp_debug_panel = AcpDebugPanelState::default();
         self.model_panel = ModelPanelState::default();
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.backtrack = BacktrackState::default();
-        self.pending_acp_permission = None;
-        self.acp_terminal_snapshots.clear();
+        self.runtime_terminal_snapshots.clear();
         self.stream_activity = None;
         self.runtime_response_buffer.clear();
         self.command_panel_selected = 0;
@@ -605,15 +510,6 @@ impl Model {
         self.sync_transcript_render();
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-    }
-
-    pub(crate) fn append_acp_response_from_runtime(
-        &mut self,
-        content: impl Into<String>,
-        reasoning_content: Option<String>,
-        reasoning_duration: Option<std::time::Duration>,
-    ) {
-        self.append_runtime_response_from_runtime(content, reasoning_content, reasoning_duration);
     }
 
     pub(crate) fn append_runtime_response_from_runtime(
@@ -889,12 +785,8 @@ impl Model {
         let call = call.into();
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let item_index = self.transcript_mut().append_runtime_tool_activity(call);
-        for snapshot in self
-            .acp_terminal_snapshots
-            .values()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
+        let snapshots = self.runtime_terminal_snapshots.clone();
+        for snapshot in snapshots {
             let _ = self
                 .transcript_mut()
                 .set_runtime_terminal_snapshot(snapshot);
@@ -941,12 +833,8 @@ impl Model {
         {
             return false;
         }
-        for snapshot in self
-            .acp_terminal_snapshots
-            .values()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
+        let snapshots = self.runtime_terminal_snapshots.clone();
+        for snapshot in snapshots {
             let _ = self
                 .transcript_mut()
                 .set_runtime_terminal_snapshot(snapshot);
@@ -964,117 +852,12 @@ impl Model {
     ) -> bool {
         let snapshot = snapshot.into();
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
-        self.acp_terminal_snapshots
-            .insert(snapshot.terminal_id.clone(), snapshot.clone());
+        self.runtime_terminal_snapshots
+            .retain(|stored| stored.terminal_id != snapshot.terminal_id);
+        self.runtime_terminal_snapshots.push(snapshot.clone());
         if !self
             .transcript_mut()
             .set_runtime_terminal_snapshot(snapshot)
-        {
-            return false;
-        }
-        self.refresh_status_line_after_transcript_change();
-        self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-        true
-    }
-
-    pub(crate) fn has_active_acp_background_terminals(&self) -> bool {
-        self.acp_terminal_snapshots
-            .values()
-            .any(is_active_acp_terminal_snapshot)
-    }
-
-    pub(crate) fn acp_background_terminal_summary_text(&self) -> String {
-        let active = self
-            .acp_terminal_snapshots
-            .values()
-            .filter(|snapshot| is_active_acp_terminal_snapshot(snapshot))
-            .collect::<Vec<_>>();
-        if active.is_empty() {
-            return "No background terminals running.".to_string();
-        }
-
-        let mut summary = String::from("Background terminals:");
-        for snapshot in active {
-            let command = snapshot
-                .command
-                .as_deref()
-                .filter(|command| !command.trim().is_empty())
-                .unwrap_or("terminal");
-            let _ = write!(summary, "\n- {command}");
-            if let Some(cwd) = snapshot.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
-                let _ = write!(summary, "\n  {cwd}");
-            }
-            if let Some(output) = acp_terminal_recent_output(&snapshot.output) {
-                let _ = write!(summary, "\n  {output}");
-            }
-        }
-        summary
-    }
-
-    pub(crate) fn set_acp_tool_call_approval_suspended_from_runtime(
-        &mut self,
-        item_index: usize,
-        suspended: bool,
-    ) -> bool {
-        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
-        if !self
-            .transcript_mut()
-            .set_acp_tool_call_approval_suspended(item_index, suspended)
-        {
-            return false;
-        }
-        self.refresh_status_line_after_transcript_change();
-        self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-        true
-    }
-
-    pub(crate) fn set_acp_tool_call_permission_waiting_from_runtime(
-        &mut self,
-        item_index: usize,
-        waiting: bool,
-    ) -> bool {
-        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
-        if !self
-            .transcript_mut()
-            .set_acp_tool_call_permission_waiting(item_index, waiting)
-        {
-            return false;
-        }
-        self.refresh_status_line_after_transcript_change();
-        self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-        true
-    }
-
-    pub(crate) fn mark_acp_tool_calls_failed_from_runtime(
-        &mut self,
-        item_indices: impl IntoIterator<Item = usize>,
-        message: &str,
-    ) -> bool {
-        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
-        if !self
-            .transcript_mut()
-            .mark_acp_tool_calls_failed(item_indices, message)
-        {
-            return false;
-        }
-        self.refresh_status_line_after_transcript_change();
-        self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
-        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-        true
-    }
-
-    pub(crate) fn mark_acp_tool_call_rejected_from_runtime(&mut self, item_index: usize) -> bool {
-        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
-        if !self
-            .transcript_mut()
-            .mark_acp_tool_call_rejected(item_index)
         {
             return false;
         }
@@ -1097,19 +880,16 @@ impl Model {
         let status_line_2 = self.current_status_line_2_render_result();
         let command_panel = self.current_inline_command_panel_render_result();
         let model_panel = self.current_inline_model_panel_render_result();
-        let acp_panel = self.current_inline_acp_panel_render_result();
         let tool_approval_panel = self.current_inline_tool_approval_panel_render_result();
         if status_line.has_content
             || status_line_2.has_content
             || command_panel.has_content
             || model_panel.has_content
-            || acp_panel.has_content
             || tool_approval_panel.has_content
         {
             if self.document_runtime.follow_bottom && !self.document_runtime.manual_scroll {
                 let panel_rows = command_panel.lines.len()
                     + model_panel.lines.len()
-                    + acp_panel.lines.len()
                     + tool_approval_panel.lines.len();
                 let visible_height = self.bottom_follow_composer_content_line_count(
                     &status_line,
@@ -1409,24 +1189,6 @@ fn resolve_initial_current_dir(
     } else {
         String::new()
     }
-}
-
-fn is_active_acp_terminal_snapshot(snapshot: &RuntimeTerminalSnapshot) -> bool {
-    snapshot.exit_status.is_none() && !snapshot.released
-}
-
-fn acp_terminal_recent_output(output: &str) -> Option<String> {
-    output
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let line = line.trim();
-            (!line.is_empty()).then(|| line.to_string())
-        })
-        .map(|line| {
-            const MAX_RECENT_OUTPUT_WIDTH: usize = 96;
-            crate::status_line::truncate_display_width_with_ellipsis(&line, MAX_RECENT_OUTPUT_WIDTH)
-        })
 }
 
 #[cfg(test)]

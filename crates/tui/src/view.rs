@@ -107,7 +107,9 @@ mod tests {
 
     use super::*;
     use crate::{HeroOptions, ReasoningDisplayMode, StyleMode, theme::default_palette};
-    use mo_core::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
+    use mo_core::session::{
+        RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityStatus, RuntimeToolKind,
+    };
 
     #[test]
     fn assistant_message_uses_two_column_visual_inset() {
@@ -270,12 +272,12 @@ mod tests {
         model.transcript_mut().clear();
         model.set_window(48, 8);
         model.set_palette(default_palette(), true);
-        model.append_runtime_tool_activity_from_runtime(AcpToolCall {
-            tool_call_id: "call-1".to_string(),
+        model.append_runtime_tool_activity_from_runtime(RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
             title: "WriteFile: src/lib.rs".to_string(),
-            kind: AcpToolKind::Edit,
-            status: AcpToolCallStatus::Completed,
-            content: vec![AcpToolCallContent::Diff {
+            kind: RuntimeToolKind::Edit,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Diff {
                 path: "src/lib.rs".to_string(),
                 old_text: Some("one\nold\ntail\n".to_string()),
                 new_text: "one\nnew\ntail\n".to_string(),

@@ -342,48 +342,6 @@ impl Transcript {
         true
     }
 
-    /// `set_acp_tool_call_approval_suspended` 在审批面板打开期间临时隐藏主界面的活跃写入项。
-    pub(crate) fn set_acp_tool_call_approval_suspended(
-        &mut self,
-        item_index: usize,
-        suspended: bool,
-    ) -> bool {
-        let Some(item) = self.items.get(item_index) else {
-            return false;
-        };
-        let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
-            return false;
-        };
-
-        let mut tool_result = tool_result.clone();
-        if !tool_result.set_approval_suspended(suspended) {
-            return false;
-        }
-        self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
-        true
-    }
-
-    /// `set_acp_tool_call_permission_waiting` 标记 tool call 正在等待 ACP 权限响应。
-    pub(crate) fn set_acp_tool_call_permission_waiting(
-        &mut self,
-        item_index: usize,
-        waiting: bool,
-    ) -> bool {
-        let Some(item) = self.items.get(item_index) else {
-            return false;
-        };
-        let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
-            return false;
-        };
-
-        let mut tool_result = tool_result.clone();
-        if !tool_result.set_permission_waiting(waiting) {
-            return false;
-        }
-        self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
-        true
-    }
-
     /// `set_runtime_terminal_snapshot` 刷新引用指定 terminal 的 tool activity 展示项。
     pub(crate) fn set_runtime_terminal_snapshot(
         &mut self,
@@ -411,56 +369,6 @@ impl Transcript {
         self.items_version = self.items_version.saturating_add(1);
         self.metrics_cache.mark_metrics_dirty_from(first_dirty);
         self.screen_cache.mark_dirty_from(first_dirty);
-        true
-    }
-
-    /// `mark_acp_tool_calls_failed` 将仍在运行的 ACP tool call 标记为失败并写入原因。
-    pub(crate) fn mark_acp_tool_calls_failed(
-        &mut self,
-        item_indices: impl IntoIterator<Item = usize>,
-        message: &str,
-    ) -> bool {
-        let mut first_dirty: Option<usize> = None;
-        let mut items = self.items.as_ref().clone();
-        for item_index in item_indices {
-            let Some(item) = items.get(item_index) else {
-                continue;
-            };
-            let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
-                continue;
-            };
-            let mut tool_result = tool_result.clone();
-            if !tool_result.mark_acp_tool_call_failed(message) {
-                continue;
-            }
-            items[item_index] = Rc::new(TranscriptItem::ToolResult(tool_result));
-            first_dirty = Some(first_dirty.map_or(item_index, |dirty| dirty.min(item_index)));
-        }
-
-        let Some(first_dirty) = first_dirty else {
-            return false;
-        };
-        self.items = Rc::new(items);
-        self.items_version = self.items_version.saturating_add(1);
-        self.metrics_cache.mark_metrics_dirty_from(first_dirty);
-        self.screen_cache.mark_dirty_from(first_dirty);
-        true
-    }
-
-    /// `mark_acp_tool_call_rejected` 将等待审批的 ACP tool call 标记为用户拒绝。
-    pub(crate) fn mark_acp_tool_call_rejected(&mut self, item_index: usize) -> bool {
-        let Some(item) = self.items.get(item_index) else {
-            return false;
-        };
-        let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
-            return false;
-        };
-
-        let mut tool_result = tool_result.clone();
-        if !tool_result.mark_acp_tool_call_rejected() {
-            return false;
-        }
-        self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
         true
     }
 

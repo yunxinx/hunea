@@ -278,7 +278,6 @@ fn view_anchor_priority(anchor: DocumentLineAnchor) -> usize {
         }
         DocumentAnchorRegion::Composer => 1,
         DocumentAnchorRegion::StreamActivity
-        | DocumentAnchorRegion::AcpPanel
         | DocumentAnchorRegion::CommandPanel
         | DocumentAnchorRegion::ToolApprovalPanel
         | DocumentAnchorRegion::ModelPanel

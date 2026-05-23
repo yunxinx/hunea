@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use mo_tui::{AppEffect, AppEvent, HeroOptions, Model};
+use mo_tui::{AppEvent, HeroOptions, Model};
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 fn ready_model(width: u16, height: u16) -> Model {
@@ -316,51 +316,6 @@ fn transcript_overlay_paste_does_not_modify_hidden_composer() {
         !rows_after.iter().any(|row| row.contains("hidden paste")),
         "paste while overlay is active should not change the hidden composer: {:?}",
         rows_after
-    );
-}
-
-#[test]
-fn transcript_overlay_closes_for_runtime_tool_approval_request() {
-    let mut model = ready_model(50, 12);
-
-    for character in "history".chars() {
-        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
-    }
-    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
-    model.update(AppEvent::Key(KeyEvent::new(
-        KeyCode::Char('t'),
-        KeyModifiers::CONTROL,
-    )));
-
-    model.update(AppEvent::AcpPermissionRequested {
-        request_id: "request-1".to_string(),
-        title: Some("echo hello".to_string()),
-        allow_option_id: Some("allow".to_string()),
-        allow_always_option_id: None,
-        reject_option_id: Some("reject".to_string()),
-        reject_always_option_id: None,
-    });
-
-    let rows = render_rows(&mut model, 50, 12);
-    assert!(
-        rows.iter().any(|row| row.contains("Tool Approval")),
-        "runtime approval should be visible instead of being hidden behind overlay: {:?}",
-        rows
-    );
-
-    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
-    assert!(
-        matches!(
-            effect,
-            Some(AppEffect::RespondAcpPermission {
-                ref request_id,
-                option_id: Some(ref option_id),
-                is_rejection: false,
-                ..
-            }) if request_id == "request-1" && option_id == "allow"
-        ),
-        "enter should route to the tool approval panel while approval is active: {:?}",
-        effect
     );
 }
 

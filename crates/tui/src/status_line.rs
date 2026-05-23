@@ -62,7 +62,7 @@ impl Model {
         if !self.current_status_notice_text().is_empty() {
             return self.current_status_notice_render_result();
         }
-        if self.command_panel_active() || self.model_panel_active() || self.acp_panel_active() {
+        if self.command_panel_active() || self.model_panel_active() {
             return StatusLineRenderResult::default();
         }
 
@@ -76,7 +76,6 @@ impl Model {
         if !self.current_status_notice_text().is_empty()
             || self.command_panel_active()
             || self.model_panel_active()
-            || self.acp_panel_active()
             || self.tool_approval_panel_active()
         {
             return StatusLineRenderResult::default();
@@ -148,9 +147,7 @@ impl Model {
                     parts.push(sanitize_status_line_part(&self.current_dir));
                 }
                 StatusLineItem::CurrentModel => {
-                    if let Some(agent_model) = self.current_acp_model_status_part() {
-                        parts.push(sanitize_status_line_part(&agent_model));
-                    } else if let Some(selection) = &self.selected_model {
+                    if let Some(selection) = &self.selected_model {
                         parts.push(sanitize_status_line_part(
                             &self.model_selection_display_name(
                                 selection.provider_id.as_str(),
@@ -204,22 +201,6 @@ fn status_line_config_bits_for_items(items: &[StatusLineItem]) -> u8 {
 }
 
 impl Model {
-    pub(crate) fn set_acp_current_model(&mut self, model: Option<String>) {
-        let model = model.and_then(|model| {
-            let model = model.trim().to_string();
-            (!model.is_empty()).then_some(model)
-        });
-        if self.acp_current_model == model {
-            return;
-        }
-
-        self.acp_current_model = model;
-        self.bump_status_line_revision();
-        if self.document_runtime.follow_bottom {
-            self.sync_document_viewport_to_bottom();
-        }
-    }
-
     /// `refresh_status_line_after_transcript_change` 在 transcript 真正追加后刷新动态状态项。
     pub(crate) fn refresh_status_line_after_transcript_change(&mut self) {
         if !self.uses_status_line_item(StatusLineItem::GitBranch) {
@@ -233,17 +214,6 @@ impl Model {
 
         self.git_branch = next_branch;
         self.bump_status_line_revision();
-    }
-}
-
-impl Model {
-    fn current_acp_model_status_part(&self) -> Option<String> {
-        let selected_agent = self.selected_acp_agent.as_ref()?;
-        self.acp_current_model
-            .as_ref()
-            .filter(|model| !model.trim().is_empty())
-            .cloned()
-            .or_else(|| Some(self.acp_agent_display_label(selected_agent)))
     }
 }
 

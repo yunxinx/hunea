@@ -14,9 +14,10 @@ use mo_core::session::{
 
 use super::{
     TOOL_EXPLORATION_BRANCH_PREFIX, TOOL_EXPLORATION_CHILD_PREFIX,
-    acp::{
-        acp_read_tool_call_title_chunks, acp_tool_call_display_title, is_acp_read_tool_call,
-        is_list_dir_tool_call, list_dir_tool_call_title_chunks, style_for_color,
+    activity::{
+        is_list_dir_tool_call, is_runtime_read_tool_activity, list_dir_tool_call_title_chunks,
+        runtime_read_tool_activity_title_chunks, runtime_tool_activity_display_title,
+        style_for_color,
     },
 };
 
@@ -51,10 +52,10 @@ pub(super) fn exploration_display_lines(
 }
 
 fn exploration_display_line_for_call(call: &RuntimeToolActivity) -> Option<ExplorationDisplayLine> {
-    if is_acp_read_tool_call(call) {
+    if is_runtime_read_tool_activity(call) {
         return Some(ExplorationDisplayLine {
             action: "Read",
-            chunks: title_detail_chunks(acp_read_tool_call_title_chunks(call), "Read"),
+            chunks: title_detail_chunks(runtime_read_tool_activity_title_chunks(call), "Read"),
         });
     }
 
@@ -93,7 +94,7 @@ fn title_detail_chunks(
 }
 
 fn search_tool_call_detail_chunks(call: &RuntimeToolActivity) -> Vec<HighlightChunk> {
-    let title = acp_tool_call_display_title(call);
+    let title = runtime_tool_activity_display_title(call);
     let detail = title
         .strip_prefix("Search:")
         .or_else(|| title.strip_prefix("Search "))

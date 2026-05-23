@@ -74,7 +74,6 @@ pub struct ModelProvider {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelProviderRuntime {
     Native(NativeModelProviderRuntime),
-    Acp,
 }
 
 /// `NativeModelProviderRuntime` 保存 native provider 发起请求所需的连接配置。
@@ -136,28 +135,10 @@ impl ModelProvider {
         }
     }
 
-    /// `acp` 创建由 ACP agent 管理的 provider。
-    pub fn acp(
-        id: impl Into<String>,
-        display_name: impl Into<String>,
-        models: Vec<ModelEntry>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            display_name: display_name.into(),
-            runtime: ModelProviderRuntime::Acp,
-            source: ModelSource::Acp,
-            models,
-            enabled: true,
-            sync_error: None,
-        }
-    }
-
     /// `native_runtime` 返回 native provider 的连接配置。
     pub fn native_runtime(&self) -> Option<&NativeModelProviderRuntime> {
         match &self.runtime {
             ModelProviderRuntime::Native(runtime) => Some(runtime),
-            ModelProviderRuntime::Acp => None,
         }
     }
 
@@ -165,7 +146,6 @@ impl ModelProvider {
     pub fn native_runtime_mut(&mut self) -> Option<&mut NativeModelProviderRuntime> {
         match &mut self.runtime {
             ModelProviderRuntime::Native(runtime) => Some(runtime),
-            ModelProviderRuntime::Acp => None,
         }
     }
 
@@ -253,7 +233,6 @@ impl ModelSelection {
 pub enum ModelSource {
     Configured,
     Synced,
-    Acp,
 }
 
 impl ModelSource {
@@ -262,7 +241,6 @@ impl ModelSource {
         match self {
             Self::Configured => "configured",
             Self::Synced => "synced from /v1/models",
-            Self::Acp => "provided by ACP agent",
         }
     }
 }

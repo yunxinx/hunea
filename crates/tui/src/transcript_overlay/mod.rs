@@ -53,8 +53,6 @@ impl Model {
         // 关闭其它 immersive panel，遵循互斥策略
         self.close_model_panel();
         self.close_tool_approval_panel();
-        self.acp_panel.is_open = false;
-        self.acp_debug_panel.is_open = false;
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();
         self.sync_composer_height();

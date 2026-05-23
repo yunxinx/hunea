@@ -4,7 +4,6 @@ use ratatui::text::Line;
 
 use crate::{
     Model,
-    acp::AcpPanelRenderResult,
     command_panel::CommandPanelRenderResult,
     composer,
     inline_panel::InlinePanelRenderResult,
@@ -34,15 +33,9 @@ pub(crate) struct DocumentTailLayoutKey {
     pub(crate) composer_width: usize,
     pub(crate) command_panel_selected: usize,
     pub(crate) command_panel_scroll: usize,
-    pub(crate) acp_panel_active: bool,
-    pub(crate) acp_panel_selected: usize,
-    pub(crate) acp_panel_scroll: usize,
-    pub(crate) acp_debug_panel_selected: usize,
-    pub(crate) acp_debug_panel_scroll: usize,
     pub(crate) tool_approval_panel_active: bool,
     pub(crate) tool_approval_panel_selected: usize,
     pub(crate) tool_approval_panel_revision: usize,
-    pub(crate) selected_acp_agent: Option<String>,
     pub(crate) model_panel_active: bool,
     pub(crate) model_panel_provider_index: usize,
     pub(crate) model_panel_model_index: usize,
@@ -88,7 +81,6 @@ pub(crate) struct DocumentTailLayoutInput {
     pub(crate) composer_cursor_y: usize,
     pub(crate) stream_activity: StatusLineRenderResult,
     pub(crate) command_panel: CommandPanelRenderResult,
-    pub(crate) acp_panel: AcpPanelRenderResult,
     pub(crate) tool_approval_panel: ToolApprovalPanelRenderResult,
     pub(crate) model_panel: ModelPanelRenderResult,
     pub(crate) status_line_gap_before: usize,
@@ -129,15 +121,9 @@ impl Model {
             composer_width: self.composer.content_width(),
             command_panel_selected: self.command_panel_selected,
             command_panel_scroll: self.command_panel_scroll,
-            acp_panel_active: self.acp_panel_active(),
-            acp_panel_selected: self.acp_panel.selected,
-            acp_panel_scroll: self.acp_panel.scroll,
-            acp_debug_panel_selected: self.acp_debug_panel.selected,
-            acp_debug_panel_scroll: self.acp_debug_panel.scroll,
             tool_approval_panel_active: self.tool_approval_panel_active(),
             tool_approval_panel_selected: self.tool_approval_panel.selected,
             tool_approval_panel_revision: self.tool_approval_panel_revision,
-            selected_acp_agent: self.selected_acp_agent.clone(),
             model_panel_active: self.model_panel_active(),
             model_panel_provider_index: self.model_panel.provider_index,
             model_panel_model_index: self.model_panel.model_index,
@@ -204,7 +190,6 @@ impl Model {
             composer_cursor_y: composer_document.cursor_y,
             stream_activity: self.current_stream_activity_render_result(),
             command_panel: self.current_inline_command_panel_render_result(),
-            acp_panel: self.current_inline_acp_panel_render_result(),
             tool_approval_panel: self.current_inline_tool_approval_panel_render_result(),
             model_panel: self.current_inline_model_panel_render_result(),
             status_line_gap_before: configured_status_line_gap_before(self.style_mode),
@@ -232,7 +217,6 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.composer_lines.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
-            + input.acp_panel.lines.len()
             + input.tool_approval_panel.lines.len()
             + input.model_panel.lines.len()
             + status_line_rows,
@@ -244,7 +228,6 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.composer_text_lines.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.plain_lines.len()
-            + input.acp_panel.plain_lines.len()
             + input.tool_approval_panel.plain_lines.len()
             + input.model_panel.plain_lines.len()
             + status_line_rows,
@@ -256,7 +239,6 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.composer_anchors.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
-            + input.acp_panel.lines.len()
             + input.tool_approval_panel.lines.len()
             + input.model_panel.lines.len()
             + status_line_rows,
@@ -268,7 +250,6 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.composer_selectable.len()
             + usize::from(has_composer_padding) * 2
             + input.command_panel.lines.len()
-            + input.acp_panel.lines.len()
             + input.tool_approval_panel.lines.len()
             + input.model_panel.lines.len()
             + status_line_rows,
@@ -293,35 +274,6 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
     if input.model_panel.has_content {
         append_model_panel(
             &input.model_panel,
-            &mut lines,
-            &mut text_lines,
-            &mut anchors,
-            &mut selectable,
-        );
-
-        if lines.is_empty() {
-            lines.push(Line::raw(""));
-            text_lines.push(String::new());
-            anchors.push(DocumentLineAnchor::default());
-            selectable.push(SelectableLineRange::default());
-        }
-
-        let cursor_y = lines.len().saturating_add(1);
-        return DocumentTailLayout {
-            lines,
-            text_lines,
-            anchors,
-            selectable,
-            composer_slot: SlotFrame::new(0, false, 0),
-            cursor_x: 0,
-            cursor_y,
-        };
-    }
-
-    if input.acp_panel.has_content {
-        append_inline_panel(
-            &input.acp_panel,
-            DocumentAnchorRegion::AcpPanel,
             &mut lines,
             &mut text_lines,
             &mut anchors,

@@ -134,31 +134,6 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
                 ),
             ],
         ),
-        AppConfigError::InvalidAgentServerType {
-            path,
-            server,
-            value,
-        } => validation_rows(
-            path,
-            &format!("agent_servers.{server}.type"),
-            value,
-            "Unknown ACP agent server type",
-            "registry, custom",
-        ),
-        AppConfigError::InvalidAcpInstallRoot { path, value } => validation_rows(
-            path,
-            "acp.install_root",
-            value,
-            "Unknown ACP install root",
-            "config, data, cache, project, custom",
-        ),
-        AppConfigError::InvalidAcpDistribution { path, value } => validation_rows(
-            path,
-            "acp.distribution_preference",
-            value,
-            "Unknown ACP distribution preference",
-            "binary",
-        ),
         AppConfigError::InvalidEscInterruptPresses { path, value } => rows_with_optional_file(
             path,
             vec![
@@ -302,30 +277,6 @@ mod tests {
         assert!(report.contains("unclosed table"));
         assert!(!report.contains("1 | [tui"));
         assert!(!report.contains("| ^"));
-    }
-
-    #[test]
-    fn config_error_report_uses_current_expected_values_for_validated_enums() {
-        let agent_report = format_config_error(&AppConfigError::InvalidAgentServerType {
-            path: None,
-            server: "kimi".to_string(),
-            value: "stdio".to_string(),
-        });
-        assert!(agent_report.contains("registry, custom"));
-        assert!(!agent_report.contains("| Expected | stdio"));
-
-        let install_root_report = format_config_error(&AppConfigError::InvalidAcpInstallRoot {
-            path: None,
-            value: "state".to_string(),
-        });
-        assert!(install_root_report.contains("config, data, cache, project, custom"));
-
-        let distribution_report = format_config_error(&AppConfigError::InvalidAcpDistribution {
-            path: None,
-            value: "npm".to_string(),
-        });
-        assert!(distribution_report.contains("| Expected | binary"));
-        assert!(!distribution_report.contains("binary, npm"));
     }
 
     #[test]

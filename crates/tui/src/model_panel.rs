@@ -14,7 +14,6 @@ use super::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, inline_panel_visible_rows, wrap_inline_text,
     },
-    model::acp_model_provider_id,
     theme::{
         command_accent_text_style, primary_text_style, secondary_text_style, surface_text_style,
         tertiary_text_style,
@@ -46,7 +45,6 @@ impl Model {
         let old_column = self.composer.column();
 
         self.composer.replace_text_and_move_to_end(String::new());
-        self.acp_panel.is_open = false;
         self.close_tool_approval_panel();
         self.model_panel.is_open = true;
         self.sync_model_panel_to_selection();
@@ -247,38 +245,16 @@ impl Model {
     }
 
     fn select_current_model_panel_model(&mut self) -> Option<AppEffect> {
-        let (provider_id, model_id, model_label) = {
+        let (provider_id, model_id) = {
             let provider = self.active_model_panel_provider()?;
             let model = provider.models.get(self.model_panel.model_index)?;
             let provider_id = provider.id.clone();
             let model_id = model.id.clone();
-            let model_label = model
-                .description
-                .clone()
-                .unwrap_or_else(|| model_id.clone());
-            (provider_id, model_id, model_label)
+            (provider_id, model_id)
         };
-        let acp_agent_id = self
-            .selected_acp_agent
-            .as_ref()
-            .filter(|agent_id| provider_id == acp_model_provider_id(agent_id))
-            .cloned();
-        if let Some(agent_id) = acp_agent_id.as_deref() {
-            self.begin_pending_acp_model_change(agent_id);
-        }
-
         let selection = ModelSelection::new(provider_id.clone(), model_id.clone());
         self.selected_model = Some(selection.clone());
         self.bump_status_line_revision();
-        if acp_agent_id.is_some() {
-            self.set_acp_current_model(Some(model_label.clone()));
-            self.show_transient_status_notice(&format!("ACP model selected: {model_label}"));
-            self.close_model_panel();
-            return Some(AppEffect::SetAcpModel {
-                config_id: self.acp_model_config_id.clone(),
-                value: model_id,
-            });
-        }
         self.show_transient_status_notice(&format!(
             "Model selected: {}",
             self.model_selection_display_name(
@@ -294,7 +270,7 @@ impl Model {
         let (request, display_name) = {
             let provider = self.active_model_panel_provider()?;
             let Some(native_runtime) = provider.native_runtime() else {
-                self.show_transient_status_notice("ACP models are managed by the agent");
+                self.show_transient_status_notice("Provider does not support model refresh");
                 return None;
             };
             (
@@ -582,24 +558,6 @@ fn append_model_entry_lines(
     } else {
         secondary_text_style(model.palette)
     };
-
-    if provider.source == ModelSource::Acp {
-        let label = entry
-            .description
-            .as_deref()
-            .map(str::trim)
-            .filter(|description| !description.is_empty())
-            .unwrap_or(entry.id.as_str());
-        append_wrapped_inline_value(
-            lines,
-            width,
-            marker,
-            label,
-            style,
-            secondary_text_style(model.palette),
-        );
-        return;
-    }
 
     append_wrapped_inline_value(
         lines,

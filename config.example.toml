@@ -73,7 +73,7 @@ swap_enter_and_send = false
 ctrl_c_clears_input = true
 
 # `esc_interrupt_presses` 控制当前对话 turn 运行中，
-# 需要连续按多少次 Esc 才会中断当前请求或 ACP prompt。
+# 需要连续按多少次 Esc 才会中断当前 native 请求。
 # 可选值为 1、2、3；默认 2。
 esc_interrupt_presses = 2
 
@@ -104,7 +104,7 @@ reasoning_content_display = "collapsed"
 
 [runtime]
 # `request_retry_attempts` 控制 runtime 请求失败后最多重试几次。
-# 当前 native chat 会使用该策略；后续 ACP 等 runtime 请求也可以复用。
+# 当前 native chat 会使用该策略。
 # 可选值为 1..10；默认 3。
 request_retry_attempts = 3
 

@@ -1,7 +1,6 @@
 use super::{
-    RuntimeAvailableCommand, RuntimeIdentity, RuntimeModelConfig, RuntimePermissionRequest,
-    RuntimeRequestMetrics, RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity,
-    RuntimeToolActivityUpdate,
+    RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics, RuntimeTarget,
+    RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
 };
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
@@ -59,21 +58,6 @@ pub enum RuntimeEvent {
         target: RuntimeTarget,
         snapshot: RuntimeTerminalSnapshot,
     },
-    ModelConfigChanged {
-        target: RuntimeTarget,
-        config: RuntimeModelConfig,
-    },
-    AvailableCommandsChanged {
-        target: RuntimeTarget,
-        commands: Vec<RuntimeAvailableCommand>,
-    },
-    ConfigChangeSucceeded {
-        target: RuntimeTarget,
-    },
-    ConfigChangeFailed {
-        target: RuntimeTarget,
-        message: String,
-    },
     PermissionRequested {
         target: RuntimeTarget,
         request: RuntimePermissionRequest,
@@ -114,10 +98,6 @@ impl RuntimeEvent {
             | Self::ToolActivityStarted { target, .. }
             | Self::ToolActivityUpdated { target, .. }
             | Self::TerminalUpdated { target, .. }
-            | Self::ModelConfigChanged { target, .. }
-            | Self::AvailableCommandsChanged { target, .. }
-            | Self::ConfigChangeSucceeded { target }
-            | Self::ConfigChangeFailed { target, .. }
             | Self::PermissionRequested { target, .. }
             | Self::PermissionCancelled { target, .. }
             | Self::Stopped { target, .. } => Some(target),

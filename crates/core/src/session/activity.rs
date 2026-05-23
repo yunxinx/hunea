@@ -5,39 +5,6 @@ const TOOL_RESULT_RAW_VALUE_VERSION: &str = "v1";
 const TOOL_RESULT_RAW_VALUE_CONTENT: &str = "content";
 const TOOL_RESULT_RAW_VALUE_DETAILS: &str = "details";
 
-/// `RuntimeAvailableCommandInput` 表示 runtime 广告命令的输入要求。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeAvailableCommandInput {
-    /// `Unstructured` 表示命令名后的文本整体传给 runtime。
-    Unstructured { hint: String },
-    /// `Unknown` 为未来协议输入类型预留扩展点。
-    Unknown,
-}
-
-/// `RuntimeAvailableCommand` 表示 runtime 暴露的一条动态命令。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeAvailableCommand {
-    pub name: String,
-    pub description: String,
-    pub input: Option<RuntimeAvailableCommandInput>,
-}
-
-/// `RuntimeModelOption` 表示 runtime 暴露的一个模型配置选项。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeModelOption {
-    pub value: String,
-    pub name: String,
-}
-
-/// `RuntimeModelConfig` 表示 runtime 当前模型选择器状态。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeModelConfig {
-    pub config_id: Option<String>,
-    pub current_value: String,
-    pub current_name: String,
-    pub options: Vec<RuntimeModelOption>,
-}
-
 /// `RuntimeToolKind` 是 runtime tool activity 的稳定工具分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeToolKind {

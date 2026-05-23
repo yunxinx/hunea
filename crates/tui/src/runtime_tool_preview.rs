@@ -34,9 +34,9 @@ impl ToolApprovalPreview {
         update
             .content
             .as_deref()
-            .and_then(file_preview_from_acp_content)
+            .and_then(file_preview_from_runtime_content)
             .or_else(|| {
-                let path = acp_write_tool_call_update_target(update)?;
+                let path = runtime_write_tool_activity_update_target(update)?;
                 let content = update.raw_input.as_ref().and_then(raw_input_content)?;
                 Some(Self::file_write(path, content))
             })
@@ -66,13 +66,13 @@ impl ToolApprovalPreview {
         };
         Self {
             action,
-            path: acp_display_path(&path),
+            path: runtime_display_path(&path),
             content,
         }
     }
 }
 
-pub(crate) fn acp_display_path(path: &str) -> String {
+pub(crate) fn runtime_display_path(path: &str) -> String {
     let path_ref = Path::new(path);
     if path_ref.is_absolute()
         && let Ok(cwd) = std::env::current_dir()
@@ -85,8 +85,8 @@ pub(crate) fn acp_display_path(path: &str) -> String {
     path_ref.display().to_string()
 }
 
-pub(crate) fn is_acp_write_tool_call(call: &RuntimeToolActivity) -> bool {
-    acp_write_tool_call_title_target(&call.title).is_some()
+pub(crate) fn is_runtime_write_tool_activity(call: &RuntimeToolActivity) -> bool {
+    runtime_write_tool_activity_title_target(&call.title).is_some()
         || call.kind == RuntimeToolKind::Write
         || (call.kind == RuntimeToolKind::Edit
             && call.raw_input.as_ref().is_some_and(|raw_input| {
@@ -94,8 +94,8 @@ pub(crate) fn is_acp_write_tool_call(call: &RuntimeToolActivity) -> bool {
             }))
 }
 
-pub(crate) fn should_collapse_acp_write_tool_call(call: &RuntimeToolActivity) -> bool {
-    is_acp_write_tool_call(call)
+pub(crate) fn should_collapse_runtime_write_tool_activity(call: &RuntimeToolActivity) -> bool {
+    is_runtime_write_tool_activity(call)
         && call.status != RuntimeToolActivityStatus::Failed
         && !call
             .content
@@ -103,22 +103,22 @@ pub(crate) fn should_collapse_acp_write_tool_call(call: &RuntimeToolActivity) ->
             .any(|content| matches!(content, RuntimeToolActivityContent::Diff { .. }))
 }
 
-pub(crate) fn acp_write_tool_call_target(call: &RuntimeToolActivity) -> Option<String> {
-    acp_write_tool_call_title_target(&call.title)
+pub(crate) fn runtime_write_tool_activity_target(call: &RuntimeToolActivity) -> Option<String> {
+    runtime_write_tool_activity_title_target(&call.title)
         .or_else(|| call.raw_input.as_ref().and_then(raw_input_path))
-        .map(|path| acp_display_path(&path))
+        .map(|path| runtime_display_path(&path))
 }
 
-fn acp_write_tool_call_update_target(update: &RuntimeToolActivityUpdate) -> Option<String> {
+fn runtime_write_tool_activity_update_target(update: &RuntimeToolActivityUpdate) -> Option<String> {
     update
         .title
         .as_deref()
-        .and_then(acp_write_tool_call_title_target)
+        .and_then(runtime_write_tool_activity_title_target)
         .or_else(|| update.raw_input.as_ref().and_then(raw_input_path))
-        .map(|path| acp_display_path(&path))
+        .map(|path| runtime_display_path(&path))
 }
 
-fn acp_write_tool_call_title_target(title: &str) -> Option<String> {
+fn runtime_write_tool_activity_title_target(title: &str) -> Option<String> {
     let title = title.trim();
     ["WriteFile:", "Write File:", "Write:", "Write "]
         .iter()
@@ -130,7 +130,7 @@ fn acp_write_tool_call_title_target(title: &str) -> Option<String> {
         })
 }
 
-fn file_preview_from_acp_content(
+fn file_preview_from_runtime_content(
     content: &[RuntimeToolActivityContent],
 ) -> Option<ToolApprovalPreview> {
     content.iter().find_map(|content| {
@@ -149,14 +149,14 @@ fn file_preview_from_acp_content(
         };
         if action == ToolApprovalPreviewAction::CreateFile {
             return Some(ToolApprovalPreview::create_file(
-                acp_display_path(path),
+                runtime_display_path(path),
                 new_text.clone(),
             ));
         }
 
         Some(ToolApprovalPreview {
             action,
-            path: acp_display_path(path),
+            path: runtime_display_path(path),
             content: new_text.clone(),
         })
     })

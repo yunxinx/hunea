@@ -2,7 +2,6 @@ use std::{path::PathBuf, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use mo_core::{
-    acp::AcpPromptRequest,
     model_catalog::{ModelSelection, ProviderSyncRequest},
     session::{ChatMessage, NativeAgentTurnRequest, RuntimeTarget},
 };
@@ -24,26 +23,11 @@ pub enum AppEffect {
     LaunchExternalEditor(ExternalEditorLaunch),
     CopySelection(String),
     ResetRuntimeSession,
-    StartAcpSession {
-        agent_id: String,
-    },
-    SubmitAcpPrompt(AcpPromptSubmission),
-    RespondAcpPermission {
-        request_id: String,
-        option_id: Option<String>,
-        is_rejection: bool,
-        rejected_tool_call_id: Option<String>,
-    },
     RespondRuntimePermission {
         target: RuntimeTarget,
         request_id: String,
         option_id: Option<String>,
     },
-    SetAcpModel {
-        config_id: Option<String>,
-        value: String,
-    },
-    StopAcpBackgroundTerminals,
     TruncateNativeAgentSession {
         retained_user_turns: usize,
     },
@@ -58,9 +42,6 @@ pub enum AppEffect {
         request: ProviderSyncRequest,
     },
 }
-
-/// `AcpPromptSubmission` 保存消费层提交给 ACP runtime 的原始输入。
-pub type AcpPromptSubmission = AcpPromptRequest;
 
 /// `AppEvent` 描述 TUI 模型可处理的外部事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,14 +90,6 @@ pub enum AppEvent {
         draft_path: PathBuf,
         original_draft: String,
         failed: bool,
-    },
-    AcpPermissionRequested {
-        request_id: String,
-        title: Option<String>,
-        allow_option_id: Option<String>,
-        allow_always_option_id: Option<String>,
-        reject_option_id: Option<String>,
-        reject_always_option_id: Option<String>,
     },
     SelectionAutoScrollTick {
         token: usize,
@@ -233,24 +206,6 @@ impl Model {
                 self.apply_external_editor_finished(&draft_path, &original_draft, failed);
                 None
             }
-            AppEvent::AcpPermissionRequested {
-                request_id,
-                title,
-                allow_option_id,
-                allow_always_option_id,
-                reject_option_id,
-                reject_always_option_id,
-            } => {
-                self.show_acp_permission_request(
-                    request_id,
-                    title,
-                    allow_option_id,
-                    allow_always_option_id,
-                    reject_option_id,
-                    reject_always_option_id,
-                );
-                None
-            }
             AppEvent::SelectionAutoScrollTick { token } => {
                 self.handle_selection_auto_scroll_tick(token);
                 None
@@ -328,10 +283,6 @@ impl Model {
         }
 
         if let Some(effect) = self.handle_model_panel_key(key) {
-            return effect;
-        }
-
-        if let Some(effect) = self.handle_acp_panel_key(key) {
             return effect;
         }
 
@@ -517,19 +468,15 @@ impl Model {
         if content.trim().is_empty() {
             return None;
         }
-        if self.requires_model_selection
-            && self.selected_model.is_none()
-            && self.selected_acp_agent.is_none()
-        {
+        if self.requires_model_selection && self.selected_model.is_none() {
             self.show_transient_status_notice("Select a model before sending");
             return None;
         }
-        if self.stream_activity.is_some() && self.selected_acp_agent.is_none() {
+        if self.stream_activity.is_some() {
             self.show_transient_status_notice("Chat request is already running");
             return None;
         }
-        if self.selected_acp_agent.is_none()
-            && let Some(selection) = self.selected_model.clone()
+        if let Some(selection) = self.selected_model.clone()
             && !self.validate_native_agent_selection(&selection)
         {
             return None;
@@ -555,25 +502,6 @@ impl Model {
         self.sync_composer_height();
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
-        if let Some(agent_id) = self.selected_acp_agent.clone() {
-            self.show_stream_activity(
-                self.acp_current_model
-                    .clone()
-                    .unwrap_or_else(|| agent_id.clone()),
-            );
-            let identity = self
-                .acp_agent_identities
-                .get(&agent_id)
-                .cloned()
-                .unwrap_or_default();
-            return Some(AppEffect::SubmitAcpPrompt(AcpPromptSubmission {
-                agent_id,
-                text: content,
-                current_dir: self.prompt_root(),
-                identity: Box::new(identity),
-            }));
-        }
-
         let selection = self.selected_model.clone()?;
         self.native_agent_request_for_selection(&selection, source_message)
             .map(|request| AppEffect::SendNativeAgent { request })

@@ -265,24 +265,6 @@ fn native_backtrack_does_not_start_when_composer_has_draft() {
 }
 
 #[test]
-fn acp_idle_esc_does_not_start_backtrack_or_mutate_history() {
-    let mut model = native_test_model();
-    append_two_turns(&mut model);
-    model.selected_acp_agent = Some("Kimi Code CLI".to_string());
-
-    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
-    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
-
-    assert!(!model.transcript_overlay_active());
-    assert_eq!(model.composer_text(), "");
-    assert_eq!(
-        model.transcript_mut().source_messages(),
-        two_turn_source_messages()
-    );
-    assert!(!model.current_status_notice_text().contains("edit previous"));
-}
-
-#[test]
 fn ordinary_transcript_overlay_esc_still_closes_without_backtrack() {
     let mut model = native_test_model();
     append_two_turns(&mut model);

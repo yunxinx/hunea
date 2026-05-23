@@ -342,7 +342,7 @@ impl DocumentTranscriptSnapshot {
 
     fn warmed_block(&self, item_index: usize) -> Option<Rc<CachedRenderBlock>> {
         let item = self.items.get(item_index)?.as_ref();
-        if item.has_active_acp_tool_call() {
+        if item.has_active_runtime_tool_activity() {
             return None;
         }
         let warmed_block = self

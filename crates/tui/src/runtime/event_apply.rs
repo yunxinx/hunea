@@ -4,7 +4,7 @@ use mo_core::session::{
 };
 
 use super::super::{
-    Model, acp_tool_preview::ToolApprovalPreview, model::RequestMetrics,
+    Model, model::RequestMetrics, runtime_tool_preview::ToolApprovalPreview,
     tool_approval_panel::ToolApprovalSource,
 };
 
@@ -68,23 +68,13 @@ impl RuntimeEventApply for Model {
             RuntimeEvent::TerminalUpdated { snapshot, .. } => {
                 let _ = self.apply_runtime_terminal_snapshot_from_runtime(snapshot);
             }
-            RuntimeEvent::ModelConfigChanged { .. }
-            | RuntimeEvent::AvailableCommandsChanged { .. }
-            | RuntimeEvent::ConfigChangeSucceeded { .. }
-            | RuntimeEvent::ConfigChangeFailed { .. } => {}
             RuntimeEvent::PermissionRequested { target, request } => {
                 self.flush_runtime_response_buffer();
                 show_runtime_permission_request(self, target, request);
             }
-            RuntimeEvent::PermissionCancelled { target, .. } => {
+            RuntimeEvent::PermissionCancelled { .. } => {
                 self.close_tool_approval_panel();
-                let message = match target {
-                    mo_core::session::RuntimeTarget::AcpAgent { .. } => {
-                        "ACP permission request cancelled"
-                    }
-                    _ => "Runtime permission request cancelled",
-                };
-                self.show_transient_status_notice(message);
+                self.show_transient_status_notice("Runtime permission request cancelled");
             }
             RuntimeEvent::MessageFinished {
                 content,

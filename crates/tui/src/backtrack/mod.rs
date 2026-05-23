@@ -27,10 +27,7 @@ impl Model {
             self.reset_backtrack_state();
         }
 
-        if self.selected_acp_agent.is_some()
-            || self.stream_activity.is_some()
-            || !self.composer_text().is_empty()
-        {
+        if self.stream_activity.is_some() || !self.composer_text().is_empty() {
             self.reset_backtrack_state();
             return None;
         }
@@ -196,10 +193,6 @@ impl Model {
         &mut self,
         selection: BacktrackSelection,
     ) -> Option<AppEffect> {
-        if self.selected_acp_agent.is_some() {
-            return None;
-        }
-
         let old_value = self.composer_text().to_string();
         if self.selection_runtime.selection.is_active() {
             self.invalidate_selection_for_reflow();

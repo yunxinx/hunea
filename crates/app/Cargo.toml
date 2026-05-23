@@ -5,7 +5,6 @@ edition.workspace = true
 
 [dependencies]
 color-eyre.workspace = true
-mo-acp.workspace = true
 mo-config.workspace = true
 mo-core.workspace = true
 mo-native-agent.workspace = true

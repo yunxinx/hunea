@@ -7,8 +7,6 @@ mod benchmark;
 #[doc(hidden)]
 pub mod benchmark;
 
-mod acp;
-mod acp_tool_preview;
 mod backtrack;
 mod command_panel;
 mod composer;
@@ -32,6 +30,7 @@ mod path_resolve;
 mod reasoning_message;
 mod runner;
 mod runtime;
+mod runtime_tool_preview;
 mod selection;
 mod sender;
 mod shimmer;
@@ -66,6 +65,6 @@ pub use runner::{
 pub use sender::Sender;
 pub use status_line::StatusLineItem;
 pub use style_mode::StyleMode;
-pub use update::{AcpPromptSubmission, AppEffect, AppEvent, STARTUP_PROBE_TIMEOUT};
+pub use update::{AppEffect, AppEvent, STARTUP_PROBE_TIMEOUT};
 
 pub use mo_core::request_policy::RuntimeRequestPolicy;

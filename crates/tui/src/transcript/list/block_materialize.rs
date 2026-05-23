@@ -48,7 +48,7 @@ impl Transcript {
         index: usize,
         width: u16,
     ) -> Rc<CachedRenderBlock> {
-        let has_dynamic_render = self.items[index].has_active_acp_tool_call();
+        let has_dynamic_render = self.items[index].has_active_runtime_tool_activity();
         let cache_key = self.items[index].render_cache_key();
         if !has_dynamic_render
             && let Some(cached) = self
@@ -305,8 +305,8 @@ impl TranscriptItem {
         }
     }
 
-    pub(crate) fn has_active_acp_tool_call(&self) -> bool {
-        matches!(self, Self::ToolResult(item) if item.has_active_acp_tool_call())
+    pub(crate) fn has_active_runtime_tool_activity(&self) -> bool {
+        matches!(self, Self::ToolResult(item) if item.has_active_runtime_tool_activity())
     }
 
     pub(crate) fn active_marker_started_at(&self) -> Option<std::time::Instant> {

@@ -8,11 +8,11 @@ mod file_preview;
 
 use super::{
     AppEffect, Model,
-    acp_tool_preview::ToolApprovalPreview,
     inline_panel::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, wrap_inline_text,
     },
+    runtime_tool_preview::ToolApprovalPreview,
     theme::{primary_text_style, secondary_text_style, tertiary_text_style},
     tool_result::ToolResultKind,
     transcript::markdown_highlight::{highlight_code_chunks, wrap_highlight_chunks},
@@ -29,19 +29,11 @@ pub(super) struct ToolApprovalPanelState {
     pub(super) title: String,
     pub(super) details: Vec<ToolApprovalDetail>,
     pub(super) preview: Option<ToolApprovalPreview>,
-    pub(super) suspended_acp_tool_call_item_index: Option<usize>,
 }
 
 /// `ToolApprovalSource` 描述工具审批确认后需要回到哪个运行时来源。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ToolApprovalSource {
-    AcpPermission {
-        request_id: String,
-        allow_option_id: Option<String>,
-        allow_always_option_id: Option<String>,
-        reject_option_id: Option<String>,
-        reject_always_option_id: Option<String>,
-    },
     RuntimePermission {
         target: RuntimeTarget,
         request_id: String,
@@ -111,11 +103,9 @@ impl Model {
         details: Vec<ToolApprovalDetail>,
         preview: Option<ToolApprovalPreview>,
     ) {
-        self.restore_suspended_acp_tool_call_for_approval_panel();
         self.close_transcript_overlay();
         self.pause_stream_activity();
         self.model_panel.is_open = false;
-        self.acp_panel.is_open = false;
         self.tool_approval_panel = ToolApprovalPanelState {
             is_open: true,
             selected: 0,
@@ -123,7 +113,6 @@ impl Model {
             title,
             details,
             preview,
-            suspended_acp_tool_call_item_index: None,
         };
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.sync_command_panel_navigation();
@@ -137,18 +126,7 @@ impl Model {
             return;
         }
 
-        let suspended_item_index = self
-            .tool_approval_panel
-            .suspended_acp_tool_call_item_index
-            .take();
-        let permission_tool_call_item_index = self
-            .pending_acp_permission
-            .as_ref()
-            .and_then(|permission| permission.tool_call_item_index);
         self.tool_approval_panel = ToolApprovalPanelState::default();
-        self.pending_acp_permission = None;
-        self.clear_acp_tool_call_permission_waiting(permission_tool_call_item_index);
-        self.restore_suspended_acp_tool_call_item(suspended_item_index);
         self.resume_stream_activity();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.sync_composer_height();
@@ -161,16 +139,6 @@ impl Model {
             Some(ToolApprovalSource::RuntimePermission { .. })
         ) {
             self.close_tool_approval_panel();
-        }
-    }
-
-    pub(crate) fn suspend_acp_tool_call_for_approval_panel(&mut self, item_index: usize) {
-        if !self.tool_approval_panel_active() {
-            return;
-        }
-
-        if self.set_acp_tool_call_approval_suspended_from_runtime(item_index, true) {
-            self.tool_approval_panel.suspended_acp_tool_call_item_index = Some(item_index);
         }
     }
 
@@ -256,72 +224,15 @@ impl Model {
     }
 
     fn resolve_tool_approval_choice(&mut self, choice: ToolApprovalChoice) -> Option<AppEffect> {
-        let suspended_item_index = self
-            .tool_approval_panel
-            .suspended_acp_tool_call_item_index
-            .take();
-        let Some(source) = self.tool_approval_panel.source.clone() else {
-            let permission_tool_call_item_index = self
-                .pending_acp_permission
-                .as_ref()
-                .and_then(|permission| permission.tool_call_item_index);
-            self.clear_acp_tool_call_permission_waiting(permission_tool_call_item_index);
-            self.restore_suspended_acp_tool_call_item(suspended_item_index);
-            return None;
-        };
+        let source = self.tool_approval_panel.source.clone()?;
         let title = self.tool_approval_panel.title.clone();
-        let pending_permission = self.pending_acp_permission.clone();
-        let permission_tool_call_item_index = pending_permission
-            .as_ref()
-            .and_then(|permission| permission.tool_call_item_index);
-        let permission_tool_call_id =
-            pending_permission.and_then(|permission| permission.tool_call_id);
         self.tool_approval_panel = ToolApprovalPanelState::default();
-        self.pending_acp_permission = None;
-        self.clear_acp_tool_call_permission_waiting(permission_tool_call_item_index);
-        self.restore_suspended_acp_tool_call_item(suspended_item_index);
         self.resume_stream_activity();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.sync_composer_height();
         self.sync_document_viewport_for_composer_cursor();
 
         match source {
-            ToolApprovalSource::AcpPermission {
-                request_id,
-                allow_option_id,
-                allow_always_option_id,
-                reject_option_id,
-                reject_always_option_id,
-            } => {
-                let option_id = match choice {
-                    ToolApprovalChoice::Allow => allow_option_id,
-                    ToolApprovalChoice::AllowInSession => allow_always_option_id,
-                    ToolApprovalChoice::Deny => reject_option_id,
-                    ToolApprovalChoice::DenyInSession => reject_always_option_id,
-                };
-                let is_rejection = matches!(
-                    choice,
-                    ToolApprovalChoice::Deny | ToolApprovalChoice::DenyInSession
-                );
-                if is_rejection {
-                    if let Some(item_index) = permission_tool_call_item_index {
-                        self.mark_acp_tool_call_rejected_from_runtime(item_index);
-                    } else {
-                        self.append_tool_result_from_runtime(
-                            approval_result_content(choice, &title),
-                            approval_result_kind(choice),
-                        );
-                    }
-                }
-                Some(AppEffect::RespondAcpPermission {
-                    request_id,
-                    option_id,
-                    is_rejection,
-                    rejected_tool_call_id: is_rejection
-                        .then_some(permission_tool_call_id)
-                        .flatten(),
-                })
-            }
             ToolApprovalSource::RuntimePermission {
                 target,
                 request_id,
@@ -357,14 +268,6 @@ impl Model {
         self.close_tool_approval_panel();
 
         match source {
-            Some(ToolApprovalSource::AcpPermission { request_id, .. }) => {
-                Some(AppEffect::RespondAcpPermission {
-                    request_id,
-                    option_id: None,
-                    is_rejection: false,
-                    rejected_tool_call_id: None,
-                })
-            }
             Some(ToolApprovalSource::RuntimePermission {
                 target, request_id, ..
             }) => Some(AppEffect::RespondRuntimePermission {
@@ -373,26 +276,6 @@ impl Model {
                 option_id: None,
             }),
             Some(ToolApprovalSource::Preview) | None => None,
-        }
-    }
-
-    fn restore_suspended_acp_tool_call_for_approval_panel(&mut self) {
-        let suspended_item_index = self
-            .tool_approval_panel
-            .suspended_acp_tool_call_item_index
-            .take();
-        self.restore_suspended_acp_tool_call_item(suspended_item_index);
-    }
-
-    fn restore_suspended_acp_tool_call_item(&mut self, item_index: Option<usize>) {
-        if let Some(item_index) = item_index {
-            self.set_acp_tool_call_approval_suspended_from_runtime(item_index, false);
-        }
-    }
-
-    fn clear_acp_tool_call_permission_waiting(&mut self, item_index: Option<usize>) {
-        if let Some(item_index) = item_index {
-            self.set_acp_tool_call_permission_waiting_from_runtime(item_index, false);
         }
     }
 }
@@ -534,14 +417,7 @@ pub(super) fn approval_choice_line(
 
 fn tool_approval_choices(state: &ToolApprovalPanelState) -> Vec<ToolApprovalChoice> {
     match state.source.as_ref() {
-        Some(ToolApprovalSource::AcpPermission {
-            allow_option_id,
-            allow_always_option_id,
-            reject_option_id,
-            reject_always_option_id,
-            ..
-        })
-        | Some(ToolApprovalSource::RuntimePermission {
+        Some(ToolApprovalSource::RuntimePermission {
             allow_option_id,
             allow_always_option_id,
             reject_option_id,

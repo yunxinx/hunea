@@ -35,7 +35,6 @@ impl Model {
     pub(crate) fn sync_file_picker_state(&mut self) {
         if self.tool_approval_panel_active()
             || self.model_panel_active()
-            || self.acp_panel_active()
             || self.command_panel_active()
         {
             self.close_file_picker();

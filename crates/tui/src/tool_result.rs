@@ -9,14 +9,14 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-mod acp;
+mod activity;
 mod approval;
 mod exploration;
 mod state;
 
 use super::transcript::markdown_highlight::HighlightChunk;
 use super::{
-    acp_tool_preview::is_acp_write_tool_call,
+    runtime_tool_preview::is_runtime_write_tool_activity,
     styled_text::{line_to_plain_text, lines_to_ansi_text, lines_to_plain_text},
     theme::{TerminalPalette, secondary_text_style},
     transcript::{
@@ -27,13 +27,15 @@ use super::{
         wrap_prompt_visual_lines,
     },
 };
-use acp::{
-    AcpDiffDetailLine, AcpToolCallDetailBlock, acp_diff_line_prefix,
-    acp_read_tool_call_title_chunks, acp_tool_call_detail_blocks, acp_tool_call_diff_header_chunks,
-    acp_tool_call_diff_line_style, acp_tool_call_diff_row_style, acp_tool_call_display_title,
-    acp_tool_call_has_diff_content, acp_tool_call_location_suffix, acp_tool_call_status_color,
-    acp_write_tool_call_title_chunks, active_marker_visible_at, is_acp_read_tool_call,
-    is_list_dir_tool_call, list_dir_tool_call_title_chunks, style_for_color,
+use activity::{
+    RuntimeDiffDetailLine, RuntimeToolActivityDetailBlock, active_marker_visible_at,
+    is_list_dir_tool_call, is_runtime_read_tool_activity, list_dir_tool_call_title_chunks,
+    runtime_diff_line_prefix, runtime_read_tool_activity_title_chunks,
+    runtime_tool_activity_detail_blocks, runtime_tool_activity_diff_header_chunks,
+    runtime_tool_activity_diff_line_style, runtime_tool_activity_diff_row_style,
+    runtime_tool_activity_display_title, runtime_tool_activity_has_diff_content,
+    runtime_tool_activity_location_suffix, runtime_tool_activity_status_color,
+    runtime_write_tool_activity_title_chunks, style_for_color,
 };
 use approval::{ParsedToolResultLine, looks_like_shell_command, style_core_result_line};
 use exploration::{
@@ -171,7 +173,7 @@ impl ToolResultItem {
         self.wrapped_styled_lines_at(width, palette, now)
     }
 
-    pub(crate) fn has_active_acp_tool_call(&self) -> bool {
+    pub(crate) fn has_active_runtime_tool_activity(&self) -> bool {
         self.active_marker_started_at.is_some() && !self.is_compact_approval_suspended()
     }
 
@@ -237,7 +239,7 @@ impl ToolResultItem {
                 self.approval_wrapped_styled_lines(content, width, palette)
             }
             ToolResultBody::RuntimeToolActivity(call) => {
-                self.acp_tool_call_styled_lines_at(call, width, palette, now)
+                self.runtime_tool_activity_styled_lines_at(call, width, palette, now)
             }
             ToolResultBody::Exploration(calls) => {
                 self.exploration_styled_lines_at(calls, width, palette, now)
@@ -358,32 +360,6 @@ impl ToolResultItem {
         true
     }
 
-    pub(crate) fn set_approval_suspended(&mut self, suspended: bool) -> bool {
-        if !matches!(self.body, ToolResultBody::RuntimeToolActivity(_)) {
-            return false;
-        }
-        if self.approval_suspended == suspended {
-            return false;
-        }
-
-        self.approval_suspended = suspended;
-        self.refresh_render_cache_key();
-        true
-    }
-
-    pub(crate) fn set_permission_waiting(&mut self, waiting: bool) -> bool {
-        if !matches!(self.body, ToolResultBody::RuntimeToolActivity(_)) {
-            return false;
-        }
-        if self.permission_waiting == waiting {
-            return false;
-        }
-
-        self.permission_waiting = waiting;
-        self.refresh_render_cache_key();
-        true
-    }
-
     pub(crate) fn set_runtime_terminal_snapshot(
         &mut self,
         snapshot: impl Into<RuntimeTerminalSnapshot>,
@@ -461,71 +437,10 @@ impl ToolResultItem {
         true
     }
 
-    pub(crate) fn mark_acp_tool_call_failed(&mut self, message: impl Into<String>) -> bool {
-        let message = message.into();
-        match &mut self.body {
-            ToolResultBody::RuntimeToolActivity(call) => {
-                if matches!(
-                    call.status,
-                    RuntimeToolActivityStatus::Completed | RuntimeToolActivityStatus::Failed
-                ) {
-                    return false;
-                }
-
-                call.status = RuntimeToolActivityStatus::Failed;
-                call.content = vec![RuntimeToolActivityContent::Text(message)];
-                self.permission_waiting = false;
-            }
-            ToolResultBody::Exploration(calls) => {
-                let mut changed = false;
-                for call in calls.iter_mut() {
-                    if matches!(
-                        call.status,
-                        RuntimeToolActivityStatus::Completed | RuntimeToolActivityStatus::Failed
-                    ) {
-                        continue;
-                    }
-
-                    call.status = RuntimeToolActivityStatus::Failed;
-                    call.content = vec![RuntimeToolActivityContent::Text(message.clone())];
-                    changed = true;
-                }
-                if !changed {
-                    return false;
-                }
-            }
-            ToolResultBody::Approval { .. } => return false,
-        }
-        self.active_marker_started_at = None;
-        self.refresh_render_cache_key();
-        true
-    }
-
     fn refresh_active_marker_started_at(&mut self) {
         self.active_marker_started_at =
             active_marker_started_at_for_body(&self.body, &self.terminal_snapshots)
                 .then(|| self.active_marker_started_at.unwrap_or_else(Instant::now));
-    }
-
-    pub(crate) fn mark_acp_tool_call_rejected(&mut self) -> bool {
-        let ToolResultBody::RuntimeToolActivity(call) = &mut self.body else {
-            return false;
-        };
-        if call.status == RuntimeToolActivityStatus::Failed
-            && call.content.is_empty()
-            && !self.permission_waiting
-        {
-            return false;
-        }
-
-        call.status = RuntimeToolActivityStatus::Failed;
-        call.content.clear();
-        call.raw_input = None;
-        call.raw_output = None;
-        self.permission_waiting = false;
-        self.active_marker_started_at = None;
-        self.refresh_render_cache_key();
-        true
     }
 
     fn approval_wrapped_styled_lines(
@@ -624,7 +539,7 @@ impl ToolResultItem {
         now: Instant,
     ) -> Vec<Line<'static>> {
         let width = usize::from(width.max(1));
-        self.acp_tool_call_header_lines_at(call, width, palette, now, self.exploration_open)
+        self.runtime_tool_activity_header_lines_at(call, width, palette, now, self.exploration_open)
     }
 
     fn failed_exploration_detail_lines(
@@ -648,7 +563,8 @@ impl ToolResultItem {
         palette: TerminalPalette,
         now: Instant,
     ) -> Vec<Line<'static>> {
-        let mut lines = self.acp_tool_call_header_lines_at(call, width, palette, now, false);
+        let mut lines =
+            self.runtime_tool_activity_header_lines_at(call, width, palette, now, false);
         lines.extend(wrap_failed_exploration_detail_line(
             &failed_tool_call_detail_text(call),
             width,
@@ -774,7 +690,7 @@ impl ToolResultItem {
         Span::styled(prefix, self.result_style(palette))
     }
 
-    fn acp_tool_call_styled_lines_at(
+    fn runtime_tool_activity_styled_lines_at(
         &self,
         call: &RuntimeToolActivity,
         width: u16,
@@ -782,19 +698,20 @@ impl ToolResultItem {
         now: Instant,
     ) -> Vec<Line<'static>> {
         let width = usize::from(width.max(1));
-        let mut lines = self.acp_tool_call_header_lines_at(call, width, palette, now, false);
-        for block in acp_tool_call_detail_blocks(
+        let mut lines =
+            self.runtime_tool_activity_header_lines_at(call, width, palette, now, false);
+        for block in runtime_tool_activity_detail_blocks(
             call,
             self.render_mode,
             self.permission_waiting,
             &self.terminal_snapshots,
         ) {
-            lines.extend(self.wrap_acp_detail_block(&block, width, palette));
+            lines.extend(self.wrap_runtime_detail_block(&block, width, palette));
         }
         lines
     }
 
-    fn acp_tool_call_header_lines_at(
+    fn runtime_tool_activity_header_lines_at(
         &self,
         call: &RuntimeToolActivity,
         width: usize,
@@ -819,7 +736,7 @@ impl ToolResultItem {
         let marker_color = if active_started_at.is_some() || use_open_marker_color {
             palette.main
         } else {
-            acp_tool_call_status_color(call.status, palette)
+            runtime_tool_activity_status_color(call.status, palette)
         };
         let status_style = style_for_color(marker_color).add_modifier(Modifier::BOLD);
         let location_style = style_for_color(palette.tertiary);
@@ -827,12 +744,12 @@ impl ToolResultItem {
             text: marker_text.to_string(),
             style: status_style,
         }];
-        chunks.extend(self.acp_tool_call_title_chunks(call, palette));
+        chunks.extend(self.runtime_tool_activity_title_chunks(call, palette));
 
-        if !is_acp_read_tool_call(call)
+        if !is_runtime_read_tool_activity(call)
             && !is_list_dir_tool_call(call)
-            && !acp_tool_call_has_diff_content(call)
-            && let Some(locations) = acp_tool_call_location_suffix(&call.locations)
+            && !runtime_tool_activity_has_diff_content(call)
+            && let Some(locations) = runtime_tool_activity_location_suffix(&call.locations)
         {
             chunks.push(HighlightChunk {
                 text: format!(" {locations}"),
@@ -846,28 +763,28 @@ impl ToolResultItem {
             .collect()
     }
 
-    fn acp_tool_call_title_chunks(
+    fn runtime_tool_activity_title_chunks(
         &self,
         call: &RuntimeToolActivity,
         palette: TerminalPalette,
     ) -> Vec<HighlightChunk> {
-        if let Some(chunks) = acp_tool_call_diff_header_chunks(call, palette) {
+        if let Some(chunks) = runtime_tool_activity_diff_header_chunks(call, palette) {
             return chunks;
         }
 
-        if is_acp_read_tool_call(call) {
-            return acp_read_tool_call_title_chunks(call);
+        if is_runtime_read_tool_activity(call) {
+            return runtime_read_tool_activity_title_chunks(call);
         }
 
-        if is_acp_write_tool_call(call) {
-            return acp_write_tool_call_title_chunks(call);
+        if is_runtime_write_tool_activity(call) {
+            return runtime_write_tool_activity_title_chunks(call);
         }
 
         if is_list_dir_tool_call(call) {
             return list_dir_tool_call_title_chunks(call);
         }
 
-        let title = acp_tool_call_display_title(call);
+        let title = runtime_tool_activity_display_title(call);
         let title_style = Style::new().add_modifier(Modifier::BOLD);
         if looks_like_shell_command(&title) {
             return self.shell_command_chunks_with_style(&title, title_style);
@@ -879,26 +796,26 @@ impl ToolResultItem {
         }]
     }
 
-    fn wrap_acp_detail_block(
+    fn wrap_runtime_detail_block(
         &self,
-        block: &AcpToolCallDetailBlock,
+        block: &RuntimeToolActivityDetailBlock,
         width: usize,
         palette: TerminalPalette,
     ) -> Vec<Line<'static>> {
         match block {
-            AcpToolCallDetailBlock::Text(logical_lines) => {
-                self.wrap_acp_text_detail_block(logical_lines, width)
+            RuntimeToolActivityDetailBlock::Text(logical_lines) => {
+                self.wrap_runtime_text_detail_block(logical_lines, width)
             }
-            AcpToolCallDetailBlock::SecondaryText(logical_lines) => {
-                self.wrap_acp_secondary_text_detail_block(logical_lines, width, palette)
+            RuntimeToolActivityDetailBlock::SecondaryText(logical_lines) => {
+                self.wrap_runtime_secondary_text_detail_block(logical_lines, width, palette)
             }
-            AcpToolCallDetailBlock::Diff(logical_lines) => {
-                self.wrap_acp_diff_detail_block(logical_lines, width, palette)
+            RuntimeToolActivityDetailBlock::Diff(logical_lines) => {
+                self.wrap_runtime_diff_detail_block(logical_lines, width, palette)
             }
         }
     }
 
-    fn wrap_acp_text_detail_block(
+    fn wrap_runtime_text_detail_block(
         &self,
         logical_lines: &[String],
         width: usize,
@@ -936,16 +853,20 @@ impl ToolResultItem {
             .collect()
     }
 
-    fn wrap_acp_secondary_text_detail_block(
+    fn wrap_runtime_secondary_text_detail_block(
         &self,
         logical_lines: &[String],
         width: usize,
         palette: TerminalPalette,
     ) -> Vec<Line<'static>> {
-        self.wrap_acp_styled_text_detail_block(logical_lines, width, secondary_text_style(palette))
+        self.wrap_runtime_styled_text_detail_block(
+            logical_lines,
+            width,
+            secondary_text_style(palette),
+        )
     }
 
-    fn wrap_acp_styled_text_detail_block(
+    fn wrap_runtime_styled_text_detail_block(
         &self,
         logical_lines: &[String],
         width: usize,
@@ -993,20 +914,20 @@ impl ToolResultItem {
             .collect()
     }
 
-    fn wrap_acp_diff_detail_block(
+    fn wrap_runtime_diff_detail_block(
         &self,
-        logical_lines: &[AcpDiffDetailLine],
+        logical_lines: &[RuntimeDiffDetailLine],
         width: usize,
         palette: TerminalPalette,
     ) -> Vec<Line<'static>> {
         logical_lines
             .iter()
             .flat_map(|content| {
-                let prefix = acp_diff_line_prefix(content.line_number, content.kind);
+                let prefix = runtime_diff_line_prefix(content.line_number, content.kind);
                 let continuation_prefix = " ".repeat(UnicodeWidthStr::width(prefix.as_str()));
                 let prefix_width = UnicodeWidthStr::width(prefix.as_str());
                 let content_width = width.saturating_sub(prefix_width).max(1);
-                let line_style = acp_tool_call_diff_line_style(content.kind, palette);
+                let line_style = runtime_tool_activity_diff_line_style(content.kind, palette);
                 let wrapped = wrap_highlight_chunks(
                     &[vec![HighlightChunk {
                         text: content.text.clone(),
@@ -1019,7 +940,7 @@ impl ToolResultItem {
                     let mut line = Line::from(vec![Span::styled(prefix, line_style)]);
                     line.style = line
                         .style
-                        .patch(acp_tool_call_diff_row_style(content.kind, palette));
+                        .patch(runtime_tool_activity_diff_row_style(content.kind, palette));
                     return vec![line];
                 }
 
@@ -1038,7 +959,7 @@ impl ToolResultItem {
                         let mut rendered = Line::from(spans);
                         rendered.style = rendered
                             .style
-                            .patch(acp_tool_call_diff_row_style(content.kind, palette));
+                            .patch(runtime_tool_activity_diff_row_style(content.kind, palette));
                         rendered
                     })
                     .collect::<Vec<_>>()
@@ -1057,7 +978,7 @@ impl ToolResultItem {
                 ..
             } => palette.approval_rejected,
             ToolResultBody::RuntimeToolActivity(call) => {
-                acp_tool_call_status_color(call.status, palette)
+                runtime_tool_activity_status_color(call.status, palette)
             }
             ToolResultBody::Exploration(calls) => {
                 if self.exploration_open {

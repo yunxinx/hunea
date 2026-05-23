@@ -1,7 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{AppEvent, HeroOptions, Model, Sender, theme::default_palette};
-use mo_core::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
+use mo_core::session::{
+    RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityStatus, RuntimeToolKind,
+};
 
 #[test]
 fn overlay_scroll_boundary() {
@@ -112,12 +114,12 @@ fn transcript_overlay_switches_tool_activity_detail_mode() {
     model.transcript_mut().clear();
     model
         .transcript_mut()
-        .append_runtime_tool_activity(AcpToolCall {
-            tool_call_id: "call-1".to_string(),
+        .append_runtime_tool_activity(RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
             title: "Run tests".to_string(),
-            kind: AcpToolKind::Execute,
-            status: AcpToolCallStatus::Completed,
-            content: vec![AcpToolCallContent::Text("summary".to_string())],
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Text("summary".to_string())],
             locations: Vec::new(),
             raw_input: None,
             raw_output: Some(
@@ -210,12 +212,12 @@ fn overlay_diff_line_background_fills_the_rendered_row() {
     model.transcript_mut().clear();
     model
         .transcript_mut()
-        .append_runtime_tool_activity(AcpToolCall {
-            tool_call_id: "call-1".to_string(),
+        .append_runtime_tool_activity(RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
             title: "WriteFile: src/lib.rs".to_string(),
-            kind: AcpToolKind::Edit,
-            status: AcpToolCallStatus::Completed,
-            content: vec![AcpToolCallContent::Diff {
+            kind: RuntimeToolKind::Edit,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Diff {
                 path: "src/lib.rs".to_string(),
                 old_text: Some("one\nold\ntail\n".to_string()),
                 new_text: "one\nnew\ntail\n".to_string(),

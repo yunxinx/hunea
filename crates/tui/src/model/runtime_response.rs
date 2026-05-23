@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-/// `RuntimeResponseBuffer` 暂存非 ACP runtime 的流式文本，直到工具调用等语义边界出现。
+/// `RuntimeResponseBuffer` 暂存 runtime 的流式文本，直到工具调用等语义边界出现。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RuntimeResponseBuffer {
     content: String,

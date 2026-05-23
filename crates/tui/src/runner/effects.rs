@@ -4,11 +4,6 @@ use mo_core::session::{RuntimeCommand, RuntimeCommandReceipt, RuntimeTarget};
 use crate::{AppEffect, Model};
 
 use super::RuntimeCoordinator;
-use super::acp_session::{
-    AcpSessionUiState, run_interrupt_acp_prompt_effect, run_respond_acp_permission_effect,
-    run_send_acp_prompt_effect, run_set_acp_model_effect, run_start_acp_session_effect,
-    run_stop_acp_background_terminals_effect,
-};
 use super::external_io::{run_copy_selection_effect, run_external_editor_effect};
 use super::model_refresh::{persist_selected_model, run_refresh_model_provider_effect};
 use super::native_agent::run_send_native_agent_effect;
@@ -17,7 +12,6 @@ use super::terminal::TuiTerminal;
 pub(super) fn apply_effect_if_needed(
     terminal: &mut TuiTerminal,
     model: &mut Model,
-    acp_ui_state: &mut AcpSessionUiState,
     runtime_coordinator: &mut impl RuntimeCoordinator,
     effect: Option<AppEffect>,
 ) -> Result<()> {
@@ -31,32 +25,7 @@ pub(super) fn apply_effect_if_needed(
         }
         AppEffect::CopySelection(text) => run_copy_selection_effect(terminal, model, &text),
         AppEffect::ResetRuntimeSession => {
-            reset_runtime_session_after_clear(acp_ui_state, runtime_coordinator);
-            Ok(())
-        }
-        AppEffect::StartAcpSession { agent_id } => {
-            run_start_acp_session_effect(model, acp_ui_state, runtime_coordinator, &agent_id);
-            Ok(())
-        }
-        AppEffect::SubmitAcpPrompt(submission) => {
-            run_send_acp_prompt_effect(model, acp_ui_state, runtime_coordinator, submission);
-            Ok(())
-        }
-        AppEffect::RespondAcpPermission {
-            request_id,
-            option_id,
-            is_rejection,
-            rejected_tool_call_id,
-        } => {
-            run_respond_acp_permission_effect(
-                model,
-                acp_ui_state,
-                runtime_coordinator,
-                &request_id,
-                option_id,
-                is_rejection,
-                rejected_tool_call_id,
-            );
+            reset_runtime_session_after_clear(runtime_coordinator);
             Ok(())
         }
         AppEffect::RespondRuntimePermission {
@@ -71,14 +40,6 @@ pub(super) fn apply_effect_if_needed(
                 &request_id,
                 option_id,
             );
-            Ok(())
-        }
-        AppEffect::SetAcpModel { config_id, value } => {
-            run_set_acp_model_effect(model, runtime_coordinator, config_id, value);
-            Ok(())
-        }
-        AppEffect::StopAcpBackgroundTerminals => {
-            run_stop_acp_background_terminals_effect(model, runtime_coordinator);
             Ok(())
         }
         AppEffect::TruncateNativeAgentSession {
@@ -104,7 +65,7 @@ pub(super) fn apply_effect_if_needed(
             Ok(())
         }
         AppEffect::InterruptCurrentTurn => {
-            run_interrupt_current_turn_effect(model, acp_ui_state, runtime_coordinator);
+            run_interrupt_current_turn_effect(model, runtime_coordinator);
             Ok(())
         }
     }
@@ -140,17 +101,12 @@ fn run_respond_runtime_permission_effect(
     }
 }
 
-pub(super) fn reset_runtime_session_after_clear(
-    acp_ui_state: &mut AcpSessionUiState,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
-) {
-    acp_ui_state.reset_after_clear();
+pub(super) fn reset_runtime_session_after_clear(runtime_coordinator: &mut impl RuntimeCoordinator) {
     let _ = runtime_coordinator.dispatch_runtime_command(RuntimeCommand::Reset);
 }
 
 pub(super) fn run_interrupt_current_turn_effect(
     model: &mut Model,
-    acp_ui_state: &mut AcpSessionUiState,
     runtime_coordinator: &mut impl RuntimeCoordinator,
 ) {
     match runtime_coordinator.dispatch_runtime_command(RuntimeCommand::interrupt_current()) {
@@ -160,9 +116,7 @@ pub(super) fn run_interrupt_current_turn_effect(
             model.append_system_message_from_runtime("Chat interrupted");
             model.finish_stream_activity_with_work_summary();
         }
-        Ok(RuntimeCommandReceipt::Interrupted { .. }) => {
-            run_interrupt_acp_prompt_effect(model, acp_ui_state, runtime_coordinator, false);
-        }
+        Ok(RuntimeCommandReceipt::Interrupted { .. }) => {}
         Ok(_) => {}
         Err(message) => model.show_transient_status_notice(&message),
     }

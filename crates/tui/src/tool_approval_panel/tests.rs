@@ -154,11 +154,12 @@ fn long_command_keeps_full_document_flow_without_truncating_choices() {
 }
 
 #[test]
-fn acp_session_allow_option_only_renders_when_available() {
+fn runtime_session_allow_option_only_renders_when_available() {
     let mut model = Model::new(HeroOptions::default());
     model.palette = default_palette();
     model.open_tool_approval_panel(
-        ToolApprovalSource::AcpPermission {
+        ToolApprovalSource::RuntimePermission {
+            target: mo_core::session::RuntimeTarget::native_agent("local", "qwen3"),
             request_id: "permission-1".to_string(),
             allow_option_id: Some("allow-once".to_string()),
             allow_always_option_id: None,
@@ -189,7 +190,8 @@ fn acp_session_allow_option_only_renders_when_available() {
     );
 
     model.open_tool_approval_panel(
-        ToolApprovalSource::AcpPermission {
+        ToolApprovalSource::RuntimePermission {
+            target: mo_core::session::RuntimeTarget::native_agent("local", "qwen3"),
             request_id: "permission-2".to_string(),
             allow_option_id: Some("allow-once".to_string()),
             allow_always_option_id: Some("allow-always".to_string()),
@@ -285,11 +287,12 @@ fn preview_choice_closes_without_status_notice_and_appends_result() {
 }
 
 #[test]
-fn acp_allow_choice_does_not_append_redundant_ran_result() {
+fn runtime_allow_choice_does_not_append_redundant_ran_result() {
     let mut model = Model::new(HeroOptions::default());
     model.palette = default_palette();
     model.open_tool_approval_panel(
-        ToolApprovalSource::AcpPermission {
+        ToolApprovalSource::RuntimePermission {
+            target: mo_core::session::RuntimeTarget::native_agent("local", "qwen3"),
             request_id: "permission-ran".to_string(),
             allow_option_id: Some("allow-once".to_string()),
             allow_always_option_id: None,
@@ -307,16 +310,15 @@ fn acp_allow_choice_does_not_append_redundant_ran_result() {
 
     assert_eq!(
         effect,
-        Some(AppEffect::RespondAcpPermission {
+        Some(AppEffect::RespondRuntimePermission {
+            target: mo_core::session::RuntimeTarget::native_agent("local", "qwen3"),
             request_id: "permission-ran".to_string(),
             option_id: Some("allow-once".to_string()),
-            is_rejection: false,
-            rejected_tool_call_id: None,
         })
     );
     assert!(
         model.transcript_mut().plain_items() == before,
-        "ACP allow should not append a redundant approval result when the tool call item will already show execution"
+        "runtime allow should not append a redundant approval result when the tool call item will already show execution"
     );
     assert_eq!(
         model.transcript_mut().source_messages(),
@@ -326,11 +328,12 @@ fn acp_allow_choice_does_not_append_redundant_ran_result() {
 }
 
 #[test]
-fn esc_cancels_acp_permission_without_rejecting() {
+fn esc_cancels_runtime_permission_without_rejecting() {
     let mut model = Model::new(HeroOptions::default());
     model.palette = default_palette();
     model.open_tool_approval_panel(
-        ToolApprovalSource::AcpPermission {
+        ToolApprovalSource::RuntimePermission {
+            target: mo_core::session::RuntimeTarget::native_agent("local", "qwen3"),
             request_id: "permission-cancel".to_string(),
             allow_option_id: Some("allow-once".to_string()),
             allow_always_option_id: None,
@@ -348,11 +351,10 @@ fn esc_cancels_acp_permission_without_rejecting() {
 
     assert_eq!(
         effect,
-        Some(AppEffect::RespondAcpPermission {
+        Some(AppEffect::RespondRuntimePermission {
+            target: mo_core::session::RuntimeTarget::native_agent("local", "qwen3"),
             request_id: "permission-cancel".to_string(),
             option_id: None,
-            is_rejection: false,
-            rejected_tool_call_id: None,
         })
     );
     assert!(!model.tool_approval_panel_active());
@@ -368,7 +370,8 @@ fn file_preview_panel_renders_numbered_content_without_transport_json() {
     let mut model = Model::new(HeroOptions::default());
     model.palette = default_palette();
     model.open_tool_approval_panel_with_preview(
-        ToolApprovalSource::AcpPermission {
+        ToolApprovalSource::RuntimePermission {
+            target: mo_core::session::RuntimeTarget::native_agent("local", "qwen3"),
             request_id: "permission-write".to_string(),
             allow_option_id: Some("allow-once".to_string()),
             allow_always_option_id: Some("allow-always".to_string()),
@@ -424,7 +427,8 @@ fn file_preview_panel_choices_use_model_panel_selection_style() {
     let mut model = Model::new(HeroOptions::default());
     model.palette = default_palette();
     model.open_tool_approval_panel_with_preview(
-        ToolApprovalSource::AcpPermission {
+        ToolApprovalSource::RuntimePermission {
+            target: mo_core::session::RuntimeTarget::native_agent("local", "qwen3"),
             request_id: "permission-write".to_string(),
             allow_option_id: Some("allow-once".to_string()),
             allow_always_option_id: Some("allow-always".to_string()),
@@ -472,7 +476,8 @@ fn file_preview_panel_hides_status_notice() {
     let mut model = Model::new(HeroOptions::default());
     model.palette = default_palette();
     model.open_tool_approval_panel_with_preview(
-        ToolApprovalSource::AcpPermission {
+        ToolApprovalSource::RuntimePermission {
+            target: mo_core::session::RuntimeTarget::native_agent("local", "qwen3"),
             request_id: "permission-write".to_string(),
             allow_option_id: Some("allow-once".to_string()),
             allow_always_option_id: Some("allow-always".to_string()),
@@ -499,7 +504,8 @@ fn file_preview_panel_selection_moves_linearly_for_vertical_choices() {
     let mut model = Model::new(HeroOptions::default());
     model.palette = default_palette();
     model.open_tool_approval_panel_with_preview(
-        ToolApprovalSource::AcpPermission {
+        ToolApprovalSource::RuntimePermission {
+            target: mo_core::session::RuntimeTarget::native_agent("local", "qwen3"),
             request_id: "permission-write".to_string(),
             allow_option_id: Some("allow-once".to_string()),
             allow_always_option_id: Some("allow-always".to_string()),
@@ -534,7 +540,8 @@ fn arrow_keys_move_linearly_between_vertical_choices() {
     let mut model = Model::new(HeroOptions::default());
     model.palette = default_palette();
     model.open_tool_approval_panel(
-        ToolApprovalSource::AcpPermission {
+        ToolApprovalSource::RuntimePermission {
+            target: mo_core::session::RuntimeTarget::native_agent("local", "qwen3"),
             request_id: "permission-3".to_string(),
             allow_option_id: Some("allow-once".to_string()),
             allow_always_option_id: Some("allow-always".to_string()),

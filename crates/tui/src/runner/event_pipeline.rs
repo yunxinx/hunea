@@ -117,7 +117,7 @@ mod tests {
 
     use super::*;
     use crate::{HeroOptions, Model, tool_result::TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL};
-    use mo_core::acp::{AcpToolCall, AcpToolCallStatus, AcpToolKind};
+    use mo_core::session::{RuntimeToolActivity, RuntimeToolActivityStatus, RuntimeToolKind};
 
     #[test]
     fn static_model_blocks_without_periodic_polling() {
@@ -182,11 +182,11 @@ mod tests {
         model.update(crate::AppEvent::StartupReadyTimeout);
         model
             .transcript_mut()
-            .append_runtime_tool_activity(AcpToolCall {
-                tool_call_id: "tool-1".to_string(),
+            .append_runtime_tool_activity(RuntimeToolActivity {
+                activity_id: "tool-1".to_string(),
                 title: "WriteFile: TEMP.md".to_string(),
-                kind: AcpToolKind::Other,
-                status: AcpToolCallStatus::InProgress,
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::InProgress,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
@@ -213,11 +213,11 @@ mod tests {
         model.update(crate::AppEvent::StartupReadyTimeout);
         model
             .transcript_mut()
-            .append_runtime_tool_activity(AcpToolCall {
-                tool_call_id: "tool-1".to_string(),
+            .append_runtime_tool_activity(RuntimeToolActivity {
+                activity_id: "tool-1".to_string(),
                 title: "WriteFile: TEMP.md".to_string(),
-                kind: AcpToolKind::Other,
-                status: AcpToolCallStatus::InProgress,
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::InProgress,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),
@@ -241,11 +241,11 @@ mod tests {
         model.update(crate::AppEvent::StartupReadyTimeout);
         model
             .transcript_mut()
-            .append_runtime_tool_activity(AcpToolCall {
-                tool_call_id: "tool-1".to_string(),
+            .append_runtime_tool_activity(RuntimeToolActivity {
+                activity_id: "tool-1".to_string(),
                 title: "WriteFile: TEMP.md".to_string(),
-                kind: AcpToolKind::Other,
-                status: AcpToolCallStatus::InProgress,
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::InProgress,
                 content: Vec::new(),
                 locations: Vec::new(),
                 raw_input: Some(r##"{"path":"TEMP.md","content":"body"}"##.into()),

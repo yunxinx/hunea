@@ -44,15 +44,7 @@ fn workspace_declares_ai_runtime_crates_and_tools_domain() {
     );
 
     let dependencies = dependency_section(&tools_manifest);
-    for forbidden in [
-        "agent-client-protocol",
-        "mo-acp",
-        "mo-app",
-        "mo-core",
-        "mo-native-agent",
-        "mo-tui",
-        "ratatui",
-    ] {
+    for forbidden in ["mo-app", "mo-core", "mo-native-agent", "mo-tui", "ratatui"] {
         assert!(
             !dependencies.contains(forbidden),
             "mo-tools should stay independent from {forbidden}"
@@ -65,13 +57,7 @@ fn core_has_no_frontend_or_runtime_crate_dependencies() {
     let manifest = include_str!("../Cargo.toml");
     let dependencies = dependency_section(manifest);
 
-    for crate_name in [
-        "agent-client-protocol",
-        "mo-acp",
-        "mo-tools",
-        "mo-native-agent",
-        "mo-tui",
-    ] {
+    for crate_name in ["mo-tools", "mo-native-agent", "mo-tui"] {
         assert!(
             !dependencies.contains(crate_name),
             "mo-core should define shared DTOs without depending on {crate_name}"

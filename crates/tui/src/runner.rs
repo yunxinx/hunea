@@ -8,7 +8,6 @@ use mo_core::{
 
 use super::{AppEvent, HeroOptions, Model, ModelOptions, STARTUP_PROBE_TIMEOUT, StyleMode, theme};
 
-mod acp_session;
 mod effects;
 mod event_pipeline;
 mod external_io;
@@ -17,7 +16,7 @@ mod model_refresh;
 mod native_agent;
 mod terminal;
 
-use acp_session::{AcpSessionUiState, apply_runtime_event_with_coordinator};
+use super::runtime::RuntimeEventApply;
 use effects::apply_effect_if_needed;
 use input::{TerminalInputAction, coalesced_input_actions, read_ready_terminal_events};
 use model_refresh::apply_model_provider_refresh_event;
@@ -97,7 +96,6 @@ pub fn run_with_runtime_coordinator(
     runtime_coordinator: &mut impl RuntimeCoordinator,
 ) -> Result<Model> {
     let mut model = Model::new_with_options(hero_options, options);
-    let mut acp_ui_state = AcpSessionUiState::default();
 
     if let Some(detection) = theme::try_detect_palette() {
         let _ = model.update(AppEvent::DetectedPalette {
@@ -118,8 +116,7 @@ pub fn run_with_runtime_coordinator(
     let mut mouse_mode = TerminalMouseMode::for_mouse_capture(true);
 
     loop {
-        render_needed |=
-            drain_runtime_coordinator_events(&mut model, &mut acp_ui_state, runtime_coordinator);
+        render_needed |= drain_runtime_coordinator_events(&mut model, runtime_coordinator);
 
         if render_needed {
             terminal.draw(|frame| model.render(frame))?;
@@ -141,26 +138,14 @@ pub fn run_with_runtime_coordinator(
         let now = Instant::now();
         if !model.has_palette() && now >= startup_deadline {
             let effect = model.update(AppEvent::StartupReadyTimeout);
-            apply_effect_if_needed(
-                &mut terminal,
-                &mut model,
-                &mut acp_ui_state,
-                runtime_coordinator,
-                effect,
-            )?;
+            apply_effect_if_needed(&mut terminal, &mut model, runtime_coordinator, effect)?;
             render_needed = true;
             continue;
         }
 
         if let Some(timeout_event) = model.timeout_event(now) {
             let effect = model.update(timeout_event);
-            apply_effect_if_needed(
-                &mut terminal,
-                &mut model,
-                &mut acp_ui_state,
-                runtime_coordinator,
-                effect,
-            )?;
+            apply_effect_if_needed(&mut terminal, &mut model, runtime_coordinator, effect)?;
             render_needed = true;
             continue;
         }
@@ -187,13 +172,7 @@ pub fn run_with_runtime_coordinator(
             match action {
                 TerminalInputAction::App(app_event) => {
                     let effect = model.update(app_event);
-                    apply_effect_if_needed(
-                        &mut terminal,
-                        &mut model,
-                        &mut acp_ui_state,
-                        runtime_coordinator,
-                        effect,
-                    )?;
+                    apply_effect_if_needed(&mut terminal, &mut model, runtime_coordinator, effect)?;
                     render_needed = true;
                 }
                 TerminalInputAction::CancelExitConfirmation => {
@@ -213,13 +192,12 @@ pub fn run_with_runtime_coordinator(
 
 fn drain_runtime_coordinator_events(
     model: &mut Model,
-    acp_ui_state: &mut AcpSessionUiState,
     runtime_coordinator: &mut impl RuntimeCoordinator,
 ) -> bool {
     let mut changed = false;
 
     for event in runtime_coordinator.drain_runtime_events() {
-        apply_runtime_event_with_coordinator(model, acp_ui_state, runtime_coordinator, event);
+        model.apply_runtime_event(event);
         changed = true;
     }
 

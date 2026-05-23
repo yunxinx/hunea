@@ -20,7 +20,7 @@ impl RuntimeIdentity {
         }
     }
 
-    /// `with_source_label` 附加来源标签，例如 provider id 或 ACP 配置 key。
+    /// `with_source_label` 附加来源标签，例如 provider id。
     pub fn with_source_label(mut self, source_label: impl Into<String>) -> Self {
         self.source_label = Some(source_label.into());
         self

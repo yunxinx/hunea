@@ -175,57 +175,15 @@ fn command_panel_descriptions_align_for_all_root_commands() {
         .iter()
         .find(|row| row.contains("/exit"))
         .expect("/exit command should render");
-    let acp_row = rows
+    let models_row = rows
         .iter()
-        .find(|row| row.contains("/acp"))
-        .expect("/acp command should render");
+        .find(|row| row.contains("/models"))
+        .expect("/models command should render");
 
     assert_eq!(
         exit_row.find("Exit the application"),
-        acp_row.find("Select ACP agent for this session"),
+        models_row.find("Select model for this session"),
         "command descriptions should start in the same column: {rows:?}"
-    );
-}
-
-#[test]
-fn command_panel_lists_acp_command_before_acp_session_starts() {
-    let mut model = ready_model(64, 12, ModelOptions::default());
-    type_text(&mut model, "/");
-
-    let rows = render_trimmed_rows(&mut model, 64, 12);
-
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("/acp") && row.contains("ACP")),
-        "expected /acp command without ACP config, got: {rows:?}"
-    );
-}
-
-#[test]
-fn command_panel_hides_acp_command_after_acp_session_starts() {
-    let mut model = ready_model(
-        64,
-        12,
-        ModelOptions {
-            acp_agent_servers: vec!["codex-acp".to_string()],
-            ..ModelOptions::default()
-        },
-    );
-    type_text(&mut model, "/acp");
-    model.update(AppEvent::Key(KeyCode::Enter.into()));
-    model.update(AppEvent::Key(KeyCode::Enter.into()));
-    type_text(&mut model, "/");
-
-    let rows = render_trimmed_rows(&mut model, 64, 12);
-
-    assert_eq!(model.selected_acp_agent(), Some("codex-acp"));
-    assert!(
-        rows.iter().all(|row| !row.contains("/acp")),
-        "/acp should disappear once an ACP session has been started: {rows:?}"
-    );
-    assert!(
-        rows.iter().any(|row| row.contains("/exit")),
-        "other slash commands should remain available: {rows:?}"
     );
 }
 
@@ -243,45 +201,12 @@ fn command_panel_selected_item_uses_accent_without_coloring_description_blue() {
 
     let buffer = render_buffer(&mut model, 64, 12);
 
-    assert_text_cells_use_color(&buffer, "/acp", palette.command_accent);
-    assert_text_cells_do_not_use_color(&buffer, "/acp", palette.accent);
-    assert_text_cells_are_bold(&buffer, "/acp");
-    assert_text_cells_use_color(&buffer, "Select ACP agent for this session", palette.main);
-    assert_text_cells_do_not_use_color(
-        &buffer,
-        "Select ACP agent for this session",
-        palette.command_accent,
-    );
-    assert_text_cells_use_color(&buffer, "/exit", palette.secondary);
-    assert_text_cells_use_color(&buffer, "Exit the application", palette.secondary);
+    assert_text_cells_use_color(&buffer, "/exit", palette.command_accent);
+    assert_text_cells_do_not_use_color(&buffer, "/exit", palette.accent);
+    assert_text_cells_are_bold(&buffer, "/exit");
+    assert_text_cells_use_color(&buffer, "Exit the application", palette.main);
+    assert_text_cells_do_not_use_color(&buffer, "Exit the application", palette.command_accent);
     assert_text_cells_use_color(&buffer, "/models", palette.secondary);
-}
-
-#[test]
-fn command_panel_enter_on_acp_command_opens_acp_panel() {
-    let mut model = ready_model(
-        64,
-        12,
-        ModelOptions {
-            acp_agent_servers: vec!["kimi".to_string()],
-            ..ModelOptions::default()
-        },
-    );
-    type_text(&mut model, "/");
-
-    model.update(AppEvent::Key(KeyCode::Enter.into()));
-
-    assert_eq!(model.composer_text(), "");
-    assert_eq!(model.selected_acp_agent(), None);
-    let rows = render_trimmed_rows(&mut model, 64, 12);
-    assert!(
-        rows.iter().any(|row| row.contains("ACP Agents:")),
-        "expected ACP panel after /acp command, got: {rows:?}"
-    );
-    assert!(
-        rows.iter().all(|row| !row.contains("[Session]")),
-        "ACP panel should not render a fake tab/provider label: {rows:?}"
-    );
 }
 
 #[test]
@@ -369,82 +294,6 @@ fn debug_tool_command_opens_tool_approval_preview_panel() {
     assert!(
         rows.iter().all(|row| !row.contains('›')),
         "composer prompt should be hidden while preview panel is open: {rows:?}"
-    );
-}
-
-#[test]
-fn acp_debug_command_opens_protocol_version_system_message_panel_item() {
-    let mut model = ready_model(
-        80,
-        16,
-        ModelOptions {
-            debug_commands_enabled: true,
-            ..ModelOptions::default()
-        },
-    );
-    type_text(&mut model, "/acp-debug");
-
-    let effect = model.update(AppEvent::Key(KeyCode::Enter.into()));
-
-    assert_eq!(effect, None);
-    assert_eq!(model.composer_text(), "");
-    let rows = render_trimmed_rows(&mut model, 80, 16);
-    assert!(
-        rows.iter().any(|row| row.contains("ACP Debug:")),
-        "expected /acp-debug panel, got: {rows:?}"
-    );
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("protocolVersion-system-msg")),
-        "expected protocolVersion debug item, got: {rows:?}"
-    );
-
-    model.update(AppEvent::Key(KeyCode::Enter.into()));
-
-    let items = model.transcript_plain_items();
-    assert!(
-        items
-            .iter()
-            .any(|item| item.contains("ACP protocol version mismatch")),
-        "expected protocolVersion system message, got: {items:?}"
-    );
-}
-
-#[test]
-fn acp_debug_panel_down_enter_appends_agent_capabilities_system_message() {
-    let mut model = ready_model(
-        80,
-        16,
-        ModelOptions {
-            debug_commands_enabled: true,
-            acp_agent_servers: vec!["kimi".to_string()],
-            ..ModelOptions::default()
-        },
-    );
-    type_text(&mut model, "/acp");
-    model.update(AppEvent::Key(KeyCode::Enter.into()));
-    model.update(AppEvent::Key(KeyCode::Enter.into()));
-
-    type_text(&mut model, "/acp-debug");
-    model.update(AppEvent::Key(KeyCode::Enter.into()));
-
-    model.update(AppEvent::Key(KeyCode::Down.into()));
-    let rows = render_trimmed_rows(&mut model, 80, 16);
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("➜ agent-capabilities-system-msg")),
-        "Down should visibly select the capabilities debug item, got: {rows:?}"
-    );
-
-    model.update(AppEvent::Key(KeyCode::Enter.into()));
-
-    let items = model.transcript_plain_items();
-    assert!(
-        items
-            .iter()
-            .any(|item| item
-                .contains("ACP agent capabilities: no initialize result recorded for kimi.")),
-        "expected selected capabilities system message after Down+Enter, got: {items:?}"
     );
 }
 

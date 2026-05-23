@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Write as _};
+use std::fmt::Write as _;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
@@ -23,13 +23,8 @@ const COMMAND_PANEL_DESCRIPTION_GAP: usize = 4;
 pub(super) enum CommandPanelAction {
     Clear,
     Exit,
-    CompleteAcpCommand { command_name: String },
-    ListAcpBackgroundTerminals,
-    OpenAcpDebug,
-    OpenAcpPicker,
     OpenModelPanel,
     OpenToolApprovalDebug,
-    StopAcpBackgroundTerminals,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -375,25 +370,6 @@ impl Model {
                 self.mark_quitting();
                 None
             }
-            CommandPanelAction::CompleteAcpCommand { .. } => {
-                let completion_text = command_panel_completion_text(&item);
-                self.complete_command_panel_selection(&completion_text);
-                None
-            }
-            CommandPanelAction::ListAcpBackgroundTerminals => {
-                let summary = self.acp_background_terminal_summary_text();
-                self.clear_command_panel_input();
-                self.append_system_message_from_runtime(summary);
-                None
-            }
-            CommandPanelAction::OpenAcpDebug => {
-                self.open_acp_debug_panel();
-                None
-            }
-            CommandPanelAction::OpenAcpPicker => {
-                self.open_acp_panel();
-                None
-            }
             CommandPanelAction::OpenModelPanel => {
                 self.open_model_panel();
                 None
@@ -402,23 +378,11 @@ impl Model {
                 self.open_tool_approval_debug_preview_panel();
                 None
             }
-            CommandPanelAction::StopAcpBackgroundTerminals => {
-                self.clear_command_panel_input();
-                self.append_system_message_from_runtime("Stopping all background terminals.");
-                Some(AppEffect::StopAcpBackgroundTerminals)
-            }
         }
     }
 
     fn filter_command_panel_items(&self, query: &str) -> Vec<CommandPanelItem> {
-        let is_acp_session_active = self.selected_acp_agent.is_some();
-        let base_items = filter_base_command_panel_items(
-            "",
-            is_acp_session_active,
-            self.has_active_acp_background_terminals(),
-            self.debug_commands_enabled,
-        );
-        let items = merge_command_panel_items(base_items, self.selected_acp_available_commands());
+        let items = filter_base_command_panel_items("", self.debug_commands_enabled);
 
         if query.is_empty() {
             return items;
@@ -429,18 +393,6 @@ impl Model {
             .filter(|item| command_panel_item_matches_query(item, query))
             .collect()
     }
-
-    fn clear_command_panel_input(&mut self) {
-        let old_value = self.composer_text().to_string();
-        let old_line = self.composer.line();
-        let old_column = self.composer.column();
-        self.composer.clear();
-        self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
-        self.sync_external_editor_helper_after_draft_change(&old_value);
-        self.sync_composer_height();
-        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
-    }
 }
 
 #[cfg(test)]
@@ -450,9 +402,7 @@ fn command_panel_query(value: &str) -> Option<String> {
     }
 
     let query = raw_command_panel_query(value)?;
-    if !filter_base_command_panel_items(&query, false, false, false).is_empty()
-        || query.chars().count() == 1
-    {
+    if !filter_base_command_panel_items(&query, false).is_empty() || query.chars().count() == 1 {
         return Some(query);
     }
 
@@ -488,8 +438,6 @@ fn raw_command_panel_query(value: &str) -> Option<String> {
 
 fn filter_base_command_panel_items(
     query: &str,
-    is_acp_session_active: bool,
-    has_active_acp_background_terminals: bool,
     debug_commands_enabled: bool,
 ) -> Vec<CommandPanelItem> {
     let mut items = vec![CommandPanelItem {
@@ -498,29 +446,6 @@ fn filter_base_command_panel_items(
         description: "Exit the application".to_string(),
         action: CommandPanelAction::Exit,
     }];
-
-    if !is_acp_session_active {
-        items.push(CommandPanelItem {
-            name: "/acp".to_string(),
-            aliases: Vec::new(),
-            description: "Select ACP agent for this session".to_string(),
-            action: CommandPanelAction::OpenAcpPicker,
-        });
-    }
-    if has_active_acp_background_terminals {
-        items.push(CommandPanelItem {
-            name: "/ps".to_string(),
-            aliases: Vec::new(),
-            description: "List background terminals".to_string(),
-            action: CommandPanelAction::ListAcpBackgroundTerminals,
-        });
-        items.push(CommandPanelItem {
-            name: "/stop".to_string(),
-            aliases: Vec::new(),
-            description: "Stop background terminals".to_string(),
-            action: CommandPanelAction::StopAcpBackgroundTerminals,
-        });
-    }
 
     items.push(CommandPanelItem {
         name: "/models".to_string(),
@@ -550,52 +475,11 @@ fn filter_base_command_panel_items(
 
 #[cfg(test)]
 fn base_command_panel_items_for_query(query: &str) -> Vec<CommandPanelItem> {
-    filter_base_command_panel_items(query, false, false, false)
+    filter_base_command_panel_items(query, false)
 }
 
 fn command_panel_completion_text(item: &CommandPanelItem) -> String {
-    match &item.action {
-        CommandPanelAction::CompleteAcpCommand { command_name } => {
-            format!("/{command_name} ")
-        }
-        _ => item.name.clone(),
-    }
-}
-
-fn merge_command_panel_items(
-    base_items: Vec<CommandPanelItem>,
-    acp_available_commands: &[mo_core::session::RuntimeAvailableCommand],
-) -> Vec<CommandPanelItem> {
-    let mut items = BTreeMap::new();
-    for item in base_items {
-        items.insert(command_panel_item_sort_key(&item), item);
-    }
-    for item in acp_command_panel_items(acp_available_commands) {
-        items.insert(command_panel_item_sort_key(&item), item);
-    }
-
-    items.into_values().collect()
-}
-
-fn acp_command_panel_items(
-    commands: &[mo_core::session::RuntimeAvailableCommand],
-) -> Vec<CommandPanelItem> {
-    commands
-        .iter()
-        .filter_map(|command| {
-            let command_name = command.name.trim().trim_start_matches('/').to_string();
-            if command_name.is_empty() {
-                return None;
-            }
-
-            Some(CommandPanelItem {
-                name: format!("/{command_name}"),
-                aliases: Vec::new(),
-                description: command.description.clone(),
-                action: CommandPanelAction::CompleteAcpCommand { command_name },
-            })
-        })
-        .collect()
+    item.name.clone()
 }
 
 fn command_panel_item_matches_query(item: &CommandPanelItem, query: &str) -> bool {
@@ -610,10 +494,6 @@ fn command_panel_item_matches_query(item: &CommandPanelItem, query: &str) -> boo
             .to_lowercase()
             .starts_with(query)
     })
-}
-
-fn command_panel_item_sort_key(item: &CommandPanelItem) -> String {
-    item.name.trim_start_matches('/').to_lowercase()
 }
 
 fn pad_display_width_right(text: &str, width: usize) -> String {

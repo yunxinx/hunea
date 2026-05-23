@@ -9,7 +9,6 @@ mod permission;
 mod target;
 
 pub use activity::{
-    RuntimeAvailableCommand, RuntimeAvailableCommandInput, RuntimeModelConfig, RuntimeModelOption,
     RuntimeTerminalExitStatus, RuntimeTerminalSnapshot, RuntimeToolActivity,
     RuntimeToolActivityContent, RuntimeToolActivityLocation, RuntimeToolActivityRawValue,
     RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,

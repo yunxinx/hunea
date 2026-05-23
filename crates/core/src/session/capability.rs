@@ -15,13 +15,4 @@ impl RuntimeCapability {
             supports_model_config: false,
         }
     }
-
-    /// `acp` 返回当前 ACP 会话对 TUI 暴露的能力快照。
-    pub const fn acp() -> Self {
-        Self {
-            supports_tools: false,
-            supports_permissions: true,
-            supports_model_config: true,
-        }
-    }
 }

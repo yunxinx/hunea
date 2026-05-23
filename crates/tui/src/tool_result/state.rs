@@ -8,7 +8,9 @@ use mo_core::session::{
     RuntimeToolActivityStatus, RuntimeToolActivityUpdate,
 };
 
-use super::{ToolActivityRenderMode, ToolResultBody, acp::acp_tool_call_content_byte_len};
+use super::{
+    ToolActivityRenderMode, ToolResultBody, activity::runtime_tool_activity_content_byte_len,
+};
 
 pub(super) fn runtime_tool_activity_source_byte_len(call: &RuntimeToolActivity) -> usize {
     call.title.len()
@@ -25,7 +27,7 @@ pub(super) fn runtime_tool_activity_source_byte_len(call: &RuntimeToolActivity) 
         + call
             .content
             .iter()
-            .map(acp_tool_call_content_byte_len)
+            .map(runtime_tool_activity_content_byte_len)
             .sum::<usize>()
 }
 

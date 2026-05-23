@@ -13,7 +13,6 @@ use crate::{
     },
     theme::{default_palette, terminal_default_palette},
 };
-use mo_core::acp::{AcpToolCall, AcpToolCallContent, AcpToolCallStatus, AcpToolKind};
 use mo_core::session::{
     RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityStatus,
     RuntimeToolActivityUpdate, RuntimeToolKind,
@@ -146,12 +145,12 @@ fn tool_result_is_display_only_and_not_assistant_message() {
 #[test]
 fn tool_activity_uses_compact_and_detailed_rendering_modes() {
     let mut transcript = Transcript::new(default_palette());
-    transcript.append_runtime_tool_activity(AcpToolCall {
-        tool_call_id: "call-1".to_string(),
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-1".to_string(),
         title: "Shell: cargo check".to_string(),
-        kind: AcpToolKind::Other,
-        status: AcpToolCallStatus::Completed,
-        content: vec![AcpToolCallContent::Text("summary".to_string())],
+        kind: RuntimeToolKind::Other,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text("summary".to_string())],
         locations: Vec::new(),
         raw_input: None,
         raw_output: Some(

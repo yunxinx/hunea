@@ -1,12 +1,8 @@
 use std::io::{self, IsTerminal, Write};
 
 use color_eyre::eyre::{Result, WrapErr};
-use mo_acp::{
-    AcpAgentServerConfig, AcpAgentServerType, AcpSessionCatalog, AcpSessionCatalogConfig,
-};
 use mo_config::appconfig::{
-    self, AcpConfig, AgentServerType, Config, DebugConfig, ReasoningContentDisplay, RuntimeConfig,
-    TuiConfig, UserInputStyle,
+    self, Config, DebugConfig, ReasoningContentDisplay, RuntimeConfig, TuiConfig, UserInputStyle,
 };
 use mo_core::{
     envinfo,
@@ -69,7 +65,7 @@ pub fn run_with_writer<W: Write>(
     write_terminal_replay_on_exit(writer, &model, preserve_ansi, tui_config)
 }
 
-/// `run_with_config_writer` 使用完整配置启动 TUI，包含 ACP 命令入口。
+/// `run_with_config_writer` 使用完整配置启动 TUI。
 pub fn run_with_config_writer<W: Write>(
     writer: &mut W,
     preserve_ansi: bool,
@@ -186,7 +182,7 @@ fn model_options_from_config_and_models(
     loaded_models: &LoadedModelCatalog,
     loaded_phrases: &LoadedStatusPhrases,
 ) -> ModelOptions {
-    model_options_from_configs(tui_config, None, None, loaded_models, loaded_phrases)
+    model_options_from_configs(tui_config, None, loaded_models, loaded_phrases)
 }
 
 fn model_options_from_app_config_and_models(
@@ -197,7 +193,6 @@ fn model_options_from_app_config_and_models(
     model_options_from_configs(
         &config.tui,
         Some(&config.debug),
-        Some(&config.acp),
         loaded_models,
         loaded_phrases,
     )
@@ -208,7 +203,6 @@ fn runtime_options_from_app_config_and_models(
     loaded_models: &LoadedModelCatalog,
 ) -> AppRuntimeOptions {
     AppRuntimeOptions {
-        acp_sessions: acp_session_catalog_from_config(&config.acp),
         model_config_path: loaded_models.source_path.clone(),
         runtime_request_policy: runtime_request_policy_from_config(&config.runtime),
     }
@@ -226,7 +220,6 @@ fn runtime_request_policy_from_config(config: &RuntimeConfig) -> RuntimeRequestP
 fn model_options_from_configs(
     tui_config: &TuiConfig,
     debug_config: Option<&DebugConfig>,
-    acp_config: Option<&AcpConfig>,
     loaded_models: &LoadedModelCatalog,
     loaded_phrases: &LoadedStatusPhrases,
 ) -> ModelOptions {
@@ -248,54 +241,11 @@ fn model_options_from_configs(
             tui_config.reasoning_content_display,
         ),
         debug_commands_enabled: debug_config.is_some_and(|config| config.enabled),
-        acp_agent_servers: acp_agent_servers_from_config(acp_config),
         model_catalog: loaded_models.catalog.clone(),
         selected_model: loaded_models.selected_model.clone(),
         requires_model_selection: loaded_models.requires_model_selection,
         status_phrases: loaded_phrases.phrases.clone(),
         status_phrase_order: loaded_phrases.order,
-    }
-}
-
-fn acp_agent_servers_from_config(acp_config: Option<&AcpConfig>) -> Vec<String> {
-    let Some(acp_config) = acp_config else {
-        return Vec::new();
-    };
-    if !acp_config.enabled {
-        return Vec::new();
-    }
-
-    acp_config.agent_servers.keys().cloned().collect()
-}
-
-fn acp_session_catalog_from_config(config: &AcpConfig) -> AcpSessionCatalog {
-    AcpSessionCatalog::from_config(&AcpSessionCatalogConfig {
-        enabled: config.enabled,
-        agent_servers: config
-            .agent_servers
-            .iter()
-            .map(|(agent_id, server)| {
-                (
-                    agent_id.clone(),
-                    AcpAgentServerConfig {
-                        server_type: acp_agent_server_type_from_config(server.server_type),
-                        agent: server.agent.clone(),
-                        command: server.command.clone(),
-                        args: server.args.clone(),
-                        env: server.env.clone(),
-                        default_model: server.default_model.clone(),
-                        default_mode: server.default_mode.clone(),
-                    },
-                )
-            })
-            .collect(),
-    })
-}
-
-fn acp_agent_server_type_from_config(server_type: AgentServerType) -> AcpAgentServerType {
-    match server_type {
-        AgentServerType::Registry => AcpAgentServerType::Registry,
-        AgentServerType::Custom => AcpAgentServerType::Custom,
     }
 }
 
@@ -315,9 +265,6 @@ fn external_editor_hint_from_config(configured: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mo_config::appconfig::{
-        AcpDistribution, AcpInstallRoot, AgentServerConfig, AgentServerType,
-    };
 
     #[test]
     fn model_options_from_config_carries_mouse_selection_copy_flag() {
@@ -544,93 +491,9 @@ mod tests {
             tui: default_tui_config(),
             runtime: default_runtime_config(),
             debug: DebugConfig { enabled: true },
-            acp: AcpConfig {
-                enabled: false,
-                registry_url: String::new(),
-                install_root: AcpInstallRoot::Config,
-                custom_install_dir: std::path::PathBuf::new(),
-                distribution_preference: vec![AcpDistribution::Binary],
-                auto_update_check: true,
-                agent_servers: std::collections::BTreeMap::new(),
-            },
         });
 
         assert!(options.debug_commands_enabled);
-    }
-
-    #[test]
-    fn acp_options_from_app_config_exposes_direct_acp_commands() {
-        let mut agent_servers = std::collections::BTreeMap::new();
-        agent_servers.insert(
-            "local-kimi".to_string(),
-            AgentServerConfig {
-                server_type: AgentServerType::Custom,
-                agent: String::new(),
-                command: "kimi".to_string(),
-                args: vec!["acp".to_string()],
-                env: std::collections::BTreeMap::new(),
-                default_model: None,
-                default_mode: None,
-            },
-        );
-        let config = Config {
-            tui: default_tui_config(),
-            runtime: default_runtime_config(),
-            debug: DebugConfig { enabled: false },
-            acp: AcpConfig {
-                enabled: true,
-                registry_url: "https://example.test/registry.json".to_string(),
-                install_root: AcpInstallRoot::Config,
-                custom_install_dir: std::path::PathBuf::new(),
-                distribution_preference: vec![AcpDistribution::Binary],
-                auto_update_check: true,
-                agent_servers,
-            },
-        };
-
-        let options = runtime_options_from_app_config(&config);
-        let command = options
-            .acp_sessions
-            .command("local-kimi")
-            .expect("local-kimi should be directly launchable");
-
-        assert_eq!(command.command, "kimi");
-        assert_eq!(command.args, vec!["acp"]);
-    }
-
-    #[test]
-    fn model_options_from_app_config_exposes_enabled_acp_servers() {
-        let mut agent_servers = std::collections::BTreeMap::new();
-        agent_servers.insert(
-            "kimi".to_string(),
-            AgentServerConfig {
-                server_type: AgentServerType::Registry,
-                agent: "kimi".to_string(),
-                command: String::new(),
-                args: Vec::new(),
-                env: std::collections::BTreeMap::new(),
-                default_model: None,
-                default_mode: None,
-            },
-        );
-        let config = Config {
-            tui: default_tui_config(),
-            runtime: default_runtime_config(),
-            debug: DebugConfig { enabled: false },
-            acp: AcpConfig {
-                enabled: true,
-                registry_url: "https://example.test/registry.json".to_string(),
-                install_root: AcpInstallRoot::Config,
-                custom_install_dir: std::path::PathBuf::new(),
-                distribution_preference: vec![AcpDistribution::Binary],
-                auto_update_check: true,
-                agent_servers,
-            },
-        };
-
-        let options = model_options_from_app_config(&config);
-
-        assert_eq!(options.acp_agent_servers, vec!["kimi"]);
     }
 
     #[test]
@@ -644,15 +507,6 @@ mod tests {
                 tool_max_turns: Some(11),
             },
             debug: DebugConfig { enabled: false },
-            acp: AcpConfig {
-                enabled: false,
-                registry_url: String::new(),
-                install_root: AcpInstallRoot::Config,
-                custom_install_dir: std::path::PathBuf::new(),
-                distribution_preference: vec![AcpDistribution::Binary],
-                auto_update_check: true,
-                agent_servers: std::collections::BTreeMap::new(),
-            },
         };
 
         let options = runtime_options_from_app_config(&config);

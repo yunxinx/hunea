@@ -97,7 +97,7 @@ fn shell_result_removes_shell_prefix_and_highlights_command() {
 }
 
 #[test]
-fn acp_tool_call_header_uses_title_only_and_strips_shell_prefix() {
+fn runtime_tool_activity_header_uses_title_only_and_strips_shell_prefix() {
     let palette = default_palette();
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
@@ -121,7 +121,7 @@ fn acp_tool_call_header_uses_title_only_and_strips_shell_prefix() {
             .spans
             .iter()
             .all(|span| !span.content.as_ref().contains("Completed")),
-        "status text should not be part of the ACP header: {:?}",
+        "status text should not be part of the runtime header: {:?}",
         lines[0].spans
     );
     assert!(
@@ -129,7 +129,7 @@ fn acp_tool_call_header_uses_title_only_and_strips_shell_prefix() {
             .spans
             .iter()
             .all(|span| !span.content.as_ref().contains("[Other]")),
-        "kind label should not be part of the ACP header: {:?}",
+        "kind label should not be part of the runtime header: {:?}",
         lines[0].spans
     );
     assert!(
@@ -137,13 +137,13 @@ fn acp_tool_call_header_uses_title_only_and_strips_shell_prefix() {
             .spans
             .iter()
             .all(|span| !span.content.as_ref().contains("Shell:")),
-        "tool prefix should be stripped from the ACP header: {:?}",
+        "tool prefix should be stripped from the runtime header: {:?}",
         lines[0].spans
     );
 }
 
 #[test]
-fn acp_tool_call_header_highlights_shell_titles() {
+fn runtime_tool_activity_header_highlights_shell_titles() {
     let palette = default_palette();
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
@@ -167,7 +167,7 @@ fn acp_tool_call_header_highlights_shell_titles() {
             .iter()
             .skip(1)
             .any(|span| span.style.fg.is_some()),
-        "shell-like ACP titles should carry syntax highlight foreground colors: {:?}",
+        "shell-like runtime titles should carry syntax highlight foreground colors: {:?}",
         lines[0].spans
     );
 }
@@ -381,7 +381,7 @@ fn completed_non_execute_tool_call_still_renders_text_content() {
 }
 
 #[test]
-fn acp_tool_call_raw_output_trailing_newline_does_not_render_blank_line() {
+fn runtime_tool_activity_raw_output_trailing_newline_does_not_render_blank_line() {
     let palette = default_palette();
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
@@ -410,12 +410,12 @@ fn acp_tool_call_raw_output_trailing_newline_does_not_render_blank_line() {
         rendered
             .last()
             .is_some_and(|line| !line_to_plain_text(line).trim().is_empty()),
-        "rendered ACP output should not end with a blank line: {rendered_plain:?}"
+        "rendered runtime output should not end with a blank line: {rendered_plain:?}"
     );
 }
 
 #[test]
-fn acp_pending_text_content_is_not_approval_waiting_without_permission_state() {
+fn runtime_pending_text_content_is_not_approval_waiting_without_permission_state() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-1".to_string(),
@@ -452,7 +452,7 @@ fn acp_pending_text_content_is_not_approval_waiting_without_permission_state() {
 }
 
 #[test]
-fn acp_tool_call_multi_line_raw_output_uses_four_space_continuation_prefix() {
+fn runtime_tool_activity_multi_line_raw_output_uses_four_space_continuation_prefix() {
     let palette = default_palette();
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
@@ -484,7 +484,7 @@ fn acp_tool_call_multi_line_raw_output_uses_four_space_continuation_prefix() {
 }
 
 #[test]
-fn acp_tool_call_terminal_content_renders_live_snapshot() {
+fn runtime_tool_activity_terminal_content_renders_live_snapshot() {
     let mut item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-terminal".to_string(),
@@ -522,12 +522,12 @@ fn acp_tool_call_terminal_content_renders_live_snapshot() {
     assert!(plain.contains("Running..."));
     assert!(plain.contains("Checking lumos"));
     assert!(plain.contains("Finished"));
-    assert!(!plain.contains("ACP terminal unavailable"));
+    assert!(!plain.contains("runtime terminal unavailable"));
     assert!(!plain.contains("terminal/create unsupported"));
 }
 
 #[test]
-fn acp_tool_call_raw_output_uses_secondary_color_and_codex_like_alignment() {
+fn runtime_tool_activity_raw_output_uses_secondary_color_and_codex_like_alignment() {
     let palette = default_palette();
     let item = ToolResultItem::from_runtime_tool_activity(
             RuntimeToolActivity {
@@ -568,7 +568,7 @@ fn acp_tool_call_raw_output_uses_secondary_color_and_codex_like_alignment() {
 }
 
 #[test]
-fn acp_read_tool_call_renders_compact_summary_without_content_details() {
+fn runtime_read_tool_activity_renders_compact_summary_without_content_details() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-1".to_string(),
@@ -597,7 +597,7 @@ fn acp_read_tool_call_renders_compact_summary_without_content_details() {
 }
 
 #[test]
-fn acp_read_tool_call_appends_completed_partial_line_range() {
+fn runtime_read_tool_activity_appends_completed_partial_line_range() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-1".to_string(),
@@ -643,7 +643,7 @@ fn acp_read_tool_call_appends_completed_partial_line_range() {
 }
 
 #[test]
-fn acp_read_tool_call_keeps_full_file_title_without_line_range() {
+fn runtime_read_tool_activity_keeps_full_file_title_without_line_range() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-1".to_string(),
@@ -680,7 +680,7 @@ fn acp_read_tool_call_keeps_full_file_title_without_line_range() {
 }
 
 #[test]
-fn acp_read_tool_call_does_not_infer_line_range_from_input_arguments() {
+fn runtime_read_tool_activity_does_not_infer_line_range_from_input_arguments() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-1".to_string(),
@@ -716,7 +716,7 @@ fn acp_read_tool_call_does_not_infer_line_range_from_input_arguments() {
 }
 
 #[test]
-fn acp_readfile_title_fallback_renders_compact_summary_even_without_read_kind() {
+fn runtime_readfile_title_fallback_renders_compact_summary_even_without_read_kind() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-1".to_string(),
@@ -956,7 +956,7 @@ fn exploration_group_wraps_target_lists_at_word_boundaries() {
         "Cargo.toml",
         "phrases.example.toml",
         ".gitignore",
-        "acp.example.toml",
+        "config.example.toml",
     ] {
         assert!(item.append_exploration_tool_activity(completed_read_call(path)));
     }
@@ -974,7 +974,7 @@ fn exploration_group_wraps_target_lists_at_word_boundaries() {
                 "● Explored".to_string(),
                 "  └ Read CLAUDE.md, config.example.toml, models.example.toml, Cargo.toml, phrases.example.toml, .gitignore,"
                     .to_string(),
-                "    acp.example.toml".to_string(),
+                "    config.example.toml".to_string(),
             ]
         );
 }
@@ -1157,7 +1157,7 @@ fn completed_read_call(path: &str) -> RuntimeToolActivity {
 }
 
 #[test]
-fn acp_writefile_in_progress_suppresses_raw_input_and_uses_compact_title() {
+fn runtime_writefile_in_progress_suppresses_raw_input_and_uses_compact_title() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-1".to_string(),
@@ -1191,7 +1191,7 @@ fn acp_writefile_in_progress_suppresses_raw_input_and_uses_compact_title() {
 }
 
 #[test]
-fn active_acp_write_marker_blinks_by_disappearing_with_main_text_color() {
+fn active_runtime_write_marker_blinks_by_disappearing_with_main_text_color() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-1".to_string(),
@@ -1229,7 +1229,7 @@ fn active_acp_write_marker_blinks_by_disappearing_with_main_text_color() {
 }
 
 #[test]
-fn acp_tool_call_diff_context_lines_keep_default_style() {
+fn runtime_tool_activity_diff_context_lines_keep_default_style() {
     let palette = default_palette();
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
@@ -1275,7 +1275,7 @@ fn acp_tool_call_diff_context_lines_keep_default_style() {
 }
 
 #[test]
-fn acp_tool_call_added_diff_uses_codex_like_header_and_line_numbers() {
+fn runtime_tool_activity_added_diff_uses_codex_like_header_and_line_numbers() {
     let palette = default_palette();
     let absolute_path = std::env::current_dir()
         .expect("cwd should be available")
@@ -1340,7 +1340,7 @@ fn acp_tool_call_added_diff_uses_codex_like_header_and_line_numbers() {
 }
 
 #[test]
-fn acp_tool_call_detailed_diff_keeps_all_rows() {
+fn runtime_tool_activity_detailed_diff_keeps_all_rows() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-1".to_string(),
@@ -1382,7 +1382,7 @@ fn acp_tool_call_detailed_diff_keeps_all_rows() {
 }
 
 #[test]
-fn acp_tool_call_updated_diff_renders_delete_and_insert_line_numbers() {
+fn runtime_tool_activity_updated_diff_renders_delete_and_insert_line_numbers() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-1".to_string(),
@@ -1428,7 +1428,7 @@ fn acp_tool_call_updated_diff_renders_delete_and_insert_line_numbers() {
 }
 
 #[test]
-fn acp_tool_call_diff_right_aligns_three_digit_line_numbers_in_fixed_gutter() {
+fn runtime_tool_activity_diff_right_aligns_three_digit_line_numbers_in_fixed_gutter() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-1".to_string(),

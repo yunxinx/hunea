@@ -1,13 +1,12 @@
 use mo_core::{
-    acp::{AcpAgentIdentity, AcpPromptRequest},
     provider::ProviderKind,
     session::{
         ChatMessage, NativeAgentTurnRequest, RuntimeCapability, RuntimeCommand, RuntimeEvent,
-        RuntimeIdentity, RuntimeModelConfig, RuntimeModelOption, RuntimePermissionOption,
-        RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeTarget,
-        RuntimeTerminalExitStatus, RuntimeTerminalSnapshot, RuntimeToolActivity,
-        RuntimeToolActivityContent, RuntimeToolActivityLocation, RuntimeToolActivityRawValue,
-        RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
+        RuntimeIdentity, RuntimePermissionOption, RuntimePermissionOptionKind,
+        RuntimePermissionRequest, RuntimeTarget, RuntimeTerminalExitStatus,
+        RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
+        RuntimeToolActivityLocation, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
+        RuntimeToolActivityUpdate, RuntimeToolKind,
     },
 };
 
@@ -32,7 +31,6 @@ fn runtime_permission_request_selects_cancel_reject_fallback() {
 #[test]
 fn runtime_command_and_event_carry_target_identity() {
     let target = RuntimeTarget::native_agent("openai", "gpt-4o-mini");
-    let command = RuntimeCommand::submit_prompt(target.clone(), "hello");
     let native_command = RuntimeCommand::submit_native_agent(NativeAgentTurnRequest::new(
         "openai",
         ProviderKind::OpenAi,
@@ -42,34 +40,23 @@ fn runtime_command_and_event_carry_target_identity() {
         None,
         ChatMessage::user("hello".to_string()),
     ));
-    let acp_target = RuntimeTarget::acp_agent("kimi");
-    let acp_command = RuntimeCommand::submit_acp_prompt(AcpPromptRequest {
-        agent_id: "kimi".to_string(),
-        text: "hello".to_string(),
-        current_dir: std::path::PathBuf::from("."),
-        identity: Box::<AcpAgentIdentity>::default(),
-    });
     let truncate_command = RuntimeCommand::truncate_native_agent_session(1);
     let permission_command =
         RuntimeCommand::respond_permission(target.clone(), "permission-1", Some("allow".into()));
-    let config_command = RuntimeCommand::set_config_option(target.clone(), "model", "gpt-4.1-mini");
     let event = RuntimeEvent::Started {
         target: target.clone(),
         identity: RuntimeIdentity::new("gpt-4o-mini").with_source_label("openai"),
     };
 
-    assert_eq!(command.target(), Some(&target));
     assert_eq!(native_command.target(), Some(&target));
-    assert_eq!(acp_command.target(), Some(&acp_target));
     assert_eq!(truncate_command.target(), None);
     assert_eq!(permission_command.target(), Some(&target));
-    assert_eq!(config_command.target(), Some(&target));
     assert_eq!(event.target(), Some(&target));
 }
 
 #[test]
 fn runtime_event_target_covers_rich_activity_surface() {
-    let target = RuntimeTarget::acp_agent("kimi");
+    let target = RuntimeTarget::native_agent("openai", "gpt-4o-mini");
     let tool_activity = RuntimeToolActivity {
         activity_id: "tool-1".to_string(),
         title: "Read src/main.rs".to_string(),
@@ -102,16 +89,6 @@ fn runtime_event_target_covers_rich_activity_surface() {
         }),
         released: false,
     };
-    let config = RuntimeModelConfig {
-        config_id: Some("model".to_string()),
-        current_value: "gpt-4.1".to_string(),
-        current_name: "GPT 4.1".to_string(),
-        options: vec![RuntimeModelOption {
-            value: "gpt-4.1".to_string(),
-            name: "GPT 4.1".to_string(),
-        }],
-    };
-
     let events = [
         RuntimeEvent::ToolActivityStarted {
             target: target.clone(),
@@ -124,10 +101,6 @@ fn runtime_event_target_covers_rich_activity_surface() {
         RuntimeEvent::TerminalUpdated {
             target: target.clone(),
             snapshot: terminal,
-        },
-        RuntimeEvent::ModelConfigChanged {
-            target: target.clone(),
-            config,
         },
     ];
 

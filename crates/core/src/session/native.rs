@@ -50,6 +50,81 @@ impl NativeAgentRequest {
     }
 }
 
+/// `NativeAgentTurnRequest` 描述 TUI 向 native agent session 提交的一次用户 turn。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeAgentTurnRequest {
+    provider_id: String,
+    provider_kind: ProviderKind,
+    model_id: String,
+    base_url: Option<String>,
+    api_key: Option<ProviderApiKey>,
+    api_key_env: Option<String>,
+    message: ChatMessage,
+}
+
+impl NativeAgentTurnRequest {
+    /// `new` 创建一次 native agent turn 提交请求。
+    pub fn new(
+        provider_id: impl Into<String>,
+        provider_kind: ProviderKind,
+        model_id: impl Into<String>,
+        base_url: Option<String>,
+        api_key: Option<ProviderApiKey>,
+        api_key_env: Option<String>,
+        message: ChatMessage,
+    ) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            provider_kind,
+            model_id: model_id.into(),
+            base_url,
+            api_key,
+            api_key_env,
+            message,
+        }
+    }
+
+    /// `target` 返回该 turn 对应的统一 runtime 目标。
+    pub fn target(&self) -> RuntimeTarget {
+        RuntimeTarget::native_agent(self.provider_id.clone(), self.model_id.clone())
+    }
+
+    /// `provider_id` 返回当前 provider 标识。
+    pub fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
+    /// `provider_kind` 返回 provider 类型。
+    pub const fn provider_kind(&self) -> ProviderKind {
+        self.provider_kind
+    }
+
+    /// `model_id` 返回当前模型标识。
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// `base_url` 返回当前 provider base_url。
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
+    /// `api_key` 返回直接配置的 API key。
+    pub fn api_key(&self) -> Option<&ProviderApiKey> {
+        self.api_key.as_ref()
+    }
+
+    /// `api_key_env` 返回 API key 环境变量名。
+    pub fn api_key_env(&self) -> Option<&str> {
+        self.api_key_env.as_deref()
+    }
+
+    /// `message` 返回本轮提交的用户消息。
+    pub fn message(&self) -> &ChatMessage {
+        &self.message
+    }
+}
+
 /// `NativeLlmRequest` 保存 native agent 调用 LLM backend 所需的模型参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeLlmRequest {

@@ -18,6 +18,7 @@ pub(crate) struct BacktrackState {
 struct BacktrackSelection {
     item_index: usize,
     prefill: String,
+    retained_user_turns: usize,
 }
 
 impl Model {
@@ -90,7 +91,7 @@ impl Model {
                 let selection = self.current_backtrack_selection();
                 self.close_transcript_overlay();
                 if let Some(selection) = selection {
-                    self.apply_native_backtrack_selection(selection);
+                    return Some(self.apply_native_backtrack_selection(selection));
                 }
                 Some(None)
             }
@@ -175,6 +176,11 @@ impl Model {
                 Some(BacktrackSelection {
                     item_index,
                     prefill: message.source_content().to_string(),
+                    retained_user_turns: self
+                        .backtrack_user_item_indices()
+                        .into_iter()
+                        .filter(|candidate| *candidate < item_index)
+                        .count(),
                 })
             }
             TranscriptItem::Hero(_)
@@ -186,9 +192,12 @@ impl Model {
         }
     }
 
-    fn apply_native_backtrack_selection(&mut self, selection: BacktrackSelection) {
+    fn apply_native_backtrack_selection(
+        &mut self,
+        selection: BacktrackSelection,
+    ) -> Option<AppEffect> {
         if self.selected_acp_agent.is_some() {
-            return;
+            return None;
         }
 
         let old_value = self.composer_text().to_string();
@@ -199,7 +208,7 @@ impl Model {
             .transcript_mut()
             .truncate_before_item(selection.item_index)
         {
-            return;
+            return None;
         }
 
         self.refresh_status_line_after_transcript_change();
@@ -214,6 +223,9 @@ impl Model {
         self.document_runtime.manual_scroll = false;
         self.clear_manual_document_scroll_restore_target();
         self.sync_document_viewport_to_bottom();
+        Some(AppEffect::TruncateNativeAgentSession {
+            retained_user_turns: selection.retained_user_turns,
+        })
     }
 
     fn backtrack_user_item_indices(&self) -> Vec<usize> {

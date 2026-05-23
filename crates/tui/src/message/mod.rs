@@ -159,15 +159,6 @@ impl MessageItem {
         self.content.as_ref()
     }
 
-    pub(crate) fn source_chat_message(&self) -> ChatMessage {
-        self.source_message
-            .clone()
-            .unwrap_or_else(|| match self.sender {
-                Sender::User => ChatMessage::user(self.content.as_ref().to_string()),
-                Sender::Assistant => ChatMessage::assistant(self.content.as_ref().to_string()),
-            })
-    }
-
     pub(crate) fn render_cache_key(&self) -> u64 {
         self.render_cache_key
     }

@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use mo_core::{
     acp::AcpPromptRequest,
     model_catalog::{ModelSelection, ProviderSyncRequest},
-    session::{ChatMessage, NativeAgentRequest, RuntimeTarget},
+    session::{ChatMessage, NativeAgentTurnRequest, RuntimeTarget},
 };
 
 use super::{
@@ -44,8 +44,11 @@ pub enum AppEffect {
         value: String,
     },
     StopAcpBackgroundTerminals,
+    TruncateNativeAgentSession {
+        retained_user_turns: usize,
+    },
     SendNativeAgent {
-        request: NativeAgentRequest,
+        request: NativeAgentTurnRequest,
     },
     InterruptCurrentTurn,
     PersistSelectedModel {
@@ -541,7 +544,7 @@ impl Model {
                 Sender::User,
                 content.clone(),
                 style_mode,
-                Some(source_message),
+                Some(source_message.clone()),
             );
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
@@ -572,7 +575,7 @@ impl Model {
         }
 
         let selection = self.selected_model.clone()?;
-        self.native_agent_request_for_selection(&selection)
+        self.native_agent_request_for_selection(&selection, source_message)
             .map(|request| AppEffect::SendNativeAgent { request })
     }
 
@@ -608,7 +611,8 @@ impl Model {
     fn native_agent_request_for_selection(
         &mut self,
         selection: &ModelSelection,
-    ) -> Option<NativeAgentRequest> {
+        message: ChatMessage,
+    ) -> Option<NativeAgentTurnRequest> {
         let Some(provider) = self
             .model_catalog
             .enabled_provider_by_id(&selection.provider_id)
@@ -620,14 +624,14 @@ impl Model {
             self.show_transient_status_notice("Selected provider is not native");
             return None;
         };
-        Some(NativeAgentRequest::new(
+        Some(NativeAgentTurnRequest::new(
             selection.provider_id.clone(),
             native_runtime.kind,
             selection.model_id.clone(),
             native_runtime.base_url.clone(),
             native_runtime.api_key.clone(),
             native_runtime.api_key_env.clone(),
-            self.agent_messages_from_transcript(),
+            message,
         ))
     }
 
@@ -656,10 +660,6 @@ impl Model {
         }
 
         true
-    }
-
-    fn agent_messages_from_transcript(&self) -> Vec<ChatMessage> {
-        self.transcript.source_chat_messages()
     }
 }
 

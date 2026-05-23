@@ -21,10 +21,13 @@ use crate::{
 };
 
 const TOOL_PERMISSION_DENIED: &str = "Tool permission denied";
+const TOOL_EXECUTION_INTERRUPTED: &str = "Tool execution interrupted";
 
-/// `AgentRuntimeProgress` describes UI-consumable runtime progress.
+/// `AgentRuntimeProgress` describes runtime progress and provider-context session deltas.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentRuntimeProgress {
+    ProviderTurnStarted,
+    ProviderContextMessage { message: Message },
     OutputTokens { total_tokens: usize },
     InputTokens { total_tokens: usize },
     Thinking { is_thinking: bool },
@@ -47,6 +50,7 @@ pub struct AgentRuntimeResponse {
 pub struct AgentRuntimeCompletion {
     pub response: AgentRuntimeResponse,
     pub metrics: Option<NativeLlmPerformanceMetrics>,
+    pub appended_messages: Vec<Message>,
 }
 
 /// `AgentRuntimeOptions` controls runtime-owned tool loop behavior.
@@ -91,6 +95,7 @@ where
     request.tools = ai_tool_definitions_from_registry(&tool_definitions);
     let mut state = RuntimeTurnState::new(request.model.clone());
     let mut tool_turns = 0usize;
+    let mut appended_messages = Vec::new();
 
     loop {
         let prompt = request.clone();
@@ -100,7 +105,12 @@ where
         state.capture_turn_response(&provider_response);
         let tool_calls = provider_response.tool_calls.clone();
         if !provider_response.finish_reason.is_tool_call() || tool_calls.is_empty() {
-            return Ok(state.finish_at(Instant::now()));
+            append_provider_context_message(
+                provider_response.message,
+                &mut appended_messages,
+                &mut on_progress,
+            );
+            return Ok(state.finish_at(Instant::now(), appended_messages));
         }
 
         if let Some(max_turns) = options.tool_max_turns
@@ -110,20 +120,30 @@ where
         }
         state.mark_tool_call_turn();
         tool_turns = tool_turns.saturating_add(1);
-        request.messages.push(provider_response.message);
+        request.messages.push(provider_response.message.clone());
+        append_provider_context_message(
+            provider_response.message,
+            &mut appended_messages,
+            &mut on_progress,
+        );
 
+        let mut tool_result_batch = Vec::new();
         for call in tool_calls {
             let activity = runtime_tool_activity_from_call(&call, &tool_definitions);
             on_progress(AgentRuntimeProgress::ToolActivityStarted { activity });
-            let execution = execute_tool_call(
-                &call,
-                &executor,
-                &tool_definitions,
-                cancellation,
-                options.permission_handler.as_ref(),
-                &options.error_formatter,
-            )
-            .await;
+            let execution = if cancellation.is_cancelled() {
+                interrupted_tool_execution(&call)
+            } else {
+                execute_tool_call(
+                    &call,
+                    &executor,
+                    &tool_definitions,
+                    cancellation,
+                    options.permission_handler.as_ref(),
+                    &options.error_formatter,
+                )
+                .await
+            };
             let update = runtime_tool_activity_update_from_result(
                 &call,
                 &execution.raw_result,
@@ -131,17 +151,44 @@ where
                 &tool_definitions,
             );
             on_progress(AgentRuntimeProgress::ToolActivityUpdated { update });
-            if execution.raw_result.terminate {
-                return Ok(state.finish_at(Instant::now()));
+            let tool_result_message = Message::tool_result(execution.provider_result);
+            tool_result_batch.push((tool_result_message, execution.raw_result.terminate));
+        }
+
+        let should_terminate_after_batch = tool_result_batch
+            .iter()
+            .all(|(_, should_terminate)| *should_terminate);
+        for (tool_result_message, _) in tool_result_batch {
+            if should_terminate_after_batch {
+                append_provider_context_message(
+                    tool_result_message,
+                    &mut appended_messages,
+                    &mut on_progress,
+                );
+                continue;
             }
+            let provider_result_content = tool_result_message
+                .first_tool_result()
+                .expect("runtime-created tool result messages should contain a tool result")
+                .content
+                .as_str();
             state.observe_tool_result_input(
-                &execution.provider_result.content,
+                provider_result_content,
                 Instant::now(),
                 &mut on_progress,
             );
-            request
-                .messages
-                .push(Message::tool_result(execution.provider_result));
+            request.messages.push(tool_result_message.clone());
+            append_provider_context_message(
+                tool_result_message,
+                &mut appended_messages,
+                &mut on_progress,
+            );
+        }
+        if cancellation.is_cancelled() {
+            return Err(AgentRuntimeError::Cancelled);
+        }
+        if should_terminate_after_batch {
+            return Ok(state.finish_at(Instant::now(), appended_messages));
         }
     }
 }
@@ -157,6 +204,10 @@ where
     C: ProviderClient + ?Sized,
     F: FnMut(AgentRuntimeProgress) + Send,
 {
+    if cancellation.is_cancelled() {
+        return Err(AgentRuntimeError::Cancelled);
+    }
+    on_progress(AgentRuntimeProgress::ProviderTurnStarted);
     state.mark_request_started(Instant::now());
     let mut provider_response = None;
     let result = {
@@ -179,6 +230,19 @@ where
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn append_provider_context_message<F>(
+    message: Message,
+    appended_messages: &mut Vec<Message>,
+    on_progress: &mut F,
+) where
+    F: FnMut(AgentRuntimeProgress),
+{
+    on_progress(AgentRuntimeProgress::ProviderContextMessage {
+        message: message.clone(),
+    });
+    appended_messages.push(message);
 }
 
 struct RuntimeStreamSink<'a, F>
@@ -224,6 +288,21 @@ struct ToolExecution {
     raw_result: ToolResult,
     provider_result: AiToolResult,
     processed_error: Option<ProcessedToolError>,
+}
+
+fn interrupted_tool_execution(call: &AiToolCall) -> ToolExecution {
+    let processed_error =
+        ProcessedToolError::new(TOOL_EXECUTION_INTERRUPTED, TOOL_EXECUTION_INTERRUPTED);
+    ToolExecution {
+        raw_result: ToolResult::error(call.call_id.clone(), TOOL_EXECUTION_INTERRUPTED),
+        provider_result: AiToolResult::error(
+            call.call_id.clone(),
+            call.name.clone(),
+            processed_error.assistant_message.clone(),
+            None,
+        ),
+        processed_error: Some(processed_error),
+    }
 }
 
 async fn execute_tool_call(
@@ -449,7 +528,11 @@ impl RuntimeTurnState {
         on_progress(AgentRuntimeProgress::InputTokens { total_tokens });
     }
 
-    fn finish_at(mut self, finished_at: Instant) -> AgentRuntimeCompletion {
+    fn finish_at(
+        mut self,
+        finished_at: Instant,
+        appended_messages: Vec<Message>,
+    ) -> AgentRuntimeCompletion {
         if self.is_thinking {
             self.is_thinking = false;
         }
@@ -469,6 +552,7 @@ impl RuntimeTurnState {
                 reasoning_duration,
             },
             metrics,
+            appended_messages,
         }
     }
 
@@ -737,6 +821,111 @@ mod tests {
         }
     }
 
+    struct MultiToolBatchProvider {
+        calls: Mutex<usize>,
+        request_messages: Mutex<Vec<Vec<Message>>>,
+    }
+
+    impl MultiToolBatchProvider {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(0),
+                request_messages: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ProviderClient for MultiToolBatchProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            request: PromptRequest,
+            sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+            Box::pin(async move {
+                self.request_messages
+                    .lock()
+                    .expect("request messages lock should not poison")
+                    .push(request.messages.clone());
+                let call_count = {
+                    let mut calls = self.calls.lock().expect("fake lock should not poison");
+                    *calls += 1;
+                    *calls
+                };
+                sink.emit(StreamEvent::MessageStarted);
+                if call_count == 1 {
+                    let terminating_call = ToolCall::new(
+                        "call-terminate",
+                        "echo",
+                        serde_json::json!({ "terminate": true }),
+                    );
+                    let continuing_call = ToolCall::new(
+                        "call-continue",
+                        "echo",
+                        serde_json::json!({ "terminate": false }),
+                    );
+                    let calls = vec![terminating_call.clone(), continuing_call.clone()];
+                    sink.emit(StreamEvent::TextDelta("checking".to_string()));
+                    let response = PromptResponse::new(
+                        Message::assistant_with_tool_calls("checking".to_string(), calls.clone()),
+                        mo_ai_core::FinishReason::ToolCalls,
+                        None,
+                        calls,
+                    );
+                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    Ok(response)
+                } else {
+                    sink.emit(StreamEvent::TextDelta("done".to_string()));
+                    let response = PromptResponse::new(
+                        Message::text(MessageRole::Assistant, "done"),
+                        mo_ai_core::FinishReason::Stop,
+                        None,
+                        Vec::new(),
+                    );
+                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    Ok(response)
+                }
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    struct ConditionalTerminatingTool;
+
+    impl Tool for ConditionalTerminatingTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new("echo")
+                .with_label("Echo")
+                .with_kind(ToolKind::Other)
+                .with_permission_policy(ToolPermissionPolicy::Always)
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: RuntimeToolCall,
+            _cancellation: &'a CancellationToken,
+        ) -> ToolExecutionFuture<'a> {
+            Box::pin(async move {
+                let should_terminate = call
+                    .arguments
+                    .get("terminate")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let mut result = ToolResult::success(call.call_id.clone(), call.call_id);
+                result.terminate = should_terminate;
+                result
+            })
+        }
+    }
+
     struct TerminatingTool;
 
     impl Tool for TerminatingTool {
@@ -810,6 +999,199 @@ mod tests {
             matches!(event, AgentRuntimeProgress::ToolActivityStarted { activity } if activity.title == "Echo")
         }));
         assert_eq!(*provider.calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn provider_context_messages_emit_before_follow_up_provider_failure() {
+        struct FailingFollowUpProvider {
+            calls: Mutex<usize>,
+        }
+
+        impl ProviderClient for FailingFollowUpProvider {
+            fn stream_prompt<'a>(
+                &'a self,
+                _request: PromptRequest,
+                sink: &'a mut (dyn StreamEventSink + Send),
+            ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+                Box::pin(async move {
+                    let mut calls = self.calls.lock().expect("fake lock should not poison");
+                    *calls += 1;
+                    if *calls == 1 {
+                        let call =
+                            ToolCall::new("call-1", "echo", serde_json::json!({ "text": "hi" }));
+                        let response = PromptResponse::new(
+                            Message::assistant_with_tool_calls(String::new(), vec![call.clone()]),
+                            mo_ai_core::FinishReason::ToolCalls,
+                            None,
+                            vec![call],
+                        );
+                        sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                        Ok(response)
+                    } else {
+                        Err(ProviderError::Transport("connection dropped".to_string()))
+                    }
+                })
+            }
+
+            fn list_models<'a>(
+                &'a self,
+            ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+
+            fn capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities::chat_completions()
+            }
+        }
+
+        let provider = FailingFollowUpProvider {
+            calls: Mutex::new(0),
+        };
+        let mut executor = ToolExecutorRegistry::new();
+        executor.insert(EchoTool);
+        let request =
+            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let cancellation = CancellationToken::new();
+        let mut events = Vec::new();
+
+        let error = run_agent_runtime(
+            &provider,
+            request,
+            executor,
+            &cancellation,
+            AgentRuntimeOptions::default(),
+            |event| events.push(event),
+        )
+        .await
+        .expect_err("follow-up provider error should fail the turn");
+
+        assert!(matches!(
+            error,
+            super::AgentRuntimeError::Provider(ProviderError::Transport(_))
+        ));
+        let committed_roles = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentRuntimeProgress::ProviderContextMessage { message } => Some(message.role),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            committed_roles,
+            vec![MessageRole::Assistant, MessageRole::Tool]
+        );
+        assert_eq!(*provider.calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_tool_batch_emits_matching_tool_results_before_stopping() {
+        struct TwoToolProvider {
+            calls: Mutex<usize>,
+        }
+
+        impl ProviderClient for TwoToolProvider {
+            fn stream_prompt<'a>(
+                &'a self,
+                _request: PromptRequest,
+                sink: &'a mut (dyn StreamEventSink + Send),
+            ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+                Box::pin(async move {
+                    let mut calls = self.calls.lock().expect("fake lock should not poison");
+                    *calls += 1;
+                    let first = ToolCall::new("call-1", "cancel_once", serde_json::json!({}));
+                    let second = ToolCall::new("call-2", "cancel_once", serde_json::json!({}));
+                    let response = PromptResponse::new(
+                        Message::assistant_with_tool_calls(
+                            String::new(),
+                            vec![first.clone(), second.clone()],
+                        ),
+                        mo_ai_core::FinishReason::ToolCalls,
+                        None,
+                        vec![first, second],
+                    );
+                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    Ok(response)
+                })
+            }
+
+            fn list_models<'a>(
+                &'a self,
+            ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+
+            fn capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities::chat_completions()
+            }
+        }
+
+        struct CancelOnceTool(Arc<Mutex<usize>>);
+
+        impl Tool for CancelOnceTool {
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition::new("cancel_once")
+                    .with_label("Cancel Once")
+                    .with_kind(ToolKind::Other)
+                    .with_permission_policy(ToolPermissionPolicy::Always)
+            }
+
+            fn execute<'a>(
+                &'a self,
+                call: RuntimeToolCall,
+                cancellation: &'a CancellationToken,
+            ) -> ToolExecutionFuture<'a> {
+                *self.0.lock().expect("execution lock should not poison") += 1;
+                cancellation.cancel();
+                Box::pin(async move { ToolResult::success(call.call_id, "first result") })
+            }
+        }
+
+        let provider = TwoToolProvider {
+            calls: Mutex::new(0),
+        };
+        let executions = Arc::new(Mutex::new(0));
+        let mut executor = ToolExecutorRegistry::new();
+        executor.insert(CancelOnceTool(Arc::clone(&executions)));
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![Message::text(MessageRole::User, "call tools")],
+        );
+        let cancellation = CancellationToken::new();
+        let mut events = Vec::new();
+
+        let error = run_agent_runtime(
+            &provider,
+            request,
+            executor,
+            &cancellation,
+            AgentRuntimeOptions::default(),
+            |event| events.push(event),
+        )
+        .await
+        .expect_err("cancellation should stop before a follow-up provider turn");
+
+        assert!(matches!(error, super::AgentRuntimeError::Cancelled));
+        assert_eq!(*provider.calls.lock().unwrap(), 1);
+        assert_eq!(*executions.lock().unwrap(), 1);
+        let committed_messages = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentRuntimeProgress::ProviderContextMessage { message } => Some(message),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            committed_messages
+                .iter()
+                .map(|message| message.role)
+                .collect::<Vec<_>>(),
+            vec![MessageRole::Assistant, MessageRole::Tool, MessageRole::Tool]
+        );
+        let interrupted_result = committed_messages[2]
+            .first_tool_result()
+            .expect("interrupted tool should have a synthetic result");
+        assert!(interrupted_result.is_error);
+        assert_eq!(interrupted_result.content, "Tool execution interrupted");
     }
 
     #[tokio::test]
@@ -990,6 +1372,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mixed_terminating_tool_batch_executes_all_tools_and_continues() {
+        let provider = MultiToolBatchProvider::new();
+        let mut executor = ToolExecutorRegistry::new();
+        executor.insert(ConditionalTerminatingTool);
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![Message::text(MessageRole::User, "call both tools")],
+        );
+        let cancellation = CancellationToken::new();
+        let mut events = Vec::new();
+
+        let completion = run_agent_runtime(
+            &provider,
+            request,
+            executor,
+            &cancellation,
+            AgentRuntimeOptions::default(),
+            |event| events.push(event),
+        )
+        .await
+        .expect("runtime should complete");
+
+        assert_eq!(completion.response.content, "done");
+        assert_eq!(*provider.calls.lock().unwrap(), 2);
+        assert_eq!(
+            completion
+                .appended_messages
+                .iter()
+                .map(|message| message.role)
+                .collect::<Vec<_>>(),
+            vec![
+                MessageRole::Assistant,
+                MessageRole::Tool,
+                MessageRole::Tool,
+                MessageRole::Assistant,
+            ]
+        );
+        assert_eq!(
+            completion.appended_messages[1]
+                .first_tool_result()
+                .expect("first tool result should be preserved")
+                .call_id,
+            "call-terminate"
+        );
+        assert_eq!(
+            completion.appended_messages[2]
+                .first_tool_result()
+                .expect("second tool result should be preserved")
+                .call_id,
+            "call-continue"
+        );
+
+        let request_messages = provider
+            .request_messages
+            .lock()
+            .expect("request messages lock should not poison");
+        let second_request_tool_result_ids = request_messages[1]
+            .iter()
+            .filter_map(|message| message.first_tool_result())
+            .map(|result| result.call_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            second_request_tool_result_ids,
+            vec!["call-terminate", "call-continue"]
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentRuntimeProgress::InputTokens { .. })),
+            "non-terminating batches should send tool results into the follow-up provider turn"
+        );
+    }
+
+    #[tokio::test]
     async fn terminating_tool_result_does_not_emit_input_tokens() {
         let provider = FakeProvider {
             calls: Mutex::new(0),
@@ -1001,7 +1457,7 @@ mod tests {
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
 
-        let _ = run_agent_runtime(
+        let completion = run_agent_runtime(
             &provider,
             request,
             executor,
@@ -1012,6 +1468,20 @@ mod tests {
         .await
         .expect("runtime should complete");
 
+        assert_eq!(completion.appended_messages.len(), 2);
+        assert_eq!(completion.appended_messages[0].role, MessageRole::Assistant);
+        assert_eq!(completion.appended_messages[1].role, MessageRole::Tool);
+        assert_eq!(
+            completion.appended_messages[0].tool_calls()[0].call_id,
+            "call-1"
+        );
+        assert_eq!(
+            completion.appended_messages[1]
+                .first_tool_result()
+                .expect("terminating tool result should be preserved")
+                .call_id,
+            "call-1"
+        );
         assert!(
             !events
                 .iter()

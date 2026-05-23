@@ -5,12 +5,13 @@ use mo_core::{
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     request_policy::RuntimeRequestPolicy,
     session::{
-        NativeAgentEvent, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent,
-        RuntimeRequestMetrics, RuntimeTarget,
+        NativeAgentEvent, NativeAgentTurnRequest, RuntimeCommand, RuntimeCommandReceipt,
+        RuntimeEvent, RuntimeRequestMetrics, RuntimeTarget,
     },
 };
 use mo_native_agent::{
-    ModelProviderRefreshRuntimeState, NativeAgentRuntimeState, models as native_models,
+    ModelProviderRefreshRuntimeState, NativeAgentRuntimeState, NativeAgentSession,
+    models as native_models,
 };
 use mo_tools::{ToolExecutorRegistry, builtin::workspace_tool_registry};
 use mo_tui::RuntimeCoordinator;
@@ -29,6 +30,7 @@ pub(crate) struct AppRuntimeCoordinator {
     options: AppRuntimeOptions,
     acp_worker: Option<AcpSessionWorker>,
     native_agent: NativeAgentRuntimeState,
+    native_session: NativeAgentSession,
     model_refresh: ModelProviderRefreshRuntimeState,
 }
 
@@ -38,6 +40,7 @@ impl AppRuntimeCoordinator {
             options,
             acp_worker: None,
             native_agent: NativeAgentRuntimeState::default(),
+            native_session: NativeAgentSession::default(),
             model_refresh: ModelProviderRefreshRuntimeState::default(),
         }
     }
@@ -58,6 +61,19 @@ impl AppRuntimeCoordinator {
             }
             RuntimeCommand::SubmitNativeAgent { target, request } => {
                 self.start_native_agent(target, request)
+            }
+            RuntimeCommand::TruncateNativeAgentSession {
+                retained_user_turns,
+            } => {
+                if self.native_agent.is_running() {
+                    return Err(
+                        "Cannot truncate native agent session while a request is running"
+                            .to_string(),
+                    );
+                }
+                self.native_session
+                    .truncate_after_user_turns(retained_user_turns);
+                Ok(RuntimeCommandReceipt::Accepted)
             }
             RuntimeCommand::Interrupt { target } => self.interrupt_runtime(target),
             RuntimeCommand::RespondPermission {
@@ -83,6 +99,7 @@ impl AppRuntimeCoordinator {
             }
             RuntimeCommand::Reset => {
                 self.native_agent.reset_after_clear();
+                self.native_session.clear();
                 self.model_refresh.reset_after_clear();
                 Ok(RuntimeCommandReceipt::Accepted)
             }
@@ -205,7 +222,7 @@ impl AppRuntimeCoordinator {
     fn start_native_agent(
         &mut self,
         target: RuntimeTarget,
-        request: mo_core::session::NativeAgentRequest,
+        request: NativeAgentTurnRequest,
     ) -> Result<RuntimeCommandReceipt, String> {
         let request_target = request.target();
         if target != request_target {
@@ -218,10 +235,17 @@ impl AppRuntimeCoordinator {
             return Err("Chat request is already running".to_string());
         }
 
-        let activity_label = request.llm_request().model_id.clone();
+        let activity_label = request.model_id().to_string();
+        let execution_request = self
+            .native_session
+            .prepare_turn(&request)
+            .map_err(|error| error.to_string())?;
         let tools = native_agent_workspace_tools();
-        self.native_agent
-            .start(request, tools, self.options.runtime_request_policy.clone());
+        self.native_agent.start(
+            execution_request,
+            tools,
+            self.options.runtime_request_policy.clone(),
+        );
         Ok(RuntimeCommandReceipt::NativeAgentStarted { activity_label })
     }
 
@@ -301,8 +325,13 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
         loop {
             let target = self.native_agent.current_target().cloned();
             let Some(event) = self.native_agent.try_recv_event() else {
+                self.reconcile_native_session_updates();
                 break;
             };
+            self.reconcile_native_session_updates();
+            if event.is_terminal() {
+                self.native_session.rollback_pending_user();
+            }
             events.push(runtime_event_from_native_agent_event(target, event));
         }
         events
@@ -342,6 +371,22 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
 
         self.model_refresh.start(request);
         Ok(())
+    }
+}
+
+impl AppRuntimeCoordinator {
+    fn reconcile_native_session_updates(&mut self) {
+        if self.native_agent.take_provider_turn_started() {
+            self.native_session.commit_pending_user();
+        }
+
+        let messages = self.native_agent.take_session_messages();
+        if messages.is_empty() {
+            return;
+        }
+
+        self.native_session.commit_pending_user();
+        self.native_session.commit_turn_messages(messages);
     }
 }
 
@@ -448,8 +493,19 @@ fn ensure_native_command_target(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_acp_command_target, ensure_native_command_target};
-    use mo_core::session::RuntimeTarget;
+    use std::{thread, time::Duration};
+
+    use super::{
+        AppRuntimeCoordinator, AppRuntimeOptions, ensure_acp_command_target,
+        ensure_native_command_target,
+    };
+    use mo_core::{
+        provider::ProviderKind,
+        session::{
+            ChatMessage, NativeAgentTurnRequest, RuntimeCommand, RuntimeEvent, RuntimeTarget,
+        },
+    };
+    use mo_tui::RuntimeCoordinator;
 
     #[test]
     fn acp_command_target_must_match_active_session() {
@@ -489,5 +545,65 @@ mod tests {
         let acp_error = ensure_native_command_target(Some(&active_target), Some(&acp_target))
             .expect_err("ACP target should not be accepted for native commands");
         assert!(acp_error.contains("Runtime command target is not native agent"));
+    }
+
+    #[test]
+    fn native_agent_failure_before_provider_request_rolls_back_pending_user() {
+        let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+            runtime_request_policy: mo_core::request_policy::RuntimeRequestPolicy::new(
+                0,
+                Vec::new(),
+                1,
+            ),
+            ..AppRuntimeOptions::default()
+        });
+        let request = NativeAgentTurnRequest::new(
+            "openai",
+            ProviderKind::OpenAi,
+            "gpt-4o-mini",
+            None,
+            None,
+            None,
+            ChatMessage::user("hello".to_string()),
+        );
+        let target = request.target();
+
+        coordinator
+            .handle_runtime_command(RuntimeCommand::SubmitNativeAgent { target, request })
+            .expect("native request should start");
+
+        let mut events = Vec::new();
+        for _ in 0..50 {
+            events.extend(RuntimeCoordinator::drain_runtime_events(&mut coordinator));
+            if events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::Failed { .. }))
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::Failed { .. })),
+            "preflight failure should be reported"
+        );
+        assert!(coordinator.native_session.history().is_empty());
+
+        let next_request = NativeAgentTurnRequest::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "qwen3",
+            Some("http://127.0.0.1:1234/v1".to_string()),
+            None,
+            None,
+            ChatMessage::user("next".to_string()),
+        );
+        coordinator
+            .native_session
+            .prepare_turn(&next_request)
+            .expect("failed preflight turn should not leave stale pending state");
     }
 }

@@ -1,6 +1,6 @@
 use crate::acp::AcpPromptRequest;
 
-use super::{NativeAgentRequest, RuntimeTarget};
+use super::{NativeAgentTurnRequest, RuntimeTarget};
 
 /// `RuntimeCommand` 描述 TUI 向交互式 runtime 发出的统一命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +18,10 @@ pub enum RuntimeCommand {
     },
     SubmitNativeAgent {
         target: RuntimeTarget,
-        request: NativeAgentRequest,
+        request: NativeAgentTurnRequest,
+    },
+    TruncateNativeAgentSession {
+        retained_user_turns: usize,
     },
     Interrupt {
         target: Option<RuntimeTarget>,
@@ -62,10 +65,17 @@ impl RuntimeCommand {
     }
 
     /// `submit_native_agent` 创建 native agent 提交命令。
-    pub fn submit_native_agent(request: NativeAgentRequest) -> Self {
+    pub fn submit_native_agent(request: NativeAgentTurnRequest) -> Self {
         Self::SubmitNativeAgent {
             target: request.target(),
             request,
+        }
+    }
+
+    /// `truncate_native_agent_session` 创建 native agent 历史截断命令。
+    pub fn truncate_native_agent_session(retained_user_turns: usize) -> Self {
+        Self::TruncateNativeAgentSession {
+            retained_user_turns,
         }
     }
 
@@ -130,6 +140,7 @@ impl RuntimeCommand {
             | Self::RespondPermission { target: None, .. }
             | Self::SetConfigOption { target: None, .. }
             | Self::StopBackgroundTerminals { target: None }
+            | Self::TruncateNativeAgentSession { .. }
             | Self::Reset => None,
         }
     }

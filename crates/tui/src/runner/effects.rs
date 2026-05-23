@@ -81,6 +81,16 @@ pub(super) fn apply_effect_if_needed(
             run_stop_acp_background_terminals_effect(model, runtime_coordinator);
             Ok(())
         }
+        AppEffect::TruncateNativeAgentSession {
+            retained_user_turns,
+        } => {
+            run_truncate_native_agent_session_effect(
+                model,
+                runtime_coordinator,
+                retained_user_turns,
+            );
+            Ok(())
+        }
         AppEffect::PersistSelectedModel { selection } => {
             persist_selected_model(model, runtime_coordinator, &selection);
             Ok(())
@@ -97,6 +107,18 @@ pub(super) fn apply_effect_if_needed(
             run_interrupt_current_turn_effect(model, acp_ui_state, runtime_coordinator);
             Ok(())
         }
+    }
+}
+
+fn run_truncate_native_agent_session_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+    retained_user_turns: usize,
+) {
+    if let Err(message) = runtime_coordinator.dispatch_runtime_command(
+        RuntimeCommand::truncate_native_agent_session(retained_user_turns),
+    ) {
+        model.show_transient_status_notice(&message);
     }
 }
 

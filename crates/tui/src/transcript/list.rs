@@ -623,21 +623,6 @@ impl Transcript {
             .collect()
     }
 
-    /// `source_chat_messages` 返回 transcript 中可直接提交给 native agent 的源消息。
-    pub(crate) fn source_chat_messages(&self) -> Vec<ChatMessage> {
-        self.items
-            .iter()
-            .filter_map(|item| match item.as_ref() {
-                TranscriptItem::Message(message) => Some(message.source_chat_message()),
-                TranscriptItem::Hero(_)
-                | TranscriptItem::Reasoning(_)
-                | TranscriptItem::System(_)
-                | TranscriptItem::ToolResult(_)
-                | TranscriptItem::WorkDuration(_) => None,
-            })
-            .collect()
-    }
-
     /// `terminal_replay_items` 返回适用于退出 AltScreen 后回放到终端的文本项。
     pub(crate) fn terminal_replay_items(&self, preserve_ansi: bool) -> Vec<String> {
         let width = self.render_width();

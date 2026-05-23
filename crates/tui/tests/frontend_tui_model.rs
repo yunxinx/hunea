@@ -100,17 +100,12 @@ fn enter_with_selected_native_model_returns_native_agent_effect() {
     let Some(AppEffect::SendNativeAgent { request }) = effect else {
         panic!("expected native agent effect, got {effect:?}");
     };
-    let llm_request = request.llm_request();
-    assert_eq!(llm_request.provider_id, "local");
-    assert_eq!(llm_request.provider_kind, ProviderKind::OpenAiCompatible);
-    assert_eq!(llm_request.model_id, "qwen3");
-    assert_eq!(
-        llm_request.base_url.as_deref(),
-        Some("http://127.0.0.1:1234/v1")
-    );
-    assert_eq!(llm_request.messages.len(), 1);
-    assert_eq!(llm_request.messages[0].role, ChatRole::User);
-    assert_eq!(llm_request.messages[0].content, "hello");
+    assert_eq!(request.provider_id(), "local");
+    assert_eq!(request.provider_kind(), ProviderKind::OpenAiCompatible);
+    assert_eq!(request.model_id(), "qwen3");
+    assert_eq!(request.base_url(), Some("http://127.0.0.1:1234/v1"));
+    assert_eq!(request.message().role, ChatRole::User);
+    assert_eq!(request.message().content, "hello");
 }
 
 #[test]
@@ -142,12 +137,11 @@ fn enter_with_provider_api_key_returns_native_agent_effect_with_direct_key() {
     let Some(AppEffect::SendNativeAgent { request }) = effect else {
         panic!("expected native agent effect, got {effect:?}");
     };
-    let llm_request = request.llm_request();
     assert_eq!(
-        llm_request.api_key.as_ref().map(ProviderApiKey::as_str),
+        request.api_key().map(ProviderApiKey::as_str),
         Some("sk-test-direct")
     );
-    assert_eq!(llm_request.api_key_env, None);
+    assert_eq!(request.api_key_env(), None);
 }
 
 #[test]
@@ -216,10 +210,8 @@ fn clear_command_removes_previous_native_agent_context() {
     let Some(AppEffect::SendNativeAgent { request }) = effect else {
         panic!("expected native agent effect, got {effect:?}");
     };
-    let llm_request = request.llm_request();
-    assert_eq!(llm_request.messages.len(), 1);
-    assert_eq!(llm_request.messages[0].role, ChatRole::User);
-    assert_eq!(llm_request.messages[0].content, "fresh question");
+    assert_eq!(request.message().role, ChatRole::User);
+    assert_eq!(request.message().content, "fresh question");
 }
 
 fn single_model_catalog() -> ModelCatalog {

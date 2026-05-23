@@ -3,7 +3,7 @@ use crate::Model;
 use crate::runtime::RuntimeEventApply;
 #[cfg(test)]
 use mo_core::session::{NativeAgentEvent, RuntimeEvent, RuntimeRequestMetrics, RuntimeTarget};
-use mo_core::session::{NativeAgentRequest, RuntimeCommand, RuntimeCommandReceipt};
+use mo_core::session::{NativeAgentTurnRequest, RuntimeCommand, RuntimeCommandReceipt};
 
 use super::RuntimeCoordinator;
 
@@ -68,7 +68,7 @@ pub(super) fn apply_native_agent_event(
 pub(super) fn run_send_native_agent_effect(
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
-    request: NativeAgentRequest,
+    request: NativeAgentTurnRequest,
 ) {
     match runtime_coordinator.dispatch_runtime_command(RuntimeCommand::submit_native_agent(request))
     {

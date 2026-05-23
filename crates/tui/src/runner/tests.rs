@@ -26,10 +26,11 @@ use mo_core::phrases::StatusPhraseOrder;
 use mo_core::provider::ProviderKind;
 use mo_core::request_policy::RuntimeRequestPolicy;
 use mo_core::session::{
-    NativeAgentEvent, NativeAgentRequest, NativeAgentResponse, NativeLlmPerformanceMetrics,
-    RuntimeAvailableCommandInput, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent,
-    RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityContent,
-    RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
+    ChatMessage, NativeAgentEvent, NativeAgentResponse, NativeAgentTurnRequest,
+    NativeLlmPerformanceMetrics, RuntimeAvailableCommandInput, RuntimeCommand,
+    RuntimeCommandReceipt, RuntimeEvent, RuntimePermissionRequest, RuntimeTarget,
+    RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityStatus,
+    RuntimeToolActivityUpdate, RuntimeToolKind,
 };
 use ratatui::style::Color;
 
@@ -38,8 +39,9 @@ struct TestRuntimeCoordinator {
     runtime_events: Vec<RuntimeEvent>,
     native_running: bool,
     native_interrupted: bool,
-    native_request: Option<NativeAgentRequest>,
+    native_request: Option<NativeAgentTurnRequest>,
     reset_count: usize,
+    native_session_retained_user_turns: Option<usize>,
 }
 
 impl RuntimeCoordinator for TestRuntimeCoordinator {
@@ -58,12 +60,18 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                 self.reset_count += 1;
                 Ok(RuntimeCommandReceipt::Accepted)
             }
+            RuntimeCommand::TruncateNativeAgentSession {
+                retained_user_turns,
+            } => {
+                self.native_session_retained_user_turns = Some(retained_user_turns);
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
             RuntimeCommand::SubmitNativeAgent { request, .. } => {
                 if self.native_running {
                     return Err("Chat request is already running".to_string());
                 }
 
-                let activity_label = request.llm_request().model_id.clone();
+                let activity_label = request.model_id().to_string();
                 self.native_running = true;
                 self.native_request = Some(request);
                 Ok(RuntimeCommandReceipt::NativeAgentStarted { activity_label })
@@ -4240,14 +4248,14 @@ fn native_agent_tool_finished_updates_runtime_tool_activity() {
 fn native_agent_send_effect_starts_native_agent_target() {
     let mut model = Model::new(HeroOptions::default());
     let mut runtime_coordinator = TestRuntimeCoordinator::default();
-    let request = NativeAgentRequest::new(
+    let request = NativeAgentTurnRequest::new(
         "local",
         ProviderKind::OpenAiCompatible,
         "qwen3",
         None,
         None,
         None,
-        vec![],
+        ChatMessage::user("hello".to_string()),
     );
 
     run_send_native_agent_effect(&mut model, &mut runtime_coordinator, request);
@@ -4256,22 +4264,36 @@ fn native_agent_send_effect_starts_native_agent_target() {
         runtime_coordinator
             .native_request
             .as_ref()
-            .map(NativeAgentRequest::target),
+            .map(NativeAgentTurnRequest::target),
         Some(RuntimeTarget::native_agent("local", "qwen3"))
     );
     assert!(model.current_stream_activity_render_result().has_content);
 }
 
 #[test]
-fn native_agent_request_keeps_runtime_target_in_core_dto() {
-    let request = NativeAgentRequest::new(
+fn truncate_native_agent_session_command_records_retained_turns() {
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+
+    runtime_coordinator
+        .dispatch_runtime_command(RuntimeCommand::truncate_native_agent_session(2))
+        .expect("truncate command should be accepted");
+
+    assert_eq!(
+        runtime_coordinator.native_session_retained_user_turns,
+        Some(2)
+    );
+}
+
+#[test]
+fn native_agent_turn_request_keeps_runtime_target_in_core_dto() {
+    let request = NativeAgentTurnRequest::new(
         "local",
         ProviderKind::OpenAiCompatible,
         "qwen3",
         None,
         None,
         None,
-        vec![],
+        ChatMessage::user("hello".to_string()),
     );
 
     assert_eq!(

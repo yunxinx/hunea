@@ -1,7 +1,8 @@
-use mo_ai_core::{Message, MessageContent, MessageRole, PromptRequest};
+use mo_ai_core::PromptRequest;
 
-pub use mo_core::session::{ChatMessage, ChatMessageBlock, ChatRole, NativeLlmRequest};
+pub use mo_core::session::{ChatMessage, ChatRole, NativeLlmRequest};
 
+use crate::agent_session::{NativeAgentExecutionRequest, message_from_chat_message};
 use crate::llm::NativeLlmError;
 
 pub(crate) fn prompt_request_from_native_llm_request(
@@ -24,64 +25,28 @@ pub(crate) fn prompt_request_from_native_llm_request(
     ))
 }
 
-fn message_from_chat_message(message: ChatMessage) -> Message {
-    let role = match message.role {
-        ChatRole::User => MessageRole::User,
-        ChatRole::Assistant => MessageRole::Assistant,
-    };
-    let content = match message.blocks {
-        Some(blocks) if !blocks.is_empty() => {
-            blocks.into_iter().map(content_from_chat_block).collect()
-        }
-        _ => vec![MessageContent::Text(message.content)],
-    };
-
-    Message::new(role, content)
-}
-
-fn content_from_chat_block(block: ChatMessageBlock) -> MessageContent {
-    match block {
-        ChatMessageBlock::Text(text) => MessageContent::Text(text),
-        ChatMessageBlock::Image {
-            data_base64,
-            mime_type,
-            uri,
-        } => MessageContent::Image {
-            data_base64,
-            mime_type,
-            uri,
-        },
-        ChatMessageBlock::Audio {
-            data_base64,
-            mime_type,
-            uri,
-        } => MessageContent::Audio {
-            data_base64,
-            mime_type,
-            uri,
-        },
-        ChatMessageBlock::Document {
-            data_base64,
-            mime_type,
-            filename,
-            uri,
-        } => MessageContent::Document {
-            data_base64,
-            mime_type,
-            filename,
-            uri,
-        },
+pub(crate) fn prompt_request_from_execution_request(
+    request: &NativeAgentExecutionRequest,
+) -> Result<PromptRequest, NativeLlmError> {
+    if request.messages().is_empty() {
+        return Err(NativeLlmError::EmptyPrompt {
+            provider_id: request.provider_id().to_string(),
+        });
     }
+
+    Ok(PromptRequest::new(
+        request.model_id().to_string(),
+        request.messages().to_vec(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use mo_ai_core::{MessageContent, MessageRole};
 
-    use super::{
-        ChatMessage, ChatMessageBlock, NativeLlmRequest, prompt_request_from_native_llm_request,
-    };
+    use super::{ChatMessage, NativeLlmRequest, prompt_request_from_native_llm_request};
     use crate::ProviderKind;
+    use mo_core::session::ChatMessageBlock;
 
     #[test]
     fn prompt_request_keeps_structured_user_blocks() {

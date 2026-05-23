@@ -2,8 +2,8 @@ use mo_core::{
     acp::{AcpAgentIdentity, AcpPromptRequest},
     provider::ProviderKind,
     session::{
-        NativeAgentRequest, RuntimeCapability, RuntimeCommand, RuntimeEvent, RuntimeIdentity,
-        RuntimeModelConfig, RuntimeModelOption, RuntimePermissionOption,
+        ChatMessage, NativeAgentTurnRequest, RuntimeCapability, RuntimeCommand, RuntimeEvent,
+        RuntimeIdentity, RuntimeModelConfig, RuntimeModelOption, RuntimePermissionOption,
         RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeTarget,
         RuntimeTerminalExitStatus, RuntimeTerminalSnapshot, RuntimeToolActivity,
         RuntimeToolActivityContent, RuntimeToolActivityLocation, RuntimeToolActivityRawValue,
@@ -33,14 +33,14 @@ fn runtime_permission_request_selects_cancel_reject_fallback() {
 fn runtime_command_and_event_carry_target_identity() {
     let target = RuntimeTarget::native_agent("openai", "gpt-4o-mini");
     let command = RuntimeCommand::submit_prompt(target.clone(), "hello");
-    let native_command = RuntimeCommand::submit_native_agent(NativeAgentRequest::new(
+    let native_command = RuntimeCommand::submit_native_agent(NativeAgentTurnRequest::new(
         "openai",
         ProviderKind::OpenAi,
         "gpt-4o-mini",
         None,
         None,
         None,
-        Vec::new(),
+        ChatMessage::user("hello".to_string()),
     ));
     let acp_target = RuntimeTarget::acp_agent("kimi");
     let acp_command = RuntimeCommand::submit_acp_prompt(AcpPromptRequest {
@@ -49,6 +49,7 @@ fn runtime_command_and_event_carry_target_identity() {
         current_dir: std::path::PathBuf::from("."),
         identity: Box::<AcpAgentIdentity>::default(),
     });
+    let truncate_command = RuntimeCommand::truncate_native_agent_session(1);
     let permission_command =
         RuntimeCommand::respond_permission(target.clone(), "permission-1", Some("allow".into()));
     let config_command = RuntimeCommand::set_config_option(target.clone(), "model", "gpt-4.1-mini");
@@ -60,6 +61,7 @@ fn runtime_command_and_event_carry_target_identity() {
     assert_eq!(command.target(), Some(&target));
     assert_eq!(native_command.target(), Some(&target));
     assert_eq!(acp_command.target(), Some(&acp_target));
+    assert_eq!(truncate_command.target(), None);
     assert_eq!(permission_command.target(), Some(&target));
     assert_eq!(config_command.target(), Some(&target));
     assert_eq!(event.target(), Some(&target));

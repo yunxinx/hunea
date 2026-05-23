@@ -36,7 +36,9 @@ fn native_backtrack_latest_user_prefills_composer_and_truncates_history() {
 
     assert_eq!(
         model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter))),
-        None
+        Some(AppEffect::TruncateNativeAgentSession {
+            retained_user_turns: 1,
+        })
     );
 
     assert!(!model.transcript_overlay_active());
@@ -53,20 +55,7 @@ fn native_backtrack_latest_user_prefills_composer_and_truncates_history() {
     let Some(AppEffect::SendNativeAgent { request }) = effect else {
         panic!("expected native agent effect, got {effect:?}");
     };
-    let roles_and_content = request
-        .llm_request()
-        .messages
-        .iter()
-        .map(|message| (message.role.as_str(), message.content.as_str()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        roles_and_content,
-        vec![
-            ("user", "first question"),
-            ("assistant", "first answer"),
-            ("user", "second question"),
-        ]
-    );
+    assert_eq!(request.message().content, "second question");
 }
 
 #[test]
@@ -84,7 +73,12 @@ fn native_backtrack_overlay_steps_to_older_user_message() {
             .and_then(|overlay| overlay.highlight_item_index),
         Some(0)
     );
-    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    assert_eq!(
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter))),
+        Some(AppEffect::TruncateNativeAgentSession {
+            retained_user_turns: 0,
+        })
+    );
 
     assert!(!model.transcript_overlay_active());
     assert_eq!(model.composer_text(), "first question");

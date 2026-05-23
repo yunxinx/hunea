@@ -1,9 +1,16 @@
+use mo_agent_runtime::AgentRuntimeCompletion;
+use mo_ai_core::Message;
+
 use crate::NativeLlmPerformanceMetrics;
 pub use mo_core::session::NativeAgentResponse;
 
 /// `NativeAgentProgress` 描述 native agent loop 期间的内部进度事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NativeAgentProgress {
+    ProviderTurnStarted,
+    ProviderContextMessage {
+        message: Message,
+    },
     OutputTokens {
         total_tokens: usize,
     },
@@ -34,6 +41,17 @@ pub(crate) struct NativeAgentCompletion {
 }
 
 impl NativeAgentCompletion {
+    pub(crate) fn from_runtime_completion(completion: AgentRuntimeCompletion) -> Self {
+        Self {
+            response: NativeAgentResponse {
+                content: completion.response.content,
+                reasoning_content: completion.response.reasoning_content,
+                reasoning_duration: completion.response.reasoning_duration,
+            },
+            metrics: completion.metrics,
+        }
+    }
+
     pub(crate) fn into_response(self) -> NativeAgentResponse {
         let Self { response, metrics } = self;
         let _ = metrics;

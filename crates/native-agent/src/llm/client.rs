@@ -3,10 +3,11 @@ use mo_tools::{SharedToolPermissionHandler, ToolExecutorRegistry};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    NativeAgentError, NativeAgentRequest,
+    NativeAgentError, NativeAgentExecutionRequest, NativeAgentRequest,
     agent::{NativeAgentCompletion, NativeAgentProgress},
     llm::{
-        NativeAgentToolErrorFormatter, NativeLlmError, openai_client_for_request,
+        NativeAgentToolErrorFormatter, NativeLlmError, openai_client_for_execution_request,
+        openai_client_for_request, prompt_request_from_execution_request,
         prompt_request_from_native_llm_request,
     },
 };
@@ -57,20 +58,67 @@ where
         ),
     })?;
 
-    Ok(NativeAgentCompletion {
-        response: mo_core::session::NativeAgentResponse {
-            content: completion.response.content,
-            reasoning_content: completion.response.reasoning_content,
-            reasoning_duration: completion.response.reasoning_duration,
+    Ok(NativeAgentCompletion::from_runtime_completion(completion))
+}
+
+pub(crate) async fn execute_native_agent_for_execution_request<F>(
+    request: &NativeAgentExecutionRequest,
+    executor: ToolExecutorRegistry,
+    cancellation: &CancellationToken,
+    tool_max_turns: Option<usize>,
+    permission_handler: Option<SharedToolPermissionHandler>,
+    on_progress: &mut F,
+) -> Result<NativeAgentCompletion, NativeAgentError>
+where
+    F: FnMut(NativeAgentProgress) + Send,
+{
+    if cancellation.is_cancelled() {
+        return Err(NativeAgentError::Cancelled);
+    }
+
+    let client = openai_client_for_execution_request(request)?;
+    let prompt_request = prompt_request_from_execution_request(request)?;
+    let completion = run_agent_runtime(
+        &client,
+        prompt_request,
+        executor,
+        cancellation,
+        AgentRuntimeOptions {
+            tool_max_turns,
+            permission_handler,
+            error_formatter: std::sync::Arc::new(NativeAgentToolErrorFormatter),
         },
-        metrics: completion.metrics,
-    })
+        |progress| on_progress(native_progress_from_runtime_progress(progress)),
+    )
+    .await
+    .map_err(|error| match error {
+        mo_agent_runtime::AgentRuntimeError::Cancelled => NativeAgentError::Cancelled,
+        mo_agent_runtime::AgentRuntimeError::Provider(source) => {
+            NativeAgentError::from(NativeLlmError::from(source))
+        }
+        mo_agent_runtime::AgentRuntimeError::EmptyPrompt => {
+            NativeAgentError::from(NativeLlmError::EmptyPrompt {
+                provider_id: request.provider_id().to_string(),
+            })
+        }
+        mo_agent_runtime::AgentRuntimeError::ToolTurnLimit { max_turns } => NativeAgentError::from(
+            NativeLlmError::Provider(format!("agent reached tool turn limit ({max_turns})")),
+        ),
+    })?;
+
+    Ok(NativeAgentCompletion::from_runtime_completion(completion))
 }
 
 fn native_progress_from_runtime_progress(
     progress: mo_agent_runtime::AgentRuntimeProgress,
 ) -> NativeAgentProgress {
     match progress {
+        mo_agent_runtime::AgentRuntimeProgress::ProviderTurnStarted => {
+            NativeAgentProgress::ProviderTurnStarted
+        }
+        mo_agent_runtime::AgentRuntimeProgress::ProviderContextMessage { message } => {
+            NativeAgentProgress::ProviderContextMessage { message }
+        }
         mo_agent_runtime::AgentRuntimeProgress::OutputTokens { total_tokens } => {
             NativeAgentProgress::OutputTokens { total_tokens }
         }

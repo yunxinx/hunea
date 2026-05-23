@@ -8,7 +8,7 @@ use mo_core::model_catalog::{
 };
 use mo_core::phrases::StatusPhraseOrder;
 use mo_core::provider::ProviderKind;
-use mo_core::session::ChatMessageBlock;
+use mo_core::session::{ChatMessageBlock, ChatRole};
 use ratatui::{Terminal, backend::TestBackend};
 use std::path::{Path, PathBuf};
 
@@ -120,7 +120,7 @@ fn transcript_plain_items_use_assistant_markdown_render_path() {
 }
 
 #[test]
-fn native_agent_request_includes_full_transcript_history() {
+fn native_agent_turn_request_carries_only_current_user_message() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -157,24 +157,12 @@ fn native_agent_request_includes_full_transcript_history() {
     let Some(AppEffect::SendNativeAgent { request }) = effect else {
         panic!("expected native agent effect, got {effect:?}");
     };
-    let roles_and_content = request
-        .llm_request()
-        .messages
-        .iter()
-        .map(|message| (message.role.as_str(), message.content.as_str()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        roles_and_content,
-        vec![
-            ("user", "first question"),
-            ("assistant", "first answer"),
-            ("user", "follow up"),
-        ]
-    );
+    assert_eq!(request.message().role, ChatRole::User);
+    assert_eq!(request.message().content, "follow up");
 }
 
 #[test]
-fn native_agent_request_excludes_runtime_system_messages() {
+fn native_agent_turn_request_ignores_runtime_system_messages_in_transcript() {
     let mut model = Model::new_with_options(
         HeroOptions::default(),
         ModelOptions {
@@ -206,13 +194,8 @@ fn native_agent_request_excludes_runtime_system_messages() {
     let Some(AppEffect::SendNativeAgent { request }) = effect else {
         panic!("expected native agent effect, got {effect:?}");
     };
-    let roles_and_content = request
-        .llm_request()
-        .messages
-        .iter()
-        .map(|message| (message.role.as_str(), message.content.as_str()))
-        .collect::<Vec<_>>();
-    assert_eq!(roles_and_content, vec![("user", "hello")]);
+    assert_eq!(request.message().role, ChatRole::User);
+    assert_eq!(request.message().content, "hello");
     assert_eq!(
         model.transcript_plain_items(),
         vec!["■ connection refused".to_string(), "› hello".to_string()]
@@ -220,7 +203,7 @@ fn native_agent_request_excludes_runtime_system_messages() {
 }
 
 #[test]
-fn native_agent_request_embeds_explicit_file_blocks() {
+fn native_agent_turn_request_embeds_explicit_file_blocks() {
     let root = TempFileTree::new("native-structured-prompt");
     root.write_file_with_content("assets/sample.png", &[0x89, b'P', b'N', b'G']);
     root.write_file_with_content("src/code.py", b"print('hi')\n");
@@ -237,11 +220,7 @@ fn native_agent_request_embeds_explicit_file_blocks() {
         panic!("expected native agent effect");
     };
 
-    let message = request
-        .llm_request()
-        .messages
-        .last()
-        .expect("request should include current user prompt");
+    let message = request.message();
     assert_eq!(message.content, "review @assets/sample.png @src/code.py");
     let blocks = message
         .blocks
@@ -263,7 +242,7 @@ fn native_agent_request_embeds_explicit_file_blocks() {
 }
 
 #[test]
-fn native_agent_request_preserves_structured_user_history() {
+fn native_agent_turn_request_does_not_reuse_structured_transcript_history() {
     let root = TempFileTree::new("native-structured-history");
     root.write_file_with_content("assets/sample.png", &[0x89, b'P', b'N', b'G']);
 
@@ -285,16 +264,8 @@ fn native_agent_request_preserves_structured_user_history() {
         panic!("expected native agent effect");
     };
 
-    let history = &request.llm_request().messages;
-    assert_eq!(history.len(), 3);
-    let first_message_blocks = history[0]
-        .blocks
-        .as_ref()
-        .expect("first user message should keep structured attachments");
-    assert!(matches!(
-        &first_message_blocks[1],
-        ChatMessageBlock::Image { mime_type, .. } if mime_type == "image/png"
-    ));
+    assert_eq!(request.message().content, "follow up");
+    assert!(request.message().blocks.is_none());
 }
 
 #[test]
@@ -495,11 +466,7 @@ fn at_file_picker_enter_on_exact_visible_path_submits_prompt() {
     let Some(AppEffect::SendNativeAgent { request }) = effect else {
         panic!("expected native send effect, got {effect:?}");
     };
-    let message = request
-        .llm_request()
-        .messages
-        .last()
-        .expect("request should include current user prompt");
+    let message = request.message();
     assert_eq!(message.content, "@src/lib.rs");
     let blocks = message
         .blocks
@@ -581,11 +548,7 @@ fn at_file_picker_enter_on_explicit_gitignored_file_submits_prompt() {
     let Some(AppEffect::SendNativeAgent { request }) = effect else {
         panic!("expected native send effect, got {effect:?}");
     };
-    let message = request
-        .llm_request()
-        .messages
-        .last()
-        .expect("request should include current user prompt");
+    let message = request.message();
     assert_eq!(message.content, "@target/debug.log");
     let blocks = message
         .blocks
@@ -627,11 +590,7 @@ fn at_file_picker_enter_on_explicit_absolute_file_submits_prompt() {
     let Some(AppEffect::SendNativeAgent { request }) = effect else {
         panic!("expected native send effect, got {effect:?}");
     };
-    let message = request
-        .llm_request()
-        .messages
-        .last()
-        .expect("request should include current user prompt");
+    let message = request.message();
     assert_eq!(message.content, format!("@{}", outside_path.display()));
     let blocks = message
         .blocks

@@ -4,39 +4,71 @@ use mo_ai_core::ProviderClient;
 use mo_ai_openai::{DEFAULT_OPENAI_BASE_URL, OpenAiChatCompletionsClient, OpenAiClientConfig};
 use mo_core::{provider::ProviderKind, session::NativeLlmRequest};
 
+use crate::NativeAgentExecutionRequest;
 use crate::llm::NativeLlmError;
 
 pub(crate) fn openai_client_for_request(
     request: &NativeLlmRequest,
 ) -> Result<OpenAiChatCompletionsClient, NativeLlmError> {
-    let config = match request.provider_kind {
+    openai_client_from_parts(
+        &request.provider_id,
+        request.provider_kind,
+        request.base_url.as_deref(),
+        request.api_key.as_ref(),
+        request.api_key_env.as_deref(),
+    )
+}
+
+pub(crate) fn openai_client_for_execution_request(
+    request: &NativeAgentExecutionRequest,
+) -> Result<OpenAiChatCompletionsClient, NativeLlmError> {
+    openai_client_from_parts(
+        request.provider_id(),
+        request.provider_kind(),
+        request.base_url(),
+        request.api_key(),
+        request.api_key_env(),
+    )
+}
+
+fn openai_client_from_parts(
+    provider_id: &str,
+    provider_kind: ProviderKind,
+    base_url: Option<&str>,
+    api_key: Option<&mo_core::provider::ProviderApiKey>,
+    api_key_env: Option<&str>,
+) -> Result<OpenAiChatCompletionsClient, NativeLlmError> {
+    let config = match provider_kind {
         ProviderKind::OpenAiCompatible => {
-            let Some(base_url) = request
-                .base_url
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-            else {
+            let Some(base_url) = base_url.filter(|value| !value.trim().is_empty()) else {
                 return Err(NativeLlmError::MissingBaseUrl {
-                    provider_id: request.provider_id.clone(),
+                    provider_id: provider_id.to_string(),
                 });
             };
-            openai_config_for_base_url(request, base_url, optional_api_key_for_request(request)?)
+            openai_config_for_base_url(
+                provider_id,
+                base_url,
+                optional_api_key_from_parts(provider_id, provider_kind, api_key, api_key_env)?,
+            )
         }
         ProviderKind::OpenAi => {
-            let base_url = request
-                .base_url
-                .as_deref()
+            let base_url = base_url
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or(DEFAULT_OPENAI_BASE_URL);
             openai_config_for_base_url(
-                request,
+                provider_id,
                 base_url,
-                Some(required_api_key_for_request(request)?),
+                Some(required_api_key_from_parts(
+                    provider_id,
+                    provider_kind,
+                    api_key,
+                    api_key_env,
+                )?),
             )
         }
         provider_kind => {
             return Err(NativeLlmError::UnsupportedProvider {
-                provider_id: request.provider_id.clone(),
+                provider_id: provider_id.to_string(),
                 provider_kind,
             });
         }
@@ -46,12 +78,12 @@ pub(crate) fn openai_client_for_request(
 }
 
 fn openai_config_for_base_url(
-    request: &NativeLlmRequest,
+    provider_id: &str,
     base_url: &str,
     api_key: Option<String>,
 ) -> Result<OpenAiClientConfig, NativeLlmError> {
     OpenAiClientConfig::new(base_url, api_key).map_err(|_| NativeLlmError::InvalidBaseUrl {
-        provider_id: request.provider_id.clone(),
+        provider_id: provider_id.to_string(),
         base_url: base_url.to_string(),
     })
 }
@@ -77,36 +109,41 @@ pub(crate) fn list_native_provider_models(
     })
 }
 
-fn optional_api_key_for_request(
-    request: &NativeLlmRequest,
+fn optional_api_key_from_parts(
+    provider_id: &str,
+    provider_kind: ProviderKind,
+    api_key: Option<&mo_core::provider::ProviderApiKey>,
+    api_key_env: Option<&str>,
 ) -> Result<Option<String>, NativeLlmError> {
-    if let Some(api_key) = request.api_key.as_ref() {
+    if let Some(api_key) = api_key {
         return Ok(Some(api_key.as_str().to_string()));
     }
-    let Some(api_key_env) = request
-        .api_key_env
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(api_key_env) = api_key_env.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
     env::var(api_key_env)
         .map(|value| value.trim().to_string())
         .map(|value| (!value.is_empty()).then_some(value))
         .map_err(|_| NativeLlmError::MissingApiKey {
-            provider_id: request.provider_id.clone(),
-            provider_kind: request.provider_kind,
+            provider_id: provider_id.to_string(),
+            provider_kind,
             api_key_env: Some(api_key_env.to_string()),
         })
 }
 
-fn required_api_key_for_request(request: &NativeLlmRequest) -> Result<String, NativeLlmError> {
-    optional_api_key_for_request(request)?.ok_or_else(|| NativeLlmError::MissingApiKey {
-        provider_id: request.provider_id.clone(),
-        provider_kind: request.provider_kind,
-        api_key_env: request.api_key_env.clone(),
-    })
+fn required_api_key_from_parts(
+    provider_id: &str,
+    provider_kind: ProviderKind,
+    api_key: Option<&mo_core::provider::ProviderApiKey>,
+    api_key_env: Option<&str>,
+) -> Result<String, NativeLlmError> {
+    optional_api_key_from_parts(provider_id, provider_kind, api_key, api_key_env)?.ok_or_else(
+        || NativeLlmError::MissingApiKey {
+            provider_id: provider_id.to_string(),
+            provider_kind,
+            api_key_env: api_key_env.map(str::to_string),
+        },
+    )
 }
 
 #[cfg(test)]

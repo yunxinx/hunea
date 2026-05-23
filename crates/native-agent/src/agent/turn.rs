@@ -2,7 +2,10 @@ use super::{
     NativeAgentError, NativeAgentRequest,
     response::{NativeAgentCompletion, NativeAgentProgress},
 };
-use crate::{NativeLlmProgress, execute_native_agent_for_request};
+use crate::{
+    NativeAgentExecutionRequest, NativeLlmProgress,
+    llm::{execute_native_agent_for_execution_request, execute_native_agent_for_request},
+};
 use mo_tools::{SharedToolPermissionHandler, ToolExecutorRegistry};
 
 pub(crate) async fn send_agent_loop_with_cancellation_and_token_progress<F>(
@@ -32,6 +35,8 @@ where
             }
             NativeAgentProgress::AssistantDelta { .. }
             | NativeAgentProgress::ReasoningDelta { .. }
+            | NativeAgentProgress::ProviderTurnStarted
+            | NativeAgentProgress::ProviderContextMessage { .. }
             | NativeAgentProgress::ToolActivityStarted { .. }
             | NativeAgentProgress::ToolActivityUpdated { .. } => {}
         },
@@ -51,6 +56,28 @@ where
     F: FnMut(NativeAgentProgress) + Send,
 {
     execute_native_agent_for_request(
+        request,
+        executor,
+        cancellation,
+        tool_max_turns,
+        permission_handler,
+        &mut on_progress,
+    )
+    .await
+}
+
+pub(crate) async fn send_execution_loop_with_cancellation_and_progress<F>(
+    request: &NativeAgentExecutionRequest,
+    executor: ToolExecutorRegistry,
+    cancellation: &tokio_util::sync::CancellationToken,
+    tool_max_turns: Option<usize>,
+    permission_handler: Option<SharedToolPermissionHandler>,
+    mut on_progress: F,
+) -> Result<NativeAgentCompletion, NativeAgentError>
+where
+    F: FnMut(NativeAgentProgress) + Send,
+{
+    execute_native_agent_for_execution_request(
         request,
         executor,
         cancellation,

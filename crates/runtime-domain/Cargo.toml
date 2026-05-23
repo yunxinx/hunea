@@ -1,0 +1,15 @@
+[package]
+name = "runtime-domain"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+directories.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+tiktoken.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tokio-util.workspace = true

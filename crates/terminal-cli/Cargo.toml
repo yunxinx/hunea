@@ -1,0 +1,13 @@
+[package]
+name = "terminal-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "lumos"
+path = "src/main.rs"
+
+[dependencies]
+color-eyre.workspace = true
+terminal-app.workspace = true
+app-config.workspace = true

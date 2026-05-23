@@ -1,0 +1,15 @@
+[package]
+name = "terminal-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+color-eyre.workspace = true
+app-config.workspace = true
+runtime-domain.workspace = true
+conversation-runtime.workspace = true
+tool-runtime.workspace = true
+terminal-ui.workspace = true
+
+[dev-dependencies]
+crossterm.workspace = true

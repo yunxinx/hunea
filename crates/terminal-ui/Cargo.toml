@@ -1,0 +1,35 @@
+[package]
+name = "terminal-ui"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+bench-support = []
+
+[dependencies]
+arboard.workspace = true
+base64.workspace = true
+color-eyre.workspace = true
+crossterm.workspace = true
+diffy.workspace = true
+ignore.workspace = true
+runtime-domain.workspace = true
+percent-encoding.workspace = true
+pulldown-cmark.workspace = true
+ratatui.workspace = true
+serde_json.workspace = true
+syntect.workspace = true
+terminal-light.workspace = true
+two-face.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "frontend_tui"
+harness = false
+required-features = ["bench-support"]

@@ -60,6 +60,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "app-config"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "runtime-domain",
+ "serde",
+ "toml",
+ "toml_edit",
+ "unicode-width",
+]
+
+[[package]]
 name = "arboard"
 version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -381,6 +393,26 @@ dependencies = [
  "rustversion",
  "ryu",
  "static_assertions",
+]
+
+[[package]]
+name = "conversation-runtime"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "openai-compat-provider",
+ "provider-protocol",
+ "reqwest",
+ "runtime-domain",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "toml_edit",
+ "tool-loop-runtime",
+ "tool-runtime",
 ]
 
 [[package]]
@@ -1593,143 +1625,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mo-agent-runtime"
-version = "0.1.0"
-dependencies = [
- "mo-ai-core",
- "mo-core",
- "mo-tools",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "mo-ai-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "mo-ai-openai"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "mo-ai-core",
- "reqwest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "mo-app"
-version = "0.1.0"
-dependencies = [
- "color-eyre",
- "crossterm",
- "mo-config",
- "mo-core",
- "mo-native-agent",
- "mo-tools",
- "mo-tui",
-]
-
-[[package]]
-name = "mo-cli"
-version = "0.1.0"
-dependencies = [
- "color-eyre",
- "mo-app",
- "mo-config",
-]
-
-[[package]]
-name = "mo-config"
-version = "0.1.0"
-dependencies = [
- "directories",
- "mo-core",
- "serde",
- "toml",
- "toml_edit",
- "unicode-width",
-]
-
-[[package]]
-name = "mo-core"
-version = "0.1.0"
-dependencies = [
- "directories",
- "serde",
- "serde_json",
- "tiktoken",
- "tokio",
- "tokio-util",
- "toml",
-]
-
-[[package]]
-name = "mo-native-agent"
-version = "0.1.0"
-dependencies = [
- "directories",
- "mo-agent-runtime",
- "mo-ai-core",
- "mo-ai-openai",
- "mo-core",
- "mo-tools",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "toml",
- "toml_edit",
-]
-
-[[package]]
-name = "mo-tools"
-version = "0.1.0"
-dependencies = [
- "ignore",
- "serde",
- "serde_json",
- "time",
- "tokio",
- "tokio-util",
- "unicode-normalization",
-]
-
-[[package]]
-name = "mo-tui"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "base64",
- "color-eyre",
- "criterion",
- "crossterm",
- "diffy",
- "ignore",
- "mo-core",
- "percent-encoding",
- "pulldown-cmark",
- "ratatui",
- "serde_json",
- "syntect",
- "terminal-light",
- "two-face",
- "unicode-segmentation",
- "unicode-width",
- "url",
-]
-
-[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1921,6 +1816,17 @@ name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
+
+[[package]]
+name = "openai-compat-provider"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "provider-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "openssl-probe"
@@ -2204,6 +2110,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "provider-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2574,6 +2489,19 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "runtime-domain"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "serde",
+ "serde_json",
+ "tiktoken",
+ "tokio",
+ "tokio-util",
+ "toml",
 ]
 
 [[package]]
@@ -3024,6 +2952,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminal-app"
+version = "0.1.0"
+dependencies = [
+ "app-config",
+ "color-eyre",
+ "conversation-runtime",
+ "crossterm",
+ "runtime-domain",
+ "terminal-ui",
+ "tool-runtime",
+]
+
+[[package]]
+name = "terminal-cli"
+version = "0.1.0"
+dependencies = [
+ "app-config",
+ "color-eyre",
+ "terminal-app",
+]
+
+[[package]]
 name = "terminal-light"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3033,6 +2983,30 @@ dependencies = [
  "crossterm",
  "thiserror 1.0.69",
  "xterm-query",
+]
+
+[[package]]
+name = "terminal-ui"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "base64",
+ "color-eyre",
+ "criterion",
+ "crossterm",
+ "diffy",
+ "ignore",
+ "percent-encoding",
+ "pulldown-cmark",
+ "ratatui",
+ "runtime-domain",
+ "serde_json",
+ "syntect",
+ "terminal-light",
+ "two-face",
+ "unicode-segmentation",
+ "unicode-width",
+ "url",
 ]
 
 [[package]]
@@ -3343,6 +3317,32 @@ name = "toml_writer"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
+
+[[package]]
+name = "tool-loop-runtime"
+version = "0.1.0"
+dependencies = [
+ "provider-protocol",
+ "runtime-domain",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tool-runtime",
+]
+
+[[package]]
+name = "tool-runtime"
+version = "0.1.0"
+dependencies = [
+ "ignore",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "tokio-util",
+ "unicode-normalization",
+]
 
 [[package]]
 name = "tower"

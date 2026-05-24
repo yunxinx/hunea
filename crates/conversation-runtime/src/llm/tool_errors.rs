@@ -7,6 +7,13 @@ pub(crate) struct ConversationToolErrorFormatter;
 
 impl ToolErrorFormatter for ConversationToolErrorFormatter {
     fn format_tool_error(&self, tool_name: &str, raw_error: &str) -> ProcessedToolError {
+        if is_bash_user_rejection(tool_name, raw_error) {
+            return ProcessedToolError::new(
+                "The user rejected running this bash command. Do not retry it unless the user explicitly asks for it or provides a revised command.",
+                "You rejected running this command",
+            );
+        }
+
         let display_reason = tool_error_display_reason(tool_name, raw_error);
         let hint = tool_error_hint(tool_name, &display_reason);
         ProcessedToolError::new(
@@ -14,6 +21,12 @@ impl ToolErrorFormatter for ConversationToolErrorFormatter {
             display_reason,
         )
     }
+}
+
+fn is_bash_user_rejection(tool_name: &str, raw_error: &str) -> bool {
+    tool_name == "bash"
+        && raw_error.trim().starts_with("Tool permission denied:")
+        && raw_error.contains("user rejected the tool call")
 }
 
 fn tool_error_display_reason(tool_name: &str, raw_error: &str) -> String {
@@ -306,4 +319,21 @@ mod tests {
     }
 
     // 工具循环在进入 provider context 前负责业务错误归一化。
+
+    #[test]
+    fn conversation_tool_error_formatter_uses_clear_bash_rejection_copy() {
+        let formatted = ConversationToolErrorFormatter.format_tool_error(
+            "bash",
+            "Tool permission denied: bash user rejected the tool call",
+        );
+
+        assert_eq!(
+            formatted.display_reason,
+            "You rejected running this command"
+        );
+        assert_eq!(
+            formatted.assistant_message,
+            "The user rejected running this bash command. Do not retry it unless the user explicitly asks for it or provides a revised command."
+        );
+    }
 }

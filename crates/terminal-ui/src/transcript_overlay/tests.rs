@@ -152,7 +152,7 @@ fn assert_contains_transcript_hint(text: &str) {
         .filter(|ch| !ch.is_whitespace())
         .collect::<String>();
     assert!(
-        compacted.contains("…+4lines(")
+        compacted.contains("…+10lines(")
             && compacted.contains("ctrl+t")
             && compacted.contains("viewtranscript)"),
         "expected wrapped transcript hint in {text:?}; compacted={compacted:?}"

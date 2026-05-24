@@ -1,5 +1,6 @@
 //! Workspace builtin tools 的公共命名空间。
 
+mod bash;
 mod edit;
 mod edit_apply;
 mod file_state;
@@ -10,6 +11,7 @@ mod workspace;
 mod workspace_access;
 mod write;
 
+pub use bash::bash_tool;
 pub use edit::edit_tool;
 pub use list_dir::list_dir_tool;
 pub use read::read_tool;

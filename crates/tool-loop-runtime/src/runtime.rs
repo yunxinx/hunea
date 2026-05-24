@@ -5,14 +5,18 @@ use provider_protocol::{
     ToolCall as AiToolCall, ToolDefinition as AiToolDefinition, ToolResult as AiToolResult,
 };
 use runtime_domain::{
-    session::{ProviderRequestMetrics, RuntimeToolActivity, RuntimeToolActivityUpdate},
+    session::{
+        ProviderRequestMetrics, RuntimeTerminalExitStatus, RuntimeTerminalSnapshot,
+        RuntimeToolActivity, RuntimeToolActivityUpdate,
+    },
     token_count::StreamingTokenProgress,
 };
 use tokio_util::sync::CancellationToken;
 use tool_runtime::{
     DefaultToolErrorFormatter, ProcessedToolError, SharedToolErrorFormatter,
-    SharedToolPermissionHandler, ToolExecutor, ToolExecutorRegistry, ToolPermissionDecision,
-    ToolPermissionPolicy, ToolPermissionRequest, ToolRegistry, ToolResult,
+    SharedToolPermissionHandler, ToolExecutionContext, ToolExecutor, ToolExecutorRegistry,
+    ToolKind, ToolPermissionDecision, ToolPermissionPolicy, ToolPermissionRequest, ToolProgress,
+    ToolProgressSink, ToolRegistry, ToolResult, ToolTerminalExitStatus, ToolTerminalSnapshot,
 };
 
 use crate::{
@@ -35,6 +39,7 @@ pub enum ToolLoopProgress {
     ReasoningDelta { content: String },
     ToolActivityStarted { activity: RuntimeToolActivity },
     ToolActivityUpdated { update: RuntimeToolActivityUpdate },
+    TerminalUpdated { snapshot: RuntimeTerminalSnapshot },
 }
 
 /// `ToolLoopResponse` is the final visible assistant output.
@@ -141,6 +146,7 @@ where
                     cancellation,
                     options.permission_handler.as_ref(),
                     &options.error_formatter,
+                    &mut on_progress,
                 )
                 .await
             };
@@ -312,6 +318,7 @@ async fn execute_tool_call(
     cancellation: &CancellationToken,
     permission_handler: Option<&SharedToolPermissionHandler>,
     error_formatter: &SharedToolErrorFormatter,
+    on_progress: &mut impl FnMut(ToolLoopProgress),
 ) -> ToolExecution {
     let runtime_call = tool_runtime::ToolCall::new(
         call.call_id.clone(),
@@ -328,12 +335,12 @@ async fn execute_tool_call(
     .await
     {
         Some(message) => ToolResult::error(call.call_id.clone(), message),
-        None => executor.execute_tool(runtime_call, cancellation).await,
+        None => execute_tool_with_progress(executor, runtime_call, cancellation, on_progress).await,
     };
 
-    let processed_error = raw_result
-        .is_error
-        .then(|| error_formatter.format_tool_error(&call.name, &raw_result.content));
+    let processed_error = (raw_result.is_error
+        && !is_command_execution_error(&raw_result, tool_definitions.definition(&call.name)))
+    .then(|| error_formatter.format_tool_error(&call.name, &raw_result.content));
     let provider_content = processed_error
         .as_ref()
         .map(|processed| processed.assistant_message.clone())
@@ -358,6 +365,86 @@ async fn execute_tool_call(
         raw_result,
         provider_result,
         processed_error,
+    }
+}
+
+fn is_command_execution_error(
+    result: &ToolResult,
+    definition: Option<&tool_runtime::ToolDefinition>,
+) -> bool {
+    if definition.map(|definition| definition.kind) != Some(ToolKind::Execute) {
+        return false;
+    }
+
+    let Some(details) = result.details.as_ref() else {
+        return false;
+    };
+    details
+        .get("execution_kind")
+        .and_then(serde_json::Value::as_str)
+        == Some("command")
+}
+
+async fn execute_tool_with_progress(
+    executor: &ToolExecutorRegistry,
+    call: tool_runtime::ToolCall,
+    cancellation: &CancellationToken,
+    on_progress: &mut impl FnMut(ToolLoopProgress),
+) -> ToolResult {
+    let (progress_sender, mut progress_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let context = ToolExecutionContext::new(cancellation)
+        .with_progress_sink(ToolProgressSink::from_sender(progress_sender));
+    let execution = executor.execute_tool_with_context(call, context);
+    tokio::pin!(execution);
+    let mut progress_closed = false;
+
+    let result = loop {
+        tokio::select! {
+            biased;
+            maybe_progress = progress_receiver.recv(), if !progress_closed => {
+                if let Some(progress) = maybe_progress {
+                    emit_tool_progress(progress, on_progress);
+                } else {
+                    progress_closed = true;
+                };
+            }
+            result = &mut execution => break result,
+        }
+    };
+
+    while let Ok(progress) = progress_receiver.try_recv() {
+        emit_tool_progress(progress, on_progress);
+    }
+
+    result
+}
+
+fn emit_tool_progress(progress: ToolProgress, on_progress: &mut impl FnMut(ToolLoopProgress)) {
+    match progress {
+        ToolProgress::TerminalUpdated { snapshot } => {
+            on_progress(ToolLoopProgress::TerminalUpdated {
+                snapshot: runtime_terminal_snapshot(snapshot),
+            });
+        }
+    }
+}
+
+fn runtime_terminal_snapshot(snapshot: ToolTerminalSnapshot) -> RuntimeTerminalSnapshot {
+    RuntimeTerminalSnapshot {
+        terminal_id: snapshot.terminal_id,
+        command: snapshot.command,
+        cwd: snapshot.cwd,
+        output: snapshot.output,
+        truncated: snapshot.truncated,
+        exit_status: snapshot.exit_status.map(runtime_terminal_exit_status),
+        released: snapshot.released,
+    }
+}
+
+fn runtime_terminal_exit_status(status: ToolTerminalExitStatus) -> RuntimeTerminalExitStatus {
+    RuntimeTerminalExitStatus {
+        exit_code: status.exit_code,
+        signal: status.signal,
     }
 }
 
@@ -622,8 +709,9 @@ mod tests {
     use runtime_domain::token_count::StreamingTokenProgress;
     use tokio_util::sync::CancellationToken;
     use tool_runtime::{
-        Tool, ToolCall as RuntimeToolCall, ToolDefinition, ToolExecutionFuture,
-        ToolExecutorRegistry, ToolKind, ToolPermissionPolicy, ToolResult,
+        Tool, ToolCall as RuntimeToolCall, ToolDefinition, ToolExecutionContext,
+        ToolExecutionFuture, ToolExecutorRegistry, ToolKind, ToolPermissionPolicy, ToolProgress,
+        ToolResult, ToolTerminalSnapshot,
     };
 
     use super::{ToolLoopOptions, ToolLoopProgress, run_tool_loop};
@@ -968,6 +1056,75 @@ mod tests {
         }
     }
 
+    struct FailingExecuteTool;
+
+    impl Tool for FailingExecuteTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new("echo")
+                .with_label("Shell:")
+                .with_kind(ToolKind::Execute)
+                .with_permission_policy(ToolPermissionPolicy::Always)
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: RuntimeToolCall,
+            _cancellation: &'a CancellationToken,
+        ) -> ToolExecutionFuture<'a> {
+            Box::pin(async move {
+                let mut result =
+                    ToolResult::error(call.call_id, "before failure\n\nCommand exited with code 7");
+                result.details = Some(serde_json::json!({
+                    "execution_kind": "command",
+                    "exit_code": 7,
+                    "duration_ms": 250,
+                    "timed_out": false,
+                    "cancelled": false
+                }));
+                result.display_content = Some("before failure".to_string());
+                result
+            })
+        }
+    }
+
+    struct TerminalProgressTool;
+
+    impl Tool for TerminalProgressTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new("run")
+                .with_label("Run")
+                .with_kind(ToolKind::Execute)
+                .with_permission_policy(ToolPermissionPolicy::Always)
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: RuntimeToolCall,
+            _cancellation: &'a CancellationToken,
+        ) -> ToolExecutionFuture<'a> {
+            Box::pin(async move { ToolResult::success(call.call_id, "done") })
+        }
+
+        fn execute_with_context<'a>(
+            &'a self,
+            call: RuntimeToolCall,
+            context: ToolExecutionContext<'a>,
+        ) -> ToolExecutionFuture<'a> {
+            context.emit(ToolProgress::TerminalUpdated {
+                snapshot: ToolTerminalSnapshot {
+                    terminal_id: call.call_id.clone(),
+                    command: Some("cargo check".to_string()),
+                    cwd: Some("/workspace".to_string()),
+                    output: "Checking lumos".to_string(),
+                    truncated: false,
+                    exit_status: None,
+                    released: false,
+                },
+            });
+            Box::pin(async move { ToolResult::success(call.call_id, "done") })
+        }
+    }
+
     #[tokio::test]
     async fn runtime_executes_tool_calls_and_continues_until_final_text() {
         let provider = FakeProvider {
@@ -999,6 +1156,171 @@ mod tests {
             matches!(event, ToolLoopProgress::ToolActivityStarted { activity } if activity.title == "Echo")
         }));
         assert_eq!(*provider.calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn execute_tool_command_errors_preserve_raw_output_and_details() {
+        let provider = FakeProvider {
+            calls: Mutex::new(0),
+        };
+        let mut executor = ToolExecutorRegistry::new();
+        executor.insert(FailingExecuteTool);
+        let request =
+            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let cancellation = CancellationToken::new();
+        let mut events = Vec::new();
+
+        let completion = run_tool_loop(
+            &provider,
+            request,
+            executor,
+            &cancellation,
+            ToolLoopOptions {
+                tool_max_turns: Some(1),
+                ..ToolLoopOptions::default()
+            },
+            |event| events.push(event),
+        )
+        .await
+        .expect("runtime should complete");
+
+        let tool_result = completion.appended_messages[1]
+            .first_tool_result()
+            .expect("tool result should be appended");
+        assert!(tool_result.is_error);
+        assert_eq!(
+            tool_result.content,
+            "before failure\n\nCommand exited with code 7"
+        );
+        assert_eq!(
+            tool_result
+                .details
+                .as_ref()
+                .and_then(|details| details.get("exit_code"))
+                .and_then(serde_json::Value::as_i64),
+            Some(7)
+        );
+
+        let raw_output = events.iter().find_map(|event| match event {
+            ToolLoopProgress::ToolActivityUpdated { update } if update.activity_id == "call-1" => {
+                update.raw_output.as_ref()
+            }
+            _ => None,
+        });
+        let raw_output = raw_output.expect("command failure should preserve raw output");
+        assert_eq!(raw_output.display_text().as_deref(), Some("before failure"));
+        assert_eq!(
+            raw_output
+                .tool_result_details()
+                .and_then(|details| details.get("duration_ms"))
+                .and_then(serde_json::Value::as_u64),
+            Some(250)
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_forwards_terminal_progress_from_tool_execution() {
+        struct RunOnceProvider {
+            calls: Mutex<usize>,
+        }
+
+        impl ProviderClient for RunOnceProvider {
+            fn stream_prompt<'a>(
+                &'a self,
+                request: PromptRequest,
+                sink: &'a mut (dyn StreamEventSink + Send),
+            ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+                Box::pin(async move {
+                    let mut calls = self.calls.lock().expect("fake lock should not poison");
+                    *calls += 1;
+                    if request
+                        .messages
+                        .iter()
+                        .any(|message| message.first_tool_result().is_some())
+                    {
+                        let response = PromptResponse::new(
+                            Message::text(MessageRole::Assistant, "done"),
+                            provider_protocol::FinishReason::Stop,
+                            None,
+                            Vec::new(),
+                        );
+                        sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                        return Ok(response);
+                    }
+
+                    let call = ToolCall::new(
+                        "call-run",
+                        "run",
+                        serde_json::json!({ "command": "cargo check" }),
+                    );
+                    let response = PromptResponse::new(
+                        Message::assistant_with_tool_calls(String::new(), vec![call.clone()]),
+                        provider_protocol::FinishReason::ToolCalls,
+                        None,
+                        vec![call],
+                    );
+                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    Ok(response)
+                })
+            }
+
+            fn list_models<'a>(
+                &'a self,
+            ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+
+            fn capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities::chat_completions()
+            }
+        }
+
+        let provider = RunOnceProvider {
+            calls: Mutex::new(0),
+        };
+        let mut executor = ToolExecutorRegistry::new();
+        executor.insert(TerminalProgressTool);
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![Message::text(MessageRole::User, "run cargo check")],
+        );
+        let cancellation = CancellationToken::new();
+        let mut events = Vec::new();
+
+        let completion = run_tool_loop(
+            &provider,
+            request,
+            executor,
+            &cancellation,
+            ToolLoopOptions::default(),
+            |event| events.push(event),
+        )
+        .await
+        .expect("runtime should complete");
+
+        assert_eq!(completion.response.content, "done");
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ToolLoopProgress::ToolActivityStarted { activity }
+                    if activity.content.iter().any(|content| {
+                        matches!(
+                            content,
+                            runtime_domain::session::RuntimeToolActivityContent::Terminal { terminal_id }
+                                if terminal_id == "call-run"
+                        )
+                    })
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ToolLoopProgress::TerminalUpdated { snapshot }
+                    if snapshot.terminal_id == "call-run"
+                        && snapshot.output == "Checking lumos"
+                        && snapshot.command.as_deref() == Some("cargo check")
+            )
+        }));
     }
 
     #[tokio::test]

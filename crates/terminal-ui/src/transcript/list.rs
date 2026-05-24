@@ -346,6 +346,56 @@ impl Transcript {
         true
     }
 
+    /// `set_runtime_tool_activity_approval_suspended` 控制审批面板打开期间的工具行展示。
+    pub(crate) fn set_runtime_tool_activity_approval_suspended(
+        &mut self,
+        activity_id: &str,
+        is_suspended: bool,
+    ) -> bool {
+        let Some(item_index) = self.runtime_tool_activity_index(activity_id) else {
+            return false;
+        };
+        let Some(item) = self.items.get(item_index) else {
+            return false;
+        };
+        let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+            return false;
+        };
+
+        let mut tool_result = tool_result.clone();
+        if !tool_result.set_approval_suspended(is_suspended) {
+            return false;
+        }
+        self.replace_item(item_index, TranscriptItem::ToolResult(tool_result));
+        true
+    }
+
+    /// `clear_runtime_tool_activity_approval_suspensions` 恢复所有被审批面板临时隐藏的工具行。
+    pub(crate) fn clear_runtime_tool_activity_approval_suspensions(&mut self) -> bool {
+        let mut first_dirty: Option<usize> = None;
+        let mut items = self.items.as_ref().clone();
+        for (item_index, item) in items.iter_mut().enumerate() {
+            let TranscriptItem::ToolResult(tool_result) = item.as_ref() else {
+                continue;
+            };
+            let mut tool_result = tool_result.clone();
+            if !tool_result.set_approval_suspended(false) {
+                continue;
+            }
+            *item = Rc::new(TranscriptItem::ToolResult(tool_result));
+            first_dirty = Some(first_dirty.map_or(item_index, |dirty| dirty.min(item_index)));
+        }
+
+        let Some(first_dirty) = first_dirty else {
+            return false;
+        };
+        self.items = Rc::new(items);
+        self.items_version = self.items_version.saturating_add(1);
+        self.metrics_cache.mark_metrics_dirty_from(first_dirty);
+        self.screen_cache.mark_dirty_from(first_dirty);
+        true
+    }
+
     /// `set_runtime_terminal_snapshot` 刷新引用指定 terminal 的 tool activity 展示项。
     pub(crate) fn set_runtime_terminal_snapshot(
         &mut self,

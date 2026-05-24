@@ -11,7 +11,10 @@ mod tool_error;
 
 pub use definition::ToolDefinition;
 pub use execution::{ToolCall, ToolResult};
-pub use executor::{Tool, ToolExecutionFuture, ToolExecutor, ToolExecutorRegistry};
+pub use executor::{
+    Tool, ToolExecutionContext, ToolExecutionFuture, ToolExecutor, ToolExecutorRegistry,
+    ToolProgress, ToolProgressSink, ToolTerminalExitStatus, ToolTerminalSnapshot,
+};
 pub use kind::ToolKind;
 pub use permission::{
     SharedToolPermissionHandler, ToolPermissionDecision, ToolPermissionFuture,

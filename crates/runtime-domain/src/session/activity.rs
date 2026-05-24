@@ -3,6 +3,7 @@ use serde_json::Value;
 const TOOL_RESULT_RAW_VALUE_MARKER: &str = "__lumos_tool_result";
 const TOOL_RESULT_RAW_VALUE_VERSION: &str = "v1";
 const TOOL_RESULT_RAW_VALUE_CONTENT: &str = "content";
+const TOOL_RESULT_RAW_VALUE_DISPLAY_CONTENT: &str = "display_content";
 const TOOL_RESULT_RAW_VALUE_DETAILS: &str = "details";
 
 /// `RuntimeToolKind` 是 runtime tool activity 的稳定工具分类。
@@ -83,6 +84,15 @@ impl RuntimeToolActivityRawValue {
 
     /// `tool_result` 保留工具原始文本输出，同时附带内部 metadata。
     pub fn tool_result(content: impl Into<String>, details: Option<Value>) -> Self {
+        Self::tool_result_with_display_content(content, None::<String>, details)
+    }
+
+    /// `tool_result_with_display_content` 区分模型可见输出与 TUI 展示输出。
+    pub fn tool_result_with_display_content(
+        content: impl Into<String>,
+        display_content: Option<impl Into<String>>,
+        details: Option<Value>,
+    ) -> Self {
         let mut value = serde_json::Map::new();
         value.insert(
             TOOL_RESULT_RAW_VALUE_MARKER.to_string(),
@@ -92,6 +102,12 @@ impl RuntimeToolActivityRawValue {
             TOOL_RESULT_RAW_VALUE_CONTENT.to_string(),
             Value::String(content.into()),
         );
+        if let Some(display_content) = display_content {
+            value.insert(
+                TOOL_RESULT_RAW_VALUE_DISPLAY_CONTENT.to_string(),
+                Value::String(display_content.into()),
+            );
+        }
         if let Some(details) = details {
             value.insert(TOOL_RESULT_RAW_VALUE_DETAILS.to_string(), details);
         }
@@ -115,6 +131,10 @@ impl RuntimeToolActivityRawValue {
 
     /// `display_text` 返回适合 transcript 展示的文本。
     pub fn display_text(&self) -> Option<String> {
+        if let Some(content) = self.tool_result_display_content() {
+            return (!content.is_empty()).then(|| content.to_string());
+        }
+
         if let Some(content) = self.tool_result_content() {
             return (!content.is_empty()).then(|| content.to_string());
         }
@@ -152,6 +172,16 @@ impl RuntimeToolActivityRawValue {
 
         self.value
             .get(TOOL_RESULT_RAW_VALUE_CONTENT)
+            .and_then(Value::as_str)
+    }
+
+    fn tool_result_display_content(&self) -> Option<&str> {
+        if !self.is_tool_result_raw_value() {
+            return None;
+        }
+
+        self.value
+            .get(TOOL_RESULT_RAW_VALUE_DISPLAY_CONTENT)
             .and_then(Value::as_str)
     }
 

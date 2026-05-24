@@ -114,7 +114,7 @@ fn runtime_tool_activity_header_uses_title_only_and_strips_shell_prefix() {
     );
     let lines = item.render_lines(80, palette);
 
-    assert_eq!(line_to_plain_text(&lines[0]), "● cargo check");
+    assert_eq!(line_to_plain_text(&lines[0]), "● Ran cargo check");
     assert_eq!(lines[0].spans[0].style.fg, Some(palette.quote));
     assert!(
         lines[0]
@@ -160,7 +160,7 @@ fn runtime_tool_activity_header_highlights_shell_titles() {
     );
     let lines = item.render_lines(80, palette);
 
-    assert_eq!(line_to_plain_text(&lines[0]), "● cargo check");
+    assert_eq!(line_to_plain_text(&lines[0]), "● Ran cargo check");
     assert!(
         lines[0]
             .spans
@@ -174,6 +174,7 @@ fn runtime_tool_activity_header_highlights_shell_titles() {
 
 #[test]
 fn pending_execute_tool_call_renders_waiting_detail() {
+    let palette = default_palette();
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
             activity_id: "call-approval".to_string(),
@@ -187,21 +188,32 @@ fn pending_execute_tool_call_renders_waiting_detail() {
         },
         ToolActivityRenderMode::Compact,
     );
-    let rendered_plain = item
-        .render_lines(80, default_palette())
-        .iter()
-        .map(line_to_plain_text)
-        .collect::<Vec<_>>();
+    let lines = item.render_lines(80, palette);
+    let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
 
     assert_eq!(
         rendered_plain,
-        vec!["● cargo check".to_string(), "  └─ Waiting...".to_string()]
+        vec!["● cargo check".to_string(), "  └ Waiting...".to_string()]
     );
     assert!(
         rendered_plain
             .iter()
             .all(|line| !line.contains("Requesting approval")),
         "tool call row should not duplicate the approval panel request text: {rendered_plain:?}"
+    );
+    assert_eq!(
+        lines[1].spans[0].style.fg,
+        Some(palette.tertiary),
+        "waiting detail should use the same muted branch prefix as exploration rows"
+    );
+    assert!(
+        lines[1]
+            .spans
+            .iter()
+            .skip(1)
+            .all(|span| span.style.fg == Some(palette.secondary)),
+        "waiting detail text should remain visually weak: {:?}",
+        lines[1].spans
     );
 }
 
@@ -230,7 +242,7 @@ fn active_execute_tool_call_defers_streamed_content_until_finished() {
 
     assert_eq!(
         rendered_plain,
-        vec!["● cargo check".to_string(), "  └─ Waiting...".to_string()]
+        vec!["● cargo check".to_string(), "  └ Waiting...".to_string()]
     );
     assert!(
         rendered_plain.iter().all(|line| {
@@ -266,9 +278,350 @@ fn completed_execute_tool_call_renders_deferred_content() {
     assert_eq!(
         rendered_plain,
         vec![
-            "● cargo check".to_string(),
-            "  └─ Checking lumos v0.1.0".to_string(),
+            "● Ran cargo check".to_string(),
+            "  └ Checking lumos v0.1.0".to_string(),
         ]
+    );
+}
+
+#[test]
+fn completed_execute_tool_call_strips_legacy_run_prefix_after_ran_header() {
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-exec".to_string(),
+            title: "Run tests".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: Some("ok".into()),
+        },
+        ToolActivityRenderMode::Compact,
+    );
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered_plain[0], "● Ran tests");
+}
+
+#[test]
+fn completed_execute_tool_call_compact_output_keeps_two_head_and_tail_lines() {
+    let raw_output = (1..=11)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-exec".to_string(),
+            title: "Shell: ls".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: Some(raw_output.into()),
+        },
+        ToolActivityRenderMode::Compact,
+    );
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec![
+            "● Ran ls".to_string(),
+            "  └ line 1".to_string(),
+            "    line 2".to_string(),
+            "    … +7 lines (ctrl + t to view transcript)".to_string(),
+            "    line 10".to_string(),
+            "    line 11".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn completed_execute_tool_call_compact_output_wraps_at_spaces() {
+    let raw_output = (1..=70)
+        .map(|number| number.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-exec".to_string(),
+            title: "Shell: seq 1 70".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: Some(raw_output.into()),
+        },
+        ToolActivityRenderMode::Compact,
+    );
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered_plain[1].split_whitespace().last(), Some("28"));
+    assert!(
+        rendered_plain[2].starts_with("    29 "),
+        "fixture should resume at the next complete number: {rendered_plain:?}"
+    );
+}
+
+#[test]
+fn completed_execute_tool_call_uses_display_content_without_model_truncation_footer() {
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-exec".to_string(),
+            title: "Shell: seq 1000".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: Some(
+                runtime_domain::session::RuntimeToolActivityRawValue::tool_result_with_display_content(
+                    concat!(
+                        "line 999\n",
+                        "line 1000\n\n",
+                        "[Showing lines 999-1000 of 1000. Full output: /tmp/lumos-bash.log]"
+                    ),
+                    Some("line 999\nline 1000"),
+                    Some(serde_json::json!({
+                        "truncated": true,
+                        "full_output_path": "/tmp/lumos-bash.log"
+                    })),
+                ),
+            ),
+        },
+        ToolActivityRenderMode::Compact,
+    );
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec![
+            "● Ran seq 1000".to_string(),
+            "  └ line 999".to_string(),
+            "    line 1000".to_string(),
+        ]
+    );
+    assert!(
+        rendered_plain
+            .iter()
+            .all(|line| !line.contains("[Showing lines")),
+        "model-visible truncation footer should not be rendered as shell output: {rendered_plain:?}"
+    );
+}
+
+#[test]
+fn detailed_execute_tool_call_uses_display_content_without_model_truncation_footer() {
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-exec".to_string(),
+            title: "Shell: seq 1000".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: Some(
+                runtime_domain::session::RuntimeToolActivityRawValue::tool_result_with_display_content(
+                    concat!(
+                        "line 999\n",
+                        "line 1000\n\n",
+                        "[Showing lines 999-1000 of 1000. Full output: /tmp/lumos-bash.log]"
+                    ),
+                    Some("line 999\nline 1000"),
+                    Some(serde_json::json!({
+                        "exit_code": 0,
+                        "duration_ms": 1500,
+                        "truncated": true,
+                        "full_output_path": "/tmp/lumos-bash.log"
+                    })),
+                ),
+            ),
+        },
+        ToolActivityRenderMode::Detailed,
+    );
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec![
+            "$ seq 1000".to_string(),
+            "line 999".to_string(),
+            "line 1000".to_string(),
+            "".to_string(),
+            "✓ • 1.50s".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn detailed_execute_tool_call_appends_duration_footer() {
+    let palette = default_palette();
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-exec".to_string(),
+            title: "Shell: cargo check".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: Some(
+                runtime_domain::session::RuntimeToolActivityRawValue::tool_result(
+                    "Finished dev profile",
+                    Some(serde_json::json!({
+                        "exit_code": 0,
+                        "duration_ms": 1500
+                    })),
+                ),
+            ),
+        },
+        ToolActivityRenderMode::Detailed,
+    );
+    let lines = item.render_lines(80, palette);
+    let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec![
+            "$ cargo check".to_string(),
+            "Finished dev profile".to_string(),
+            "".to_string(),
+            "✓ • 1.50s".to_string(),
+        ]
+    );
+    assert!(
+        lines[1].spans.iter().all(|span| span.style.fg.is_none()),
+        "detailed output should use the terminal default color: {:?}",
+        lines[1].spans
+    );
+    assert_eq!(lines[3].spans[0].content.as_ref(), "✓");
+    assert_eq!(lines[3].spans[0].style.fg, Some(palette.quote));
+    assert!(
+        lines[3]
+            .spans
+            .iter()
+            .skip(1)
+            .all(|span| span.style.fg == Some(palette.secondary)),
+        "footer duration text should stay visually weak: {:?}",
+        lines[3].spans
+    );
+}
+
+#[test]
+fn detailed_execute_tool_call_keeps_shell_command_highlighting() {
+    let palette = default_palette();
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-exec".to_string(),
+            title: "Shell: echo \"hello\"".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(r#"{"command":"echo \"hello\""}"#.into()),
+            raw_output: Some("hello".into()),
+        },
+        ToolActivityRenderMode::Detailed,
+    );
+    let lines = item.render_lines(80, palette);
+    let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec!["$ echo \"hello\"".to_string(), "hello".to_string()]
+    );
+    assert_eq!(lines[0].spans[0].content.as_ref(), "$ ");
+    assert!(lines[0].spans[0].style.fg.is_none());
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .skip(1)
+            .any(|span| span.style.fg.is_some()),
+        "detailed command should retain bash syntax highlight colors: {:?}",
+        lines[0].spans
+    );
+    assert!(
+        lines[1].spans.iter().all(|span| span.style.fg.is_none()),
+        "detailed command output should stay terminal-default colored: {:?}",
+        lines[1].spans
+    );
+}
+
+#[test]
+fn detailed_failed_execute_tool_call_appends_exit_footer() {
+    let palette = default_palette();
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-exec".to_string(),
+            title: "Shell: cargo check".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Failed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: Some(
+                runtime_domain::session::RuntimeToolActivityRawValue::tool_result(
+                    "error: failed",
+                    Some(serde_json::json!({
+                        "exit_code": 7,
+                        "duration_ms": 250
+                    })),
+                ),
+            ),
+        },
+        ToolActivityRenderMode::Detailed,
+    );
+    let lines = item.render_lines(80, palette);
+    let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec![
+            "$ cargo check".to_string(),
+            "error: failed".to_string(),
+            "".to_string(),
+            "✗ (exit 7) • 250ms".to_string(),
+        ]
+    );
+    assert!(
+        lines[1].spans.iter().all(|span| span.style.fg.is_none()),
+        "detailed output should use the terminal default color: {:?}",
+        lines[1].spans
+    );
+    assert_eq!(lines[3].spans[0].content.as_ref(), "✗");
+    assert_eq!(lines[3].spans[0].style.fg, Some(palette.system_error));
+    assert!(
+        lines[3]
+            .spans
+            .iter()
+            .skip(1)
+            .all(|span| span.style.fg == Some(palette.secondary)),
+        "footer duration text should stay visually weak: {:?}",
+        lines[3].spans
     );
 }
 
@@ -298,8 +651,8 @@ fn completed_execute_tool_call_prefers_raw_output_and_hides_permission_copy_cont
     assert_eq!(
         rendered_plain,
         vec![
-            "● cargo check".to_string(),
-            "  └─ Finished dev profile".to_string(),
+            "● Ran cargo check".to_string(),
+            "  └ Finished dev profile".to_string(),
         ]
     );
     assert!(
@@ -336,8 +689,8 @@ fn failed_execute_tool_call_renders_final_output_without_raw_input() {
     assert_eq!(
         rendered_plain,
         vec![
-            "● cargo check".to_string(),
-            "  └─ error: could not compile `lumos`".to_string(),
+            "● Ran cargo check".to_string(),
+            "  └ error: could not compile `lumos`".to_string(),
         ]
     );
     assert!(
@@ -345,6 +698,47 @@ fn failed_execute_tool_call_renders_final_output_without_raw_input() {
             !line.contains("Input:") && !line.contains(r#"{"command":"cargo check"}"#)
         }),
         "failed command rows should show final output without raw transport input: {rendered_plain:?}"
+    );
+}
+
+#[test]
+fn failed_execute_tool_call_uses_secondary_detail_text_for_rejection_copy() {
+    let palette = default_palette();
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-exec".to_string(),
+            title: "Shell: echo hi".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Failed,
+            content: vec![RuntimeToolActivityContent::Text(
+                "Failed: You rejected running this command".to_string(),
+            )],
+            locations: Vec::new(),
+            raw_input: Some(r#"{"command":"echo hi"}"#.into()),
+            raw_output: None,
+        },
+        ToolActivityRenderMode::Compact,
+    );
+
+    let lines = item.render_lines(80, palette);
+    let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec![
+            "● Ran echo hi".to_string(),
+            "  └ Failed: You rejected running this command".to_string(),
+        ]
+    );
+    assert_eq!(lines[1].spans[0].style.fg, Some(palette.tertiary));
+    assert!(
+        lines[1]
+            .spans
+            .iter()
+            .skip(1)
+            .all(|span| span.style.fg == Some(palette.secondary)),
+        "failed execute detail should use the same weak color as completed command output: {:?}",
+        lines[1].spans
     );
 }
 
@@ -375,7 +769,7 @@ fn completed_non_execute_tool_call_still_renders_text_content() {
         rendered_plain,
         vec![
             "● Fetch package metadata".to_string(),
-            "  └─ Found 3 releases".to_string(),
+            "  └ Found 3 releases".to_string(),
         ]
     );
 }
@@ -402,8 +796,8 @@ fn runtime_tool_activity_raw_output_trailing_newline_does_not_render_blank_line(
     assert_eq!(
         rendered_plain,
         vec![
-            "● cargo check".to_string(),
-            "  └─ Checking lumos".to_string(),
+            "● Ran cargo check".to_string(),
+            "  └ Checking lumos".to_string(),
         ]
     );
     assert!(
@@ -476,8 +870,8 @@ fn runtime_tool_activity_multi_line_raw_output_uses_four_space_continuation_pref
     assert_eq!(
         rendered_plain,
         vec![
-            "● git log --oneline -5".to_string(),
-            "  └─ first line".to_string(),
+            "● Ran git log --oneline -5".to_string(),
+            "  └ first line".to_string(),
             "    second line".to_string(),
         ]
     );
@@ -527,6 +921,67 @@ fn runtime_tool_activity_terminal_content_renders_live_snapshot() {
 }
 
 #[test]
+fn detailed_runtime_tool_activity_terminal_content_highlights_command_only() {
+    let palette = default_palette();
+    let mut item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-terminal".to_string(),
+            title: "Run tests".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::InProgress,
+            content: vec![RuntimeToolActivityContent::Terminal {
+                terminal_id: "term-1".to_string(),
+            }],
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: None,
+        },
+        ToolActivityRenderMode::Detailed,
+    );
+    assert!(item.set_runtime_terminal_snapshot_for_test(
+        runtime_domain::session::RuntimeTerminalSnapshot {
+            terminal_id: "term-1".to_string(),
+            command: Some("cargo check".to_string()),
+            cwd: None,
+            output: "Checking lumos\nFinished".to_string(),
+            truncated: false,
+            exit_status: None,
+            released: false,
+        },
+    ));
+
+    let lines = item.render_lines(80, palette);
+    let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec![
+            "$ cargo check".to_string(),
+            "Checking lumos".to_string(),
+            "Finished".to_string(),
+        ]
+    );
+    assert_eq!(lines[0].spans[0].content.as_ref(), "$ ");
+    assert!(lines[0].spans[0].style.fg.is_none());
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .skip(1)
+            .any(|span| span.style.fg.is_some()),
+        "detailed live transcript command should retain bash syntax highlight colors: {:?}",
+        lines[0].spans
+    );
+    assert!(
+        lines
+            .iter()
+            .skip(1)
+            .all(|line| line.spans.iter().all(|span| span.style.fg.is_none())),
+        "detailed live transcript output should use the terminal default color: {lines:?}"
+    );
+}
+
+#[test]
 fn runtime_tool_activity_raw_output_uses_secondary_color_and_codex_like_alignment() {
     let palette = default_palette();
     let item = ToolResultItem::from_runtime_tool_activity(
@@ -551,10 +1006,15 @@ fn runtime_tool_activity_raw_output_uses_secondary_color_and_codex_like_alignmen
     assert_eq!(
         rendered_plain,
         vec![
-            "● cargo check".to_string(),
-            "  └─ Checking lumos v0.1.0 (/home/archie/GoCodes/lumos_rust)".to_string(),
+            "● Ran cargo check".to_string(),
+            "  └ Checking lumos v0.1.0 (/home/archie/GoCodes/lumos_rust)".to_string(),
             "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.01s".to_string(),
         ]
+    );
+    assert!(
+        lines[1].spans[0].style.fg == Some(palette.tertiary),
+        "raw output prefix should use the muted exploration branch color: {:?}",
+        lines[1].spans
     );
     assert!(
         lines[1]

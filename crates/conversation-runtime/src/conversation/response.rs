@@ -32,6 +32,9 @@ pub(crate) enum ConversationProgress {
     ToolActivityUpdated {
         update: runtime_domain::session::RuntimeToolActivityUpdate,
     },
+    TerminalUpdated {
+        snapshot: runtime_domain::session::RuntimeTerminalSnapshot,
+    },
 }
 
 #[derive(Debug)]

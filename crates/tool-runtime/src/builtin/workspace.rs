@@ -48,6 +48,7 @@ pub fn workspace_tool_registry(root: impl AsRef<Path>) -> ToolExecutorRegistry {
     registry.insert(super::edit::edit_tool_with_access(
         &root, access, read_state,
     ));
+    registry.insert(super::bash::bash_tool(&root));
     registry
 }
 

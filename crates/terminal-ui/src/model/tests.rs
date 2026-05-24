@@ -1115,6 +1115,116 @@ fn deleting_file_picker_trigger_after_mouse_wheel_keeps_manual_document_viewport
 }
 
 #[test]
+fn runtime_terminal_updates_keep_manual_scrollback() {
+    let mut model = Model::new_with_style_mode(StartupBannerOptions::default(), StyleMode::Ms);
+    model.transcript_mut().clear();
+    model.transcript_mut().set_gap(0);
+    for index in 0..16 {
+        model
+            .transcript_mut()
+            .append_message(Sender::Assistant, format!("history line {index}"));
+    }
+    let item_index = model.append_runtime_tool_activity_from_runtime(RuntimeToolActivity {
+        activity_id: "call-terminal".to_string(),
+        title: "Shell: seq 1000".to_string(),
+        kind: runtime_domain::session::RuntimeToolKind::Execute,
+        status: runtime_domain::session::RuntimeToolActivityStatus::InProgress,
+        content: vec![
+            runtime_domain::session::RuntimeToolActivityContent::Terminal {
+                terminal_id: "call-terminal".to_string(),
+            },
+        ],
+        locations: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+    });
+    assert!(
+        model.apply_runtime_terminal_snapshot_from_runtime(RuntimeTerminalSnapshot {
+            terminal_id: "call-terminal".to_string(),
+            command: Some("seq 1000".to_string()),
+            cwd: None,
+            output: (1..=40)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            truncated: false,
+            exit_status: None,
+            released: false,
+        })
+    );
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    model.sync_document_viewport_to_bottom();
+
+    let bottom_offset = model.document_runtime.viewport_y;
+    model.scroll_document_by(-Model::document_mouse_wheel_delta());
+    let scrolled_offset = model.document_runtime.viewport_y;
+    assert!(
+        scrolled_offset < bottom_offset,
+        "fixture should manually scroll away from the active command tail"
+    );
+    assert!(model.document_runtime.manual_scroll);
+
+    assert!(
+        model.apply_runtime_terminal_snapshot_from_runtime(RuntimeTerminalSnapshot {
+            terminal_id: "call-terminal".to_string(),
+            command: Some("seq 1000".to_string()),
+            cwd: None,
+            output: (1..=80)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            truncated: false,
+            exit_status: None,
+            released: false,
+        })
+    );
+
+    let layout = model.build_document_layout();
+    let refreshed_bottom_offset = model.document_bottom_offset(layout.line_count());
+    assert!(
+        model.document_runtime.viewport_y < refreshed_bottom_offset,
+        "terminal output refresh should not pull a manually scrolled viewport back to bottom"
+    );
+    assert!(
+        model.document_runtime.manual_scroll,
+        "terminal output refresh should keep manual scroll mode"
+    );
+    assert!(
+        !model.document_runtime.follow_bottom,
+        "terminal output refresh should not re-enable bottom-follow while user is reading scrollback"
+    );
+
+    assert!(
+        model.update_runtime_tool_activity_from_runtime(
+            item_index,
+            RuntimeToolActivityUpdate {
+                activity_id: "call-terminal".to_string(),
+                status: Some(runtime_domain::session::RuntimeToolActivityStatus::Completed),
+                raw_output: Some(
+                    (1..=80)
+                        .map(|line| format!("line {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .into(),
+                ),
+                ..RuntimeToolActivityUpdate::default()
+            },
+        )
+    );
+    let final_layout = model.build_document_layout();
+    let final_bottom_offset = model.document_bottom_offset(final_layout.line_count());
+    assert!(
+        model.document_runtime.viewport_y < final_bottom_offset,
+        "final tool update should not pull a manually scrolled viewport back to bottom"
+    );
+    assert!(
+        model.document_runtime.manual_scroll,
+        "final tool update should keep manual scroll mode"
+    );
+}
+
+#[test]
 fn height_only_resize_keeps_transcript_render_stable() {
     let mut model = Model::new_with_style_mode(StartupBannerOptions::default(), StyleMode::Ms);
     model.transcript_mut().clear();
@@ -1935,6 +2045,178 @@ fn runtime_permission_reject_key_preserves_target_identity() {
         })
     );
     assert!(!model.tool_approval_panel_active());
+}
+
+#[test]
+fn runtime_bash_permission_panel_uses_reason_and_hides_waiting_tool_row() {
+    use crate::runtime::RuntimeEventApply;
+    use runtime_domain::session::{
+        RuntimeEvent, RuntimePermissionOption, RuntimePermissionOptionKind,
+        RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityContent,
+        RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
+    };
+
+    let target = RuntimeTarget::provider("local", "qwen3");
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_palette(default_palette(), true);
+    model.apply_runtime_event(RuntimeEvent::ToolActivityStarted {
+        target: target.clone(),
+        activity: RuntimeToolActivity {
+            activity_id: "call-bash".to_string(),
+            title: "Shell: echo hi".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::InProgress,
+            content: vec![RuntimeToolActivityContent::Terminal {
+                terminal_id: "call-bash".to_string(),
+            }],
+            locations: Vec::new(),
+            raw_input: Some(serde_json::json!({ "command": "echo hi" }).into()),
+            raw_output: None,
+        },
+    });
+    assert!(
+        model
+            .transcript_plain_items()
+            .join("\n")
+            .contains("Waiting..."),
+        "execute tool row should normally show a waiting detail before approval is shown"
+    );
+
+    model.apply_runtime_event(RuntimeEvent::PermissionRequested {
+        target,
+        request: RuntimePermissionRequest::new(
+            "conversation-permission-1",
+            Some("Shell: echo hi".to_string()),
+            vec![
+                RuntimePermissionOption::new(
+                    "allow_once",
+                    "Yes",
+                    RuntimePermissionOptionKind::AllowOnce,
+                ),
+                RuntimePermissionOption::new(
+                    "reject_once",
+                    "No",
+                    RuntimePermissionOptionKind::RejectOnce,
+                ),
+            ],
+        )
+        .with_tool_activity(RuntimeToolActivityUpdate {
+            activity_id: "call-bash".to_string(),
+            title: Some("Shell: echo hi".to_string()),
+            kind: Some(RuntimeToolKind::Execute),
+            status: Some(RuntimeToolActivityStatus::Pending),
+            content: Some(vec![RuntimeToolActivityContent::Text(
+                "Requesting approval to run echo hi".to_string(),
+            )]),
+            locations: Some(Vec::new()),
+            raw_input: Some(
+                serde_json::json!({
+                    "command": "echo hi",
+                    "reason": "Check whether shell execution is available",
+                    "workdir": "crates/terminal-ui",
+                    "timeout": 5
+                })
+                .into(),
+            ),
+            raw_output: None,
+        }),
+    });
+
+    assert!(model.tool_approval_panel_active());
+    assert_eq!(model.tool_approval_panel.title, "echo hi");
+    assert!(
+        model.tool_approval_panel.details.iter().any(|detail| {
+            detail.label == "Reason" && detail.value == "Check whether shell execution is available"
+        }),
+        "approval panel should show the model-provided command reason: {:?}",
+        model.tool_approval_panel.details
+    );
+    assert!(
+        model
+            .tool_approval_panel
+            .details
+            .iter()
+            .any(|detail| { detail.label == "Workdir" && detail.value == "crates/terminal-ui" }),
+        "approval panel should surface the command workdir when provided: {:?}",
+        model.tool_approval_panel.details
+    );
+    assert!(
+        !model
+            .transcript_plain_items()
+            .join("\n")
+            .contains("echo hi"),
+        "transcript should not duplicate the pending command row while the approval panel is open"
+    );
+}
+
+#[test]
+fn runtime_bash_permission_panel_omits_missing_reason() {
+    use crate::runtime::RuntimeEventApply;
+    use runtime_domain::session::{
+        RuntimeEvent, RuntimePermissionOption, RuntimePermissionOptionKind,
+        RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivityContent,
+        RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
+    };
+
+    let target = RuntimeTarget::provider("local", "qwen3");
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.apply_runtime_event(RuntimeEvent::PermissionRequested {
+        target,
+        request: RuntimePermissionRequest::new(
+            "conversation-permission-1",
+            Some("Shell: echo hi".to_string()),
+            vec![
+                RuntimePermissionOption::new(
+                    "allow_once",
+                    "Yes",
+                    RuntimePermissionOptionKind::AllowOnce,
+                ),
+                RuntimePermissionOption::new(
+                    "reject_once",
+                    "No",
+                    RuntimePermissionOptionKind::RejectOnce,
+                ),
+            ],
+        )
+        .with_tool_activity(RuntimeToolActivityUpdate {
+            activity_id: "call-bash".to_string(),
+            title: Some("Shell: echo hi".to_string()),
+            kind: Some(RuntimeToolKind::Execute),
+            status: Some(RuntimeToolActivityStatus::Pending),
+            content: Some(vec![RuntimeToolActivityContent::Text(
+                "Requesting approval to run echo hi".to_string(),
+            )]),
+            raw_input: Some(
+                serde_json::json!({
+                    "command": "echo hi",
+                    "reason": "   ",
+                    "timeout": 5
+                })
+                .into(),
+            ),
+            ..RuntimeToolActivityUpdate::default()
+        }),
+    });
+
+    assert!(model.tool_approval_panel_active());
+    assert!(
+        model
+            .tool_approval_panel
+            .details
+            .iter()
+            .all(|detail| detail.label != "Reason"),
+        "approval panel should omit missing or blank reasons: {:?}",
+        model.tool_approval_panel.details
+    );
+    assert!(
+        model
+            .tool_approval_panel
+            .details
+            .iter()
+            .all(|detail| detail.value != "Not provided"),
+        "approval panel should not synthesize a Not provided placeholder: {:?}",
+        model.tool_approval_panel.details
+    );
 }
 
 #[test]

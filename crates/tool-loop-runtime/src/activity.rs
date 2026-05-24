@@ -16,14 +16,22 @@ pub fn runtime_tool_activity_from_call(
     tool_definitions: &ToolRegistry,
 ) -> RuntimeToolActivity {
     let definition = tool_definitions.definition(&call.name);
+    let content = if runtime_kind_for(definition) == RuntimeToolKind::Execute {
+        vec![RuntimeToolActivityContent::Terminal {
+            terminal_id: call.call_id.clone(),
+        }]
+    } else {
+        vec![RuntimeToolActivityContent::Text(tool_input_summary(
+            &call.arguments,
+        ))]
+    };
+
     RuntimeToolActivity {
         activity_id: call.call_id.clone(),
         title: tool_title_for(&call.name, definition, &call.arguments),
         kind: runtime_kind_for(definition),
         status: RuntimeToolActivityStatus::InProgress,
-        content: vec![RuntimeToolActivityContent::Text(tool_input_summary(
-            &call.arguments,
-        ))],
+        content,
         locations: tool_locations_for(&call.arguments),
         raw_input: Some(RuntimeToolActivityRawValue::from(call.arguments.clone())),
         raw_output: None,
@@ -43,17 +51,26 @@ pub fn runtime_tool_activity_update_from_result(
     } else {
         RuntimeToolActivityStatus::Completed
     });
+    let display_content = result
+        .display_content
+        .as_ref()
+        .unwrap_or(&result.content)
+        .clone();
     let content = match processed_error {
         Some(processed) => {
             RuntimeToolActivityContent::Text(format!("Failed: {}", processed.display_reason))
         }
-        None => RuntimeToolActivityContent::Text(result.content.clone()),
+        None => RuntimeToolActivityContent::Text(display_content.clone()),
     };
     let raw_input = processed_error
         .is_none()
         .then(|| RuntimeToolActivityRawValue::from(call.arguments.clone()));
     let raw_output = processed_error.is_none().then(|| {
-        RuntimeToolActivityRawValue::tool_result(result.content.clone(), result.details.clone())
+        RuntimeToolActivityRawValue::tool_result_with_display_content(
+            result.content.clone(),
+            result.display_content.clone(),
+            result.details.clone(),
+        )
     });
 
     RuntimeToolActivityUpdate {

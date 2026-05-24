@@ -9,7 +9,7 @@ mod turn;
 
 pub use client::run_conversation_turn_with_cancellation;
 pub use error::TurnExecutionError;
-pub(crate) use permission::ConversationPermissionBroker;
+pub(crate) use permission::{ConversationPermissionBroker, ConversationTimeoutPause};
 pub use response::ConversationResponse;
 pub(crate) use response::{ConversationCompletion, ConversationProgress};
 pub use runtime_domain::session::{ConversationEvent, ConversationRequest};

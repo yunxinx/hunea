@@ -6,9 +6,11 @@ use std::{
 
 use tokio_util::sync::CancellationToken;
 use tool_runtime::{
-    ToolCall, ToolExecutor, ToolExecutorRegistry, ToolKind, ToolPermissionPolicy,
+    ToolCall, ToolExecutionContext, ToolExecutor, ToolExecutorRegistry, ToolKind,
+    ToolPermissionPolicy, ToolProgress, ToolProgressSink,
     builtin::{
-        list_dir_tool, read_tool, workspace_readonly_tool_registry, workspace_tool_registry,
+        bash_tool, list_dir_tool, read_tool, workspace_readonly_tool_registry,
+        workspace_tool_registry,
     },
 };
 
@@ -55,6 +57,12 @@ fn builtin_workspace_registry_exposes_read_write_and_edit_tools() {
             .definition("edit")
             .map(|definition| definition.kind),
         Some(ToolKind::Edit)
+    );
+    assert_eq!(
+        definitions
+            .definition("bash")
+            .map(|definition| definition.kind),
+        Some(ToolKind::Execute)
     );
 
     cleanup(&root);
@@ -112,7 +120,416 @@ fn builtin_write_tools_require_ask_permission_by_default() {
             .map(|definition| definition.permission_policy),
         Some(ToolPermissionPolicy::Ask)
     );
+    assert_eq!(
+        definitions
+            .definition("bash")
+            .map(|definition| definition.permission_policy),
+        Some(ToolPermissionPolicy::Ask)
+    );
 
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_bash_tool_can_be_registered_independently() {
+    let root = temp_root("builtin-bash");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(bash_tool(&root));
+    let definitions = registry.definitions();
+
+    let definition = definitions
+        .definition("bash")
+        .expect("bash definition should be registered");
+    assert_eq!(definition.kind, ToolKind::Execute);
+    assert_eq!(definition.permission_policy, ToolPermissionPolicy::Ask);
+    assert!(
+        definition
+            .input_schema
+            .as_ref()
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get("reason"))
+            .is_some(),
+        "bash schema should expose an optional reason field"
+    );
+    assert!(definitions.definition("read").is_none());
+
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_bash_returns_merged_stdout_and_stderr() {
+    let root = temp_root("builtin-bash-merged-output");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(bash_tool(&root));
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "bash",
+                serde_json::json!({
+                    "command": "printf 'stdout\\n'; printf 'stderr\\n' >&2"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error, "bash command should succeed: {result:?}");
+    assert!(result.content.contains("stdout"));
+    assert!(result.content.contains("stderr"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_bash_records_duration_metadata() {
+    let root = temp_root("builtin-bash-duration");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(bash_tool(&root));
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "bash",
+                serde_json::json!({
+                    "command": "printf 'done\\n'"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error, "bash command should succeed: {result:?}");
+    assert!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("duration_ms"))
+            .and_then(serde_json::Value::as_u64)
+            .is_some(),
+        "bash result details should include duration_ms: {:?}",
+        result.details
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_bash_non_zero_exit_returns_error_with_output() {
+    let root = temp_root("builtin-bash-non-zero");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(bash_tool(&root));
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "bash",
+                serde_json::json!({
+                    "command": "printf 'before failure\\n'; exit 7"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("before failure"));
+    assert!(result.content.contains("Command exited with code 7"));
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("exit_code"))
+            .and_then(serde_json::Value::as_i64),
+        Some(7)
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_bash_timeout_kills_command_and_keeps_output() {
+    let root = temp_root("builtin-bash-timeout");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(bash_tool(&root));
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "bash",
+                serde_json::json!({
+                    "command": "printf 'started\\n'; sleep 2; printf 'after sleep\\n'",
+                    "timeout": 0.1
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("started"));
+    assert!(!result.content.contains("after sleep"));
+    assert!(
+        result
+            .content
+            .contains("Command timed out after 0.1 seconds")
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("timed_out"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_bash_cancellation_kills_command_and_keeps_output() {
+    let root = temp_root("builtin-bash-cancel");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(bash_tool(&root));
+    let cancellation = CancellationToken::new();
+    let cancellation_task = cancellation.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancellation_task.cancel();
+    });
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "bash",
+                serde_json::json!({
+                    "command": "printf 'started\\n'; sleep 2; printf 'after sleep\\n'"
+                }),
+            ),
+            &cancellation,
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("started"));
+    assert!(!result.content.contains("after sleep"));
+    assert!(result.content.contains("Command aborted"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_bash_runs_inside_workspace_workdir() {
+    let root = temp_root("builtin-bash-workdir");
+    fs::create_dir(root.join("nested")).expect("create nested dir");
+    fs::write(root.join("nested/marker.txt"), "marker\n").expect("write fixture");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(bash_tool(&root));
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "bash",
+                serde_json::json!({
+                    "command": "pwd; ls marker.txt",
+                    "workdir": "nested"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error, "bash workdir should succeed: {result:?}");
+    assert!(result.content.contains("nested"));
+    assert!(result.content.contains("marker.txt"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_bash_rejects_workdir_outside_workspace() {
+    let root = temp_root("builtin-bash-workdir-root");
+    let outside = temp_root("builtin-bash-workdir-outside");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(bash_tool(&root));
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "bash",
+                serde_json::json!({
+                    "command": "pwd",
+                    "workdir": outside
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("outside workspace"));
+    cleanup(&outside);
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_bash_truncates_large_output_and_persists_full_output_path() {
+    let root = temp_root("builtin-bash-truncate");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(bash_tool(&root));
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "bash",
+                serde_json::json!({
+                    "command": "i=1; while [ \"$i\" -le 2105 ]; do echo \"$i\"; i=$((i+1)); done"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error, "large output should succeed: {result:?}");
+    assert!(result.content.contains("2105"));
+    let expected_display_content = (106..=2105)
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        result.display_content.as_deref(),
+        Some(expected_display_content.as_str()),
+        "TUI display output should not include the model-visible full-output footer"
+    );
+    assert!(!result.content.contains("\n1\n"));
+    let details = result.details.as_ref().expect("details should exist");
+    assert_eq!(
+        details
+            .get("truncated")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    let full_output_path = details
+        .get("full_output_path")
+        .and_then(serde_json::Value::as_str)
+        .expect("full output path should be recorded");
+    let full_output = fs::read_to_string(full_output_path).expect("read full output");
+    assert!(full_output.starts_with("1\n2\n"));
+    assert!(full_output.contains("2105\n"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = fs::metadata(full_output_path)
+            .expect("stat full output")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(permissions, 0o600);
+    }
+    fs::remove_file(full_output_path).expect("remove full output fixture");
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_bash_byte_truncation_uses_accurate_model_footer() {
+    let root = temp_root("builtin-bash-byte-truncate");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(bash_tool(&root));
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "bash",
+                serde_json::json!({
+                    "command": "printf '%*s' 60000 '' | tr ' ' x"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(
+        !result.is_error,
+        "large one-line output should succeed: {result:?}"
+    );
+    assert!(
+        result.content.contains("[Showing last "),
+        "byte truncation should describe a byte tail, not a complete line range: {}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("[Showing lines "),
+        "byte truncation should not claim complete line ranges: {}",
+        result.content
+    );
+    assert!(
+        result
+            .display_content
+            .as_deref()
+            .is_some_and(|content| !content.contains("[Showing last ")),
+        "display content should stay free of model metadata: {:?}",
+        result.display_content
+    );
+
+    if let Some(full_output_path) = result
+        .details
+        .as_ref()
+        .and_then(|details| details.get("full_output_path"))
+        .and_then(serde_json::Value::as_str)
+    {
+        let _ = fs::remove_file(full_output_path);
+    }
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_bash_emits_terminal_progress_snapshots() {
+    let root = temp_root("builtin-bash-terminal-progress");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(bash_tool(&root));
+    let cancellation = CancellationToken::new();
+    let (progress_sender, mut progress_receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let result = registry
+        .execute_tool_with_context(
+            ToolCall::new(
+                "call-1",
+                "bash",
+                serde_json::json!({
+                    "command": "printf 'progress\\n'"
+                }),
+            ),
+            ToolExecutionContext::new(&cancellation)
+                .with_progress_sink(ToolProgressSink::from_sender(progress_sender)),
+        )
+        .await;
+
+    assert!(!result.is_error);
+    let mut snapshots = Vec::new();
+    while let Ok(progress) = progress_receiver.try_recv() {
+        match progress {
+            ToolProgress::TerminalUpdated { snapshot } => snapshots.push(snapshot),
+        }
+    }
+    assert!(
+        snapshots.iter().any(|snapshot| {
+            snapshot.terminal_id == "call-1"
+                && snapshot.command.as_deref() == Some("printf 'progress\\n'")
+        }),
+        "bash should emit an initial terminal snapshot: {snapshots:?}"
+    );
+    assert!(
+        snapshots.iter().any(|snapshot| {
+            snapshot.terminal_id == "call-1"
+                && snapshot.output.contains("progress")
+                && snapshot.exit_status.is_some()
+                && snapshot.released
+        }),
+        "bash should emit a final terminal snapshot: {snapshots:?}"
+    );
     cleanup(&root);
 }
 

@@ -38,7 +38,8 @@ where
             | ConversationProgress::ProviderTurnStarted
             | ConversationProgress::ProviderContextMessage { .. }
             | ConversationProgress::ToolActivityStarted { .. }
-            | ConversationProgress::ToolActivityUpdated { .. } => {}
+            | ConversationProgress::ToolActivityUpdated { .. }
+            | ConversationProgress::TerminalUpdated { .. } => {}
         },
     )
     .await

@@ -847,6 +847,43 @@ impl Model {
         }
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
+        if preserved_viewport_state.is_none() {
+            self.document_runtime.follow_bottom = true;
+        }
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        true
+    }
+
+    /// `suspend_runtime_tool_activity_approval_from_runtime` 在审批面板打开期间隐藏重复的等待行。
+    pub(crate) fn suspend_runtime_tool_activity_approval_from_runtime(
+        &mut self,
+        activity_id: &str,
+    ) -> bool {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        if !self
+            .transcript_mut()
+            .set_runtime_tool_activity_approval_suspended(activity_id, true)
+        {
+            return false;
+        }
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+        true
+    }
+
+    /// `clear_runtime_tool_activity_approval_suspensions_from_runtime` 恢复被审批面板隐藏的工具行。
+    pub(crate) fn clear_runtime_tool_activity_approval_suspensions_from_runtime(&mut self) -> bool {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        if !self
+            .transcript_mut()
+            .clear_runtime_tool_activity_approval_suspensions()
+        {
+            return false;
+        }
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
         self.document_runtime.follow_bottom = true;
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         true
@@ -869,7 +906,9 @@ impl Model {
         }
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
-        self.document_runtime.follow_bottom = true;
+        if preserved_viewport_state.is_none() {
+            self.document_runtime.follow_bottom = true;
+        }
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         true
     }

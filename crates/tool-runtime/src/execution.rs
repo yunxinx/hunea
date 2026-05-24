@@ -24,6 +24,7 @@ impl ToolCall {
 pub struct ToolResult {
     pub call_id: String,
     pub content: String,
+    pub display_content: Option<String>,
     pub is_error: bool,
     pub details: Option<Value>,
     pub terminate: bool,
@@ -35,6 +36,7 @@ impl ToolResult {
         Self {
             call_id: call_id.into(),
             content: content.into(),
+            display_content: None,
             is_error: false,
             details: None,
             terminate: false,
@@ -46,9 +48,16 @@ impl ToolResult {
         Self {
             call_id: call_id.into(),
             content: content.into(),
+            display_content: None,
             is_error: true,
             details: None,
             terminate: false,
         }
+    }
+
+    /// `with_display_content` 设置仅供 runtime/TUI 展示的内容。
+    pub fn with_display_content(mut self, display_content: impl Into<String>) -> Self {
+        self.display_content = Some(display_content.into());
+        self
     }
 }

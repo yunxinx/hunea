@@ -127,6 +127,7 @@ impl Model {
         }
 
         self.tool_approval_panel = ToolApprovalPanelState::default();
+        self.clear_runtime_tool_activity_approval_suspensions_from_runtime();
         self.resume_stream_activity();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.sync_composer_height();
@@ -227,6 +228,7 @@ impl Model {
         let source = self.tool_approval_panel.source.clone()?;
         let title = self.tool_approval_panel.title.clone();
         self.tool_approval_panel = ToolApprovalPanelState::default();
+        self.clear_runtime_tool_activity_approval_suspensions_from_runtime();
         self.resume_stream_activity();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.sync_composer_height();

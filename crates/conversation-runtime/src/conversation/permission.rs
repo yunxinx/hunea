@@ -11,7 +11,7 @@ use runtime_domain::session::{
     ConversationEvent, RuntimePermissionOption, RuntimePermissionOptionKind,
     RuntimePermissionRequest,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tool_runtime::{
     ToolPermissionDecision, ToolPermissionFuture, ToolPermissionHandler, ToolPermissionRequest,
@@ -26,6 +26,54 @@ const TOOL_PERMISSION_DENIED: &str = "Tool permission denied";
 
 type PermissionResponseSender = oneshot::Sender<Option<String>>;
 
+/// `ConversationTimeoutPause` 在用户审批期间暂停 request timeout 计时。
+#[derive(Debug, Clone)]
+pub(crate) struct ConversationTimeoutPause {
+    sender: watch::Sender<usize>,
+}
+
+impl Default for ConversationTimeoutPause {
+    fn default() -> Self {
+        let (sender, _) = watch::channel(0);
+        Self { sender }
+    }
+}
+
+impl ConversationTimeoutPause {
+    pub(crate) fn pause(&self) -> ConversationTimeoutPauseGuard {
+        let count = self.current_count().saturating_add(1);
+        let _ = self.sender.send(count);
+        ConversationTimeoutPauseGuard {
+            pause: self.clone(),
+        }
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<usize> {
+        self.sender.subscribe()
+    }
+
+    fn resume(&self) {
+        let count = self.current_count().saturating_sub(1);
+        let _ = self.sender.send(count);
+    }
+
+    fn current_count(&self) -> usize {
+        *self.sender.borrow()
+    }
+}
+
+/// `ConversationTimeoutPauseGuard` 在 drop 时恢复 request timeout 计时。
+#[derive(Debug)]
+pub(crate) struct ConversationTimeoutPauseGuard {
+    pause: ConversationTimeoutPause,
+}
+
+impl Drop for ConversationTimeoutPauseGuard {
+    fn drop(&mut self) {
+        self.pause.resume();
+    }
+}
+
 /// `ConversationPermissionBroker` 保存 conversation tool Ask 请求与 TUI 响应之间的等待关系。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ConversationPermissionBroker {
@@ -37,10 +85,12 @@ impl ConversationPermissionBroker {
     pub(crate) fn handler(
         &self,
         sender: mpsc::Sender<ConversationEvent>,
+        timeout_pause: ConversationTimeoutPause,
     ) -> ConversationToolPermissionHandler {
         ConversationToolPermissionHandler {
             broker: self.clone(),
             sender,
+            timeout_pause,
         }
     }
 
@@ -98,6 +148,7 @@ impl ConversationPermissionBroker {
 pub(crate) struct ConversationToolPermissionHandler {
     broker: ConversationPermissionBroker,
     sender: mpsc::Sender<ConversationEvent>,
+    timeout_pause: ConversationTimeoutPause,
 }
 
 impl ToolPermissionHandler for ConversationToolPermissionHandler {
@@ -107,6 +158,7 @@ impl ToolPermissionHandler for ConversationToolPermissionHandler {
         cancellation: &'a CancellationToken,
     ) -> ToolPermissionFuture<'a> {
         Box::pin(async move {
+            let _timeout_pause = self.timeout_pause.pause();
             let request_id = self.broker.next_request_id();
             let (response_sender, response_receiver) = oneshot::channel();
             self.broker.register(request_id.clone(), response_sender);
@@ -134,7 +186,7 @@ impl ToolPermissionHandler for ConversationToolPermissionHandler {
             if option_id.as_deref() == Some(ALLOW_ONCE_OPTION_ID) {
                 ToolPermissionDecision::Allow
             } else {
-                deny_permission(&request.definition.name, "request was rejected")
+                deny_permission(&request.definition.name, "user rejected the tool call")
             }
         })
     }
@@ -144,7 +196,8 @@ fn conversation_runtime_permission_request(
     request_id: &str,
     request: &ToolPermissionRequest,
 ) -> RuntimePermissionRequest {
-    let tool_activity = runtime_tool_activity_update_from_permission_request(request_id, request);
+    let tool_activity =
+        runtime_tool_activity_update_from_permission_request(&request.call.call_id, request);
     RuntimePermissionRequest::new(
         request_id.to_string(),
         tool_activity.title.clone(),
@@ -218,7 +271,7 @@ mod tests {
     async fn conversation_permission_handler_round_trips_allow_response() {
         let broker = ConversationPermissionBroker::default();
         let (sender, receiver) = mpsc::channel();
-        let handler = Arc::new(broker.handler(sender));
+        let handler = Arc::new(broker.handler(sender, ConversationTimeoutPause::default()));
         let cancellation = CancellationToken::new();
         let task_handler = Arc::clone(&handler);
         let task_cancellation = cancellation.clone();
@@ -245,6 +298,14 @@ mod tests {
                     request.tool_activity.is_some(),
                     "conversation permission requests should include a tool activity preview"
                 );
+                assert_eq!(
+                    request
+                        .tool_activity
+                        .as_ref()
+                        .map(|activity| activity.activity_id.as_str()),
+                    Some("write"),
+                    "tool activity preview should keep the original provider tool call id"
+                );
                 request.request_id
             }
             other => panic!("expected permission request event, got {other:?}"),
@@ -265,7 +326,7 @@ mod tests {
      {
         let broker = ConversationPermissionBroker::default();
         let (sender, receiver) = mpsc::channel();
-        let handler = Arc::new(broker.handler(sender));
+        let handler = Arc::new(broker.handler(sender, ConversationTimeoutPause::default()));
         let cancellation = CancellationToken::new();
         let task_handler = Arc::clone(&handler);
         let task_cancellation = cancellation.clone();
@@ -289,7 +350,7 @@ mod tests {
         assert_eq!(
             decision.await.expect("permission task should finish"),
             ToolPermissionDecision::Deny {
-                message: "Tool permission denied: write request was rejected".to_string()
+                message: "Tool permission denied: write user rejected the tool call".to_string()
             }
         );
         assert!(
@@ -302,7 +363,7 @@ mod tests {
     async fn conversation_permission_cancel_all_denies_pending_request() {
         let broker = ConversationPermissionBroker::default();
         let (sender, receiver) = mpsc::channel();
-        let handler = Arc::new(broker.handler(sender));
+        let handler = Arc::new(broker.handler(sender, ConversationTimeoutPause::default()));
         let cancellation = CancellationToken::new();
         let task_handler = Arc::clone(&handler);
         let task_cancellation = cancellation.clone();
@@ -324,7 +385,7 @@ mod tests {
         assert_eq!(
             decision.await.expect("permission task should finish"),
             ToolPermissionDecision::Deny {
-                message: "Tool permission denied: write request was rejected".to_string()
+                message: "Tool permission denied: write user rejected the tool call".to_string()
             }
         );
         assert!(

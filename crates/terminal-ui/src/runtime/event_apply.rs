@@ -4,9 +4,12 @@ use runtime_domain::session::{
 };
 
 use super::super::{
-    Model, model::RequestMetrics, runtime_tool_preview::ToolApprovalPreview,
-    tool_approval_panel::ToolApprovalSource,
+    Model,
+    model::RequestMetrics,
+    runtime_tool_preview::ToolApprovalPreview,
+    tool_approval_panel::{ToolApprovalDetail, ToolApprovalSource},
 };
+use serde_json::Value;
 
 const FALLBACK_CHAT_FAILURE_MESSAGE: &str = "Unknown error";
 
@@ -254,7 +257,15 @@ fn show_runtime_permission_request(
         .tool_activity
         .as_ref()
         .and_then(ToolApprovalPreview::from_runtime_tool_activity_update);
-    let title = request.title.as_deref().unwrap_or("");
+    if let Some(activity_id) = request
+        .tool_activity
+        .as_ref()
+        .map(|tool_activity| tool_activity.activity_id.as_str())
+    {
+        model.suspend_runtime_tool_activity_approval_from_runtime(activity_id);
+    }
+    let title = runtime_permission_title(&request);
+    let details = runtime_permission_details(&request);
     model.clear_status_notice();
     model.open_tool_approval_panel_with_preview(
         ToolApprovalSource::RuntimePermission {
@@ -277,10 +288,86 @@ fn show_runtime_permission_request(
                 RuntimePermissionOptionKind::RejectAlways,
             ),
         },
-        title.to_string(),
-        Vec::new(),
+        title,
+        details,
         preview,
     );
+}
+
+fn runtime_permission_title(request: &RuntimePermissionRequest) -> String {
+    runtime_permission_raw_input(request)
+        .and_then(|raw_input| raw_input.string_field(&["command", "cmd"]))
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty())
+        .or_else(|| request.title.clone())
+        .unwrap_or_default()
+}
+
+fn runtime_permission_details(request: &RuntimePermissionRequest) -> Vec<ToolApprovalDetail> {
+    let Some(raw_input) = runtime_permission_raw_input(request) else {
+        return Vec::new();
+    };
+    let is_command_request = raw_input
+        .string_field(&["command", "cmd"])
+        .map(|command| !command.trim().is_empty())
+        .unwrap_or(false);
+    if !is_command_request {
+        return Vec::new();
+    }
+
+    let mut details = Vec::new();
+    if let Some(reason) = raw_input
+        .string_field(&["reason"])
+        .map(|reason| reason.trim().to_string())
+        .filter(|reason| !reason.is_empty())
+    {
+        details.push(ToolApprovalDetail {
+            label: "Reason".to_string(),
+            value: reason,
+        });
+    }
+
+    if let Some(workdir) = raw_input_string_field(raw_input.as_json(), &["workdir", "cwd"]) {
+        details.push(ToolApprovalDetail {
+            label: "Workdir".to_string(),
+            value: workdir,
+        });
+    }
+    if let Some(timeout) = raw_input_display_field(raw_input.as_json(), &["timeout", "timeout_ms"])
+    {
+        details.push(ToolApprovalDetail {
+            label: "Timeout".to_string(),
+            value: timeout,
+        });
+    }
+
+    details
+}
+
+fn runtime_permission_raw_input(
+    request: &RuntimePermissionRequest,
+) -> Option<&runtime_domain::session::RuntimeToolActivityRawValue> {
+    request.tool_activity.as_ref()?.raw_input.as_ref()
+}
+
+fn raw_input_string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn raw_input_display_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| match value.get(*key)? {
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(boolean) => Some(boolean.to_string()),
+        _ => None,
+    })
 }
 
 fn option_id_for(

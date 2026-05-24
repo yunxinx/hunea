@@ -6,7 +6,7 @@ use std::{
         mpsc::{self, Receiver},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use provider_protocol::{Message, ToolCall, ToolResult};
@@ -19,8 +19,8 @@ use runtime_domain::{
 use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
 
 use super::{
-    ConversationPermissionBroker, TurnExecutionError, response::ConversationProgress,
-    turn::run_prepared_conversation_with_progress,
+    ConversationPermissionBroker, ConversationTimeoutPause, TurnExecutionError,
+    response::ConversationProgress, turn::run_prepared_conversation_with_progress,
 };
 use crate::PreparedConversationRequest;
 
@@ -234,14 +234,18 @@ async fn run_conversation_worker(
             Arc::clone(&provider_context_messages_started);
         let attempt_provider_context_repair_ledger = Arc::clone(&provider_context_repair_ledger);
         let attempt_cancellation = cancellation.child_token();
-        let permission_handler: SharedToolPermissionHandler = std::sync::Arc::new(
-            permission_broker.handler(progress_sender_to_permission_sender(sender.clone())),
-        );
+        let timeout_pause = ConversationTimeoutPause::default();
+        let permission_handler: SharedToolPermissionHandler =
+            std::sync::Arc::new(permission_broker.handler(
+                progress_sender_to_permission_sender(sender.clone()),
+                timeout_pause.clone(),
+            ));
         let attempt_result = run_with_soft_timeout(
             &cancellation,
             &attempt_cancellation,
             request_policy.timeout(),
             TIMEOUT_REPAIR_GRACE,
+            timeout_pause,
             run_prepared_conversation_with_progress(
                 &request,
                 executor.clone(),
@@ -379,32 +383,82 @@ async fn run_with_soft_timeout<T>(
     attempt_cancellation: &CancellationToken,
     timeout: Duration,
     repair_grace: Duration,
+    timeout_pause: ConversationTimeoutPause,
     future: impl Future<Output = T>,
 ) -> TurnAttemptOutcome<T> {
-    let timeout = tokio::time::sleep(timeout);
-    tokio::pin!(timeout);
     tokio::pin!(future);
+    let mut timeout_remaining = timeout;
+    let mut pause_receiver = timeout_pause.subscribe();
 
-    tokio::select! {
-        output = &mut future => TurnAttemptOutcome::Completed(output),
-        _ = parent_cancellation.cancelled() => {
-            attempt_cancellation.cancel();
-            let repair_grace = tokio::time::sleep(repair_grace);
-            tokio::pin!(repair_grace);
+    loop {
+        if *pause_receiver.borrow_and_update() > 0 {
             tokio::select! {
-                output = &mut future => TurnAttemptOutcome::Completed(output),
-                _ = &mut repair_grace => TurnAttemptOutcome::CancelledAfterGrace,
+                output = &mut future => return TurnAttemptOutcome::Completed(output),
+                _ = parent_cancellation.cancelled() => {
+                    attempt_cancellation.cancel();
+                    let repair_grace = tokio::time::sleep(repair_grace);
+                    tokio::pin!(repair_grace);
+                    tokio::select! {
+                        output = &mut future => return TurnAttemptOutcome::Completed(output),
+                        _ = &mut repair_grace => return TurnAttemptOutcome::CancelledAfterGrace,
+                    }
+                }
+                _ = wait_until_timeout_unpaused(&mut pause_receiver) => {}
+            }
+            continue;
+        }
+
+        let active_started_at = Instant::now();
+        let timeout_sleep = tokio::time::sleep(timeout_remaining);
+        tokio::pin!(timeout_sleep);
+
+        tokio::select! {
+            output = &mut future => return TurnAttemptOutcome::Completed(output),
+            _ = parent_cancellation.cancelled() => {
+                attempt_cancellation.cancel();
+                let repair_grace = tokio::time::sleep(repair_grace);
+                tokio::pin!(repair_grace);
+                tokio::select! {
+                    output = &mut future => return TurnAttemptOutcome::Completed(output),
+                    _ = &mut repair_grace => return TurnAttemptOutcome::CancelledAfterGrace,
+                }
+            }
+            _ = wait_until_timeout_paused(&mut pause_receiver) => {
+                timeout_remaining = timeout_remaining
+                    .saturating_sub(active_started_at.elapsed());
+            }
+            _ = &mut timeout_sleep => {
+                attempt_cancellation.cancel();
+                let repair_grace = tokio::time::sleep(repair_grace);
+                tokio::pin!(repair_grace);
+                tokio::select! {
+                    output = &mut future => return TurnAttemptOutcome::TimedOut(output),
+                    _ = parent_cancellation.cancelled() => return TurnAttemptOutcome::CancelledAfterGrace,
+                    _ = &mut repair_grace => return TurnAttemptOutcome::TimedOutAfterGrace,
+                }
             }
         }
-        _ = &mut timeout => {
-            attempt_cancellation.cancel();
-            let repair_grace = tokio::time::sleep(repair_grace);
-            tokio::pin!(repair_grace);
-            tokio::select! {
-                output = &mut future => TurnAttemptOutcome::TimedOut(output),
-                _ = parent_cancellation.cancelled() => TurnAttemptOutcome::CancelledAfterGrace,
-                _ = &mut repair_grace => TurnAttemptOutcome::TimedOutAfterGrace,
-            }
+    }
+}
+
+async fn wait_until_timeout_paused(receiver: &mut tokio::sync::watch::Receiver<usize>) {
+    loop {
+        if *receiver.borrow_and_update() > 0 {
+            return;
+        }
+        if receiver.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+async fn wait_until_timeout_unpaused(receiver: &mut tokio::sync::watch::Receiver<usize>) {
+    loop {
+        if *receiver.borrow_and_update() == 0 {
+            return;
+        }
+        if receiver.changed().await.is_err() {
+            return;
         }
     }
 }
@@ -508,6 +562,9 @@ fn conversation_worker_event_from_progress(
         }
         ConversationProgress::ToolActivityUpdated { update } => {
             ConversationWorkerEvent::progress(ConversationEvent::ToolActivityUpdated { update })
+        }
+        ConversationProgress::TerminalUpdated { snapshot } => {
+            ConversationWorkerEvent::progress(ConversationEvent::TerminalUpdated { snapshot })
         }
     }
 }
@@ -738,6 +795,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn soft_timeout_pauses_while_permission_is_waiting() {
+        let parent_cancellation = CancellationToken::new();
+        let attempt_cancellation = parent_cancellation.child_token();
+        let timeout_pause = super::ConversationTimeoutPause::default();
+        let future_timeout_pause = timeout_pause.clone();
+
+        let outcome = super::run_with_soft_timeout(
+            &parent_cancellation,
+            &attempt_cancellation,
+            Duration::from_millis(10),
+            Duration::from_millis(5),
+            timeout_pause,
+            async move {
+                let permission_wait = future_timeout_pause.pause();
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                drop(permission_wait);
+                "approved"
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            super::TurnAttemptOutcome::Completed("approved")
+        ));
+        assert!(
+            !attempt_cancellation.is_cancelled(),
+            "permission waits should not consume the request timeout budget"
+        );
+    }
+
+    #[tokio::test]
     async fn soft_timeout_cancels_child_and_waits_for_repair() {
         let parent_cancellation = CancellationToken::new();
         let attempt_cancellation = parent_cancellation.child_token();
@@ -750,6 +839,7 @@ mod tests {
             &attempt_cancellation,
             Duration::from_millis(10),
             Duration::from_millis(10),
+            super::ConversationTimeoutPause::default(),
             async move {
                 future_cancellation.cancelled().await;
                 future_repair_observed.store(true, Ordering::Relaxed);
@@ -781,6 +871,7 @@ mod tests {
             &attempt_cancellation,
             Duration::from_millis(5),
             Duration::from_millis(5),
+            super::ConversationTimeoutPause::default(),
             async {
                 std::future::pending::<()>().await;
                 "never"
@@ -806,6 +897,7 @@ mod tests {
             &attempt_cancellation,
             Duration::from_secs(1),
             Duration::from_millis(5),
+            super::ConversationTimeoutPause::default(),
             async {
                 std::future::pending::<()>().await;
                 "never"

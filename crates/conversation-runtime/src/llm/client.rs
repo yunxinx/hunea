@@ -140,5 +140,8 @@ fn conversation_progress_from_runtime_progress(
         tool_loop_runtime::ToolLoopProgress::ToolActivityUpdated { update } => {
             ConversationProgress::ToolActivityUpdated { update }
         }
+        tool_loop_runtime::ToolLoopProgress::TerminalUpdated { snapshot } => {
+            ConversationProgress::TerminalUpdated { snapshot }
+        }
     }
 }

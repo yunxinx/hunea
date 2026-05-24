@@ -31,6 +31,27 @@ pub(super) enum RuntimeToolActivityDetailBlock {
     Text(Vec<String>),
     SecondaryText(Vec<String>),
     Diff(Vec<RuntimeDiffDetailLine>),
+    ExecuteTranscript(RuntimeExecuteTranscriptBlock),
+    ExecuteFooter(RuntimeExecuteFooterLine),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RuntimeExecuteTranscriptBlock {
+    pub(super) command: String,
+    pub(super) output_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RuntimeExecuteFooterLine {
+    pub(super) status: RuntimeExecuteFooterStatus,
+    pub(super) marker: &'static str,
+    pub(super) suffix: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeExecuteFooterStatus {
+    Success,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +90,8 @@ struct RuntimeDiffSummary {
     removed: usize,
     change_kind: RuntimeDiffChangeKind,
 }
+
+const TOOL_ACTIVITY_EXECUTE_COMPACT_EDGE_LINES: usize = 2;
 
 pub(super) fn runtime_tool_activity_detail_blocks(
     call: &RuntimeToolActivity,
@@ -139,14 +162,40 @@ fn execute_tool_call_detail_blocks(
     }
 
     if let Some(raw_output) = call.raw_output.as_ref().and_then(|raw| raw.display_text()) {
-        return vec![RuntimeToolActivityDetailBlock::SecondaryText(
-            truncate_detail_block(text_lines(&raw_output), render_mode),
+        let output_lines = execute_tool_call_output_lines(&raw_output);
+        if render_mode == ToolActivityRenderMode::Detailed {
+            let mut blocks = vec![RuntimeToolActivityDetailBlock::ExecuteTranscript(
+                RuntimeExecuteTranscriptBlock {
+                    command: execute_tool_call_display_command(call),
+                    output_lines,
+                },
+            )];
+            if let Some(footer) = execute_result_footer_line(call, render_mode) {
+                blocks.push(RuntimeToolActivityDetailBlock::ExecuteFooter(footer));
+            }
+            return blocks;
+        }
+
+        let mut blocks = vec![RuntimeToolActivityDetailBlock::SecondaryText(
+            truncate_execute_detail_block(output_lines, render_mode),
         )];
+        if let Some(footer) = execute_result_footer_line(call, render_mode) {
+            blocks.push(RuntimeToolActivityDetailBlock::ExecuteFooter(footer));
+        }
+        return blocks;
     }
 
     let mut blocks = Vec::new();
     for content in &call.content {
         if should_hide_execute_text_content(content) {
+            continue;
+        }
+        if call.status == RuntimeToolActivityStatus::Failed
+            && let RuntimeToolActivityContent::Text(text) = content
+        {
+            blocks.push(RuntimeToolActivityDetailBlock::SecondaryText(
+                truncate_execute_detail_block(text_lines(text), render_mode),
+            ));
             continue;
         }
         blocks.extend(runtime_tool_activity_content_blocks(
@@ -175,8 +224,25 @@ fn active_execute_terminal_blocks(
     call.content
         .iter()
         .filter(|content| matches!(content, RuntimeToolActivityContent::Terminal { .. }))
-        .flat_map(|content| {
-            runtime_tool_activity_content_blocks(content, render_mode, terminal_snapshots)
+        .map(|content| {
+            let RuntimeToolActivityContent::Terminal { terminal_id } = content else {
+                unreachable!("content is filtered to terminal blocks");
+            };
+            let snapshot = terminal_snapshots.get(terminal_id);
+            if render_mode == ToolActivityRenderMode::Detailed {
+                return RuntimeToolActivityDetailBlock::ExecuteTranscript(
+                    RuntimeExecuteTranscriptBlock {
+                        command: execute_terminal_snapshot_command(call, snapshot),
+                        output_lines: terminal_transcript_output_lines(snapshot),
+                    },
+                );
+            }
+
+            RuntimeToolActivityDetailBlock::SecondaryText(terminal_detail_lines_with_edge(
+                snapshot,
+                render_mode,
+                TOOL_ACTIVITY_EXECUTE_COMPACT_EDGE_LINES,
+            ))
         })
         .collect()
 }
@@ -188,7 +254,7 @@ fn is_active_tool_call_status(status: RuntimeToolActivityStatus) -> bool {
     )
 }
 
-fn is_execute_like_tool_call(call: &RuntimeToolActivity) -> bool {
+pub(super) fn is_execute_like_tool_call(call: &RuntimeToolActivity) -> bool {
     call.kind == RuntimeToolKind::Execute
         || call.title.trim_start().starts_with("Shell:")
         || call.title.trim_start().starts_with("Run ")
@@ -197,6 +263,125 @@ fn is_execute_like_tool_call(call: &RuntimeToolActivity) -> bool {
             .as_ref()
             .and_then(|raw_input| raw_input.string_field(&["command", "cmd"]))
             .is_some()
+}
+
+pub(super) fn execute_tool_call_display_command(call: &RuntimeToolActivity) -> String {
+    call.raw_input
+        .as_ref()
+        .and_then(|raw_input| raw_input.string_field(&["command", "cmd"]))
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty())
+        .unwrap_or_else(|| {
+            let title = runtime_tool_activity_display_title(call);
+            title
+                .strip_prefix("Run ")
+                .map(str::trim_start)
+                .filter(|command| !command.is_empty())
+                .unwrap_or(&title)
+                .to_string()
+        })
+}
+
+fn execute_terminal_snapshot_command(
+    call: &RuntimeToolActivity,
+    snapshot: Option<&RuntimeTerminalSnapshot>,
+) -> String {
+    snapshot
+        .and_then(|snapshot| snapshot.command.as_deref())
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| execute_tool_call_display_command(call))
+}
+
+fn terminal_transcript_output_lines(snapshot: Option<&RuntimeTerminalSnapshot>) -> Vec<String> {
+    let Some(snapshot) = snapshot else {
+        return Vec::new();
+    };
+
+    let mut lines = Vec::new();
+    if snapshot.truncated {
+        lines.push("... output truncated ...".to_string());
+    }
+    if !snapshot.output.is_empty() {
+        lines.extend(text_lines(&snapshot.output));
+    }
+    lines
+}
+
+fn execute_tool_call_output_lines(raw_output: &str) -> Vec<String> {
+    text_lines(raw_output)
+}
+
+fn execute_result_footer_line(
+    call: &RuntimeToolActivity,
+    render_mode: ToolActivityRenderMode,
+) -> Option<RuntimeExecuteFooterLine> {
+    if render_mode != ToolActivityRenderMode::Detailed {
+        return None;
+    }
+    let details = call.raw_output.as_ref()?.tool_result_details()?;
+    let duration = details
+        .get("duration_ms")
+        .and_then(serde_json::Value::as_u64)
+        .map(format_execution_duration_ms)?;
+    let (status, marker, status_suffix) = execute_result_footer_status(details);
+    let suffix = format!("{status_suffix} • {duration}");
+
+    Some(RuntimeExecuteFooterLine {
+        status,
+        marker,
+        suffix,
+    })
+}
+
+fn execute_result_footer_status(
+    details: &serde_json::Value,
+) -> (RuntimeExecuteFooterStatus, &'static str, String) {
+    if details
+        .get("timed_out")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return (
+            RuntimeExecuteFooterStatus::Failed,
+            "✗",
+            " (timed out)".to_string(),
+        );
+    }
+    if details
+        .get("cancelled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return (
+            RuntimeExecuteFooterStatus::Failed,
+            "✗",
+            " (cancelled)".to_string(),
+        );
+    }
+
+    match details.get("exit_code").and_then(serde_json::Value::as_i64) {
+        Some(0) => (RuntimeExecuteFooterStatus::Success, "✓", String::new()),
+        Some(code) => (
+            RuntimeExecuteFooterStatus::Failed,
+            "✗",
+            format!(" (exit {code})"),
+        ),
+        None => (RuntimeExecuteFooterStatus::Failed, "✗", String::new()),
+    }
+}
+
+fn format_execution_duration_ms(duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        format!("{duration_ms}ms")
+    } else if duration_ms < 60_000 {
+        format!("{:.2}s", duration_ms as f64 / 1_000.0)
+    } else {
+        let minutes = duration_ms / 60_000;
+        let seconds = (duration_ms % 60_000) / 1_000;
+        format!("{minutes}m {seconds:02}s")
+    }
 }
 
 fn should_hide_execute_text_content(content: &RuntimeToolActivityContent) -> bool {
@@ -305,6 +490,14 @@ fn terminal_detail_lines(
     snapshot: Option<&RuntimeTerminalSnapshot>,
     render_mode: ToolActivityRenderMode,
 ) -> Vec<String> {
+    terminal_detail_lines_with_edge(snapshot, render_mode, TOOL_ACTIVITY_COMPACT_EDGE_LINES)
+}
+
+fn terminal_detail_lines_with_edge(
+    snapshot: Option<&RuntimeTerminalSnapshot>,
+    render_mode: ToolActivityRenderMode,
+    edge: usize,
+) -> Vec<String> {
     let Some(snapshot) = snapshot else {
         return vec!["Waiting...".to_string()];
     };
@@ -332,14 +525,28 @@ fn terminal_detail_lines(
         lines.push("Waiting...".to_string());
     }
 
-    truncate_detail_block(lines, render_mode)
+    truncate_detail_block_with_edge(lines, render_mode, edge)
 }
 
 fn truncate_detail_block(lines: Vec<String>, render_mode: ToolActivityRenderMode) -> Vec<String> {
+    truncate_detail_block_with_edge(lines, render_mode, TOOL_ACTIVITY_COMPACT_EDGE_LINES)
+}
+
+fn truncate_execute_detail_block(
+    lines: Vec<String>,
+    render_mode: ToolActivityRenderMode,
+) -> Vec<String> {
+    truncate_detail_block_with_edge(lines, render_mode, TOOL_ACTIVITY_EXECUTE_COMPACT_EDGE_LINES)
+}
+
+fn truncate_detail_block_with_edge(
+    lines: Vec<String>,
+    render_mode: ToolActivityRenderMode,
+    edge: usize,
+) -> Vec<String> {
     if render_mode == ToolActivityRenderMode::Detailed {
         return lines;
     }
-    let edge = TOOL_ACTIVITY_COMPACT_EDGE_LINES;
     let limit = edge.saturating_mul(2);
     if lines.len() <= limit {
         return lines;

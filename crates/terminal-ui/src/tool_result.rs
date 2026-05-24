@@ -28,14 +28,15 @@ use super::{
     },
 };
 use activity::{
-    RuntimeDiffDetailLine, RuntimeToolActivityDetailBlock, active_marker_visible_at,
-    is_list_dir_tool_call, is_runtime_read_tool_activity, list_dir_tool_call_title_chunks,
-    runtime_diff_line_prefix, runtime_read_tool_activity_title_chunks,
-    runtime_tool_activity_detail_blocks, runtime_tool_activity_diff_header_chunks,
-    runtime_tool_activity_diff_line_style, runtime_tool_activity_diff_row_style,
-    runtime_tool_activity_display_title, runtime_tool_activity_has_diff_content,
-    runtime_tool_activity_location_suffix, runtime_tool_activity_status_color,
-    runtime_write_tool_activity_title_chunks, style_for_color,
+    RuntimeDiffDetailLine, RuntimeExecuteFooterLine, RuntimeExecuteFooterStatus,
+    RuntimeExecuteTranscriptBlock, RuntimeToolActivityDetailBlock, active_marker_visible_at,
+    is_execute_like_tool_call, is_list_dir_tool_call, is_runtime_read_tool_activity,
+    list_dir_tool_call_title_chunks, runtime_diff_line_prefix,
+    runtime_read_tool_activity_title_chunks, runtime_tool_activity_detail_blocks,
+    runtime_tool_activity_diff_header_chunks, runtime_tool_activity_diff_line_style,
+    runtime_tool_activity_diff_row_style, runtime_tool_activity_display_title,
+    runtime_tool_activity_has_diff_content, runtime_tool_activity_location_suffix,
+    runtime_tool_activity_status_color, runtime_write_tool_activity_title_chunks, style_for_color,
 };
 use approval::{ParsedToolResultLine, looks_like_shell_command, style_core_result_line};
 use exploration::{
@@ -60,7 +61,7 @@ const TOOL_RESULT_CONTINUATION_PREFIX: &str = "  ";
 const TOOL_EXPLORATION_PREFIX: &str = "● ";
 const TOOL_EXPLORATION_BRANCH_PREFIX: &str = "  └ ";
 const TOOL_EXPLORATION_CHILD_PREFIX: &str = "    ";
-const TOOL_ACTIVITY_DETAIL_PREFIX: &str = "  └─ ";
+const TOOL_ACTIVITY_DETAIL_PREFIX: &str = "  └ ";
 const TOOL_ACTIVITY_DETAIL_CONTINUATION_PREFIX: &str = "    ";
 pub(crate) const TOOL_ACTIVITY_LINE_NUMBER_WIDTH: usize = 7;
 pub(crate) const TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL: Duration = Duration::from_millis(600);
@@ -89,6 +90,22 @@ enum ToolResultBody {
     },
     RuntimeToolActivity(RuntimeToolActivity),
     Exploration(Vec<RuntimeToolActivity>),
+}
+
+fn is_finished_execute_like_tool_call(call: &RuntimeToolActivity) -> bool {
+    matches!(
+        call.status,
+        RuntimeToolActivityStatus::Completed | RuntimeToolActivityStatus::Failed
+    ) && is_execute_like_tool_call(call)
+}
+
+fn runtime_finished_execute_title(title: &str) -> String {
+    title
+        .strip_prefix("Run ")
+        .map(str::trim_start)
+        .filter(|command| !command.is_empty())
+        .unwrap_or(title)
+        .to_string()
 }
 
 /// `ToolResultItem` 表示只用于 TUI 展示的工具活动，不参与模型上下文。
@@ -402,6 +419,7 @@ impl ToolResultItem {
         update: impl Into<RuntimeToolActivityUpdate>,
     ) -> bool {
         let update = update.into();
+        let update_status = update.status;
         match &mut self.body {
             ToolResultBody::RuntimeToolActivity(call) => {
                 if call.activity_id != update.activity_id {
@@ -432,6 +450,23 @@ impl ToolResultItem {
             }
             ToolResultBody::Approval { .. } => return false,
         }
+        if update_status.is_some_and(|status| status != RuntimeToolActivityStatus::Pending) {
+            self.approval_suspended = false;
+            self.permission_waiting = false;
+        }
+        self.refresh_active_marker_started_at();
+        self.refresh_render_cache_key();
+        true
+    }
+
+    /// `set_approval_suspended` 临时隐藏正在等待审批的 compact 工具活动。
+    pub(crate) fn set_approval_suspended(&mut self, is_suspended: bool) -> bool {
+        if self.approval_suspended == is_suspended {
+            return false;
+        }
+
+        self.approval_suspended = is_suspended;
+        self.permission_waiting = is_suspended;
         self.refresh_active_marker_started_at();
         self.refresh_render_cache_key();
         true
@@ -698,8 +733,11 @@ impl ToolResultItem {
         now: Instant,
     ) -> Vec<Line<'static>> {
         let width = usize::from(width.max(1));
-        let mut lines =
-            self.runtime_tool_activity_header_lines_at(call, width, palette, now, false);
+        let mut lines = if self.should_use_detailed_execute_transcript(call) {
+            Vec::new()
+        } else {
+            self.runtime_tool_activity_header_lines_at(call, width, palette, now, false)
+        };
         for block in runtime_tool_activity_detail_blocks(
             call,
             self.render_mode,
@@ -709,6 +747,22 @@ impl ToolResultItem {
             lines.extend(self.wrap_runtime_detail_block(&block, width, palette));
         }
         lines
+    }
+
+    fn should_use_detailed_execute_transcript(&self, call: &RuntimeToolActivity) -> bool {
+        if self.render_mode != ToolActivityRenderMode::Detailed || !is_execute_like_tool_call(call)
+        {
+            return false;
+        }
+
+        call.raw_output
+            .as_ref()
+            .and_then(|raw| raw.display_text())
+            .is_some()
+            || call
+                .content
+                .iter()
+                .any(|content| matches!(content, RuntimeToolActivityContent::Terminal { .. }))
     }
 
     fn runtime_tool_activity_header_lines_at(
@@ -786,6 +840,29 @@ impl ToolResultItem {
 
         let title = runtime_tool_activity_display_title(call);
         let title_style = Style::new().add_modifier(Modifier::BOLD);
+        if is_finished_execute_like_tool_call(call) {
+            let title = runtime_finished_execute_title(&title);
+            let mut chunks = vec![
+                HighlightChunk {
+                    text: "Ran".to_string(),
+                    style: title_style,
+                },
+                HighlightChunk {
+                    text: " ".to_string(),
+                    style: Style::new(),
+                },
+            ];
+            if looks_like_shell_command(&title) {
+                chunks.extend(self.shell_command_chunks(&title));
+            } else {
+                chunks.push(HighlightChunk {
+                    text: title,
+                    style: Style::new(),
+                });
+            }
+            return chunks;
+        }
+
         if looks_like_shell_command(&title) {
             return self.shell_command_chunks_with_style(&title, title_style);
         }
@@ -804,10 +881,16 @@ impl ToolResultItem {
     ) -> Vec<Line<'static>> {
         match block {
             RuntimeToolActivityDetailBlock::Text(logical_lines) => {
-                self.wrap_runtime_text_detail_block(logical_lines, width)
+                self.wrap_runtime_text_detail_block(logical_lines, width, palette)
             }
             RuntimeToolActivityDetailBlock::SecondaryText(logical_lines) => {
                 self.wrap_runtime_secondary_text_detail_block(logical_lines, width, palette)
+            }
+            RuntimeToolActivityDetailBlock::ExecuteTranscript(transcript) => {
+                self.wrap_runtime_execute_transcript(transcript, width)
+            }
+            RuntimeToolActivityDetailBlock::ExecuteFooter(footer) => {
+                self.wrap_runtime_execute_footer(footer, width, palette)
             }
             RuntimeToolActivityDetailBlock::Diff(logical_lines) => {
                 self.wrap_runtime_diff_detail_block(logical_lines, width, palette)
@@ -819,7 +902,9 @@ impl ToolResultItem {
         &self,
         logical_lines: &[String],
         width: usize,
+        palette: TerminalPalette,
     ) -> Vec<Line<'static>> {
+        let prefix_style = style_for_color(palette.tertiary);
         logical_lines
             .iter()
             .enumerate()
@@ -834,7 +919,7 @@ impl ToolResultItem {
                 let wrapped = wrap_prompt_visual_lines(content, content_width, 0);
 
                 if wrapped.is_empty() {
-                    return vec![Line::from(vec![Span::raw(initial_prefix)])];
+                    return vec![Line::from(vec![Span::styled(initial_prefix, prefix_style)])];
                 }
 
                 wrapped
@@ -846,7 +931,10 @@ impl ToolResultItem {
                         } else {
                             TOOL_ACTIVITY_DETAIL_CONTINUATION_PREFIX
                         };
-                        Line::from(vec![Span::raw(prefix), Span::raw(line.text)])
+                        Line::from(vec![
+                            Span::styled(prefix, prefix_style),
+                            Span::raw(line.text),
+                        ])
                     })
                     .collect::<Vec<_>>()
             })
@@ -862,16 +950,89 @@ impl ToolResultItem {
         self.wrap_runtime_styled_text_detail_block(
             logical_lines,
             width,
+            palette,
             secondary_text_style(palette),
         )
+    }
+
+    fn wrap_runtime_execute_transcript(
+        &self,
+        transcript: &RuntimeExecuteTranscriptBlock,
+        width: usize,
+    ) -> Vec<Line<'static>> {
+        let mut lines = self.wrap_runtime_execute_command_line(&transcript.command, width);
+        for output_line in &transcript.output_lines {
+            lines.extend(self.wrap_runtime_plain_transcript_line(output_line, width));
+        }
+        lines
+    }
+
+    fn wrap_runtime_execute_command_line(&self, command: &str, width: usize) -> Vec<Line<'static>> {
+        let mut chunks = vec![HighlightChunk {
+            text: "$ ".to_string(),
+            style: Style::new(),
+        }];
+        chunks.extend(self.shell_command_chunks(command));
+
+        wrap_highlight_chunks(&[chunks], width.max(1))
+            .into_iter()
+            .map(Line::from)
+            .collect()
+    }
+
+    fn wrap_runtime_plain_transcript_line(
+        &self,
+        content: &str,
+        width: usize,
+    ) -> Vec<Line<'static>> {
+        let wrapped = wrap_prompt_visual_lines(content, width.max(1), 0);
+        if wrapped.is_empty() {
+            return vec![Line::from("")];
+        }
+
+        wrapped
+            .into_iter()
+            .map(|line| Line::from(Span::raw(line.text)))
+            .collect()
+    }
+
+    fn wrap_runtime_execute_footer(
+        &self,
+        footer: &RuntimeExecuteFooterLine,
+        width: usize,
+        palette: TerminalPalette,
+    ) -> Vec<Line<'static>> {
+        let marker_color = match footer.status {
+            RuntimeExecuteFooterStatus::Success => palette.quote,
+            RuntimeExecuteFooterStatus::Failed => palette.system_error,
+        };
+        let chunks = vec![
+            HighlightChunk {
+                text: footer.marker.to_string(),
+                style: style_for_color(marker_color).add_modifier(Modifier::BOLD),
+            },
+            HighlightChunk {
+                text: footer.suffix.clone(),
+                style: secondary_text_style(palette),
+            },
+        ];
+        let mut lines = vec![Line::from("")];
+        lines.extend(
+            wrap_highlight_chunks(&[chunks], width.max(1))
+                .into_iter()
+                .map(Line::from),
+        );
+        lines
     }
 
     fn wrap_runtime_styled_text_detail_block(
         &self,
         logical_lines: &[String],
         width: usize,
+        palette: TerminalPalette,
         content_style: Style,
     ) -> Vec<Line<'static>> {
+        let prefix_style = style_for_color(palette.tertiary);
         logical_lines
             .iter()
             .enumerate()
@@ -883,7 +1044,7 @@ impl ToolResultItem {
                 };
                 let prefix_width = UnicodeWidthStr::width(initial_prefix);
                 let content_width = width.saturating_sub(prefix_width).max(1);
-                let wrapped = wrap_highlight_chunks(
+                let wrapped = wrap_highlight_chunks_soft(
                     &[vec![HighlightChunk {
                         text: content.clone(),
                         style: content_style,
@@ -892,7 +1053,7 @@ impl ToolResultItem {
                 );
 
                 if wrapped.is_empty() {
-                    return vec![Line::from(vec![Span::raw(initial_prefix)])];
+                    return vec![Line::from(vec![Span::styled(initial_prefix, prefix_style)])];
                 }
 
                 wrapped
@@ -905,7 +1066,7 @@ impl ToolResultItem {
                             TOOL_ACTIVITY_DETAIL_CONTINUATION_PREFIX
                         };
                         let mut spans = Vec::with_capacity(content_spans.len() + 1);
-                        spans.push(Span::raw(prefix));
+                        spans.push(Span::styled(prefix, prefix_style));
                         spans.extend(content_spans);
                         Line::from(spans)
                     })

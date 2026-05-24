@@ -163,10 +163,10 @@ fn tool_activity_uses_compact_and_detailed_rendering_modes() {
     });
 
     let compact = transcript.plain_items().join("\n");
-    assert!(compact.contains("● cargo check"));
+    assert!(compact.contains("● Ran cargo check"));
     assert!(compact.contains("line 1"));
     assert!(compact.contains("line 14"));
-    assert!(compact.contains("… +4 lines (ctrl + t to view transcript)"));
+    assert!(compact.contains("… +10 lines (ctrl + t to view transcript)"));
     assert!(!compact.contains("line 7"));
     assert!(!compact.contains("Completed"));
     assert!(!compact.contains("[Other]"));

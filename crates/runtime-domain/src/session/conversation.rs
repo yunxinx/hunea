@@ -3,7 +3,8 @@ use crate::provider::{ProviderApiKey, ProviderKind};
 use std::time::Duration;
 
 use super::{
-    RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityUpdate,
+    RuntimePermissionRequest, RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity,
+    RuntimeToolActivityUpdate,
 };
 
 /// `ConversationRequest` 描述一次完整的对话执行请求。
@@ -274,6 +275,9 @@ pub enum ConversationEvent {
     },
     ToolActivityUpdated {
         update: RuntimeToolActivityUpdate,
+    },
+    TerminalUpdated {
+        snapshot: RuntimeTerminalSnapshot,
     },
     PermissionRequested {
         request: RuntimePermissionRequest,

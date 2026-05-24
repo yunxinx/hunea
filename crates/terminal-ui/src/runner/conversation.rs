@@ -49,6 +49,10 @@ pub(super) fn apply_conversation_event(
             target: target.expect("conversation target should be available for tool activity"),
             update,
         },
+        ConversationEvent::TerminalUpdated { snapshot } => RuntimeEvent::TerminalUpdated {
+            target: target.expect("conversation target should be available for terminal update"),
+            snapshot,
+        },
         ConversationEvent::PermissionRequested { request } => RuntimeEvent::PermissionRequested {
             target: target.expect("conversation target should be available for permission request"),
             request,

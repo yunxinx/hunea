@@ -316,14 +316,15 @@ fn runtime_permission_details(request: &RuntimePermissionRequest) -> Vec<ToolApp
     }
 
     let mut details = Vec::new();
-    if let Some(reason) = raw_input
-        .string_field(&["reason"])
-        .map(|reason| reason.trim().to_string())
-        .filter(|reason| !reason.is_empty())
+    if let Some(description) = raw_input
+        .string_field(&["description"])
+        .map(|description| description.trim().to_string())
+        .filter(|description| !description.is_empty())
     {
         details.push(ToolApprovalDetail {
+            // UI 文案保持历史用语：字段已迁移为 `description`，但审批面板仍显示 "Reason"。
             label: "Reason".to_string(),
-            value: reason,
+            value: description,
         });
     }
 

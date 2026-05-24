@@ -147,12 +147,38 @@ async fn builtin_bash_tool_can_be_registered_independently() {
             .input_schema
             .as_ref()
             .and_then(|schema| schema.get("properties"))
-            .and_then(|properties| properties.get("reason"))
+            .and_then(|properties| properties.get("description"))
             .is_some(),
-        "bash schema should expose an optional reason field"
+        "bash schema should expose an optional description field"
     );
     assert!(definitions.definition("read").is_none());
 
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_bash_rejects_legacy_reason_argument() {
+    let root = temp_root("builtin-bash-legacy-reason");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(bash_tool(&root));
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "bash",
+                serde_json::json!({
+                    "command": "printf 'hi\\n'",
+                    "reason": "Legacy argument should not be accepted"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.content.contains("arguments do not match schema"));
+    assert!(result.content.contains("reason"));
     cleanup(&root);
 }
 

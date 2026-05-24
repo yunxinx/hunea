@@ -73,9 +73,9 @@ impl Tool for BashTool {
                         "minimum": 0.001,
                         "description": "Optional timeout in seconds"
                     },
-                    "reason": {
+                    "description": {
                         "type": "string",
-                        "description": "Optional reason explaining why this command should be run"
+                        "description": "Optional description explaining why this command should be run"
                     },
                     "workdir": {
                         "type": "string",

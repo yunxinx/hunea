@@ -2048,7 +2048,7 @@ fn runtime_permission_reject_key_preserves_target_identity() {
 }
 
 #[test]
-fn runtime_bash_permission_panel_uses_reason_and_hides_waiting_tool_row() {
+fn runtime_bash_permission_panel_uses_description_and_hides_waiting_tool_row() {
     use crate::runtime::RuntimeEventApply;
     use runtime_domain::session::{
         RuntimeEvent, RuntimePermissionOption, RuntimePermissionOptionKind,
@@ -2112,7 +2112,7 @@ fn runtime_bash_permission_panel_uses_reason_and_hides_waiting_tool_row() {
             raw_input: Some(
                 serde_json::json!({
                     "command": "echo hi",
-                    "reason": "Check whether shell execution is available",
+                    "description": "Check whether shell execution is available",
                     "workdir": "crates/terminal-ui",
                     "timeout": 5
                 })
@@ -2128,7 +2128,7 @@ fn runtime_bash_permission_panel_uses_reason_and_hides_waiting_tool_row() {
         model.tool_approval_panel.details.iter().any(|detail| {
             detail.label == "Reason" && detail.value == "Check whether shell execution is available"
         }),
-        "approval panel should show the model-provided command reason: {:?}",
+        "approval panel should show the model-provided command description under a Reason label: {:?}",
         model.tool_approval_panel.details
     );
     assert!(
@@ -2150,7 +2150,7 @@ fn runtime_bash_permission_panel_uses_reason_and_hides_waiting_tool_row() {
 }
 
 #[test]
-fn runtime_bash_permission_panel_omits_missing_reason() {
+fn runtime_bash_permission_panel_omits_missing_description() {
     use crate::runtime::RuntimeEventApply;
     use runtime_domain::session::{
         RuntimeEvent, RuntimePermissionOption, RuntimePermissionOptionKind,
@@ -2189,7 +2189,7 @@ fn runtime_bash_permission_panel_omits_missing_reason() {
             raw_input: Some(
                 serde_json::json!({
                     "command": "echo hi",
-                    "reason": "   ",
+                    "description": "   ",
                     "timeout": 5
                 })
                 .into(),
@@ -2205,7 +2205,7 @@ fn runtime_bash_permission_panel_omits_missing_reason() {
             .details
             .iter()
             .all(|detail| detail.label != "Reason"),
-        "approval panel should omit missing or blank reasons: {:?}",
+        "approval panel should omit missing or blank descriptions: {:?}",
         model.tool_approval_panel.details
     );
     assert!(

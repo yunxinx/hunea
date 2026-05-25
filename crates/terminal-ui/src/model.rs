@@ -63,6 +63,9 @@ pub struct Model {
     pub(super) stream_activity: Option<StreamActivityState>,
     pub(super) runtime_response_buffer: RuntimeResponseBuffer,
     pub(super) streamed_runtime_reasoning: StreamedRuntimeReasoning,
+    pub(super) runtime_turn_tool_call_count: usize,
+    pub(super) runtime_final_body_divider_pending: bool,
+    pub(super) runtime_final_body_divider_inserted: bool,
     pub(super) status_phrase_selector: StatusPhraseSelector,
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
@@ -245,6 +248,9 @@ impl Model {
                 item_indices: Vec::new(),
                 displayed_content: String::new(),
             },
+            runtime_turn_tool_call_count: 0,
+            runtime_final_body_divider_pending: false,
+            runtime_final_body_divider_inserted: false,
             status_phrase_selector: StatusPhraseSelector::new(
                 options.status_phrases,
                 options.status_phrase_order,
@@ -385,6 +391,7 @@ impl Model {
         if width_changed {
             self.sync_transcript_render();
         }
+        self.sync_tool_approval_preview_mode();
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();
         self.sync_composer_height();
@@ -607,11 +614,7 @@ impl Model {
         };
 
         if let Some(response) = buffered_response {
-            self.append_runtime_response_from_runtime(
-                response.content,
-                response.reasoning_content,
-                response.reasoning_duration,
-            );
+            self.append_final_buffered_runtime_response_from_runtime(response);
         }
         self.accept_streamed_runtime_reasoning_from_runtime();
     }
@@ -628,6 +631,9 @@ impl Model {
 
     pub(crate) fn flush_runtime_reasoning_for_expanded_display(&mut self) {
         if !self.streams_reasoning_into_transcript_during_response() {
+            return;
+        }
+        if self.runtime_final_body_divider_pending {
             return;
         }
 
@@ -685,6 +691,36 @@ impl Model {
                 .displayed_content
                 .push_str(&reasoning_content);
         }
+    }
+
+    fn append_final_buffered_runtime_response_from_runtime(
+        &mut self,
+        response: BufferedRuntimeResponse,
+    ) {
+        let should_insert_divider =
+            self.runtime_final_body_divider_pending && !response.content.is_empty();
+        if !should_insert_divider {
+            self.append_runtime_response_from_runtime(
+                response.content,
+                response.reasoning_content,
+                response.reasoning_duration,
+            );
+            return;
+        }
+
+        let visible_reasoning_content = response
+            .reasoning_content
+            .filter(|content| !content.trim().is_empty())
+            .filter(|_| self.show_reasoning_content);
+        if let Some(reasoning_content) = visible_reasoning_content {
+            self.append_assistant_message_with_reasoning_from_runtime(
+                String::new(),
+                reasoning_content,
+                response.reasoning_duration,
+            );
+        }
+        self.append_runtime_final_body_divider_if_pending();
+        self.append_assistant_message_from_runtime(response.content);
     }
 
     fn discard_streamed_runtime_reasoning_from_runtime(&mut self) {
@@ -760,6 +796,34 @@ impl Model {
     pub(crate) fn append_work_duration_from_runtime(&mut self, duration: Duration) {
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         self.transcript_mut().append_work_duration_message(duration);
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+    }
+
+    pub(crate) fn reset_runtime_final_body_divider_state(&mut self) {
+        self.runtime_turn_tool_call_count = 0;
+        self.runtime_final_body_divider_pending = false;
+        self.runtime_final_body_divider_inserted = false;
+    }
+
+    pub(crate) fn record_runtime_tool_activity_started_for_final_body_divider(&mut self) {
+        self.runtime_turn_tool_call_count = self.runtime_turn_tool_call_count.saturating_add(1);
+        if self.runtime_turn_tool_call_count > 3 && !self.runtime_final_body_divider_inserted {
+            self.runtime_final_body_divider_pending = true;
+        }
+    }
+
+    fn append_runtime_final_body_divider_if_pending(&mut self) {
+        if !self.runtime_final_body_divider_pending || self.runtime_final_body_divider_inserted {
+            return;
+        }
+
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        self.transcript_mut().append_final_body_divider();
+        self.runtime_final_body_divider_pending = false;
+        self.runtime_final_body_divider_inserted = true;
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
         self.document_runtime.follow_bottom = true;

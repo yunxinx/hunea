@@ -17,8 +17,9 @@ pub use executor::{
 };
 pub use kind::ToolKind;
 pub use permission::{
-    SharedToolPermissionHandler, ToolPermissionDecision, ToolPermissionFuture,
-    ToolPermissionHandler, ToolPermissionPolicy, ToolPermissionRequest,
+    SharedToolPermissionHandler, ToolPermissionDecision, ToolPermissionFileSnapshot,
+    ToolPermissionFuture, ToolPermissionHandler, ToolPermissionPolicy, ToolPermissionPreview,
+    ToolPermissionRequest,
 };
 pub use registry::ToolRegistry;
 pub use schema::{ToolSchema, ToolSchemaError};

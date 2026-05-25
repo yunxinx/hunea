@@ -221,6 +221,7 @@ fn overlay_diff_line_background_fills_the_rendered_row() {
                 path: "src/lib.rs".to_string(),
                 old_text: Some("one\nold\ntail\n".to_string()),
                 new_text: "one\nnew\ntail\n".to_string(),
+                is_truncated: false,
             }],
             locations: Vec::new(),
             raw_input: None,

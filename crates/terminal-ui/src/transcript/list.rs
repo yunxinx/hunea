@@ -25,6 +25,7 @@ use super::ViewportRenderResult;
 use crate::styled_text::line_to_plain_text;
 use crate::{
     Sender, StartupBannerOptions, StyleMode,
+    final_body_divider::FinalBodyDividerItem,
     message::MessageItem,
     reasoning_message::{ReasoningDisplayMode, ReasoningMessageItem},
     selection::{SelectableLineRange, normalize_transcript_selectable_range},
@@ -54,6 +55,7 @@ pub(crate) enum TranscriptItem {
     System(SystemMessageItem),
     ToolResult(ToolResultItem),
     WorkDuration(WorkDurationMessageItem),
+    FinalBodyDivider(FinalBodyDividerItem),
 }
 
 /// `Transcript` 管理 document-flow 顺序、宽度与逐项渲染缓存。
@@ -233,7 +235,8 @@ impl Transcript {
                 | TranscriptItem::Message(_)
                 | TranscriptItem::ToolResult(_)
                 | TranscriptItem::System(_)
-                | TranscriptItem::WorkDuration(_) => false,
+                | TranscriptItem::WorkDuration(_)
+                | TranscriptItem::FinalBodyDivider(_) => false,
             })
     }
 
@@ -267,6 +270,11 @@ impl Transcript {
         self.push_item(TranscriptItem::WorkDuration(WorkDurationMessageItem::new(
             duration,
         )));
+    }
+
+    /// `append_final_body_divider` 追加一条只用于分隔工具活动与最终正文的纯分割线。
+    pub(crate) fn append_final_body_divider(&mut self) {
+        self.push_item(TranscriptItem::FinalBodyDivider(FinalBodyDividerItem::new()));
     }
 
     /// `append_tool_result` 追加一条只用于 TUI 展示的工具审批结果。
@@ -580,7 +588,8 @@ impl Transcript {
                 | TranscriptItem::Reasoning(_)
                 | TranscriptItem::System(_)
                 | TranscriptItem::ToolResult(_)
-                | TranscriptItem::WorkDuration(_) => None,
+                | TranscriptItem::WorkDuration(_)
+                | TranscriptItem::FinalBodyDivider(_) => None,
             })
             .collect()
     }

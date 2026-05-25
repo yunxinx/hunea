@@ -1,23 +1,22 @@
-use std::{
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::{task, task::JoinError};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Tool, ToolCall, ToolDefinition, ToolExecutionFuture, ToolKind, ToolPermissionPolicy, ToolResult,
+    Tool, ToolCall, ToolDefinition, ToolExecutionContext, ToolExecutionFuture, ToolKind,
+    ToolPermissionFileSnapshot, ToolPermissionPolicy, ToolPermissionPreview, ToolResult,
 };
 
 use super::{
     edit_apply::{EditApplication, EditRequest, TextEdit, apply_edit},
     file_state::WorkspaceReadState,
     mutation::{
-        TOOL_CALL_INTERRUPTED, ensure_existing_file_was_read, existing_file_metadata,
-        record_written_text_snapshot,
+        TOOL_CALL_INTERRUPTED, bounded_permission_preview, bounded_tool_result_details,
+        ensure_existing_file_was_read, existing_file_metadata, permission_file_snapshot,
+        read_existing_text_file, record_written_text_snapshot,
     },
     workspace::resolve_workspace_write_path,
     workspace_access::{SharedWorkspaceAccess, WorkspaceAccess, local_workspace_access},
@@ -128,7 +127,7 @@ impl Tool for EditTool {
         let cancellation = cancellation.clone();
         Box::pin(async move {
             match task::spawn_blocking(move || {
-                execute_edit(root, access, read_state, call, cancellation)
+                execute_edit(root, access, read_state, call, None, cancellation)
             })
             .await
             {
@@ -136,6 +135,49 @@ impl Tool for EditTool {
                 Err(error) => join_error_result(call_id, error),
             }
         })
+    }
+
+    fn execute_with_context<'a>(
+        &'a self,
+        call: ToolCall,
+        context: ToolExecutionContext<'a>,
+    ) -> ToolExecutionFuture<'a> {
+        let root = self.root.clone();
+        let access = self.access.clone();
+        let read_state = self.read_state.clone();
+        let permission_snapshot = context.permission_snapshot().cloned();
+        let call_id = call.call_id.clone();
+        let cancellation = context.cancellation().clone();
+        Box::pin(async move {
+            match task::spawn_blocking(move || {
+                execute_edit(
+                    root,
+                    access,
+                    read_state,
+                    call,
+                    permission_snapshot,
+                    cancellation,
+                )
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => join_error_result(call_id, error),
+            }
+        })
+    }
+
+    fn permission_preview(
+        &self,
+        call: &ToolCall,
+        cancellation: &CancellationToken,
+    ) -> Option<ToolPermissionPreview> {
+        edit_permission_preview(
+            &self.root,
+            self.access.as_ref(),
+            call.arguments.clone(),
+            cancellation,
+        )
     }
 }
 
@@ -218,6 +260,7 @@ fn execute_edit(
     access: SharedWorkspaceAccess,
     read_state: WorkspaceReadState,
     call: ToolCall,
+    permission_snapshot: Option<ToolPermissionFileSnapshot>,
     cancellation: CancellationToken,
 ) -> ToolResult {
     let arguments = match serde_json::from_value::<EditArguments>(call.arguments) {
@@ -245,27 +288,111 @@ fn execute_edit(
         path: &path,
         requested_path: &requested_path,
         request: &request,
+        permission_snapshot: permission_snapshot.as_ref(),
         cancellation: &cancellation,
     }) {
-        Ok(EditOutcome::Created) => ToolResult::success(
-            call.call_id,
-            format!("File created successfully at: {requested_path}"),
-        ),
-        Ok(EditOutcome::Updated { replacements }) => ToolResult::success(
-            call.call_id,
-            format!(
-                "The file {} has been updated successfully. Replaced {replacements} occurrence(s).",
-                requested_path
-            ),
-        ),
+        Ok(EditOutcome::Created { new_text }) => edit_success_result(EditSuccessResultOptions {
+            call_id: call.call_id,
+            requested_path,
+            old_text: None,
+            new_text,
+            replacements: 1,
+        }),
+        Ok(EditOutcome::Updated {
+            old_text,
+            new_text,
+            replacements,
+        }) => edit_success_result(EditSuccessResultOptions {
+            call_id: call.call_id,
+            requested_path,
+            old_text: Some(old_text),
+            new_text,
+            replacements,
+        }),
         Err(message) => ToolResult::error(call.call_id, message),
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+fn edit_permission_preview(
+    root: &Path,
+    access: &dyn WorkspaceAccess,
+    arguments: serde_json::Value,
+    cancellation: &CancellationToken,
+) -> Option<ToolPermissionPreview> {
+    if cancellation.is_cancelled() {
+        return None;
+    }
+    let arguments = serde_json::from_value::<EditArguments>(arguments).ok()?;
+    let (requested_path, request) = arguments.into_request().ok()?;
+    let path = resolve_workspace_write_path(access, root, &requested_path).ok()?;
+    let metadata = existing_file_metadata(access, &path, &requested_path, "edit").ok()?;
+
+    let Some(metadata) = metadata else {
+        let EditRequest::Single { edit, .. } = request else {
+            return None;
+        };
+        if !edit.old_string.is_empty() {
+            return None;
+        }
+        return Some(bounded_permission_preview(
+            requested_path,
+            None,
+            edit.new_string,
+            None,
+        ));
+    };
+
+    let original = read_existing_text_file(access, &path).ok()?;
+    let application = apply_edit(&original, &request, &requested_path).ok()?;
+    let snapshot = Some(permission_file_snapshot(&metadata, &original));
+    Some(bounded_permission_preview(
+        requested_path,
+        Some(original),
+        application.final_content,
+        snapshot,
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum EditOutcome {
-    Created,
-    Updated { replacements: usize },
+    Created {
+        new_text: String,
+    },
+    Updated {
+        old_text: String,
+        new_text: String,
+        replacements: usize,
+    },
+}
+
+struct EditSuccessResultOptions {
+    call_id: String,
+    requested_path: String,
+    old_text: Option<String>,
+    new_text: String,
+    replacements: usize,
+}
+
+fn edit_success_result(options: EditSuccessResultOptions) -> ToolResult {
+    let EditSuccessResultOptions {
+        call_id,
+        requested_path,
+        old_text,
+        new_text,
+        replacements,
+    } = options;
+    let mut details = serde_json::Map::new();
+    let bounded_details = bounded_tool_result_details(requested_path.clone(), old_text, new_text);
+    if let Some(bounded_details) = bounded_details.as_object() {
+        details.extend(bounded_details.clone());
+    }
+    details.insert("replacements".to_string(), json!(replacements));
+
+    ToolResult::success(
+        call_id,
+        format!("Successfully replaced {replacements} block(s) in {requested_path}."),
+    )
+    .with_details(Value::Object(details))
 }
 
 struct EditTextFileOptions<'a> {
@@ -274,6 +401,7 @@ struct EditTextFileOptions<'a> {
     path: &'a Path,
     requested_path: &'a str,
     request: &'a EditRequest,
+    permission_snapshot: Option<&'a ToolPermissionFileSnapshot>,
     cancellation: &'a CancellationToken,
 }
 
@@ -284,6 +412,7 @@ fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, Strin
         path,
         requested_path,
         request,
+        permission_snapshot,
         cancellation,
     } = options;
 
@@ -296,7 +425,9 @@ fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, Strin
         match request {
             EditRequest::Single { edit, .. } if edit.old_string.is_empty() => {
                 write_new_file(access, read_state, path, &edit.new_string)?;
-                return Ok(EditOutcome::Created);
+                return Ok(EditOutcome::Created {
+                    new_text: edit.new_string.clone(),
+                });
             }
             EditRequest::Single { .. } => {
                 return Err(format!(
@@ -319,7 +450,14 @@ fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, Strin
         );
     }
 
-    ensure_existing_file_was_read(access, read_state, path, &metadata, cancellation)?;
+    ensure_existing_file_was_read(
+        access,
+        read_state,
+        permission_snapshot,
+        path,
+        &metadata,
+        cancellation,
+    )?;
     let original = read_existing_text_file(access, path)?;
     let EditApplication {
         final_content,
@@ -334,7 +472,11 @@ fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, Strin
         .map_err(|error| format!("edit failed for '{}': {error}", path.display()))?;
     record_written_text_snapshot(access, read_state, path, &final_content);
 
-    Ok(EditOutcome::Updated { replacements })
+    Ok(EditOutcome::Updated {
+        old_text: original,
+        new_text: final_content,
+        replacements,
+    })
 }
 
 fn write_new_file(
@@ -356,20 +498,4 @@ fn write_new_file(
         .map_err(|error| format!("edit failed for '{}': {error}", path.display()))?;
     record_written_text_snapshot(access, read_state, path, content);
     Ok(())
-}
-
-fn read_existing_text_file(access: &dyn WorkspaceAccess, path: &Path) -> Result<String, String> {
-    let mut reader = access
-        .open_reader(path)
-        .map_err(|error| format!("read failed for '{}': {error}", path.display()))?;
-    let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("read failed for '{}': {error}", path.display()))?;
-    String::from_utf8(bytes).map_err(|_| {
-        format!(
-            "edit failed for '{}': file is not valid UTF-8 text",
-            path.display()
-        )
-    })
 }

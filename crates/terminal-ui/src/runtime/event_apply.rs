@@ -1,6 +1,6 @@
 use runtime_domain::session::{
-    RuntimeEvent, RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeToolActivity,
-    RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
+    RuntimeEvent, RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeTarget,
+    RuntimeToolActivity, RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
 };
 
 use super::super::{
@@ -31,6 +31,7 @@ impl RuntimeEventApply for Model {
                 self.append_system_message_from_runtime(message);
             }
             RuntimeEvent::TurnStarted { label, .. } => {
+                self.reset_runtime_final_body_divider_state();
                 self.clear_runtime_response_buffer();
                 if self.stream_activity.is_none() {
                     self.show_stream_activity(label);
@@ -44,10 +45,18 @@ impl RuntimeEventApply for Model {
                 self.push_runtime_reasoning_delta(&content);
                 self.set_stream_activity_thinking(true);
             }
-            RuntimeEvent::OutputTokenEstimate { total_tokens, .. } => {
+            RuntimeEvent::OutputTokenEstimate {
+                target,
+                total_tokens,
+            } => {
+                self.ensure_stream_activity_for_runtime_token_progress(target.as_ref());
                 self.set_stream_activity_output_tokens(total_tokens);
             }
-            RuntimeEvent::InputTokenEstimate { total_tokens, .. } => {
+            RuntimeEvent::InputTokenEstimate {
+                target,
+                total_tokens,
+            } => {
+                self.ensure_stream_activity_for_runtime_token_progress(target.as_ref());
                 self.set_stream_activity_input_tokens(total_tokens);
             }
             RuntimeEvent::Thinking { is_thinking, .. } => {
@@ -61,6 +70,7 @@ impl RuntimeEventApply for Model {
             RuntimeEvent::ToolActivityStarted { activity, .. } => {
                 self.flush_runtime_response_buffer();
                 self.append_runtime_tool_activity_from_runtime(activity);
+                self.record_runtime_tool_activity_started_for_final_body_divider();
                 self.set_stream_activity_thinking(false);
             }
             RuntimeEvent::ToolActivityUpdated { update, .. } => {
@@ -101,6 +111,7 @@ impl RuntimeEventApply for Model {
                     reasoning_duration,
                 );
                 self.finish_stream_activity_with_work_summary();
+                self.reset_runtime_final_body_divider_state();
             }
             RuntimeEvent::Failed { message, .. } => {
                 self.close_runtime_permission_approval_panel();
@@ -108,19 +119,22 @@ impl RuntimeEventApply for Model {
                 self.accept_streamed_runtime_reasoning_from_runtime();
                 self.append_system_message_from_runtime(normalize_chat_failure_message(&message));
                 self.finish_stream_activity_with_work_summary();
+                self.reset_runtime_final_body_divider_state();
             }
             RuntimeEvent::Interrupted { .. } => {
                 self.close_runtime_permission_approval_panel();
                 self.flush_runtime_response_buffer();
                 self.accept_streamed_runtime_reasoning_from_runtime();
                 self.append_system_message_from_runtime("Chat interrupted");
-                self.finish_stream_activity_with_work_summary();
+                self.clear_stream_activity();
+                self.reset_runtime_final_body_divider_state();
             }
             RuntimeEvent::Stopped { message, .. } => {
                 self.close_runtime_permission_approval_panel();
                 self.flush_runtime_response_buffer();
                 self.accept_streamed_runtime_reasoning_from_runtime();
                 self.finish_stream_activity_with_work_summary();
+                self.reset_runtime_final_body_divider_state();
                 if let Some(message) = message {
                     self.show_transient_status_notice(&format!("Runtime stopped: {message}"));
                 }
@@ -143,6 +157,23 @@ fn normalize_chat_failure_message(message: &str) -> String {
         (true, None) => FALLBACK_CHAT_FAILURE_MESSAGE.to_string(),
         (false, Some(body)) => format!("{description}\nBody: {body}"),
         (false, None) => description,
+    }
+}
+
+impl Model {
+    fn ensure_stream_activity_for_runtime_token_progress(
+        &mut self,
+        target: Option<&RuntimeTarget>,
+    ) {
+        if self.stream_activity.is_some() {
+            return;
+        }
+
+        self.show_stream_activity(
+            target
+                .map(RuntimeTarget::display_label)
+                .unwrap_or("Working"),
+        );
     }
 }
 

@@ -9,7 +9,7 @@ use runtime_domain::model_catalog::{
 };
 use runtime_domain::phrases::StatusPhraseOrder;
 use runtime_domain::provider::ProviderKind;
-use runtime_domain::session::{ChatMessageBlock, ChatRole};
+use runtime_domain::session::ChatRole;
 use std::path::{Path, PathBuf};
 
 fn progressive_exactization_fixture() -> Model {
@@ -203,7 +203,7 @@ fn conversation_turn_request_ignores_runtime_system_messages_in_transcript() {
 }
 
 #[test]
-fn conversation_turn_request_embeds_explicit_file_blocks() {
+fn conversation_turn_request_preserves_at_file_reference_as_text() {
     let root = TempFileTree::new("conversation-structured-prompt");
     root.write_file_with_content("assets/sample.png", &[0x89, b'P', b'N', b'G']);
     root.write_file_with_content("src/code.py", b"print('hi')\n");
@@ -222,23 +222,7 @@ fn conversation_turn_request_embeds_explicit_file_blocks() {
 
     let message = request.message();
     assert_eq!(message.content, "review @assets/sample.png @src/code.py");
-    let blocks = message
-        .blocks
-        .as_ref()
-        .expect("conversation request should preserve structured blocks");
-    assert!(matches!(&blocks[0], ChatMessageBlock::Text(text) if text == "review "));
-    assert!(matches!(
-        &blocks[1],
-        ChatMessageBlock::Image { mime_type, data_base64, .. }
-            if mime_type == "image/png" && data_base64 == "iVBORw=="
-    ));
-    assert!(matches!(&blocks[2], ChatMessageBlock::Text(text) if text == " "));
-    assert!(matches!(
-        &blocks[3],
-        ChatMessageBlock::Text(text)
-            if text.contains("[Attached file: src/code.py (text/x-python)]")
-                && text.contains("print('hi')")
-    ));
+    assert!(message.blocks.is_none());
 }
 
 #[test]
@@ -471,16 +455,7 @@ fn at_file_picker_enter_on_exact_visible_path_submits_prompt() {
     };
     let message = request.message();
     assert_eq!(message.content, "@src/lib.rs");
-    let blocks = message
-        .blocks
-        .as_ref()
-        .expect("exact visible file should still attach directly");
-    assert!(matches!(
-        &blocks[0],
-        ChatMessageBlock::Text(text)
-            if text.contains("[Attached file: src/lib.rs (text/plain)]")
-                && text.contains("pub fn demo() {}")
-    ));
+    assert!(message.blocks.is_none());
 }
 
 #[test]
@@ -553,16 +528,7 @@ fn at_file_picker_enter_on_explicit_gitignored_file_submits_prompt() {
     };
     let message = request.message();
     assert_eq!(message.content, "@target/debug.log");
-    let blocks = message
-        .blocks
-        .as_ref()
-        .expect("ignored explicit file should still attach");
-    assert!(matches!(
-        &blocks[0],
-        ChatMessageBlock::Text(text)
-            if text.contains("[Attached file: target/debug.log (text/plain)]")
-                && text.contains("hidden log")
-    ));
+    assert!(message.blocks.is_none());
 }
 
 #[test]
@@ -595,17 +561,7 @@ fn at_file_picker_enter_on_explicit_absolute_file_submits_prompt() {
     };
     let message = request.message();
     assert_eq!(message.content, format!("@{}", outside_path.display()));
-    let blocks = message
-        .blocks
-        .as_ref()
-        .expect("absolute explicit file should still attach");
-    assert!(matches!(
-        &blocks[0],
-        ChatMessageBlock::Text(text)
-            if text.contains("[Attached file:")
-                && text.contains("outside.txt")
-                && text.contains("outside text")
-    ));
+    assert!(message.blocks.is_none());
 }
 
 #[test]

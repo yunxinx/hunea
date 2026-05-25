@@ -803,6 +803,7 @@ impl ToolResultItem {
         if !is_runtime_read_tool_activity(call)
             && !is_list_dir_tool_call(call)
             && !runtime_tool_activity_has_diff_content(call)
+            && !is_runtime_write_tool_activity(call)
             && let Some(locations) = runtime_tool_activity_location_suffix(&call.locations)
         {
             chunks.push(HighlightChunk {

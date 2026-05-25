@@ -172,6 +172,9 @@ impl TranscriptItem {
             Self::WorkDuration(item) => {
                 item.estimate_render_metrics_fast(width, palette, previous_metrics)
             }
+            Self::FinalBodyDivider(item) => {
+                item.estimate_render_metrics_fast(width, palette, previous_metrics)
+            }
         }
     }
 
@@ -187,6 +190,7 @@ impl TranscriptItem {
             Self::System(item) => item.measure_render_metrics(width, palette),
             Self::ToolResult(item) => item.measure_render_metrics(width, palette),
             Self::WorkDuration(item) => item.measure_render_metrics(width, palette),
+            Self::FinalBodyDivider(item) => item.measure_render_metrics(width, palette),
         }
     }
 
@@ -198,6 +202,7 @@ impl TranscriptItem {
             Self::System(item) => item.render_lines(width, palette),
             Self::ToolResult(item) => item.render_lines(width, palette),
             Self::WorkDuration(item) => item.render_lines(width, palette),
+            Self::FinalBodyDivider(item) => item.render_lines(width, palette),
         }
     }
 
@@ -220,6 +225,9 @@ impl TranscriptItem {
             Self::WorkDuration(item) => {
                 item.render_for_terminal_replay(width, palette, preserve_ansi)
             }
+            Self::FinalBodyDivider(item) => {
+                item.render_for_terminal_replay(width, palette, preserve_ansi)
+            }
         }
     }
 
@@ -231,6 +239,7 @@ impl TranscriptItem {
             Self::System(item) => item.render_plain_text(width, palette),
             Self::ToolResult(item) => item.render_plain_text(width, palette),
             Self::WorkDuration(item) => item.render_plain_text(width, palette),
+            Self::FinalBodyDivider(item) => item.render_plain_text(width, palette),
         }
     }
 
@@ -253,6 +262,7 @@ impl TranscriptItem {
             Self::System(item) => item.render_line_anchors(width, palette),
             Self::ToolResult(item) => item.render_line_anchors(width, palette),
             Self::WorkDuration(item) => item.render_line_anchors(width, palette),
+            Self::FinalBodyDivider(item) => item.render_line_anchors(width, palette),
         }
     }
 
@@ -269,6 +279,7 @@ impl TranscriptItem {
             Self::System(_) => Vec::new(),
             Self::ToolResult(_) => Vec::new(),
             Self::WorkDuration(_) => Vec::new(),
+            Self::FinalBodyDivider(_) => Vec::new(),
         };
         if ranges.len() == plain_lines.len() {
             return ranges;
@@ -295,6 +306,7 @@ impl TranscriptItem {
             Self::System(item) => item.render_cache_key(),
             Self::ToolResult(item) => item.render_cache_key(),
             Self::WorkDuration(item) => item.render_cache_key(),
+            Self::FinalBodyDivider(item) => item.render_cache_key(),
         }
     }
 
@@ -306,6 +318,7 @@ impl TranscriptItem {
             Self::System(item) => item.source_text_byte_len(),
             Self::ToolResult(item) => item.source_text_byte_len(),
             Self::WorkDuration(item) => item.source_text_byte_len(),
+            Self::FinalBodyDivider(item) => item.source_text_byte_len(),
         }
     }
 

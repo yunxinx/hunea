@@ -7,11 +7,9 @@ pub(crate) struct ConversationToolErrorFormatter;
 
 impl ToolErrorFormatter for ConversationToolErrorFormatter {
     fn format_tool_error(&self, tool_name: &str, raw_error: &str) -> ProcessedToolError {
-        if is_bash_user_rejection(tool_name, raw_error) {
-            return ProcessedToolError::new(
-                "The user rejected running this bash command. Do not retry it unless the user explicitly asks for it or provides a revised command.",
-                "You rejected running this command",
-            );
+        if is_user_rejected_tool_call(raw_error) {
+            let (assistant_message, display_reason) = user_rejection_copy(tool_name);
+            return ProcessedToolError::new(assistant_message, display_reason);
         }
 
         let display_reason = tool_error_display_reason(tool_name, raw_error);
@@ -23,10 +21,30 @@ impl ToolErrorFormatter for ConversationToolErrorFormatter {
     }
 }
 
-fn is_bash_user_rejection(tool_name: &str, raw_error: &str) -> bool {
-    tool_name == "bash"
-        && raw_error.trim().starts_with("Tool permission denied:")
+fn is_user_rejected_tool_call(raw_error: &str) -> bool {
+    raw_error.trim().starts_with("Tool permission denied:")
         && raw_error.contains("user rejected the tool call")
+}
+
+fn user_rejection_copy(tool_name: &str) -> (&'static str, &'static str) {
+    match tool_name {
+        "bash" => (
+            "The user rejected running this bash command. Do not retry it unless the user explicitly asks for it or provides a revised command.",
+            "You rejected running this command",
+        ),
+        "write" => (
+            "The user rejected writing this file. Do not retry the write unless the user explicitly asks again or provides revised content.",
+            "You rejected writing this file",
+        ),
+        "edit" => (
+            "The user rejected editing this file. Do not retry the edit unless the user explicitly asks again or provides revised instructions.",
+            "You rejected editing this file",
+        ),
+        _ => (
+            "The user rejected running this tool call. Do not retry it unless the user explicitly asks for it or provides revised input.",
+            "You rejected this tool call",
+        ),
+    }
 }
 
 fn tool_error_display_reason(tool_name: &str, raw_error: &str) -> String {
@@ -335,5 +353,31 @@ mod tests {
             formatted.assistant_message,
             "The user rejected running this bash command. Do not retry it unless the user explicitly asks for it or provides a revised command."
         );
+    }
+
+    #[test]
+    fn conversation_tool_error_formatter_uses_clear_file_edit_rejection_copy() {
+        let cases = [
+            (
+                "write",
+                "You rejected writing this file",
+                "The user rejected writing this file. Do not retry the write unless the user explicitly asks again or provides revised content.",
+            ),
+            (
+                "edit",
+                "You rejected editing this file",
+                "The user rejected editing this file. Do not retry the edit unless the user explicitly asks again or provides revised instructions.",
+            ),
+        ];
+
+        for (tool_name, display_reason, assistant_message) in cases {
+            let formatted = ConversationToolErrorFormatter.format_tool_error(
+                tool_name,
+                &format!("Tool permission denied: {tool_name} user rejected the tool call"),
+            );
+
+            assert_eq!(formatted.display_reason, display_reason);
+            assert_eq!(formatted.assistant_message, assistant_message);
+        }
     }
 }

@@ -136,6 +136,17 @@ impl Model {
         Some(activity.elapsed_at(activity.active_now(now)))
     }
 
+    #[cfg(test)]
+    pub(crate) fn backdate_stream_activity_started_at_for_test(&mut self, offset: Duration) {
+        let Some(activity) = self.stream_activity.as_mut() else {
+            return;
+        };
+        activity.started_at = activity
+            .started_at
+            .checked_sub(offset)
+            .expect("test clock should allow backdating stream activity");
+    }
+
     pub(crate) fn pause_stream_activity(&mut self) {
         self.pause_stream_activity_at(Instant::now());
     }

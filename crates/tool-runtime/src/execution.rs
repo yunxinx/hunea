@@ -60,4 +60,10 @@ impl ToolResult {
         self.display_content = Some(display_content.into());
         self
     }
+
+    /// `with_details` 附加结构化执行细节，供 runtime/TUI 使用。
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
+    }
 }

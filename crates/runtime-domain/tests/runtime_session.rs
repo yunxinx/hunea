@@ -130,6 +130,7 @@ fn runtime_permission_request_can_carry_tool_activity_preview() {
             path: "src/lib.rs".to_string(),
             old_text: None,
             new_text: "pub fn added() {}".to_string(),
+            is_truncated: false,
         }]),
         ..RuntimeToolActivityUpdate::default()
     });
@@ -148,6 +149,7 @@ fn runtime_permission_request_can_carry_tool_activity_preview() {
             path: "src/lib.rs".to_string(),
             old_text: None,
             new_text: "pub fn added() {}".to_string(),
+            is_truncated: false,
         })
     );
 }

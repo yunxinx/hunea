@@ -51,16 +51,11 @@ pub fn runtime_tool_activity_update_from_result(
     } else {
         RuntimeToolActivityStatus::Completed
     });
-    let display_content = result
-        .display_content
-        .as_ref()
-        .unwrap_or(&result.content)
-        .clone();
     let content = match processed_error {
         Some(processed) => {
             RuntimeToolActivityContent::Text(format!("Failed: {}", processed.display_reason))
         }
-        None => RuntimeToolActivityContent::Text(display_content.clone()),
+        None => runtime_tool_activity_content_for_result(&call.arguments, result, definition),
     };
     let raw_input = processed_error
         .is_none()
@@ -85,6 +80,56 @@ pub fn runtime_tool_activity_update_from_result(
     }
 }
 
+fn runtime_tool_activity_content_for_result(
+    arguments: &Value,
+    result: &ToolResult,
+    definition: Option<&LumosToolDefinition>,
+) -> RuntimeToolActivityContent {
+    if matches!(
+        runtime_kind_for(definition),
+        RuntimeToolKind::Edit | RuntimeToolKind::Write
+    ) && let Some(content) = diff_content_from_tool_result(arguments, result)
+    {
+        return content;
+    }
+
+    RuntimeToolActivityContent::Text(
+        result
+            .display_content
+            .as_ref()
+            .unwrap_or(&result.content)
+            .clone(),
+    )
+}
+
+fn diff_content_from_tool_result(
+    arguments: &Value,
+    result: &ToolResult,
+) -> Option<RuntimeToolActivityContent> {
+    let details = result.details.as_ref()?;
+    let path = details
+        .get("path")
+        .and_then(Value::as_str)
+        .or_else(|| arguments.get("path").and_then(Value::as_str))?
+        .to_string();
+    let new_text = details.get("new_text")?.as_str()?.to_string();
+    let old_text = details
+        .get("old_text")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let is_truncated = details
+        .get("preview_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    Some(RuntimeToolActivityContent::Diff {
+        path,
+        old_text,
+        new_text,
+        is_truncated,
+    })
+}
+
 /// `runtime_tool_activity_update_from_permission_request` previews an Ask permission request.
 pub fn runtime_tool_activity_update_from_permission_request(
     activity_id: &str,
@@ -92,6 +137,15 @@ pub fn runtime_tool_activity_update_from_permission_request(
 ) -> RuntimeToolActivityUpdate {
     let tool_name = &request.call.name;
     let arguments = &request.call.arguments;
+    let content = request.preview.as_ref().map_or_else(
+        || RuntimeToolActivityContent::Text(tool_input_summary(arguments)),
+        |preview| RuntimeToolActivityContent::Diff {
+            path: preview.path.clone(),
+            old_text: preview.old_text.clone(),
+            new_text: preview.new_text.clone(),
+            is_truncated: preview.is_truncated,
+        },
+    );
     RuntimeToolActivityUpdate {
         activity_id: activity_id.to_string(),
         title: Some(tool_title_for(
@@ -101,9 +155,7 @@ pub fn runtime_tool_activity_update_from_permission_request(
         )),
         kind: Some(runtime_kind_for(Some(&request.definition))),
         status: Some(RuntimeToolActivityStatus::Pending),
-        content: Some(vec![RuntimeToolActivityContent::Text(tool_input_summary(
-            arguments,
-        ))]),
+        content: Some(vec![content]),
         locations: Some(tool_locations_for(arguments)),
         raw_input: Some(RuntimeToolActivityRawValue::from(arguments.clone())),
         raw_output: None,
@@ -183,8 +235,13 @@ fn tool_input_summary(arguments: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use provider_protocol::ToolCall;
-    use runtime_domain::session::{RuntimeToolActivityContent, RuntimeToolActivityStatus};
-    use tool_runtime::{ToolDefinition, ToolKind, ToolRegistry, ToolResult};
+    use runtime_domain::session::{
+        RuntimeToolActivityContent, RuntimeToolActivityStatus, RuntimeToolKind,
+    };
+    use tool_runtime::{
+        ToolDefinition, ToolKind, ToolPermissionPreview, ToolPermissionRequest, ToolRegistry,
+        ToolResult,
+    };
 
     use super::{runtime_tool_activity_from_call, runtime_tool_activity_update_from_result};
 
@@ -235,5 +292,146 @@ mod tests {
             raw_output.tool_result_details(),
             Some(&serde_json::json!({ "kind": "text" }))
         );
+    }
+
+    #[test]
+    fn edit_result_with_details_becomes_diff_content() {
+        let mut registry = ToolRegistry::new();
+        registry.insert(
+            ToolDefinition::new("edit")
+                .with_label("Edit")
+                .with_kind(ToolKind::Edit),
+        );
+        let call = ToolCall::new(
+            "call-1",
+            "edit",
+            serde_json::json!({
+                "path": "test/temp.md",
+                "edits": [
+                    { "old_string": "old\n", "new_string": "new\n" }
+                ]
+            }),
+        );
+        let result = ToolResult::success(
+            "call-1",
+            "Successfully replaced 1 block(s) in test/temp.md.",
+        )
+        .with_details(serde_json::json!({
+            "path": "test/temp.md",
+            "old_text": "old\n",
+            "new_text": "new\n",
+            "replacements": 1
+        }));
+
+        let update = runtime_tool_activity_update_from_result(&call, &result, None, &registry);
+
+        assert!(matches!(
+            update.content.as_deref(),
+            Some([RuntimeToolActivityContent::Diff {
+                path,
+                old_text,
+                new_text,
+                ..
+            }]) if path == "test/temp.md"
+                && old_text.as_deref() == Some("old\n")
+                && new_text == "new\n"
+        ));
+        assert_eq!(update.title.as_deref(), Some("Edit test/temp.md"));
+        assert_eq!(update.kind, Some(RuntimeToolKind::Edit));
+        let raw_output = update.raw_output.expect("raw output should be preserved");
+        assert_eq!(
+            raw_output.tool_result_details(),
+            Some(&serde_json::json!({
+                "path": "test/temp.md",
+                "old_text": "old\n",
+                "new_text": "new\n",
+                "replacements": 1
+            }))
+        );
+    }
+
+    #[test]
+    fn write_result_with_details_becomes_diff_content() {
+        let mut registry = ToolRegistry::new();
+        registry.insert(
+            ToolDefinition::new("write")
+                .with_label("Write")
+                .with_kind(ToolKind::Write),
+        );
+        let call = ToolCall::new(
+            "call-1",
+            "write",
+            serde_json::json!({
+                "path": "test/temp.md",
+                "content": "new\n"
+            }),
+        );
+        let result = ToolResult::success(
+            "call-1",
+            "The file test/temp.md has been updated successfully.",
+        )
+        .with_details(serde_json::json!({
+            "path": "test/temp.md",
+            "old_text": "old\n",
+            "new_text": "new\n"
+        }));
+
+        let update = runtime_tool_activity_update_from_result(&call, &result, None, &registry);
+
+        assert!(matches!(
+            update.content.as_deref(),
+            Some([RuntimeToolActivityContent::Diff {
+                path,
+                old_text,
+                new_text,
+                ..
+            }]) if path == "test/temp.md"
+                && old_text.as_deref() == Some("old\n")
+                && new_text == "new\n"
+        ));
+        assert_eq!(update.title.as_deref(), Some("Write test/temp.md"));
+        assert_eq!(update.kind, Some(RuntimeToolKind::Write));
+    }
+
+    #[test]
+    fn permission_request_preview_becomes_diff_content() {
+        let definition = ToolDefinition::new("edit")
+            .with_label("Edit")
+            .with_kind(ToolKind::Edit);
+        let request = ToolPermissionRequest::new(
+            tool_runtime::ToolCall::new(
+                "call-1",
+                "edit",
+                serde_json::json!({
+                    "path": "temp.md",
+                    "edits": [
+                        { "old_string": "old\n", "new_string": "new\n" }
+                    ]
+                }),
+            ),
+            definition,
+        )
+        .with_preview(ToolPermissionPreview {
+            path: "temp.md".to_string(),
+            old_text: Some("old\n".to_string()),
+            new_text: "new\n".to_string(),
+            is_truncated: false,
+            snapshot: None,
+        });
+
+        let update =
+            super::runtime_tool_activity_update_from_permission_request("call-1", &request);
+
+        assert!(matches!(
+            update.content.as_deref(),
+            Some([RuntimeToolActivityContent::Diff {
+                path,
+                old_text,
+                new_text,
+                ..
+            }]) if path == "temp.md"
+                && old_text.as_deref() == Some("old\n")
+                && new_text == "new\n"
+        ));
     }
 }

@@ -509,6 +509,7 @@ fn runtime_interruption_flushes_buffered_delta_before_notice() {
     let target = RuntimeTarget::provider("local", "qwen3");
     model.transcript_mut().clear();
     model.show_stream_activity("qwen3");
+    model.backdate_stream_activity_started_at_for_test(Duration::from_secs(38));
 
     model.apply_runtime_event(RuntimeEvent::AssistantDelta {
         target: target.clone(),
@@ -523,6 +524,180 @@ fn runtime_interruption_flushes_buffered_delta_before_notice() {
         vec!["已输出的片段".to_string(), "■ Chat interrupted".to_string(),]
     );
     assert!(!model.current_stream_activity_render_result().has_content);
+}
+
+#[test]
+fn runtime_final_response_after_four_tool_calls_inserts_divider_before_body() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let target = RuntimeTarget::provider("local", "qwen3");
+    model.set_window(40, 8);
+    model.transcript_mut().clear();
+    model.apply_runtime_event(RuntimeEvent::TurnStarted {
+        target: target.clone(),
+        label: "qwen3".to_string(),
+    });
+
+    apply_runtime_tool_starts(&mut model, &target, 4);
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(target),
+        content: "最终正文".to_string(),
+        reasoning_content: None,
+        reasoning_duration: None,
+        finish_reason: None,
+        metrics: None,
+    });
+
+    let items = model.transcript_plain_items();
+    let body_index = items
+        .iter()
+        .position(|item| item == "最终正文")
+        .expect("final body should be appended");
+    assert!(
+        body_index > 0 && is_plain_divider(&items[body_index - 1]),
+        "final body should be separated from prior tool activity: {items:#?}"
+    );
+}
+
+#[test]
+fn runtime_final_response_after_three_tool_calls_does_not_insert_divider() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let target = RuntimeTarget::provider("local", "qwen3");
+    model.set_window(40, 8);
+    model.transcript_mut().clear();
+    model.apply_runtime_event(RuntimeEvent::TurnStarted {
+        target: target.clone(),
+        label: "qwen3".to_string(),
+    });
+
+    apply_runtime_tool_starts(&mut model, &target, 3);
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(target),
+        content: "最终正文".to_string(),
+        reasoning_content: None,
+        reasoning_duration: None,
+        finish_reason: None,
+        metrics: None,
+    });
+
+    let items = model.transcript_plain_items();
+    assert_eq!(items.last().map(String::as_str), Some("最终正文"));
+    assert!(
+        !items.iter().any(|item| is_plain_divider(item)),
+        "three tool calls should not insert a divider: {items:#?}"
+    );
+}
+
+#[test]
+fn runtime_reasoning_after_four_tool_calls_inserts_divider_before_final_body() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            show_reasoning_content: true,
+            reasoning_display_mode: ReasoningDisplayMode::Expanded,
+            ..ModelOptions::default()
+        },
+    );
+    let target = RuntimeTarget::provider("local", "qwen3");
+    model.set_window(40, 8);
+    model.transcript_mut().clear();
+    model.apply_runtime_event(RuntimeEvent::TurnStarted {
+        target: target.clone(),
+        label: "qwen3".to_string(),
+    });
+
+    apply_runtime_tool_starts(&mut model, &target, 4);
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(target),
+        content: "最终正文".to_string(),
+        reasoning_content: Some("最终前的思考".to_string()),
+        reasoning_duration: Some(Duration::from_secs(1)),
+        finish_reason: None,
+        metrics: None,
+    });
+
+    let items = model.transcript_plain_items();
+    let reasoning_index = items
+        .iter()
+        .position(|item| item == "最终前的思考")
+        .expect("reasoning should be appended");
+    let body_index = items
+        .iter()
+        .position(|item| item == "最终正文")
+        .expect("final body should be appended");
+    assert!(
+        reasoning_index + 2 == body_index && is_plain_divider(&items[reasoning_index + 1]),
+        "divider should be placed after visible reasoning and before final body: {items:#?}"
+    );
+}
+
+#[test]
+fn runtime_intermediate_text_after_four_tool_calls_does_not_insert_divider_before_next_tool() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let target = RuntimeTarget::provider("local", "qwen3");
+    model.set_window(40, 8);
+    model.transcript_mut().clear();
+    model.apply_runtime_event(RuntimeEvent::TurnStarted {
+        target: target.clone(),
+        label: "qwen3".to_string(),
+    });
+
+    apply_runtime_tool_starts(&mut model, &target, 4);
+    model.apply_runtime_event(RuntimeEvent::AssistantDelta {
+        target: target.clone(),
+        content: "还要继续检查".to_string(),
+    });
+    apply_runtime_tool_starts(&mut model, &target, 1);
+
+    let intermediate_items = model.transcript_plain_items();
+    assert!(
+        intermediate_items.iter().any(|item| item == "还要继续检查"),
+        "intermediate assistant text should still flush before the next tool: {intermediate_items:#?}"
+    );
+    assert!(
+        !intermediate_items.iter().any(|item| is_plain_divider(item)),
+        "divider should be reserved for the final body, not intermediate tool-call text: {intermediate_items:#?}"
+    );
+
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(target),
+        content: "最终正文".to_string(),
+        reasoning_content: None,
+        reasoning_duration: None,
+        finish_reason: None,
+        metrics: None,
+    });
+
+    let items = model.transcript_plain_items();
+    let body_index = items
+        .iter()
+        .position(|item| item == "最终正文")
+        .expect("final body should be appended");
+    assert!(
+        body_index > 0 && is_plain_divider(&items[body_index - 1]),
+        "final body should still be separated after later tools: {items:#?}"
+    );
+}
+
+fn apply_runtime_tool_starts(model: &mut Model, target: &RuntimeTarget, count: usize) {
+    for index in 0..count {
+        model.apply_runtime_event(RuntimeEvent::ToolActivityStarted {
+            target: target.clone(),
+            activity: RuntimeToolActivity {
+                activity_id: format!("call-{index}"),
+                title: format!("Tool {index}"),
+                kind: RuntimeToolKind::Other,
+                status: RuntimeToolActivityStatus::InProgress,
+                content: vec![RuntimeToolActivityContent::Text(format!("input {index}"))],
+                locations: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+            },
+        });
+    }
+}
+
+fn is_plain_divider(item: &str) -> bool {
+    !item.is_empty() && item.chars().all(|ch| ch == '─')
 }
 
 #[test]
@@ -1059,6 +1234,28 @@ fn conversation_token_estimate_updates_activity_without_finishing_request() {
 }
 
 #[test]
+fn conversation_token_estimate_starts_activity_for_tool_only_stream() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(70, 6);
+    model.transcript_mut().clear();
+
+    apply_conversation_event(
+        &mut model,
+        Some(RuntimeTarget::provider("local", "qwen3")),
+        ConversationEvent::OutputTokenEstimate { total_tokens: 57 },
+    );
+
+    let activity = model
+        .current_stream_activity_render_result_at(
+            std::time::Instant::now() + std::time::Duration::from_millis(120),
+        )
+        .plain_line;
+    assert!(activity.contains("↓ 57 tokens"));
+    assert!(model.current_stream_activity_render_result().has_content);
+    assert!(model.transcript_plain_items().is_empty());
+}
+
+#[test]
 fn conversation_input_token_estimate_updates_activity_without_finishing_request() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.set_window(70, 6);
@@ -1224,7 +1421,7 @@ fn conversation_turn_request_keeps_runtime_target_in_core_dto() {
 }
 
 #[test]
-fn interrupt_conversation_clears_runtime_and_appends_system_message() {
+fn interrupt_conversation_clears_runtime_without_immediate_notice() {
     let mut runtime_coordinator = TestRuntimeCoordinator {
         conversation_running: true,
         ..TestRuntimeCoordinator::default()
@@ -1241,6 +1438,29 @@ fn interrupt_conversation_clears_runtime_and_appends_system_message() {
 
     assert!(runtime_coordinator.conversation_interrupted);
     assert!(!model.current_stream_activity_render_result().has_content);
+    assert!(model.transcript_plain_items().is_empty());
+}
+
+#[test]
+fn interrupt_receipt_and_runtime_event_append_single_system_message() {
+    let mut runtime_coordinator = TestRuntimeCoordinator {
+        conversation_running: true,
+        ..TestRuntimeCoordinator::default()
+    };
+    let target = RuntimeTarget::provider("local", "qwen3");
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    apply_effect_if_needed_for_test(
+        &mut model,
+        &mut runtime_coordinator,
+        Some(AppEffect::InterruptCurrentTurn),
+    );
+    model.apply_runtime_event(RuntimeEvent::Interrupted {
+        target: Some(target),
+    });
+
     assert_eq!(
         model.transcript_plain_items(),
         vec!["■ Chat interrupted".to_string()]

@@ -109,7 +109,6 @@ pub(super) fn run_interrupt_current_turn_effect(
         Ok(RuntimeCommandReceipt::Interrupted {
             target: Some(RuntimeTarget::Provider(_)),
         }) => {
-            model.append_system_message_from_runtime("Chat interrupted");
             model.finish_stream_activity_with_work_summary();
         }
         Ok(RuntimeCommandReceipt::Interrupted { .. }) => {}

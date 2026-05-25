@@ -50,6 +50,10 @@ impl TextFingerprint {
         Self::from_bytes(text.as_bytes())
     }
 
+    pub(crate) const fn from_parts(hash: u64, byte_len: u64) -> Self {
+        Self { hash, byte_len }
+    }
+
     pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         hasher.write(bytes);
@@ -57,6 +61,14 @@ impl TextFingerprint {
             hash: hasher.finish(),
             byte_len: bytes.len() as u64,
         }
+    }
+
+    pub(crate) const fn hash(&self) -> u64 {
+        self.hash
+    }
+
+    pub(crate) const fn byte_len(&self) -> u64 {
+        self.byte_len
     }
 }
 

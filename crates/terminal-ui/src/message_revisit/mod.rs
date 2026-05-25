@@ -187,7 +187,8 @@ impl Model {
             | TranscriptItem::Reasoning(_)
             | TranscriptItem::System(_)
             | TranscriptItem::ToolResult(_)
-            | TranscriptItem::WorkDuration(_) => None,
+            | TranscriptItem::WorkDuration(_)
+            | TranscriptItem::FinalBodyDivider(_) => None,
         }
     }
 
@@ -235,7 +236,8 @@ impl Model {
                 | TranscriptItem::Reasoning(_)
                 | TranscriptItem::System(_)
                 | TranscriptItem::ToolResult(_)
-                | TranscriptItem::WorkDuration(_) => None,
+                | TranscriptItem::WorkDuration(_)
+                | TranscriptItem::FinalBodyDivider(_) => None,
             })
             .collect()
     }

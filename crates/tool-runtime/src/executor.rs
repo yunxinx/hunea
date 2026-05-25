@@ -8,7 +8,10 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{ToolCall, ToolDefinition, ToolRegistry, ToolResult, schema::validate_tool_arguments};
+use super::{
+    ToolCall, ToolDefinition, ToolPermissionFileSnapshot, ToolPermissionPreview, ToolRegistry,
+    ToolResult, schema::validate_tool_arguments,
+};
 
 /// `ToolExecutionFuture` 是工具执行返回结果的异步任务。
 pub type ToolExecutionFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
@@ -70,6 +73,7 @@ impl ToolProgressSink {
 pub struct ToolExecutionContext<'a> {
     cancellation: &'a CancellationToken,
     progress_sink: ToolProgressSink,
+    permission_snapshot: Option<ToolPermissionFileSnapshot>,
 }
 
 impl<'a> ToolExecutionContext<'a> {
@@ -78,6 +82,7 @@ impl<'a> ToolExecutionContext<'a> {
         Self {
             cancellation,
             progress_sink: ToolProgressSink::none(),
+            permission_snapshot: None,
         }
     }
 
@@ -87,9 +92,23 @@ impl<'a> ToolExecutionContext<'a> {
         self
     }
 
+    /// `with_permission_snapshot` 附带本次审批预览读取到的文件指纹。
+    pub fn with_permission_snapshot(
+        mut self,
+        snapshot: Option<ToolPermissionFileSnapshot>,
+    ) -> Self {
+        self.permission_snapshot = snapshot;
+        self
+    }
+
     /// `cancellation` 返回本次工具调用的取消 token。
     pub const fn cancellation(&self) -> &'a CancellationToken {
         self.cancellation
+    }
+
+    /// `permission_snapshot` 返回用户审批时看到的文件指纹。
+    pub const fn permission_snapshot(&self) -> Option<&ToolPermissionFileSnapshot> {
+        self.permission_snapshot.as_ref()
     }
 
     /// `emit` 向 runtime 发送一次工具进度事件。
@@ -117,6 +136,15 @@ pub trait Tool: Send + Sync {
         context: ToolExecutionContext<'a>,
     ) -> ToolExecutionFuture<'a> {
         self.execute(call, context.cancellation())
+    }
+
+    /// `permission_preview` 返回执行前可展示的结构化变更预览。
+    fn permission_preview(
+        &self,
+        _call: &ToolCall,
+        _cancellation: &CancellationToken,
+    ) -> Option<ToolPermissionPreview> {
+        None
     }
 }
 
@@ -193,6 +221,23 @@ impl ToolExecutorRegistry {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// `permission_preview` 读取指定工具的审批前结构化变更预览。
+    pub fn permission_preview(
+        &self,
+        call: &ToolCall,
+        cancellation: &CancellationToken,
+    ) -> Option<ToolPermissionPreview> {
+        let tool = {
+            self.tools
+                .read()
+                .expect("tool registry lock should not be poisoned")
+                .get(&call.name)
+                .cloned()
+        }?;
+
+        tool.permission_preview(call, cancellation)
     }
 }
 

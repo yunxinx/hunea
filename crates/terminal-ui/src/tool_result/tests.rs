@@ -743,6 +743,102 @@ fn failed_execute_tool_call_uses_secondary_detail_text_for_rejection_copy() {
 }
 
 #[test]
+fn failed_file_mutation_tool_call_uses_secondary_detail_text_for_rejection_copy() {
+    let palette = default_palette();
+    let cases = [
+        (
+            "call-write",
+            "Write temp.md",
+            RuntimeToolKind::Write,
+            "Failed: You rejected writing this file",
+            "● Write temp.md",
+        ),
+        (
+            "call-edit",
+            "Edit temp.md",
+            RuntimeToolKind::Edit,
+            "Failed: You rejected editing this file",
+            "● Write temp.md",
+        ),
+    ];
+
+    for (activity_id, title, kind, detail, header) in cases {
+        let item = ToolResultItem::from_runtime_tool_activity(
+            RuntimeToolActivity {
+                activity_id: activity_id.to_string(),
+                title: title.to_string(),
+                kind,
+                status: RuntimeToolActivityStatus::Failed,
+                content: vec![RuntimeToolActivityContent::Text(detail.to_string())],
+                locations: Vec::new(),
+                raw_input: Some(r#"{"path":"temp.md","content":"body"}"#.into()),
+                raw_output: None,
+            },
+            ToolActivityRenderMode::Compact,
+        );
+
+        let lines = item.render_lines(80, palette);
+        let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_plain,
+            vec![header.to_string(), format!("  └ {detail}")]
+        );
+        assert_eq!(lines[1].spans[0].style.fg, Some(palette.tertiary));
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .skip(1)
+                .all(|span| span.style.fg == Some(palette.secondary)),
+            "failed file mutation rejection detail should use the same weak color as command rejection output: {:?}",
+            lines[1].spans
+        );
+    }
+}
+
+#[test]
+fn failed_file_mutation_tool_call_uses_secondary_detail_text_for_runtime_error() {
+    let palette = default_palette();
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-write".to_string(),
+            title: "Write temp.md".to_string(),
+            kind: RuntimeToolKind::Write,
+            status: RuntimeToolActivityStatus::Failed,
+            content: vec![RuntimeToolActivityContent::Text(
+                "Failed: File must be read before writing".to_string(),
+            )],
+            locations: Vec::new(),
+            raw_input: Some(r#"{"path":"temp.md","content":"body"}"#.into()),
+            raw_output: None,
+        },
+        ToolActivityRenderMode::Compact,
+    );
+
+    let lines = item.render_lines(80, palette);
+    let rendered_plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec![
+            "● Write temp.md".to_string(),
+            "  └ Failed: File must be read before writing".to_string(),
+        ]
+    );
+    assert_eq!(lines[1].spans[0].style.fg, Some(palette.tertiary));
+    assert!(
+        lines[1]
+            .spans
+            .iter()
+            .skip(1)
+            .all(|span| span.style.fg == Some(palette.secondary)),
+        "failed file mutation runtime error should use weak detail text: {:?}",
+        lines[1].spans
+    );
+}
+
+#[test]
 fn completed_non_execute_tool_call_still_renders_text_content() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
@@ -1655,6 +1751,58 @@ fn runtime_writefile_in_progress_suppresses_raw_input_and_uses_compact_title() {
 }
 
 #[test]
+fn runtime_edit_tool_activity_header_avoids_duplicate_path_display() {
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "Edit test/temp.md".to_string(),
+            kind: RuntimeToolKind::Edit,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Diff {
+                path: "test/temp.md".to_string(),
+                old_text: Some("old\n".to_string()),
+                new_text: "new\n".to_string(),
+                is_truncated: false,
+            }],
+            locations: vec![RuntimeToolActivityLocation {
+                path: "test/temp.md".to_string(),
+                line: None,
+            }],
+            raw_input: Some(
+                serde_json::json!({
+                    "path": "test/temp.md",
+                    "old_string": "old\n",
+                    "new_string": "new\n"
+                })
+                .into(),
+            ),
+            raw_output: None,
+        },
+        ToolActivityRenderMode::Compact,
+    );
+
+    let rendered_plain = item
+        .render_lines(120, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered_plain[0], "● Edited test/temp.md (+1 -1)");
+    assert_eq!(
+        rendered_plain
+            .iter()
+            .filter(|line| line.contains("test/temp.md"))
+            .count(),
+        1,
+        "edit headers should show the file path only once: {rendered_plain:?}"
+    );
+    assert!(
+        rendered_plain.iter().all(|line| !line.contains("Input")),
+        "edit headers should not append raw input details when diff content is present: {rendered_plain:?}"
+    );
+}
+
+#[test]
 fn active_runtime_write_marker_blinks_by_disappearing_with_main_text_color() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
@@ -1705,6 +1853,7 @@ fn runtime_tool_activity_diff_context_lines_keep_default_style() {
                 path: "src/lib.rs".to_string(),
                 old_text: Some("one\nold\ntail\n".to_string()),
                 new_text: "one\nnew\ntail\n".to_string(),
+                is_truncated: false,
             }],
             locations: Vec::new(),
             raw_input: None,
@@ -1760,6 +1909,7 @@ fn runtime_tool_activity_added_diff_uses_codex_like_header_and_line_numbers() {
                 path: absolute_path,
                 old_text: None,
                 new_text,
+                is_truncated: false,
             }],
             locations: Vec::new(),
             raw_input: None,
@@ -1804,6 +1954,96 @@ fn runtime_tool_activity_added_diff_uses_codex_like_header_and_line_numbers() {
 }
 
 #[test]
+fn runtime_tool_activity_truncated_diff_shows_partial_preview_notice() {
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "Write temp.md".to_string(),
+            kind: RuntimeToolKind::Write,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Diff {
+                path: "temp.md".to_string(),
+                old_text: Some("old\n".to_string()),
+                new_text: "new\n".to_string(),
+                is_truncated: true,
+            }],
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: None,
+        },
+        ToolActivityRenderMode::Detailed,
+    );
+
+    let rendered_plain = item
+        .render_lines(120, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert!(
+        rendered_plain
+            .iter()
+            .any(|line| line.contains("preview truncated")),
+        "truncated diffs should clearly say the preview is partial: {rendered_plain:?}"
+    );
+}
+
+#[test]
+fn runtime_tool_activity_write_kind_uses_diff_rendering() {
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "Write temp.md".to_string(),
+            kind: RuntimeToolKind::Write,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Diff {
+                path: "temp.md".to_string(),
+                old_text: Some("old\n".to_string()),
+                new_text: "new\n".to_string(),
+                is_truncated: false,
+            }],
+            locations: vec![RuntimeToolActivityLocation {
+                path: "temp.md".to_string(),
+                line: None,
+            }],
+            raw_input: Some(
+                serde_json::json!({
+                    "path": "temp.md",
+                    "content": "new\n"
+                })
+                .into(),
+            ),
+            raw_output: Some(
+                runtime_domain::session::RuntimeToolActivityRawValue::tool_result_with_display_content(
+                    "The file temp.md has been updated successfully.",
+                    Some("The file temp.md has been updated successfully."),
+                    Some(serde_json::json!({
+                        "path": "temp.md",
+                        "old_text": "old\n",
+                        "new_text": "new\n"
+                    })),
+                ),
+            ),
+        },
+        ToolActivityRenderMode::Compact,
+    );
+
+    let rendered_plain = item
+        .render_lines(120, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered_plain[0], "● Edited temp.md (+1 -1)");
+    assert!(
+        rendered_plain
+            .iter()
+            .all(|line| !line.contains("The file temp.md has been updated successfully")),
+        "write diff rendering should prefer the diff view over the raw success payload: {rendered_plain:?}"
+    );
+}
+
+#[test]
 fn runtime_tool_activity_detailed_diff_keeps_all_rows() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
@@ -1818,6 +2058,7 @@ fn runtime_tool_activity_detailed_diff_keeps_all_rows() {
                     .map(|line| format!("line {line}"))
                     .collect::<Vec<_>>()
                     .join("\n"),
+                is_truncated: false,
             }],
             locations: Vec::new(),
             raw_input: None,
@@ -1857,6 +2098,7 @@ fn runtime_tool_activity_updated_diff_renders_delete_and_insert_line_numbers() {
                 path: "src/lib.rs".to_string(),
                 old_text: Some("one\nold\ntail\n".to_string()),
                 new_text: "one\nnew\ntail\n".to_string(),
+                is_truncated: false,
             }],
             locations: Vec::new(),
             raw_input: None,
@@ -1892,6 +2134,72 @@ fn runtime_tool_activity_updated_diff_renders_delete_and_insert_line_numbers() {
 }
 
 #[test]
+fn runtime_tool_activity_diff_suppresses_raw_input_and_output_details() {
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "Edit test/temp.md".to_string(),
+            kind: RuntimeToolKind::Edit,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Diff {
+                path: "test/temp.md".to_string(),
+                old_text: Some("old\n".to_string()),
+                new_text: "new\n".to_string(),
+                is_truncated: false,
+            }],
+            locations: vec![RuntimeToolActivityLocation {
+                path: "test/temp.md".to_string(),
+                line: None,
+            }],
+            raw_input: Some(serde_json::json!({
+                "path": "test/temp.md",
+                "old_string": "old\n",
+                "new_string": "new\n"
+            })
+            .into()),
+            raw_output: Some(
+                runtime_domain::session::RuntimeToolActivityRawValue::tool_result_with_display_content(
+                    "Successfully replaced 1 block(s) in test/temp.md.",
+                    Some("Successfully replaced 1 block(s) in test/temp.md."),
+                    Some(serde_json::json!({
+                        "path": "test/temp.md",
+                        "old_text": "old\n",
+                        "new_text": "new\n",
+                        "replacements": 1
+                    })),
+                ),
+            ),
+        },
+        ToolActivityRenderMode::Compact,
+    );
+    let rendered_plain = item
+        .render_lines(120, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered_plain[0], "● Edited test/temp.md (+1 -1)");
+    assert!(
+        rendered_plain.iter().all(|line| !line.contains("Input")),
+        "diff rendering should not append raw input details: {rendered_plain:?}"
+    );
+    assert!(
+        rendered_plain
+            .iter()
+            .all(|line| !line.contains("Successfully replaced 1 block(s)")),
+        "diff rendering should not repeat the tool success payload next to the patch view: {rendered_plain:?}"
+    );
+    assert_eq!(
+        rendered_plain
+            .iter()
+            .filter(|line| line.contains("test/temp.md"))
+            .count(),
+        1,
+        "filename should appear once in the diff header: {rendered_plain:?}"
+    );
+}
+
+#[test]
 fn runtime_tool_activity_diff_right_aligns_three_digit_line_numbers_in_fixed_gutter() {
     let item = ToolResultItem::from_runtime_tool_activity(
         RuntimeToolActivity {
@@ -1906,6 +2214,7 @@ fn runtime_tool_activity_diff_right_aligns_three_digit_line_numbers_in_fixed_gut
                     .map(|line| format!("line {line}"))
                     .collect::<Vec<_>>()
                     .join("\n"),
+                is_truncated: false,
             }],
             locations: Vec::new(),
             raw_input: None,

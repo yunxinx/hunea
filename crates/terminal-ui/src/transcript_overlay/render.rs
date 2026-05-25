@@ -19,7 +19,11 @@ const MESSAGE_REVISIT_FOOTER_HINT: &str =
 
 /// 右对齐百分比的分隔线。
 /// 格式：左侧为连续的 ─，百分比靠右，百分比右侧固定两个 ─。
-fn build_percentage_rule(width: u16, percentage: usize, palette: TerminalPalette) -> Line<'static> {
+pub(crate) fn build_percentage_rule(
+    width: u16,
+    percentage: usize,
+    palette: TerminalPalette,
+) -> Line<'static> {
     let width = width as usize;
     let label = format!(" {percentage}% ");
     let label_len = label.chars().count();

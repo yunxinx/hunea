@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
 
 use tokio_util::sync::CancellationToken;
 
@@ -18,13 +18,42 @@ pub enum ToolPermissionPolicy {
 pub struct ToolPermissionRequest {
     pub call: ToolCall,
     pub definition: ToolDefinition,
+    pub preview: Option<ToolPermissionPreview>,
 }
 
 impl ToolPermissionRequest {
     /// `new` 创建一次工具权限确认请求。
     pub fn new(call: ToolCall, definition: ToolDefinition) -> Self {
-        Self { call, definition }
+        Self {
+            call,
+            definition,
+            preview: None,
+        }
     }
+
+    /// `with_preview` 附加审批前的结构化变更预览。
+    pub fn with_preview(mut self, preview: ToolPermissionPreview) -> Self {
+        self.preview = Some(preview);
+        self
+    }
+}
+
+/// `ToolPermissionPreview` 描述执行前可供用户审查的文件变更。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolPermissionPreview {
+    pub path: String,
+    pub old_text: Option<String>,
+    pub new_text: String,
+    pub is_truncated: bool,
+    pub snapshot: Option<ToolPermissionFileSnapshot>,
+}
+
+/// `ToolPermissionFileSnapshot` 保存审批预览读取到的文件指纹。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolPermissionFileSnapshot {
+    pub content_hash: u64,
+    pub byte_len: u64,
+    pub modified_at: Option<SystemTime>,
 }
 
 /// `ToolPermissionDecision` 表示权限确认结果。

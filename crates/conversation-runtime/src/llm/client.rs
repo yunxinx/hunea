@@ -39,6 +39,7 @@ where
             tool_max_turns,
             permission_handler,
             error_formatter: std::sync::Arc::new(ConversationToolErrorFormatter),
+            clock: Default::default(),
         },
         |progress| on_progress(conversation_progress_from_runtime_progress(progress)),
     )
@@ -87,6 +88,7 @@ where
             tool_max_turns,
             permission_handler,
             error_formatter: std::sync::Arc::new(ConversationToolErrorFormatter),
+            clock: Default::default(),
         },
         |progress| on_progress(conversation_progress_from_runtime_progress(progress)),
     )

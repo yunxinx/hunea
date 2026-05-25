@@ -63,6 +63,12 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
         return;
     }
 
+    // 文件审批预览需要完整审查 diff，超出当前屏幕时进入独立全屏界面。
+    if model.tool_approval_fullscreen_preview_active() {
+        model.render_tool_approval_fullscreen_preview(frame, area);
+        return;
+    }
+
     // Transcript 覆盖层模式：全屏渲染对话历史，隐藏 composer 和各面板
     if model.transcript_overlay_active() {
         model.render_transcript_overlay(frame, area);
@@ -281,6 +287,7 @@ mod tests {
                 path: "src/lib.rs".to_string(),
                 old_text: Some("one\nold\ntail\n".to_string()),
                 new_text: "one\nnew\ntail\n".to_string(),
+                is_truncated: false,
             }],
             locations: Vec::new(),
             raw_input: None,

@@ -106,7 +106,9 @@ impl Model {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
             AppEvent::Paste(text) => {
-                if self.transcript_overlay_active() {
+                if self.transcript_overlay_active()
+                    || self.tool_approval_fullscreen_preview_active()
+                {
                     self.cancel_exit_confirmation();
                     None
                 } else {
@@ -119,6 +121,10 @@ impl Model {
             }
             AppEvent::MouseWheel { delta_lines } => {
                 self.cancel_exit_confirmation();
+                if self.tool_approval_fullscreen_preview_active() {
+                    self.scroll_tool_approval_fullscreen_preview_by(delta_lines);
+                    return None;
+                }
                 if self.transcript_overlay_active() {
                     return None;
                 }
@@ -146,7 +152,9 @@ impl Model {
                 column,
                 row,
             } => {
-                if self.transcript_overlay_active() {
+                if self.transcript_overlay_active()
+                    || self.tool_approval_fullscreen_preview_active()
+                {
                     return None;
                 }
                 self.handle_mouse_down(button, column, row)
@@ -156,7 +164,9 @@ impl Model {
                 column,
                 row,
             } => {
-                if self.transcript_overlay_active() {
+                if self.transcript_overlay_active()
+                    || self.tool_approval_fullscreen_preview_active()
+                {
                     return None;
                 }
                 self.handle_mouse_up(button, column, row)
@@ -166,7 +176,9 @@ impl Model {
                 column,
                 row,
             } => {
-                if self.transcript_overlay_active() {
+                if self.transcript_overlay_active()
+                    || self.tool_approval_fullscreen_preview_active()
+                {
                     return None;
                 }
                 self.handle_mouse_drag(button, column, row)

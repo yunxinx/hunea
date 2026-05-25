@@ -22,12 +22,13 @@ pub(crate) struct AppRuntimeOptions {
 }
 
 /// `AppRuntimeCoordinator` 负责把 TUI runtime command 连接到对话运行时。
-#[derive(Default)]
 pub(crate) struct AppRuntimeCoordinator {
     options: AppRuntimeOptions,
     conversation_worker: ConversationWorker,
     provider_conversation: ProviderConversation,
     model_refresh: ModelRefreshWorker,
+    workspace_tools: ToolExecutorRegistry,
+    pending_runtime_events: Vec<RuntimeEvent>,
 }
 
 impl AppRuntimeCoordinator {
@@ -37,6 +38,8 @@ impl AppRuntimeCoordinator {
             conversation_worker: ConversationWorker::default(),
             provider_conversation: ProviderConversation::default(),
             model_refresh: ModelRefreshWorker::default(),
+            workspace_tools: conversation_workspace_tools(),
+            pending_runtime_events: Vec::new(),
         }
     }
 
@@ -75,6 +78,8 @@ impl AppRuntimeCoordinator {
                 self.conversation_worker.reset_after_clear();
                 self.provider_conversation.clear();
                 self.model_refresh.reset_after_clear();
+                self.workspace_tools = conversation_workspace_tools();
+                self.pending_runtime_events.clear();
                 Ok(RuntimeCommandReceipt::Accepted)
             }
         }
@@ -129,10 +134,9 @@ impl AppRuntimeCoordinator {
             .provider_conversation
             .prepare_turn(&request)
             .map_err(|error| error.to_string())?;
-        let tools = conversation_workspace_tools();
         self.conversation_worker.start(
             prepared_request,
-            tools,
+            self.workspace_tools.clone(),
             self.options.runtime_request_policy.clone(),
         );
         Ok(RuntimeCommandReceipt::ConversationStarted { activity_label })
@@ -173,6 +177,10 @@ impl AppRuntimeCoordinator {
 
 impl RuntimeCoordinator for AppRuntimeCoordinator {
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
+        if !self.pending_runtime_events.is_empty() {
+            return std::mem::take(&mut self.pending_runtime_events);
+        }
+
         let mut events = Vec::new();
         loop {
             let target = self.conversation_worker.current_target().cloned();
@@ -184,7 +192,12 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
             if event.is_terminal() {
                 self.provider_conversation.rollback_pending_user();
             }
-            events.push(runtime_event_from_conversation_event(target, event));
+            let runtime_event = runtime_event_from_conversation_event(target, event);
+            if should_defer_runtime_event_for_render_barrier(&events, &runtime_event) {
+                self.pending_runtime_events.push(runtime_event);
+                break;
+            }
+            events.push(runtime_event);
         }
         events
     }
@@ -306,6 +319,21 @@ fn runtime_event_from_conversation_event(
     }
 }
 
+fn should_defer_runtime_event_for_render_barrier(
+    current_batch: &[RuntimeEvent],
+    next_event: &RuntimeEvent,
+) -> bool {
+    matches!(next_event, RuntimeEvent::PermissionRequested { .. })
+        && current_batch.iter().any(is_runtime_token_estimate)
+}
+
+fn is_runtime_token_estimate(event: &RuntimeEvent) -> bool {
+    matches!(
+        event,
+        RuntimeEvent::OutputTokenEstimate { .. } | RuntimeEvent::InputTokenEstimate { .. }
+    )
+}
+
 fn ensure_conversation_target(
     active_target: Option<&RuntimeTarget>,
     command_target: Option<&RuntimeTarget>,
@@ -330,11 +358,15 @@ fn ensure_conversation_target(
 mod tests {
     use std::{thread, time::Duration};
 
-    use super::{AppRuntimeCoordinator, AppRuntimeOptions, ensure_conversation_target};
+    use super::{
+        AppRuntimeCoordinator, AppRuntimeOptions, ensure_conversation_target,
+        should_defer_runtime_event_for_render_barrier,
+    };
     use runtime_domain::{
         provider::ProviderKind,
         session::{
-            ChatMessage, ConversationTurnRequest, RuntimeCommand, RuntimeEvent, RuntimeTarget,
+            ChatMessage, ConversationTurnRequest, RuntimeCommand, RuntimeEvent,
+            RuntimePermissionRequest, RuntimeTarget,
         },
     };
     use terminal_ui::RuntimeCoordinator;
@@ -354,6 +386,39 @@ mod tests {
         let stopped_error = ensure_conversation_target(None, Some(&active_target))
             .expect_err("explicit conversation target should require a running worker");
         assert!(stopped_error.contains("Conversation is not running"));
+    }
+
+    #[test]
+    fn token_estimate_creates_render_barrier_before_permission_request() {
+        let output_batch = vec![RuntimeEvent::OutputTokenEstimate {
+            target: Some(RuntimeTarget::provider("local", "qwen3")),
+            total_tokens: 57,
+        }];
+        let input_batch = vec![RuntimeEvent::InputTokenEstimate {
+            target: Some(RuntimeTarget::provider("local", "qwen3")),
+            total_tokens: 12,
+        }];
+        let permission_event = RuntimeEvent::PermissionRequested {
+            target: RuntimeTarget::provider("local", "qwen3"),
+            request: RuntimePermissionRequest::new(
+                "permission-1",
+                Some("Write temp.md".into()),
+                vec![],
+            ),
+        };
+
+        assert!(
+            should_defer_runtime_event_for_render_barrier(&output_batch, &permission_event),
+            "permission should wait for the output token estimate batch to render first"
+        );
+        assert!(
+            should_defer_runtime_event_for_render_barrier(&input_batch, &permission_event),
+            "permission should wait for the input token estimate batch to render first"
+        );
+        assert!(
+            !should_defer_runtime_event_for_render_barrier(&[], &permission_event),
+            "permission should not be deferred when there is no token estimate to render"
+        );
     }
 
     #[test]

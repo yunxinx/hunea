@@ -17,6 +17,7 @@ mod exit_confirmation;
 mod external_editor;
 mod file_picker;
 mod file_search;
+mod final_body_divider;
 mod floating;
 mod history_scroll_indicator;
 mod inline_panel;

@@ -5,6 +5,8 @@ mod scroll;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use render::build_percentage_rule;
+
 use crate::{Model, tool_result::ToolActivityRenderMode};
 
 /// `TranscriptOverlayState` 保存 transcript 覆盖层的滚动与展示状态。
@@ -42,7 +44,7 @@ impl Model {
 
     /// 覆盖层激活时禁用鼠标捕获，以恢复终端模拟器原生选区能力。
     pub(crate) fn wants_mouse_capture(&self) -> bool {
-        !self.transcript_overlay_active()
+        !self.transcript_overlay_active() && !self.tool_approval_fullscreen_preview_active()
     }
 
     pub(crate) fn open_transcript_overlay(&mut self) {

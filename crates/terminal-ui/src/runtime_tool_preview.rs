@@ -10,7 +10,9 @@ use runtime_domain::session::{
 pub(crate) struct ToolApprovalPreview {
     action: ToolApprovalPreviewAction,
     path: String,
-    content: String,
+    old_text: Option<String>,
+    new_text: String,
+    is_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +26,9 @@ impl ToolApprovalPreview {
         Self {
             action: ToolApprovalPreviewAction::CreateFile,
             path: path.into(),
-            content: content.into(),
+            old_text: None,
+            new_text: content.into(),
+            is_truncated: false,
         }
     }
 
@@ -55,7 +59,15 @@ impl ToolApprovalPreview {
     }
 
     pub(crate) fn content(&self) -> &str {
-        &self.content
+        &self.new_text
+    }
+
+    pub(crate) fn old_text(&self) -> Option<&str> {
+        self.old_text.as_deref()
+    }
+
+    pub(crate) const fn is_truncated(&self) -> bool {
+        self.is_truncated
     }
 
     fn file_write(path: String, content: String) -> Self {
@@ -67,7 +79,9 @@ impl ToolApprovalPreview {
         Self {
             action,
             path: runtime_display_path(&path),
-            content,
+            old_text: None,
+            new_text: content,
+            is_truncated: false,
         }
     }
 }
@@ -86,12 +100,8 @@ pub(crate) fn runtime_display_path(path: &str) -> String {
 }
 
 pub(crate) fn is_runtime_write_tool_activity(call: &RuntimeToolActivity) -> bool {
-    runtime_write_tool_activity_title_target(&call.title).is_some()
-        || call.kind == RuntimeToolKind::Write
-        || (call.kind == RuntimeToolKind::Edit
-            && call.raw_input.as_ref().is_some_and(|raw_input| {
-                raw_input_path(raw_input).is_some() && raw_input_content(raw_input).is_some()
-            }))
+    matches!(call.kind, RuntimeToolKind::Write | RuntimeToolKind::Edit)
+        || runtime_write_tool_activity_title_target(&call.title).is_some()
 }
 
 pub(crate) fn should_collapse_runtime_write_tool_activity(call: &RuntimeToolActivity) -> bool {
@@ -120,14 +130,21 @@ fn runtime_write_tool_activity_update_target(update: &RuntimeToolActivityUpdate)
 
 fn runtime_write_tool_activity_title_target(title: &str) -> Option<String> {
     let title = title.trim();
-    ["WriteFile:", "Write File:", "Write:", "Write "]
-        .iter()
-        .find_map(|prefix| {
-            title.strip_prefix(prefix).and_then(|target| {
-                let target = target.trim();
-                (!target.is_empty()).then(|| target.to_string())
-            })
+    [
+        "WriteFile:",
+        "Write File:",
+        "Write:",
+        "Write ",
+        "Edit:",
+        "Edit ",
+    ]
+    .iter()
+    .find_map(|prefix| {
+        title.strip_prefix(prefix).and_then(|target| {
+            let target = target.trim();
+            (!target.is_empty()).then(|| target.to_string())
         })
+    })
 }
 
 fn file_preview_from_runtime_content(
@@ -138,6 +155,7 @@ fn file_preview_from_runtime_content(
             path,
             old_text,
             new_text,
+            is_truncated,
         } = content
         else {
             return None;
@@ -148,16 +166,17 @@ fn file_preview_from_runtime_content(
             ToolApprovalPreviewAction::EditFile
         };
         if action == ToolApprovalPreviewAction::CreateFile {
-            return Some(ToolApprovalPreview::create_file(
-                runtime_display_path(path),
-                new_text.clone(),
-            ));
+            let mut preview =
+                ToolApprovalPreview::create_file(runtime_display_path(path), new_text.clone());
+            preview.is_truncated = *is_truncated;
+            return Some(preview);
         }
-
         Some(ToolApprovalPreview {
             action,
             path: runtime_display_path(path),
-            content: new_text.clone(),
+            old_text: old_text.clone(),
+            new_text: new_text.clone(),
+            is_truncated: *is_truncated,
         })
     })
 }

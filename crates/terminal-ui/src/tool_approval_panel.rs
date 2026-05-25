@@ -17,7 +17,10 @@ use super::{
     tool_result::ToolResultKind,
     transcript::markdown_highlight::{highlight_code_chunks, wrap_highlight_chunks},
 };
-use file_preview::build_file_preview_panel_lines;
+use file_preview::{
+    FilePreviewRenderCache, build_file_preview_panel_lines, file_preview_fullscreen_content_height,
+    file_preview_fullscreen_max_offset,
+};
 use runtime_domain::session::RuntimeTarget;
 
 /// `ToolApprovalPanelState` 保存通用工具审批面板的展示与导航状态。
@@ -29,6 +32,9 @@ pub(super) struct ToolApprovalPanelState {
     pub(super) title: String,
     pub(super) details: Vec<ToolApprovalDetail>,
     pub(super) preview: Option<ToolApprovalPreview>,
+    pub(super) preview_is_fullscreen: bool,
+    pub(super) preview_scroll_offset: usize,
+    pub(super) preview_render_cache: Option<FilePreviewRenderCache>,
 }
 
 /// `ToolApprovalSource` 描述工具审批确认后需要回到哪个运行时来源。
@@ -71,20 +77,17 @@ impl ToolApprovalChoice {
             Self::DenyInSession => "No, reject similar requests during this session",
         }
     }
-
-    fn file_preview_display_label(self) -> &'static str {
-        match self {
-            Self::Allow => "Yes",
-            Self::AllowInSession => "Yes, allow all edits during this session",
-            Self::Deny => "No",
-            Self::DenyInSession => "No, reject all edits during this session",
-        }
-    }
 }
 
 impl Model {
     pub(crate) fn tool_approval_panel_active(&self) -> bool {
         self.tool_approval_panel.is_open
+    }
+
+    pub(crate) fn tool_approval_fullscreen_preview_active(&self) -> bool {
+        self.tool_approval_panel.is_open
+            && self.tool_approval_panel.preview.is_some()
+            && self.tool_approval_panel.preview_is_fullscreen
     }
 
     pub(super) fn open_tool_approval_panel(
@@ -113,7 +116,11 @@ impl Model {
             title,
             details,
             preview,
+            preview_is_fullscreen: false,
+            preview_scroll_offset: 0,
+            preview_render_cache: None,
         };
+        self.sync_tool_approval_preview_mode();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();
@@ -149,6 +156,13 @@ impl Model {
     ) -> Option<Option<AppEffect>> {
         if !self.tool_approval_panel_active() {
             return None;
+        }
+
+        if self.tool_approval_fullscreen_preview_active() {
+            return Some(self.handle_tool_approval_fullscreen_preview_key(key));
+        }
+        if self.tool_approval_panel.preview.is_some() {
+            return Some(self.handle_tool_approval_inline_file_preview_key(key));
         }
 
         match key.code {
@@ -218,10 +232,172 @@ impl Model {
         if !self.tool_approval_panel_active() {
             return ToolApprovalPanelRenderResult::default();
         }
+        if self.tool_approval_fullscreen_preview_active() {
+            return ToolApprovalPanelRenderResult::default();
+        }
 
         let width = usize::from(self.width.max(1));
         let lines = build_panel_lines(self, width);
         inline_panel_render_result(lines)
+    }
+
+    pub(crate) fn sync_tool_approval_preview_mode(&mut self) {
+        if !self.tool_approval_panel.is_open || self.tool_approval_panel.preview.is_none() {
+            self.tool_approval_panel.preview_is_fullscreen = false;
+            self.tool_approval_panel.preview_scroll_offset = 0;
+            self.tool_approval_panel.preview_render_cache = None;
+            return;
+        }
+        if !self.has_window {
+            self.tool_approval_panel.preview_is_fullscreen = false;
+            self.tool_approval_panel.preview_scroll_offset = 0;
+            return;
+        }
+
+        let width = usize::from(self.width.max(1));
+        let height = usize::from(self.height.max(1));
+        let panel_line_count = build_file_preview_panel_lines(self, width).len();
+        self.tool_approval_panel.preview_is_fullscreen = panel_line_count > height;
+        self.clamp_tool_approval_fullscreen_preview_scroll();
+    }
+
+    pub(crate) fn scroll_tool_approval_fullscreen_preview_by(&mut self, delta_lines: isize) {
+        if !self.tool_approval_fullscreen_preview_active() {
+            return;
+        }
+
+        let max_offset = file_preview_fullscreen_max_offset(self);
+        let current = self
+            .tool_approval_panel
+            .preview_scroll_offset
+            .min(max_offset);
+        let next = if delta_lines.is_negative() {
+            current.saturating_sub(delta_lines.unsigned_abs())
+        } else {
+            current.saturating_add(delta_lines as usize).min(max_offset)
+        };
+        self.tool_approval_panel.preview_scroll_offset = next;
+    }
+
+    fn handle_tool_approval_fullscreen_preview_key(&mut self, key: KeyEvent) -> Option<AppEffect> {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                self.scroll_tool_approval_fullscreen_preview_by(-1);
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                self.scroll_tool_approval_fullscreen_preview_by(1);
+                None
+            }
+            KeyCode::PageUp => {
+                let page = file_preview_fullscreen_content_height(self)
+                    .saturating_sub(1)
+                    .max(1);
+                self.scroll_tool_approval_fullscreen_preview_by(-(page as isize));
+                None
+            }
+            KeyCode::PageDown => {
+                let page = file_preview_fullscreen_content_height(self)
+                    .saturating_sub(1)
+                    .max(1);
+                self.scroll_tool_approval_fullscreen_preview_by(page as isize);
+                None
+            }
+            KeyCode::Char('u') if key.modifiers == crossterm::event::KeyModifiers::CONTROL => {
+                let half_page = file_preview_fullscreen_content_height(self) / 2;
+                self.scroll_tool_approval_fullscreen_preview_by(-(half_page.max(1) as isize));
+                None
+            }
+            KeyCode::Char('d') if key.modifiers == crossterm::event::KeyModifiers::CONTROL => {
+                let half_page = file_preview_fullscreen_content_height(self) / 2;
+                self.scroll_tool_approval_fullscreen_preview_by(half_page.max(1) as isize);
+                None
+            }
+            KeyCode::Home => {
+                self.tool_approval_panel.preview_scroll_offset = 0;
+                None
+            }
+            KeyCode::End => {
+                self.tool_approval_panel.preview_scroll_offset =
+                    file_preview_fullscreen_max_offset(self);
+                None
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => self.resolve_tool_approval_choice(
+                preferred_tool_approval_choice(
+                    &self.tool_approval_panel,
+                    &[
+                        ToolApprovalChoice::Allow,
+                        ToolApprovalChoice::AllowInSession,
+                    ],
+                )
+                .unwrap_or(ToolApprovalChoice::Deny),
+            ),
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.resolve_tool_approval_choice(
+                preferred_tool_approval_choice(
+                    &self.tool_approval_panel,
+                    &[
+                        ToolApprovalChoice::Allow,
+                        ToolApprovalChoice::AllowInSession,
+                    ],
+                )
+                .unwrap_or(ToolApprovalChoice::Allow),
+            ),
+            KeyCode::Char('n') | KeyCode::Char('N') => self.resolve_tool_approval_choice(
+                preferred_tool_approval_choice(
+                    &self.tool_approval_panel,
+                    &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
+                )
+                .unwrap_or(ToolApprovalChoice::Deny),
+            ),
+            KeyCode::Esc if key.modifiers.is_empty() => self.cancel_tool_approval_panel(),
+            _ => None,
+        }
+    }
+
+    fn handle_tool_approval_inline_file_preview_key(&mut self, key: KeyEvent) -> Option<AppEffect> {
+        match key.code {
+            KeyCode::Enter if key.modifiers.is_empty() => self.resolve_tool_approval_choice(
+                preferred_tool_approval_choice(
+                    &self.tool_approval_panel,
+                    &[
+                        ToolApprovalChoice::Allow,
+                        ToolApprovalChoice::AllowInSession,
+                    ],
+                )
+                .unwrap_or(ToolApprovalChoice::Deny),
+            ),
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.resolve_tool_approval_choice(
+                preferred_tool_approval_choice(
+                    &self.tool_approval_panel,
+                    &[
+                        ToolApprovalChoice::Allow,
+                        ToolApprovalChoice::AllowInSession,
+                    ],
+                )
+                .unwrap_or(ToolApprovalChoice::Allow),
+            ),
+            KeyCode::Char('n') | KeyCode::Char('N') => self.resolve_tool_approval_choice(
+                preferred_tool_approval_choice(
+                    &self.tool_approval_panel,
+                    &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
+                )
+                .unwrap_or(ToolApprovalChoice::Deny),
+            ),
+            KeyCode::Esc if key.modifiers.is_empty() => self.cancel_tool_approval_panel(),
+            _ => None,
+        }
+    }
+
+    fn clamp_tool_approval_fullscreen_preview_scroll(&mut self) {
+        if !self.tool_approval_panel.preview_is_fullscreen {
+            self.tool_approval_panel.preview_scroll_offset = 0;
+            return;
+        }
+        let max_offset = file_preview_fullscreen_max_offset(self);
+        self.tool_approval_panel.preview_scroll_offset = self
+            .tool_approval_panel
+            .preview_scroll_offset
+            .min(max_offset);
     }
 
     fn resolve_tool_approval_choice(&mut self, choice: ToolApprovalChoice) -> Option<AppEffect> {

@@ -1,8 +1,6 @@
 use super::*;
-use crate::{
-    Sender, StartupBannerOptions,
-    theme::{default_palette, primary_text_style, secondary_text_style},
-};
+use crate::{AppEvent, Sender, StartupBannerOptions, theme::default_palette};
+use ratatui::{Terminal, backend::TestBackend};
 
 #[test]
 fn preview_layout_omits_labels_and_uses_vertical_numbered_choices() {
@@ -68,7 +66,7 @@ fn preview_layout_omits_labels_and_uses_vertical_numbered_choices() {
     );
     assert!(
         lines.iter().any(|line| line == "  ➜ 1. Yes"),
-        "selected choice should match the file-preview marker and numbering style: {lines:?}"
+        "selected choice should use the shared marker and numbering style: {lines:?}"
     );
     assert!(
         lines
@@ -226,7 +224,7 @@ fn runtime_session_allow_option_only_renders_when_available() {
 }
 
 #[test]
-fn choices_render_vertically_like_file_preview_panel() {
+fn choices_render_vertically_for_command_approval() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.palette = default_palette();
     open_preview_panel(&mut model);
@@ -366,7 +364,7 @@ fn esc_cancels_runtime_permission_without_rejecting() {
 }
 
 #[test]
-fn file_preview_panel_renders_numbered_content_without_transport_json() {
+fn file_preview_panel_renders_added_diff_without_transport_json() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.palette = default_palette();
     model.open_tool_approval_panel_with_preview(
@@ -399,31 +397,425 @@ fn file_preview_panel_renders_numbered_content_without_transport_json() {
 
     assert!(
         !text.contains("Create file") && !text.contains("Edit file"),
-        "file preview should keep the header to the file path only: {lines:?}"
+        "file preview should keep the header to the diff summary only: {lines:?}"
     );
     assert!(
         text.contains("TEMP.md"),
         "preview path should render: {lines:?}"
     );
     assert!(
-        lines.iter().any(|line| line == "      1  # 临时文档")
-            && lines.iter().any(|line| line == "      2  ")
-            && lines.iter().any(|line| line == "      3  body")
-            && lines.iter().any(|line| line == "      4    indented"),
-        "file preview should render numbered file content: {lines:?}"
+        lines.iter().all(|line| line.trim() != "TEMP.md"),
+        "file preview should not render a standalone path row before the diff summary: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .position(|line| line.contains("Added TEMP.md (+4 -0)"))
+            < lines
+                .iter()
+                .position(|line| line == "      1 +  # 临时文档"),
+        "diff summary should act as the inline content header: {lines:?}"
+    );
+    assert!(
+        text.contains("Added TEMP.md (+4 -0)")
+            && lines.iter().any(|line| line == "      1 +  # 临时文档")
+            && lines.iter().any(|line| line == "      2 +  ")
+            && lines.iter().any(|line| line == "      3 +  body")
+            && lines.iter().any(|line| line == "      4 +    indented"),
+        "file preview should render added diff content: {lines:?}"
     );
     assert!(
         !text.contains("\"path\"") && !text.contains("\"content\""),
         "file preview should not expose raw transport JSON: {lines:?}"
     );
     assert!(
-        text.contains("Yes") && text.contains("Yes, allow all edits during this session"),
-        "file preview should use user-facing approval labels: {lines:?}"
+        text.contains("Do you want to create TEMP.md?")
+            && text.contains("y/Enter approve")
+            && text.contains("n reject")
+            && text.contains("Esc cancel"),
+        "file preview should use the single approval command bar: {lines:?}"
+    );
+    assert!(
+        !text.contains("1. Yes")
+            && !text.contains("Yes, allow all edits during this session")
+            && !text.contains("PgUp/PgDn"),
+        "inline file preview should not render vertical choices or fullscreen scroll hints: {lines:?}"
     );
 }
 
 #[test]
-fn file_preview_panel_choices_use_model_panel_selection_style() {
+fn inline_file_preview_expands_diff_without_transcript_hint_when_it_fits() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(72, 80);
+    model.palette = default_palette();
+    let content = (1..=12)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-write".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "WriteFile: temp.md".to_string(),
+        Vec::new(),
+        Some(ToolApprovalPreview::create_file(
+            "temp.md".to_string(),
+            content,
+        )),
+    );
+
+    let panel = model.current_inline_tool_approval_panel_render_result();
+    let text = panel.plain_lines.join("\n");
+
+    assert!(panel.has_content, "fitting diff should stay inline");
+    assert!(
+        text.contains("     12 +  line 12"),
+        "inline preview should show the full fitting diff: {text:?}"
+    );
+    assert!(
+        !text.contains("ctrl + t to view transcript"),
+        "approval preview should not point at transcript overlay: {text:?}"
+    );
+    assert!(
+        text.contains("● Added temp.md (+12 -0)")
+            && text.contains("Do you want to create temp.md?")
+            && text.contains("y/Enter approve")
+            && text.contains("n reject"),
+        "inline preview should share the fullscreen-style header and command bar: {text:?}"
+    );
+    assert!(
+        !text.contains("1. Yes") && !text.contains("PgUp/PgDn"),
+        "inline preview should not expose the old choice picker or fullscreen scroll controls: {text:?}"
+    );
+}
+
+#[test]
+fn overflowing_file_preview_uses_fullscreen_instead_of_inline_panel() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(72, 12);
+    model.palette = default_palette();
+    let content = (1..=30)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-write".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: Some("allow-always".to_string()),
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "WriteFile: temp.md".to_string(),
+        Vec::new(),
+        Some(ToolApprovalPreview::create_file(
+            "temp.md".to_string(),
+            content,
+        )),
+    );
+
+    let panel = model.current_inline_tool_approval_panel_render_result();
+
+    assert!(
+        !panel.has_content,
+        "overflowing file preview should leave document flow for fullscreen review"
+    );
+    assert!(
+        model.tool_approval_panel_active(),
+        "approval state must remain open while fullscreen preview is active"
+    );
+    assert_eq!(
+        model.tool_approval_panel.selected, 0,
+        "fullscreen preview still starts on the default approval choice"
+    );
+
+    model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Down));
+    assert_eq!(
+        model.tool_approval_panel.selected, 0,
+        "Down should scroll fullscreen diff, not move the approval choice"
+    );
+}
+
+#[test]
+fn fullscreen_file_preview_renders_scrollable_diff_with_approval_footer() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(120, 12);
+    model.set_palette(default_palette(), true);
+    let content = (1..=30)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-write".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: Some("allow-always".to_string()),
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "WriteFile: temp.md".to_string(),
+        Vec::new(),
+        Some(ToolApprovalPreview::create_file(
+            "temp.md".to_string(),
+            content,
+        )),
+    );
+
+    let initial = rendered_model_rows(&mut model, 120, 12).join("\n");
+    assert!(
+        initial.contains("● Added temp.md (+30 -0)"),
+        "fixed diff summary should render in the first row: {initial:?}"
+    );
+    assert!(
+        initial.contains("line 1") && !initial.contains("line 30"),
+        "fullscreen preview should start at the top of the diff: {initial:?}"
+    );
+    assert!(
+        initial.contains("Do you want to create temp.md?")
+            && initial.contains("y/Enter approve")
+            && initial.contains("n reject")
+            && initial.contains("PgUp/PgDn"),
+        "fullscreen preview should show a single command-bar footer: {initial:?}"
+    );
+    assert!(
+        initial.contains("0%") && initial.contains("──"),
+        "fullscreen preview should keep the fixed progress divider above the command bar: {initial:?}"
+    );
+    assert!(
+        !initial.contains("1. Yes") && !initial.contains("←→ choice"),
+        "fullscreen preview should not render the vertical choice picker: {initial:?}"
+    );
+
+    model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::End));
+    let bottom = rendered_model_rows(&mut model, 120, 12).join("\n");
+
+    assert!(
+        bottom.contains("● Added temp.md (+30 -0)"),
+        "diff summary should stay fixed while scrolled: {bottom:?}"
+    );
+    assert!(
+        bottom.contains("line 30"),
+        "End should jump to the bottom of the full diff: {bottom:?}"
+    );
+    assert!(
+        bottom.contains("Do you want to create temp.md?"),
+        "approval command bar should remain visible while scrolled: {bottom:?}"
+    );
+    assert!(
+        bottom.contains("100%") && bottom.contains("──"),
+        "fullscreen preview should update the progress divider while scrolled: {bottom:?}"
+    );
+}
+
+#[test]
+fn fullscreen_file_preview_uses_direct_approval_keys_without_choice_navigation() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(48, 12);
+    model.set_palette(default_palette(), true);
+    let content = (1..=30)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-write".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: Some("allow-always".to_string()),
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "WriteFile: temp.md".to_string(),
+        Vec::new(),
+        Some(ToolApprovalPreview::create_file(
+            "temp.md".to_string(),
+            content,
+        )),
+    );
+
+    model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Right));
+    assert_eq!(
+        model.tool_approval_panel.selected, 0,
+        "fullscreen mode should not use left/right choice navigation"
+    );
+
+    let effect = model
+        .handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Enter))
+        .expect("fullscreen key should be handled")
+        .expect("Enter should approve the preview");
+
+    assert_eq!(
+        effect,
+        AppEffect::RespondRuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-write".to_string(),
+            option_id: Some("allow-once".to_string()),
+        }
+    );
+}
+
+#[test]
+fn fullscreen_file_preview_uses_overlay_mouse_policy_and_mouse_wheel_scroll() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(48, 12);
+    model.set_palette(default_palette(), true);
+    let content = (1..=30)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-write".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "WriteFile: temp.md".to_string(),
+        Vec::new(),
+        Some(ToolApprovalPreview::create_file(
+            "temp.md".to_string(),
+            content,
+        )),
+    );
+
+    assert!(
+        !model.wants_mouse_capture(),
+        "fullscreen preview should use overlay mouse policy so wheel maps to pager navigation"
+    );
+    assert_eq!(model.tool_approval_panel.preview_scroll_offset, 0);
+
+    model.update(AppEvent::MouseWheel { delta_lines: 3 });
+
+    assert_eq!(
+        model.tool_approval_panel.preview_scroll_offset, 3,
+        "mouse wheel events should scroll the fullscreen diff if delivered directly"
+    );
+
+    model.close_tool_approval_panel();
+    assert!(
+        model.wants_mouse_capture(),
+        "closing fullscreen approval should restore normal mouse capture"
+    );
+}
+
+#[test]
+fn edit_preview_panel_renders_diff_instead_of_new_file_snapshot() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.palette = default_palette();
+    let update = runtime_domain::session::RuntimeToolActivityUpdate {
+        activity_id: "call-edit".to_string(),
+        title: Some("Edit temp.md".to_string()),
+        kind: Some(runtime_domain::session::RuntimeToolKind::Edit),
+        status: Some(runtime_domain::session::RuntimeToolActivityStatus::Pending),
+        content: Some(vec![
+            runtime_domain::session::RuntimeToolActivityContent::Diff {
+                path: "temp.md".to_string(),
+                old_text: Some("1. 第一项\n2. 第二项\n3. 第三项\n".to_string()),
+                new_text: "1. 第一项\n3. 第三项\n".to_string(),
+                is_truncated: false,
+            },
+        ]),
+        ..runtime_domain::session::RuntimeToolActivityUpdate::default()
+    };
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-edit".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "Edit temp.md".to_string(),
+        Vec::new(),
+        ToolApprovalPreview::from_runtime_tool_activity_update(&update),
+    );
+
+    let lines = build_panel_lines(&model, 72)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let text = lines.join("\n");
+
+    assert!(
+        text.contains("Edited temp.md (+0 -1)"),
+        "edit preview should render the diff summary: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line == "      2 -  2. 第二项"),
+        "edit preview should show deleted content instead of only the final file: {lines:?}"
+    );
+    assert!(
+        !text.contains("      2  3. 第三项"),
+        "edit preview should not render only numbered new file content: {lines:?}"
+    );
+}
+
+#[test]
+fn edit_preview_panel_marks_truncated_diff_as_partial() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.palette = default_palette();
+    let update = runtime_domain::session::RuntimeToolActivityUpdate {
+        activity_id: "call-edit".to_string(),
+        title: Some("Edit temp.md".to_string()),
+        kind: Some(runtime_domain::session::RuntimeToolKind::Edit),
+        status: Some(runtime_domain::session::RuntimeToolActivityStatus::Pending),
+        content: Some(vec![
+            runtime_domain::session::RuntimeToolActivityContent::Diff {
+                path: "temp.md".to_string(),
+                old_text: Some("old\n".to_string()),
+                new_text: "new\n".to_string(),
+                is_truncated: true,
+            },
+        ]),
+        ..runtime_domain::session::RuntimeToolActivityUpdate::default()
+    };
+    model.open_tool_approval_panel_with_preview(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-edit".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "Edit temp.md".to_string(),
+        Vec::new(),
+        ToolApprovalPreview::from_runtime_tool_activity_update(&update),
+    );
+
+    let lines = build_panel_lines(&model, 72)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        lines.iter().any(|line| line.contains("preview truncated")),
+        "truncated approval diffs should clearly say the preview is partial: {lines:?}"
+    );
+}
+
+#[test]
+fn file_preview_panel_uses_single_command_bar_without_choice_picker() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.palette = default_palette();
     model.open_tool_approval_panel_with_preview(
@@ -443,31 +835,24 @@ fn file_preview_panel_choices_use_model_panel_selection_style() {
         )),
     );
 
-    let selected_line = build_panel_lines(&model, 72)
+    let lines = build_panel_lines(&model, 72)
         .into_iter()
-        .find(|line| {
+        .map(|line| {
             line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
+                .into_iter()
+                .map(|span| span.content.into_owned())
                 .collect::<String>()
-                .contains("1. Yes")
         })
-        .expect("selected file preview choice should render");
-    let plain = selected_line
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>();
+        .collect::<Vec<_>>();
+    let text = lines.join("\n");
 
-    assert_eq!(plain, "  ➜ 1. Yes");
-    assert_eq!(selected_line.spans[1].content.as_ref(), "➜ ");
-    assert_eq!(
-        selected_line.spans[1].style,
-        secondary_text_style(model.palette)
+    assert!(
+        text.contains("Do you want to create TEMP.md?  y/Enter approve · n reject · Esc cancel"),
+        "file preview should render one command bar footer: {lines:?}"
     );
-    assert_eq!(
-        selected_line.spans[2].style,
-        primary_text_style(model.palette).bold()
+    assert!(
+        !text.contains("➜ 1. Yes") && !text.contains("2. Yes, allow all edits during this session"),
+        "file preview should not render numbered approval choices: {lines:?}"
     );
 }
 
@@ -500,7 +885,7 @@ fn file_preview_panel_hides_status_notice() {
 }
 
 #[test]
-fn file_preview_panel_selection_moves_linearly_for_vertical_choices() {
+fn inline_file_preview_uses_direct_approval_keys_without_choice_navigation() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.palette = default_palette();
     model.open_tool_approval_panel_with_preview(
@@ -523,16 +908,28 @@ fn file_preview_panel_selection_moves_linearly_for_vertical_choices() {
     assert_eq!(model.tool_approval_panel.selected, 0);
     model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Down));
     assert_eq!(
-        model.tool_approval_panel.selected, 1,
-        "vertical preview choices should move from Yes to session allow with Down"
+        model.tool_approval_panel.selected, 0,
+        "inline file preview should not keep hidden vertical choice navigation"
     );
-    model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Down));
+    model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Right));
     assert_eq!(
-        model.tool_approval_panel.selected, 2,
-        "vertical preview choices should then move to No"
+        model.tool_approval_panel.selected, 0,
+        "inline file preview should ignore left/right choice navigation"
     );
-    model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Up));
-    assert_eq!(model.tool_approval_panel.selected, 1);
+
+    let effect = model
+        .handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Enter))
+        .expect("inline file preview key should be handled")
+        .expect("Enter should approve the preview");
+
+    assert_eq!(
+        effect,
+        AppEffect::RespondRuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-write".to_string(),
+            option_id: Some("allow-once".to_string()),
+        }
+    );
 }
 
 #[test]
@@ -640,4 +1037,22 @@ fn assert_ordered_plain_lines(lines: &[String], needles: &[&str]) {
         }
         last_index = Some(index);
     }
+}
+
+fn rendered_model_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("test backend should initialize");
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render into test backend");
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|row| {
+            let mut line = String::new();
+            for column in 0..buffer.area.width {
+                line.push_str(buffer[(column, row)].symbol());
+            }
+            line
+        })
+        .collect()
 }

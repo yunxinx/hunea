@@ -121,13 +121,23 @@ pub(super) fn runtime_tool_activity_detail_blocks(
     let mut blocks = Vec::new();
 
     for content in &call.content {
+        if call.status == RuntimeToolActivityStatus::Failed
+            && let RuntimeToolActivityContent::Text(text) = content
+        {
+            blocks.push(RuntimeToolActivityDetailBlock::SecondaryText(
+                truncate_detail_block(text_lines(text), render_mode),
+            ));
+            continue;
+        }
         blocks.extend(runtime_tool_activity_content_blocks(
             content,
             render_mode,
             terminal_snapshots,
         ));
     }
-    if call.status != RuntimeToolActivityStatus::Failed {
+    if call.status != RuntimeToolActivityStatus::Failed
+        && !runtime_tool_activity_has_diff_content(call)
+    {
         if let Some(raw_input) = call.raw_input.as_ref().and_then(|raw| raw.display_text()) {
             blocks.push(RuntimeToolActivityDetailBlock::Text(labeled_detail_block(
                 "Input",
@@ -453,9 +463,10 @@ fn runtime_tool_activity_content_blocks(
             path: _,
             old_text,
             new_text,
+            is_truncated,
         } => vec![RuntimeToolActivityDetailBlock::Diff(
             truncate_diff_detail_block(
-                diff_detail_lines(old_text.as_deref(), new_text),
+                diff_detail_lines_with_truncation(old_text.as_deref(), new_text, *is_truncated),
                 render_mode,
             ),
         )],
@@ -656,6 +667,25 @@ fn diff_detail_lines(old_text: Option<&str>, new_text: &str) -> Vec<RuntimeDiffD
     lines
 }
 
+fn diff_detail_lines_with_truncation(
+    old_text: Option<&str>,
+    new_text: &str,
+    is_truncated: bool,
+) -> Vec<RuntimeDiffDetailLine> {
+    let mut lines = diff_detail_lines(old_text, new_text);
+    if is_truncated {
+        lines.insert(
+            0,
+            RuntimeDiffDetailLine {
+                line_number: None,
+                text: "⋮ preview truncated; showing partial diff".to_string(),
+                kind: RuntimeDiffDetailLineKind::Omitted,
+            },
+        );
+    }
+    lines
+}
+
 fn line_count(text: &str) -> usize {
     if text.is_empty() {
         0
@@ -718,6 +748,7 @@ fn runtime_diff_summary(content: &RuntimeToolActivityContent) -> Option<RuntimeD
         path,
         old_text,
         new_text,
+        ..
     } = content
     else {
         return None;
@@ -1209,6 +1240,7 @@ pub(super) fn runtime_tool_activity_content_byte_len(
             path,
             old_text,
             new_text,
+            ..
         } => path.len() + old_text.as_deref().map(str::len).unwrap_or(0) + new_text.len(),
         RuntimeToolActivityContent::Terminal { terminal_id } => terminal_id.len(),
         RuntimeToolActivityContent::Unknown(label) => label.len(),

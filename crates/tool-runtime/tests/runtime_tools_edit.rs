@@ -210,7 +210,39 @@ async fn builtin_edit_accepts_multiple_disjoint_edits_in_one_call() {
         .await;
 
     assert!(!result.is_error, "multi edit should succeed: {result:?}");
-    assert!(result.content.contains("Replaced 2 occurrence(s)"));
+    assert!(result.content.contains("Successfully replaced 2 block(s)"));
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("path"))
+            .and_then(serde_json::Value::as_str),
+        Some("notes.txt")
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("old_text"))
+            .and_then(serde_json::Value::as_str),
+        Some("alpha\nbeta\ngamma\ndelta\n")
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("new_text"))
+            .and_then(serde_json::Value::as_str),
+        Some("ALPHA\nbeta\nGAMMA\ndelta\n")
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("replacements"))
+            .and_then(serde_json::Value::as_u64),
+        Some(2)
+    );
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read edited fixture"),
         "ALPHA\nbeta\nGAMMA\ndelta\n"
@@ -440,7 +472,7 @@ async fn builtin_edit_replace_all_handles_fuzzy_equivalent_matches() {
         !result.is_error,
         "fuzzy replace_all should succeed: {result:?}"
     );
-    assert!(result.content.contains("Replaced 2 occurrence(s)"));
+    assert!(result.content.contains("Successfully replaced 2 block(s)"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read edited fixture"),
         "replaced\nreplaced\n"
@@ -475,7 +507,7 @@ async fn builtin_edit_replace_all_keeps_exact_whitespace_only_matches() {
         !result.is_error,
         "exact whitespace replace_all should succeed: {result:?}"
     );
-    assert!(result.content.contains("Replaced 2 occurrence(s)"));
+    assert!(result.content.contains("Successfully replaced 2 block(s)"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read edited fixture"),
         "left_middle_right\n"

@@ -644,6 +644,29 @@ async fn builtin_write_creates_missing_file_without_prior_read() {
         fs::read_to_string(root.join("nested/notes.txt")).expect("read created file"),
         "one\ntwo\n"
     );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("path"))
+            .and_then(serde_json::Value::as_str),
+        Some("nested/notes.txt")
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("old_text")),
+        None
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("new_text"))
+            .and_then(serde_json::Value::as_str),
+        Some("one\ntwo\n")
+    );
     cleanup(&root);
 }
 
@@ -822,6 +845,22 @@ async fn builtin_write_existing_file_succeeds_after_complete_read() {
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read updated fixture"),
         "new\n"
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("old_text"))
+            .and_then(serde_json::Value::as_str),
+        Some("old\n")
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("new_text"))
+            .and_then(serde_json::Value::as_str),
+        Some("new\n")
     );
     cleanup(&root);
 }

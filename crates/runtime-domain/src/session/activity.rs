@@ -63,6 +63,7 @@ pub enum RuntimeToolActivityContent {
         path: String,
         old_text: Option<String>,
         new_text: String,
+        is_truncated: bool,
     },
     Terminal {
         terminal_id: String,

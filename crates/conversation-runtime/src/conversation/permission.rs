@@ -230,7 +230,10 @@ mod tests {
         time::Duration,
     };
 
-    use tool_runtime::{ToolCall, ToolDefinition, ToolKind, ToolPermissionPolicy};
+    use runtime_domain::session::RuntimeToolActivityContent;
+    use tool_runtime::{
+        ToolCall, ToolDefinition, ToolKind, ToolPermissionPolicy, ToolPermissionPreview,
+    };
 
     use super::*;
 
@@ -249,6 +252,16 @@ mod tests {
                 .with_kind(ToolKind::Write)
                 .with_permission_policy(ToolPermissionPolicy::Ask),
         )
+    }
+
+    fn permission_request_with_preview() -> ToolPermissionRequest {
+        permission_request().with_preview(ToolPermissionPreview {
+            path: "TEMP.md".to_string(),
+            old_text: Some("old\n".to_string()),
+            new_text: "new\n".to_string(),
+            is_truncated: false,
+            snapshot: None,
+        })
     }
 
     async fn recv_event(receiver: &mpsc::Receiver<ConversationEvent>) -> ConversationEvent {
@@ -306,6 +319,54 @@ mod tests {
                     Some("write"),
                     "tool activity preview should keep the original provider tool call id"
                 );
+                request.request_id
+            }
+            other => panic!("expected permission request event, got {other:?}"),
+        };
+
+        broker
+            .respond_permission(&request_id, Some(ALLOW_ONCE_OPTION_ID.to_string()))
+            .expect("pending request should accept allow response");
+
+        assert_eq!(
+            decision.await.expect("permission task should finish"),
+            ToolPermissionDecision::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_permission_request_preserves_tool_diff_preview() {
+        let broker = ConversationPermissionBroker::default();
+        let (sender, receiver) = mpsc::channel();
+        let handler = Arc::new(broker.handler(sender, ConversationTimeoutPause::default()));
+        let cancellation = CancellationToken::new();
+        let task_handler = Arc::clone(&handler);
+        let task_cancellation = cancellation.clone();
+
+        let decision = tokio::spawn(async move {
+            task_handler
+                .request_permission(permission_request_with_preview(), &task_cancellation)
+                .await
+        });
+
+        let event = recv_event(&receiver).await;
+        let request_id = match event {
+            ConversationEvent::PermissionRequested { request } => {
+                assert!(matches!(
+                    request
+                        .tool_activity
+                        .as_ref()
+                        .and_then(|activity| activity.content.as_ref())
+                        .and_then(|content| content.first()),
+                    Some(RuntimeToolActivityContent::Diff {
+                        path,
+                        old_text,
+                        new_text,
+                        ..
+                    }) if path == "TEMP.md"
+                        && old_text.as_deref() == Some("old\n")
+                        && new_text == "new\n"
+                ));
                 request.request_id
             }
             other => panic!("expected permission request event, got {other:?}"),

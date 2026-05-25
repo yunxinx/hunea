@@ -7,6 +7,7 @@ use crate::ToolExecutorRegistry;
 
 use super::{
     file_state::WorkspaceReadState,
+    mutation::WorkspaceMutationQueue,
     workspace_access::{WorkspaceAccess, local_workspace_access},
 };
 
@@ -30,6 +31,7 @@ pub fn workspace_tool_registry(root: impl AsRef<Path>) -> ToolExecutorRegistry {
     let root = root.as_ref().to_path_buf();
     let access = local_workspace_access();
     let read_state = WorkspaceReadState::default();
+    let mutation_queue = WorkspaceMutationQueue::default();
     let mut registry = ToolExecutorRegistry::new();
     registry.insert(super::read::read_tool_with_access(
         &root,
@@ -44,9 +46,13 @@ pub fn workspace_tool_registry(root: impl AsRef<Path>) -> ToolExecutorRegistry {
         &root,
         access.clone(),
         read_state.clone(),
+        mutation_queue.clone(),
     ));
     registry.insert(super::edit::edit_tool_with_access(
-        &root, access, read_state,
+        &root,
+        access,
+        read_state,
+        mutation_queue,
     ));
     registry.insert(super::bash::bash_tool(&root));
     registry

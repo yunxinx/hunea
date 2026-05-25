@@ -9,40 +9,28 @@ use tool_runtime::{
     ToolCall, ToolExecutor, ToolExecutorRegistry, builtin::workspace_tool_registry,
 };
 
-#[tokio::test]
-async fn builtin_edit_creates_missing_file_when_old_string_is_empty() {
-    let root = temp_root("edit-create");
+#[test]
+fn builtin_edit_schema_only_exposes_edits_array() {
+    let root = temp_root("edit-schema-edits-only");
     let registry = workspace_tool_registry(&root);
+    let definitions = registry.definitions();
 
-    let result = registry
-        .execute_tool(
-            ToolCall::new(
-                "edit-1",
-                "edit",
-                serde_json::json!({
-                    "path": "created.txt",
-                    "old_string": "",
-                    "new_string": "created\n"
-                }),
-            ),
-            &CancellationToken::new(),
-        )
-        .await;
+    let edit_schema_properties = definitions
+        .definition("edit")
+        .and_then(|definition| definition.input_schema.as_ref())
+        .and_then(|schema| schema.get("properties"))
+        .and_then(serde_json::Value::as_object)
+        .expect("edit schema should expose object properties");
 
-    assert!(
-        !result.is_error,
-        "edit should create missing file: {result:?}"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("created.txt")).expect("read created file"),
-        "created\n"
-    );
+    assert_eq!(edit_schema_properties.len(), 2);
+    assert!(edit_schema_properties.contains_key("path"));
+    assert!(edit_schema_properties.contains_key("edits"));
     cleanup(&root);
 }
 
 #[tokio::test]
-async fn builtin_edit_can_create_empty_missing_file() {
-    let root = temp_root("edit-create-empty");
+async fn builtin_edit_rejects_single_edit_arguments() {
+    let root = temp_root("edit-reject-single-arguments");
     let registry = workspace_tool_registry(&root);
 
     let result = registry
@@ -51,23 +39,19 @@ async fn builtin_edit_can_create_empty_missing_file() {
                 "edit-1",
                 "edit",
                 serde_json::json!({
-                    "path": "empty.txt",
-                    "old_string": "",
-                    "new_string": ""
+                    "path": "notes.txt",
+                    "old_string": "old",
+                    "new_string": "new"
                 }),
             ),
             &CancellationToken::new(),
         )
         .await;
 
-    assert!(
-        !result.is_error,
-        "edit should create empty file: {result:?}"
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("empty.txt")).expect("read created file"),
-        ""
-    );
+    assert!(result.is_error);
+    assert!(result.content.contains("arguments do not match schema"));
+    assert!(result.content.contains("$.edits"));
+    assert!(result.content.contains("is required"));
     cleanup(&root);
 }
 
@@ -84,8 +68,9 @@ async fn builtin_edit_existing_file_requires_complete_prior_read() {
                 "edit",
                 serde_json::json!({
                     "path": "notes.txt",
-                    "old_string": "old",
-                    "new_string": "new"
+                    "edits": [
+                        { "old_string": "old", "new_string": "new" }
+                    ]
                 }),
             ),
             &CancellationToken::new(),
@@ -113,8 +98,9 @@ async fn builtin_edit_rejects_file_changed_after_read() {
                 "edit",
                 serde_json::json!({
                     "path": "notes.txt",
-                    "old_string": "old",
-                    "new_string": "new"
+                    "edits": [
+                        { "old_string": "old", "new_string": "new" }
+                    ]
                 }),
             ),
             &CancellationToken::new(),
@@ -131,56 +117,36 @@ async fn builtin_edit_rejects_file_changed_after_read() {
 }
 
 #[tokio::test]
-async fn builtin_edit_replace_all_controls_multiple_matches() {
-    let root = temp_root("edit-replace-all");
+async fn builtin_edit_requires_unique_match_for_single_edits_array_item() {
+    let root = temp_root("edit-unique-array-item");
     fs::write(root.join("notes.txt"), "apple\napple\n").expect("write fixture");
     let registry = workspace_tool_registry(&root);
     read_complete_file(&registry, "notes.txt").await;
 
-    let duplicate_result = registry
+    let result = registry
         .execute_tool(
             ToolCall::new(
                 "edit-1",
                 "edit",
                 serde_json::json!({
                     "path": "notes.txt",
-                    "old_string": "apple",
-                    "new_string": "orange"
+                    "edits": [
+                        { "old_string": "apple", "new_string": "orange" }
+                    ]
                 }),
             ),
             &CancellationToken::new(),
         )
         .await;
-    assert!(duplicate_result.is_error);
+    assert!(result.is_error);
     assert!(
-        duplicate_result.content.contains("Found 2 matches"),
+        result.content.contains("Found 2 matches"),
         "unexpected duplicate-match error: {}",
-        duplicate_result.content
-    );
-
-    let result = registry
-        .execute_tool(
-            ToolCall::new(
-                "edit-2",
-                "edit",
-                serde_json::json!({
-                    "path": "notes.txt",
-                    "old_string": "apple",
-                    "new_string": "orange",
-                    "replace_all": true
-                }),
-            ),
-            &CancellationToken::new(),
-        )
-        .await;
-
-    assert!(
-        !result.is_error,
-        "replace_all edit should succeed: {result:?}"
+        result.content
     );
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read edited fixture"),
-        "orange\norange\n"
+        "apple\napple\n"
     );
     cleanup(&root);
 }
@@ -428,8 +394,9 @@ async fn builtin_edit_detects_duplicates_after_fuzzy_normalization() {
                 "edit",
                 serde_json::json!({
                     "path": "notes.txt",
-                    "old_string": "hello world",
-                    "new_string": "replaced"
+                    "edits": [
+                        { "old_string": "hello world", "new_string": "replaced" }
+                    ]
                 }),
             ),
             &CancellationToken::new(),
@@ -446,110 +413,8 @@ async fn builtin_edit_detects_duplicates_after_fuzzy_normalization() {
 }
 
 #[tokio::test]
-async fn builtin_edit_replace_all_handles_fuzzy_equivalent_matches() {
-    let root = temp_root("edit-fuzzy-replace-all");
-    fs::write(root.join("notes.txt"), "hello world\nhello\u{00a0}world\n").expect("write fixture");
-    let registry = workspace_tool_registry(&root);
-    read_complete_file(&registry, "notes.txt").await;
-
-    let result = registry
-        .execute_tool(
-            ToolCall::new(
-                "edit-1",
-                "edit",
-                serde_json::json!({
-                    "path": "notes.txt",
-                    "old_string": "hello world",
-                    "new_string": "replaced",
-                    "replace_all": true
-                }),
-            ),
-            &CancellationToken::new(),
-        )
-        .await;
-
-    assert!(
-        !result.is_error,
-        "fuzzy replace_all should succeed: {result:?}"
-    );
-    assert!(result.content.contains("Successfully replaced 2 block(s)"));
-    assert_eq!(
-        fs::read_to_string(root.join("notes.txt")).expect("read edited fixture"),
-        "replaced\nreplaced\n"
-    );
-    cleanup(&root);
-}
-
-#[tokio::test]
-async fn builtin_edit_replace_all_keeps_exact_whitespace_only_matches() {
-    let root = temp_root("edit-whitespace-replace-all");
-    fs::write(root.join("notes.txt"), "left    middle    right\n").expect("write fixture");
-    let registry = workspace_tool_registry(&root);
-    read_complete_file(&registry, "notes.txt").await;
-
-    let result = registry
-        .execute_tool(
-            ToolCall::new(
-                "edit-1",
-                "edit",
-                serde_json::json!({
-                    "path": "notes.txt",
-                    "old_string": "    ",
-                    "new_string": "_",
-                    "replace_all": true
-                }),
-            ),
-            &CancellationToken::new(),
-        )
-        .await;
-
-    assert!(
-        !result.is_error,
-        "exact whitespace replace_all should succeed: {result:?}"
-    );
-    assert!(result.content.contains("Successfully replaced 2 block(s)"));
-    assert_eq!(
-        fs::read_to_string(root.join("notes.txt")).expect("read edited fixture"),
-        "left_middle_right\n"
-    );
-    cleanup(&root);
-}
-
-#[tokio::test]
-async fn builtin_edit_rejects_mixed_single_and_multi_arguments() {
-    let root = temp_root("edit-mixed-arguments");
-    let registry = workspace_tool_registry(&root);
-
-    let result = registry
-        .execute_tool(
-            ToolCall::new(
-                "edit-1",
-                "edit",
-                serde_json::json!({
-                    "path": "notes.txt",
-                    "old_string": "old",
-                    "new_string": "new",
-                    "edits": [
-                        { "old_string": "old", "new_string": "new" }
-                    ]
-                }),
-            ),
-            &CancellationToken::new(),
-        )
-        .await;
-
-    assert!(result.is_error);
-    assert!(
-        result
-            .content
-            .contains("provide either edits or old_string/new_string")
-    );
-    cleanup(&root);
-}
-
-#[tokio::test]
-async fn builtin_edit_rejects_replace_all_with_multi_edit() {
-    let root = temp_root("edit-replace-all-with-multi");
+async fn builtin_edit_rejects_replace_all_argument() {
+    let root = temp_root("edit-reject-replace-all");
     let registry = workspace_tool_registry(&root);
 
     let result = registry
@@ -570,11 +435,8 @@ async fn builtin_edit_rejects_replace_all_with_multi_edit() {
         .await;
 
     assert!(result.is_error);
-    assert!(
-        result
-            .content
-            .contains("replace_all is only supported with old_string/new_string")
-    );
+    assert!(result.content.contains("arguments do not match schema"));
+    assert!(result.content.contains("replace_all"));
     cleanup(&root);
 }
 
@@ -632,34 +494,6 @@ async fn builtin_edit_rejects_empty_old_string_inside_edits() {
         result
             .content
             .contains("edits[0].old_string must not be empty")
-    );
-    cleanup(&root);
-}
-
-#[tokio::test]
-async fn builtin_edit_rejects_missing_single_edit_field() {
-    let root = temp_root("edit-missing-single-field");
-    let registry = workspace_tool_registry(&root);
-
-    let result = registry
-        .execute_tool(
-            ToolCall::new(
-                "edit-1",
-                "edit",
-                serde_json::json!({
-                    "path": "notes.txt",
-                    "old_string": "old"
-                }),
-            ),
-            &CancellationToken::new(),
-        )
-        .await;
-
-    assert!(result.is_error);
-    assert!(
-        result
-            .content
-            .contains("new_string is required when edits is not provided")
     );
     cleanup(&root);
 }

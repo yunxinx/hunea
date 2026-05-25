@@ -7,9 +7,8 @@ pub(super) struct TextEdit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum EditRequest {
-    Single { edit: TextEdit, replace_all: bool },
-    Multiple { edits: Vec<TextEdit> },
+pub(super) struct EditRequest {
+    pub(super) edits: Vec<TextEdit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,28 +26,16 @@ pub(super) fn apply_edit(
     let line_ending = detect_line_ending(content_without_bom);
     let normalized_content = normalize_line_endings(content_without_bom);
 
-    let applied = match request {
-        EditRequest::Single { edit, replace_all } => {
-            let normalized_edit = NormalizedTextEdit::from_text_edit(edit);
-            apply_single_edit_to_normalized_content(
-                &normalized_content,
-                &normalized_edit,
-                *replace_all,
-                requested_path,
-            )?
-        }
-        EditRequest::Multiple { edits } => {
-            let normalized_edits = edits
-                .iter()
-                .map(NormalizedTextEdit::from_text_edit)
-                .collect::<Vec<_>>();
-            apply_unique_edits_to_normalized_content(
-                &normalized_content,
-                &normalized_edits,
-                requested_path,
-            )?
-        }
-    };
+    let normalized_edits = request
+        .edits
+        .iter()
+        .map(NormalizedTextEdit::from_text_edit)
+        .collect::<Vec<_>>();
+    let applied = apply_unique_edits_to_normalized_content(
+        &normalized_content,
+        &normalized_edits,
+        requested_path,
+    )?;
 
     Ok(EditApplication {
         final_content: format!(
@@ -80,75 +67,6 @@ struct AppliedNormalizedContent {
     replacements: usize,
 }
 
-fn apply_single_edit_to_normalized_content(
-    content: &str,
-    edit: &NormalizedTextEdit,
-    replace_all: bool,
-    requested_path: &str,
-) -> Result<AppliedNormalizedContent, String> {
-    if edit.old_string.is_empty() {
-        if !content.is_empty() {
-            return Err("Cannot create new file - file already exists.".to_string());
-        }
-        return Ok(AppliedNormalizedContent {
-            content: edit.new_string.clone(),
-            replacements: 1,
-        });
-    }
-
-    if replace_all {
-        apply_replace_all_to_normalized_content(content, edit, requested_path)
-    } else {
-        apply_unique_edits_to_normalized_content(
-            content,
-            std::slice::from_ref(edit),
-            requested_path,
-        )
-    }
-}
-
-fn apply_replace_all_to_normalized_content(
-    content: &str,
-    edit: &NormalizedTextEdit,
-    requested_path: &str,
-) -> Result<AppliedNormalizedContent, String> {
-    let exact_occurrences = count_exact_occurrences(content, &edit.old_string);
-    let fuzzy_occurrences = count_fuzzy_occurrences(content, &edit.old_string);
-    if exact_occurrences == 0 && fuzzy_occurrences == 0 {
-        return Err(not_found_error(&edit.old_string, None));
-    }
-
-    let use_fuzzy_base = fuzzy_occurrences > 0 && exact_occurrences != fuzzy_occurrences;
-    let base_content = if use_fuzzy_base {
-        normalize_for_fuzzy_match(content)
-    } else {
-        content.to_string()
-    };
-    let old_string = if use_fuzzy_base {
-        normalize_for_fuzzy_match(&edit.old_string)
-    } else {
-        edit.old_string.clone()
-    };
-
-    if old_string.is_empty() {
-        return Err(not_found_error(&edit.old_string, None));
-    }
-
-    let updated = base_content.replace(&old_string, &edit.new_string);
-    if updated == base_content {
-        return Err(format!("No changes made to {requested_path}."));
-    }
-
-    Ok(AppliedNormalizedContent {
-        content: updated,
-        replacements: if use_fuzzy_base {
-            fuzzy_occurrences
-        } else {
-            exact_occurrences
-        },
-    })
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MatchedTextEdit<'a> {
     edit_index: usize,
@@ -171,7 +89,7 @@ fn apply_unique_edits_to_normalized_content(
 ) -> Result<AppliedNormalizedContent, String> {
     for (index, edit) in edits.iter().enumerate() {
         if edit.old_string.is_empty() {
-            return Err(empty_old_string_error(index, edits.len()));
+            return Err(empty_old_string_error(index));
         }
     }
 
@@ -188,19 +106,12 @@ fn apply_unique_edits_to_normalized_content(
     let mut matched_edits = Vec::with_capacity(edits.len());
     for (index, edit) in edits.iter().enumerate() {
         let Some(match_result) = find_text(&base_content, &edit.old_string) else {
-            return Err(not_found_error(
-                &edit.old_string,
-                edit_index(index, edits.len()),
-            ));
+            return Err(not_found_error(&edit.old_string, index));
         };
 
         let occurrences = count_replacement_occurrences(&base_content, &edit.old_string);
         if occurrences > 1 {
-            return Err(duplicate_error(
-                &edit.old_string,
-                edit_index(index, edits.len()),
-                occurrences,
-            ));
+            return Err(duplicate_error(&edit.old_string, index, occurrences));
         }
 
         matched_edits.push(MatchedTextEdit {
@@ -291,42 +202,20 @@ fn count_replacement_occurrences(content: &str, needle: &str) -> usize {
     }
 }
 
-fn edit_index(index: usize, edit_count: usize) -> Option<usize> {
-    (edit_count > 1).then_some(index)
+fn empty_old_string_error(index: usize) -> String {
+    format!("edits[{index}].old_string must not be empty")
 }
 
-fn empty_old_string_error(index: usize, edit_count: usize) -> String {
-    if edit_count == 1 {
-        "old_string must not be empty.".to_string()
-    } else {
-        format!("edits[{index}].old_string must not be empty")
-    }
+fn not_found_error(old_string: &str, edit_index: usize) -> String {
+    format!(
+        "String to replace not found in file for edits[{edit_index}].old_string.\nString: {old_string}"
+    )
 }
 
-fn not_found_error(old_string: &str, edit_index: Option<usize>) -> String {
-    match edit_index {
-        Some(index) => {
-            format!(
-                "String to replace not found in file for edits[{index}].old_string.\nString: {old_string}"
-            )
-        }
-        None => format!("String to replace not found in file.\nString: {old_string}"),
-    }
-}
-
-fn duplicate_error(old_string: &str, edit_index: Option<usize>, occurrences: usize) -> String {
-    match edit_index {
-        Some(index) => {
-            format!(
-                "Found {occurrences} matches of edits[{index}].old_string. Each old_string must be unique. Provide more context.\nString: {old_string}"
-            )
-        }
-        None => {
-            format!(
-                "Found {occurrences} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, provide more context.\nString: {old_string}"
-            )
-        }
-    }
+fn duplicate_error(old_string: &str, edit_index: usize, occurrences: usize) -> String {
+    format!(
+        "Found {occurrences} matches of edits[{edit_index}].old_string. Each old_string must be unique. Provide more context.\nString: {old_string}"
+    )
 }
 
 fn normalize_for_fuzzy_match(text: &str) -> String {

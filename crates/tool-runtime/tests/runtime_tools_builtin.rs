@@ -602,6 +602,15 @@ async fn builtin_list_dir_tool_can_be_registered_independently() {
 
     assert!(definitions.definition("list_dir").is_some());
     assert!(definitions.definition("read").is_none());
+    let list_dir_schema_properties = definitions
+        .definition("list_dir")
+        .and_then(|definition| definition.input_schema.as_ref())
+        .and_then(|schema| schema.get("properties"))
+        .and_then(serde_json::Value::as_object)
+        .expect("list_dir schema should expose object properties");
+    assert_eq!(list_dir_schema_properties.len(), 2);
+    assert!(list_dir_schema_properties.contains_key("path"));
+    assert!(list_dir_schema_properties.contains_key("limit"));
 
     let result = registry
         .execute_tool(
@@ -1008,33 +1017,6 @@ async fn builtin_list_dir_limits_output_entries() {
     assert!(result.content.contains("b.txt"));
     assert!(!result.content.contains("c.txt"));
     assert!(result.content.contains("Truncated"));
-    cleanup(&root);
-}
-
-#[tokio::test]
-async fn builtin_list_dir_can_show_entry_details() {
-    let root = temp_root("builtin-list-dir-details");
-    fs::create_dir(root.join("src")).expect("create src dir");
-    fs::write(root.join("Cargo.toml"), "[package]\n").expect("write fixture");
-    let registry = workspace_readonly_tool_registry(&root);
-
-    let result = registry
-        .execute_tool(
-            ToolCall::new(
-                "call-1",
-                "list_dir",
-                serde_json::json!({
-                    "path": ".",
-                    "show_details": true
-                }),
-            ),
-            &CancellationToken::new(),
-        )
-        .await;
-
-    assert!(!result.is_error);
-    assert!(result.content.contains("\tCargo.toml"));
-    assert!(result.content.contains("\tsrc/"));
     cleanup(&root);
 }
 

@@ -1,6 +1,8 @@
 use std::{
+    collections::HashSet,
     io::{self, Read},
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{Arc, Condvar, Mutex},
 };
 
 use tokio_util::sync::CancellationToken;
@@ -19,6 +21,58 @@ pub(crate) const FILE_NOT_READ_MESSAGE: &str =
 pub(crate) const FILE_CHANGED_MESSAGE: &str = "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.";
 pub(crate) const FILE_PERMISSION_PREVIEW_MAX_TOTAL_BYTES: usize = 256 * 1024;
 pub(crate) const FILE_PERMISSION_PREVIEW_MAX_LINES: usize = 6_000;
+
+/// `WorkspaceMutationQueue` 串行化同一 workspace 路径上的写入型工具调用。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WorkspaceMutationQueue {
+    state: Arc<WorkspaceMutationQueueState>,
+}
+
+#[derive(Debug, Default)]
+struct WorkspaceMutationQueueState {
+    active_paths: Mutex<HashSet<PathBuf>>,
+    path_released: Condvar,
+}
+
+pub(crate) struct WorkspaceMutationGuard<'a> {
+    queue: &'a WorkspaceMutationQueue,
+    path: PathBuf,
+}
+
+impl WorkspaceMutationQueue {
+    pub(crate) fn lock_path(&self, path: &Path) -> WorkspaceMutationGuard<'_> {
+        let path = path.to_path_buf();
+        let mut active_paths = self
+            .state
+            .active_paths
+            .lock()
+            .expect("workspace mutation queue lock should not be poisoned");
+
+        while active_paths.contains(&path) {
+            active_paths = self
+                .state
+                .path_released
+                .wait(active_paths)
+                .expect("workspace mutation queue lock should not be poisoned");
+        }
+
+        active_paths.insert(path.clone());
+        WorkspaceMutationGuard { queue: self, path }
+    }
+}
+
+impl Drop for WorkspaceMutationGuard<'_> {
+    fn drop(&mut self) {
+        let mut active_paths = self
+            .queue
+            .state
+            .active_paths
+            .lock()
+            .expect("workspace mutation queue lock should not be poisoned");
+        active_paths.remove(&self.path);
+        self.queue.state.path_released.notify_all();
+    }
+}
 
 pub(crate) fn existing_file_metadata(
     access: &dyn WorkspaceAccess,

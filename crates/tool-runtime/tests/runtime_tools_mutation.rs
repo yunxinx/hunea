@@ -38,8 +38,9 @@ async fn builtin_edit_rejects_partial_read_snapshot() {
                 "edit",
                 serde_json::json!({
                     "path": "notes.txt",
-                    "old_string": "two",
-                    "new_string": "changed"
+                    "edits": [
+                        { "old_string": "two", "new_string": "changed" }
+                    ]
                 }),
             ),
             &CancellationToken::new(),
@@ -56,8 +57,8 @@ async fn builtin_edit_rejects_partial_read_snapshot() {
 }
 
 #[tokio::test]
-async fn builtin_edit_rejects_missing_file_when_old_string_is_non_empty() {
-    let root = temp_root("mutation-edit-missing-old-string");
+async fn builtin_edit_rejects_missing_files() {
+    let root = temp_root("mutation-edit-missing-file");
     let registry = workspace_tool_registry(&root);
 
     let result = registry
@@ -67,8 +68,9 @@ async fn builtin_edit_rejects_missing_file_when_old_string_is_non_empty() {
                 "edit",
                 serde_json::json!({
                     "path": "missing.txt",
-                    "old_string": "old",
-                    "new_string": "new"
+                    "edits": [
+                        { "old_string": "old", "new_string": "new" }
+                    ]
                 }),
             ),
             &CancellationToken::new(),
@@ -110,8 +112,9 @@ async fn builtin_write_and_edit_reject_directory_paths() {
                 "edit",
                 serde_json::json!({
                     "path": "src",
-                    "old_string": "",
-                    "new_string": "created"
+                    "edits": [
+                        { "old_string": "old", "new_string": "new" }
+                    ]
                 }),
             ),
             &CancellationToken::new(),
@@ -145,15 +148,16 @@ async fn builtin_edit_reports_noop_and_missing_match_without_modifying_file() {
                 "edit",
                 serde_json::json!({
                     "path": "notes.txt",
-                    "old_string": "alpha",
-                    "new_string": "alpha"
+                    "edits": [
+                        { "old_string": "alpha", "new_string": "alpha" }
+                    ]
                 }),
             ),
             &CancellationToken::new(),
         )
         .await;
     assert!(noop_result.is_error);
-    assert!(noop_result.content.contains("No changes to make"));
+    assert!(noop_result.content.contains("No changes"));
 
     let missing_match_result = registry
         .execute_tool(
@@ -162,8 +166,9 @@ async fn builtin_edit_reports_noop_and_missing_match_without_modifying_file() {
                 "edit",
                 serde_json::json!({
                     "path": "notes.txt",
-                    "old_string": "missing",
-                    "new_string": "replacement"
+                    "edits": [
+                        { "old_string": "missing", "new_string": "replacement" }
+                    ]
                 }),
             ),
             &CancellationToken::new(),
@@ -199,8 +204,9 @@ async fn builtin_write_can_follow_successful_edit_without_another_read() {
                 "edit",
                 serde_json::json!({
                     "path": "notes.txt",
-                    "old_string": "two\n",
-                    "new_string": ""
+                    "edits": [
+                        { "old_string": "two\n", "new_string": "" }
+                    ]
                 }),
             ),
             &CancellationToken::new(),
@@ -300,8 +306,9 @@ async fn builtin_edit_can_use_permission_preview_snapshot_for_approved_update() 
         "edit",
         serde_json::json!({
             "path": "notes.txt",
-            "old_string": "two\n",
-            "new_string": "updated\n"
+            "edits": [
+                { "old_string": "two\n", "new_string": "updated\n" }
+            ]
         }),
     );
 
@@ -364,8 +371,9 @@ async fn builtin_write_after_edit_still_rejects_external_changes() {
                 "edit",
                 serde_json::json!({
                     "path": "notes.txt",
-                    "old_string": "two\n",
-                    "new_string": "edited\n"
+                    "edits": [
+                        { "old_string": "two\n", "new_string": "edited\n" }
+                    ]
                 }),
             ),
             &CancellationToken::new(),
@@ -600,8 +608,9 @@ async fn builtin_edit_preserves_utf8_bom_and_crlf_line_endings() {
                 "edit",
                 serde_json::json!({
                     "path": "notes.txt",
-                    "old_string": "beta\n",
-                    "new_string": "gamma\n"
+                    "edits": [
+                        { "old_string": "beta\n", "new_string": "gamma\n" }
+                    ]
                 }),
             ),
             &CancellationToken::new(),

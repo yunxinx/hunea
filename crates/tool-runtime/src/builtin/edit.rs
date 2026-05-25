@@ -14,9 +14,9 @@ use super::{
     edit_apply::{EditApplication, EditRequest, TextEdit, apply_edit},
     file_state::WorkspaceReadState,
     mutation::{
-        TOOL_CALL_INTERRUPTED, bounded_permission_preview, bounded_tool_result_details,
-        ensure_existing_file_was_read, existing_file_metadata, permission_file_snapshot,
-        read_existing_text_file, record_written_text_snapshot,
+        TOOL_CALL_INTERRUPTED, WorkspaceMutationQueue, bounded_permission_preview,
+        bounded_tool_result_details, ensure_existing_file_was_read, existing_file_metadata,
+        permission_file_snapshot, read_existing_text_file, record_written_text_snapshot,
     },
     workspace::resolve_workspace_write_path,
     workspace_access::{SharedWorkspaceAccess, WorkspaceAccess, local_workspace_access},
@@ -30,6 +30,7 @@ pub fn edit_tool(root: impl AsRef<Path>) -> impl Tool + 'static {
         root,
         local_workspace_access(),
         WorkspaceReadState::default(),
+        WorkspaceMutationQueue::default(),
     )
 }
 
@@ -37,11 +38,13 @@ pub(crate) fn edit_tool_with_access(
     root: impl AsRef<Path>,
     access: SharedWorkspaceAccess,
     read_state: WorkspaceReadState,
+    mutation_queue: WorkspaceMutationQueue,
 ) -> impl Tool + 'static {
     EditTool {
         root: root.as_ref().to_path_buf(),
         access,
         read_state,
+        mutation_queue,
     }
 }
 
@@ -50,6 +53,7 @@ struct EditTool {
     root: PathBuf,
     access: SharedWorkspaceAccess,
     read_state: WorkspaceReadState,
+    mutation_queue: WorkspaceMutationQueue,
 }
 
 impl std::fmt::Debug for EditTool {
@@ -67,7 +71,7 @@ impl Tool for EditTool {
             .with_label("Edit")
             .with_kind(ToolKind::Edit)
             .with_description(
-                "Edit a UTF-8 text file inside the current workspace by replacing targeted text. Existing files must be read completely with read first. Use edits for multiple disjoint replacements in one call. If old_string is empty and the file does not exist, edit creates the file with new_string.",
+                "Edit an existing UTF-8 text file inside the current workspace by applying one or more targeted replacements. Existing files must be read completely with read first. Use write to create files.",
             )
             .with_input_schema(json!({
                 "type": "object",
@@ -79,7 +83,7 @@ impl Tool for EditTool {
                     "edits": {
                         "type": "array",
                         "minItems": 1,
-                        "description": "One or more targeted replacements. Each old_string is matched against the original file, must be unique after fuzzy normalization, and must not overlap another edit. Do not combine edits with old_string/new_string or replace_all.",
+                        "description": "One or more targeted replacements. A single replacement is still passed as a one-item array. Each old_string is matched against the original file, must be unique after fuzzy normalization, and must not overlap another edit.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -95,21 +99,9 @@ impl Tool for EditTool {
                             "required": ["old_string", "new_string"],
                             "additionalProperties": false
                         }
-                    },
-                    "old_string": {
-                        "type": "string",
-                        "description": "Text to replace for a single replacement. Use an empty string only to create a missing file."
-                    },
-                    "new_string": {
-                        "type": "string",
-                        "description": "Replacement text"
-                    },
-                    "replace_all": {
-                        "type": "boolean",
-                        "description": "Whether to replace every occurrence of old_string; defaults to false"
                     }
                 },
-                "required": ["path"],
+                "required": ["path", "edits"],
                 "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Ask)
@@ -123,11 +115,20 @@ impl Tool for EditTool {
         let root = self.root.clone();
         let access = self.access.clone();
         let read_state = self.read_state.clone();
+        let mutation_queue = self.mutation_queue.clone();
         let call_id = call.call_id.clone();
         let cancellation = cancellation.clone();
         Box::pin(async move {
             match task::spawn_blocking(move || {
-                execute_edit(root, access, read_state, call, None, cancellation)
+                execute_edit(
+                    root,
+                    access,
+                    read_state,
+                    mutation_queue,
+                    call,
+                    None,
+                    cancellation,
+                )
             })
             .await
             {
@@ -145,6 +146,7 @@ impl Tool for EditTool {
         let root = self.root.clone();
         let access = self.access.clone();
         let read_state = self.read_state.clone();
+        let mutation_queue = self.mutation_queue.clone();
         let permission_snapshot = context.permission_snapshot().cloned();
         let call_id = call.call_id.clone();
         let cancellation = context.cancellation().clone();
@@ -154,6 +156,7 @@ impl Tool for EditTool {
                     root,
                     access,
                     read_state,
+                    mutation_queue,
                     call,
                     permission_snapshot,
                     cancellation,
@@ -185,10 +188,7 @@ impl Tool for EditTool {
 #[serde(deny_unknown_fields)]
 struct EditArguments {
     path: String,
-    old_string: Option<String>,
-    new_string: Option<String>,
-    replace_all: Option<bool>,
-    edits: Option<Vec<EditItemArgument>>,
+    edits: Vec<EditItemArgument>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,54 +200,25 @@ struct EditItemArgument {
 
 impl EditArguments {
     fn into_request(self) -> Result<(String, EditRequest), String> {
-        let has_single_edit = self.old_string.is_some() || self.new_string.is_some();
-        let has_edits = self.edits.is_some();
-
-        if has_single_edit && has_edits {
-            return Err("provide either edits or old_string/new_string, not both".to_string());
+        if self.edits.is_empty() {
+            return Err("edits must contain at least one replacement".to_string());
         }
-
-        if let Some(edits) = self.edits {
-            if self.replace_all.is_some() {
-                return Err("replace_all is only supported with old_string/new_string".to_string());
-            }
-            if edits.is_empty() {
-                return Err("edits must contain at least one replacement".to_string());
-            }
-            let edits = edits
-                .into_iter()
-                .enumerate()
-                .map(|(index, edit)| {
-                    if edit.old_string.is_empty() {
-                        return Err(format!("edits[{index}].old_string must not be empty"));
-                    }
-                    Ok(TextEdit {
-                        old_string: edit.old_string,
-                        new_string: edit.new_string,
-                    })
+        let edits = self
+            .edits
+            .into_iter()
+            .enumerate()
+            .map(|(index, edit)| {
+                if edit.old_string.is_empty() {
+                    return Err(format!("edits[{index}].old_string must not be empty"));
+                }
+                Ok(TextEdit {
+                    old_string: edit.old_string,
+                    new_string: edit.new_string,
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
-            return Ok((self.path, EditRequest::Multiple { edits }));
-        }
-
-        let old_string = self
-            .old_string
-            .ok_or_else(|| "old_string is required when edits is not provided".to_string())?;
-        let new_string = self
-            .new_string
-            .ok_or_else(|| "new_string is required when edits is not provided".to_string())?;
-
-        Ok((
-            self.path,
-            EditRequest::Single {
-                edit: TextEdit {
-                    old_string,
-                    new_string,
-                },
-                replace_all: self.replace_all.unwrap_or(false),
-            },
-        ))
+        Ok((self.path, EditRequest { edits }))
     }
 }
 
@@ -259,6 +230,7 @@ fn execute_edit(
     root: PathBuf,
     access: SharedWorkspaceAccess,
     read_state: WorkspaceReadState,
+    mutation_queue: WorkspaceMutationQueue,
     call: ToolCall,
     permission_snapshot: Option<ToolPermissionFileSnapshot>,
     cancellation: CancellationToken,
@@ -290,14 +262,8 @@ fn execute_edit(
         request: &request,
         permission_snapshot: permission_snapshot.as_ref(),
         cancellation: &cancellation,
+        mutation_queue: &mutation_queue,
     }) {
-        Ok(EditOutcome::Created { new_text }) => edit_success_result(EditSuccessResultOptions {
-            call_id: call.call_id,
-            requested_path,
-            old_text: None,
-            new_text,
-            replacements: 1,
-        }),
         Ok(EditOutcome::Updated {
             old_text,
             new_text,
@@ -326,21 +292,7 @@ fn edit_permission_preview(
     let (requested_path, request) = arguments.into_request().ok()?;
     let path = resolve_workspace_write_path(access, root, &requested_path).ok()?;
     let metadata = existing_file_metadata(access, &path, &requested_path, "edit").ok()?;
-
-    let Some(metadata) = metadata else {
-        let EditRequest::Single { edit, .. } = request else {
-            return None;
-        };
-        if !edit.old_string.is_empty() {
-            return None;
-        }
-        return Some(bounded_permission_preview(
-            requested_path,
-            None,
-            edit.new_string,
-            None,
-        ));
-    };
+    let metadata = metadata?;
 
     let original = read_existing_text_file(access, &path).ok()?;
     let application = apply_edit(&original, &request, &requested_path).ok()?;
@@ -355,9 +307,6 @@ fn edit_permission_preview(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EditOutcome {
-    Created {
-        new_text: String,
-    },
     Updated {
         old_text: String,
         new_text: String,
@@ -403,6 +352,7 @@ struct EditTextFileOptions<'a> {
     request: &'a EditRequest,
     permission_snapshot: Option<&'a ToolPermissionFileSnapshot>,
     cancellation: &'a CancellationToken,
+    mutation_queue: &'a WorkspaceMutationQueue,
 }
 
 fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, String> {
@@ -414,41 +364,20 @@ fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, Strin
         request,
         permission_snapshot,
         cancellation,
+        mutation_queue,
     } = options;
 
     if cancellation.is_cancelled() {
         return Err(TOOL_CALL_INTERRUPTED.to_string());
     }
 
+    let _mutation_guard = mutation_queue.lock_path(path);
     let metadata = existing_file_metadata(access, path, requested_path, "edit")?;
     let Some(metadata) = metadata else {
-        match request {
-            EditRequest::Single { edit, .. } if edit.old_string.is_empty() => {
-                write_new_file(access, read_state, path, &edit.new_string)?;
-                return Ok(EditOutcome::Created {
-                    new_text: edit.new_string.clone(),
-                });
-            }
-            EditRequest::Single { .. } => {
-                return Err(format!(
-                    "File does not exist. To create a new file with edit, set old_string to an empty string: {requested_path}"
-                ));
-            }
-            EditRequest::Multiple { .. } => {
-                return Err(format!(
-                    "File does not exist. Use write to create a new file before applying edits: {requested_path}"
-                ));
-            }
-        }
+        return Err(format!(
+            "File does not exist. Use write to create a new file before applying edits: {requested_path}"
+        ));
     };
-
-    if let EditRequest::Single { edit, .. } = request
-        && edit.old_string == edit.new_string
-    {
-        return Err(
-            "No changes to make: old_string and new_string are exactly the same.".to_string(),
-        );
-    }
 
     ensure_existing_file_was_read(
         access,
@@ -477,25 +406,4 @@ fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, Strin
         new_text: final_content,
         replacements,
     })
-}
-
-fn write_new_file(
-    access: &dyn WorkspaceAccess,
-    read_state: &WorkspaceReadState,
-    path: &Path,
-    content: &str,
-) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        access.create_dir_all(parent).map_err(|error| {
-            format!(
-                "create parent directory failed for '{}': {error}",
-                parent.display()
-            )
-        })?;
-    }
-    access
-        .write_text_file(path, content)
-        .map_err(|error| format!("edit failed for '{}': {error}", path.display()))?;
-    record_written_text_snapshot(access, read_state, path, content);
-    Ok(())
 }

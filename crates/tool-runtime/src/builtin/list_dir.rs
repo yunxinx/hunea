@@ -1,7 +1,6 @@
 use std::{
     io::{self, Read},
     path::{Path, PathBuf},
-    time::SystemTime,
 };
 
 use ignore::{
@@ -10,7 +9,6 @@ use ignore::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{task, task::JoinError};
 use tokio_util::sync::CancellationToken;
 
@@ -77,10 +75,6 @@ impl Tool for ListDirTool {
                         "minimum": 1,
                         "maximum": LIST_DIR_MAX_ENTRY_LIMIT,
                         "description": "Maximum number of entries to return"
-                    },
-                    "show_details": {
-                        "type": "boolean",
-                        "description": "Whether to include modified time and size for each entry"
                     }
                 },
                 "additionalProperties": false
@@ -112,14 +106,6 @@ impl Tool for ListDirTool {
 struct ListDirArguments {
     path: Option<String>,
     limit: Option<usize>,
-    show_details: Option<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ListedEntry {
-    path: PathBuf,
-    display_name: String,
-    metadata: Option<super::workspace_access::WorkspaceMetadata>,
 }
 
 fn join_error_result(call_id: String, error: JoinError) -> ToolResult {
@@ -168,15 +154,7 @@ fn execute_list_dir(
         .limit
         .unwrap_or(LIST_DIR_DEFAULT_ENTRY_LIMIT)
         .clamp(1, LIST_DIR_MAX_ENTRY_LIMIT);
-    let show_details = arguments.show_details.unwrap_or(false);
-    match list_directory_entries(
-        &root,
-        access.as_ref(),
-        &path,
-        limit,
-        show_details,
-        &cancellation,
-    ) {
+    match list_directory_entries(&root, access.as_ref(), &path, limit, &cancellation) {
         Ok(content) => ToolResult::success(call.call_id, content),
         Err(message) => ToolResult::error(call.call_id, message),
     }
@@ -187,7 +165,6 @@ fn list_directory_entries(
     access: &dyn super::workspace_access::WorkspaceAccess,
     path: &Path,
     limit: usize,
-    show_details: bool,
     cancellation: &CancellationToken,
 ) -> Result<String, String> {
     if cancellation.is_cancelled() {
@@ -210,27 +187,20 @@ fn list_directory_entries(
             } else {
                 entry.name
             };
-            Some(ListedEntry {
-                path: entry.path,
-                display_name,
-                metadata: None,
-            })
+            Some(display_name)
         })
         .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.display_name.to_lowercase());
+    entries.sort_by_key(|entry| entry.to_lowercase());
 
     if entries.is_empty() {
         return Ok("No entries found.".to_string());
     }
 
     let total_entries = entries.len();
-    let mut selected = entries.into_iter().take(limit).collect::<Vec<_>>();
-    if show_details {
-        populate_entry_metadata(access, &mut selected, cancellation)?;
-    }
-    let mut content = selected
+    let mut content = entries
         .iter()
-        .map(|entry| render_listed_entry(entry, show_details))
+        .take(limit)
+        .map(String::as_str)
         .collect::<Vec<_>>()
         .join("\n");
     if total_entries > limit {
@@ -246,52 +216,6 @@ fn list_directory_entries(
         }
     }
     Ok(content)
-}
-
-fn populate_entry_metadata(
-    access: &dyn super::workspace_access::WorkspaceAccess,
-    entries: &mut [ListedEntry],
-    cancellation: &CancellationToken,
-) -> Result<(), String> {
-    for entry in entries {
-        if cancellation.is_cancelled() {
-            return Err(TOOL_CALL_INTERRUPTED.to_string());
-        }
-        let metadata = access
-            .metadata(&entry.path)
-            .map_err(|error| format!("stat failed for '{}': {error}", entry.path.display()))?;
-        entry.metadata = Some(metadata);
-    }
-
-    Ok(())
-}
-
-fn render_listed_entry(entry: &ListedEntry, show_details: bool) -> String {
-    if !show_details {
-        return entry.display_name.clone();
-    }
-
-    let metadata = entry
-        .metadata
-        .as_ref()
-        .expect("detailed list entries should have metadata");
-    let modified = format_modified_time(metadata.modified_at);
-    let size = if metadata.is_dir {
-        "-".to_string()
-    } else {
-        metadata.len.to_string()
-    };
-    format!("{modified}\t{size}\t{}", entry.display_name)
-}
-
-fn format_modified_time(modified_at: Option<SystemTime>) -> String {
-    let Some(modified_at) = modified_at else {
-        return "-".to_string();
-    };
-    let offset_date_time = OffsetDateTime::from(modified_at);
-    offset_date_time
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "-".to_string())
 }
 
 fn gitignore_matcher(
@@ -392,7 +316,6 @@ mod tests {
         collections::HashMap,
         io::{self, Cursor, Read},
         path::{Path, PathBuf},
-        time::{Duration, UNIX_EPOCH},
     };
 
     use super::list_directory_entries;
@@ -481,7 +404,6 @@ mod tests {
             &access,
             Path::new("/srv/workspace/src"),
             10,
-            false,
             &CancellationToken::new(),
         )
         .expect("directory listing should succeed");
@@ -524,7 +446,6 @@ mod tests {
             &access,
             Path::new("/srv/workspace/src"),
             10,
-            false,
             &CancellationToken::new(),
         )
         .expect_err("invalid .gitignore should surface as an error");
@@ -575,121 +496,10 @@ mod tests {
             &access,
             Path::new("/srv/workspace/src/subdir"),
             10,
-            false,
             &CancellationToken::new(),
         )
         .expect("nested directory listing should honor its own gitignore");
 
         assert_eq!(content, "keep.rs");
-    }
-
-    #[test]
-    fn list_directory_entries_can_render_entry_details() {
-        let modified_at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let access = FakeWorkspaceAccess {
-            canonical_paths: HashMap::from([(
-                PathBuf::from("/workspace-link"),
-                PathBuf::from("/srv/workspace"),
-            )]),
-            metadata_by_path: HashMap::from([
-                (
-                    PathBuf::from("/srv/workspace/src"),
-                    WorkspaceMetadata {
-                        is_dir: true,
-                        is_file: false,
-                        len: 0,
-                        modified_at: Some(modified_at),
-                    },
-                ),
-                (
-                    PathBuf::from("/srv/workspace/Cargo.toml"),
-                    WorkspaceMetadata {
-                        is_dir: false,
-                        is_file: true,
-                        len: 123,
-                        modified_at: Some(modified_at),
-                    },
-                ),
-            ]),
-            file_contents: HashMap::new(),
-            directories: HashMap::from([(
-                PathBuf::from("/srv/workspace"),
-                vec![
-                    WorkspaceDirectoryEntry {
-                        path: PathBuf::from("/srv/workspace/src"),
-                        name: "src".to_string(),
-                        is_dir: true,
-                    },
-                    WorkspaceDirectoryEntry {
-                        path: PathBuf::from("/srv/workspace/Cargo.toml"),
-                        name: "Cargo.toml".to_string(),
-                        is_dir: false,
-                    },
-                ],
-            )]),
-        };
-
-        let content = list_directory_entries(
-            Path::new("/workspace-link"),
-            &access,
-            Path::new("/srv/workspace"),
-            10,
-            true,
-            &CancellationToken::new(),
-        )
-        .expect("detailed directory listing should succeed");
-
-        assert_eq!(
-            content,
-            "2023-11-14T22:13:20Z\t123\tCargo.toml\n2023-11-14T22:13:20Z\t-\tsrc/"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn list_directory_entries_detailed_mode_uses_backend_entry_paths() {
-        use std::ffi::OsString;
-        use std::os::unix::ffi::OsStringExt;
-
-        let lossy_name = String::from_utf8_lossy(b"bad\xffname").into_owned();
-        let raw_name = OsString::from_vec(b"bad\xffname".to_vec());
-        let raw_path = PathBuf::from("/srv/workspace").join(&raw_name);
-        let modified_at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let access = FakeWorkspaceAccess {
-            canonical_paths: HashMap::from([(
-                PathBuf::from("/workspace-link"),
-                PathBuf::from("/srv/workspace"),
-            )]),
-            metadata_by_path: HashMap::from([(
-                raw_path.clone(),
-                WorkspaceMetadata {
-                    is_dir: false,
-                    is_file: true,
-                    len: 7,
-                    modified_at: Some(modified_at),
-                },
-            )]),
-            file_contents: HashMap::new(),
-            directories: HashMap::from([(
-                PathBuf::from("/srv/workspace"),
-                vec![WorkspaceDirectoryEntry {
-                    path: raw_path,
-                    name: lossy_name.clone(),
-                    is_dir: false,
-                }],
-            )]),
-        };
-
-        let content = list_directory_entries(
-            Path::new("/workspace-link"),
-            &access,
-            Path::new("/srv/workspace"),
-            10,
-            true,
-            &CancellationToken::new(),
-        )
-        .expect("detailed directory listing should use the original backend path");
-
-        assert_eq!(content, format!("2023-11-14T22:13:20Z\t7\t{lossy_name}"));
     }
 }

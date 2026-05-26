@@ -241,7 +241,7 @@ pub struct ConversationResponse {
     pub reasoning_duration: Option<Duration>,
 }
 
-/// `ProviderRequestMetrics` 记录一次成功请求的输出性能指标。
+/// `ProviderRequestMetrics` 记录一次成功请求中的 LLM 输出性能指标。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderRequestMetrics {
     pub latency: Duration,

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-/// `RuntimeRequestMetrics` 记录一次成功 runtime 请求的交互性能指标。
+/// `RuntimeRequestMetrics` 记录一次成功 runtime 请求中的 LLM 输出性能指标。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeRequestMetrics {
     pub latency: Duration,

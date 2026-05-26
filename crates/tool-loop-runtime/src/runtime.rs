@@ -166,7 +166,6 @@ where
         {
             return Err(ToolLoopError::ToolTurnLimit { max_turns });
         }
-        state.mark_tool_call_turn();
         tool_turns = tool_turns.saturating_add(1);
         request.messages.push(provider_response.message.clone());
         append_provider_context_message(
@@ -265,7 +264,7 @@ where
         return Err(ToolLoopError::Cancelled);
     }
     on_progress(ToolLoopProgress::ProviderTurnStarted);
-    state.mark_request_started(clock.now());
+    state.start_provider_turn(clock.now());
     let mut provider_response = None;
     let result = {
         let mut sink = RuntimeStreamSink {
@@ -283,7 +282,9 @@ where
     match result {
         Ok(response) => {
             let response = provider_response.unwrap_or(response);
-            state.observe_response_tool_calls_completed(&response, clock.now(), on_progress);
+            let completed_at = clock.now();
+            state.observe_response_tool_calls_completed(&response, completed_at, on_progress);
+            state.complete_provider_turn(&response, completed_at);
             Ok(response)
         }
         Err(ProviderError::Transport(message)) if cancellation.is_cancelled() => {
@@ -334,7 +335,8 @@ where
             }
             StreamEvent::UsageUpdated(usage) => {
                 if let Some(output_tokens) = usage.output_tokens {
-                    self.state.final_output_tokens = Some(output_tokens as usize);
+                    self.state
+                        .record_provider_output_usage(output_tokens as usize);
                 }
             }
             StreamEvent::ToolCallStarted { index, call_id, .. } => {
@@ -576,29 +578,12 @@ async fn authorize_tool_call(
             if let Some(preview) = preview {
                 permission_request = permission_request.with_preview(preview);
             }
-            let permission_started_at = context.clock.now();
             match permission_handler
                 .request_permission(permission_request, context.cancellation)
                 .await
             {
-                ToolPermissionDecision::Allow => {
-                    context.state.record_permission_wait(
-                        context
-                            .clock
-                            .now()
-                            .saturating_duration_since(permission_started_at),
-                    );
-                    ToolAuthorization::allow(permission_snapshot)
-                }
-                ToolPermissionDecision::Deny { message } => {
-                    context.state.record_permission_wait(
-                        context
-                            .clock
-                            .now()
-                            .saturating_duration_since(permission_started_at),
-                    );
-                    ToolAuthorization::deny(message)
-                }
+                ToolPermissionDecision::Allow => ToolAuthorization::allow(permission_snapshot),
+                ToolPermissionDecision::Deny { message } => ToolAuthorization::deny(message),
             }
         }
     }
@@ -669,19 +654,24 @@ fn ai_tool_definitions_from_registry(registry: &ToolRegistry) -> Vec<AiToolDefin
 }
 
 struct RuntimeTurnState {
+    model_id: String,
     content: String,
     final_content: Option<String>,
     reasoning_content: String,
+    // 可见进度包含工具输出；statusline metrics 只能使用 LLM 输出。
     output_progress: StreamingTokenProgress,
+    llm_output_progress: StreamingTokenProgress,
     input_progress: StreamingTokenProgress,
     is_thinking: bool,
     reasoning_started_at: Option<Instant>,
     reasoning_finished_at: Option<Instant>,
     request_started_at: Option<Instant>,
     first_token_at: Option<Instant>,
-    permission_wait_duration: Duration,
-    final_output_tokens: Option<usize>,
-    saw_tool_call_turn: bool,
+    current_provider_turn_started_at: Option<Instant>,
+    current_provider_generation_started_at: Option<Instant>,
+    llm_generation_duration: Duration,
+    current_provider_output_tokens: Option<usize>,
+    llm_output_tokens_total: usize,
     terminal_output_by_id: HashMap<String, String>,
     tool_call_ids_by_index: HashMap<usize, String>,
     tool_call_argument_output_by_index: HashMap<usize, String>,
@@ -691,19 +681,23 @@ struct RuntimeTurnState {
 impl RuntimeTurnState {
     fn new(model_id: String) -> Self {
         Self {
+            model_id: model_id.clone(),
             content: String::new(),
             final_content: None,
             reasoning_content: String::new(),
             output_progress: StreamingTokenProgress::new(model_id.clone()),
+            llm_output_progress: StreamingTokenProgress::new(model_id.clone()),
             input_progress: StreamingTokenProgress::new(model_id),
             is_thinking: false,
             reasoning_started_at: None,
             reasoning_finished_at: None,
             request_started_at: None,
             first_token_at: None,
-            permission_wait_duration: Duration::ZERO,
-            final_output_tokens: None,
-            saw_tool_call_turn: false,
+            current_provider_turn_started_at: None,
+            current_provider_generation_started_at: None,
+            llm_generation_duration: Duration::ZERO,
+            current_provider_output_tokens: None,
+            llm_output_tokens_total: 0,
             terminal_output_by_id: HashMap::new(),
             tool_call_ids_by_index: HashMap::new(),
             tool_call_argument_output_by_index: HashMap::new(),
@@ -715,16 +709,71 @@ impl RuntimeTurnState {
         self.request_started_at.get_or_insert(now);
     }
 
+    fn start_provider_turn(&mut self, now: Instant) {
+        self.mark_request_started(now);
+        self.current_provider_turn_started_at = Some(now);
+        self.current_provider_generation_started_at = None;
+        self.current_provider_output_tokens = None;
+        self.llm_output_progress = StreamingTokenProgress::new(self.model_id.clone());
+    }
+
+    fn record_provider_output_usage(&mut self, output_tokens: usize) {
+        self.current_provider_output_tokens = Some(
+            self.current_provider_output_tokens
+                .map(|current| current.max(output_tokens))
+                .unwrap_or(output_tokens),
+        );
+    }
+
+    fn complete_provider_turn(
+        &mut self,
+        response: &provider_protocol::PromptResponse,
+        finished_at: Instant,
+    ) {
+        let response_output_tokens = response
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.output_tokens)
+            .map(|tokens| tokens as usize);
+        let turn_output_tokens = self
+            .current_provider_output_tokens
+            .max(response_output_tokens);
+        let _ = self.llm_output_progress.flush(finished_at);
+        let estimated_output_tokens = self.llm_output_progress.total_tokens();
+        self.llm_output_tokens_total =
+            self.llm_output_tokens_total
+                .saturating_add(match turn_output_tokens {
+                    Some(output_tokens) => output_tokens,
+                    None => estimated_output_tokens,
+                });
+
+        if self.provider_turn_has_output(response, turn_output_tokens) {
+            self.first_token_at.get_or_insert(finished_at);
+            if let Some(generation_started_at) = self.current_provider_generation_started_at {
+                self.llm_generation_duration = self
+                    .llm_generation_duration
+                    .saturating_add(finished_at.saturating_duration_since(generation_started_at));
+            }
+        }
+
+        self.current_provider_turn_started_at = None;
+        self.current_provider_generation_started_at = None;
+        self.current_provider_output_tokens = None;
+    }
+
+    fn provider_turn_has_output(
+        &self,
+        response: &provider_protocol::PromptResponse,
+        output_tokens: Option<usize>,
+    ) -> bool {
+        self.current_provider_generation_started_at.is_some()
+            || output_tokens.is_some_and(|tokens| tokens > 0)
+            || !response.message.text_content().is_empty()
+            || !response.tool_calls.is_empty()
+    }
+
     fn capture_turn_response(&mut self, response: &provider_protocol::PromptResponse) {
         self.final_content = Some(response.message.text_content());
-    }
-
-    fn mark_tool_call_turn(&mut self) {
-        self.saw_tool_call_turn = true;
-    }
-
-    fn record_permission_wait(&mut self, duration: Duration) {
-        self.permission_wait_duration = self.permission_wait_duration.saturating_add(duration);
     }
 
     fn observe_content_chunk(
@@ -741,7 +790,7 @@ impl RuntimeTurnState {
         on_progress(ToolLoopProgress::AssistantDelta {
             content: content.to_string(),
         });
-        self.observe_token_delta(content, now, on_progress);
+        self.observe_provider_output_delta(content, now, on_progress);
     }
 
     fn observe_reasoning_chunk(
@@ -753,7 +802,7 @@ impl RuntimeTurnState {
         if content.is_empty() {
             return;
         }
-        self.first_token_at.get_or_insert(now);
+        self.mark_llm_output_started(now);
         if !self.is_thinking {
             self.is_thinking = true;
             self.reasoning_started_at.get_or_insert(now);
@@ -764,10 +813,24 @@ impl RuntimeTurnState {
         on_progress(ToolLoopProgress::ReasoningDelta {
             content: content.to_string(),
         });
-        self.observe_token_delta(content, now, on_progress);
+        self.observe_provider_output_delta(content, now, on_progress);
     }
 
-    fn observe_token_delta(
+    fn observe_provider_output_delta(
+        &mut self,
+        content: &str,
+        now: Instant,
+        on_progress: &mut impl FnMut(ToolLoopProgress),
+    ) {
+        self.observe_llm_output_delta(content, now);
+        self.observe_visible_output_delta(content, now, on_progress);
+    }
+
+    fn observe_llm_output_delta(&mut self, content: &str, now: Instant) {
+        let _ = self.llm_output_progress.observe_delta(content, now);
+    }
+
+    fn observe_visible_output_delta(
         &mut self,
         content: &str,
         now: Instant,
@@ -806,7 +869,7 @@ impl RuntimeTurnState {
             self.tool_call_argument_output_by_id
                 .insert(call_id.clone(), output.clone());
         }
-        self.observe_token_delta(delta, now, on_progress);
+        self.observe_provider_output_delta(delta, now, on_progress);
     }
 
     fn observe_response_tool_calls_completed(
@@ -845,12 +908,12 @@ impl RuntimeTurnState {
         if output.is_empty() {
             return;
         }
-        self.mark_generated_output_started(now, on_progress);
+        self.mark_completed_generated_output_observed(now, on_progress);
         self.tool_call_argument_output_by_index
             .insert(index, output.clone());
         self.tool_call_argument_output_by_id
             .insert(call.call_id.clone(), output.clone());
-        self.observe_token_delta(&output, now, on_progress);
+        self.observe_provider_output_delta(&output, now, on_progress);
     }
 
     fn mark_generated_output_started(
@@ -858,7 +921,30 @@ impl RuntimeTurnState {
         now: Instant,
         on_progress: &mut impl FnMut(ToolLoopProgress),
     ) {
+        self.mark_llm_output_started(now);
+        self.stop_reasoning_for_generated_output(now, on_progress);
+    }
+
+    fn mark_completed_generated_output_observed(
+        &mut self,
+        now: Instant,
+        on_progress: &mut impl FnMut(ToolLoopProgress),
+    ) {
         self.first_token_at.get_or_insert(now);
+        self.stop_reasoning_for_generated_output(now, on_progress);
+    }
+
+    fn mark_llm_output_started(&mut self, now: Instant) {
+        self.first_token_at.get_or_insert(now);
+        self.current_provider_generation_started_at
+            .get_or_insert(now);
+    }
+
+    fn stop_reasoning_for_generated_output(
+        &mut self,
+        now: Instant,
+        on_progress: &mut impl FnMut(ToolLoopProgress),
+    ) {
         if self.is_thinking {
             self.is_thinking = false;
             self.reasoning_finished_at = Some(now);
@@ -944,7 +1030,8 @@ impl RuntimeTurnState {
             self.is_thinking = false;
         }
         let _ = self.output_progress.flush(finished_at);
-        let metrics = self.performance_metrics(finished_at);
+        let _ = self.llm_output_progress.flush(finished_at);
+        let metrics = self.performance_metrics();
         let reasoning_content = trim_outer_blank_lines(&self.reasoning_content);
         let reasoning_duration = self.reasoning_duration();
         let content = self
@@ -963,20 +1050,13 @@ impl RuntimeTurnState {
         }
     }
 
-    fn performance_metrics(&self, finished_at: Instant) -> Option<ProviderRequestMetrics> {
+    fn performance_metrics(&self) -> Option<ProviderRequestMetrics> {
         let request_started_at = self.request_started_at?;
         let first_token_at = self.first_token_at?;
         Some(ProviderRequestMetrics {
             latency: first_token_at.saturating_duration_since(request_started_at),
-            output_tokens: if self.saw_tool_call_turn {
-                self.output_progress.total_tokens()
-            } else {
-                self.final_output_tokens
-                    .unwrap_or_else(|| self.output_progress.total_tokens())
-            },
-            duration: finished_at
-                .saturating_duration_since(request_started_at)
-                .saturating_sub(self.permission_wait_duration),
+            output_tokens: self.llm_output_tokens_total,
+            duration: self.llm_generation_duration,
         })
     }
 
@@ -1128,7 +1208,7 @@ fn terminal_output_delta<'a>(previous: &str, current: &'a str) -> &'a str {
 mod tests {
     use std::sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     };
     use std::time::{Duration, Instant};
 
@@ -1146,7 +1226,7 @@ mod tests {
         ToolPermissionRequest, ToolProgress, ToolResult, ToolTerminalSnapshot,
     };
 
-    use super::{ToolLoopOptions, ToolLoopProgress, run_tool_loop};
+    use super::{ToolLoopClock, ToolLoopOptions, ToolLoopProgress, run_tool_loop};
 
     struct FakeProvider {
         calls: Mutex<usize>,
@@ -1327,6 +1407,196 @@ mod tests {
                     sink.emit(StreamEvent::MessageCompleted(response.clone()));
                     Ok(response)
                 }
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    struct MixedUsageProvider;
+
+    impl ProviderClient for MixedUsageProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            request: PromptRequest,
+            sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+            Box::pin(async move {
+                let has_tool_result = request
+                    .messages
+                    .iter()
+                    .any(|message| message.first_tool_result().is_some());
+                sink.emit(StreamEvent::MessageStarted);
+                if !has_tool_result {
+                    let call = ToolCall::new("call-1", "echo", serde_json::json!({ "text": "hi" }));
+                    sink.emit(StreamEvent::TextDelta("hello world".to_string()));
+                    sink.emit(StreamEvent::UsageUpdated(TokenUsage::new(
+                        None,
+                        Some(20),
+                        None,
+                    )));
+                    let response = PromptResponse::new(
+                        Message::assistant_with_tool_calls(
+                            "hello world".to_string(),
+                            vec![call.clone()],
+                        ),
+                        provider_protocol::FinishReason::ToolCalls,
+                        Some(TokenUsage::new(None, Some(20), None)),
+                        vec![call],
+                    );
+                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    Ok(response)
+                } else {
+                    sink.emit(StreamEvent::TextDelta("done".to_string()));
+                    let response = PromptResponse::new(
+                        Message::text(MessageRole::Assistant, "done"),
+                        provider_protocol::FinishReason::Stop,
+                        None,
+                        Vec::new(),
+                    );
+                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    Ok(response)
+                }
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    #[derive(Clone)]
+    struct ManualClock {
+        started_at: Instant,
+        elapsed_ms: Arc<AtomicU64>,
+    }
+
+    impl ManualClock {
+        fn new() -> Self {
+            Self {
+                started_at: Instant::now(),
+                elapsed_ms: Arc::new(AtomicU64::new(0)),
+            }
+        }
+
+        fn now(&self) -> Instant {
+            self.started_at + Duration::from_millis(self.elapsed_ms.load(Ordering::SeqCst))
+        }
+
+        fn advance(&self, duration: Duration) {
+            let elapsed_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+            self.elapsed_ms.fetch_add(elapsed_ms, Ordering::SeqCst);
+        }
+
+        fn tool_loop_clock(&self) -> ToolLoopClock {
+            let clock = self.clone();
+            ToolLoopClock::new(move || clock.now())
+        }
+    }
+
+    struct TimedToolLoopProvider {
+        clock: ManualClock,
+    }
+
+    impl ProviderClient for TimedToolLoopProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            request: PromptRequest,
+            sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+            Box::pin(async move {
+                let has_tool_result = request
+                    .messages
+                    .iter()
+                    .any(|message| message.first_tool_result().is_some());
+                sink.emit(StreamEvent::MessageStarted);
+                self.clock.advance(Duration::from_millis(10));
+                if !has_tool_result {
+                    let call = ToolCall::new("call-1", "echo", serde_json::json!({ "text": "hi" }));
+                    sink.emit(StreamEvent::TextDelta("hello world".to_string()));
+                    self.clock.advance(Duration::from_millis(30));
+                    sink.emit(StreamEvent::UsageUpdated(TokenUsage::new(
+                        None,
+                        Some(20),
+                        None,
+                    )));
+                    let response = PromptResponse::new(
+                        Message::assistant_with_tool_calls(
+                            "hello world".to_string(),
+                            vec![call.clone()],
+                        ),
+                        provider_protocol::FinishReason::ToolCalls,
+                        Some(TokenUsage::new(None, Some(20), None)),
+                        vec![call],
+                    );
+                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    Ok(response)
+                } else {
+                    sink.emit(StreamEvent::TextDelta("done".to_string()));
+                    self.clock.advance(Duration::from_millis(30));
+                    sink.emit(StreamEvent::UsageUpdated(TokenUsage::new(
+                        None,
+                        Some(5),
+                        None,
+                    )));
+                    let response = PromptResponse::new(
+                        Message::text(MessageRole::Assistant, "done"),
+                        provider_protocol::FinishReason::Stop,
+                        Some(TokenUsage::new(None, Some(5), None)),
+                        Vec::new(),
+                    );
+                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    Ok(response)
+                }
+            })
+        }
+
+        fn list_models<'a>(
+            &'a self,
+        ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::chat_completions()
+        }
+    }
+
+    struct ResponseOnlyTimedTextProvider {
+        clock: ManualClock,
+    }
+
+    impl ProviderClient for ResponseOnlyTimedTextProvider {
+        fn stream_prompt<'a>(
+            &'a self,
+            _request: PromptRequest,
+            sink: &'a mut (dyn StreamEventSink + Send),
+        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+            Box::pin(async move {
+                sink.emit(StreamEvent::MessageStarted);
+                self.clock.advance(Duration::from_millis(100));
+                let response = PromptResponse::new(
+                    Message::text(MessageRole::Assistant, "done"),
+                    provider_protocol::FinishReason::Stop,
+                    None,
+                    Vec::new(),
+                );
+                sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                Ok(response)
             })
         }
 
@@ -1770,6 +2040,30 @@ mod tests {
             _cancellation: &'a CancellationToken,
         ) -> ToolExecutionFuture<'a> {
             Box::pin(async move { ToolResult::success(call.call_id, "echoed") })
+        }
+    }
+
+    struct ClockAdvanceTool {
+        clock: ManualClock,
+    }
+
+    impl Tool for ClockAdvanceTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new("echo")
+                .with_label("Echo")
+                .with_kind(ToolKind::Other)
+                .with_permission_policy(ToolPermissionPolicy::Always)
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: RuntimeToolCall,
+            _cancellation: &'a CancellationToken,
+        ) -> ToolExecutionFuture<'a> {
+            Box::pin(async move {
+                self.clock.advance(Duration::from_millis(100));
+                ToolResult::success(call.call_id, "echoed")
+            })
         }
     }
 
@@ -2863,7 +3157,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_loop_metrics_ignore_last_turn_usage_and_keep_cumulative_visible_output() {
+    async fn tool_loop_metrics_sum_provider_output_usage_without_tool_output() {
         let provider = ToolLoopUsageProvider;
         let mut executor = ToolExecutorRegistry::new();
         executor.insert(EchoTool);
@@ -2885,25 +3179,116 @@ mod tests {
         .expect("runtime should complete");
 
         let metrics = completion.metrics.expect("metrics should be recorded");
-        let started_at = Instant::now();
-        let mut progress = StreamingTokenProgress::new("gpt-4o");
-        let _ = progress.observe_delta("hello world", started_at);
-        let _ = progress.observe_delta(
-            &serde_json::json!({ "text": "hi" }).to_string(),
-            started_at + Duration::from_millis(50),
-        );
-        let _ = super::observe_complete_token_total(
-            &mut progress,
-            "echoed",
-            started_at + Duration::from_millis(100),
-        );
-        let _ = progress.observe_delta("done", started_at + Duration::from_millis(200));
-        let _ = progress.flush(started_at + Duration::from_millis(400));
-        let expected = progress.total_tokens();
 
         assert_eq!(
-            metrics.output_tokens, expected,
-            "tool-loop throughput should use cumulative visible output instead of last-turn provider usage"
+            metrics.output_tokens, 25,
+            "status-line throughput should use only cumulative LLM output usage"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_loop_metrics_fall_back_per_turn_when_usage_is_missing() {
+        let provider = MixedUsageProvider;
+        let mut executor = ToolExecutorRegistry::new();
+        executor.insert(EchoTool);
+        let request = PromptRequest::new(
+            "gpt-4o",
+            vec![Message::text(MessageRole::User, "call echo")],
+        );
+        let cancellation = CancellationToken::new();
+
+        let completion = run_tool_loop(
+            &provider,
+            request,
+            executor,
+            &cancellation,
+            ToolLoopOptions::default(),
+            |_| {},
+        )
+        .await
+        .expect("runtime should complete");
+
+        let mut fallback_progress = StreamingTokenProgress::new("gpt-4o");
+        let fallback_tokens = fallback_progress
+            .observe_delta("done", Instant::now())
+            .expect("first fallback delta should emit tokens");
+        let metrics = completion.metrics.expect("metrics should be recorded");
+
+        assert_eq!(
+            metrics.output_tokens,
+            20 + fallback_tokens,
+            "turns without provider usage should fall back to local LLM output estimates"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_loop_metrics_duration_excludes_latency_and_tool_execution() {
+        let clock = ManualClock::new();
+        let provider = TimedToolLoopProvider {
+            clock: clock.clone(),
+        };
+        let mut executor = ToolExecutorRegistry::new();
+        executor.insert(ClockAdvanceTool {
+            clock: clock.clone(),
+        });
+        let request = PromptRequest::new(
+            "gpt-4o",
+            vec![Message::text(MessageRole::User, "call echo")],
+        );
+        let cancellation = CancellationToken::new();
+
+        let completion = run_tool_loop(
+            &provider,
+            request,
+            executor,
+            &cancellation,
+            ToolLoopOptions {
+                clock: clock.tool_loop_clock(),
+                ..ToolLoopOptions::default()
+            },
+            |_| {},
+        )
+        .await
+        .expect("runtime should complete");
+
+        let metrics = completion.metrics.expect("metrics should be recorded");
+
+        assert_eq!(
+            metrics.duration,
+            Duration::from_millis(60),
+            "status-line throughput duration should include only LLM generation windows"
+        );
+    }
+
+    #[tokio::test]
+    async fn response_only_metrics_do_not_count_wait_as_generation_duration() {
+        let clock = ManualClock::new();
+        let provider = ResponseOnlyTimedTextProvider {
+            clock: clock.clone(),
+        };
+        let request = PromptRequest::new("gpt-4o", vec![Message::text(MessageRole::User, "hello")]);
+        let cancellation = CancellationToken::new();
+
+        let completion = run_tool_loop(
+            &provider,
+            request,
+            ToolExecutorRegistry::new(),
+            &cancellation,
+            ToolLoopOptions {
+                clock: clock.tool_loop_clock(),
+                ..ToolLoopOptions::default()
+            },
+            |_| {},
+        )
+        .await
+        .expect("runtime should complete");
+
+        let metrics = completion.metrics.expect("metrics should be recorded");
+
+        assert_eq!(
+            metrics.duration,
+            Duration::ZERO,
+            "response-only providers should not report provider wait time as LLM generation time"
         );
     }
 

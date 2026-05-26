@@ -6,7 +6,9 @@ use std::{
 
 use app_config::appconfig::{
     AppConfigError, ReasoningContentDisplay, UserInputStyle, load_from_paths,
+    persist_managed_search_tool_authorization_to_path,
 };
+use runtime_domain::session::ManagedSearchTool;
 
 #[test]
 fn load_defaults_to_cx_when_no_config_exists() {
@@ -544,6 +546,8 @@ fn load_defaults_runtime_request_policy() {
     assert_eq!(config.runtime.request_retry_delays, vec![1, 2, 3]);
     assert_eq!(config.runtime.request_timeout_seconds, 120);
     assert_eq!(config.runtime.tool_max_turns, None);
+    assert_eq!(config.runtime.allow_managed_rg, None);
+    assert_eq!(config.runtime.allow_managed_fd, None);
 }
 
 #[test]
@@ -561,6 +565,36 @@ fn load_accepts_configured_runtime_request_policy() {
     assert_eq!(config.runtime.request_retry_delays, vec![1, 3, 3, 3, 3]);
     assert_eq!(config.runtime.request_timeout_seconds, 240);
     assert_eq!(config.runtime.tool_max_turns, Some(11));
+}
+
+#[test]
+fn load_accepts_managed_search_tool_authorization_flags() {
+    let working_dir = temp_test_dir("load-runtime-managed-search-tools-working");
+    write_config(
+        &working_dir.join(".lumos").join("config.toml"),
+        "[runtime]\nallow_managed_rg = true\nallow_managed_fd = false\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("runtime managed search tool flags should load");
+
+    assert_eq!(config.runtime.allow_managed_rg, Some(true));
+    assert_eq!(config.runtime.allow_managed_fd, Some(false));
+}
+
+#[test]
+fn persists_managed_search_tool_authorization_to_user_config() {
+    let working_dir = temp_test_dir("persist-managed-search-authorization");
+    let config_path = working_dir.join("config.toml");
+    write_config(&config_path, "[runtime]\nrequest_timeout_seconds = 240\n");
+
+    persist_managed_search_tool_authorization_to_path(&config_path, ManagedSearchTool::Ripgrep)
+        .expect("authorization should be written");
+
+    let content = fs::read_to_string(&config_path).expect("config should be readable");
+    assert!(content.contains("request_timeout_seconds = 240"));
+    assert!(content.contains("allow_managed_rg = true"));
+    assert!(!content.contains("allow_managed_fd = true"));
 }
 
 #[test]

@@ -1575,6 +1575,148 @@ fn single_exploration_tool_call_renders_as_standalone_row() {
 }
 
 #[test]
+fn grouped_grep_and_find_keep_specific_actions_and_show_workspace_path() {
+    let mut item = ToolResultItem::from_exploration_tool_activity(
+        completed_grep_call("workspace_relative_path", None),
+        ToolActivityRenderMode::Compact,
+    )
+    .expect("grep should be an exploration tool activity");
+    assert!(item.append_exploration_tool_activity(completed_find_call("**/*.rs", Some("."))));
+    assert!(item.mark_exploration_complete());
+
+    let rendered_plain = item
+        .render_lines(120, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec![
+            "● Explored".to_string(),
+            "  └ Grep workspace_relative_path in .".to_string(),
+            "    Find **/*.rs in .".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn grouped_grep_and_find_coalesce_consecutive_patterns_by_action_and_path() {
+    let mut item = ToolResultItem::from_exploration_tool_activity(
+        completed_grep_call("hello", None),
+        ToolActivityRenderMode::Compact,
+    )
+    .expect("grep should be an exploration tool activity");
+    assert!(item.append_exploration_tool_activity(completed_grep_call("import", Some("."))));
+    assert!(item.append_exploration_tool_activity(completed_grep_call("class", Some("crates"))));
+    assert!(item.append_exploration_tool_activity(completed_find_call("**/*.toml", None)));
+    assert!(item.append_exploration_tool_activity(completed_find_call("**/*.md", Some("."))));
+    assert!(item.mark_exploration_complete());
+
+    let rendered_plain = item
+        .render_lines(120, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec![
+            "● Explored".to_string(),
+            "  └ Grep hello|import in .".to_string(),
+            "    Grep class in crates".to_string(),
+            "    Find **/*.toml|**/*.md in .".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn exploration_group_uses_secondary_style_for_search_and_target_separators() {
+    let palette = default_palette();
+    let mut search_item = ToolResultItem::from_exploration_tool_activity(
+        completed_grep_call("hello", None),
+        ToolActivityRenderMode::Compact,
+    )
+    .expect("grep should be an exploration tool activity");
+    assert!(search_item.append_exploration_tool_activity(completed_grep_call("import", Some("."))));
+    assert!(search_item.mark_exploration_complete());
+
+    let search_lines = search_item.render_lines(120, palette);
+    assert_eq!(
+        line_to_plain_text(&search_lines[1]),
+        "  └ Grep hello|import in ."
+    );
+    assert_eq!(
+        span_fg(&search_lines[1], "|"),
+        Some(palette.secondary),
+        "coalesced grep pattern separator should be visually secondary"
+    );
+    assert_eq!(
+        span_fg(&search_lines[1], " in "),
+        Some(palette.secondary),
+        "grep path connector should be visually secondary"
+    );
+
+    let mut read_item = ToolResultItem::from_exploration_tool_activity(
+        completed_read_call("Cargo.toml"),
+        ToolActivityRenderMode::Compact,
+    )
+    .expect("read should be an exploration tool activity");
+    assert!(read_item.append_exploration_tool_activity(completed_read_call("AGENTS.md")));
+    assert!(read_item.mark_exploration_complete());
+
+    let read_lines = read_item.render_lines(120, palette);
+    assert_eq!(
+        line_to_plain_text(&read_lines[1]),
+        "  └ Read Cargo.toml, AGENTS.md"
+    );
+    assert_eq!(
+        span_fg(&read_lines[1], ", "),
+        Some(palette.secondary),
+        "read target separator should be visually secondary"
+    );
+}
+
+#[test]
+fn standalone_grep_and_find_show_specific_action_without_search_prefix() {
+    let palette = default_palette();
+    let grep_item = ToolResultItem::from_runtime_tool_activity(
+        completed_grep_call("ToolProgress", None),
+        ToolActivityRenderMode::Compact,
+    );
+    let find_item = ToolResultItem::from_runtime_tool_activity(
+        completed_find_call("crates/**/*.rs", Some("crates")),
+        ToolActivityRenderMode::Compact,
+    );
+
+    let grep_lines = grep_item.render_lines(120, palette);
+    let find_lines = find_item.render_lines(120, palette);
+    let grep_plain = grep_lines
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+    let find_plain = find_lines
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(grep_plain, vec!["● Grep ToolProgress in .".to_string()]);
+    assert_eq!(
+        find_plain,
+        vec!["● Find crates/**/*.rs in crates".to_string()]
+    );
+    assert_eq!(span_fg(&grep_lines[0], " in "), Some(palette.secondary));
+    assert_eq!(span_fg(&find_lines[0], " in "), Some(palette.secondary));
+}
+
+fn span_fg(line: &ratatui::text::Line<'_>, text: &str) -> Option<ratatui::style::Color> {
+    line.spans
+        .iter()
+        .find(|span| span.content.as_ref() == text)
+        .and_then(|span| span.style.fg)
+}
+
+#[test]
 fn failed_exploration_tool_call_renders_as_standalone_failed_row() {
     let palette = default_palette();
     let mut item = ToolResultItem::from_exploration_tool_activity(
@@ -1713,6 +1855,44 @@ fn completed_read_call(path: &str) -> RuntimeToolActivity {
         }],
         raw_input: Some(serde_json::json!({ "path": path }).into()),
         raw_output: Some("content".into()),
+    }
+}
+
+fn completed_grep_call(pattern: &str, path: Option<&str>) -> RuntimeToolActivity {
+    let mut raw_input = serde_json::json!({ "pattern": pattern });
+    if let Some(path) = path {
+        raw_input["path"] = serde_json::json!(path);
+    }
+
+    RuntimeToolActivity {
+        activity_id: format!("call-grep-{pattern}"),
+        title: "Grep".to_string(),
+        kind: RuntimeToolKind::Search,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text(format!(
+            "src/lib.rs:1:{pattern}"
+        ))],
+        locations: Vec::new(),
+        raw_input: Some(raw_input.into()),
+        raw_output: Some(format!("src/lib.rs:1:{pattern}").into()),
+    }
+}
+
+fn completed_find_call(pattern: &str, path: Option<&str>) -> RuntimeToolActivity {
+    let mut raw_input = serde_json::json!({ "pattern": pattern });
+    if let Some(path) = path {
+        raw_input["path"] = serde_json::json!(path);
+    }
+
+    RuntimeToolActivity {
+        activity_id: format!("call-find-{pattern}"),
+        title: "Find".to_string(),
+        kind: RuntimeToolKind::Search,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text("src/lib.rs".to_string())],
+        locations: Vec::new(),
+        raw_input: Some(raw_input.into()),
+        raw_output: Some("src/lib.rs".into()),
     }
 }
 

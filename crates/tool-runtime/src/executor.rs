@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    ToolCall, ToolDefinition, ToolPermissionFileSnapshot, ToolPermissionPreview, ToolRegistry,
+    SharedToolPermissionHandler, ToolCall, ToolDefinition, ToolPermissionDecision,
+    ToolPermissionFileSnapshot, ToolPermissionPreview, ToolPermissionRequest, ToolRegistry,
     ToolResult, schema::validate_tool_arguments,
 };
 
@@ -19,7 +20,9 @@ pub type ToolExecutionFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Sen
 /// `ToolProgress` 描述工具执行期间可向 runtime/TUI 流式更新的事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolProgress {
+    SystemMessage { message: String },
     TerminalUpdated { snapshot: ToolTerminalSnapshot },
+    ManagedSearchToolAuthorization { tool_name: String },
 }
 
 /// `ToolTerminalSnapshot` 描述执行类工具的 terminal 输出快照。
@@ -69,11 +72,12 @@ impl ToolProgressSink {
 }
 
 /// `ToolExecutionContext` 保存一次工具调用的取消与进度上报上下文。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolExecutionContext<'a> {
     cancellation: &'a CancellationToken,
     progress_sink: ToolProgressSink,
     permission_snapshot: Option<ToolPermissionFileSnapshot>,
+    permission_handler: Option<SharedToolPermissionHandler>,
 }
 
 impl<'a> ToolExecutionContext<'a> {
@@ -83,6 +87,7 @@ impl<'a> ToolExecutionContext<'a> {
             cancellation,
             progress_sink: ToolProgressSink::none(),
             permission_snapshot: None,
+            permission_handler: None,
         }
     }
 
@@ -101,6 +106,15 @@ impl<'a> ToolExecutionContext<'a> {
         self
     }
 
+    /// `with_permission_handler` 允许工具执行中发起 runtime-owned 确认请求。
+    pub fn with_permission_handler(
+        mut self,
+        permission_handler: Option<SharedToolPermissionHandler>,
+    ) -> Self {
+        self.permission_handler = permission_handler;
+        self
+    }
+
     /// `cancellation` 返回本次工具调用的取消 token。
     pub const fn cancellation(&self) -> &'a CancellationToken {
         self.cancellation
@@ -114,6 +128,24 @@ impl<'a> ToolExecutionContext<'a> {
     /// `emit` 向 runtime 发送一次工具进度事件。
     pub fn emit(&self, progress: ToolProgress) {
         self.progress_sink.emit(progress);
+    }
+
+    /// `request_permission` 复用 runtime 权限通道，避免工具内部私建审批流程。
+    pub async fn request_permission(
+        &self,
+        request: ToolPermissionRequest,
+    ) -> ToolPermissionDecision {
+        let Some(permission_handler) = self.permission_handler.as_ref() else {
+            return ToolPermissionDecision::Deny {
+                message: format!(
+                    "Tool permission denied: {} requires approval",
+                    request.definition.name
+                ),
+            };
+        };
+        permission_handler
+            .request_permission(request, self.cancellation)
+            .await
     }
 }
 

@@ -118,6 +118,9 @@ fn conversation_progress_from_runtime_progress(
         tool_loop_runtime::ToolLoopProgress::ProviderTurnStarted => {
             ConversationProgress::ProviderTurnStarted
         }
+        tool_loop_runtime::ToolLoopProgress::SystemMessage { message } => {
+            ConversationProgress::SystemMessage { message }
+        }
         tool_loop_runtime::ToolLoopProgress::ProviderContextMessage { message } => {
             ConversationProgress::ProviderContextMessage { message }
         }
@@ -144,6 +147,9 @@ fn conversation_progress_from_runtime_progress(
         }
         tool_loop_runtime::ToolLoopProgress::TerminalUpdated { snapshot } => {
             ConversationProgress::TerminalUpdated { snapshot }
+        }
+        tool_loop_runtime::ToolLoopProgress::ManagedSearchToolAuthorization { tool } => {
+            ConversationProgress::ManagedSearchToolAuthorization { tool }
         }
     }
 }

@@ -16,6 +16,9 @@ pub(super) fn apply_conversation_event(
     event: ConversationEvent,
 ) {
     let runtime_event = match event {
+        ConversationEvent::SystemMessage { message } => {
+            RuntimeEvent::SystemMessage { target, message }
+        }
         ConversationEvent::Retrying { message } => RuntimeEvent::Retrying { target, message },
         ConversationEvent::OutputTokenEstimate { total_tokens } => {
             RuntimeEvent::OutputTokenEstimate {
@@ -53,6 +56,7 @@ pub(super) fn apply_conversation_event(
             target: target.expect("conversation target should be available for terminal update"),
             snapshot,
         },
+        ConversationEvent::ManagedSearchToolAuthorization { .. } => return,
         ConversationEvent::PermissionRequested { request } => RuntimeEvent::PermissionRequested {
             target: target.expect("conversation target should be available for permission request"),
             request,

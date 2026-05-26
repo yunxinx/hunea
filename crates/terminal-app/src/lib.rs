@@ -17,6 +17,7 @@ use terminal_ui::{
 mod runtime;
 
 use runtime::{AppRuntimeCoordinator, AppRuntimeOptions};
+use tool_runtime::builtin::ManagedSearchToolConfig;
 
 /// `AppRunError` 区分用户配置错误与运行期错误，便于 CLI 使用不同输出策略。
 #[derive(Debug)]
@@ -205,6 +206,8 @@ fn runtime_options_from_app_config_and_models(
     AppRuntimeOptions {
         model_config_path: loaded_models.source_path.clone(),
         runtime_request_policy: runtime_request_policy_from_config(&config.runtime),
+        managed_search_tools: managed_search_tools_from_config(&config.runtime),
+        managed_search_authorization_config_path: appconfig::user_config_file_path(),
     }
 }
 
@@ -215,6 +218,13 @@ fn runtime_request_policy_from_config(config: &RuntimeConfig) -> RuntimeRequestP
         config.request_timeout_seconds,
     )
     .with_tool_max_turns(config.tool_max_turns)
+}
+
+fn managed_search_tools_from_config(config: &RuntimeConfig) -> ManagedSearchToolConfig {
+    ManagedSearchToolConfig {
+        allow_managed_rg: config.allow_managed_rg,
+        allow_managed_fd: config.allow_managed_fd,
+    }
 }
 
 fn model_options_from_configs(
@@ -505,6 +515,8 @@ mod tests {
                 request_retry_delays: vec![1, 3, 3, 3],
                 request_timeout_seconds: 240,
                 tool_max_turns: Some(11),
+                allow_managed_rg: Some(true),
+                allow_managed_fd: Some(false),
             },
             debug: DebugConfig { enabled: false },
         };
@@ -521,6 +533,8 @@ mod tests {
             std::time::Duration::from_secs(240)
         );
         assert_eq!(options.runtime_request_policy.tool_max_turns(), Some(11));
+        assert_eq!(options.managed_search_tools.allow_managed_rg, Some(true));
+        assert_eq!(options.managed_search_tools.allow_managed_fd, Some(false));
     }
 
     #[test]
@@ -599,6 +613,8 @@ mod tests {
             request_retry_delays: vec![1, 2, 3],
             request_timeout_seconds: 120,
             tool_max_turns: None,
+            allow_managed_rg: None,
+            allow_managed_fd: None,
         }
     }
 

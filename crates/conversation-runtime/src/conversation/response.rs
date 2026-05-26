@@ -7,6 +7,9 @@ pub use runtime_domain::session::ConversationResponse;
 /// `ConversationProgress` 描述对话工具循环期间的内部进度事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ConversationProgress {
+    SystemMessage {
+        message: String,
+    },
     ProviderTurnStarted,
     ProviderContextMessage {
         message: Message,
@@ -34,6 +37,9 @@ pub(crate) enum ConversationProgress {
     },
     TerminalUpdated {
         snapshot: runtime_domain::session::RuntimeTerminalSnapshot,
+    },
+    ManagedSearchToolAuthorization {
+        tool: runtime_domain::session::ManagedSearchTool,
     },
 }
 

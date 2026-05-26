@@ -6,7 +6,7 @@ use std::{
 use directories::ProjectDirs;
 use serde::Deserialize;
 
-use runtime_domain::envinfo;
+use runtime_domain::{envinfo, session::ManagedSearchTool};
 
 /// @ 文件选择浮窗至少需要 3 行，避免列表在导航时过于局促。
 pub const FILE_PICKER_POPUP_MIN_HEIGHT: u16 = 3;
@@ -69,6 +69,8 @@ pub struct RuntimeConfig {
     pub request_retry_delays: Vec<u64>,
     pub request_timeout_seconds: u64,
     pub tool_max_turns: Option<usize>,
+    pub allow_managed_rg: Option<bool>,
+    pub allow_managed_fd: Option<bool>,
 }
 
 /// `AppConfigError` 描述配置加载或校验失败。
@@ -160,6 +162,8 @@ struct FileRuntimeConfig {
     request_retry_delays: Option<Vec<u64>>,
     request_timeout_seconds: Option<u64>,
     tool_max_turns: Option<usize>,
+    allow_managed_rg: Option<bool>,
+    allow_managed_fd: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -192,6 +196,8 @@ impl Config {
                 request_retry_delays: vec![1, 2, 3],
                 request_timeout_seconds: 120,
                 tool_max_turns: None,
+                allow_managed_rg: None,
+                allow_managed_fd: None,
             },
             debug: DebugConfig { enabled: false },
         }
@@ -379,6 +385,53 @@ pub fn load_from_paths(
         working_dir.map(Path::to_path_buf),
         user_config_dir.map(Path::to_path_buf),
     )
+}
+
+/// `user_config_file_path` 返回用户级 `config.toml` 的默认写入位置。
+pub fn user_config_file_path() -> Option<PathBuf> {
+    user_config_directory().map(|path| path.join("config.toml"))
+}
+
+/// `persist_managed_search_tool_authorization_to_path` 将受管搜索工具授权写入指定配置文件。
+pub fn persist_managed_search_tool_authorization_to_path(
+    path: &Path,
+    tool: ManagedSearchTool,
+) -> Result<(), AppConfigError> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(AppConfigError::Read {
+                path: path.to_path_buf(),
+                source: error,
+            });
+        }
+    };
+    let mut document =
+        content
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| AppConfigError::Edit {
+                path: path.to_path_buf(),
+                source: error,
+            })?;
+    document["runtime"][managed_search_tool_authorization_field(tool)] = toml_edit::value(true);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| AppConfigError::Write {
+            path: path.to_path_buf(),
+            source: error,
+        })?;
+    }
+    fs::write(path, document.to_string()).map_err(|error| AppConfigError::Write {
+        path: path.to_path_buf(),
+        source: error,
+    })
+}
+
+fn managed_search_tool_authorization_field(tool: ManagedSearchTool) -> &'static str {
+    match tool {
+        ManagedSearchTool::Ripgrep => "allow_managed_rg",
+        ManagedSearchTool::Fd => "allow_managed_fd",
+    }
 }
 
 fn load_with_lookups(
@@ -577,6 +630,8 @@ fn merge_runtime_config(
         && file_config.request_retry_delays.is_none()
         && file_config.request_timeout_seconds.is_none()
         && file_config.tool_max_turns.is_none()
+        && file_config.allow_managed_rg.is_none()
+        && file_config.allow_managed_fd.is_none()
     {
         return Ok(());
     }
@@ -611,6 +666,12 @@ fn merge_runtime_config(
     config.request_retry_delays = delays;
     config.request_timeout_seconds = timeout_seconds;
     config.tool_max_turns = tool_max_turns;
+    if let Some(allow_managed_rg) = file_config.allow_managed_rg {
+        config.allow_managed_rg = Some(allow_managed_rg);
+    }
+    if let Some(allow_managed_fd) = file_config.allow_managed_fd {
+        config.allow_managed_fd = Some(allow_managed_fd);
+    }
     Ok(())
 }
 

@@ -839,6 +839,10 @@ impl ToolResultItem {
             return list_dir_tool_call_title_chunks(call);
         }
 
+        if let Some(chunks) = activity::specific_search_tool_activity_title_chunks(call, palette) {
+            return chunks;
+        }
+
         let title = runtime_tool_activity_display_title(call);
         let title_style = Style::new().add_modifier(Modifier::BOLD);
         if is_finished_execute_like_tool_call(call) {

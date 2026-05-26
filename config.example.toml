@@ -123,6 +123,12 @@ request_timeout_seconds = 120
 # 默认不限制；设置为正整数后，超过该轮次会终止本次请求。
 # tool_max_turns = 32
 
+# `allow_managed_rg` / `allow_managed_fd` 记录是否允许 lumos 在系统 PATH
+# 和 bundled binary 都不可用时，下载、校验并安装 pin 版本的 `rg` / `fd`。
+# 缺省或 false 表示下次实际需要下载时重新询问；true 表示同类下载可直接继续。
+# allow_managed_rg = true
+# allow_managed_fd = true
+
 [debug]
 # `enabled` 控制是否显示仅用于本地调试 TUI 效果的斜杠命令。
 # 默认关闭；开启后会显示 `/tool-debug` 等临时调试入口。

@@ -17,7 +17,7 @@ use super::{
     activity::{
         is_list_dir_tool_call, is_runtime_read_tool_activity, list_dir_tool_call_title_chunks,
         runtime_read_tool_activity_title_chunks, runtime_tool_activity_display_title,
-        style_for_color,
+        specific_search_tool_activity_parts, style_for_color,
     },
 };
 
@@ -25,6 +25,33 @@ use super::{
 pub(super) struct ExplorationDisplayLine {
     action: &'static str,
     chunks: Vec<HighlightChunk>,
+    coalesce: ExplorationDisplayCoalesce,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExplorationDisplayCoalesce {
+    None,
+    TargetList,
+    SpecificSearch { path: String },
+}
+
+impl ExplorationDisplayLine {
+    fn coalesce_separator(&self, next: &Self) -> Option<&'static str> {
+        if self.action != next.action {
+            return None;
+        }
+
+        match (&self.coalesce, &next.coalesce) {
+            (ExplorationDisplayCoalesce::TargetList, ExplorationDisplayCoalesce::TargetList) => {
+                Some(", ")
+            }
+            (
+                ExplorationDisplayCoalesce::SpecificSearch { path: left },
+                ExplorationDisplayCoalesce::SpecificSearch { path: right },
+            ) if left == right => Some("|"),
+            _ => None,
+        }
+    }
 }
 
 pub(super) fn is_groupable_exploration_tool_call(call: &RuntimeToolActivity) -> bool {
@@ -56,6 +83,7 @@ fn exploration_display_line_for_call(call: &RuntimeToolActivity) -> Option<Explo
         return Some(ExplorationDisplayLine {
             action: "Read",
             chunks: title_detail_chunks(runtime_read_tool_activity_title_chunks(call), "Read"),
+            coalesce: ExplorationDisplayCoalesce::TargetList,
         });
     }
 
@@ -63,13 +91,26 @@ fn exploration_display_line_for_call(call: &RuntimeToolActivity) -> Option<Explo
         return Some(ExplorationDisplayLine {
             action: "List",
             chunks: title_detail_chunks(list_dir_tool_call_title_chunks(call), "List"),
+            coalesce: ExplorationDisplayCoalesce::TargetList,
         });
     }
 
     if call.kind == RuntimeToolKind::Search {
+        if let Some(parts) = specific_search_tool_activity_parts(call) {
+            return Some(ExplorationDisplayLine {
+                action: parts.action,
+                chunks: vec![HighlightChunk {
+                    text: parts.pattern,
+                    style: Style::new(),
+                }],
+                coalesce: ExplorationDisplayCoalesce::SpecificSearch { path: parts.path },
+            });
+        }
+
         return Some(ExplorationDisplayLine {
             action: "Search",
             chunks: search_tool_call_detail_chunks(call),
+            coalesce: ExplorationDisplayCoalesce::None,
         });
     }
 
@@ -113,12 +154,11 @@ fn search_tool_call_detail_chunks(call: &RuntimeToolActivity) -> Vec<HighlightCh
 pub(super) fn coalesce_adjacent_target_display_lines(lines: &mut Vec<ExplorationDisplayLine>) {
     let mut coalesced: Vec<ExplorationDisplayLine> = Vec::with_capacity(lines.len());
     for line in lines.drain(..) {
-        if is_target_list_action(line.action)
-            && let Some(previous) = coalesced.last_mut()
-            && previous.action == line.action
+        if let Some(previous) = coalesced.last_mut()
+            && let Some(separator) = previous.coalesce_separator(&line)
         {
             previous.chunks.push(HighlightChunk {
-                text: ", ".to_string(),
+                text: separator.to_string(),
                 style: Style::new(),
             });
             previous.chunks.extend(line.chunks);
@@ -129,10 +169,6 @@ pub(super) fn coalesce_adjacent_target_display_lines(lines: &mut Vec<Exploration
     }
 
     *lines = coalesced;
-}
-
-fn is_target_list_action(action: &str) -> bool {
-    matches!(action, "Read" | "List")
 }
 
 pub(super) fn failed_tool_call_detail_text(call: &RuntimeToolActivity) -> String {
@@ -244,7 +280,17 @@ pub(super) fn wrap_exploration_display_line(
             text: " ".to_string(),
             style: Style::new(),
         });
-        chunks.extend(display_line.chunks.clone());
+        chunks.extend(display_line.styled_chunks(palette));
+    }
+    if let ExplorationDisplayCoalesce::SpecificSearch { path } = &display_line.coalesce {
+        chunks.push(HighlightChunk {
+            text: " in ".to_string(),
+            style: secondary_text_style(palette),
+        });
+        chunks.push(HighlightChunk {
+            text: path.clone(),
+            style: Style::new(),
+        });
     }
 
     let wrapped = wrap_highlight_chunks_soft(&[chunks], content_width);
@@ -270,4 +316,41 @@ pub(super) fn wrap_exploration_display_line(
             Line::from(spans)
         })
         .collect()
+}
+
+impl ExplorationDisplayLine {
+    fn styled_chunks(&self, palette: TerminalPalette) -> Vec<HighlightChunk> {
+        match &self.coalesce {
+            ExplorationDisplayCoalesce::TargetList => self
+                .chunks
+                .iter()
+                .map(|chunk| {
+                    if chunk.text == ", " {
+                        HighlightChunk {
+                            text: chunk.text.clone(),
+                            style: secondary_text_style(palette),
+                        }
+                    } else {
+                        chunk.clone()
+                    }
+                })
+                .collect(),
+            ExplorationDisplayCoalesce::SpecificSearch { .. } => self
+                .chunks
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| {
+                    if index % 2 == 1 {
+                        HighlightChunk {
+                            text: chunk.text.clone(),
+                            style: secondary_text_style(palette),
+                        }
+                    } else {
+                        chunk.clone()
+                    }
+                })
+                .collect(),
+            ExplorationDisplayCoalesce::None => self.chunks.clone(),
+        }
+    }
 }

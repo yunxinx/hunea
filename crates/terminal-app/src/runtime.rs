@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use app_config::appconfig;
 use conversation_runtime::{
     ConversationWorker, ModelRefreshWorker, ProviderConversation, models as provider_models,
 };
@@ -7,18 +8,25 @@ use runtime_domain::{
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     request_policy::RuntimeRequestPolicy,
     session::{
-        ConversationEvent, ConversationTurnRequest, RuntimeCommand, RuntimeCommandReceipt,
-        RuntimeEvent, RuntimeRequestMetrics, RuntimeTarget,
+        ConversationEvent, ConversationTurnRequest, ManagedSearchTool, RuntimeCommand,
+        RuntimeCommandReceipt, RuntimeEvent, RuntimeRequestMetrics, RuntimeTarget,
     },
 };
 use terminal_ui::RuntimeCoordinator;
-use tool_runtime::{ToolExecutorRegistry, builtin::workspace_tool_registry};
+use tool_runtime::{
+    ToolExecutorRegistry,
+    builtin::{
+        ManagedSearchToolConfig, WorkspaceToolRegistryOptions, workspace_tool_registry_with_options,
+    },
+};
 
 /// `AppRuntimeOptions` 保存 app 层对话运行时所需的配置。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AppRuntimeOptions {
     pub(crate) model_config_path: Option<PathBuf>,
     pub(crate) runtime_request_policy: RuntimeRequestPolicy,
+    pub(crate) managed_search_tools: ManagedSearchToolConfig,
+    pub(crate) managed_search_authorization_config_path: Option<PathBuf>,
 }
 
 /// `AppRuntimeCoordinator` 负责把 TUI runtime command 连接到对话运行时。
@@ -33,12 +41,13 @@ pub(crate) struct AppRuntimeCoordinator {
 
 impl AppRuntimeCoordinator {
     pub(crate) fn new(options: AppRuntimeOptions) -> Self {
+        let workspace_tools = conversation_workspace_tools(&options.managed_search_tools);
         Self {
             options,
             conversation_worker: ConversationWorker::default(),
             provider_conversation: ProviderConversation::default(),
             model_refresh: ModelRefreshWorker::default(),
-            workspace_tools: conversation_workspace_tools(),
+            workspace_tools,
             pending_runtime_events: Vec::new(),
         }
     }
@@ -78,7 +87,8 @@ impl AppRuntimeCoordinator {
                 self.conversation_worker.reset_after_clear();
                 self.provider_conversation.clear();
                 self.model_refresh.reset_after_clear();
-                self.workspace_tools = conversation_workspace_tools();
+                self.workspace_tools =
+                    conversation_workspace_tools(&self.options.managed_search_tools);
                 self.pending_runtime_events.clear();
                 Ok(RuntimeCommandReceipt::Accepted)
             }
@@ -189,6 +199,14 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
                 break;
             };
             self.reconcile_conversation_updates();
+            if let ConversationEvent::ManagedSearchToolAuthorization { tool } = event {
+                if let Some(event) =
+                    self.persist_managed_search_tool_authorization(tool, target.clone())
+                {
+                    events.push(event);
+                }
+                continue;
+            }
             if event.is_terminal() {
                 self.provider_conversation.rollback_pending_user();
             }
@@ -251,11 +269,64 @@ impl AppRuntimeCoordinator {
         self.provider_conversation.commit_pending_user();
         self.provider_conversation.commit_turn_messages(messages);
     }
+
+    fn persist_managed_search_tool_authorization(
+        &mut self,
+        tool: ManagedSearchTool,
+        target: Option<RuntimeTarget>,
+    ) -> Option<RuntimeEvent> {
+        let Some(path) = self
+            .options
+            .managed_search_authorization_config_path
+            .as_deref()
+        else {
+            return Some(RuntimeEvent::SystemMessage {
+                target,
+                message: format!(
+                    "{} installed, but managed download authorization was not saved: user config path is unavailable",
+                    tool.binary_name()
+                ),
+            });
+        };
+
+        match appconfig::persist_managed_search_tool_authorization_to_path(path, tool) {
+            Ok(()) => {
+                mark_managed_search_tool_authorized(&mut self.options.managed_search_tools, tool);
+                self.workspace_tools =
+                    conversation_workspace_tools(&self.options.managed_search_tools);
+                None
+            }
+            Err(error) => Some(RuntimeEvent::SystemMessage {
+                target,
+                message: format!(
+                    "{} installed, but managed download authorization was not saved: {error}",
+                    tool.binary_name()
+                ),
+            }),
+        }
+    }
 }
 
-fn conversation_workspace_tools() -> ToolExecutorRegistry {
+fn conversation_workspace_tools(
+    managed_search_tools: &ManagedSearchToolConfig,
+) -> ToolExecutorRegistry {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    workspace_tool_registry(root)
+    workspace_tool_registry_with_options(
+        root,
+        WorkspaceToolRegistryOptions {
+            managed_search_tools: managed_search_tools.clone(),
+        },
+    )
+}
+
+fn mark_managed_search_tool_authorized(
+    config: &mut ManagedSearchToolConfig,
+    tool: ManagedSearchTool,
+) {
+    match tool {
+        ManagedSearchTool::Ripgrep => config.allow_managed_rg = Some(true),
+        ManagedSearchTool::Fd => config.allow_managed_fd = Some(true),
+    }
 }
 
 fn runtime_event_from_conversation_event(
@@ -263,6 +334,9 @@ fn runtime_event_from_conversation_event(
     event: ConversationEvent,
 ) -> RuntimeEvent {
     match event {
+        ConversationEvent::SystemMessage { message } => {
+            RuntimeEvent::SystemMessage { target, message }
+        }
         ConversationEvent::Retrying { message } => RuntimeEvent::Retrying { target, message },
         ConversationEvent::OutputTokenEstimate { total_tokens } => {
             RuntimeEvent::OutputTokenEstimate {
@@ -299,6 +373,10 @@ fn runtime_event_from_conversation_event(
         ConversationEvent::TerminalUpdated { snapshot } => RuntimeEvent::TerminalUpdated {
             target: target.expect("conversation target should be available for terminal update"),
             snapshot,
+        },
+        ConversationEvent::ManagedSearchToolAuthorization { .. } => RuntimeEvent::SystemMessage {
+            target,
+            message: "managed search tool authorization was not persisted".to_string(),
         },
         ConversationEvent::PermissionRequested { request } => RuntimeEvent::PermissionRequested {
             target: target.expect("conversation target should be available for permission request"),
@@ -356,7 +434,12 @@ fn ensure_conversation_target(
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::Duration};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     use super::{
         AppRuntimeCoordinator, AppRuntimeOptions, ensure_conversation_target,
@@ -365,7 +448,7 @@ mod tests {
     use runtime_domain::{
         provider::ProviderKind,
         session::{
-            ChatMessage, ConversationTurnRequest, RuntimeCommand, RuntimeEvent,
+            ChatMessage, ConversationTurnRequest, ManagedSearchTool, RuntimeCommand, RuntimeEvent,
             RuntimePermissionRequest, RuntimeTarget,
         },
     };
@@ -419,6 +502,28 @@ mod tests {
             !should_defer_runtime_event_for_render_barrier(&[], &permission_event),
             "permission should not be deferred when there is no token estimate to render"
         );
+    }
+
+    #[test]
+    fn app_layer_persists_managed_search_tool_authorization() {
+        let root = temp_test_dir("managed-search-authorization");
+        let config_path = root.join("config.toml");
+        let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+            managed_search_authorization_config_path: Some(config_path.clone()),
+            ..AppRuntimeOptions::default()
+        });
+
+        let event =
+            coordinator.persist_managed_search_tool_authorization(ManagedSearchTool::Fd, None);
+
+        assert_eq!(event, None);
+        assert_eq!(
+            coordinator.options.managed_search_tools.allow_managed_fd,
+            Some(true)
+        );
+        let content = fs::read_to_string(&config_path).expect("config should be readable");
+        assert!(content.contains("allow_managed_fd = true"));
+        cleanup(&root);
     }
 
     #[test]
@@ -479,5 +584,20 @@ mod tests {
             .provider_conversation
             .prepare_turn(&next_request)
             .expect("failed preflight turn should not leave stale pending state");
+    }
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("lumos-{prefix}-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&root).expect("create temp root");
+        root
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = fs::remove_dir_all(path);
     }
 }

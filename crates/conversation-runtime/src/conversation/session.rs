@@ -532,6 +532,9 @@ fn conversation_worker_event_from_progress(
     progress: ConversationProgress,
 ) -> ConversationWorkerEvent {
     match progress {
+        ConversationProgress::SystemMessage { message } => {
+            ConversationWorkerEvent::progress(ConversationEvent::SystemMessage { message })
+        }
         ConversationProgress::ProviderTurnStarted => {
             ConversationWorkerEvent::Session(ConversationDelta::ProviderTurnStarted)
         }
@@ -565,6 +568,11 @@ fn conversation_worker_event_from_progress(
         }
         ConversationProgress::TerminalUpdated { snapshot } => {
             ConversationWorkerEvent::progress(ConversationEvent::TerminalUpdated { snapshot })
+        }
+        ConversationProgress::ManagedSearchToolAuthorization { tool } => {
+            ConversationWorkerEvent::progress(ConversationEvent::ManagedSearchToolAuthorization {
+                tool,
+            })
         }
     }
 }

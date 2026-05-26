@@ -35,11 +35,13 @@ where
             }
             ConversationProgress::AssistantDelta { .. }
             | ConversationProgress::ReasoningDelta { .. }
+            | ConversationProgress::SystemMessage { .. }
             | ConversationProgress::ProviderTurnStarted
             | ConversationProgress::ProviderContextMessage { .. }
             | ConversationProgress::ToolActivityStarted { .. }
             | ConversationProgress::ToolActivityUpdated { .. }
-            | ConversationProgress::TerminalUpdated { .. } => {}
+            | ConversationProgress::TerminalUpdated { .. }
+            | ConversationProgress::ManagedSearchToolAuthorization { .. } => {}
         },
     )
     .await

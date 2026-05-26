@@ -17,7 +17,8 @@ pub use capability::RuntimeCapability;
 pub use command::{RuntimeCommand, RuntimeCommandReceipt};
 pub use conversation::{
     ChatMessage, ChatMessageBlock, ChatRole, ConversationEvent, ConversationRequest,
-    ConversationResponse, ConversationTurnRequest, ProviderRequest, ProviderRequestMetrics,
+    ConversationResponse, ConversationTurnRequest, ManagedSearchTool, ProviderRequest,
+    ProviderRequestMetrics,
 };
 pub use event::RuntimeEvent;
 pub use identity::{RuntimeAgentCapabilities, RuntimeIdentity, RuntimePromptCapabilities};

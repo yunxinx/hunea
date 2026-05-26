@@ -6,13 +6,28 @@ use std::{
 use crate::ToolExecutorRegistry;
 
 use super::{
+    external_tool::ManagedSearchToolConfig,
     file_state::WorkspaceReadState,
     mutation::WorkspaceMutationQueue,
     workspace_access::{WorkspaceAccess, local_workspace_access},
 };
 
+/// `WorkspaceToolRegistryOptions` 保存 workspace builtin 工具注册时的窄配置。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceToolRegistryOptions {
+    pub managed_search_tools: ManagedSearchToolConfig,
+}
+
 /// `workspace_readonly_tool_registry` 组合只读 workspace 工具注册表。
 pub fn workspace_readonly_tool_registry(root: impl AsRef<Path>) -> ToolExecutorRegistry {
+    workspace_readonly_tool_registry_with_options(root, WorkspaceToolRegistryOptions::default())
+}
+
+/// `workspace_readonly_tool_registry_with_options` 使用配置组合只读 workspace 工具注册表。
+pub fn workspace_readonly_tool_registry_with_options(
+    root: impl AsRef<Path>,
+    options: WorkspaceToolRegistryOptions,
+) -> ToolExecutorRegistry {
     let root = root.as_ref().to_path_buf();
     let access = local_workspace_access();
     let read_state = WorkspaceReadState::default();
@@ -22,12 +37,31 @@ pub fn workspace_readonly_tool_registry(root: impl AsRef<Path>) -> ToolExecutorR
         access.clone(),
         read_state,
     ));
-    registry.insert(super::list_dir::list_dir_tool_with_access(&root, access));
+    registry.insert(super::list_dir::list_dir_tool_with_access(
+        &root,
+        access.clone(),
+    ));
+    registry.insert(super::grep::grep_tool_with_config(
+        &root,
+        options.managed_search_tools.clone(),
+    ));
+    registry.insert(super::find::find_tool_with_config(
+        &root,
+        options.managed_search_tools,
+    ));
     registry
 }
 
 /// `workspace_tool_registry` 组合 workspace 读写工具注册表。
 pub fn workspace_tool_registry(root: impl AsRef<Path>) -> ToolExecutorRegistry {
+    workspace_tool_registry_with_options(root, WorkspaceToolRegistryOptions::default())
+}
+
+/// `workspace_tool_registry_with_options` 使用配置组合 workspace 读写工具注册表。
+pub fn workspace_tool_registry_with_options(
+    root: impl AsRef<Path>,
+    options: WorkspaceToolRegistryOptions,
+) -> ToolExecutorRegistry {
     let root = root.as_ref().to_path_buf();
     let access = local_workspace_access();
     let read_state = WorkspaceReadState::default();
@@ -41,6 +75,14 @@ pub fn workspace_tool_registry(root: impl AsRef<Path>) -> ToolExecutorRegistry {
     registry.insert(super::list_dir::list_dir_tool_with_access(
         &root,
         access.clone(),
+    ));
+    registry.insert(super::grep::grep_tool_with_config(
+        &root,
+        options.managed_search_tools.clone(),
+    ));
+    registry.insert(super::find::find_tool_with_config(
+        &root,
+        options.managed_search_tools,
     ));
     registry.insert(super::write::write_tool_with_access(
         &root,

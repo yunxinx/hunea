@@ -12,7 +12,7 @@ use crate::{
         runtime_display_path, runtime_write_tool_activity_target,
         should_collapse_runtime_write_tool_activity,
     },
-    theme::TerminalPalette,
+    theme::{TerminalPalette, secondary_text_style},
     transcript::markdown_highlight::HighlightChunk,
 };
 use runtime_domain::envinfo::shorten_home_prefix;
@@ -106,6 +106,9 @@ pub(super) fn runtime_tool_activity_detail_blocks(
         return Vec::new();
     }
     if should_collapse_list_dir_tool_call(call) {
+        return Vec::new();
+    }
+    if should_collapse_specific_search_tool_activity(call) {
         return Vec::new();
     }
 
@@ -945,6 +948,95 @@ pub(super) fn list_dir_tool_call_title_chunks(call: &RuntimeToolActivity) -> Vec
     ]
 }
 
+pub(super) struct SpecificSearchToolActivityParts {
+    pub(super) action: &'static str,
+    pub(super) pattern: String,
+    pub(super) path: String,
+}
+
+impl SpecificSearchToolActivityParts {
+    pub(super) fn detail_chunks(&self, palette: TerminalPalette) -> Vec<HighlightChunk> {
+        vec![
+            HighlightChunk {
+                text: self.pattern.clone(),
+                style: Style::new(),
+            },
+            HighlightChunk {
+                text: " in ".to_string(),
+                style: secondary_text_style(palette),
+            },
+            HighlightChunk {
+                text: self.path.clone(),
+                style: Style::new(),
+            },
+        ]
+    }
+}
+
+pub(super) fn specific_search_tool_activity_parts(
+    call: &RuntimeToolActivity,
+) -> Option<SpecificSearchToolActivityParts> {
+    let action = specific_search_tool_activity_action(call)?;
+    let raw_input = call.raw_input.as_ref()?;
+    let pattern = raw_input
+        .string_field(&["pattern"])
+        .map(|pattern| pattern.trim().to_string())
+        .filter(|pattern| !pattern.is_empty())?;
+    let path = raw_input
+        .string_field(&["path"])
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| ".".to_string());
+
+    Some(SpecificSearchToolActivityParts {
+        action,
+        pattern,
+        path: list_dir_display_path(&path),
+    })
+}
+
+pub(super) fn specific_search_tool_activity_title_chunks(
+    call: &RuntimeToolActivity,
+    palette: TerminalPalette,
+) -> Option<Vec<HighlightChunk>> {
+    let parts = specific_search_tool_activity_parts(call)?;
+    let mut chunks = vec![HighlightChunk {
+        text: parts.action.to_string(),
+        style: Style::new().add_modifier(Modifier::BOLD),
+    }];
+    chunks.push(HighlightChunk {
+        text: " ".to_string(),
+        style: Style::new(),
+    });
+    chunks.extend(parts.detail_chunks(palette));
+
+    Some(chunks)
+}
+
+fn specific_search_tool_activity_action(call: &RuntimeToolActivity) -> Option<&'static str> {
+    if call.kind != RuntimeToolKind::Search {
+        return None;
+    }
+
+    let title = runtime_tool_activity_display_title(call);
+    let title = title.trim();
+    if search_tool_title_uses_action(title, "Grep") {
+        return Some("Grep");
+    }
+    if search_tool_title_uses_action(title, "Find") {
+        return Some("Find");
+    }
+
+    None
+}
+
+fn search_tool_title_uses_action(title: &str, action: &str) -> bool {
+    title == action
+        || title
+            .strip_prefix(action)
+            .is_some_and(|suffix| suffix.starts_with([' ', ':']))
+}
+
 fn runtime_read_tool_activity_target(call: &RuntimeToolActivity) -> Option<String> {
     let line_range = read_tool_line_range(call);
     if call.kind == RuntimeToolKind::Read
@@ -1025,6 +1117,11 @@ fn should_collapse_runtime_read_tool_activity(call: &RuntimeToolActivity) -> boo
 
 fn should_collapse_list_dir_tool_call(call: &RuntimeToolActivity) -> bool {
     is_list_dir_tool_call(call) && call.status != RuntimeToolActivityStatus::Failed
+}
+
+fn should_collapse_specific_search_tool_activity(call: &RuntimeToolActivity) -> bool {
+    specific_search_tool_activity_parts(call).is_some()
+        && call.status != RuntimeToolActivityStatus::Failed
 }
 
 fn list_dir_tool_call_target(call: &RuntimeToolActivity) -> String {

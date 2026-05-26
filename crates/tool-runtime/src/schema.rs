@@ -158,6 +158,15 @@ fn validate_numeric_keywords(
         ));
     }
 
+    if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64)
+        && number > maximum
+    {
+        return Err(ToolSchemaError::new(
+            path,
+            format!("must be less than or equal to maximum {maximum}"),
+        ));
+    }
+
     Ok(())
 }
 
@@ -262,5 +271,27 @@ mod tests {
         .expect_err("missing fields inside array items should be rejected");
 
         assert_eq!(error.to_string(), "$.edits[0].new_string is required");
+    }
+
+    #[test]
+    fn validate_tool_arguments_reports_numbers_above_maximum() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "maximum": 10
+                }
+            },
+            "additionalProperties": false
+        });
+
+        let error = validate_tool_arguments(&schema, &json!({ "limit": 11 }))
+            .expect_err("maximum should reject values above the schema limit");
+
+        assert_eq!(
+            error.to_string(),
+            "$.limit must be less than or equal to maximum 10"
+        );
     }
 }

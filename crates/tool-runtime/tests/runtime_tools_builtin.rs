@@ -9,8 +9,8 @@ use tool_runtime::{
     ToolCall, ToolExecutionContext, ToolExecutor, ToolExecutorRegistry, ToolKind,
     ToolPermissionPolicy, ToolProgress, ToolProgressSink,
     builtin::{
-        bash_tool, list_dir_tool, read_tool, workspace_readonly_tool_registry,
-        workspace_tool_registry,
+        bash_tool, find_tool, grep_tool, list_dir_tool, read_tool,
+        workspace_readonly_tool_registry, workspace_tool_registry,
     },
 };
 
@@ -22,6 +22,8 @@ fn builtin_workspace_readonly_registry_exposes_file_tools() {
 
     assert!(definitions.definition("read").is_some());
     assert!(definitions.definition("list_dir").is_some());
+    assert!(definitions.definition("grep").is_some());
+    assert!(definitions.definition("find").is_some());
     assert_eq!(
         definitions
             .definition("read")
@@ -31,6 +33,18 @@ fn builtin_workspace_readonly_registry_exposes_file_tools() {
     assert_eq!(
         definitions
             .definition("list_dir")
+            .map(|definition| definition.kind),
+        Some(ToolKind::Search)
+    );
+    assert_eq!(
+        definitions
+            .definition("grep")
+            .map(|definition| definition.kind),
+        Some(ToolKind::Search)
+    );
+    assert_eq!(
+        definitions
+            .definition("find")
             .map(|definition| definition.kind),
         Some(ToolKind::Search)
     );
@@ -46,6 +60,8 @@ fn builtin_workspace_registry_exposes_read_write_and_edit_tools() {
 
     assert!(definitions.definition("read").is_some());
     assert!(definitions.definition("list_dir").is_some());
+    assert!(definitions.definition("grep").is_some());
+    assert!(definitions.definition("find").is_some());
     assert_eq!(
         definitions
             .definition("write")
@@ -95,6 +111,18 @@ fn builtin_readonly_file_tools_are_approved_by_default() {
     assert_eq!(
         definitions
             .definition("list_dir")
+            .map(|definition| definition.permission_policy),
+        Some(ToolPermissionPolicy::Always)
+    );
+    assert_eq!(
+        definitions
+            .definition("grep")
+            .map(|definition| definition.permission_policy),
+        Some(ToolPermissionPolicy::Always)
+    );
+    assert_eq!(
+        definitions
+            .definition("find")
             .map(|definition| definition.permission_policy),
         Some(ToolPermissionPolicy::Always)
     );
@@ -537,7 +565,9 @@ async fn builtin_bash_emits_terminal_progress_snapshots() {
     let mut snapshots = Vec::new();
     while let Ok(progress) = progress_receiver.try_recv() {
         match progress {
+            ToolProgress::SystemMessage { .. } => {}
             ToolProgress::TerminalUpdated { snapshot } => snapshots.push(snapshot),
+            ToolProgress::ManagedSearchToolAuthorization { .. } => {}
         }
     }
     assert!(
@@ -623,6 +653,372 @@ async fn builtin_list_dir_tool_can_be_registered_independently() {
     assert!(result.content.contains("Cargo.toml"));
     assert!(result.content.contains("src/"));
     assert!(result.content.contains(".hidden"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_grep_tool_can_be_registered_independently() {
+    let root = temp_root("builtin-grep");
+    fs::create_dir(root.join("src")).expect("create src dir");
+    fs::write(
+        root.join("src").join("lib.rs"),
+        "fn keep() {\n    needle();\n}\n",
+    )
+    .expect("write fixture");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(grep_tool(&root));
+    let definitions = registry.definitions();
+
+    let definition = definitions
+        .definition("grep")
+        .expect("grep definition should be registered");
+    assert_eq!(definition.kind, ToolKind::Search);
+    assert_eq!(definition.permission_policy, ToolPermissionPolicy::Always);
+    assert!(definitions.definition("find").is_none());
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "grep",
+                serde_json::json!({
+                    "pattern": "needle",
+                    "path": ".",
+                    "glob": "*.rs"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error, "grep should succeed: {result:?}");
+    assert!(result.content.contains("src/lib.rs:2:"));
+    assert!(result.content.contains("needle();"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_grep_searches_hidden_files_and_truncates_long_lines_by_default() {
+    let root = temp_root("builtin-grep-hidden-long-line");
+    let long_match = format!("needle {}", "x".repeat(700));
+    fs::write(root.join(".hidden.rs"), format!("{long_match}\n")).expect("write hidden fixture");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(grep_tool(&root));
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "grep",
+                serde_json::json!({
+                    "pattern": "needle",
+                    "literal": true
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error, "grep should succeed: {result:?}");
+    assert!(result.content.contains(".hidden.rs:1:"));
+    assert!(result.content.contains("needle "));
+    assert!(
+        result.content.contains("..."),
+        "long matching line should be visibly truncated: {}",
+        result.content
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("truncated"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("lines_truncated"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_grep_applies_byte_truncation_after_match_limit() {
+    let root = temp_root("builtin-grep-byte-limit");
+    let mut content = String::new();
+    for index in 0..200 {
+        content.push_str(&format!("needle-{index:03} {}\n", "x".repeat(350)));
+    }
+    fs::write(root.join("large.rs"), content).expect("write large fixture");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(grep_tool(&root));
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "grep",
+                serde_json::json!({
+                    "pattern": "needle",
+                    "literal": true,
+                    "limit": 200
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error, "grep should succeed: {result:?}");
+    assert!(result.content.contains("50.0KB limit reached"));
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("truncated"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details.get("byte_truncated"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_find_tool_can_be_registered_independently() {
+    let root = temp_root("builtin-find");
+    fs::create_dir_all(root.join("src").join("bin")).expect("create nested src dir");
+    fs::write(root.join(".gitignore"), "target/\n").expect("write gitignore");
+    fs::write(root.join("src").join("lib.rs"), "pub fn lib() {}\n").expect("write lib fixture");
+    fs::write(
+        root.join("src").join("bin").join("main.rs"),
+        "fn main() {}\n",
+    )
+    .expect("write main fixture");
+    fs::create_dir(root.join("target")).expect("create target dir");
+    fs::write(root.join("target").join("ignored.rs"), "ignored\n").expect("write ignored fixture");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(find_tool(&root));
+    let definitions = registry.definitions();
+
+    let definition = definitions
+        .definition("find")
+        .expect("find definition should be registered");
+    assert_eq!(definition.kind, ToolKind::Search);
+    assert_eq!(definition.permission_policy, ToolPermissionPolicy::Always);
+    assert!(definitions.definition("grep").is_none());
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "find",
+                serde_json::json!({
+                    "pattern": "*.rs",
+                    "path": "."
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error, "find should succeed: {result:?}");
+    assert_eq!(result.content, "src/bin/main.rs\nsrc/lib.rs");
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_find_uses_required_glob_pattern_and_searches_hidden_paths_by_default() {
+    let root = temp_root("builtin-find-pi-like-glob");
+    fs::create_dir_all(root.join("src").join("bin")).expect("create nested src dir");
+    fs::write(root.join("src").join("lib.rs"), "pub fn lib() {}\n").expect("write lib fixture");
+    fs::write(
+        root.join("src").join("bin").join("main.rs"),
+        "fn main() {}\n",
+    )
+    .expect("write main fixture");
+    fs::write(root.join(".hidden.rs"), "hidden\n").expect("write hidden fixture");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(find_tool(&root));
+    let definitions = registry.definitions();
+    let schema = definitions
+        .definition("find")
+        .and_then(|definition| definition.input_schema.as_ref())
+        .expect("find schema should exist");
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("find schema should expose properties");
+
+    assert_eq!(properties.len(), 3);
+    assert!(properties.contains_key("pattern"));
+    assert!(properties.contains_key("path"));
+    assert!(properties.contains_key("limit"));
+    assert_eq!(
+        schema.get("required"),
+        Some(&serde_json::json!(["pattern"]))
+    );
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "find",
+                serde_json::json!({
+                    "pattern": "*.rs"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error, "find should succeed: {result:?}");
+    assert!(result.content.contains(".hidden.rs"));
+    assert!(result.content.contains("src/lib.rs"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_find_treats_path_containing_pattern_as_full_path_glob() {
+    let root = temp_root("builtin-find-full-path-glob");
+    fs::create_dir_all(root.join("src").join("bin")).expect("create nested src dir");
+    fs::write(root.join("src").join("lib.rs"), "pub fn lib() {}\n").expect("write lib fixture");
+    fs::write(
+        root.join("src").join("bin").join("main.rs"),
+        "fn main() {}\n",
+    )
+    .expect("write main fixture");
+    fs::write(root.join("main.rs"), "fn root_main() {}\n").expect("write root fixture");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(find_tool(&root));
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "find",
+                serde_json::json!({
+                    "pattern": "src/**/*.rs"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error, "find should succeed: {result:?}");
+    assert!(result.content.contains("src/bin/main.rs"));
+    assert!(result.content.contains("src/lib.rs"));
+    assert!(!result.content.contains("\nmain.rs"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_search_tools_exclude_vcs_directories_but_keep_hidden_files() {
+    let root = temp_root("builtin-search-vcs-hidden");
+    fs::create_dir_all(root.join(".git")).expect("create git dir");
+    fs::write(root.join(".git").join("config"), "needle vcs\n").expect("write git fixture");
+    fs::write(root.join(".hidden.rs"), "needle hidden\n").expect("write hidden fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let grep_result = registry
+        .execute_tool(
+            ToolCall::new(
+                "grep-1",
+                "grep",
+                serde_json::json!({
+                    "pattern": "needle",
+                    "literal": true,
+                    "limit": 10
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        !grep_result.is_error,
+        "grep should succeed: {grep_result:?}"
+    );
+    assert!(grep_result.content.contains(".hidden.rs"));
+    assert!(!grep_result.content.contains(".git/config"));
+
+    let find_result = registry
+        .execute_tool(
+            ToolCall::new(
+                "find-1",
+                "find",
+                serde_json::json!({
+                    "pattern": "*",
+                    "limit": 20
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        !find_result.is_error,
+        "find should succeed: {find_result:?}"
+    );
+    assert!(find_result.content.contains(".hidden.rs"));
+    assert!(!find_result.content.contains(".git"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_grep_and_find_reject_arguments_outside_schema_before_execution() {
+    let root = temp_root("builtin-search-schema-extra");
+    fs::write(root.join("notes.txt"), "needle\n").expect("write fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let grep_result = registry
+        .execute_tool(
+            ToolCall::new(
+                "grep-1",
+                "grep",
+                serde_json::json!({
+                    "pattern": "needle",
+                    "recursive": false
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(grep_result.is_error);
+    assert!(
+        grep_result
+            .content
+            .contains("arguments do not match schema")
+    );
+    assert!(grep_result.content.contains("recursive"));
+
+    let find_result = registry
+        .execute_tool(
+            ToolCall::new(
+                "find-1",
+                "find",
+                serde_json::json!({
+                    "pattern": "*.txt",
+                    "entry_type": "file"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(find_result.is_error);
+    assert!(
+        find_result
+            .content
+            .contains("arguments do not match schema")
+    );
+    assert!(find_result.content.contains("entry_type"));
     cleanup(&root);
 }
 

@@ -9,8 +9,9 @@ use provider_protocol::{
 };
 use runtime_domain::{
     session::{
-        ProviderRequestMetrics, RuntimeTerminalExitStatus, RuntimeTerminalSnapshot,
-        RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityUpdate,
+        ManagedSearchTool, ProviderRequestMetrics, RuntimeTerminalExitStatus,
+        RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
+        RuntimeToolActivityUpdate,
     },
     token_count::StreamingTokenProgress,
 };
@@ -34,6 +35,7 @@ const TOOL_EXECUTION_INTERRUPTED: &str = "Tool execution interrupted";
 /// `ToolLoopProgress` describes runtime progress and provider-context session deltas.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolLoopProgress {
+    SystemMessage { message: String },
     ProviderTurnStarted,
     ProviderContextMessage { message: Message },
     OutputTokens { total_tokens: usize },
@@ -44,6 +46,7 @@ pub enum ToolLoopProgress {
     ToolActivityStarted { activity: RuntimeToolActivity },
     ToolActivityUpdated { update: RuntimeToolActivityUpdate },
     TerminalUpdated { snapshot: RuntimeTerminalSnapshot },
+    ManagedSearchToolAuthorization { tool: ManagedSearchTool },
 }
 
 /// `ToolLoopResponse` is the final visible assistant output.
@@ -397,12 +400,9 @@ async fn execute_tool_call(
         Some(message) => ToolResult::error(call.call_id.clone(), message),
         None => {
             execute_tool_with_progress(
-                context.executor,
                 runtime_call,
                 authorization.permission_snapshot,
-                context.cancellation,
-                context.clock,
-                context.state,
+                context,
                 on_progress,
             )
             .await
@@ -464,19 +464,19 @@ fn is_command_execution_error(
 }
 
 async fn execute_tool_with_progress(
-    executor: &ToolExecutorRegistry,
     call: tool_runtime::ToolCall,
     permission_snapshot: Option<ToolPermissionFileSnapshot>,
-    cancellation: &CancellationToken,
-    clock: &ToolLoopClock,
-    state: &mut RuntimeTurnState,
+    context: &mut ToolCallExecutionContext<'_>,
     on_progress: &mut impl FnMut(ToolLoopProgress),
 ) -> ToolResult {
     let (progress_sender, mut progress_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let context = ToolExecutionContext::new(cancellation)
+    let tool_context = ToolExecutionContext::new(context.cancellation)
         .with_permission_snapshot(permission_snapshot)
+        .with_permission_handler(context.permission_handler.cloned())
         .with_progress_sink(ToolProgressSink::from_sender(progress_sender));
-    let execution = executor.execute_tool_with_context(call, context);
+    let execution = context
+        .executor
+        .execute_tool_with_context(call, tool_context);
     tokio::pin!(execution);
     let mut progress_closed = false;
 
@@ -485,7 +485,7 @@ async fn execute_tool_with_progress(
             biased;
             maybe_progress = progress_receiver.recv(), if !progress_closed => {
                 if let Some(progress) = maybe_progress {
-                    emit_tool_progress(progress, clock, state, on_progress);
+                    emit_tool_progress(progress, context.clock, context.state, on_progress);
                 } else {
                     progress_closed = true;
                 };
@@ -495,7 +495,7 @@ async fn execute_tool_with_progress(
     };
 
     while let Ok(progress) = progress_receiver.try_recv() {
-        emit_tool_progress(progress, clock, state, on_progress);
+        emit_tool_progress(progress, context.clock, context.state, on_progress);
     }
 
     result
@@ -508,12 +508,20 @@ fn emit_tool_progress(
     on_progress: &mut impl FnMut(ToolLoopProgress),
 ) {
     match progress {
+        ToolProgress::SystemMessage { message } => {
+            on_progress(ToolLoopProgress::SystemMessage { message });
+        }
         ToolProgress::TerminalUpdated { snapshot } => {
             let snapshot = runtime_terminal_snapshot(snapshot);
             on_progress(ToolLoopProgress::TerminalUpdated {
                 snapshot: snapshot.clone(),
             });
             state.observe_terminal_snapshot_output(&snapshot, clock.now(), on_progress);
+        }
+        ToolProgress::ManagedSearchToolAuthorization { tool_name } => {
+            if let Some(tool) = ManagedSearchTool::from_binary_name(&tool_name) {
+                on_progress(ToolLoopProgress::ManagedSearchToolAuthorization { tool });
+            }
         }
     }
 }

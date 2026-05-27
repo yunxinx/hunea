@@ -2,7 +2,7 @@ use provider_protocol::PromptRequest;
 
 pub use runtime_domain::session::{ChatMessage, ChatRole, ProviderRequest};
 
-use crate::conversation_session::{PreparedConversationRequest, message_from_chat_message};
+use crate::conversation::{PreparedConversationRequest, message_from_chat_message};
 use crate::llm::ProviderRequestError;
 
 pub(crate) fn prompt_request_from_provider_request(

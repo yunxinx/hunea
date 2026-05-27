@@ -6,7 +6,7 @@ use runtime_domain::session::{
 use super::super::{
     Model,
     model::RequestMetrics,
-    runtime_tool_preview::ToolApprovalPreview,
+    runtime::tool_activity_preview::ToolApprovalPreview,
     tool_approval_panel::{ToolApprovalDetail, ToolApprovalSource},
 };
 use serde_json::Value;

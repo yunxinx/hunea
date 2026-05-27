@@ -1,5 +1,4 @@
 pub mod conversation;
-mod conversation_session;
 mod llm;
 pub mod models;
 
@@ -8,7 +7,7 @@ pub use conversation::{
     ConversationRequest, ConversationResponse, TurnExecutionError,
     run_conversation_turn_with_cancellation,
 };
-pub use conversation_session::{
+pub use conversation::{
     PreparedConversationRequest, ProviderConversation, ProviderConversationError,
 };
 pub use llm::ProviderRequestMetrics;

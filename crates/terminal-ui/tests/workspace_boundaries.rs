@@ -14,7 +14,7 @@ fn tui_has_no_runtime_crate_dependencies() {
 
 #[test]
 fn tui_runner_consumes_runtime_events() {
-    let runner = include_str!("../src/runner.rs");
+    let runner = include_str!("../src/runner/mod.rs");
 
     assert!(
         runner.contains("RuntimeEvent"),

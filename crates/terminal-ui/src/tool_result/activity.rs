@@ -8,7 +8,7 @@ use std::{
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::{
-    runtime_tool_preview::{
+    runtime::tool_activity_preview::{
         runtime_display_path, runtime_write_tool_activity_target,
         should_collapse_runtime_write_tool_activity,
     },

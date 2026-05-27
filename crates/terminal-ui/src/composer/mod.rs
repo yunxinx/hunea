@@ -1,6 +1,8 @@
 mod grapheme;
 mod layout;
+mod message;
 mod mouse;
+mod mouse_interaction;
 mod render;
 mod viewport;
 
@@ -21,9 +23,11 @@ use self::{
 };
 use super::{style_mode::StyleMode, theme::TerminalPalette};
 
+pub(crate) use self::message::chat_message_from_composer_text;
 pub(crate) use self::mouse::{
     cursor_position_for_line_anchor_click, move_cursor_to_logical_position,
 };
+pub(crate) use self::mouse_interaction::{ComposerMouseOutcome, PendingComposerCursorClick};
 pub(crate) use self::render::LineAnchor;
 #[cfg(test)]
 use self::render::{RenderResult, render};

@@ -4,7 +4,7 @@ use crossterm::event::MouseButton;
 
 use crate::{
     AppEffect, Model,
-    composer_mouse::ComposerMouseOutcome,
+    composer::ComposerMouseOutcome,
     document::{DocumentAnchorRegion, DocumentLayout},
     message::assistant_message_visual_inset,
     transcript::LineAnchorKind,

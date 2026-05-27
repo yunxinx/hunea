@@ -1,23 +1,34 @@
 use std::io::{self, IsTerminal, Write};
 
-use app_config::appconfig::{
-    self, Config, DebugConfig, ReasoningContentDisplay, RuntimeConfig, TuiConfig, UserInputStyle,
-};
+use app_config::appconfig::{self, Config, TuiConfig};
 use color_eyre::eyre::{Result, WrapErr};
-use conversation_runtime::models::{self as provider_models, LoadedModelCatalog};
-use runtime_domain::{
-    envinfo,
-    phrases::{self, LoadedStatusPhrases},
-};
-use terminal_ui::{
-    self, Model, ModelOptions, ReasoningDisplayMode, RuntimeRequestPolicy, StartupBannerOptions,
-    StatusLineItem, StyleMode,
-};
+use conversation_runtime::models as provider_models;
+use runtime_domain::phrases;
+use terminal_ui::{self, StartupBannerOptions};
 
+mod options_mapping;
+mod replay;
 mod runtime;
 
+use options_mapping::{
+    model_options_from_app_config_and_models, model_options_from_config_and_models,
+    runtime_options_from_app_config_and_models,
+};
+use replay::write_terminal_replay_on_exit;
+pub use replay::{
+    write_terminal_replay, write_terminal_replay_preserving_ansi,
+    write_terminal_replay_with_context,
+};
 use runtime::{AppRuntimeCoordinator, AppRuntimeOptions};
-use tool_runtime::builtin::ManagedSearchToolConfig;
+
+#[cfg(test)]
+use app_config::appconfig::{DebugConfig, ReasoningContentDisplay, RuntimeConfig, UserInputStyle};
+#[cfg(test)]
+use options_mapping::{
+    model_options_from_app_config, model_options_from_config, runtime_options_from_app_config,
+};
+#[cfg(test)]
+use terminal_ui::{Model, ReasoningDisplayMode, StatusLineItem};
 
 /// `AppRunError` 区分用户配置错误与运行期错误，便于 CLI 使用不同输出策略。
 #[derive(Debug)]
@@ -84,192 +95,6 @@ pub fn run_with_config_writer<W: Write>(
     )
     .wrap_err("failed to run tui application")?;
     write_terminal_replay_on_exit(writer, &model, preserve_ansi, &config.tui)
-}
-
-/// `write_terminal_replay` 将 terminal replay 内容输出到目标 writer。
-pub fn write_terminal_replay<W: Write>(writer: &mut W, model: &Model) -> io::Result<()> {
-    write_terminal_replay_with_mode(writer, model, false)
-}
-
-/// `write_terminal_replay_preserving_ansi` 在目标仍支持终端样式时保留 ANSI。
-pub fn write_terminal_replay_preserving_ansi<W: Write>(
-    writer: &mut W,
-    model: &Model,
-) -> io::Result<()> {
-    write_terminal_replay_with_mode(writer, model, true)
-}
-
-fn write_terminal_replay_with_mode<W: Write>(
-    writer: &mut W,
-    model: &Model,
-    preserve_ansi: bool,
-) -> io::Result<()> {
-    let items = model.terminal_replay_items(preserve_ansi);
-
-    for (index, item) in items.iter().enumerate() {
-        writeln!(writer, "{item}")?;
-        if index + 1 < items.len() {
-            writeln!(writer)?;
-        }
-    }
-
-    Ok(())
-}
-
-/// `write_terminal_replay_with_context` 为 terminal replay 输出补充入口层错误上下文。
-pub fn write_terminal_replay_with_context<W: Write>(
-    writer: &mut W,
-    model: &Model,
-    preserve_ansi: bool,
-) -> Result<()> {
-    write_terminal_replay_with_mode(writer, model, preserve_ansi)
-        .wrap_err("failed to write terminal replay")
-}
-
-fn write_terminal_replay_on_exit<W: Write>(
-    writer: &mut W,
-    model: &Model,
-    preserve_ansi: bool,
-    tui_config: &TuiConfig,
-) -> Result<()> {
-    if !tui_config.print_transcript_on_exit {
-        return Ok(());
-    }
-
-    write_terminal_replay_with_context(writer, model, preserve_ansi)
-}
-
-fn style_mode_from_config(style: UserInputStyle) -> StyleMode {
-    match style {
-        UserInputStyle::Cx => StyleMode::Cx,
-        UserInputStyle::Cc => StyleMode::Cc,
-        UserInputStyle::Ms => StyleMode::Ms,
-    }
-}
-
-fn reasoning_display_mode_from_config(display: ReasoningContentDisplay) -> ReasoningDisplayMode {
-    match display {
-        ReasoningContentDisplay::Collapsed => ReasoningDisplayMode::Collapsed,
-        ReasoningContentDisplay::Expanded => ReasoningDisplayMode::Expanded,
-        ReasoningContentDisplay::Snippet => ReasoningDisplayMode::Snippet,
-    }
-}
-
-#[cfg(test)]
-fn model_options_from_config(tui_config: &TuiConfig) -> ModelOptions {
-    model_options_from_config_and_models(
-        tui_config,
-        &LoadedModelCatalog::default(),
-        &LoadedStatusPhrases::default(),
-    )
-}
-
-#[cfg(test)]
-fn model_options_from_app_config(config: &Config) -> ModelOptions {
-    model_options_from_app_config_and_models(
-        config,
-        &LoadedModelCatalog::default(),
-        &LoadedStatusPhrases::default(),
-    )
-}
-
-#[cfg(test)]
-fn runtime_options_from_app_config(config: &Config) -> AppRuntimeOptions {
-    runtime_options_from_app_config_and_models(config, &LoadedModelCatalog::default())
-}
-
-fn model_options_from_config_and_models(
-    tui_config: &TuiConfig,
-    loaded_models: &LoadedModelCatalog,
-    loaded_phrases: &LoadedStatusPhrases,
-) -> ModelOptions {
-    model_options_from_configs(tui_config, None, loaded_models, loaded_phrases)
-}
-
-fn model_options_from_app_config_and_models(
-    config: &Config,
-    loaded_models: &LoadedModelCatalog,
-    loaded_phrases: &LoadedStatusPhrases,
-) -> ModelOptions {
-    model_options_from_configs(
-        &config.tui,
-        Some(&config.debug),
-        loaded_models,
-        loaded_phrases,
-    )
-}
-
-fn runtime_options_from_app_config_and_models(
-    config: &Config,
-    loaded_models: &LoadedModelCatalog,
-) -> AppRuntimeOptions {
-    AppRuntimeOptions {
-        model_config_path: loaded_models.source_path.clone(),
-        runtime_request_policy: runtime_request_policy_from_config(&config.runtime),
-        managed_search_tools: managed_search_tools_from_config(&config.runtime),
-        managed_search_authorization_config_path: appconfig::user_config_file_path(),
-    }
-}
-
-fn runtime_request_policy_from_config(config: &RuntimeConfig) -> RuntimeRequestPolicy {
-    RuntimeRequestPolicy::new(
-        config.request_retry_attempts,
-        config.request_retry_delays.clone(),
-        config.request_timeout_seconds,
-    )
-    .with_tool_max_turns(config.tool_max_turns)
-}
-
-fn managed_search_tools_from_config(config: &RuntimeConfig) -> ManagedSearchToolConfig {
-    ManagedSearchToolConfig {
-        allow_managed_rg: config.allow_managed_rg,
-        allow_managed_fd: config.allow_managed_fd,
-    }
-}
-
-fn model_options_from_configs(
-    tui_config: &TuiConfig,
-    debug_config: Option<&DebugConfig>,
-    loaded_models: &LoadedModelCatalog,
-    loaded_phrases: &LoadedStatusPhrases,
-) -> ModelOptions {
-    ModelOptions {
-        style_mode: style_mode_from_config(tui_config.user_input_style),
-        status_line_items: status_line_items_from_config(&tui_config.status_line),
-        status_line_2_items: status_line_items_from_config(&tui_config.status_line_2),
-        external_editor: tui_config.external_editor.clone(),
-        external_editor_hint: external_editor_hint_from_config(&tui_config.external_editor),
-        show_external_editor_helper: tui_config.show_external_editor_helper,
-        copy_on_mouse_selection_release: tui_config.copy_on_mouse_selection_release,
-        swap_enter_and_send: tui_config.swap_enter_and_send,
-        ctrl_c_clears_input: tui_config.ctrl_c_clears_input,
-        esc_interrupt_presses: tui_config.esc_interrupt_presses,
-        show_esc_interrupt_hint: tui_config.show_esc_interrupt_hint,
-        file_picker_popup_height: tui_config.file_picker_popup_height,
-        show_reasoning_content: tui_config.show_reasoning_content,
-        reasoning_display_mode: reasoning_display_mode_from_config(
-            tui_config.reasoning_content_display,
-        ),
-        debug_commands_enabled: debug_config.is_some_and(|config| config.enabled),
-        model_catalog: loaded_models.catalog.clone(),
-        selected_model: loaded_models.selected_model.clone(),
-        requires_model_selection: loaded_models.requires_model_selection,
-        status_phrases: loaded_phrases.phrases.clone(),
-        status_phrase_order: loaded_phrases.order,
-    }
-}
-
-fn status_line_items_from_config(items: &[String]) -> Vec<StatusLineItem> {
-    items
-        .iter()
-        .filter_map(|item| StatusLineItem::from_config_value(item))
-        .collect()
-}
-
-fn external_editor_hint_from_config(configured: &[String]) -> String {
-    envinfo::resolve_external_editor(configured)
-        .map(|editor| editor.display_name)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 mod cache;
 mod item_index;
+mod items;
 mod list;
 mod markdown;
 pub(crate) mod markdown_highlight;
@@ -22,6 +23,10 @@ pub(crate) use item_index::{
     TranscriptEstimateBreakdown, TranscriptEstimateKind, TranscriptEstimateSource,
     TranscriptFastEstimate, TranscriptItemMetrics, TranscriptItemMetricsCache,
     TranscriptItemMetricsIndex, TranscriptItemMetricsQuality, TranscriptItemPosition,
+};
+pub use items::ReasoningDisplayMode;
+pub(crate) use items::{
+    FinalBodyDividerItem, ReasoningMessageItem, SystemMessageItem, WorkDurationMessageItem,
 };
 pub(crate) use list::{Transcript, TranscriptItem, materialize_transcript_item_render_block};
 pub(crate) use markdown::{

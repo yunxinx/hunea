@@ -8,7 +8,7 @@ use runtime_domain::{
 
 use super::{
     ExternalEditorLaunch, Model, Sender,
-    composer_message::chat_message_from_composer_text,
+    composer::chat_message_from_composer_text,
     exit_confirmation::EXIT_CONFIRMATION_PROMPT,
     path_resolve::resolve_configured_current_dir,
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},

@@ -349,7 +349,7 @@ async fn builtin_edit_fuzzy_matches_common_model_text_differences() {
                         { "old_string": "line one\nline two\n", "new_string": "trimmed\n" },
                         { "old_string": "const msg = \"Hello\"-world\n", "new_string": "const msg = \"Goodbye\"-world\n" },
                         { "old_string": "hello world\n", "new_string": "hello universe\n" },
-                        { "old_string": "你好,世界\n", "new_string": "你好，lumos\n" },
+                        { "old_string": "你好,世界\n", "new_string": "你好，hunea\n" },
                         { "old_string": "ABC123\ncafé\n", "new_string": "XYZ789\ncoffee\n" }
                     ]
                 }),
@@ -368,7 +368,7 @@ async fn builtin_edit_fuzzy_matches_common_model_text_differences() {
             "trimmed\n",
             "const msg = \"Goodbye\"-world\n",
             "hello universe\n",
-            "你好，lumos\n",
+            "你好，hunea\n",
             "XYZ789\n",
             "coffee\n",
         )
@@ -576,7 +576,7 @@ fn temp_root(prefix: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after unix epoch")
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("lumos-{prefix}-{}-{stamp}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("hunea-{prefix}-{}-{stamp}", std::process::id()));
     fs::create_dir_all(&root).expect("create temp root");
     root
 }

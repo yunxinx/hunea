@@ -323,7 +323,7 @@ async fn confirm_managed_download(
                 "install_dir": install_root.display().to_string(),
                 "config_field": tool.authorization_field(),
                 "description": format!(
-                    "Download {} from official GitHub Releases, verify SHA256, install under lumos managed tools, and remember this authorization.",
+                    "Download {} from official GitHub Releases, verify SHA256, install under hunea managed tools, and remember this authorization.",
                     tool.display_name()
                 )
             }),
@@ -343,7 +343,7 @@ fn permission_definition(name: String, label: String) -> ToolDefinition {
     ToolDefinition::new(name)
         .with_label(label)
         .with_kind(ToolKind::Fetch)
-        .with_description("Install a pinned external search tool for lumos managed use.")
+        .with_description("Install a pinned external search tool for hunea managed use.")
         .with_input_schema(json!({ "type": "object" }))
         .with_permission_policy(ToolPermissionPolicy::Ask)
 }
@@ -747,11 +747,11 @@ fn app_managed_root() -> Option<PathBuf> {
         env::var_os("APPDATA")
             .map(PathBuf::from)
             .or_else(|| BaseDirs::new().map(|dirs| dirs.data_dir().to_path_buf()))
-            .map(|path| path.join("lumos"))
+            .map(|path| path.join("hunea"))
     }
     #[cfg(not(windows))]
     {
-        BaseDirs::new().map(|dirs| dirs.home_dir().join(".lumos"))
+        BaseDirs::new().map(|dirs| dirs.home_dir().join(".hunea"))
     }
 }
 
@@ -934,7 +934,7 @@ mod tests {
             .expect("system time should be after unix epoch")
             .as_nanos();
         let root =
-            std::env::temp_dir().join(format!("lumos-{prefix}-{}-{stamp}", std::process::id()));
+            std::env::temp_dir().join(format!("hunea-{prefix}-{}-{stamp}", std::process::id()));
         fs::create_dir_all(&root).expect("create temp root");
         root
     }

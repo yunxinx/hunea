@@ -327,7 +327,7 @@ mod tests {
             .expect("system time should be after unix epoch")
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "lumos-file-search-{prefix}-{}-{stamp}",
+            "hunea-file-search-{prefix}-{}-{stamp}",
             std::process::id()
         ));
         fs::create_dir_all(root.join("src")).expect("create temp root");

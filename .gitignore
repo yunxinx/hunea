@@ -2,6 +2,7 @@ target/
 .codex
 .docs/
 .lumos/
+.hunea/
 .planning/
 docs/
 AGENTS.md

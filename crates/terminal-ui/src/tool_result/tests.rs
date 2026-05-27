@@ -230,7 +230,7 @@ fn active_execute_tool_call_defers_streamed_content_until_finished() {
             )],
             locations: Vec::new(),
             raw_input: Some(r#"{"command":"cargo check"}"#.into()),
-            raw_output: Some("Checking lumos v0.1.0".into()),
+            raw_output: Some("Checking hunea v0.1.0".into()),
         },
         ToolActivityRenderMode::Compact,
     );
@@ -247,7 +247,7 @@ fn active_execute_tool_call_defers_streamed_content_until_finished() {
     assert!(
         rendered_plain.iter().all(|line| {
             !line.contains("Requesting approval")
-                && !line.contains("Checking lumos")
+                && !line.contains("Checking hunea")
                 && !line.contains(r#"{"command":"cargo check"}"#)
         }),
         "active command tool calls should not stream command details in the main transcript: {rendered_plain:?}"
@@ -265,7 +265,7 @@ fn completed_execute_tool_call_renders_deferred_content() {
             content: Vec::new(),
             locations: Vec::new(),
             raw_input: None,
-            raw_output: Some("Checking lumos v0.1.0".into()),
+            raw_output: Some("Checking hunea v0.1.0".into()),
         },
         ToolActivityRenderMode::Compact,
     );
@@ -279,7 +279,7 @@ fn completed_execute_tool_call_renders_deferred_content() {
         rendered_plain,
         vec![
             "● Ran cargo check".to_string(),
-            "  └ Checking lumos v0.1.0".to_string(),
+            "  └ Checking hunea v0.1.0".to_string(),
         ]
     );
 }
@@ -394,12 +394,12 @@ fn completed_execute_tool_call_uses_display_content_without_model_truncation_foo
                     concat!(
                         "line 999\n",
                         "line 1000\n\n",
-                        "[Showing lines 999-1000 of 1000. Full output: /tmp/lumos-bash.log]"
+                        "[Showing lines 999-1000 of 1000. Full output: /tmp/hunea-bash.log]"
                     ),
                     Some("line 999\nline 1000"),
                     Some(serde_json::json!({
                         "truncated": true,
-                        "full_output_path": "/tmp/lumos-bash.log"
+                        "full_output_path": "/tmp/hunea-bash.log"
                     })),
                 ),
             ),
@@ -444,14 +444,14 @@ fn detailed_execute_tool_call_uses_display_content_without_model_truncation_foot
                     concat!(
                         "line 999\n",
                         "line 1000\n\n",
-                        "[Showing lines 999-1000 of 1000. Full output: /tmp/lumos-bash.log]"
+                        "[Showing lines 999-1000 of 1000. Full output: /tmp/hunea-bash.log]"
                     ),
                     Some("line 999\nline 1000"),
                     Some(serde_json::json!({
                         "exit_code": 0,
                         "duration_ms": 1500,
                         "truncated": true,
-                        "full_output_path": "/tmp/lumos-bash.log"
+                        "full_output_path": "/tmp/hunea-bash.log"
                     })),
                 ),
             ),
@@ -676,7 +676,7 @@ fn failed_execute_tool_call_renders_final_output_without_raw_input() {
             content: Vec::new(),
             locations: Vec::new(),
             raw_input: Some(r#"{"command":"cargo check"}"#.into()),
-            raw_output: Some("error: could not compile `lumos`".into()),
+            raw_output: Some("error: could not compile `hunea`".into()),
         },
         ToolActivityRenderMode::Compact,
     );
@@ -690,7 +690,7 @@ fn failed_execute_tool_call_renders_final_output_without_raw_input() {
         rendered_plain,
         vec![
             "● Ran cargo check".to_string(),
-            "  └ error: could not compile `lumos`".to_string(),
+            "  └ error: could not compile `hunea`".to_string(),
         ]
     );
     assert!(
@@ -882,7 +882,7 @@ fn runtime_tool_activity_raw_output_trailing_newline_does_not_render_blank_line(
             content: Vec::new(),
             locations: Vec::new(),
             raw_input: None,
-            raw_output: Some("Checking lumos\n".into()),
+            raw_output: Some("Checking hunea\n".into()),
         },
         ToolActivityRenderMode::Compact,
     );
@@ -893,7 +893,7 @@ fn runtime_tool_activity_raw_output_trailing_newline_does_not_render_blank_line(
         rendered_plain,
         vec![
             "● Ran cargo check".to_string(),
-            "  └ Checking lumos".to_string(),
+            "  └ Checking hunea".to_string(),
         ]
     );
     assert!(
@@ -995,7 +995,7 @@ fn runtime_tool_activity_terminal_content_renders_live_snapshot() {
             terminal_id: "term-1".to_string(),
             command: Some("cargo check".to_string()),
             cwd: None,
-            output: "Checking lumos\nFinished".to_string(),
+            output: "Checking hunea\nFinished".to_string(),
             truncated: false,
             exit_status: None,
             released: false,
@@ -1010,7 +1010,7 @@ fn runtime_tool_activity_terminal_content_renders_live_snapshot() {
         .join("\n");
 
     assert!(plain.contains("Running..."));
-    assert!(plain.contains("Checking lumos"));
+    assert!(plain.contains("Checking hunea"));
     assert!(plain.contains("Finished"));
     assert!(!plain.contains("runtime terminal unavailable"));
     assert!(!plain.contains("terminal/create unsupported"));
@@ -1039,7 +1039,7 @@ fn detailed_runtime_tool_activity_terminal_content_highlights_command_only() {
             terminal_id: "term-1".to_string(),
             command: Some("cargo check".to_string()),
             cwd: None,
-            output: "Checking lumos\nFinished".to_string(),
+            output: "Checking hunea\nFinished".to_string(),
             truncated: false,
             exit_status: None,
             released: false,
@@ -1053,7 +1053,7 @@ fn detailed_runtime_tool_activity_terminal_content_highlights_command_only() {
         rendered_plain,
         vec![
             "$ cargo check".to_string(),
-            "Checking lumos".to_string(),
+            "Checking hunea".to_string(),
             "Finished".to_string(),
         ]
     );
@@ -1090,7 +1090,7 @@ fn runtime_tool_activity_raw_output_uses_secondary_color_and_codex_like_alignmen
                 locations: Vec::new(),
                 raw_input: None,
                 raw_output: Some(
-                    "Checking lumos v0.1.0 (/home/archie/GoCodes/lumos_rust)\nFinished `dev` profile [unoptimized + debuginfo] target(s) in 1.01s"
+                    "Checking hunea v0.1.0 (/home/archie/GoCodes/lumos_rust)\nFinished `dev` profile [unoptimized + debuginfo] target(s) in 1.01s"
                         .into(),
                 ),
             },
@@ -1103,7 +1103,7 @@ fn runtime_tool_activity_raw_output_uses_secondary_color_and_codex_like_alignmen
         rendered_plain,
         vec![
             "● Ran cargo check".to_string(),
-            "  └ Checking lumos v0.1.0 (/home/archie/GoCodes/lumos_rust)".to_string(),
+            "  └ Checking hunea v0.1.0 (/home/archie/GoCodes/lumos_rust)".to_string(),
             "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.01s".to_string(),
         ]
     );

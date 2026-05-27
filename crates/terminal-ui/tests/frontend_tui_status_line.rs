@@ -491,7 +491,7 @@ fn temp_test_dir(prefix: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after unix epoch")
         .as_nanos();
-    let path = env::temp_dir().join(format!("lumos-rust-{prefix}-{unique}"));
+    let path = env::temp_dir().join(format!("hunea-rust-{prefix}-{unique}"));
     fs::create_dir_all(&path).expect("temp test dir should be created");
     path
 }

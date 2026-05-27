@@ -74,14 +74,14 @@ mod tests {
 
     #[test]
     fn estimate_text_tokens_falls_back_for_local_model_aliases() {
-        assert!(estimate_text_tokens("local/qwen3", "你好，lumos") > 0);
-        assert!(estimate_text_tokens("custom-deepseek-chat", "hello lumos") > 0);
+        assert!(estimate_text_tokens("local/qwen3", "你好，hunea") > 0);
+        assert!(estimate_text_tokens("custom-deepseek-chat", "hello hunea") > 0);
     }
 
     #[test]
     fn unavailable_alias_encoding_falls_back_to_o200k() {
         let unavailable_encoding = "definitely_missing_encoding";
-        let text = "hello from lumos";
+        let text = "hello from hunea";
 
         assert!(tiktoken::get_encoding(unavailable_encoding).is_none());
         assert_eq!(

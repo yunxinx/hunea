@@ -269,7 +269,7 @@ fn temp_test_dir(name: &str) -> std::path::PathBuf {
             .as_nanos()
     );
     let path = std::env::temp_dir()
-        .join("lumos-runtime-models-config-tests")
+        .join("hunea-runtime-models-config-tests")
         .join(unique);
     fs::create_dir_all(&path).expect("temp dir should be created");
     path

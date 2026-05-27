@@ -53,7 +53,7 @@ fn load_from_base_config(
         config_paths.push(path.join("config.toml"));
     }
     if let Some(path) = working_dir.as_ref() {
-        config_paths.push(path.join(".lumos").join("config.toml"));
+        config_paths.push(path.join(".hunea").join("config.toml"));
     }
 
     let mut reasoning_content_display_configured = false;
@@ -93,7 +93,7 @@ mod tests {
             "[tui]\nuser_input_style = \"ms\"\n",
         );
         write_config(
-            &working_dir.join(".lumos").join("config.toml"),
+            &working_dir.join(".hunea").join("config.toml"),
             "[tui]\nuser_input_style = \"cx\"\n",
         );
 
@@ -107,7 +107,7 @@ mod tests {
     fn load_accepts_cc_style_mode() {
         let working_dir = temp_test_dir("load-accepts-cc-working");
         write_config(
-            &working_dir.join(".lumos").join("config.toml"),
+            &working_dir.join(".hunea").join("config.toml"),
             "[tui]\nuser_input_style = \"cc\"\n",
         );
 
@@ -121,7 +121,7 @@ mod tests {
     fn load_rejects_unknown_style_mode() {
         let working_dir = temp_test_dir("load-rejects-style-working");
         write_config(
-            &working_dir.join(".lumos").join("config.toml"),
+            &working_dir.join(".hunea").join("config.toml"),
             "[tui]\nuser_input_style = \"weird\"\n",
         );
 
@@ -138,7 +138,7 @@ mod tests {
     fn load_rejects_unknown_keys() {
         let working_dir = temp_test_dir("load-rejects-keys-working");
         write_config(
-            &working_dir.join(".lumos").join("config.toml"),
+            &working_dir.join(".hunea").join("config.toml"),
             "[tui]\nunknown = true\n",
         );
 
@@ -188,7 +188,7 @@ mod tests {
                 .expect("system time should be after unix epoch")
                 .as_nanos()
         );
-        let path = std::env::temp_dir().join(format!("lumos-rust-{prefix}-{unique}"));
+        let path = std::env::temp_dir().join(format!("hunea-rust-{prefix}-{unique}"));
         fs::create_dir_all(&path).expect("temp test dir should be created");
         path
     }

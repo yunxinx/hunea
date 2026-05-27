@@ -2530,7 +2530,7 @@ struct TempFileTree {
 impl TempFileTree {
     fn new(name: &str) -> Self {
         let path =
-            std::env::temp_dir().join(format!("lumos-file-picker-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("hunea-file-picker-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("temp root should be creatable");
         Self { path }

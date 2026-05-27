@@ -330,9 +330,9 @@ fn transcript_overlay_excludes_startup_banner() {
     )));
 
     let rows = render_rows(&mut model, 40, 10);
-    // 启动欢迎块内容（如 ">_ Lumos"）不应出现在覆盖层中
+    // 启动欢迎块内容（如 ">_ Hunea"）不应出现在覆盖层中
     assert!(
-        !rows.iter().any(|r| r.contains(">_ Lumos")),
+        !rows.iter().any(|r| r.contains(">_ Hunea")),
         "overlay should not show startup banner content: {:?}",
         rows
     );

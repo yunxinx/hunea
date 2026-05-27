@@ -51,7 +51,7 @@ fn ctrl_g_returns_external_editor_launch_with_current_draft() {
         &[
             "-c".to_string(),
             "cat \"$1\" >/dev/null".to_string(),
-            "lumos".to_string(),
+            "hunea".to_string(),
             effect.draft_path.to_string_lossy().into_owned(),
         ]
     );
@@ -134,7 +134,7 @@ fn ready_model(options: ModelOptions) -> Model {
 
 fn temp_test_file(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "lumos-rust-{prefix}-{}-{}.txt",
+        "hunea-rust-{prefix}-{}-{}.txt",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

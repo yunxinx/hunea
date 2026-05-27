@@ -110,10 +110,10 @@ fn render_markdown_splits_embedded_text_newlines_into_real_lines() {
 
 #[test]
 fn render_markdown_preserves_link_destinations() {
-    let lines = render_markdown_lines("[main.go](<cmd/lumos/main.go>)", 40, default_palette());
+    let lines = render_markdown_lines("[main.go](<cmd/hunea/main.go>)", 40, default_palette());
     let rendered = lines_to_plain_text(&lines);
 
-    assert!(rendered.contains("cmd/lumos/main.go"));
+    assert!(rendered.contains("cmd/hunea/main.go"));
 }
 
 #[test]
@@ -348,7 +348,7 @@ fn render_markdown_keeps_heading_attributes_literal() {
 
 #[test]
 fn render_markdown_renders_tables_with_connected_box_borders() {
-    let markdown = "| 名称 | 类型 | 版本 | 启用 |\n| --- | --- | ---: | :---: |\n| lumos | 应用 | 0.1.0 | 是 |\n| ratatui | 依赖 | 0.24 | 否 |";
+    let markdown = "| 名称 | 类型 | 版本 | 启用 |\n| --- | --- | ---: | :---: |\n| hunea | 应用 | 0.1.0 | 是 |\n| ratatui | 依赖 | 0.24 | 否 |";
 
     let lines = render_markdown_lines(markdown, 80, default_palette());
 
@@ -357,7 +357,7 @@ fn render_markdown_renders_tables_with_connected_box_borders() {
         "┌─────────┬──────┬───────┬──────┐\n\
              │ 名称    │ 类型 │  版本 │ 启用 │\n\
              ├─────────┼──────┼───────┼──────┤\n\
-             │ lumos   │ 应用 │ 0.1.0 │  是  │\n\
+             │ hunea   │ 应用 │ 0.1.0 │  是  │\n\
              │ ratatui │ 依赖 │  0.24 │  否  │\n\
              └─────────┴──────┴───────┴──────┘"
     );
@@ -366,7 +366,7 @@ fn render_markdown_renders_tables_with_connected_box_borders() {
 #[test]
 fn render_markdown_wraps_table_cells_in_narrow_width_without_ellipsis() {
     let markdown =
-        "| 名称 | 说明 |\n| --- | --- |\n| lumos | 一个基于 Rust 和 Ratatui 的 TUI 客户端 |";
+        "| 名称 | 说明 |\n| --- | --- |\n| hunea | 一个基于 Rust 和 Ratatui 的 TUI 客户端 |";
 
     let lines = render_markdown_lines(markdown, 24, default_palette());
     let rendered = lines_to_plain_text(&lines);

@@ -94,7 +94,7 @@ mod tests {
         );
 
         let second = progress
-            .observe_delta(" from lumos", started_at + Duration::from_millis(120))
+            .observe_delta(" from hunea", started_at + Duration::from_millis(120))
             .expect("throttled snapshot should be emitted");
         assert!(second > first);
 

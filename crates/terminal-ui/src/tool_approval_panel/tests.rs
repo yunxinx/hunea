@@ -134,7 +134,7 @@ fn long_command_keeps_full_document_flow_without_truncating_choices() {
     model.set_window(24, 8);
     model.open_tool_approval_panel(
         ToolApprovalSource::Preview,
-        "cargo run --bin lumos -- --very-long-debug-command-that-wraps".to_string(),
+        "cargo run --bin hunea -- --very-long-debug-command-that-wraps".to_string(),
         Vec::new(),
     );
 

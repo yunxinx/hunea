@@ -94,7 +94,7 @@ fn item_metrics_index_matches_materialized_block_metrics_for_mixed_item_types() 
     transcript.set_gap(1);
     transcript.set_width(18);
     transcript.append_startup_banner(StartupBannerOptions {
-        app_name: Some("Lumos".to_string()),
+        app_name: Some("Hunea".to_string()),
         version: Some("v0.1.0".to_string()),
         work_dir: Some("/tmp/phase-e-metrics".to_string()),
         width: 0,
@@ -221,11 +221,11 @@ fn exploration_tool_activities_coalesce_into_single_transcript_item() {
         kind: RuntimeToolKind::Read,
         status: RuntimeToolActivityStatus::Completed,
         content: vec![RuntimeToolActivityContent::Text(
-            "[package]\nname = \"lumos\"".to_string(),
+            "[package]\nname = \"hunea\"".to_string(),
         )],
         locations: Vec::new(),
         raw_input: Some(serde_json::json!({ "path": "Cargo.toml" }).into()),
-        raw_output: Some("[package]\nname = \"lumos\"".into()),
+        raw_output: Some("[package]\nname = \"hunea\"".into()),
     });
     transcript.append_runtime_tool_activity(RuntimeToolActivity {
         activity_id: "call-list-crates".to_string(),
@@ -319,7 +319,7 @@ fn exploration_group_keeps_activity_ids_and_coalesces_adjacent_reads() {
 fn exploration_group_coalesces_adjacent_lists() {
     let mut transcript = Transcript::new(default_palette());
 
-    for path in ["crates", "docs", ".docs", ".agents", ".lumos"] {
+    for path in ["crates", "docs", ".docs", ".agents", ".hunea"] {
         transcript.append_runtime_tool_activity(RuntimeToolActivity {
             activity_id: format!("call-list-{path}"),
             title: format!("List Directory {path}"),
@@ -357,7 +357,7 @@ fn exploration_group_coalesces_adjacent_lists() {
     assert_eq!(
         transcript.plain_items(),
         vec![
-            "● Explored\n  └ List crates, docs, .docs, .agents, .lumos\n    Read Cargo.toml\n    List crates/runtime-domain, crates/runtime-domain/src"
+            "● Explored\n  └ List crates, docs, .docs, .agents, .hunea\n    Read Cargo.toml\n    List crates/runtime-domain, crates/runtime-domain/src"
                 .to_string()
         ]
     );

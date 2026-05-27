@@ -411,7 +411,7 @@ async fn run_shell_command(
     tokio::spawn(read_pipe(stdout, chunk_sender.clone()));
     tokio::spawn(read_pipe(stderr, chunk_sender));
 
-    let mut output = OutputAccumulator::new("lumos-bash");
+    let mut output = OutputAccumulator::new("hunea-bash");
     let mut output_closed = false;
     let mut exit_status = None;
     let mut end_reason = CommandEndReason::Exited;
@@ -959,7 +959,7 @@ mod tests {
 
     #[tokio::test]
     async fn output_accumulator_preserves_utf8_split_across_chunks() {
-        let mut output = OutputAccumulator::new("lumos-bash-test");
+        let mut output = OutputAccumulator::new("hunea-bash-test");
         let text = "before 你 after\n";
         let split_inside_multibyte_character = "before ".len() + 1;
 

@@ -229,7 +229,7 @@ pub(crate) fn external_editor_command_with_draft(
 
         let name_index = script_index + 1;
         if name_index >= args.len() {
-            args.push("lumos".to_string());
+            args.push("hunea".to_string());
             args.push(draft_path);
         } else {
             args.insert(name_index + 1, draft_path);
@@ -249,7 +249,7 @@ fn write_external_editor_draft(content: &str) -> std::io::Result<PathBuf> {
     let mut counter = 0u64;
     loop {
         let candidate = std::env::temp_dir().join(format!(
-            "lumos-draft-{}-{}-{counter}.md",
+            "hunea-draft-{}-{}-{counter}.md",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -341,7 +341,7 @@ mod tests {
                 "sh".to_string(),
                 "-c".to_string(),
                 "nvim \"$1\"".to_string(),
-                "lumos".to_string(),
+                "hunea".to_string(),
                 "/tmp/draft.md".to_string(),
             ]
         );

@@ -212,9 +212,9 @@ fn long_user_message_scroll_profile() {
         .expect("long message scroll profile backend should initialize");
     let mut model = Model::new_with_options(
         StartupBannerOptions {
-            app_name: Some("lumos".to_string()),
+            app_name: Some("hunea".to_string()),
             version: Some("dev".to_string()),
-            work_dir: Some("/tmp/lumos".to_string()),
+            work_dir: Some("/tmp/hunea".to_string()),
             width: 0,
         },
         ModelOptions {
@@ -455,9 +455,9 @@ struct HotPathTimings {
 fn new_hot_path_profile_model(width: u16, height: u16) -> Model {
     let mut model = Model::new_with_options(
         StartupBannerOptions {
-            app_name: Some("lumos".to_string()),
+            app_name: Some("hunea".to_string()),
             version: Some("dev".to_string()),
-            work_dir: Some("/tmp/lumos".to_string()),
+            work_dir: Some("/tmp/hunea".to_string()),
             width: 0,
         },
         ModelOptions {
@@ -780,9 +780,9 @@ fn mixed_long_history_high_frequency_scroll_profile() {
         .expect("mixed long-history scroll profile backend should initialize");
     let mut model = Model::new_with_options(
         StartupBannerOptions {
-            app_name: Some("lumos".to_string()),
+            app_name: Some("hunea".to_string()),
             version: Some("dev".to_string()),
-            work_dir: Some("/tmp/lumos".to_string()),
+            work_dir: Some("/tmp/hunea".to_string()),
             width: 0,
         },
         ModelOptions {

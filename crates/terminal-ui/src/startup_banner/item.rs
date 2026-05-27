@@ -10,8 +10,9 @@ use ratatui::text::Line;
 use crate::{
     StartupBannerOptions,
     startup_banner::{
-        render_startup_banner_lines_with_palette, render_startup_banner_plain_lines_with_palette,
-        resolved_content_width, startup_banner_title_plain_text, startup_banner_total_width,
+        DEFAULT_APP_NAME, DEFAULT_VERSION, render_startup_banner_lines_with_palette,
+        render_startup_banner_plain_lines_with_palette, resolved_content_width,
+        startup_banner_title_plain_text, startup_banner_total_width,
     },
     styled_text::{lines_to_ansi_text, lines_to_plain_text},
     theme::TerminalPalette,
@@ -186,8 +187,8 @@ impl StartupBannerItem {
     }
 
     fn content_line_anchors(&self, options: &StartupBannerOptions) -> Vec<ItemLineAnchor> {
-        let app_name = options.app_name.as_deref().unwrap_or("Lumos");
-        let version = options.version.as_deref().unwrap_or("v0.1.0");
+        let app_name = options.app_name.as_deref().unwrap_or(DEFAULT_APP_NAME);
+        let version = options.version.as_deref().unwrap_or(DEFAULT_VERSION);
         let work_dir = options.work_dir.as_deref().unwrap_or("");
         let content_width = resolved_content_width(
             options.width,

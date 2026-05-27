@@ -728,9 +728,9 @@ fn new_stress_document_model(item_count: usize, width: u16, height: u16) -> Mode
 fn new_warm_stress_document_model(item_count: usize, width: u16, height: u16) -> Model {
     let mut model = Model::new_with_options(
         StartupBannerOptions {
-            app_name: Some("lumos".to_string()),
+            app_name: Some("hunea".to_string()),
             version: Some("dev".to_string()),
-            work_dir: Some("/tmp/lumos".to_string()),
+            work_dir: Some("/tmp/hunea".to_string()),
             width: 0,
         },
         ModelOptions {
@@ -756,9 +756,9 @@ fn new_warm_stress_document_model(item_count: usize, width: u16, height: u16) ->
 fn new_cold_stress_document_model(item_count: usize, width: u16, height: u16) -> Model {
     let mut model = Model::new_with_options(
         StartupBannerOptions {
-            app_name: Some("lumos".to_string()),
+            app_name: Some("hunea".to_string()),
             version: Some("dev".to_string()),
-            work_dir: Some("/tmp/lumos".to_string()),
+            work_dir: Some("/tmp/hunea".to_string()),
             width: 0,
         },
         ModelOptions {

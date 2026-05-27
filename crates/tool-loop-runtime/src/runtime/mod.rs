@@ -1264,7 +1264,7 @@ mod tests {
                     terminal_id: call.call_id.clone(),
                     command: Some("cargo check".to_string()),
                     cwd: Some("/workspace".to_string()),
-                    output: "Checking lumos".to_string(),
+                    output: "Checking hunea".to_string(),
                     truncated: false,
                     exit_status: None,
                     released: false,
@@ -1466,7 +1466,7 @@ mod tests {
                 event,
                 ToolLoopProgress::TerminalUpdated { snapshot }
                     if snapshot.terminal_id == "call-run"
-                        && snapshot.output == "Checking lumos"
+                        && snapshot.output == "Checking hunea"
                         && snapshot.command.as_deref() == Some("cargo check")
             )
         }));

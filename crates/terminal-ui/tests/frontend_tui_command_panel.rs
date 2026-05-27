@@ -111,7 +111,7 @@ fn command_panel_enter_executes_new_alias_as_clear() {
     assert!(
         render_trimmed_rows(&mut model, 64, 12)
             .iter()
-            .any(|row| row.contains("Lumos")),
+            .any(|row| row.contains("Hunea")),
         "clear should restore the startup banner"
     );
     assert!(
@@ -572,7 +572,7 @@ fn temp_test_dir(prefix: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after unix epoch")
         .as_nanos();
-    let path = env::temp_dir().join(format!("lumos-rust-{prefix}-{unique}"));
+    let path = env::temp_dir().join(format!("hunea-rust-{prefix}-{unique}"));
     fs::create_dir_all(&path).expect("temp test dir should be created");
     path
 }

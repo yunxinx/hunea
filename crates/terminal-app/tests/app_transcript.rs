@@ -23,7 +23,7 @@ fn write_terminal_replay_separates_items_with_blank_lines() {
     write_terminal_replay(&mut output, &model).expect("terminal replay should render");
 
     let rendered = String::from_utf8(output).expect("terminal replay should be utf-8");
-    assert!(rendered.contains("Lumos"));
+    assert!(rendered.contains("Hunea"));
     assert!(rendered.contains("\n\n› hello"));
 }
 

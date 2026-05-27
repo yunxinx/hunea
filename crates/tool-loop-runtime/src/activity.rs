@@ -6,7 +6,7 @@ use runtime_domain::session::{
 };
 use serde_json::Value;
 use tool_runtime::{
-    ProcessedToolError, ToolDefinition as LumosToolDefinition, ToolKind, ToolPermissionRequest,
+    ProcessedToolError, ToolDefinition as HuneaToolDefinition, ToolKind, ToolPermissionRequest,
     ToolRegistry, ToolResult,
 };
 
@@ -83,7 +83,7 @@ pub fn runtime_tool_activity_update_from_result(
 fn runtime_tool_activity_content_for_result(
     arguments: &Value,
     result: &ToolResult,
-    definition: Option<&LumosToolDefinition>,
+    definition: Option<&HuneaToolDefinition>,
 ) -> RuntimeToolActivityContent {
     if matches!(
         runtime_kind_for(definition),
@@ -162,7 +162,7 @@ pub fn runtime_tool_activity_update_from_permission_request(
     }
 }
 
-fn runtime_kind_for(definition: Option<&LumosToolDefinition>) -> RuntimeToolKind {
+fn runtime_kind_for(definition: Option<&HuneaToolDefinition>) -> RuntimeToolKind {
     match definition.map(|definition| definition.kind) {
         Some(ToolKind::Read) => RuntimeToolKind::Read,
         Some(ToolKind::Write) => RuntimeToolKind::Write,
@@ -180,7 +180,7 @@ fn runtime_kind_for(definition: Option<&LumosToolDefinition>) -> RuntimeToolKind
 
 fn tool_title_for(
     tool_name: &str,
-    definition: Option<&LumosToolDefinition>,
+    definition: Option<&HuneaToolDefinition>,
     arguments: &Value,
 ) -> String {
     let base = definition

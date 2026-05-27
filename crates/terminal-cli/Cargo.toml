@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "lumos"
+name = "hunea"
 path = "src/main.rs"
 
 [dependencies]

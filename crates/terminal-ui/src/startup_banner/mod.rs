@@ -19,8 +19,8 @@ use crate::{
 
 pub(crate) use item::StartupBannerItem;
 
-const DEFAULT_APP_NAME: &str = "Lumos";
-const DEFAULT_VERSION: &str = "v0.1.0";
+pub(super) const DEFAULT_APP_NAME: &str = "Hunea";
+pub(super) const DEFAULT_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const BORDER_WIDTH: u16 = 2;
 const HORIZONTAL_PADDING: u16 = 2;
 

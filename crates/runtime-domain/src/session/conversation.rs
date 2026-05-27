@@ -216,7 +216,7 @@ impl ChatMessage {
     }
 }
 
-/// `ChatRole` 描述 Lumos 当前会发送给上游的 transcript role。
+/// `ChatRole` 描述 Hunea 当前会发送给上游的 transcript role。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatRole {
     User,

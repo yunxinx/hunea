@@ -17,10 +17,8 @@ fn render_uses_default_startup_banner_copy_and_includes_the_current_working_dire
         &StartupBannerOptions::default(),
         sample_palette(),
     );
-    let content_width = default_title()
-        .chars()
-        .count()
-        .max(work_dir.chars().count()) as u16;
+    let default_title = default_title();
+    let content_width = default_title.chars().count().max(work_dir.chars().count()) as u16;
 
     assert_eq!(buffer.area.width, content_width + 6);
     assert_eq!(buffer.area.height, 5);
@@ -31,7 +29,7 @@ fn render_uses_default_startup_banner_copy_and_includes_the_current_working_dire
     );
     assert_eq!(
         buffer_line(&buffer, 1),
-        framed_content_line(default_title(), content_width)
+        framed_content_line(&default_title, content_width)
     );
     assert_eq!(
         buffer_line(&buffer, 2),
@@ -93,7 +91,7 @@ fn render_expands_to_requested_content_width() {
     assert_eq!(buffer.area.width, requested_width + 6);
     assert_eq!(
         buffer_line(&buffer, 1),
-        framed_content_line(default_title(), requested_width)
+        framed_content_line(&default_title(), requested_width)
     );
     assert_eq!(
         buffer_line(&buffer, 3),
@@ -116,8 +114,8 @@ fn sample_palette() -> TerminalPalette {
     palette_from_background(true, None)
 }
 
-fn default_title() -> &'static str {
-    ">_ Lumos (v0.1.0)"
+fn default_title() -> String {
+    format!(">_ Hunea (v{})", env!("CARGO_PKG_VERSION"))
 }
 
 fn horizontal_border(content_width: u16, left: char, right: char) -> String {

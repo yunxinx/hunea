@@ -169,7 +169,7 @@ fn phrase_config_paths(working_dir: Option<&Path>, user_config_dir: Option<&Path
     }
     if let Some(path) = working_dir {
         paths.push(path.join(PHRASES_FILE_NAME));
-        paths.push(path.join(".lumos").join(PHRASES_FILE_NAME));
+        paths.push(path.join(".hunea").join(PHRASES_FILE_NAME));
     }
     paths
 }
@@ -243,5 +243,5 @@ fn normalize_phrases(phrases: Vec<String>) -> Vec<String> {
 }
 
 fn user_config_directory() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "lumos").map(|dirs| dirs.config_dir().to_path_buf())
+    ProjectDirs::from("", "", "hunea").map(|dirs| dirs.config_dir().to_path_buf())
 }

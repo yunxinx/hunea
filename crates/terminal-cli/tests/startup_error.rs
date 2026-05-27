@@ -8,13 +8,13 @@ use std::{
 #[test]
 fn invalid_app_config_exits_with_user_facing_table() {
     let working_dir = temp_test_dir("invalid-app-config-table-working");
-    let config_path = working_dir.join(".lumos").join("config.toml");
+    let config_path = working_dir.join(".hunea").join("config.toml");
     write_config(&config_path, "[tui]\nstatus_line = [\"current-mode\"]\n");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_lumos"))
+    let output = Command::new(env!("CARGO_BIN_EXE_hunea"))
         .current_dir(&working_dir)
         .output()
-        .expect("lumos binary should run");
+        .expect("hunea binary should run");
 
     assert!(
         !output.status.success(),
@@ -42,6 +42,25 @@ fn invalid_app_config_exits_with_user_facing_table() {
     );
 }
 
+#[test]
+fn version_flag_prints_product_version_without_starting_tui() {
+    let output = Command::new(env!("CARGO_BIN_EXE_hunea"))
+        .arg("--version")
+        .output()
+        .expect("hunea binary should run");
+
+    assert!(output.status.success(), "--version should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("hunea {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "--version should not initialize the TUI: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn write_config(path: &Path, content: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("test config parent directory should be created");
@@ -54,7 +73,7 @@ fn temp_test_dir(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after epoch")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("lumos-{name}-{nanos}"));
+    let path = std::env::temp_dir().join(format!("hunea-{name}-{nanos}"));
     fs::create_dir_all(&path).expect("test directory should be created");
     path
 }

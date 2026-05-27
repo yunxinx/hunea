@@ -38,7 +38,7 @@ pub fn format_config_error(error: &appconfig::AppConfigError) -> String {
         report.push_str(&table_row(label, &value, label_width, value_width));
     }
     report.push_str(&border);
-    report.push_str("\n\nFix the configuration file and restart Lumos.");
+    report.push_str("\n\nFix the configuration file and restart Hunea.");
     report
 }
 
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn config_error_report_formats_status_line_validation_as_table() {
         let error = AppConfigError::InvalidStatusLineItem {
-            path: Some("/tmp/lumos/.lumos/config.toml".into()),
+            path: Some("/tmp/hunea/.hunea/config.toml".into()),
             value: "current-mode".to_string(),
         };
 
@@ -241,7 +241,7 @@ mod tests {
         assert!(report.contains("Configuration error"));
         assert!(report.contains("| Field"));
         assert!(report.contains("| File"));
-        assert!(report.contains("/tmp/lumos/.lumos/config.toml"));
+        assert!(report.contains("/tmp/hunea/.hunea/config.toml"));
         assert!(report.contains("| Setting"));
         assert!(report.contains("tui.status_line"));
         assert!(report.contains("| Value"));
@@ -265,7 +265,7 @@ mod tests {
         let source = toml::from_str::<toml::Value>("[tui")
             .expect_err("invalid TOML should produce a decode error");
         let error = AppConfigError::Decode {
-            path: "/tmp/lumos/.lumos/config.toml".into(),
+            path: "/tmp/hunea/.hunea/config.toml".into(),
             source,
         };
 

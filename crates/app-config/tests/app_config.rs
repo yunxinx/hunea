@@ -34,7 +34,7 @@ fn load_project_config_overrides_user_config() {
         "[tui]\nuser_input_style = \"ms\"\n",
     );
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nuser_input_style = \"cx\"\n",
     );
 
@@ -48,7 +48,7 @@ fn load_project_config_overrides_user_config() {
 fn load_accepts_cc_style_mode() {
     let working_dir = temp_test_dir("load-accepts-cc-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nuser_input_style = \"cc\"\n",
     );
 
@@ -62,7 +62,7 @@ fn load_accepts_cc_style_mode() {
 fn load_accepts_git_branch_status_line() {
     let working_dir = temp_test_dir("load-accepts-git-branch-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nstatus_line = [\"git-branch\"]\n",
     );
 
@@ -76,7 +76,7 @@ fn load_accepts_git_branch_status_line() {
 fn load_accepts_current_dir_status_line() {
     let working_dir = temp_test_dir("load-accepts-current-dir-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nstatus_line = [\"current-dir\"]\n",
     );
 
@@ -90,7 +90,7 @@ fn load_accepts_current_dir_status_line() {
 fn load_accepts_current_model_status_line() {
     let working_dir = temp_test_dir("load-accepts-current-model-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nstatus_line = [\"current-model\"]\n",
     );
 
@@ -104,7 +104,7 @@ fn load_accepts_current_model_status_line() {
 fn load_accepts_throughput_status_line() {
     let working_dir = temp_test_dir("load-accepts-throughput-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nstatus_line = [\"throughput\"]\n",
     );
 
@@ -118,7 +118,7 @@ fn load_accepts_throughput_status_line() {
 fn load_accepts_latency_status_line() {
     let working_dir = temp_test_dir("load-accepts-latency-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nstatus_line = [\"latency\"]\n",
     );
 
@@ -132,7 +132,7 @@ fn load_accepts_latency_status_line() {
 fn load_accepts_second_status_line() {
     let working_dir = temp_test_dir("load-accepts-second-status-line-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nstatus_line_2 = [\"current-dir\", \"git-branch\"]\n",
     );
 
@@ -151,7 +151,7 @@ fn load_project_config_can_clear_user_second_status_line() {
         "[tui]\nstatus_line_2 = [\"current-dir\"]\n",
     );
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nstatus_line_2 = []\n",
     );
 
@@ -165,7 +165,7 @@ fn load_project_config_can_clear_user_second_status_line() {
 fn load_rejects_unknown_second_status_line_item() {
     let working_dir = temp_test_dir("load-rejects-second-status-line-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nstatus_line_2 = [\"weird-item\"]\n",
     );
 
@@ -182,7 +182,7 @@ fn load_rejects_unknown_second_status_line_item() {
 fn load_rejects_underscore_current_model_status_line() {
     let working_dir = temp_test_dir("load-rejects-underscore-current-model-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nstatus_line = [\"current_model\"]\n",
     );
 
@@ -199,7 +199,7 @@ fn load_rejects_underscore_current_model_status_line() {
 fn load_accepts_external_editor_command() {
     let working_dir = temp_test_dir("load-accepts-external-editor-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nexternal_editor = [\"code\", \"--wait\"]\n",
     );
 
@@ -213,7 +213,7 @@ fn load_accepts_external_editor_command() {
 fn load_accepts_disabling_external_editor_helper() {
     let working_dir = temp_test_dir("load-disable-external-editor-helper-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nshow_external_editor_helper = false\n",
     );
 
@@ -318,7 +318,7 @@ fn load_defaults_reasoning_content_display_to_collapsed() {
 fn load_accepts_enabling_show_reasoning_content() {
     let working_dir = temp_test_dir("load-enable-show-reasoning-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nshow_reasoning_content = true\n",
     );
 
@@ -332,7 +332,7 @@ fn load_accepts_enabling_show_reasoning_content() {
 fn load_defaults_reasoning_content_display_to_expanded_when_reasoning_content_is_enabled() {
     let working_dir = temp_test_dir("load-show-reasoning-default-expanded-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nshow_reasoning_content = true\n",
     );
 
@@ -349,7 +349,7 @@ fn load_defaults_reasoning_content_display_to_expanded_when_reasoning_content_is
 fn load_keeps_explicit_reasoning_content_display_when_reasoning_content_is_enabled() {
     let working_dir = temp_test_dir("load-show-reasoning-keeps-explicit-display-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nshow_reasoning_content = true\nreasoning_content_display = \"collapsed\"\n",
     );
 
@@ -366,7 +366,7 @@ fn load_keeps_explicit_reasoning_content_display_when_reasoning_content_is_enabl
 fn load_accepts_expanded_reasoning_content_display() {
     let working_dir = temp_test_dir("load-expanded-reasoning-display-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nreasoning_content_display = \"expanded\"\n",
     );
 
@@ -383,7 +383,7 @@ fn load_accepts_expanded_reasoning_content_display() {
 fn load_accepts_snippet_reasoning_content_display() {
     let working_dir = temp_test_dir("load-snippet-reasoning-display-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nreasoning_content_display = \"snippet\"\n",
     );
 
@@ -400,7 +400,7 @@ fn load_accepts_snippet_reasoning_content_display() {
 fn load_rejects_unknown_reasoning_content_display() {
     let working_dir = temp_test_dir("load-invalid-reasoning-display-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nreasoning_content_display = \"always\"\n",
     );
 
@@ -417,7 +417,7 @@ fn load_rejects_unknown_reasoning_content_display() {
 fn load_accepts_enabling_copy_on_mouse_selection_release() {
     let working_dir = temp_test_dir("load-enable-copy-on-selection-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\ncopy_on_mouse_selection_release = true\n",
     );
 
@@ -431,7 +431,7 @@ fn load_accepts_enabling_copy_on_mouse_selection_release() {
 fn load_accepts_swap_enter_and_send() {
     let working_dir = temp_test_dir("load-swap-enter-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nswap_enter_and_send = true\n",
     );
 
@@ -445,7 +445,7 @@ fn load_accepts_swap_enter_and_send() {
 fn load_accepts_disabling_ctrl_c_clears_input() {
     let working_dir = temp_test_dir("load-disable-ctrl-c-clears-input-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nctrl_c_clears_input = false\n",
     );
 
@@ -459,7 +459,7 @@ fn load_accepts_disabling_ctrl_c_clears_input() {
 fn load_accepts_configured_esc_interrupt_presses() {
     let working_dir = temp_test_dir("load-esc-interrupt-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nesc_interrupt_presses = 3\n",
     );
 
@@ -473,7 +473,7 @@ fn load_accepts_configured_esc_interrupt_presses() {
 fn load_accepts_configured_file_picker_popup_height() {
     let working_dir = temp_test_dir("load-file-picker-popup-height-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nfile_picker_popup_height = 21\n",
     );
 
@@ -487,7 +487,7 @@ fn load_accepts_configured_file_picker_popup_height() {
 fn load_accepts_minimum_file_picker_popup_height() {
     let working_dir = temp_test_dir("load-min-file-picker-popup-height-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nfile_picker_popup_height = 3\n",
     );
 
@@ -501,7 +501,7 @@ fn load_accepts_minimum_file_picker_popup_height() {
 fn load_rejects_file_picker_popup_height_below_minimum() {
     let working_dir = temp_test_dir("load-low-file-picker-popup-height-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nfile_picker_popup_height = 2\n",
     );
 
@@ -520,7 +520,7 @@ fn load_rejects_file_picker_popup_height_below_minimum() {
 fn load_rejects_file_picker_popup_height_above_maximum() {
     let working_dir = temp_test_dir("load-high-file-picker-popup-height-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nfile_picker_popup_height = 22\n",
     );
 
@@ -554,7 +554,7 @@ fn load_defaults_runtime_request_policy() {
 fn load_accepts_configured_runtime_request_policy() {
     let working_dir = temp_test_dir("load-runtime-retry-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[runtime]\nrequest_retry_attempts = 5\nrequest_retry_delays = [1, 3]\nrequest_timeout_seconds = 240\ntool_max_turns = 11\n",
     );
 
@@ -571,7 +571,7 @@ fn load_accepts_configured_runtime_request_policy() {
 fn load_accepts_managed_search_tool_authorization_flags() {
     let working_dir = temp_test_dir("load-runtime-managed-search-tools-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[runtime]\nallow_managed_rg = true\nallow_managed_fd = false\n",
     );
 
@@ -601,7 +601,7 @@ fn persists_managed_search_tool_authorization_to_user_config() {
 fn load_rejects_zero_runtime_tool_max_turns() {
     let working_dir = temp_test_dir("load-runtime-tool-max-turns-zero-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[runtime]\ntool_max_turns = 0\n",
     );
 
@@ -620,7 +620,7 @@ fn load_rejects_zero_runtime_tool_max_turns() {
 fn load_uses_runtime_request_retry_delay_count_when_attempts_are_omitted() {
     let working_dir = temp_test_dir("load-runtime-retry-delays-only-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[runtime]\nrequest_retry_delays = [1, 3, 5]\n",
     );
 
@@ -635,7 +635,7 @@ fn load_uses_runtime_request_retry_delay_count_when_attempts_are_omitted() {
 fn load_truncates_default_runtime_request_retry_delays_when_only_attempts_are_configured() {
     let working_dir = temp_test_dir("load-runtime-retry-attempts-only-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[runtime]\nrequest_retry_attempts = 2\n",
     );
 
@@ -650,7 +650,7 @@ fn load_truncates_default_runtime_request_retry_delays_when_only_attempts_are_co
 fn load_rejects_invalid_runtime_request_retry_policy_shape() {
     let working_dir = temp_test_dir("load-invalid-runtime-retry-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[runtime]\nrequest_retry_attempts = 3\nrequest_retry_delays = [1, 3, 5, 8]\n",
     );
 
@@ -664,7 +664,7 @@ fn load_rejects_invalid_runtime_request_retry_policy_shape() {
 fn load_rejects_out_of_range_runtime_request_retry_values() {
     let attempts_dir = temp_test_dir("load-invalid-runtime-retry-attempts-working");
     write_config(
-        &attempts_dir.join(".lumos").join("config.toml"),
+        &attempts_dir.join(".hunea").join("config.toml"),
         "[runtime]\nrequest_retry_attempts = 11\n",
     );
     let attempts_error = load_from_paths(Some(attempts_dir.as_path()), None)
@@ -673,7 +673,7 @@ fn load_rejects_out_of_range_runtime_request_retry_values() {
 
     let delays_dir = temp_test_dir("load-invalid-runtime-retry-delays-working");
     write_config(
-        &delays_dir.join(".lumos").join("config.toml"),
+        &delays_dir.join(".hunea").join("config.toml"),
         "[runtime]\nrequest_retry_delays = [1, 1801]\n",
     );
     let delays_error = load_from_paths(Some(delays_dir.as_path()), None)
@@ -685,7 +685,7 @@ fn load_rejects_out_of_range_runtime_request_retry_values() {
 fn load_rejects_out_of_range_runtime_request_timeout_values() {
     let zero_dir = temp_test_dir("load-invalid-runtime-timeout-zero-working");
     write_config(
-        &zero_dir.join(".lumos").join("config.toml"),
+        &zero_dir.join(".hunea").join("config.toml"),
         "[runtime]\nrequest_timeout_seconds = 0\n",
     );
     let zero_error = load_from_paths(Some(zero_dir.as_path()), None)
@@ -694,7 +694,7 @@ fn load_rejects_out_of_range_runtime_request_timeout_values() {
 
     let too_large_dir = temp_test_dir("load-invalid-runtime-timeout-large-working");
     write_config(
-        &too_large_dir.join(".lumos").join("config.toml"),
+        &too_large_dir.join(".hunea").join("config.toml"),
         "[runtime]\nrequest_timeout_seconds = 7201\n",
     );
     let too_large_error = load_from_paths(Some(too_large_dir.as_path()), None)
@@ -706,7 +706,7 @@ fn load_rejects_out_of_range_runtime_request_timeout_values() {
 fn load_accepts_disabling_show_esc_interrupt_hint() {
     let working_dir = temp_test_dir("load-disable-show-esc-hint-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nshow_esc_interrupt_hint = false\n",
     );
 
@@ -720,7 +720,7 @@ fn load_accepts_disabling_show_esc_interrupt_hint() {
 fn load_accepts_enabling_debug_commands() {
     let working_dir = temp_test_dir("load-enable-debug-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[debug]\nenabled = true\n",
     );
 
@@ -734,7 +734,7 @@ fn load_accepts_enabling_debug_commands() {
 fn load_rejects_invalid_esc_interrupt_presses() {
     let working_dir = temp_test_dir("load-invalid-esc-interrupt-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nesc_interrupt_presses = 4\n",
     );
 
@@ -748,7 +748,7 @@ fn load_rejects_invalid_esc_interrupt_presses() {
 fn load_accepts_enabling_print_transcript_on_exit() {
     let working_dir = temp_test_dir("load-enable-print-transcript-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nprint_transcript_on_exit = true\n",
     );
 
@@ -767,7 +767,7 @@ fn load_project_config_can_clear_user_status_line() {
         "[tui]\nstatus_line = [\"git-branch\"]\n",
     );
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nstatus_line = []\n",
     );
 
@@ -786,7 +786,7 @@ fn load_project_config_can_clear_user_external_editor() {
         "[tui]\nexternal_editor = [\"code\", \"--wait\"]\n",
     );
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nexternal_editor = []\n",
     );
 
@@ -800,7 +800,7 @@ fn load_project_config_can_clear_user_external_editor() {
 fn load_rejects_unknown_status_line_item() {
     let working_dir = temp_test_dir("load-rejects-status-line-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nstatus_line = [\"weird-item\"]\n",
     );
 
@@ -817,7 +817,7 @@ fn load_rejects_unknown_status_line_item() {
 fn load_rejects_unknown_style_mode() {
     let working_dir = temp_test_dir("load-rejects-style-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nuser_input_style = \"weird\"\n",
     );
 
@@ -834,7 +834,7 @@ fn load_rejects_unknown_style_mode() {
 fn load_rejects_legacy_command_panel_mode_key() {
     let working_dir = temp_test_dir("load-rejects-legacy-command-panel-mode-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\ncommand_panel_mode = \"inline\"\n",
     );
 
@@ -851,7 +851,7 @@ fn load_rejects_legacy_command_panel_mode_key() {
 fn load_rejects_unknown_keys() {
     let working_dir = temp_test_dir("load-rejects-keys-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nunknown = true\n",
     );
 
@@ -868,7 +868,7 @@ fn load_rejects_unknown_keys() {
 fn load_rejects_external_editor_without_command() {
     let working_dir = temp_test_dir("load-rejects-empty-external-editor-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nexternal_editor = [\"\"]\n",
     );
 
@@ -885,7 +885,7 @@ fn load_rejects_external_editor_without_command() {
 fn load_rejects_non_blocking_external_editor() {
     let working_dir = temp_test_dir("load-rejects-non-blocking-external-editor-working");
     write_config(
-        &working_dir.join(".lumos").join("config.toml"),
+        &working_dir.join(".hunea").join("config.toml"),
         "[tui]\nexternal_editor = [\"code\"]\n",
     );
 
@@ -905,7 +905,7 @@ fn temp_test_dir(prefix: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after unix epoch")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("lumos-rust-{prefix}-{unique}"));
+    let path = std::env::temp_dir().join(format!("hunea-rust-{prefix}-{unique}"));
     fs::create_dir_all(&path).expect("temp test dir should be created");
     path
 }

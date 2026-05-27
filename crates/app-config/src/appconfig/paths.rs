@@ -8,5 +8,5 @@ pub fn user_config_file_path() -> Option<PathBuf> {
 }
 
 pub(super) fn user_config_directory() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "lumos").map(|dirs| dirs.config_dir().to_path_buf())
+    ProjectDirs::from("", "", "hunea").map(|dirs| dirs.config_dir().to_path_buf())
 }

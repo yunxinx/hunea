@@ -47,7 +47,7 @@ phrases = ["Polishing", "Checking"]
 fn phrases_config_overrides_builtin_phrases() {
     let working_dir = temp_test_dir("override-phrases");
     fs::write(
-        working_dir.join(".lumos").join("phrases.toml"),
+        working_dir.join(".hunea").join("phrases.toml"),
         r#"
 mode = "override"
 phrases = ["Thinking locally", "", "Reading context"]
@@ -72,8 +72,8 @@ fn temp_test_dir(name: &str) -> std::path::PathBuf {
             .as_nanos()
     );
     let path = std::env::temp_dir()
-        .join("lumos-runtime-phrases-config-tests")
+        .join("hunea-runtime-phrases-config-tests")
         .join(unique);
-    fs::create_dir_all(path.join(".lumos")).expect("temp dir should be created");
+    fs::create_dir_all(path.join(".hunea")).expect("temp dir should be created");
     path
 }

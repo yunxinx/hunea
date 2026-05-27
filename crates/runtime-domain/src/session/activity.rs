@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-const TOOL_RESULT_RAW_VALUE_MARKER: &str = "__lumos_tool_result";
+const TOOL_RESULT_RAW_VALUE_MARKER: &str = "__hunea_tool_result";
 const TOOL_RESULT_RAW_VALUE_VERSION: &str = "v1";
 const TOOL_RESULT_RAW_VALUE_CONTENT: &str = "content";
 const TOOL_RESULT_RAW_VALUE_DISPLAY_CONTENT: &str = "display_content";

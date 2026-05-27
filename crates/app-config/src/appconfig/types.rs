@@ -3,7 +3,7 @@ pub const FILE_PICKER_POPUP_MIN_HEIGHT: u16 = 3;
 /// @ 文件选择浮窗最多显示 21 行，避免覆盖过多上下文。
 pub const FILE_PICKER_POPUP_MAX_HEIGHT: u16 = 21;
 
-/// `Config` 表示当前 lumos 支持的启动配置。
+/// `Config` 表示当前 hunea 支持的启动配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub tui: TuiConfig,

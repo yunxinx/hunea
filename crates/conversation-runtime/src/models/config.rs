@@ -222,7 +222,7 @@ fn model_config_paths(working_dir: Option<&Path>, user_config_dir: Option<&Path>
     }
     if let Some(path) = working_dir {
         paths.push(path.join(MODELS_FILE_NAME));
-        paths.push(path.join(".lumos").join(MODELS_FILE_NAME));
+        paths.push(path.join(".hunea").join(MODELS_FILE_NAME));
     }
     paths
 }
@@ -386,7 +386,7 @@ fn sync_provider_models(request: &ProviderSyncRequest) -> ModelSyncResult {
 }
 
 fn user_config_directory() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "lumos").map(|dirs| dirs.config_dir().to_path_buf())
+    ProjectDirs::from("", "", "hunea").map(|dirs| dirs.config_dir().to_path_buf())
 }
 
 #[cfg(test)]

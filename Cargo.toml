@@ -43,7 +43,7 @@ conversation-runtime = { path = "crates/conversation-runtime" }
 tool-runtime = { path = "crates/tool-runtime" }
 terminal-ui = { path = "crates/terminal-ui" }
 percent-encoding = "2"
-pulldown-cmark = "0.13.3"
+pulldown-cmark = "0.13.4"
 ratatui = { version = "0.30.0", features = ["crossterm_0_29"] }
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "stream"] }
@@ -60,7 +60,7 @@ tiktoken = "3.1.4"
 tokio = { version = "1.52.1", features = ["process", "rt", "macros", "io-util", "time", "sync", "fs"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 toml = "1.1.2"
-toml_edit = "0.25.11"
+toml_edit = "0.25.12"
 two-face = "0.5.1"
 unicode-normalization = "0.1.25"
 unicode-segmentation = "1.13.2"

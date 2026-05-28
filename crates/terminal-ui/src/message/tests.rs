@@ -8,6 +8,7 @@ use crate::{
         reset_prompt_text_wrap_call_count,
     },
 };
+use ratatui::style::Modifier;
 use std::rc::Rc;
 
 #[test]
@@ -163,6 +164,54 @@ fn assistant_render_uses_markdown_emphasis_rendering() {
         .collect::<Vec<_>>();
 
     assert_eq!(lines, vec!["init"]);
+}
+
+#[test]
+fn assistant_display_trims_blank_lines_without_trimming_content_whitespace() {
+    assert_eq!(assistant_display_content("\n\n    code\n\n"), "    code");
+    assert_eq!(assistant_display_content("    code  "), "    code  ");
+    assert_eq!(assistant_display_content(" \t\n\t\ncontent"), "content");
+    assert_eq!(assistant_display_content("line  \n\n"), "line  \n");
+}
+
+#[test]
+fn assistant_display_blank_line_trim_preserves_indented_code_block() {
+    let palette = default_palette();
+    let item = MessageItem::new(Sender::Assistant, "\n    # not a heading\n");
+
+    let lines = item.render_lines(80, palette);
+
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| plain_line(line.clone()))
+            .collect::<Vec<_>>(),
+        vec!["# not a heading"]
+    );
+    assert!(
+        lines[0].spans.iter().all(|span| !span
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD | Modifier::UNDERLINED)),
+        "leading indentation should prevent marker-looking text from becoming a heading: {:?}",
+        lines[0].spans
+    );
+}
+
+#[test]
+fn assistant_display_blank_line_trim_preserves_list_and_quote_indentation() {
+    let palette = default_palette();
+
+    for content in ["\n    - not a list\n", "\n    > not a quote\n"] {
+        let item = MessageItem::new(Sender::Assistant, content);
+        let lines = item.render_lines(80, palette);
+
+        assert!(
+            lines[0].spans.len() == 1,
+            "leading indentation should prevent marker-looking text from becoming list or quote markup: {:?}",
+            lines[0].spans
+        );
+    }
 }
 
 #[test]

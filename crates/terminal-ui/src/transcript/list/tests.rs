@@ -180,6 +180,37 @@ fn tool_activity_uses_compact_and_detailed_rendering_modes() {
 }
 
 #[test]
+fn assistant_display_trims_outer_blank_lines_without_mutating_source_content() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_tool_activity_render_mode(ToolActivityRenderMode::Detailed);
+    transcript.append_message(Sender::Assistant, "文件已创建成功。\n\n");
+    transcript.append_runtime_tool_activity(RuntimeToolActivity {
+        activity_id: "call-wc".to_string(),
+        title: "Shell: wc -m Temp.md".to_string(),
+        kind: RuntimeToolKind::Execute,
+        status: RuntimeToolActivityStatus::Completed,
+        content: Vec::new(),
+        locations: Vec::new(),
+        raw_input: Some(serde_json::json!({ "command": "wc -m Temp.md" }).into()),
+        raw_output: Some("705 Temp.md".into()),
+    });
+
+    assert_eq!(
+        transcript.render().all_plain_lines(),
+        vec![
+            "文件已创建成功。".to_string(),
+            "".to_string(),
+            "$ wc -m Temp.md".to_string(),
+            "705 Temp.md".to_string(),
+        ]
+    );
+    assert_eq!(
+        transcript.source_messages(),
+        vec![(Sender::Assistant, "文件已创建成功。\n\n".to_string())]
+    );
+}
+
+#[test]
 fn single_exploration_tool_activity_renders_as_standalone_transcript_item() {
     let mut transcript = Transcript::new(default_palette());
 

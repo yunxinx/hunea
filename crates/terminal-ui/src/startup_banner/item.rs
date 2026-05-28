@@ -11,8 +11,9 @@ use crate::{
     StartupBannerOptions,
     startup_banner::{
         DEFAULT_APP_NAME, DEFAULT_VERSION, render_startup_banner_lines_with_palette,
-        render_startup_banner_plain_lines_with_palette, resolved_content_width,
-        startup_banner_title_plain_text, startup_banner_total_width,
+        render_startup_banner_plain_lines_with_palette, resolved_startup_banner_content_width,
+        startup_banner_directory_plain_text, startup_banner_model_plain_text,
+        startup_banner_plain_rows, startup_banner_title_plain_text, startup_banner_total_width,
     },
     styled_text::{lines_to_ansi_text, lines_to_plain_text},
     theme::TerminalPalette,
@@ -26,8 +27,9 @@ use runtime_domain::envinfo::short_work_dir;
 const BANNER_LOGICAL_LINE_TOP_BORDER: usize = 0;
 const BANNER_LOGICAL_LINE_TITLE: usize = 1;
 const BANNER_LOGICAL_LINE_SEPARATOR: usize = 2;
-const BANNER_LOGICAL_LINE_WORK_DIR: usize = 3;
-const BANNER_LOGICAL_LINE_BOTTOM_BORDER: usize = 4;
+const BANNER_LOGICAL_LINE_MODEL: usize = 3;
+const BANNER_LOGICAL_LINE_WORK_DIR: usize = 4;
+const BANNER_LOGICAL_LINE_BOTTOM_BORDER: usize = 5;
 
 /// `StartupBannerItem` 表示 transcript 的开场项。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +98,7 @@ impl StartupBannerItem {
     pub(crate) fn source_text_byte_len(&self) -> usize {
         self.options.app_name.as_deref().unwrap_or("").len()
             + self.options.version.as_deref().unwrap_or("").len()
+            + self.options.model_name.as_deref().unwrap_or("").len()
             + self.options.work_dir.as_deref().unwrap_or("").len()
     }
 
@@ -144,6 +147,17 @@ impl StartupBannerItem {
         }
 
         let content_anchors = self.content_line_anchors(&options);
+        if content_anchors.len() == rendered_lines.len() {
+            return content_anchors
+                .into_iter()
+                .enumerate()
+                .map(|(rendered_line, anchor)| ItemLineAnchor {
+                    rendered_line,
+                    ..anchor
+                })
+                .collect();
+        }
+
         if content_anchors.len() + 2 != rendered_lines.len() {
             return Vec::new();
         }
@@ -181,7 +195,7 @@ impl StartupBannerItem {
         }
 
         Some(StartupBannerOptions {
-            width: width.saturating_sub(6).max(1),
+            width: width.saturating_sub(4).max(1),
             ..self.options.clone()
         })
     }
@@ -189,18 +203,21 @@ impl StartupBannerItem {
     fn content_line_anchors(&self, options: &StartupBannerOptions) -> Vec<ItemLineAnchor> {
         let app_name = options.app_name.as_deref().unwrap_or(DEFAULT_APP_NAME);
         let version = options.version.as_deref().unwrap_or(DEFAULT_VERSION);
+        let model_name = options
+            .model_name
+            .as_deref()
+            .filter(|model_name| !model_name.is_empty());
         let work_dir = options.work_dir.as_deref().unwrap_or("");
-        let content_width = resolved_content_width(
-            options.width,
-            &startup_banner_title_plain_text(app_name, version),
-            work_dir,
-        );
+        let title = startup_banner_title_plain_text(app_name, version);
+        let plain_rows = startup_banner_plain_rows(app_name, version, model_name, work_dir);
+        let content_width =
+            resolved_startup_banner_content_width(options.width, &title, &plain_rows);
         let mut anchors = startup_banner_wrapped_text_anchors(
-            &startup_banner_title_plain_text(app_name, version),
+            &title,
             usize::from(content_width),
             BANNER_LOGICAL_LINE_TITLE,
         );
-        if work_dir.is_empty() {
+        if plain_rows.is_empty() {
             return anchors;
         }
 
@@ -208,11 +225,20 @@ impl StartupBannerItem {
             BANNER_LOGICAL_LINE_SEPARATOR,
             0,
         ));
-        anchors.extend(startup_banner_wrapped_text_anchors(
-            work_dir,
-            usize::from(content_width),
-            BANNER_LOGICAL_LINE_WORK_DIR,
-        ));
+        if let Some(model_name) = model_name {
+            anchors.extend(startup_banner_wrapped_text_anchors(
+                &startup_banner_model_plain_text(model_name),
+                usize::from(content_width),
+                BANNER_LOGICAL_LINE_MODEL,
+            ));
+        }
+        if !work_dir.is_empty() {
+            anchors.extend(startup_banner_wrapped_text_anchors(
+                &startup_banner_directory_plain_text(work_dir),
+                usize::from(content_width),
+                BANNER_LOGICAL_LINE_WORK_DIR,
+            ));
+        }
         anchors
     }
 }
@@ -221,6 +247,11 @@ fn startup_banner_item_render_cache_key(options: &StartupBannerOptions) -> u64 {
     let mut hasher = DefaultHasher::new();
     options.app_name.as_deref().unwrap_or("").hash(&mut hasher);
     options.version.as_deref().unwrap_or("").hash(&mut hasher);
+    options
+        .model_name
+        .as_deref()
+        .unwrap_or("")
+        .hash(&mut hasher);
     options.work_dir.as_deref().unwrap_or("").hash(&mut hasher);
     options.width.hash(&mut hasher);
     hasher.finish()

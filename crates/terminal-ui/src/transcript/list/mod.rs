@@ -556,6 +556,12 @@ impl Transcript {
         Rc::clone(&self.items)
     }
 
+    pub(crate) fn starts_with_startup_banner(&self) -> bool {
+        self.items
+            .first()
+            .is_some_and(|item| matches!(item.as_ref(), TranscriptItem::StartupBanner(_)))
+    }
+
     /// `cached_screen_blocks_snapshot` 返回当前宽度下已预热的 item block 引用表。
     pub(crate) fn cached_screen_blocks_snapshot(
         &self,

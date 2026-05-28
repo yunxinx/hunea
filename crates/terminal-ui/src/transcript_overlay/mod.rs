@@ -52,6 +52,8 @@ impl Model {
             return;
         }
 
+        self.complete_startup_banner_entrance();
+
         // 关闭其它 immersive panel，遵循互斥策略
         self.close_model_panel();
         self.close_tool_approval_panel();

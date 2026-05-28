@@ -207,7 +207,7 @@ fn transcript_overlay_toggles_with_ctrl_t() {
     }
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let rows_normal = render_rows(&mut model, 20, 10);
+    let rows_startup_frame = render_rows(&mut model, 20, 10);
 
     // Ctrl+T 打开
     model.update(AppEvent::Key(KeyEvent::new(
@@ -216,7 +216,7 @@ fn transcript_overlay_toggles_with_ctrl_t() {
     )));
     let rows_overlay = render_rows(&mut model, 20, 10);
     assert_ne!(
-        rows_normal, rows_overlay,
+        rows_startup_frame, rows_overlay,
         "overlay should change the view: {:?}",
         rows_overlay
     );
@@ -227,9 +227,19 @@ fn transcript_overlay_toggles_with_ctrl_t() {
         KeyModifiers::CONTROL,
     )));
     let rows_closed = render_rows(&mut model, 20, 10);
-    assert_eq!(
-        rows_normal, rows_closed,
-        "closing overlay should restore normal view"
+    assert_ne!(
+        rows_overlay, rows_closed,
+        "closing overlay should leave overlay view"
+    );
+    assert!(
+        rows_closed.iter().any(|row| row.contains("directory:")),
+        "closing overlay should restore normal document view: {:?}",
+        rows_closed
+    );
+    assert!(
+        rows_closed.iter().any(|row| row.contains("› hi")),
+        "closing overlay should restore submitted user message: {:?}",
+        rows_closed
     );
 }
 
@@ -242,7 +252,7 @@ fn transcript_overlay_esc_closes() {
     }
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let rows_normal = render_rows(&mut model, 20, 10);
+    let _rows_startup_frame = render_rows(&mut model, 20, 10);
 
     // 打开覆盖层
     model.update(AppEvent::Key(KeyEvent::new(
@@ -254,9 +264,15 @@ fn transcript_overlay_esc_closes() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
 
     let rows_after = render_rows(&mut model, 20, 10);
-    assert_eq!(
-        rows_normal, rows_after,
-        "esc should close overlay and restore normal view"
+    assert!(
+        rows_after.iter().any(|row| row.contains("directory:")),
+        "esc should close overlay and restore normal document view: {:?}",
+        rows_after
+    );
+    assert!(
+        rows_after.iter().any(|row| row.contains("› hello")),
+        "esc should close overlay and restore submitted user message: {:?}",
+        rows_after
     );
 }
 

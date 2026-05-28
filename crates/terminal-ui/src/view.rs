@@ -1,7 +1,11 @@
+use std::time::Instant;
+
 use ratatui::{Frame, buffer::Buffer, layout::Rect, text::Line, widgets::Widget};
 
 use super::{
-    Model, message::assistant_message_visual_inset,
+    Model,
+    document::{DocumentLayout, DocumentViewport},
+    message::assistant_message_visual_inset,
     styled_text::render_line_with_full_width_background,
 };
 
@@ -65,12 +69,14 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
 
     // 文件审批预览需要完整审查 diff，超出当前屏幕时进入独立全屏界面。
     if model.tool_approval_fullscreen_preview_active() {
+        model.complete_startup_banner_entrance();
         model.render_tool_approval_fullscreen_preview(frame, area);
         return;
     }
 
     // Transcript 覆盖层模式：全屏渲染对话历史，隐藏 composer 和各面板
     if model.transcript_overlay_active() {
+        model.complete_startup_banner_entrance();
         model.render_transcript_overlay(frame, area);
         return;
     }
@@ -84,6 +90,17 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
             assistant_lines: &viewport.assistant_lines,
         },
         area,
+    );
+
+    let startup_banner_entrance_area = if model.startup_banner_entrance_target_available() {
+        startup_banner_entrance_rect(&document, &viewport, area).unwrap_or_default()
+    } else {
+        Rect::default()
+    };
+    model.apply_startup_banner_entrance_at(
+        Instant::now(),
+        frame.buffer_mut(),
+        startup_banner_entrance_area,
     );
 
     if model.history_scroll_indicator_visible() {
@@ -103,6 +120,42 @@ pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
             area.y + u16::try_from(cursor_y).unwrap_or(u16::MAX),
         ));
     }
+}
+
+fn startup_banner_entrance_rect(
+    layout: &DocumentLayout,
+    viewport: &DocumentViewport,
+    area: Rect,
+) -> Option<Rect> {
+    let banner_lines = layout.transcript_item_lines(0)?;
+    let banner_start = banner_lines.content_start_line();
+    let banner_end = banner_start.saturating_add(banner_lines.content_line_count());
+    let viewport_start = viewport.resolved_offset;
+    let viewport_end = viewport_start.saturating_add(viewport.lines.len());
+    let visible_start = banner_start.max(viewport_start);
+    let visible_end = banner_end.min(viewport_end);
+    if visible_start >= visible_end {
+        return None;
+    }
+
+    let first_visible_row = visible_start.saturating_sub(viewport_start);
+    let visible_height = visible_end.saturating_sub(visible_start);
+    let width = viewport.lines[first_visible_row..first_visible_row + visible_height]
+        .iter()
+        .map(Line::width)
+        .max()
+        .unwrap_or_default()
+        .min(usize::from(area.width));
+    if width == 0 || visible_height == 0 {
+        return None;
+    }
+
+    Some(Rect::new(
+        area.x,
+        area.y + u16::try_from(first_visible_row).unwrap_or(u16::MAX),
+        u16::try_from(width).unwrap_or(u16::MAX),
+        u16::try_from(visible_height).unwrap_or(u16::MAX),
+    ))
 }
 
 #[cfg(test)]

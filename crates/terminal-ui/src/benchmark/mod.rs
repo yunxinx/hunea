@@ -730,6 +730,7 @@ fn new_warm_stress_document_model(item_count: usize, width: u16, height: u16) ->
         StartupBannerOptions {
             app_name: Some("hunea".to_string()),
             version: Some("dev".to_string()),
+            model_name: None,
             work_dir: Some("/tmp/hunea".to_string()),
             width: 0,
         },
@@ -758,6 +759,7 @@ fn new_cold_stress_document_model(item_count: usize, width: u16, height: u16) ->
         StartupBannerOptions {
             app_name: Some("hunea".to_string()),
             version: Some("dev".to_string()),
+            model_name: None,
             work_dir: Some("/tmp/hunea".to_string()),
             width: 0,
         },

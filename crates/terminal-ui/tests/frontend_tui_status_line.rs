@@ -29,7 +29,12 @@ fn cx_status_line_renders_below_composer_frame() {
 
     assert_eq!(
         render_trimmed_rows(&mut model, 40, 4),
-        vec!["", "› Enter to send Prompt", "", "  main"]
+        vec![
+            cx_top_surface_row(40),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(40),
+            "  main".to_string()
+        ]
     );
 
     env::set_current_dir(original_dir).expect("should restore original directory");
@@ -59,7 +64,12 @@ fn status_line_renders_current_dir_and_preserves_configured_order() {
 
     assert_eq!(
         render_trimmed_rows(&mut model, 40, 4),
-        vec!["", "› Enter to send Prompt", "", "  ~/repo · main"]
+        vec![
+            cx_top_surface_row(40),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(40),
+            "  ~/repo · main".to_string()
+        ]
     );
 
     env::set_current_dir(original_dir).expect("should restore original directory");
@@ -82,7 +92,12 @@ fn status_line_renders_current_model_when_selected() {
 
     assert_eq!(
         render_trimmed_rows(&mut model, 48, 4),
-        vec!["", "› Enter to send Prompt", "", "  [Local] qwen3"]
+        vec![
+            cx_top_surface_row(48),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(48),
+            "  [Local] qwen3".to_string()
+        ]
     );
 }
 
@@ -114,10 +129,10 @@ fn status_line_uses_provider_display_name_for_current_model() {
     assert_eq!(
         render_trimmed_rows(&mut model, 72, 4),
         vec![
-            "",
-            "› Enter to send Prompt",
-            "",
-            "  [LM Studio] qwen/qwen3-4b-2507"
+            cx_top_surface_row(72),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(72),
+            "  [LM Studio] qwen/qwen3-4b-2507".to_string()
         ]
     );
 }
@@ -136,7 +151,15 @@ fn status_line_omits_current_model_when_unselected() {
     );
 
     let rows = render_trimmed_rows(&mut model, 48, 4);
-    assert_eq!(rows, vec!["", "", "› Enter to send Prompt"]);
+    assert_eq!(
+        rows,
+        vec![
+            "".to_string(),
+            cx_top_surface_row(48),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(48)
+        ]
+    );
     assert!(
         rows.iter().all(|row| !row.contains("local/qwen3")),
         "current-model should not render without a selected model, got: {rows:?}"
@@ -184,7 +207,12 @@ fn status_line_renders_request_metrics_in_configured_order() {
 
     assert_eq!(
         render_trimmed_rows(&mut model, 48, 4),
-        vec!["", "› Enter to send Prompt", "", "  139tps · 0.53s"]
+        vec![
+            cx_top_surface_row(48),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(48),
+            "  139tps · 0.53s".to_string()
+        ]
     );
 }
 
@@ -198,7 +226,15 @@ fn status_line_skips_request_metrics_before_successful_request() {
     );
 
     let rows = render_trimmed_rows(&mut model, 48, 4);
-    assert_eq!(rows, vec!["", "", "› Enter to send Prompt"]);
+    assert_eq!(
+        rows,
+        vec![
+            "".to_string(),
+            cx_top_surface_row(48),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(48)
+        ]
+    );
     assert!(
         rows.iter()
             .all(|row| !row.contains("tps") && !row.contains("0.00s")),
@@ -232,10 +268,10 @@ fn status_line_preserves_request_metrics_order_with_other_items() {
     assert_eq!(
         render_trimmed_rows(&mut model, 72, 4),
         vec![
-            "",
-            "› Enter to send Prompt",
-            "",
-            "  [Local] qwen3 · 0.01s · 0tps"
+            cx_top_surface_row(72),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(72),
+            "  [Local] qwen3 · 0.01s · 0tps".to_string()
         ]
     );
 }
@@ -268,7 +304,13 @@ fn second_status_line_renders_after_first_line_and_deduplicates_first_line_items
 
     assert_eq!(
         render_trimmed_rows(&mut model, 48, 5),
-        vec!["", "› Enter to send Prompt", "", "  main", "  ~/repo"]
+        vec![
+            cx_top_surface_row(48),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(48),
+            "  main".to_string(),
+            "  ~/repo".to_string()
+        ]
     );
 
     env::set_current_dir(original_dir).expect("should restore original directory");
@@ -321,7 +363,12 @@ fn status_line_truncates_without_wrapping_in_narrow_viewport() {
 
     assert_eq!(
         render_trimmed_rows(&mut model, 12, 4),
-        vec!["", "› Enter to", "", "  feature..."]
+        vec![
+            cx_top_surface_row(12),
+            "› Enter to".to_string(),
+            cx_bottom_surface_row(12),
+            "  feature...".to_string()
+        ]
     );
 
     env::set_current_dir(original_dir).expect("should restore original directory");
@@ -349,7 +396,12 @@ fn status_line_falls_back_to_whole_line_ellipsis_when_only_one_cell_remains() {
 
     assert_eq!(
         render_trimmed_rows(&mut model, 10, 4),
-        vec!["", "› Enter", "", "  main..."]
+        vec![
+            cx_top_surface_row(10),
+            "› Enter".to_string(),
+            cx_bottom_surface_row(10),
+            "  main...".to_string()
+        ]
     );
 
     env::set_current_dir(original_dir).expect("should restore original directory");
@@ -372,7 +424,12 @@ fn status_line_refreshes_git_branch_only_after_transcript_changes() {
 
     assert_eq!(
         render_trimmed_rows(&mut model, 40, 4),
-        vec!["", "› Enter to send Prompt", "", "  main"]
+        vec![
+            cx_top_surface_row(40),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(40),
+            "  main".to_string()
+        ]
     );
 
     write_git_head(&repo_dir, "ref: refs/heads/feature/refresh\n");
@@ -382,7 +439,12 @@ fn status_line_refreshes_git_branch_only_after_transcript_changes() {
     });
     assert_eq!(
         render_trimmed_rows(&mut model, 41, 4),
-        vec!["", "› Enter to send Prompt", "", "  main"]
+        vec![
+            cx_top_surface_row(41),
+            "› Enter to send Prompt".to_string(),
+            cx_bottom_surface_row(41),
+            "  main".to_string()
+        ]
     );
 
     for character in "hello".chars() {
@@ -445,6 +507,14 @@ fn type_text(model: &mut Model, text: &str) {
     for character in text.chars() {
         model.update(AppEvent::Key(KeyCode::Char(character).into()));
     }
+}
+
+fn cx_top_surface_row(width: u16) -> String {
+    "▄".repeat(width as usize)
+}
+
+fn cx_bottom_surface_row(width: u16) -> String {
+    "▀".repeat(width as usize)
 }
 
 fn render_trimmed_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {

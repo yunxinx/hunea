@@ -8,7 +8,7 @@ use ratatui::text::Line;
 use crate::{
     StyleMode,
     selection::SelectableLineRange,
-    theme::TerminalPalette,
+    theme::{SurfaceHalf, TerminalPalette},
     transcript::{ItemLineAnchor, LineAnchorKind, PromptVisualLine, wrap_prompt_visual_lines},
 };
 
@@ -73,9 +73,15 @@ impl UserMessageRenderProjection {
 
     pub(crate) fn line_at(&self, index: usize) -> Option<Line<'static>> {
         if self.has_frame && self.is_frame_line(index) {
+            let half = if index == 0 {
+                SurfaceHalf::Lower
+            } else {
+                SurfaceHalf::Upper
+            };
             return Some(user_message_surface_padding_line(
                 self.layout.frame_width,
                 self.palette,
+                half,
             ));
         }
 

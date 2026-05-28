@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use terminal_app::{write_terminal_replay, write_terminal_replay_preserving_ansi};
-use terminal_ui::{AppEvent, Model, StartupBannerOptions};
+use terminal_ui::{AppEvent, Model, StartupBannerOptions, theme::default_palette};
 
 #[test]
 fn write_terminal_replay_matches_terminal_replay_items_without_ansi() {
@@ -30,6 +30,10 @@ fn write_terminal_replay_separates_items_with_blank_lines() {
 #[test]
 fn write_terminal_replay_preserving_ansi_keeps_startup_banner_styles() {
     let mut model = Model::new(StartupBannerOptions::default());
+    model.update(AppEvent::DetectedPalette {
+        palette: default_palette(),
+        has_dark_background: true,
+    });
     model.update(AppEvent::StartupReadyTimeout);
 
     let mut output = Vec::new();

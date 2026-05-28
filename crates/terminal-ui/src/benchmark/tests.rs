@@ -214,6 +214,7 @@ fn long_user_message_scroll_profile() {
         StartupBannerOptions {
             app_name: Some("hunea".to_string()),
             version: Some("dev".to_string()),
+            model_name: None,
             work_dir: Some("/tmp/hunea".to_string()),
             width: 0,
         },
@@ -457,6 +458,7 @@ fn new_hot_path_profile_model(width: u16, height: u16) -> Model {
         StartupBannerOptions {
             app_name: Some("hunea".to_string()),
             version: Some("dev".to_string()),
+            model_name: None,
             work_dir: Some("/tmp/hunea".to_string()),
             width: 0,
         },
@@ -782,6 +784,7 @@ fn mixed_long_history_high_frequency_scroll_profile() {
         StartupBannerOptions {
             app_name: Some("hunea".to_string()),
             version: Some("dev".to_string()),
+            model_name: None,
             work_dir: Some("/tmp/hunea".to_string()),
             width: 0,
         },

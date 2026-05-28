@@ -260,6 +260,9 @@ impl Model {
         let height = usize::from(self.height.max(1));
         let panel_line_count = build_file_preview_panel_lines(self, width).len();
         self.tool_approval_panel.preview_is_fullscreen = panel_line_count > height;
+        if self.tool_approval_panel.preview_is_fullscreen {
+            self.complete_startup_banner_entrance();
+        }
         self.clamp_tool_approval_fullscreen_preview_scroll();
     }
 

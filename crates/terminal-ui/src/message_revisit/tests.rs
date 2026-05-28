@@ -8,6 +8,7 @@ use runtime_domain::provider::ProviderKind;
 use crate::{
     AppEffect, AppEvent, Model, ModelOptions, Sender, StartupBannerOptions, theme::default_palette,
 };
+use ratatui::style::Modifier;
 
 #[test]
 fn conversation_message_revisit_prefills_composer_and_truncates_history() {
@@ -56,6 +57,57 @@ fn conversation_message_revisit_prefills_composer_and_truncates_history() {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert_eq!(request.message().content, "second question");
+}
+
+#[test]
+fn conversation_message_revisit_highlight_projects_cx_half_height_frame_to_solid_selection() {
+    let mut model = conversation_test_model();
+    append_two_turns(&mut model);
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    let buffer = render_model_buffer(&mut model, 40, 8);
+    let rows = buffer_rows(&buffer);
+    let message_row = rows
+        .iter()
+        .position(|row| row.contains("› second question"))
+        .expect("selected message_revisit user message should be visible");
+    let frame_top_row = message_row - 1;
+    let frame_bottom_row = message_row + 1;
+    let content_row = message_row as u16;
+    let selected_frame_top_row = frame_top_row as u16;
+    let selected_frame_bottom_row = frame_bottom_row as u16;
+    let palette = default_palette();
+    let surface = default_palette()
+        .surface
+        .expect("default palette should provide a surface color");
+
+    assert_eq!(rows[frame_top_row], " ".repeat(40));
+    assert_eq!(rows[frame_bottom_row], " ".repeat(40));
+    for column in 0..40 {
+        let top = &buffer[(column, selected_frame_top_row)];
+        let content = &buffer[(column, content_row)];
+        let bottom = &buffer[(column, selected_frame_bottom_row)];
+        assert_eq!(top.fg, palette.main);
+        assert_eq!(bottom.fg, palette.main);
+        assert_eq!(top.bg, surface);
+        assert_eq!(bottom.bg, surface);
+        assert_eq!(content.fg, palette.main);
+        assert_eq!(content.bg, surface);
+        assert!(
+            top.modifier.contains(Modifier::REVERSED),
+            "message_revisit highlight must reverse the upper half frame row"
+        );
+        assert!(
+            content.modifier.contains(Modifier::REVERSED),
+            "message_revisit highlight must reverse the selected content row"
+        );
+        assert!(
+            bottom.modifier.contains(Modifier::REVERSED),
+            "message_revisit highlight must reverse the lower half frame row"
+        );
+    }
 }
 
 #[test]
@@ -338,6 +390,25 @@ fn append_scrollable_turns(model: &mut Model, turn_count: usize) {
             .append_message(Sender::Assistant, format!("answer {index}"));
     }
     model.sync_transcript_render();
+}
+
+fn render_model_buffer(model: &mut Model, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test backend should initialize");
+    terminal
+        .draw(|frame| model.render(frame))
+        .expect("model should render on test backend");
+    terminal.backend().buffer().clone()
+}
+
+fn buffer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+    (0..buffer.area.height)
+        .map(|row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect::<String>()
+        })
+        .collect()
 }
 
 fn two_turn_source_messages() -> Vec<(Sender, String)> {

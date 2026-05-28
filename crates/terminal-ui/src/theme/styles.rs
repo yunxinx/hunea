@@ -1,9 +1,17 @@
 use ratatui::{
     style::Style,
+    text::Line,
     widgets::{Block, BorderType, Padding},
 };
 
 use super::TerminalPalette;
+
+/// `SurfaceHalf` 表示用半块字符模拟 surface 的哪一半。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SurfaceHalf {
+    Upper,
+    Lower,
+}
 
 /// `primary_text_style` 返回主体文字样式。
 pub fn primary_text_style(palette: TerminalPalette) -> Style {
@@ -53,6 +61,29 @@ pub fn surface_text_style(palette: TerminalPalette) -> Style {
 /// `surface_emphasis_style` 返回带弱化背景的强调正文样式。
 pub fn surface_emphasis_style(palette: TerminalPalette) -> Style {
     apply_surface(Style::new().bold(), palette)
+}
+
+/// `surface_half_block_line` 用半块字符模拟半高 surface 装饰线。
+pub(crate) fn surface_half_block_line(
+    width: usize,
+    palette: TerminalPalette,
+    half: SurfaceHalf,
+) -> Option<Line<'static>> {
+    let surface = palette.surface?;
+    let symbol = match half {
+        SurfaceHalf::Upper => '▀',
+        SurfaceHalf::Lower => '▄',
+    };
+
+    Some(Line::styled(
+        symbol.to_string().repeat(width.max(1)),
+        Style::new().fg(surface),
+    ))
+}
+
+/// `surface_half_block_plain_line` 保持半高装饰线在文本语义上为空白。
+pub(crate) fn surface_half_block_plain_line(width: usize) -> String {
+    " ".repeat(width.max(1))
 }
 
 /// `panel_block` 返回用于启动欢迎块容器的统一边框样式。
@@ -123,6 +154,13 @@ mod tests {
         assert_eq!(surface_text_style(palette).bg, palette.surface);
         assert_eq!(surface_emphasis_style(palette).fg, Some(palette.main));
         assert_eq!(surface_emphasis_style(palette).bg, palette.surface);
+        assert_eq!(
+            super::surface_half_block_line(3, palette, super::SurfaceHalf::Lower)
+                .expect("default palette should have a surface color")
+                .style
+                .fg,
+            palette.surface
+        );
         assert!(
             surface_emphasis_style(palette)
                 .add_modifier

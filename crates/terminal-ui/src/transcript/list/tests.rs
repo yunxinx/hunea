@@ -96,6 +96,7 @@ fn item_metrics_index_matches_materialized_block_metrics_for_mixed_item_types() 
     transcript.append_startup_banner(StartupBannerOptions {
         app_name: Some("Hunea".to_string()),
         version: Some("v0.1.0".to_string()),
+        model_name: None,
         work_dir: Some("/tmp/phase-e-metrics".to_string()),
         width: 0,
     });
@@ -822,12 +823,22 @@ fn projected_user_blocks_still_round_trip_plain_text_and_anchor_lookup() {
         ),
     ))]);
 
-    let expected_plain_lines = transcript.items[0]
+    let expected_visible_lines = transcript.items[0]
         .render_lines(16, default_palette())
         .iter()
         .map(line_to_plain_text)
         .collect::<Vec<_>>();
+    let mut expected_plain_lines = expected_visible_lines.clone();
+    expected_plain_lines[0] = " ".repeat(16);
+    let last_index = expected_plain_lines.len() - 1;
+    expected_plain_lines[last_index] = " ".repeat(16);
+
     let render = transcript.render();
+    let actual_visible_lines = render
+        .lines_for_range(0, render.line_count)
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
     let actual_plain_lines = (0..render.line_count)
         .map(|index| {
             render
@@ -841,6 +852,7 @@ fn projected_user_blocks_still_round_trip_plain_text_and_anchor_lookup() {
         .expect("projected user block should expose wrapped content lines")
         .anchor;
 
+    assert_eq!(actual_visible_lines, expected_visible_lines);
     assert_eq!(actual_plain_lines, expected_plain_lines);
     assert_eq!(render.line_index_for_anchor(anchor), Some(1));
 }

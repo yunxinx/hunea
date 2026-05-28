@@ -208,6 +208,16 @@ pub(crate) struct DocumentTranscriptItemLines {
     pub(super) total_line_count: usize,
 }
 
+impl DocumentTranscriptItemLines {
+    pub(crate) const fn content_start_line(&self) -> usize {
+        self.content_start_line
+    }
+
+    pub(crate) const fn content_line_count(&self) -> usize {
+        self.content_line_count
+    }
+}
+
 /// `DocumentLayoutCache` 缓存最近一次合成出的统一文档布局。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DocumentLayoutCache {

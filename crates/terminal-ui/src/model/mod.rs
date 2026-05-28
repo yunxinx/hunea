@@ -20,6 +20,7 @@ use super::{
     file_search::FileSearchCache,
     message_revisit::MessageRevisitState,
     model_panel::ModelPanelState,
+    startup_banner::StartupBannerEntranceState,
     status_line::StatusLineItem,
     status_phrases::StatusPhraseSelector,
     stream_activity::StreamActivityState,
@@ -47,6 +48,7 @@ use state::{DocumentRuntimeState, NoticeState, SelectionRuntimeState};
 #[derive(Debug, Clone)]
 pub struct Model {
     pub(super) startup_banner_options: StartupBannerOptions,
+    pub(super) startup_banner_entrance: StartupBannerEntranceState,
     pub(super) style_mode: StyleMode,
     pub(super) status_line_items: Vec<StatusLineItem>,
     pub(super) status_line_2_items: Vec<StatusLineItem>,
@@ -129,27 +131,33 @@ impl Model {
 
     /// `new_with_options` 创建并初始化带显式选项的 TUI 模型。
     pub fn new_with_options(
-        startup_banner_options: StartupBannerOptions,
+        mut startup_banner_options: StartupBannerOptions,
         options: ModelOptions,
     ) -> Self {
         let palette = default_palette();
-        let mut transcript = Transcript::new(palette);
-        transcript.set_gap(1);
-        transcript.append_startup_banner(startup_banner_options.clone());
-        let transcript_render = Rc::new(index_only_render_result(
-            transcript.progressive_item_metrics_index(),
-        ));
         let style_mode = options.style_mode.normalized();
         let status_line_items = options.status_line_items;
         let status_line_2_items = options.status_line_2_items;
         let selected_model = options
             .selected_model
             .filter(|selection| options.model_catalog.contains_selection(selection));
+        if startup_banner_options.model_name.is_none() {
+            startup_banner_options.model_name = selected_model
+                .as_ref()
+                .map(|selection| selection.model_id.clone());
+        }
+        let mut transcript = Transcript::new(palette);
+        transcript.set_gap(1);
+        transcript.append_startup_banner(startup_banner_options.clone());
+        let transcript_render = Rc::new(index_only_render_result(
+            transcript.progressive_item_metrics_index(),
+        ));
         let git_branch = resolve_initial_git_branch(&status_line_items, &status_line_2_items);
         let current_dir = resolve_initial_current_dir(&status_line_items, &status_line_2_items);
 
         Self {
             startup_banner_options,
+            startup_banner_entrance: StartupBannerEntranceState::default(),
             style_mode,
             status_line_items: status_line_items.clone(),
             status_line_2_items,
@@ -351,6 +359,7 @@ impl Model {
     }
 
     pub(crate) fn reset_to_initial_tui_state(&mut self) {
+        self.startup_banner_entrance.complete();
         let mut transcript = Transcript::new(self.palette);
         transcript.set_gap(1);
         if self.has_window {
@@ -383,6 +392,59 @@ impl Model {
         self.sync_transcript_render();
         self.sync_composer_height();
         self.sync_document_viewport_to_bottom();
+    }
+
+    pub(crate) fn startup_banner_entrance_frame_interval_at(
+        &self,
+        now: Instant,
+    ) -> Option<std::time::Duration> {
+        if !self.startup_banner_entrance_target_renderable() {
+            return None;
+        }
+
+        self.startup_banner_entrance.frame_interval_at(now)
+    }
+
+    pub(crate) fn apply_startup_banner_entrance_at(
+        &mut self,
+        now: Instant,
+        buffer: &mut ratatui::buffer::Buffer,
+        area: ratatui::layout::Rect,
+    ) {
+        let slide_fill_color = self.palette.surface.unwrap_or_else(|| {
+            startup_banner_entrance_fallback_fill_color(self.has_dark_background)
+        });
+        self.startup_banner_entrance
+            .apply_at(now, buffer, area, slide_fill_color);
+    }
+
+    pub(crate) fn startup_banner_entrance_target_available(&self) -> bool {
+        self.transcript.starts_with_startup_banner()
+    }
+
+    pub(crate) fn startup_banner_entrance_target_renderable(&self) -> bool {
+        self.startup_banner_entrance_target_available()
+            && !self.transcript_overlay_active()
+            && !self.tool_approval_fullscreen_preview_active()
+    }
+
+    pub(crate) fn complete_startup_banner_entrance(&mut self) {
+        self.startup_banner_entrance.complete();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_startup_banner_entrance_for_test(&mut self, now: Instant) {
+        self.startup_banner_entrance.start_for_test(now);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_startup_banner_entrance_for_test(&mut self) {
+        self.startup_banner_entrance.complete();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn startup_banner_entrance_completed_for_test(&self) -> bool {
+        self.startup_banner_entrance.is_completed()
     }
 
     pub(crate) fn mark_quitting(&mut self) {
@@ -427,6 +489,14 @@ impl Model {
 
     pub(crate) fn maybe_prepare_external_editor_launch(&mut self) -> Option<ExternalEditorLaunch> {
         self.prepare_external_editor_launch()
+    }
+}
+
+fn startup_banner_entrance_fallback_fill_color(has_dark_background: bool) -> ratatui::style::Color {
+    if has_dark_background {
+        ratatui::style::Color::from_u32(0x1d2021)
+    } else {
+        ratatui::style::Color::from_u32(0xf2f0ee)
     }
 }
 

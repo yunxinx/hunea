@@ -55,8 +55,10 @@ pub(crate) struct DocumentRenderResult {
     pub(crate) plain_lines: Vec<String>,
     pub(crate) anchors: Vec<LineAnchor>,
     pub(crate) selectable_ranges: Vec<SelectableLineRange>,
-    pub(crate) frame_decoration_line: Option<Line<'static>>,
-    pub(crate) frame_decoration_plain_line: Option<String>,
+    pub(crate) frame_decoration_top_line: Option<Line<'static>>,
+    pub(crate) frame_decoration_top_plain_line: Option<String>,
+    pub(crate) frame_decoration_bottom_line: Option<Line<'static>>,
+    pub(crate) frame_decoration_bottom_plain_line: Option<String>,
     pub(crate) cursor_x: u16,
     pub(crate) cursor_y: usize,
 }
@@ -125,8 +127,7 @@ pub(crate) fn render_document(
     let mut placeholder_style = secondary_text_style(palette);
     let mut fill_style = Style::default();
     let mut frame_fill_width = 0;
-    let (frame_decoration_line, frame_decoration_plain_line) =
-        frame_decoration_line(frame_mode, palette, frame_width);
+    let frame_decoration = frame_decoration_lines(frame_mode, palette, frame_width);
 
     if matches!(frame_mode, FrameDecorationMode::Surface) && palette.surface.is_some() {
         frame_fill_width = frame_width;
@@ -181,8 +182,10 @@ pub(crate) fn render_document(
                 prompt_first_line_only,
                 true,
             ),
-            frame_decoration_line,
-            frame_decoration_plain_line,
+            frame_decoration_top_line: frame_decoration.top_line,
+            frame_decoration_top_plain_line: frame_decoration.top_plain_line,
+            frame_decoration_bottom_line: frame_decoration.bottom_line,
+            frame_decoration_bottom_plain_line: frame_decoration.bottom_plain_line,
             cursor_x: u16::try_from(prompt_width).unwrap_or(u16::MAX),
             cursor_y: 0,
         };
@@ -228,8 +231,10 @@ pub(crate) fn render_document(
                 trim_overflow_spaces: false,
             },
         ),
-        frame_decoration_line,
-        frame_decoration_plain_line,
+        frame_decoration_top_line: frame_decoration.top_line,
+        frame_decoration_top_plain_line: frame_decoration.top_plain_line,
+        frame_decoration_bottom_line: frame_decoration.bottom_line,
+        frame_decoration_bottom_plain_line: frame_decoration.bottom_plain_line,
         cursor_x: u16::try_from(cursor_visual_x).unwrap_or(u16::MAX),
         cursor_y,
     }
@@ -403,34 +408,57 @@ fn frame_decoration_mode(style_mode: StyleMode) -> FrameDecorationMode {
     }
 }
 
-fn frame_decoration_line(
+#[derive(Debug, Clone, Default)]
+struct FrameDecorationLines {
+    top_line: Option<Line<'static>>,
+    top_plain_line: Option<String>,
+    bottom_line: Option<Line<'static>>,
+    bottom_plain_line: Option<String>,
+}
+
+fn frame_decoration_lines(
     mode: FrameDecorationMode,
     palette: TerminalPalette,
     width: usize,
-) -> (Option<Line<'static>>, Option<String>) {
+) -> FrameDecorationLines {
     if width == 0 {
-        return (None, None);
+        return FrameDecorationLines::default();
     }
 
     match mode {
-        FrameDecorationMode::None => (None, None),
+        FrameDecorationMode::None => FrameDecorationLines::default(),
         FrameDecorationMode::Surface => {
-            if palette.surface.is_none() {
-                return (None, None);
+            let Some(top_line) = crate::theme::surface_half_block_line(
+                width,
+                palette,
+                crate::theme::SurfaceHalf::Lower,
+            ) else {
+                return FrameDecorationLines::default();
+            };
+            let Some(bottom_line) = crate::theme::surface_half_block_line(
+                width,
+                palette,
+                crate::theme::SurfaceHalf::Upper,
+            ) else {
+                return FrameDecorationLines::default();
+            };
+            let plain = crate::theme::surface_half_block_plain_line(width);
+            FrameDecorationLines {
+                top_line: Some(top_line),
+                top_plain_line: Some(plain.clone()),
+                bottom_line: Some(bottom_line),
+                bottom_plain_line: Some(plain),
             }
-
-            let plain = " ".repeat(width);
-            (
-                Some(Line::styled(plain.clone(), surface_text_style(palette))),
-                Some(plain),
-            )
         }
         FrameDecorationMode::Rule => {
             let plain = "─".repeat(width);
-            (
-                Some(Line::styled(plain.clone(), tertiary_text_style(palette))),
-                Some(plain),
-            )
+            let line = Line::styled(plain.clone(), tertiary_text_style(palette));
+            FrameDecorationLines {
+                top_line: Some(line.clone()),
+                top_plain_line: Some(plain.clone()),
+                bottom_line: Some(line),
+                bottom_plain_line: Some(plain),
+            }
         }
     }
 }
@@ -546,11 +574,8 @@ mod tests {
         let expected =
             ratatui::text::Line::styled("─".repeat(12), tertiary_text_style(default_palette()));
 
-        assert_eq!(
-            result.frame_decoration_line,
-            Some(expected),
-            "rule decoration should use the tertiary style"
-        );
+        assert_eq!(result.frame_decoration_top_line, Some(expected.clone()));
+        assert_eq!(result.frame_decoration_bottom_line, Some(expected));
     }
 
     #[test]

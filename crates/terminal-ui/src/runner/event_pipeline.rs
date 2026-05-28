@@ -68,6 +68,14 @@ fn next_pipeline_deadline(
         });
     }
 
+    if let Some(entrance_interval) = model.startup_banner_entrance_frame_interval_at(now) {
+        let entrance_deadline = now + entrance_interval;
+        next_deadline = Some(match next_deadline {
+            Some(deadline) => deadline.min(entrance_deadline),
+            None => entrance_deadline,
+        });
+    }
+
     if let Some(activity_deadline) = model.tool_activity_next_frame_deadline_at(now) {
         next_deadline = Some(match next_deadline {
             Some(deadline) => deadline.min(activity_deadline),
@@ -106,6 +114,9 @@ fn render_on_timeout(
     model
         .stream_activity_frame_interval_at(now)
         .is_some_and(|activity_interval| deadline <= now + activity_interval)
+        || model
+            .startup_banner_entrance_frame_interval_at(now)
+            .is_some_and(|entrance_interval| deadline <= now + entrance_interval)
         || model
             .tool_activity_next_frame_deadline_at(now)
             .is_some_and(|activity_deadline| deadline <= activity_deadline)
@@ -146,6 +157,22 @@ mod tests {
             TerminalWaitPlan::Poll {
                 duration: BACKGROUND_EVENT_POLL_INTERVAL,
                 render_on_timeout: false,
+            }
+        );
+    }
+
+    #[test]
+    fn startup_banner_entrance_deadline_requests_render_on_timeout() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.update(crate::AppEvent::StartupReadyTimeout);
+        model.start_startup_banner_entrance_for_test(Instant::now());
+        let now = Instant::now();
+
+        assert_eq!(
+            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
+            TerminalWaitPlan::Poll {
+                duration: Duration::from_millis(16),
+                render_on_timeout: true,
             }
         );
     }

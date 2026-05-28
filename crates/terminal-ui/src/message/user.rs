@@ -3,7 +3,10 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     StyleMode,
-    theme::{TerminalPalette, secondary_text_style, surface_emphasis_style, surface_text_style},
+    theme::{
+        SurfaceHalf, TerminalPalette, secondary_text_style, surface_emphasis_style,
+        surface_half_block_line, surface_text_style,
+    },
     transcript::{ItemLineAnchor, LineAnchorKind, wrap_prompt_text, wrap_prompt_visual_lines},
 };
 
@@ -35,11 +38,18 @@ pub(super) fn render_framed_user_message(
         return rendered;
     }
 
-    let padding_line = user_message_surface_padding_line(layout.frame_width, palette);
     let mut lines = Vec::with_capacity(rendered.len() + 2);
-    lines.push(padding_line.clone());
+    lines.push(user_message_surface_padding_line(
+        layout.frame_width,
+        palette,
+        SurfaceHalf::Lower,
+    ));
     lines.append(&mut rendered);
-    lines.push(padding_line);
+    lines.push(user_message_surface_padding_line(
+        layout.frame_width,
+        palette,
+        SurfaceHalf::Upper,
+    ));
     lines
 }
 
@@ -472,11 +482,10 @@ pub(super) fn has_visible_user_message_frame(palette: TerminalPalette) -> bool {
 pub(super) fn user_message_surface_padding_line(
     width: usize,
     palette: TerminalPalette,
+    half: SurfaceHalf,
 ) -> Line<'static> {
-    Line::default().spans([Span::styled(
-        " ".repeat(width.max(1)),
-        surface_text_style(palette),
-    )])
+    surface_half_block_line(width, palette, half)
+        .unwrap_or_else(|| Line::raw(" ".repeat(width.max(1))))
 }
 
 pub(super) fn user_message_prefix(style_mode: StyleMode) -> &'static str {

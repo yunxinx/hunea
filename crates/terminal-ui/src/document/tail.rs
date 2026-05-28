@@ -75,8 +75,10 @@ pub(crate) struct DocumentTailLayoutInput {
     pub(crate) composer_text_lines: Vec<String>,
     pub(crate) composer_anchors: Vec<DocumentLineAnchor>,
     pub(crate) composer_selectable: Vec<SelectableLineRange>,
-    pub(crate) composer_frame_decoration_line: Option<Line<'static>>,
-    pub(crate) composer_frame_decoration_text_line: Option<String>,
+    pub(crate) composer_frame_decoration_top_line: Option<Line<'static>>,
+    pub(crate) composer_frame_decoration_top_text_line: Option<String>,
+    pub(crate) composer_frame_decoration_bottom_line: Option<Line<'static>>,
+    pub(crate) composer_frame_decoration_bottom_text_line: Option<String>,
     pub(crate) composer_cursor_x: u16,
     pub(crate) composer_cursor_y: usize,
     pub(crate) stream_activity: StatusLineRenderResult,
@@ -184,8 +186,12 @@ impl Model {
             composer_text_lines: composer_document.plain_lines,
             composer_anchors: document_anchors_for_composer(&composer_document.anchors),
             composer_selectable: composer_document.selectable_ranges,
-            composer_frame_decoration_line: composer_document.frame_decoration_line,
-            composer_frame_decoration_text_line: composer_document.frame_decoration_plain_line,
+            composer_frame_decoration_top_line: composer_document.frame_decoration_top_line,
+            composer_frame_decoration_top_text_line: composer_document
+                .frame_decoration_top_plain_line,
+            composer_frame_decoration_bottom_line: composer_document.frame_decoration_bottom_line,
+            composer_frame_decoration_bottom_text_line: composer_document
+                .frame_decoration_bottom_plain_line,
             composer_cursor_x: composer_document.cursor_x,
             composer_cursor_y: composer_document.cursor_y,
             stream_activity: self.current_stream_activity_render_result(),
@@ -204,7 +210,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
         usize::from(input.transcript_has_content) * transcript_composer_gap_line_count();
     let stream_activity_gap =
         usize::from(input.stream_activity.has_content) * stream_activity_composer_gap_line_count();
-    let has_composer_padding = input.composer_frame_decoration_line.is_some();
+    let has_composer_padding = input.composer_frame_decoration_top_line.is_some()
+        && input.composer_frame_decoration_bottom_line.is_some();
     let status_line_rows = status_line_pair_height(
         &input.status_line,
         &input.status_line_2,
@@ -343,8 +350,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
         input.composer_text_lines.len(),
     );
     if let (Some(line), Some(text_line)) = (
-        input.composer_frame_decoration_line.clone(),
-        input.composer_frame_decoration_text_line.clone(),
+        input.composer_frame_decoration_top_line,
+        input.composer_frame_decoration_top_text_line,
     ) {
         lines.push(line);
         text_lines.push(text_line);
@@ -365,8 +372,8 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
     ));
 
     if let (Some(line), Some(text_line)) = (
-        input.composer_frame_decoration_line,
-        input.composer_frame_decoration_text_line,
+        input.composer_frame_decoration_bottom_line,
+        input.composer_frame_decoration_bottom_text_line,
     ) {
         lines.push(line);
         text_lines.push(text_line);

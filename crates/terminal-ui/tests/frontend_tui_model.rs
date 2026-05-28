@@ -26,6 +26,26 @@ fn model_does_not_auto_select_first_catalog_model_without_default() {
 }
 
 #[test]
+fn startup_banner_uses_the_selected_model_id() {
+    let model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            ..ModelOptions::default()
+        },
+    );
+
+    let startup_banner = model
+        .transcript_plain_items()
+        .into_iter()
+        .next()
+        .expect("startup banner should be present");
+
+    assert!(startup_banner.contains("model:     qwen3   /models to change"));
+}
+
+#[test]
 fn enter_with_required_empty_model_shows_notice_without_sending() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),

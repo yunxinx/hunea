@@ -1,8 +1,11 @@
-use std::rc::Rc;
+use std::{
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use super::*;
 use crate::{AppEffect, AppEvent, Sender, StyleMode, document::DocumentAnchorRegion};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
@@ -39,6 +42,126 @@ fn progressive_exactization_fixture() -> Model {
     model.set_palette(default_palette(), true);
     model.sync_transcript_render();
     model
+}
+
+#[test]
+fn startup_banner_entrance_runs_only_once_across_banner_rebuilds() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(80, 24);
+    model.set_palette(crate::theme::default_palette(), true);
+
+    let started_at = Instant::now();
+    assert_eq!(
+        model.startup_banner_entrance_frame_interval_at(started_at),
+        None
+    );
+
+    model.start_startup_banner_entrance_for_test(started_at);
+    assert_eq!(
+        model.startup_banner_entrance_frame_interval_at(started_at),
+        Some(Duration::from_millis(16))
+    );
+
+    model.complete_startup_banner_entrance_for_test();
+    assert!(model.startup_banner_entrance_completed_for_test());
+    assert_eq!(
+        model.startup_banner_entrance_frame_interval_at(started_at),
+        None
+    );
+
+    model.reset_to_initial_tui_state();
+
+    assert!(model.startup_banner_entrance_completed_for_test());
+    assert_eq!(
+        model.startup_banner_entrance_frame_interval_at(started_at),
+        None
+    );
+}
+
+#[test]
+fn startup_banner_entrance_starts_after_ready_render() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let now = Instant::now();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+    terminal.draw(|frame| model.render(frame)).unwrap();
+    assert_eq!(model.startup_banner_entrance_frame_interval_at(now), None);
+
+    model.set_window(80, 24);
+    model.set_palette(crate::theme::default_palette(), true);
+    terminal.draw(|frame| model.render(frame)).unwrap();
+
+    assert_eq!(
+        model.startup_banner_entrance_frame_interval_at(now),
+        Some(Duration::from_millis(16))
+    );
+}
+
+#[test]
+fn startup_banner_entrance_does_not_poll_while_transcript_overlay_hides_target() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let now = Instant::now();
+    model.set_window(80, 24);
+    model.set_palette(crate::theme::default_palette(), true);
+    model.start_startup_banner_entrance_for_test(now);
+
+    model.open_transcript_overlay();
+
+    assert!(model.startup_banner_entrance_completed_for_test());
+    assert_eq!(model.startup_banner_entrance_frame_interval_at(now), None);
+}
+
+#[test]
+fn startup_banner_entrance_completes_when_transcript_overlay_renders_over_target() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let now = Instant::now();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    model.set_window(80, 24);
+    model.set_palette(crate::theme::default_palette(), true);
+    model.start_startup_banner_entrance_for_test(now);
+    model.open_transcript_overlay();
+
+    terminal.draw(|frame| model.render(frame)).unwrap();
+
+    assert!(model.startup_banner_entrance_completed_for_test());
+    assert_eq!(model.startup_banner_entrance_frame_interval_at(now), None);
+}
+
+#[test]
+fn startup_banner_entrance_completes_across_overlay_toggle() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.update(AppEvent::Resized {
+        width: 20,
+        height: 10,
+    });
+    model.update(AppEvent::StartupReadyTimeout);
+    type_text(&mut model, "hi");
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    let _startup_frame_rows = rendered_rows_for_model(&mut model, 20, 10);
+
+    model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('t'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(model.startup_banner_entrance_completed_for_test());
+    let _overlay_rows = rendered_rows_for_model(&mut model, 20, 10);
+
+    model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('t'),
+        KeyModifiers::CONTROL,
+    )));
+    let closed_rows = rendered_rows_for_model(&mut model, 20, 10);
+
+    assert!(model.startup_banner_entrance_completed_for_test());
+    assert_eq!(
+        model.startup_banner_entrance_frame_interval_at(Instant::now()),
+        None
+    );
+    assert!(
+        closed_rows.iter().any(|row| row.contains("directory:")),
+        "closed overlay should restore the normal document view: {closed_rows:?}"
+    );
 }
 
 fn idle_refinement_fixture() -> Model {

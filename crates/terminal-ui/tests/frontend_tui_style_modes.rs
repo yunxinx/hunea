@@ -30,6 +30,53 @@ fn cc_style_mode_uses_rule_lines_for_the_empty_composer() {
 }
 
 #[test]
+fn cx_style_mode_uses_half_height_surface_rows_for_the_composer() {
+    let mut model = ready_model(StyleMode::Cx, 40, 8);
+    let buffer = render_buffer(&mut model, 40, 8);
+    let rows = buffer_rows(&buffer);
+    let top = "▄".repeat(40);
+    let bottom = "▀".repeat(40);
+    let top_index = rows
+        .iter()
+        .position(|row| row == &top)
+        .expect("cx composer should render a lower-half surface row above input");
+
+    assert_eq!(rows[top_index + 1].trim_end(), "› Enter to send Prompt");
+    assert_eq!(rows[top_index + 2], bottom);
+
+    let surface = default_palette()
+        .surface
+        .expect("default palette should have a surface color");
+    for column in 0..40 {
+        assert_eq!(buffer[(column, top_index as u16)].fg, surface);
+        assert_eq!(
+            buffer[(column, top_index as u16)].bg,
+            ratatui::style::Color::Reset
+        );
+        assert_eq!(buffer[(column, (top_index + 2) as u16)].fg, surface);
+        assert_eq!(
+            buffer[(column, (top_index + 2) as u16)].bg,
+            ratatui::style::Color::Reset
+        );
+    }
+}
+
+#[test]
+fn cx_style_mode_uses_half_height_surface_rows_for_sent_user_messages() {
+    let mut model = submitted_model(StyleMode::Cx, "hello");
+    let rows = render_rows(&mut model, 40, 10);
+    let top = "▄".repeat(40);
+    let bottom = "▀".repeat(40);
+    let message_index = rows
+        .iter()
+        .position(|row| row == "› hello                                 ")
+        .expect("submitted user message should be visible");
+
+    assert_eq!(rows[message_index - 1], top);
+    assert_eq!(rows[message_index + 1], bottom);
+}
+
+#[test]
 fn ms_style_mode_keeps_the_legacy_prompt_without_frames() {
     let mut model = ready_model(StyleMode::Ms, 40, 8);
 
@@ -65,14 +112,18 @@ fn trimmed_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {
         .collect()
 }
 
-fn render_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {
+fn render_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend should initialize");
     terminal
         .draw(|frame| model.render(frame))
         .expect("model should render on test backend");
 
-    buffer_rows(terminal.backend().buffer())
+    terminal.backend().buffer().clone()
+}
+
+fn render_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {
+    buffer_rows(&render_buffer(model, width, height))
 }
 
 fn buffer_rows(buffer: &Buffer) -> Vec<String> {

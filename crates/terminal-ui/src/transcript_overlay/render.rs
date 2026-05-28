@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Line,
     widgets::Paragraph,
 };
@@ -9,7 +9,7 @@ use ratatui::{
 use crate::{
     Model,
     message::assistant_message_visual_inset,
-    styled_text::render_line_with_full_width_background,
+    styled_text::{line_to_plain_text, render_line_with_full_width_background},
     theme::{TerminalPalette, muted_text_style, tertiary_text_style},
 };
 
@@ -99,7 +99,7 @@ impl Model {
                 }
                 let line_content =
                     if highlight_item_index.is_some() && line.item_index == highlight_item_index {
-                        line.line.patch_style(message_revisit_highlight_style())
+                        message_revisit_highlight_line(line.line, palette)
                     } else {
                         line.line
                     };
@@ -174,4 +174,51 @@ impl Model {
 
 fn message_revisit_highlight_style() -> Style {
     Style::new().add_modifier(Modifier::REVERSED)
+}
+
+fn message_revisit_highlight_line(line: Line<'static>, palette: TerminalPalette) -> Line<'static> {
+    let Some(surface) = palette.surface else {
+        return line.patch_style(message_revisit_highlight_style());
+    };
+    let highlight_style = Style::new()
+        .fg(palette.main)
+        .bg(surface)
+        .add_modifier(Modifier::REVERSED);
+
+    if is_surface_half_block_line(&line, palette) {
+        return solid_message_revisit_highlight_line(line, highlight_style);
+    }
+
+    restyle_message_revisit_highlight_line(line, highlight_style)
+}
+
+fn is_surface_half_block_line(line: &Line<'_>, palette: TerminalPalette) -> bool {
+    let Some(surface) = palette.surface else {
+        return false;
+    };
+    let text = line_to_plain_text(line);
+
+    !text.is_empty()
+        && text.chars().all(|character| matches!(character, '▄' | '▀'))
+        && line.style.fg == Some(surface)
+        && !matches!(line.style.bg, Some(background) if background != Color::Reset)
+}
+
+fn restyle_message_revisit_highlight_line(
+    mut line: Line<'static>,
+    highlight_style: Style,
+) -> Line<'static> {
+    line.style = Style::new();
+    for span in &mut line.spans {
+        span.style = highlight_style.add_modifier(span.style.add_modifier);
+    }
+    line
+}
+
+fn solid_message_revisit_highlight_line(
+    line: Line<'static>,
+    highlight_style: Style,
+) -> Line<'static> {
+    let width = line_to_plain_text(&line).chars().count().max(1);
+    Line::styled(" ".repeat(width), highlight_style)
 }

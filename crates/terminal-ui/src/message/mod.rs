@@ -127,6 +127,15 @@ impl MessageItem {
         palette: TerminalPalette,
         preserve_ansi: bool,
     ) -> String {
+        if self.sender == Sender::User
+            && !preserve_ansi
+            && self.style_mode.normalized() == StyleMode::Cx
+            && user::has_visible_user_message_frame(palette)
+        {
+            let text = render_user_plain_text(self.content.as_ref(), width, self.style_mode);
+            return format!("\n{text}\n");
+        }
+
         let lines = self.render_lines(width, palette);
         if preserve_ansi {
             lines_to_ansi_text(&lines)

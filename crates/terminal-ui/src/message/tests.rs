@@ -40,9 +40,11 @@ fn cx_user_render_adds_surface_padding_lines() {
     let lines = item.render_lines(20, palette);
 
     assert_eq!(lines.len(), 3);
-    assert_eq!(plain_line(lines[0].clone()), "                    ");
+    assert_eq!(plain_line(lines[0].clone()), "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄");
     assert_eq!(plain_line(lines[1].clone()), "› hello             ");
-    assert_eq!(plain_line(lines[2].clone()), "                    ");
+    assert_eq!(plain_line(lines[2].clone()), "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀");
+    assert_eq!(lines[0].style.fg, palette.surface);
+    assert_eq!(lines[2].style.fg, palette.surface);
     assert_eq!(lines[1].width(), 20);
     assert_eq!(lines[1].spans.len(), 4);
     assert_eq!(

@@ -31,7 +31,7 @@ pub struct PaletteDetection {
 }
 
 /// `TerminalPalette` 定义当前终端下的一组基础语义颜色。
-/// `main` 用于主体信息，`muted` 用于输入正文，`secondary` 用于辅助信息，
+/// `main` 用于主体信息，`muted` 用于弱化正文，`secondary` 用于辅助信息，
 /// `tertiary` 用于更弱的状态信息，`accent` 用于面板强调线，
 /// `command_accent` 用于斜杠菜单当前命令，`approval_rejected` 用于人为拒绝审批，
 /// `system_error` 用于运行时错误提示，

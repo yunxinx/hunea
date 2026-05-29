@@ -18,8 +18,8 @@ use crate::{
     selection::SelectableLineRange,
     style_mode::StyleMode,
     theme::{
-        TerminalPalette, muted_text_style, primary_text_style, secondary_text_style,
-        surface_text_style, tertiary_text_style,
+        TerminalPalette, primary_text_style, secondary_text_style, surface_text_style,
+        tertiary_text_style,
     },
 };
 
@@ -123,7 +123,7 @@ pub(crate) fn render_document(
     } else {
         secondary_text_style(palette)
     };
-    let mut text_style = muted_text_style(palette);
+    let mut text_style = primary_text_style(palette);
     let mut placeholder_style = secondary_text_style(palette);
     let mut fill_style = Style::default();
     let mut frame_fill_width = 0;
@@ -501,7 +501,7 @@ mod tests {
     use super::{render_document, trim_overflow_boundary_spaces};
     use crate::composer::Composer;
     use crate::composer::grapheme::is_space_cluster;
-    use crate::theme::{default_palette, tertiary_text_style};
+    use crate::theme::{default_palette, surface_text_style, tertiary_text_style};
 
     #[test]
     fn trim_overflow_boundary_spaces_drops_trailing_spaces_only_when_needed() {
@@ -588,6 +588,20 @@ mod tests {
             result.lines[0].spans[0].style.fg,
             Some(palette.main),
             "live cx composer prompt should use the normal text color"
+        );
+    }
+
+    #[test]
+    fn cx_composer_input_text_uses_surface_text_style() {
+        let palette = default_palette();
+        let composer = composer_with_cursor("alpha", 12, 0, 0);
+        let result = render_document(&composer, palette);
+
+        assert_eq!(result.lines[0].spans[1].content.as_ref(), "alpha");
+        assert_eq!(
+            result.lines[0].spans[1].style,
+            surface_text_style(palette),
+            "live cx composer text should match submitted user message text"
         );
     }
 

@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Terminal,
     backend::TestBackend,
@@ -14,7 +14,7 @@ use terminal_ui::{
 };
 
 const MODEL_PANEL_FOOTER_HINT: &str =
-    "Enter select · U refresh · Esc exit · Tab providers · ↑↓ navigate";
+    "Enter select · U refresh · Esc clear/exit · ←→/Tab providers · ↑↓ navigate";
 
 #[test]
 fn models_command_replaces_composer_with_model_panel() {
@@ -40,7 +40,8 @@ fn models_command_replaces_composer_with_model_panel() {
         "inactive provider should not render bracket chrome: {rows:?}"
     );
     assert!(
-        rows.iter().any(|row| row.contains("Available Models")),
+        rows.iter()
+            .any(|row| row.contains("Available Models(Type to Search):")),
         "expected model list heading, got: {rows:?}"
     );
     assert!(
@@ -50,6 +51,200 @@ fn models_command_replaces_composer_with_model_panel() {
     assert!(
         rows.iter().all(|row| !row.contains('›')),
         "composer prompt should be hidden while model panel replaces the input area: {rows:?}"
+    );
+}
+
+#[test]
+fn model_panel_left_right_switch_provider_tabs() {
+    let mut model = ready_model(72, 18, model_options_with_catalog());
+    type_text(&mut model, "/models");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    model.update(AppEvent::Key(KeyCode::Right.into()));
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter().any(|row| row.contains("Providers:")
+            && row.contains("Local")
+            && row.contains("[DeepSeek]")),
+        "right arrow should switch to the next provider, got: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("deepseek-chat")),
+        "right arrow should show the next provider model list, got: {rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyCode::Left.into()));
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter().any(|row| row.contains("Providers:")
+            && row.contains("[Local]")
+            && row.contains("DeepSeek")),
+        "left arrow should switch back to the previous provider, got: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("qwen3")),
+        "left arrow should restore the previous provider model list, got: {rows:?}"
+    );
+}
+
+#[test]
+fn model_panel_search_title_filters_models_and_enter_selects_filtered_model() {
+    let mut model = ready_model(72, 18, model_options_with_catalog());
+    type_text(&mut model, "/models");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    type_text(&mut model, "qwen2");
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter().any(|row| row.contains("Search: qwen2")),
+        "typing should replace the available-models title with search text, got: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("qwen2")),
+        "search should keep matching models visible, got: {rows:?}"
+    );
+    let search_model_rows = model_panel_rows_after_heading(&rows, "Search: qwen2");
+    assert!(
+        search_model_rows.iter().all(|row| !row.contains("qwen3")),
+        "search should hide non-matching models in the current provider list, got: {rows:?}"
+    );
+
+    let effect = model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    assert_eq!(
+        model.selected_model(),
+        Some(ModelSelection::new("local", "qwen2"))
+    );
+    assert_eq!(
+        effect,
+        Some(AppEffect::PersistSelectedModel {
+            selection: ModelSelection::new("local", "qwen2")
+        })
+    );
+}
+
+#[test]
+fn model_panel_search_first_character_updates_after_cached_render() {
+    let mut model = ready_model(72, 18, model_options_with_catalog());
+    type_text(&mut model, "/models");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    let _cached_rows = render_trimmed_rows(&mut model, 72, 18);
+
+    model.update(AppEvent::Key(KeyCode::Char('q').into()));
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter().any(|row| row.contains("Search: q")),
+        "first search character should render immediately after an existing cache, got: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("qwen3")),
+        "first search character should apply filtering immediately, got: {rows:?}"
+    );
+}
+
+#[test]
+fn model_panel_backspace_removes_search_characters() {
+    let mut model = ready_model(72, 18, model_options_with_catalog());
+    type_text(&mut model, "/models");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    type_text(&mut model, "qwe");
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Backspace)));
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter().any(|row| row.contains("Search: qw")),
+        "Backspace should remove the last search character, got: {rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('h'),
+        KeyModifiers::CONTROL,
+    )));
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter().any(|row| row.contains("Search: q")),
+        "Ctrl+H should remove the last search character for terminals that report Backspace that way, got: {rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('\u{0008}'),
+        KeyModifiers::NONE,
+    )));
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Available Models(Type to Search):")),
+        "raw C0 Backspace should clear the final search character, got: {rows:?}"
+    );
+}
+
+#[test]
+fn model_panel_ignores_paste_without_changing_hidden_composer() {
+    let mut model = ready_model(72, 18, model_options_with_catalog());
+    type_text(&mut model, "/models");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    model.update(AppEvent::Paste("qwen2".to_string()));
+
+    assert_eq!(
+        model.composer_text(),
+        "",
+        "paste while model panel is active should not modify hidden composer"
+    );
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Available Models(Type to Search):")),
+        "paste should not become a model search query, got: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("Search: qwen2")),
+        "paste should be ignored instead of rendered as search text, got: {rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    assert_eq!(
+        model.composer_text(),
+        "",
+        "ignored paste should not appear after closing the model panel"
+    );
+}
+
+#[test]
+fn model_panel_esc_clears_search_before_closing_panel() {
+    let mut model = ready_model(72, 18, model_options_with_catalog());
+    type_text(&mut model, "/models");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    type_text(&mut model, "qwen2");
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Available Models(Type to Search):")),
+        "first Esc should clear the search and keep the panel open, got: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("qwen3"))
+            && rows.iter().any(|row| row.contains("qwen2")),
+        "clearing search should restore all current-provider models, got: {rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter().all(|row| !row.contains("Available Models")),
+        "second Esc should close the model panel, got: {rows:?}"
     );
 }
 
@@ -126,7 +321,7 @@ fn model_panel_u_requests_refresh_for_current_provider() {
     type_text(&mut model, "/models");
     model.update(AppEvent::Key(KeyCode::Enter.into()));
 
-    let effect = model.update(AppEvent::Key(KeyCode::Char('u').into()));
+    let effect = model.update(AppEvent::Key(KeyCode::Char('U').into()));
 
     assert_eq!(
         effect,
@@ -601,6 +796,19 @@ fn visible_many_model_rows(rows: &[String]) -> Vec<&'static str> {
         .filter(|model_id| model_rows.iter().any(|row| row.contains(*model_id)))
         .copied()
         .collect()
+}
+
+fn model_panel_rows_after_heading<'a>(rows: &'a [String], heading: &str) -> &'a [String] {
+    let start = rows
+        .iter()
+        .position(|row| row.contains(heading))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let end = rows
+        .iter()
+        .position(|row| row.contains("Enter select"))
+        .unwrap_or(rows.len());
+    &rows[start..end]
 }
 
 fn assert_text_cells_use_color(buffer: &Buffer, text: &str, expected: Color) {

@@ -32,6 +32,9 @@ pub(super) struct ModelPanelState {
     pub(super) provider_index: usize,
     pub(super) model_index: usize,
     pub(super) scroll: usize,
+    pub(super) search_query: String,
+    pub(super) filtered_model_indices: Vec<usize>,
+    pub(super) revision: usize,
 }
 
 pub(crate) type ModelPanelRenderResult = InlinePanelRenderResult;
@@ -49,6 +52,7 @@ impl Model {
         self.composer.replace_text_and_move_to_end(String::new());
         self.close_tool_approval_panel();
         self.model_panel.is_open = true;
+        self.model_panel.search_query.clear();
         self.sync_model_panel_to_selection();
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();
@@ -63,6 +67,9 @@ impl Model {
         }
 
         self.model_panel.is_open = false;
+        self.model_panel.search_query.clear();
+        self.model_panel.filtered_model_indices.clear();
+        self.bump_model_panel_revision();
         self.sync_composer_height();
         self.sync_document_viewport_for_composer_cursor();
     }
@@ -77,7 +84,18 @@ impl Model {
 
         match key.code {
             KeyCode::Esc => {
+                if self.clear_model_panel_search() {
+                    return Some(None);
+                }
                 self.close_model_panel();
+                Some(None)
+            }
+            KeyCode::Left if key.modifiers.is_empty() => {
+                self.move_model_panel_provider(-1);
+                Some(None)
+            }
+            KeyCode::Right if key.modifiers.is_empty() => {
+                self.move_model_panel_provider(1);
                 Some(None)
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
@@ -99,8 +117,16 @@ impl Model {
             KeyCode::Char('u' | 'U') if is_model_refresh_key(key) => {
                 Some(self.refresh_current_model_panel_provider())
             }
+            _ if is_model_search_backspace_key(key) => {
+                self.backspace_model_panel_search();
+                Some(None)
+            }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 Some(self.select_current_model_panel_model())
+            }
+            KeyCode::Char(character) if is_model_plain_search_key(key) => {
+                self.push_model_panel_search_character(character);
+                Some(None)
             }
             _ => Some(None),
         }
@@ -132,8 +158,7 @@ impl Model {
         let provider_count = self.model_catalog.enabled_provider_count();
         if provider_count == 0 {
             self.model_panel.provider_index = 0;
-            self.model_panel.model_index = 0;
-            self.model_panel.scroll = 0;
+            self.reset_model_panel_view(false);
             return;
         }
 
@@ -152,7 +177,7 @@ impl Model {
                         .position(|model| model.id == selection.model_id)
                 })
                 .unwrap_or(0);
-            self.sync_model_panel_scroll();
+            self.refresh_model_panel_view(false);
             return;
         }
 
@@ -165,7 +190,7 @@ impl Model {
             .model_panel
             .model_index
             .min(model_count.saturating_sub(1));
-        self.sync_model_panel_scroll();
+        self.refresh_model_panel_view(false);
     }
 
     fn active_model_panel_provider(&self) -> Option<&ModelProvider> {
@@ -177,63 +202,124 @@ impl Model {
         let provider_count = self.model_catalog.enabled_provider_count();
         if provider_count == 0 {
             self.model_panel.provider_index = 0;
-            self.model_panel.model_index = 0;
-            self.model_panel.scroll = 0;
+            self.reset_model_panel_view(true);
             return;
         }
 
         let current = self.model_panel.provider_index.min(provider_count - 1);
-        self.model_panel.provider_index = wrapping_index(current, provider_count, delta);
+        let next_provider_index = wrapping_index(current, provider_count, delta);
+        let did_switch_provider = next_provider_index != current;
+        self.model_panel.provider_index = next_provider_index;
         self.model_panel.model_index = 0;
         self.model_panel.scroll = 0;
+        if did_switch_provider {
+            self.model_panel.search_query.clear();
+        }
+        self.refresh_model_panel_view(true);
     }
 
     fn move_model_panel_model(&mut self, delta: isize) {
-        let Some(provider) = self.active_model_panel_provider() else {
-            return;
-        };
-        if provider.models.is_empty() {
+        let filtered_indices = self.model_panel.filtered_model_indices.as_slice();
+        if filtered_indices.is_empty() {
             self.model_panel.model_index = 0;
             self.model_panel.scroll = 0;
             return;
         }
 
-        let last_index = provider.models.len() - 1;
-        self.model_panel.model_index = if delta.is_negative() {
-            self.model_panel
-                .model_index
-                .saturating_sub(delta.unsigned_abs())
+        let current_position = filtered_indices
+            .iter()
+            .position(|index| *index == self.model_panel.model_index)
+            .unwrap_or(0);
+        let last_position = filtered_indices.len() - 1;
+        let next_position = if delta.is_negative() {
+            current_position.saturating_sub(delta.unsigned_abs())
         } else {
-            self.model_panel
-                .model_index
+            current_position
                 .saturating_add(delta as usize)
-                .min(last_index)
+                .min(last_position)
         };
-        self.sync_model_panel_scroll();
+        self.model_panel.model_index = filtered_indices[next_position];
+        self.sync_model_panel_scroll_to_filter();
     }
 
-    fn sync_model_panel_scroll(&mut self) {
-        let model_count = self
-            .active_model_panel_provider()
-            .map(|provider| provider.models.len())
-            .unwrap_or_default();
-        if model_count == 0 {
+    fn sync_model_panel_scroll_to_filter(&mut self) {
+        if self.active_model_panel_provider().is_none() {
+            self.model_panel.filtered_model_indices.clear();
+            self.model_panel.model_index = 0;
             self.model_panel.scroll = 0;
             return;
         }
 
-        let selected = self.model_panel.model_index.min(model_count - 1);
-        let visible_model_rows = self.model_panel_visible_model_rows();
-        let max_scroll = model_count.saturating_sub(visible_model_rows);
-        let mut scroll = self.model_panel.scroll.min(max_scroll);
-        if selected < scroll {
-            scroll = selected;
+        let filtered_indices = self.model_panel.filtered_model_indices.as_slice();
+        if filtered_indices.is_empty() {
+            self.model_panel.model_index = 0;
+            self.model_panel.scroll = 0;
+            return;
         }
-        if selected >= scroll + visible_model_rows {
-            scroll = selected + 1 - visible_model_rows;
+
+        let selected_position = filtered_indices
+            .iter()
+            .position(|index| *index == self.model_panel.model_index)
+            .unwrap_or(0);
+        let selected = filtered_indices[selected_position];
+        let visible_model_rows = self.model_panel_visible_model_rows();
+        let max_scroll = filtered_indices.len().saturating_sub(visible_model_rows);
+        let mut scroll = self.model_panel.scroll.min(max_scroll);
+        if selected_position < scroll {
+            scroll = selected_position;
+        }
+        if selected_position >= scroll + visible_model_rows {
+            scroll = selected_position + 1 - visible_model_rows;
         }
         self.model_panel.model_index = selected;
         self.model_panel.scroll = scroll;
+    }
+
+    fn refresh_model_panel_view(&mut self, should_sync_composer_height: bool) {
+        self.model_panel.filtered_model_indices = self
+            .active_model_panel_provider()
+            .map(|provider| filtered_model_indices(provider, &self.model_panel.search_query))
+            .unwrap_or_default();
+        self.sync_model_panel_scroll_to_filter();
+        self.mark_model_panel_view_changed(should_sync_composer_height);
+    }
+
+    fn reset_model_panel_view(&mut self, should_sync_composer_height: bool) {
+        self.model_panel.model_index = 0;
+        self.model_panel.scroll = 0;
+        self.model_panel.filtered_model_indices.clear();
+        self.mark_model_panel_view_changed(should_sync_composer_height);
+    }
+
+    fn mark_model_panel_view_changed(&mut self, should_sync_composer_height: bool) {
+        self.bump_model_panel_revision();
+        if should_sync_composer_height {
+            self.sync_composer_height();
+        }
+    }
+
+    fn clear_model_panel_search(&mut self) -> bool {
+        if self.model_panel.search_query.is_empty() {
+            return false;
+        }
+        self.model_panel.search_query.clear();
+        self.refresh_model_panel_view(true);
+        true
+    }
+
+    fn push_model_panel_search_character(&mut self, character: char) {
+        self.model_panel.search_query.push(character);
+        self.refresh_model_panel_view(true);
+    }
+
+    fn backspace_model_panel_search(&mut self) {
+        if self.model_panel.search_query.pop().is_some() {
+            self.refresh_model_panel_view(true);
+        }
+    }
+
+    fn bump_model_panel_revision(&mut self) {
+        self.model_panel.revision = self.model_panel.revision.saturating_add(1);
     }
 
     fn model_panel_visible_model_rows(&self) -> usize {
@@ -249,6 +335,13 @@ impl Model {
     fn select_current_model_panel_model(&mut self) -> Option<AppEffect> {
         let (provider_id, model_id) = {
             let provider = self.active_model_panel_provider()?;
+            if !self
+                .model_panel
+                .filtered_model_indices
+                .contains(&self.model_panel.model_index)
+            {
+                return None;
+            }
             let model = provider.models.get(self.model_panel.model_index)?;
             let provider_id = provider.id.clone();
             let model_id = model.id.clone();
@@ -314,6 +407,7 @@ impl Model {
             self.bump_status_line_revision();
         }
         self.sync_model_panel_to_selection();
+        self.sync_composer_height();
         self.show_transient_status_notice(&format!("Models refreshed: {display_name}"));
     }
 
@@ -339,12 +433,37 @@ impl Model {
                 self.show_transient_status_notice(&format!("Failed to refresh models: {message}"))
             }
         }
+        self.refresh_model_panel_view(true);
     }
 }
 
 fn is_model_refresh_key(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('u' | 'U'))
-        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+    match key.code {
+        KeyCode::Char('U') => key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT,
+        KeyCode::Char('u') => key.modifiers == KeyModifiers::SHIFT,
+        _ => false,
+    }
+}
+
+fn is_model_search_backspace_key(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Backspace => true,
+        KeyCode::Char('h') => {
+            key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+        }
+        KeyCode::Char('\u{0008}') => !key.modifiers.contains(KeyModifiers::ALT),
+        _ => false,
+    }
+}
+
+fn is_model_plain_search_key(key: KeyEvent) -> bool {
+    let KeyCode::Char(character) = key.code else {
+        return false;
+    };
+    !character.is_ascii_control()
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
 }
 
 fn build_panel_lines(model: &Model, width: usize, visible_rows: usize) -> Vec<Line<'static>> {
@@ -371,10 +490,7 @@ fn build_panel_header_lines(model: &Model, width: usize) -> Vec<Line<'static>> {
     ];
     append_provider_details_lines(model, width, &mut lines);
     lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "  Available Models:",
-        secondary_text_style(model.palette).bold(),
-    ));
+    lines.push(available_models_heading_line(model));
 
     lines
 }
@@ -383,10 +499,24 @@ fn model_panel_footer_lines(model: &Model) -> [Line<'static>; 2] {
     [
         Line::raw(""),
         Line::styled(
-            "  Enter select · U refresh · Esc exit · Tab providers · ↑↓ navigate",
+            "  Enter select · U refresh · Esc clear/exit · ←→/Tab providers · ↑↓ navigate",
             tertiary_text_style(model.palette).add_modifier(Modifier::ITALIC),
         ),
     ]
+}
+
+fn available_models_heading_line(model: &Model) -> Line<'static> {
+    if model.model_panel.search_query.is_empty() {
+        return Line::styled(
+            "  Available Models(Type to Search):",
+            secondary_text_style(model.palette).bold(),
+        );
+    }
+
+    Line::styled(
+        format!("  Search: {}", model.model_panel.search_query),
+        secondary_text_style(model.palette).bold(),
+    )
 }
 
 fn provider_tabs_line(model: &Model) -> Line<'static> {
@@ -522,10 +652,21 @@ fn append_model_lines(
         return;
     }
 
+    let filtered_indices = model.model_panel.filtered_model_indices.as_slice();
+    if filtered_indices.is_empty() {
+        lines.push(Line::styled(
+            "  No models match search",
+            tertiary_text_style(model.palette),
+        ));
+        return;
+    }
+
     let start = model.model_panel.scroll;
-    let end = (start + visible_rows).min(provider.models.len());
-    for (offset, entry) in provider.models[start..end].iter().enumerate() {
-        let index = start + offset;
+    let end = (start + visible_rows).min(filtered_indices.len());
+    for index in filtered_indices[start..end].iter().copied() {
+        let Some(entry) = provider.models.get(index) else {
+            continue;
+        };
         append_model_entry_lines(
             model,
             provider,
@@ -535,6 +676,44 @@ fn append_model_lines(
             lines,
         );
     }
+}
+
+fn filtered_model_indices(provider: &ModelProvider, search_query: &str) -> Vec<usize> {
+    if search_query.is_empty() {
+        return (0..provider.models.len()).collect();
+    }
+
+    provider
+        .models
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            model_entry_matches_search(entry, search_query).then_some(index)
+        })
+        .collect()
+}
+
+fn model_entry_matches_search(entry: &ModelEntry, query: &str) -> bool {
+    contains_case_insensitive(entry.id.as_str(), query)
+        || entry
+            .description
+            .as_ref()
+            .is_some_and(|description| contains_case_insensitive(description, query))
+}
+
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.is_ascii() {
+        let needle_bytes = needle.as_bytes();
+        return haystack
+            .as_bytes()
+            .windows(needle_bytes.len())
+            .any(|window| window.eq_ignore_ascii_case(needle_bytes));
+    }
+
+    haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
 fn append_model_entry_lines(

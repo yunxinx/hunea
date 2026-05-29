@@ -108,6 +108,7 @@ impl Model {
             AppEvent::Paste(text) => {
                 if self.transcript_overlay_active()
                     || self.tool_approval_fullscreen_preview_active()
+                    || self.model_panel_active()
                 {
                     self.cancel_exit_confirmation();
                     None

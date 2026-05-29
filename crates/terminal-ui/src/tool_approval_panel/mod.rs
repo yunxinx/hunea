@@ -110,7 +110,7 @@ impl Model {
     ) {
         self.close_transcript_overlay();
         self.pause_stream_activity();
-        self.model_panel.is_open = false;
+        self.close_model_panel();
         self.tool_approval_panel = ToolApprovalPanelState {
             is_open: true,
             selected: 0,

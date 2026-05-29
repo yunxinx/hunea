@@ -81,6 +81,7 @@ pub(crate) struct DocumentLayoutKey {
     pub(super) model_panel_provider_index: usize,
     pub(super) model_panel_model_index: usize,
     pub(super) model_panel_scroll: usize,
+    pub(super) model_panel_revision: usize,
     pub(super) selected_model: Option<String>,
     pub(super) status_line_config: u8,
     pub(super) status_line_2_config: u8,

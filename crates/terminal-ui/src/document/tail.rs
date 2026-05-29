@@ -40,6 +40,7 @@ pub(crate) struct DocumentTailLayoutKey {
     pub(crate) model_panel_provider_index: usize,
     pub(crate) model_panel_model_index: usize,
     pub(crate) model_panel_scroll: usize,
+    pub(crate) model_panel_revision: usize,
     pub(crate) selected_model: Option<String>,
     pub(crate) status_line_config: u8,
     pub(crate) status_line_2_config: u8,
@@ -130,6 +131,7 @@ impl Model {
             model_panel_provider_index: self.model_panel.provider_index,
             model_panel_model_index: self.model_panel.model_index,
             model_panel_scroll: self.model_panel.scroll,
+            model_panel_revision: self.model_panel.revision,
             selected_model: self
                 .selected_model
                 .as_ref()

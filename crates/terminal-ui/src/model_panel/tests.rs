@@ -56,6 +56,33 @@ fn open_model_panel_closes_tool_approval_panel_and_resumes_stream_activity() {
 }
 
 #[test]
+fn opening_tool_approval_panel_clears_open_model_panel_state() {
+    let mut model = model_with_single_provider();
+    model.open_model_panel();
+    model.push_model_panel_search_character('q');
+    assert!(model.model_panel.is_open);
+    assert_eq!(model.model_panel.search_query, "q");
+    assert!(!model.model_panel.filtered_model_indices.is_empty());
+
+    model.open_tool_approval_panel(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-1".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "Write file".to_string(),
+        Vec::new(),
+    );
+
+    assert!(!model.model_panel.is_open);
+    assert_eq!(model.model_panel.search_query, "");
+    assert!(model.model_panel.filtered_model_indices.is_empty());
+}
+
+#[test]
 fn provider_refresh_failure_keeps_existing_models_and_records_error() {
     let mut model = model_with_single_provider();
     model.open_model_panel();
@@ -80,6 +107,30 @@ fn provider_refresh_failure_keeps_existing_models_and_records_error() {
         model.selected_model,
         Some(ModelSelection::new("local", "qwen3"))
     );
+}
+
+#[test]
+fn model_entry_search_matches_ascii_without_case_sensitivity() {
+    let entry = ModelEntry::new(
+        "DeepSeek-Reasoner",
+        Some("General Chat Model".to_string()),
+        ModelSource::Configured,
+    );
+
+    assert!(model_entry_matches_search(&entry, "deepseek"));
+    assert!(model_entry_matches_search(&entry, "chat"));
+    assert!(!model_entry_matches_search(&entry, "qwen"));
+}
+
+#[test]
+fn model_entry_search_keeps_unicode_case_insensitive_matching() {
+    let entry = ModelEntry::new(
+        "Qwen",
+        Some("İstanbul capable model".to_string()),
+        ModelSource::Configured,
+    );
+
+    assert!(model_entry_matches_search(&entry, "i\u{307}stanbul"));
 }
 
 fn model_with_single_provider() -> Model {

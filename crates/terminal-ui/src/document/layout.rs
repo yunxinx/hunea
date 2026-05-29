@@ -143,6 +143,7 @@ impl Model {
             model_panel_provider_index: self.model_panel.provider_index,
             model_panel_model_index: self.model_panel.model_index,
             model_panel_scroll: self.model_panel.scroll,
+            model_panel_revision: self.model_panel.revision,
             selected_model: self
                 .selected_model
                 .as_ref()

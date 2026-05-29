@@ -33,6 +33,7 @@ type Rgb = (u8, u8, u8);
 pub(crate) struct StreamActivityState {
     started_at: Instant,
     header: String,
+    retry_header: Option<String>,
     interrupt_hint: Option<String>,
     output_tokens: Option<ActivityTokenProgress>,
     is_thinking: bool,
@@ -75,12 +76,71 @@ impl Model {
         self.stream_activity = Some(StreamActivityState {
             started_at: Instant::now(),
             header,
+            retry_header: None,
             interrupt_hint: self.current_stream_activity_interrupt_hint(),
             output_tokens: None,
             is_thinking: false,
             paused_at: None,
         });
         self.reset_chat_interrupt_esc_count();
+        self.bump_status_line_revision();
+        self.sync_composer_height();
+        if self.document_runtime.follow_bottom {
+            self.sync_document_viewport_to_bottom();
+        }
+    }
+
+    pub(crate) fn show_stream_activity_retry_header(&mut self, header: impl Into<String>) {
+        self.show_stream_activity_retry_header_at(header, Instant::now());
+    }
+
+    fn show_stream_activity_retry_header_at(&mut self, header: impl Into<String>, now: Instant) {
+        let header = header.into().trim().to_string();
+        if header.is_empty() {
+            return;
+        }
+
+        let Some(activity) = self.stream_activity.as_mut() else {
+            self.stream_activity = Some(StreamActivityState {
+                started_at: now,
+                header: "Working".to_string(),
+                retry_header: Some(header),
+                interrupt_hint: self.current_stream_activity_interrupt_hint(),
+                output_tokens: None,
+                is_thinking: false,
+                paused_at: Some(now),
+            });
+            self.reset_chat_interrupt_esc_count();
+            self.bump_status_line_revision();
+            self.sync_composer_height();
+            if self.document_runtime.follow_bottom {
+                self.sync_document_viewport_to_bottom();
+            }
+            return;
+        };
+        if !activity.enter_retry(header, now) {
+            return;
+        }
+
+        self.bump_status_line_revision();
+        self.sync_composer_height();
+        if self.document_runtime.follow_bottom {
+            self.sync_document_viewport_to_bottom();
+        }
+    }
+
+    pub(crate) fn clear_stream_activity_retry_header(&mut self) {
+        self.clear_stream_activity_retry_header_at(Instant::now());
+    }
+
+    fn clear_stream_activity_retry_header_at(&mut self, now: Instant) {
+        let Some(activity) = self.stream_activity.as_mut() else {
+            return;
+        };
+        if !activity.exit_retry(now) {
+            return;
+        }
+
         self.bump_status_line_revision();
         self.sync_composer_height();
         if self.document_runtime.follow_bottom {
@@ -271,7 +331,7 @@ impl Model {
         let Some(activity) = self.stream_activity.as_ref() else {
             return StatusLineRenderResult::default();
         };
-        if activity.is_paused() {
+        if activity.is_paused() && !activity.has_retry_header() {
             return StatusLineRenderResult::default();
         }
 
@@ -280,7 +340,8 @@ impl Model {
         } else {
             usize::from(self.width)
         };
-        let (text, spans) = render_activity_content(activity, self.palette, now, width);
+        let (text, spans) =
+            render_activity_content(activity, self.palette, activity.active_now(now), width);
         if text.is_empty() {
             return StatusLineRenderResult::default();
         }
@@ -336,6 +397,50 @@ impl Model {
 }
 
 impl StreamActivityState {
+    fn display_header(&self) -> &str {
+        self.retry_header.as_deref().unwrap_or(&self.header)
+    }
+
+    fn has_retry_header(&self) -> bool {
+        self.retry_header.is_some()
+    }
+
+    fn enter_retry(&mut self, header: String, now: Instant) -> bool {
+        let mut changed = self.set_retry_header(header);
+        changed |= self.clear_attempt_progress();
+        if self.paused_at.is_none() {
+            self.pause_at(now);
+            changed = true;
+        }
+        changed
+    }
+
+    fn exit_retry(&mut self, now: Instant) -> bool {
+        if self.retry_header.is_none() {
+            return false;
+        }
+
+        self.retry_header = None;
+        let _ = self.resume_at(now);
+        true
+    }
+
+    fn set_retry_header(&mut self, header: String) -> bool {
+        if self.retry_header.as_deref() == Some(header.as_str()) {
+            return false;
+        }
+
+        self.retry_header = Some(header);
+        true
+    }
+
+    fn clear_attempt_progress(&mut self) -> bool {
+        let had_progress = self.is_thinking || self.output_tokens.is_some();
+        self.is_thinking = false;
+        self.output_tokens = None;
+        had_progress
+    }
+
     fn is_paused(&self) -> bool {
         self.paused_at.is_some()
     }
@@ -561,7 +666,7 @@ fn render_activity_content(
     let elapsed_text = activity.elapsed_segment_at(now);
     let text = format!(
         "{STREAM_ACTIVITY_GLYPH} {} {elapsed_text}",
-        activity.header.as_str()
+        activity.display_header()
     );
     let truncated_text = truncate_display_width_with_ellipsis(&text, content_width);
     if truncated_text.is_empty() {
@@ -594,7 +699,7 @@ fn activity_content_spans(
     spans.push(activity_glyph_span_at(palette, activity.started_at, now));
     spans.push(Span::raw(" "));
     spans.extend(shimmer_spans_at(
-        activity.header.as_str(),
+        activity.display_header(),
         palette,
         activity.started_at,
         now,

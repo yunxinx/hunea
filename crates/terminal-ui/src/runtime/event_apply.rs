@@ -19,6 +19,10 @@ pub(crate) trait RuntimeEventApply {
 
 impl RuntimeEventApply for Model {
     fn apply_runtime_event(&mut self, event: RuntimeEvent) {
+        if !matches!(&event, RuntimeEvent::Retrying { .. }) {
+            self.clear_stream_activity_retry_header();
+        }
+
         match event {
             RuntimeEvent::Started { identity, .. } => {
                 self.show_transient_status_notice(&format!("Runtime ready: {}", identity.label));
@@ -65,7 +69,7 @@ impl RuntimeEventApply for Model {
             RuntimeEvent::Retrying { message, .. } => {
                 self.close_runtime_permission_approval_panel();
                 self.clear_runtime_response_buffer();
-                self.show_stream_activity_with_header(message);
+                self.show_stream_activity_retry_header(message);
             }
             RuntimeEvent::ToolActivityStarted { activity, .. } => {
                 self.flush_runtime_response_buffer();

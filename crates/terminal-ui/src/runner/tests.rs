@@ -1161,6 +1161,95 @@ fn conversation_retry_event_shows_reconnecting_activity() {
 }
 
 #[test]
+fn conversation_progress_after_retry_restores_previous_activity_header() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(70, 6);
+    model.transcript_mut().clear();
+    model.show_stream_activity_with_header("Generating");
+
+    apply_conversation_event(
+        &mut model,
+        None,
+        ConversationEvent::Retrying {
+            message: "Reconnecting... 1/3".to_string(),
+        },
+    );
+    assert!(
+        model
+            .current_stream_activity_render_result()
+            .plain_line
+            .contains("Reconnecting... 1/3")
+    );
+
+    apply_conversation_event(
+        &mut model,
+        None,
+        ConversationEvent::OutputTokenEstimate { total_tokens: 32 },
+    );
+
+    let activity = model
+        .current_stream_activity_render_result_at(
+            std::time::Instant::now() + std::time::Duration::from_millis(120),
+        )
+        .plain_line;
+    assert!(activity.contains("Generating"));
+    assert!(activity.contains("↓ 32 tokens"));
+    assert!(!activity.contains("Reconnecting... 1/3"));
+}
+
+#[test]
+fn conversation_retry_clears_failed_attempt_activity_progress() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(80, 6);
+    model.transcript_mut().clear();
+    model.show_stream_activity_with_header("Generating");
+
+    apply_conversation_event(
+        &mut model,
+        None,
+        ConversationEvent::OutputTokenEstimate { total_tokens: 80 },
+    );
+    apply_conversation_event(
+        &mut model,
+        None,
+        ConversationEvent::Thinking { is_thinking: true },
+    );
+
+    apply_conversation_event(
+        &mut model,
+        None,
+        ConversationEvent::Retrying {
+            message: "Reconnecting... 1/3".to_string(),
+        },
+    );
+
+    let retry_activity = model
+        .current_stream_activity_render_result_at(
+            std::time::Instant::now() + std::time::Duration::from_millis(120),
+        )
+        .plain_line;
+    assert!(retry_activity.contains("Reconnecting... 1/3"));
+    assert!(!retry_activity.contains("thinking"));
+    assert!(!retry_activity.contains("tokens"));
+
+    apply_conversation_event(
+        &mut model,
+        None,
+        ConversationEvent::OutputTokenEstimate { total_tokens: 32 },
+    );
+
+    let resumed_activity = model
+        .current_stream_activity_render_result_at(
+            std::time::Instant::now() + std::time::Duration::from_millis(120),
+        )
+        .plain_line;
+    assert!(resumed_activity.contains("Generating"));
+    assert!(resumed_activity.contains("↓ 32 tokens"));
+    assert!(!resumed_activity.contains("↓ 80 tokens"));
+    assert!(!resumed_activity.contains("thinking"));
+}
+
+#[test]
 fn conversation_retry_discards_streamed_expanded_reasoning_from_failed_attempt() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),

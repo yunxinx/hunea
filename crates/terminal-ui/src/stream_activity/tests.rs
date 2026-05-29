@@ -206,6 +206,49 @@ fn stream_activity_pause_hides_and_resume_excludes_paused_duration() {
 }
 
 #[test]
+fn stream_activity_retry_header_freezes_elapsed_timer() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(70, 6);
+    model.set_palette(default_palette(), true);
+    model.show_stream_activity_with_header("Working");
+    model.backdate_stream_activity_started_at_for_test(Duration::from_secs(10));
+
+    model.show_stream_activity_retry_header("Reconnecting... 1/3");
+
+    let retry_line = model
+        .current_stream_activity_render_result_at(Instant::now() + Duration::from_secs(20))
+        .plain_line;
+    assert!(retry_line.contains("Reconnecting... 1/3"));
+    assert!(retry_line.contains("(10s"));
+    assert!(!retry_line.contains("30s"));
+}
+
+#[test]
+fn stream_activity_multiple_retry_windows_are_excluded_from_elapsed_timer() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(70, 6);
+    model.set_palette(default_palette(), true);
+    model.show_stream_activity_with_header("Working");
+
+    let started_at = model.stream_activity.as_ref().unwrap().started_at;
+    let first_retry_at = started_at + Duration::from_secs(10);
+    let first_resume_at = first_retry_at + Duration::from_secs(5);
+    let second_retry_at = first_resume_at + Duration::from_secs(7);
+    let second_resume_at = second_retry_at + Duration::from_secs(3);
+
+    model.show_stream_activity_retry_header_at("Reconnecting... 1/3", first_retry_at);
+    model.clear_stream_activity_retry_header_at(first_resume_at);
+    model.show_stream_activity_retry_header_at("Reconnecting... 2/3", second_retry_at);
+    model.clear_stream_activity_retry_header_at(second_resume_at);
+
+    let resumed = model
+        .current_stream_activity_render_result_at(second_resume_at + Duration::from_secs(2))
+        .plain_line;
+    assert!(resumed.contains("(19s"));
+    assert!(!resumed.contains("27s"));
+}
+
+#[test]
 fn stream_activity_line_tweens_output_token_estimate_to_target() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.set_window(70, 6);

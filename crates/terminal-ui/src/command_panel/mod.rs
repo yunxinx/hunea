@@ -125,6 +125,8 @@ impl Model {
                 Some(None)
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
+                // 命令面板的输入是筛选条件，Enter 执行当前选中项；
+                // 子序列匹配出的命令只要已被选中，就和前缀匹配一样可执行。
                 let item = state.items.get(state.selected).cloned()?;
                 Some(self.execute_command_panel_item(item))
             }
@@ -486,16 +488,34 @@ fn command_panel_completion_text(item: &CommandPanelItem) -> String {
 
 fn command_panel_item_matches_query(item: &CommandPanelItem, query: &str) -> bool {
     let primary = item.name.trim_start_matches('/').to_lowercase();
-    if primary.starts_with(query) {
+    if normalized_text_matches_subsequence_query(&primary, query) {
         return true;
     }
 
     item.aliases.iter().any(|alias| {
-        alias
-            .trim_start_matches('/')
-            .to_lowercase()
-            .starts_with(query)
+        let alias_name = alias.trim_start_matches('/').to_lowercase();
+        normalized_text_matches_subsequence_query(&alias_name, query)
     })
+}
+
+fn normalized_text_matches_subsequence_query(text: &str, query: &str) -> bool {
+    let mut query_chars = query.chars();
+    let Some(mut expected) = query_chars.next() else {
+        return true;
+    };
+
+    for character in text.chars() {
+        if character != expected {
+            continue;
+        }
+
+        let Some(next_expected) = query_chars.next() else {
+            return true;
+        };
+        expected = next_expected;
+    }
+
+    false
 }
 
 fn pad_display_width_right(text: &str, width: usize) -> String {

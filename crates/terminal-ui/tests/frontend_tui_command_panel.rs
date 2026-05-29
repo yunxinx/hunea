@@ -124,6 +124,26 @@ fn command_panel_enter_executes_new_alias_as_clear() {
 }
 
 #[test]
+fn command_panel_enter_executes_selected_subsequence_match() {
+    let mut model = ready_model(64, 12, ModelOptions::default());
+    type_text(&mut model, "/del");
+
+    let rows = render_trimmed_rows(&mut model, 64, 12);
+    assert!(
+        rows.iter().any(|row| row.contains("/models")),
+        "subsequence query should show the matching command before execution: {rows:?}"
+    );
+
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    let rows = render_trimmed_rows(&mut model, 64, 12);
+    assert!(
+        rows.iter().any(|row| row.contains("Available Models")),
+        "Enter should execute the selected subsequence match, got: {rows:?}"
+    );
+}
+
+#[test]
 fn command_panel_shows_no_commands_for_single_unmatched_character() {
     let mut model = ready_model(48, 12, ModelOptions::default());
     type_text(&mut model, "/h");

@@ -11,6 +11,17 @@ fn single_unmatched_character_keeps_command_panel_active() {
 }
 
 #[test]
+fn non_prefix_subsequence_query_matches_command_name() {
+    assert_eq!(command_panel_query("/del"), Some("del".to_string()));
+
+    let names = base_command_panel_items_for_query("del")
+        .into_iter()
+        .map(|item| item.name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["/models"]);
+}
+
+#[test]
 fn current_status_notice_still_renders_below_command_panel() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),

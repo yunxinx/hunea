@@ -347,34 +347,150 @@ fn render_markdown_keeps_heading_attributes_literal() {
 }
 
 #[test]
-fn render_markdown_renders_tables_with_connected_box_borders() {
+fn render_markdown_unwraps_markdown_fence_containing_table() {
+    let markdown = "```markdown\n| A | B |\n|---|---|\n| 1 | 2 |\n```\n";
+    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+
+    assert!(rendered.contains('━'));
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.split_whitespace().collect::<Vec<_>>() == ["1", "2"]),
+        "markdown table fence should render as a native table: {rendered}"
+    );
+    assert!(
+        !rendered.contains("```"),
+        "unwrapped table output should not contain fence markers: {rendered}"
+    );
+}
+
+#[test]
+fn render_markdown_unwraps_markdown_fence_containing_table_without_outer_pipes() {
+    let markdown = "```md\nCol A | Col B | Col C\n--- | --- | ---\nx | y | z\n```\n";
+    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+
+    assert!(rendered.contains('━'));
+    assert!(
+        rendered.contains("Col A") && rendered.contains("Col B") && rendered.contains("Col C"),
+        "markdown table fence without outer pipes should render as a native table: {rendered}"
+    );
+    assert!(
+        !rendered
+            .lines()
+            .any(|line| line.trim() == "Col A | Col B | Col C"),
+        "unwrapped no-outer-pipe table should not remain literal code: {rendered}"
+    );
+}
+
+#[test]
+fn render_markdown_unwraps_blockquoted_markdown_fence_containing_table() {
+    let markdown = "> ```md\n> | A | B |\n> |---|---|\n> | 1 | 2 |\n> ```\n";
+    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+
+    assert!(rendered.lines().all(|line| line.starts_with("> ")));
+    assert!(
+        rendered.contains('━'),
+        "blockquoted markdown table fence should render as a native table: {rendered}"
+    );
+}
+
+#[test]
+fn render_markdown_keeps_markdown_fence_without_table_as_code() {
+    let lines = render_markdown_lines("```markdown\n**bold**\n```", 80, default_palette());
+
+    assert_eq!(lines_to_plain_text(&lines), "**bold**");
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .any(|span| span.content.contains("**")),
+        "markdown fences without table structure should remain literal code blocks"
+    );
+}
+
+#[test]
+fn render_markdown_keeps_non_markdown_fence_containing_table_as_code() {
+    let markdown = "```rust\n| A | B |\n|---|---|\n| 1 | 2 |\n```";
+    let lines = render_markdown_lines(markdown, 80, default_palette());
+    let rendered = lines_to_plain_text(&lines);
+
+    assert_eq!(rendered, "| A | B |\n|---|---|\n| 1 | 2 |");
+    assert!(
+        !rendered.contains('━'),
+        "non-markdown fences should not be unwrapped as tables: {rendered}"
+    );
+}
+
+#[test]
+fn render_markdown_renders_tables_with_codex_row_separators() {
     let markdown = "| 名称 | 类型 | 版本 | 启用 |\n| --- | --- | ---: | :---: |\n| hunea | 应用 | 0.1.0 | 是 |\n| ratatui | 依赖 | 0.24 | 否 |";
 
     let lines = render_markdown_lines(markdown, 80, default_palette());
 
     assert_eq!(
         lines_to_plain_text(&lines),
-        "┌─────────┬──────┬───────┬──────┐\n\
-             │ 名称    │ 类型 │  版本 │ 启用 │\n\
-             ├─────────┼──────┼───────┼──────┤\n\
-             │ hunea   │ 应用 │ 0.1.0 │  是  │\n\
-             │ ratatui │ 依赖 │  0.24 │  否  │\n\
-             └─────────┴──────┴───────┴──────┘"
+        [
+            " 名称       类型     版本    启用",
+            "━━━━━━━━━  ━━━━━━  ━━━━━━━  ━━━━━━",
+            " hunea      应用    0.1.0     是",
+            "─────────  ──────  ───────  ──────",
+            " ratatui    依赖     0.24     否",
+        ]
+        .join("\n")
     );
 }
 
 #[test]
-fn render_markdown_wraps_table_cells_in_narrow_width_without_ellipsis() {
+fn render_markdown_table_header_uses_table_header_accent() {
+    let palette = default_palette();
+    let lines = render_markdown_lines(
+        "| Name | Status |\n| --- | --- |\n| hunea | ready |",
+        80,
+        palette,
+    );
+
+    let header_span = lines[0]
+        .spans
+        .iter()
+        .find(|span| span.content.contains("Name"))
+        .expect("header row should contain the table header text");
+
+    assert_eq!(header_span.style.fg, Some(palette.table_header));
+    assert!(header_span.style.add_modifier.contains(Modifier::BOLD));
+    assert!(
+        lines_to_plain_text(&lines)
+            .lines()
+            .nth(1)
+            .is_some_and(|line| line.contains('━')),
+        "header separator should keep the codex-style heavy rule glyph"
+    );
+    assert!(
+        lines[1]
+            .spans
+            .iter()
+            .all(|span| span.style.fg != Some(palette.table_header)),
+        "separator style should not reuse the table header accent"
+    );
+}
+
+#[test]
+fn render_markdown_wraps_table_cells_without_box_borders_or_ellipsis() {
     let markdown =
         "| 名称 | 说明 |\n| --- | --- |\n| hunea | 一个基于 Rust 和 Ratatui 的 TUI 客户端 |";
 
     let lines = render_markdown_lines(markdown, 24, default_palette());
     let rendered = lines_to_plain_text(&lines);
 
-    assert!(rendered.contains("┌"));
-    assert!(rendered.contains("┬"));
-    assert!(rendered.contains("┼"));
-    assert!(rendered.contains("┘"));
+    assert!(
+        rendered.contains('━'),
+        "表头下方应使用 codex-style 分隔线: {rendered}"
+    );
+    for box_border in ['┌', '┬', '┐', '│', '├', '┼', '┤', '└', '┴', '┘'] {
+        assert!(
+            !rendered.contains(box_border),
+            "表格不应继续使用 box border {box_border}: {rendered}"
+        );
+    }
     assert!(
         rendered.contains("Ratatui"),
         "窄窗口表格必须换行保留内容，而不是省略: {rendered}"
@@ -399,9 +515,234 @@ fn render_markdown_wraps_table_cells_in_narrow_width_without_ellipsis() {
         "窄窗口表格不应使用省略号截断内容: {rendered}"
     );
     assert!(
-        lines.len() > 5,
+        lines.len() > 3,
         "长 cell 应该增加表格行高以完整显示内容: {rendered}"
     );
+}
+
+#[test]
+fn render_markdown_table_alignment_respects_markers() {
+    let markdown = "| Left | Center | Right |\n|:-----|:------:|------:|\n| a | b | c |";
+    let lines = render_markdown_lines(markdown, 80, default_palette());
+    let rendered = lines_to_plain_text(&lines);
+
+    assert!(rendered.contains(" Left"));
+    assert!(rendered.contains("Center"));
+    assert!(rendered.contains("Right"));
+    assert!(rendered.contains(" a"));
+    assert!(rendered.contains(" b"));
+    assert!(rendered.contains(" c"));
+}
+
+#[test]
+fn render_markdown_table_falls_back_to_key_value_records_when_grid_cannot_fit() {
+    let markdown = "| c1 | c2 | c3 | c4 | c5 | c6 | c7 | c8 | c9 | c10 |\n|---|---|---|---|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |";
+    let lines = render_markdown_lines(markdown, 20, default_palette());
+    let rendered = lines_to_plain_text(&lines);
+
+    assert!(rendered.contains("c1"));
+    assert!(rendered.contains("10"));
+    assert!(!rendered.contains('━'));
+    assert!(!rendered.contains('│'));
+}
+
+#[test]
+fn render_markdown_table_preserves_inline_styles_inside_cells() {
+    let palette = default_palette();
+    let lines = render_markdown_lines(
+        "| Key | Content |\n| --- | --- |\n| item | [link](https://example.com) **bold** `code` |",
+        80,
+        palette,
+    );
+    let rendered = lines_to_plain_text(&lines);
+
+    assert!(rendered.contains("link (https://example.com)"));
+    assert!(rendered.contains("bold"));
+    assert!(rendered.contains("code"));
+    assert!(
+        lines.iter().flat_map(|line| line.spans.iter()).any(|span| {
+            (span.content.as_ref() == "link" || span.content.contains("link"))
+                && span.style.add_modifier.contains(Modifier::UNDERLINED)
+        }),
+        "table cells should preserve markdown link styling: {lines:?}"
+    );
+    assert!(
+        lines.iter().flat_map(|line| line.spans.iter()).any(|span| {
+            span.content.as_ref() == "bold" && span.style.add_modifier.contains(Modifier::BOLD)
+        }),
+        "table cells should preserve strong styling: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.content.as_ref() == "code" && span.style.bg == palette.surface),
+        "table cells should preserve inline code styling: {lines:?}"
+    );
+    let destination_span = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.contains("https://example.com"))
+        .expect("table link destination should render as a separate styled span");
+    assert_eq!(destination_span.style.fg, Some(palette.secondary));
+    assert!(
+        destination_span
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED),
+        "table link destination should preserve link styling: {lines:?}"
+    );
+}
+
+#[test]
+fn render_markdown_table_header_style_is_base_for_inline_cell_styles() {
+    let palette = default_palette();
+    let lines = render_markdown_lines(
+        "| Plain | [Docs](https://example.com) | `Code` |\n| --- | --- | --- |\n| value | value | value |",
+        120,
+        palette,
+    );
+
+    let plain_header = lines[0]
+        .spans
+        .iter()
+        .find(|span| span.content.contains("Plain"))
+        .expect("plain table header should render");
+    assert_eq!(plain_header.style.fg, Some(palette.table_header));
+    assert!(plain_header.style.add_modifier.contains(Modifier::BOLD));
+
+    let destination_span = lines[0]
+        .spans
+        .iter()
+        .find(|span| span.content.contains("https://example.com"))
+        .expect("header link destination should render");
+    assert_eq!(destination_span.style.fg, Some(palette.secondary));
+    assert!(
+        destination_span
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED),
+        "header link destination should preserve link styling: {lines:?}"
+    );
+
+    let code_header = lines[0]
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == "Code")
+        .expect("header inline code should render");
+    assert_eq!(code_header.style.fg, Some(palette.main));
+    assert_eq!(code_header.style.bg, palette.surface);
+}
+
+#[test]
+fn render_markdown_table_preserves_escaped_pipe_inside_cell() {
+    let lines = render_markdown_lines("| Text |\n| --- |\n| a \\| b |", 80, default_palette());
+    let rendered = lines_to_plain_text(&lines);
+
+    assert!(
+        rendered.lines().any(|line| line.contains("a | b")),
+        "escaped pipes should stay inside the cell text instead of splitting columns: {rendered}"
+    );
+    assert!(
+        !rendered.contains("a \\| b"),
+        "escaped table pipes should render as literal pipes: {rendered}"
+    );
+}
+
+#[test]
+fn render_markdown_table_keeps_spillover_text_outside_table() {
+    let markdown = "| A | B |\n| --- | --- |\n| 1 | 2 |\ntrailing paragraph";
+    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+
+    assert!(rendered.contains(" 1"));
+    assert!(rendered.ends_with("trailing paragraph"));
+}
+
+#[test]
+fn render_markdown_table_keeps_prefixed_html_spillover_outside_table() {
+    let markdown = "| A | B |\n| --- | --- |\n| 1 | 2 |\n| HTML follows <div>content</div> |";
+    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line == "HTML follows <div>content</div>"),
+        "HTML-like spillover with prose before the tag should be rendered as prose: {rendered}"
+    );
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.split_whitespace().collect::<Vec<_>>() == ["1", "2"]),
+        "the real table row should still render as a table row: {rendered}"
+    );
+}
+
+#[test]
+fn render_markdown_table_does_not_treat_html_substring_label_as_spillover() {
+    let markdown = "| Key | Value |\n| --- | --- |\n| nothtml: | |";
+    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+
+    assert!(
+        rendered.lines().any(|line| line.starts_with(" nothtml:")),
+        "labels only containing html as a substring should remain in the table: {rendered}"
+    );
+}
+
+#[test]
+fn render_markdown_table_wraps_path_heavy_narrow_rows_without_truncation() {
+    let path = "/home/archie/GoCodes/lumos_rust/crates/terminal-ui/src/transcript/markdown_render/table.rs";
+    let markdown = format!("| File | Path |\n| --- | --- |\n| renderer | {path} |");
+    let rendered = lines_to_plain_text(&render_markdown_lines(&markdown, 28, default_palette()));
+    let compact_rendered = rendered
+        .chars()
+        .filter(|char| !char.is_whitespace())
+        .collect::<String>();
+    let compact_path = path
+        .chars()
+        .filter(|char| !char.is_whitespace())
+        .collect::<String>();
+
+    assert!(rendered.contains("File"));
+    assert!(rendered.contains("renderer"));
+    assert!(
+        compact_rendered.contains(&compact_path),
+        "path-heavy wrapping should preserve the complete path across visual lines: {rendered}"
+    );
+    assert!(
+        !rendered.contains('…'),
+        "path-heavy wrapping should not truncate with ellipsis: {rendered}"
+    );
+}
+
+#[test]
+fn render_markdown_table_falls_back_for_compact_systemic_fragmentation() {
+    let markdown = "| Build | Test | Lint | Format |\n| --- | --- | --- | --- |\n| build-pipeline-20260529 | nextest-suite-20260529 | clippy-workspace-20260529 | rustfmt-check-20260529 |";
+    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 34, default_palette()));
+
+    for token in [
+        "build-pipeline-20260529",
+        "nextest-suite-20260529",
+        "clippy-workspace-20260529",
+        "rustfmt-check-20260529",
+    ] {
+        assert!(
+            rendered.contains(token),
+            "compact fragmented fallback should preserve {token}: {rendered}"
+        );
+    }
+    assert!(
+        !rendered.contains('━'),
+        "systemic fragmentation should use record fallback rather than an unreadable grid: {rendered}"
+    );
+}
+
+#[test]
+fn render_markdown_table_inside_blockquote_keeps_quote_prefix() {
+    let markdown = "> | A | B |\n> |---|---|\n> | 1 | 2 |";
+    let rendered = lines_to_plain_text(&render_markdown_lines(markdown, 80, default_palette()));
+
+    assert!(rendered.lines().all(|line| line.starts_with("> ")));
+    assert!(rendered.contains("━━━━━"));
 }
 
 #[test]

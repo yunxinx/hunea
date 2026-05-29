@@ -123,7 +123,13 @@ fn assistant_markdown_table_uses_visual_content_width() {
     assert!(
         lines.iter().all(|line| line.width() <= 24),
         "table rows should fit the inset content width: {:?}",
-        lines.into_iter().map(plain_line).collect::<Vec<_>>()
+        lines.iter().cloned().map(plain_line).collect::<Vec<_>>()
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| !plain_line(line.clone()).contains('│')),
+        "table rows should use codex-style separators instead of box borders"
     );
 }
 

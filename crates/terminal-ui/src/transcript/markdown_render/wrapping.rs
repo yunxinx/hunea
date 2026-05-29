@@ -198,6 +198,13 @@ pub(super) fn wrap_logical_line(line: LogicalLine, width: usize) -> Vec<Line<'st
         .collect()
 }
 
+pub(super) fn wrap_styled_chunks_for_width(
+    chunks: &[StyledChunk],
+    width: usize,
+) -> Vec<Vec<StyledChunk>> {
+    wrap_prose_chunks(chunks, width.max(1), width.max(1))
+}
+
 pub(super) fn measure_wrapped_logical_line(line: LogicalLine, width: usize) -> (usize, usize) {
     if line.chunks.is_empty() && line.first_prefix.is_empty() {
         return (1, 0);

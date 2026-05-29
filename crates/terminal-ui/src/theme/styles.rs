@@ -53,6 +53,11 @@ pub fn quote_text_style(palette: TerminalPalette) -> Style {
     apply_foreground(Style::new().italic(), palette.quote)
 }
 
+/// `table_header_text_style` 返回 Markdown 表头强调文字样式。
+pub fn table_header_text_style(palette: TerminalPalette) -> Style {
+    apply_foreground(Style::new(), palette.table_header)
+}
+
 /// `surface_text_style` 返回带弱化背景的正文样式。
 pub fn surface_text_style(palette: TerminalPalette) -> Style {
     apply_surface(Style::new(), palette)
@@ -123,7 +128,7 @@ mod tests {
     use super::{
         accent_text_style, command_accent_text_style, muted_text_style, panel_block,
         primary_text_style, quote_text_style, secondary_text_style, surface_emphasis_style,
-        surface_text_style, system_error_text_style, tertiary_text_style,
+        surface_text_style, system_error_text_style, table_header_text_style, tertiary_text_style,
     };
     use crate::theme::{default_palette, terminal_default_palette};
 
@@ -143,6 +148,10 @@ mod tests {
         assert_eq!(
             system_error_text_style(palette).fg,
             Some(palette.system_error)
+        );
+        assert_eq!(
+            table_header_text_style(palette).fg,
+            Some(palette.table_header)
         );
         assert_eq!(quote_text_style(palette).fg, Some(palette.quote));
         assert!(

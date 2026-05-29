@@ -8,11 +8,14 @@ use std::cell::Cell;
 use pulldown_cmark::{Options, Parser};
 use ratatui::text::Line;
 
-use crate::theme::TerminalPalette;
+use crate::{
+    theme::TerminalPalette, transcript::markdown_table_source::unwrap_markdown_table_fences,
+};
 use engine::MarkdownRenderer;
 use wrapping::{count_leading_blank_lines, count_trailing_blank_lines};
 
 mod engine;
+mod table;
 mod wrapping;
 
 #[cfg(test)]
@@ -37,12 +40,17 @@ fn render_markdown_lines_with_cwd(
     cwd: Option<&Path>,
 ) -> Vec<Line<'static>> {
     let width = width.max(1);
+    let normalized_markdown = unwrap_markdown_table_fences(markdown);
+    let markdown = normalized_markdown.as_ref();
     let leading_blank_lines = count_leading_blank_lines(markdown);
     let trailing_blank_lines = count_trailing_blank_lines(markdown);
     let mut renderer = MarkdownRenderer::new(palette, cwd, width);
     let options = markdown_options();
 
-    renderer.render(Parser::new_ext(markdown, options));
+    renderer.render(
+        markdown,
+        Parser::new_ext(markdown, options).into_offset_iter(),
+    );
 
     let mut lines = Vec::new();
     for _ in 0..leading_blank_lines {
@@ -85,13 +93,18 @@ fn measure_markdown_metrics(
     palette: TerminalPalette,
 ) -> (usize, usize) {
     let width = width.max(1);
+    let normalized_markdown = unwrap_markdown_table_fences(markdown);
+    let markdown = normalized_markdown.as_ref();
     let leading_blank_lines = count_leading_blank_lines(markdown);
     let trailing_blank_lines = count_trailing_blank_lines(markdown);
     let cwd = std::env::current_dir().ok();
     let mut renderer = MarkdownRenderer::new_for_metrics(palette, cwd.as_deref(), width);
     let options = markdown_options();
 
-    renderer.render(Parser::new_ext(markdown, options));
+    renderer.render(
+        markdown,
+        Parser::new_ext(markdown, options).into_offset_iter(),
+    );
 
     let (line_count, plain_text_len) = renderer.finish_metrics(width);
     if plain_text_len == 0 {

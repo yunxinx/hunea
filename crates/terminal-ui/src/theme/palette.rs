@@ -12,6 +12,8 @@ const DARK_BACKGROUND_TERTIARY: Color = Color::Rgb(154, 154, 154);
 const LIGHT_BACKGROUND_TERTIARY: Color = Color::Rgb(122, 122, 122);
 const DARK_BACKGROUND_QUOTE: Color = Color::Rgb(166, 220, 176);
 const LIGHT_BACKGROUND_QUOTE: Color = Color::Rgb(70, 128, 82);
+const DARK_BACKGROUND_TABLE_HEADER: Color = Color::Rgb(137, 180, 250);
+const LIGHT_BACKGROUND_TABLE_HEADER: Color = Color::Rgb(37, 99, 160);
 const DARK_BACKGROUND_APPROVAL_REJECTED: Color = Color::Rgb(245, 213, 130);
 const LIGHT_BACKGROUND_APPROVAL_REJECTED: Color = Color::Rgb(150, 115, 42);
 const DARK_BACKGROUND_SURFACE: Color = Color::Rgb(46, 46, 46);
@@ -33,7 +35,8 @@ pub struct PaletteDetection {
 /// `tertiary` 用于更弱的状态信息，`accent` 用于面板强调线，
 /// `command_accent` 用于斜杠菜单当前命令，`approval_rejected` 用于人为拒绝审批，
 /// `system_error` 用于运行时错误提示，
-/// `quote` 用于 Markdown 引用块，`surface` 用于弱化背景块。
+/// `quote` 用于 Markdown 引用块，`table_header` 用于 Markdown 表头，
+/// `surface` 用于弱化背景块。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalPalette {
     pub main: Color,
@@ -45,6 +48,7 @@ pub struct TerminalPalette {
     pub approval_rejected: Color,
     pub system_error: Color,
     pub quote: Color,
+    pub table_header: Color,
     pub surface: Option<Color>,
     mode: PaletteMode,
 }
@@ -79,6 +83,7 @@ pub fn terminal_default_palette() -> TerminalPalette {
         approval_rejected: Color::LightYellow,
         system_error: Color::LightRed,
         quote: Color::LightGreen,
+        table_header: Color::Cyan,
         surface: None,
         mode: PaletteMode::TerminalDefault,
     }
@@ -163,6 +168,11 @@ pub fn palette_from_background(
             DARK_BACKGROUND_QUOTE
         } else {
             LIGHT_BACKGROUND_QUOTE
+        },
+        table_header: if has_dark_background {
+            DARK_BACKGROUND_TABLE_HEADER
+        } else {
+            LIGHT_BACKGROUND_TABLE_HEADER
         },
         surface: Some(surface_color(has_dark_background, background)),
         mode: PaletteMode::Explicit,
@@ -270,7 +280,7 @@ fn rgb_to_color(color: RgbColor) -> Color {
 mod tests {
     use super::{
         RgbColor, default_palette, detect_dark_background_from_env, detect_palette_from_sources,
-        is_dark_background, palette_from_background,
+        is_dark_background, palette_from_background, terminal_default_palette,
     };
     use ratatui::style::Color;
 
@@ -295,6 +305,14 @@ mod tests {
         let palette = palette_from_background(true, Some(Color::Rgb(16, 36, 63)));
 
         assert_ne!(palette.approval_rejected, palette.system_error);
+    }
+
+    #[test]
+    fn palette_table_header_is_a_distinct_readability_accent() {
+        let palette = default_palette();
+
+        assert_ne!(palette.table_header, palette.main);
+        assert_eq!(terminal_default_palette().table_header, Color::Cyan);
     }
 
     #[test]

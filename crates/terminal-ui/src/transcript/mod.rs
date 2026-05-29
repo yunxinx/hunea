@@ -6,7 +6,7 @@ mod markdown;
 pub(crate) mod markdown_highlight;
 mod markdown_links;
 mod markdown_render;
-mod markdown_table;
+pub(crate) mod markdown_table_source;
 mod prompt_wrap;
 mod render_state;
 mod wrap;

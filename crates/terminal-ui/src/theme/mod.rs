@@ -9,5 +9,5 @@ pub(crate) use styles::{SurfaceHalf, surface_half_block_line, surface_half_block
 pub use styles::{
     accent_text_style, command_accent_text_style, muted_text_style, panel_block,
     primary_text_style, quote_text_style, secondary_text_style, surface_emphasis_style,
-    surface_text_style, system_error_text_style, tertiary_text_style,
+    surface_text_style, system_error_text_style, table_header_text_style, tertiary_text_style,
 };

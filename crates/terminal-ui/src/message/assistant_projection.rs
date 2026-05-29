@@ -7,7 +7,10 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     styled_text::{line_plain_text_len, line_to_plain_text},
     theme::TerminalPalette,
-    transcript::{render_markdown_lines, render_markdown_metrics},
+    transcript::{
+        markdown_table_source::contains_table_structure, render_markdown_lines,
+        render_markdown_metrics,
+    },
 };
 
 use super::assistant::assistant_message_content_width;
@@ -349,6 +352,10 @@ fn build_common_markdown_projection_blocks(
     width: usize,
     palette: TerminalPalette,
 ) -> Option<Vec<AssistantProjectedBlock>> {
+    if contains_table_structure(content) {
+        return None;
+    }
+
     let split_lines = content.split('\n').collect::<Vec<_>>();
     let leading_blank_lines = split_lines
         .iter()

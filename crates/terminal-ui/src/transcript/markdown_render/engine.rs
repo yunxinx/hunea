@@ -1,22 +1,26 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+};
 
 use crate::{
-    theme::{TerminalPalette, quote_text_style},
+    theme::{TerminalPalette, quote_text_style, table_header_text_style},
     transcript::{
-        markdown_highlight::highlight_code_chunks,
-        markdown_links::render_local_link_target,
-        markdown_table::{MarkdownTable, TableCellKind, TableLine, render_markdown_table},
+        markdown_highlight::highlight_code_chunks, markdown_links::render_local_link_target,
     },
 };
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Tag, TagEnd};
 use ratatui::{
     style::{Modifier, Style},
     text::Line,
 };
 
-use super::wrapping::{
-    LogicalLine, OpenBlock, StyledChunk, WrapMode, measure_width, measure_wrapped_logical_line,
-    normalize_space, push_chunk, trim_display_math_text, wrap_logical_line,
+use super::{
+    table::{MarkdownTable, TableBodyRow, TableCell, TableRenderOptions, render_markdown_table},
+    wrapping::{
+        LogicalLine, OpenBlock, StyledChunk, WrapMode, measure_width, measure_wrapped_logical_line,
+        normalize_space, push_chunk, trim_display_math_text, wrap_logical_line,
+    },
 };
 
 #[derive(Debug, Clone, Default)]
@@ -51,15 +55,11 @@ struct ListFrame {
 #[derive(Debug, Clone, Default)]
 struct TableBuilder {
     alignments: Vec<Alignment>,
-    header: Vec<String>,
-    rows: Vec<TableRow>,
-    current_row: Option<TableRow>,
-    current_cell: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct TableRow {
-    cells: Vec<String>,
+    header: Vec<TableCell>,
+    rows: Vec<TableBodyRow>,
+    current_row: Option<Vec<TableCell>>,
+    current_cell: Option<TableCell>,
+    current_row_has_table_pipe_syntax: bool,
 }
 
 pub(super) struct MarkdownRenderer {
@@ -122,11 +122,14 @@ impl MarkdownRenderer {
         }
     }
 
-    pub(super) fn render<'a>(&mut self, parser: Parser<'a>) {
-        for event in parser {
+    pub(super) fn render<'a, I>(&mut self, source: &'a str, parser: I)
+    where
+        I: IntoIterator<Item = (Event<'a>, Range<usize>)>,
+    {
+        for (event, range) in parser {
             self.prepare_for_event(&event);
             match event {
-                Event::Start(tag) => self.start_tag(tag),
+                Event::Start(tag) => self.start_tag(source, range, tag),
                 Event::End(tag) => self.end_tag(tag),
                 Event::Text(text) => self.push_text(&text),
                 Event::Code(code) => self.push_inline_code(&code),
@@ -184,7 +187,7 @@ impl MarkdownRenderer {
             )
     }
 
-    fn start_tag(&mut self, tag: Tag<'_>) {
+    fn start_tag(&mut self, source: &str, source_range: Range<usize>, tag: Tag<'_>) {
         match tag {
             Tag::Paragraph => self.start_prose_block(),
             Tag::Heading { level, .. } => self.start_heading_block(level),
@@ -227,17 +230,20 @@ impl MarkdownRenderer {
             Tag::TableHead => {
                 self.in_table_head = true;
                 if let Some(table) = &mut self.table {
-                    table.current_row = Some(TableRow::default());
+                    table.current_row = Some(Vec::new());
                 }
             }
             Tag::TableRow => {
+                let has_table_pipe_syntax =
+                    table_row_has_boundary_pipe(source.get(source_range).unwrap_or_default());
                 if let Some(table) = &mut self.table {
-                    table.current_row = Some(TableRow::default());
+                    table.current_row = Some(Vec::new());
+                    table.current_row_has_table_pipe_syntax = has_table_pipe_syntax;
                 }
             }
             Tag::TableCell => {
                 if let Some(table) = &mut self.table {
-                    table.current_cell = Some(String::new());
+                    table.current_cell = Some(TableCell::default());
                 }
             }
             _ => {}
@@ -292,7 +298,7 @@ impl MarkdownRenderer {
                 if let Some(table) = &mut self.table
                     && let Some(row) = table.current_row.take()
                 {
-                    table.header = row.cells;
+                    table.header = row;
                 }
                 self.in_table_head = false;
             }
@@ -300,7 +306,11 @@ impl MarkdownRenderer {
                 if let Some(table) = &mut self.table
                     && let Some(row) = table.current_row.take()
                 {
-                    table.rows.push(row);
+                    table.rows.push(TableBodyRow::new(
+                        row,
+                        table.current_row_has_table_pipe_syntax,
+                    ));
+                    table.current_row_has_table_pipe_syntax = false;
                 }
             }
             TagEnd::TableCell => {
@@ -308,7 +318,7 @@ impl MarkdownRenderer {
                     && let Some(cell) = table.current_cell.take()
                     && let Some(row) = &mut table.current_row
                 {
-                    row.cells.push(cell);
+                    row.push(cell);
                 }
             }
             _ => {}
@@ -476,6 +486,19 @@ impl MarkdownRenderer {
         }
     }
 
+    fn in_table_cell(&self) -> bool {
+        self.table
+            .as_ref()
+            .and_then(|table| table.current_cell.as_ref())
+            .is_some()
+    }
+
+    fn current_table_cell_mut(&mut self) -> Option<&mut TableCell> {
+        self.table
+            .as_mut()
+            .and_then(|table| table.current_cell.as_mut())
+    }
+
     fn push_text(&mut self, text: &str) {
         if self.code_block_lang.is_some() {
             self.code_block_buffer.push_str(text);
@@ -496,10 +519,11 @@ impl MarkdownRenderer {
 
         self.line_ends_with_local_link_target = false;
 
-        if let Some(table) = &mut self.table
-            && let Some(cell) = &mut table.current_cell
-        {
-            cell.push_str(text);
+        if self.in_table_cell() {
+            let style = self.current_table_cell_text_style();
+            if let Some(cell) = self.current_table_cell_mut() {
+                cell.push_text(text, style);
+            }
             return;
         }
 
@@ -542,6 +566,14 @@ impl MarkdownRenderer {
     }
 
     fn push_soft_break(&mut self) {
+        if self.in_table_cell() {
+            let style = self.current_table_cell_text_style();
+            if let Some(cell) = self.current_table_cell_mut() {
+                cell.push_space_if_needed(style);
+            }
+            return;
+        }
+
         if self.line_ends_with_local_link_target {
             self.pending_local_link_soft_break = true;
             self.line_ends_with_local_link_target = false;
@@ -554,10 +586,22 @@ impl MarkdownRenderer {
     fn push_hard_break(&mut self) {
         self.line_ends_with_local_link_target = false;
         self.pending_local_link_soft_break = false;
+        if let Some(cell) = self.current_table_cell_mut() {
+            cell.hard_break();
+            return;
+        }
         self.push_newline();
     }
 
     fn push_html(&mut self, html: &str, inline: bool) {
+        if self.in_table_cell() {
+            let style = self.current_table_cell_text_style();
+            if let Some(cell) = self.current_table_cell_mut() {
+                cell.push_text(html, style);
+            }
+            return;
+        }
+
         if inline {
             self.push_text(html);
             return;
@@ -581,11 +625,10 @@ impl MarkdownRenderer {
             return;
         }
 
-        if let Some(table) = &mut self.table
-            && let Some(cell) = &mut table.current_cell
-        {
-            if !cell.ends_with(' ') {
-                cell.push(' ');
+        if self.in_table_cell() {
+            let style = self.current_table_cell_text_style();
+            if let Some(cell) = self.current_table_cell_mut() {
+                cell.push_space_if_needed(style);
             }
             return;
         }
@@ -621,10 +664,11 @@ impl MarkdownRenderer {
         };
 
         if let Some(local_target_display) = link.local_target_display {
-            if let Some(table) = &mut self.table
-                && let Some(cell) = &mut table.current_cell
-            {
-                cell.push_str(&local_target_display);
+            if self.in_table_cell() {
+                let style = self.code_style();
+                if let Some(cell) = self.current_table_cell_mut() {
+                    cell.push_text(&local_target_display, style);
+                }
                 return;
             }
 
@@ -652,10 +696,11 @@ impl MarkdownRenderer {
         }
 
         let suffix = format!(" ({destination})");
-        if let Some(table) = &mut self.table
-            && let Some(cell) = &mut table.current_cell
-        {
-            cell.push_str(&suffix);
+        if self.in_table_cell() {
+            let suffix_style = self.secondary_style().add_modifier(Modifier::UNDERLINED);
+            if let Some(cell) = self.current_table_cell_mut() {
+                cell.push_text(&suffix, suffix_style);
+            }
             return;
         }
 
@@ -671,38 +716,28 @@ impl MarkdownRenderer {
         }
 
         self.maybe_insert_spacing();
+        let (first_prefix, continuation_prefix) = self.current_prefixes();
+        self.clear_active_list_marker();
+        let header_style = table_header_text_style(self.palette).add_modifier(Modifier::BOLD);
+        let body_style = self.base_text_style();
+        let separator_style = self.secondary_style().add_modifier(Modifier::DIM);
         let table = MarkdownTable {
             alignments: table.alignments,
             header: table.header,
-            rows: table.rows.into_iter().map(|row| row.cells).collect(),
+            rows: table.rows,
         };
 
-        for line in render_markdown_table(&table, self.width) {
-            self.output.push(LogicalLine {
-                first_prefix: Vec::new(),
-                continuation_prefix: Vec::new(),
-                chunks: self.table_line_chunks(line),
-                wrap_mode: WrapMode::Literal,
-                preserve_trailing_spaces: false,
-            });
-        }
-    }
-
-    fn table_line_chunks(&self, line: TableLine) -> Vec<StyledChunk> {
-        let border_style = self.secondary_style();
-        let body_style = self.base_text_style();
-        let header_style = self.base_text_style().add_modifier(Modifier::BOLD);
-
-        line.into_iter()
-            .map(|segment| StyledChunk {
-                text: segment.text,
-                style: match segment.kind {
-                    TableCellKind::Border => border_style,
-                    TableCellKind::Header => header_style,
-                    TableCellKind::Body => body_style,
-                },
-            })
-            .collect()
+        self.output.extend(render_markdown_table(
+            table,
+            TableRenderOptions {
+                width: self.width,
+                first_prefix,
+                continuation_prefix,
+                header_style,
+                body_style,
+                separator_style,
+            },
+        ));
     }
 
     fn flush_current_block(&mut self) {
@@ -714,6 +749,32 @@ impl MarkdownRenderer {
 
     fn current_text_style(&self) -> Style {
         let mut style = self.base_text_style();
+
+        if self.inline_styles.strong_depth > 0 {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if self.inline_styles.emphasis_depth > 0 {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        if self.inline_styles.strike_depth > 0 {
+            style = style.add_modifier(Modifier::CROSSED_OUT);
+        }
+        if self.inline_styles.code_depth > 0 {
+            style = self.code_style();
+        }
+        if let Some(heading_style) = self.inline_styles.heading_style {
+            style = style.patch(heading_style);
+        }
+
+        if !self.link_stack.is_empty() {
+            style = style.add_modifier(Modifier::UNDERLINED);
+        }
+
+        style
+    }
+
+    fn current_table_cell_text_style(&self) -> Style {
+        let mut style = Style::new();
 
         if self.inline_styles.strong_depth > 0 {
             style = style.add_modifier(Modifier::BOLD);
@@ -803,4 +864,9 @@ fn heading_style(level: HeadingLevel) -> Style {
             Style::new().add_modifier(Modifier::ITALIC)
         }
     }
+}
+
+fn table_row_has_boundary_pipe(source: &str) -> bool {
+    let source = source.trim();
+    source.starts_with('|') || source.ends_with('|')
 }

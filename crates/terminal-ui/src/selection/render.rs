@@ -3,7 +3,8 @@ use ratatui::{
     text::{Line, Span},
 };
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
+
+use crate::display_width::grapheme_width;
 
 pub(crate) fn apply_selection_to_line(
     line: &Line<'static>,
@@ -19,7 +20,7 @@ pub(crate) fn apply_selection_to_line(
     for span in &line.spans {
         let base_style = line.style.patch(span.style);
         for grapheme in span.content.as_ref().graphemes(true) {
-            let width = grapheme.width();
+            let width = grapheme_width(grapheme);
             let cluster_start = column;
             let cluster_end = column + width;
             if width > 0 {

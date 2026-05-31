@@ -7,9 +7,8 @@ use std::{
 
 use crossterm::event::KeyCode;
 use ratatui::{
-    Terminal,
-    backend::TestBackend,
     buffer::Buffer,
+    layout::Rect,
     style::{Color, Modifier},
 };
 use terminal_ui::{
@@ -438,13 +437,11 @@ fn type_text(model: &mut Model, text: &str) {
 }
 
 fn render_trimmed_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render on test backend");
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    let _ = model.render_to_buffer(area, &mut buffer);
 
-    trim_rows(terminal.backend().buffer())
+    trim_rows(&buffer)
 }
 
 fn trim_rows(buffer: &Buffer) -> Vec<String> {
@@ -495,13 +492,10 @@ fn find_cell_containing(
 }
 
 fn render_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render on test backend");
-
-    terminal.backend().buffer().clone()
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    let _ = model.render_to_buffer(area, &mut buffer);
+    buffer
 }
 
 fn assert_text_cells_use_color(buffer: &Buffer, text: &str, expected: Color) {

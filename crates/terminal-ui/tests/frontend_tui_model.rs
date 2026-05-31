@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
+use ratatui::{buffer::Buffer, layout::Rect};
 use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
@@ -268,13 +268,7 @@ fn startup_timeout_allows_initial_frame_without_detected_palette() {
     assert_eq!(model.palette(), &terminal_default_palette());
     assert!(model.is_ready());
 
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render on test backend");
-
-    let rendered = buffer_text(terminal.backend().buffer());
+    let rendered = buffer_text(&render_model_buffer(&mut model, 80, 24));
     assert!(
         !rendered.trim().is_empty(),
         "ready model should produce visible frame content"
@@ -364,10 +358,12 @@ fn buffer_text(buffer: &Buffer) -> String {
 }
 
 fn rendered_model_text(model: &mut Model) -> String {
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render on test backend");
-    buffer_text(terminal.backend().buffer())
+    buffer_text(&render_model_buffer(model, 80, 24))
+}
+
+fn render_model_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    let _ = model.render_to_buffer(area, &mut buffer);
+    buffer
 }

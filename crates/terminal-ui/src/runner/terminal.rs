@@ -2,7 +2,7 @@ use std::{fmt, io};
 
 use crossterm::{
     Command,
-    cursor::{Hide, Show},
+    cursor::Show,
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event,
@@ -10,11 +10,11 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::backend::CrosstermBackend;
 
-use super::event_pipeline::TerminalWaitPlan;
+use super::{event_pipeline::TerminalWaitPlan, terminal_surface::TerminalSurface};
 
-pub(super) type TuiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
+pub(super) type TuiTerminal = TerminalSurface<CrosstermBackend<io::Stdout>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TerminalMouseMode {
@@ -132,11 +132,10 @@ impl TerminalSession {
             EnterAlternateScreen,
             DisableAlternateScroll,
             EnableMouseCapture,
-            EnableBracketedPaste,
-            Hide
+            EnableBracketedPaste
         )?;
         let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
+        let mut terminal = TerminalSurface::new(backend)?;
         terminal.hide_cursor()?;
         Ok((terminal, Self))
     }
@@ -146,7 +145,6 @@ impl TerminalSession {
         disable_raw_mode()?;
         execute!(
             terminal.backend_mut(),
-            Show,
             DisableBracketedPaste,
             DisableMouseCapture,
             DisableAlternateScroll,
@@ -162,8 +160,7 @@ impl TerminalSession {
             EnterAlternateScreen,
             DisableAlternateScroll,
             EnableMouseCapture,
-            EnableBracketedPaste,
-            Hide
+            EnableBracketedPaste
         )?;
         terminal.hide_cursor()?;
         terminal.clear()?;

@@ -1,5 +1,4 @@
 use ratatui::{
-    Frame,
     layout::Rect,
     style::Modifier,
     text::{Line, Span},
@@ -12,6 +11,7 @@ use runtime_domain::session::{
 use crate::{
     Model,
     inline_panel::inline_panel_rule_line,
+    render_frame::RenderFrame,
     styled_text::render_line_with_full_width_background,
     theme::{TerminalPalette, muted_text_style, primary_text_style, tertiary_text_style},
     tool_result::{ToolActivityRenderMode, ToolResultItem},
@@ -59,7 +59,7 @@ pub(super) fn file_preview_fullscreen_max_offset(model: &mut Model) -> usize {
 impl Model {
     pub(crate) fn render_tool_approval_fullscreen_preview(
         &mut self,
-        frame: &mut Frame<'_>,
+        frame: &mut RenderFrame<'_>,
         area: Rect,
     ) {
         if area.width == 0 || area.height == 0 {
@@ -266,7 +266,7 @@ fn file_preview_fullscreen_content_height_for(height: usize) -> usize {
 }
 
 fn render_file_preview_header(
-    frame: &mut Frame<'_>,
+    frame: &mut RenderFrame<'_>,
     area: Rect,
     palette: TerminalPalette,
     header_line: Line<'static>,
@@ -291,7 +291,7 @@ fn render_file_preview_header(
 }
 
 fn render_file_preview_content_window(
-    frame: &mut Frame<'_>,
+    frame: &mut RenderFrame<'_>,
     area: Rect,
     palette: TerminalPalette,
     visible_lines: Vec<Line<'static>>,
@@ -324,7 +324,7 @@ fn render_file_preview_content_window(
 }
 
 fn render_file_preview_footer(
-    frame: &mut Frame<'_>,
+    frame: &mut RenderFrame<'_>,
     area: Rect,
     progress_line: Line<'static>,
     footer_line: Line<'static>,

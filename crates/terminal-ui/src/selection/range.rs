@@ -1,7 +1,9 @@
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
-use crate::document::{DocumentLayout, DocumentLineAnchor};
+use crate::{
+    display_width::{display_width, grapheme_width},
+    document::{DocumentLayout, DocumentLineAnchor},
+};
 
 use super::{SelectionPoint, SelectionState};
 
@@ -131,7 +133,7 @@ impl SelectableLineRange {
 }
 
 pub(crate) fn selectable_range_for_plain_line(text: &str) -> SelectableLineRange {
-    SelectableLineRange::new(0, text.width())
+    SelectableLineRange::new(0, display_width(text))
 }
 
 pub(crate) fn normalize_transcript_selectable_range(
@@ -268,7 +270,7 @@ fn visible_text_cells(line: &str) -> Vec<VisibleTextCell> {
     let mut cells = Vec::new();
     let mut column = 0;
     for (start_byte, grapheme) in line.grapheme_indices(true) {
-        let width = grapheme.width();
+        let width = grapheme_width(grapheme);
         let end_byte = start_byte + grapheme.len();
         if width == 0 {
             continue;

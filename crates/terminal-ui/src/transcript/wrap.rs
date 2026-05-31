@@ -1,9 +1,10 @@
 use std::collections::VecDeque;
 
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use super::prompt_wrap::wrap_prompt_visual_lines;
+pub(super) use crate::display_width::display_width as measure_width;
+use crate::terminal_text::sanitize_terminal_text;
 
 #[cfg(test)]
 thread_local! {
@@ -82,6 +83,9 @@ pub(crate) fn wrap_assistant_text(
 }
 
 fn wrap_text(value: &str, width: usize, line_prefix_width: usize, mode: WrapMode) -> Vec<String> {
+    let sanitized_value = sanitize_terminal_text(value);
+    let value = sanitized_value.as_ref();
+
     if value.is_empty() {
         return vec![String::new()];
     }
@@ -699,10 +703,6 @@ pub(crate) fn should_start_new_wrap_segment(
     current_kind != next_kind || next_kind == WrapSegmentKind::Breakable
 }
 
-pub(super) fn measure_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{wrap_assistant_text, wrap_prompt_text};
@@ -750,6 +750,19 @@ mod tests {
     #[test]
     fn wrap_prompt_text_preserves_long_leading_spaces_on_wrapped_line() {
         assert_eq!(wrap_prompt_text("abc d    e", 5, 0), vec!["abc d", "    e"]);
+    }
+
+    #[test]
+    fn wrap_prompt_text_removes_terminal_control_sequences_before_wrapping() {
+        assert_eq!(wrap_prompt_text("a\u{1b}[31mb\u{1b}[0m", 10, 0), vec!["ab"]);
+    }
+
+    #[test]
+    fn wrap_assistant_text_removes_terminal_control_sequences_before_wrapping() {
+        assert_eq!(
+            wrap_assistant_text("a\u{1b}]8;;https://example.test\u{1b}\\b", 10, 0),
+            vec!["ab"]
+        );
     }
 
     #[test]

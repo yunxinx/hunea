@@ -7,9 +7,7 @@ mod state;
 mod viewport;
 use std::time::Instant;
 
-use unicode_width::UnicodeWidthStr;
-
-use crate::{AppEffect, Model, document::DocumentLayout};
+use crate::{AppEffect, Model, display_width::display_width, document::DocumentLayout};
 
 pub(super) use self::copy::selection_text;
 pub(super) use self::range::{
@@ -157,7 +155,7 @@ impl Model {
                     .unwrap_or_else(|| {
                         layout
                             .selection_line_at(line_index)
-                            .map(|line| line.text.width())
+                            .map(|line| display_width(&line.text))
                             .unwrap_or_default()
                     }),
             )

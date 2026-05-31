@@ -3,7 +3,10 @@
 use std::rc::Rc;
 use std::time::Instant;
 
-use ratatui::Frame;
+use ratatui::{
+    buffer::Buffer,
+    layout::{Position, Rect},
+};
 #[cfg(test)]
 pub(super) use runtime_domain::session::{RuntimeToolActivity, RuntimeToolActivityUpdate};
 use runtime_domain::{
@@ -20,11 +23,13 @@ use super::{
     file_search::FileSearchCache,
     message_revisit::MessageRevisitState,
     model_panel::ModelPanelState,
+    render_frame::RenderFrame,
     startup_banner::StartupBannerEntranceState,
     status_line::StatusLineItem,
     status_phrases::StatusPhraseSelector,
     stream_activity::StreamActivityState,
     style_mode::StyleMode,
+    terminal_grid::normalize_terminal_buffer,
     theme::{TerminalPalette, default_palette},
     tool_approval_panel::ToolApprovalPanelState,
     transcript::{RenderResult, Transcript, index_only_render_result},
@@ -230,9 +235,13 @@ impl Model {
         }
     }
 
-    /// `render` 将当前模型渲染到一帧。
-    pub fn render(&mut self, frame: &mut Frame<'_>) {
-        view::render(self, frame);
+    /// `render_to_buffer` 将当前模型渲染到指定屏幕缓冲区。
+    #[must_use = "`render_to_buffer` 返回渲染后的 cursor 位置，调用方必须传递或显式丢弃"]
+    pub fn render_to_buffer(&mut self, area: Rect, buffer: &mut Buffer) -> Option<Position> {
+        let mut frame = RenderFrame::new(area, buffer);
+        view::render(self, &mut frame);
+        normalize_terminal_buffer(frame.buffer_mut());
+        frame.cursor_position()
     }
 
     /// `palette` 返回当前使用的配色。

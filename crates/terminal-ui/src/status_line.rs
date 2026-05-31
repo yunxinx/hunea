@@ -1,11 +1,14 @@
 use ratatui::text::Line;
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use runtime_domain::envinfo;
 
 use crate::{
-    Model, StyleMode, selection::SelectableLineRange, theme::tertiary_text_style,
+    Model, StyleMode,
+    display_width::{display_width, grapheme_width},
+    selection::SelectableLineRange,
+    terminal_text::sanitize_terminal_text,
+    theme::tertiary_text_style,
     transcript::DEFAULT_RENDER_WIDTH,
 };
 
@@ -266,14 +269,14 @@ pub(crate) fn compose_status_line_text(parts: &[String], width: usize) -> String
     }
 
     let mut text = first;
-    let separator_width = STATUS_LINE_SEPARATOR.width();
-    let mut current_width = text.width();
+    let separator_width = display_width(STATUS_LINE_SEPARATOR);
+    let mut current_width = display_width(&text);
 
     for part in parts.iter().skip(1) {
-        let part_width = part.width();
+        let part_width = display_width(part);
         if current_width + separator_width + part_width > width {
             let remaining_width = width.saturating_sub(current_width + separator_width);
-            if remaining_width < STATUS_LINE_ELLIPSIS.width() {
+            if remaining_width < display_width(STATUS_LINE_ELLIPSIS) {
                 return force_ellipsis_at_display_width(&text, width);
             }
 
@@ -298,14 +301,15 @@ pub(crate) fn compose_status_line_text(parts: &[String], width: usize) -> String
 fn status_line_selectable_range(text: &str) -> SelectableLineRange {
     SelectableLineRange::with_hit_range(
         STATUS_LINE_INSET_WIDTH,
-        STATUS_LINE_INSET_WIDTH + text.width(),
+        STATUS_LINE_INSET_WIDTH + display_width(text),
         0,
-        STATUS_LINE_INSET_WIDTH + text.width(),
+        STATUS_LINE_INSET_WIDTH + display_width(text),
     )
 }
 
 fn sanitize_status_line_part(text: &str) -> String {
-    text.chars()
+    sanitize_terminal_text(text)
+        .chars()
         .map(|character| {
             if character.is_control() {
                 ' '
@@ -320,19 +324,19 @@ pub(crate) fn truncate_display_width(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
-    if text.width() <= width {
+    if display_width(text) <= width {
         return text.to_string();
     }
 
     let mut rendered = String::new();
     let mut used_width = 0;
     for grapheme in UnicodeSegmentation::graphemes(text, true) {
-        let grapheme_width = grapheme.width();
-        if used_width + grapheme_width > width {
+        let cluster_width = grapheme_width(grapheme);
+        if used_width + cluster_width > width {
             break;
         }
         rendered.push_str(grapheme);
-        used_width += grapheme_width;
+        used_width += cluster_width;
     }
 
     rendered
@@ -342,11 +346,11 @@ pub(crate) fn truncate_display_width_with_ellipsis(text: &str, width: usize) -> 
     if width == 0 {
         return String::new();
     }
-    if text.width() <= width {
+    if display_width(text) <= width {
         return text.to_string();
     }
 
-    let ellipsis_width = STATUS_LINE_ELLIPSIS.width();
+    let ellipsis_width = display_width(STATUS_LINE_ELLIPSIS);
     if width <= ellipsis_width {
         return truncate_display_width(STATUS_LINE_ELLIPSIS, width);
     }
@@ -363,7 +367,7 @@ fn force_ellipsis_at_display_width(text: &str, width: usize) -> String {
         return String::new();
     }
 
-    let ellipsis_width = STATUS_LINE_ELLIPSIS.width();
+    let ellipsis_width = display_width(STATUS_LINE_ELLIPSIS);
     if width <= ellipsis_width {
         return truncate_display_width(STATUS_LINE_ELLIPSIS, width);
     }

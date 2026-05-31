@@ -1,11 +1,12 @@
 use std::time::Instant;
 
-use ratatui::{Frame, buffer::Buffer, layout::Rect, text::Line, widgets::Widget};
+use ratatui::{buffer::Buffer, layout::Rect, text::Line, widgets::Widget};
 
 use super::{
     Model,
     document::{DocumentLayout, DocumentViewport},
     message::assistant_message_visual_inset,
+    render_frame::RenderFrame,
     styled_text::render_line_with_full_width_background,
 };
 
@@ -57,7 +58,7 @@ fn render_inset_line(line: &Line<'static>, area: Rect, y: u16, buf: &mut Buffer)
 }
 
 /// `render` 负责将统一文档流映射到当前帧内容。
-pub fn render(model: &mut Model, frame: &mut Frame<'_>) {
+pub fn render(model: &mut Model, frame: &mut RenderFrame<'_>) {
     if !model.is_ready() {
         return;
     }
@@ -162,7 +163,7 @@ fn startup_banner_entrance_rect(
 mod tests {
     use std::time::Duration;
 
-    use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
     use super::*;
     use crate::{ReasoningDisplayMode, StartupBannerOptions, StyleMode, theme::default_palette};
@@ -178,16 +179,13 @@ mod tests {
         model.set_palette(default_palette(), true);
         model.append_assistant_message_from_runtime("hello world");
 
-        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
-        terminal.draw(|frame| model.render(frame)).unwrap();
-
-        let buffer = terminal.backend().buffer();
+        let buffer = render_model_buffer(&mut model, 20, 8);
         assert!(
-            rendered_rows(buffer)
+            rendered_rows(&buffer)
                 .iter()
                 .any(|row| row == "  hello world       "),
             "assistant row should be rendered with a two-column visual inset: {:?}",
-            rendered_rows(buffer)
+            rendered_rows(&buffer)
         );
     }
 
@@ -228,15 +226,14 @@ mod tests {
                 StyleMode::Cx,
             );
 
-        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
-        terminal.draw(|frame| model.render(frame)).unwrap();
+        let buffer = render_model_buffer(&mut model, 20, 8);
 
         assert!(
-            rendered_rows(terminal.backend().buffer())
+            rendered_rows(&buffer)
                 .iter()
                 .any(|row| row == "• thoughts 16s      "),
             "snippet reasoning should start at column zero without assistant inset: {:?}",
-            rendered_rows(terminal.backend().buffer())
+            rendered_rows(&buffer)
         );
     }
 
@@ -263,15 +260,13 @@ mod tests {
             true,
         );
 
-        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
-        let sentinel = Position::new(17, 3);
-        terminal.set_cursor_position(sentinel).unwrap();
-        terminal.draw(|frame| model.render(frame)).unwrap();
+        let area = Rect::new(0, 0, 20, 4);
+        let mut buffer = Buffer::empty(area);
+        let cursor_position = model.render_to_buffer(area, &mut buffer);
 
         assert_eq!(
-            terminal.get_cursor_position().unwrap(),
-            sentinel,
-            "render must not pin the hidden composer cursor to viewport row 0"
+            cursor_position, None,
+            "render must not expose the hidden composer cursor"
         );
     }
 
@@ -283,10 +278,8 @@ mod tests {
         model.set_palette(default_palette(), true);
         model.append_assistant_message_from_runtime("abcdefghijklmnopqrstuvwxyz");
 
-        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
-        terminal.draw(|frame| model.render(frame)).unwrap();
-
-        let rows = rendered_rows(terminal.backend().buffer());
+        let buffer = render_model_buffer(&mut model, 20, 8);
+        let rows = rendered_rows(&buffer);
 
         assert!(
             rows.iter().any(|row| row == "  abcdefghijklmnop  "),
@@ -310,10 +303,8 @@ mod tests {
             None,
         );
 
-        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
-        terminal.draw(|frame| model.render(frame)).unwrap();
-
-        let rows = rendered_rows(terminal.backend().buffer());
+        let buffer = render_model_buffer(&mut model, 20, 8);
+        let rows = rendered_rows(&buffer);
 
         assert!(
             rows.iter().any(|row| row == "  abcdefghijklmnop  "),
@@ -347,10 +338,8 @@ mod tests {
             raw_output: None,
         });
 
-        let mut terminal = Terminal::new(TestBackend::new(48, 8)).unwrap();
-        terminal.draw(|frame| model.render(frame)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let rows = rendered_rows(buffer);
+        let buffer = render_model_buffer(&mut model, 48, 8);
+        let rows = rendered_rows(&buffer);
         let insert_row = rows
             .iter()
             .position(|row| row.contains("+  new"))
@@ -361,6 +350,13 @@ mod tests {
             Color::Reset,
             "diff insert row background should fill trailing cells: {rows:?}"
         );
+    }
+
+    fn render_model_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
+        let area = Rect::new(0, 0, width, height);
+        let mut buffer = Buffer::empty(area);
+        let _ = model.render_to_buffer(area, &mut buffer);
+        buffer
     }
 
     fn rendered_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {

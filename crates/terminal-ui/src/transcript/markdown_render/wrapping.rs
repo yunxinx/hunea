@@ -5,8 +5,9 @@ use ratatui::{
     text::{Line, Span},
 };
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
+pub(super) use crate::display_width::display_width as measure_width;
+use crate::display_width::grapheme_width;
 use crate::transcript::wrap::{WrapSegmentKind, should_start_new_wrap_segment, wrap_segment_kind};
 
 const DISPLAY_TAB_WIDTH: usize = 8;
@@ -103,7 +104,7 @@ impl OpenBlock {
             }
 
             push_chunk(self.current_line_mut(), grapheme.to_string(), style);
-            column += grapheme.width();
+            column += grapheme_width(grapheme);
         }
     }
 
@@ -390,7 +391,7 @@ fn tokenize_chunks(chunks: &[StyledChunk]) -> Vec<StyledSegment> {
             }
 
             current.push_str(grapheme);
-            current_width += grapheme.width();
+            current_width += grapheme_width(grapheme);
         }
 
         if let Some(kind) = current_kind {
@@ -499,10 +500,6 @@ pub(super) fn chunk_width(chunks: &[StyledChunk]) -> usize {
 
 fn chunk_text_len(chunks: &[StyledChunk]) -> usize {
     chunks.iter().map(|chunk| chunk.text.len()).sum()
-}
-
-pub(super) fn measure_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
 }
 
 pub(super) fn normalize_space(text: &str) -> String {

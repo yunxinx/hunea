@@ -1,6 +1,6 @@
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
+pub(super) use crate::display_width::display_width as measure_width;
 use crate::{
     StyleMode,
     theme::{
@@ -439,10 +439,6 @@ pub(super) fn legacy_user_plain_line_len(
     } else {
         user_message_inset_width(style_mode) + text.len()
     }
-}
-
-pub(super) fn measure_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
 }
 
 pub(super) fn rendered_line_anchor(rendered_line: usize) -> ItemLineAnchor {

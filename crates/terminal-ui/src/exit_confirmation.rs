@@ -1,8 +1,6 @@
 use std::time::{Duration, Instant};
 
-use unicode_width::UnicodeWidthStr;
-
-use super::{Model, document::ViewportState};
+use super::{Model, display_width::display_width, document::ViewportState};
 
 pub(crate) const EXIT_CONFIRMATION_PROMPT: &str = "Press again to exit";
 pub(crate) const EXIT_CONFIRMATION_WINDOW: Duration = Duration::from_secs(1);
@@ -89,7 +87,7 @@ impl Model {
             plain_line,
             selectable: super::selection::SelectableLineRange::new(
                 super::status_line::STATUS_LINE_INSET_WIDTH,
-                super::status_line::STATUS_LINE_INSET_WIDTH + text.width(),
+                super::status_line::STATUS_LINE_INSET_WIDTH + display_width(&text),
             ),
             has_content: true,
             gap_before: super::status_line::status_line_gap_before(self.style_mode),

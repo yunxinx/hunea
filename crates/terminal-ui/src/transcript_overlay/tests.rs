@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{buffer::Buffer, layout::Rect};
 
 use crate::{AppEvent, Model, Sender, StartupBannerOptions, theme::default_palette};
 use runtime_domain::session::{
@@ -172,16 +173,7 @@ fn overlay_assistant_message_inset() {
 
     model.open_transcript_overlay();
 
-    let backend = ratatui::backend::TestBackend::new(40, 10);
-    let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            model.render_transcript_overlay(frame, area);
-        })
-        .unwrap();
-
-    let buffer = terminal.backend().buffer();
+    let buffer = render_model_buffer(&mut model, 40, 10);
     let mut found = false;
     for row in 0..10 {
         let mut row_text = String::new();
@@ -230,16 +222,7 @@ fn overlay_diff_line_background_fills_the_rendered_row() {
     model.sync_transcript_render();
     model.open_transcript_overlay();
 
-    let backend = ratatui::backend::TestBackend::new(48, 8);
-    let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            model.render_transcript_overlay(frame, area);
-        })
-        .unwrap();
-
-    let buffer = terminal.backend().buffer();
+    let buffer = render_model_buffer(&mut model, 48, 8);
     let insert_row = (0..8)
         .find(|row| {
             let row_text = (0..48)
@@ -275,20 +258,20 @@ fn overlay_render_does_not_materialize_full_transcript_result() {
 
     model.open_transcript_overlay();
 
-    let backend = ratatui::backend::TestBackend::new(40, 8);
-    let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            model.render_transcript_overlay(frame, area);
-        })
-        .unwrap();
+    let _ = render_model_buffer(&mut model, 40, 8);
 
     assert_eq!(
         model.transcript.cached_render_result_item_count_for_test(),
         0,
         "overlay render should use viewport/item materialization instead of full transcript render"
     );
+}
+
+fn render_model_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    let _ = model.render_to_buffer(area, &mut buffer);
+    buffer
 }
 
 #[test]

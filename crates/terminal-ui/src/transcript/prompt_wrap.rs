@@ -4,6 +4,7 @@ use super::wrap::{
     leading_space_count, measure_width, render_cluster_for_display, should_start_new_wrap_segment,
     split_short_indent, split_text_to_width, wrap_segment_kind,
 };
+use crate::terminal_text::sanitize_terminal_text;
 
 #[cfg(test)]
 thread_local! {
@@ -67,6 +68,9 @@ pub(crate) fn wrap_prompt_visual_lines(
     width: usize,
     line_prefix_width: usize,
 ) -> Vec<PromptVisualLine> {
+    let sanitized_value = sanitize_terminal_text(value);
+    let value = sanitized_value.as_ref();
+
     if value.is_empty() {
         return vec![PromptVisualLine::default()];
     }

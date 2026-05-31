@@ -1,7 +1,6 @@
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
-use crate::document::DocumentLayout;
+use crate::{display_width::grapheme_width, document::DocumentLayout};
 
 use super::{
     SelectionState, policy::preserves_blank_selection, selection_columns_for_line,
@@ -57,7 +56,7 @@ pub(crate) fn selection_text_for_line(
     let mut rendered = String::new();
     let mut column = 0;
     for grapheme in text.graphemes(true) {
-        let width = grapheme.width();
+        let width = grapheme_width(grapheme);
         if width == 0 {
             continue;
         }

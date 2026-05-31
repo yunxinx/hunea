@@ -6,7 +6,7 @@ use std::{
 };
 
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
+use ratatui::{buffer::Buffer, layout::Rect};
 use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
@@ -518,13 +518,11 @@ fn cx_bottom_surface_row(width: u16) -> String {
 }
 
 fn render_trimmed_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render on test backend");
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    let _ = model.render_to_buffer(area, &mut buffer);
 
-    trim_rows(terminal.backend().buffer())
+    trim_rows(&buffer)
 }
 
 fn trim_rows(buffer: &Buffer) -> Vec<String> {

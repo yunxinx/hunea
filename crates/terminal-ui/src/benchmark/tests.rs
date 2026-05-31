@@ -29,6 +29,8 @@ fn document_pipeline_stress_summary_reports_consistent_counts_for_small_fixture(
     assert!(summary.document_line_count >= summary.transcript_line_count);
     assert!(summary.viewport_line_count > 0);
     assert!(summary.frame_non_empty_cells > 0);
+    assert!(summary.frame_output_bytes > 0);
+    assert_eq!(summary.frame_flushes, 1);
     assert!(summary.first_visible_time >= summary.estimate_time);
     assert!(summary.first_visible_time >= summary.visible_exact_time);
     assert!(summary.full_settle_time >= summary.first_visible_time);
@@ -60,6 +62,7 @@ fn document_pipeline_stress_summary_reports_consistent_counts_for_small_fixture(
     assert!(formatted.contains("visible_exact:"));
     assert!(formatted.contains("first_visible:"));
     assert!(formatted.contains("full_settle:"));
+    assert!(formatted.contains("frame_output={bytes:"));
     assert!(formatted.contains("after_metrics"));
     assert!(formatted.contains("memory_bytes={"));
 }
@@ -174,6 +177,8 @@ fn phase_a_baseline_summary_reports_core_sections() {
     assert_eq!(summary.frame.width, 80);
     assert_eq!(summary.frame.height, 18);
     assert!(summary.frame.non_empty_cells > 0);
+    assert!(summary.frame.output_bytes > 0);
+    assert_eq!(summary.frame.flushes, 1);
 
     let formatted = format_phase_a_baseline_summary(&summary);
     assert!(formatted.contains("phase_a"));
@@ -182,6 +187,7 @@ fn phase_a_baseline_summary_reports_core_sections() {
     assert!(formatted.contains("manual_scroll"));
     assert!(formatted.contains("bottom_follow"));
     assert!(formatted.contains("frame={"));
+    assert!(formatted.contains("output_bytes:"));
 }
 
 #[test]
@@ -208,8 +214,6 @@ fn long_user_message_scroll_profile() {
     let height = 24;
     let message_count = 15;
     let scroll_steps = 180;
-    let mut terminal = Terminal::new(TestBackend::new(width, height))
-        .expect("long message scroll profile backend should initialize");
     let mut model = Model::new_with_options(
         StartupBannerOptions {
             app_name: Some("hunea".to_string()),
@@ -253,6 +257,7 @@ fn long_user_message_scroll_profile() {
     let mut viewport_times = Vec::with_capacity(scroll_steps);
     let mut frame_times = Vec::with_capacity(scroll_steps);
     let mut tick_times = Vec::with_capacity(scroll_steps);
+    let mut frame_surface = FrameSurfaceHarness::new(width, height);
     for _ in 0..scroll_steps {
         let tick_started_at = std::time::Instant::now();
 
@@ -267,9 +272,7 @@ fn long_user_message_scroll_profile() {
         viewport_times.push(viewport_started_at.elapsed());
 
         let frame_started_at = std::time::Instant::now();
-        terminal
-            .draw(|frame| model.render(frame))
-            .expect("long message scroll profile frame render should succeed");
+        let _ = frame_surface.render_model(&mut model);
         frame_times.push(frame_started_at.elapsed());
         tick_times.push(tick_started_at.elapsed());
     }
@@ -480,18 +483,16 @@ fn prepare_hot_path_profile_model(model: &mut Model, _width: u16, _height: u16) 
     model.sync_composer_height();
 }
 
-fn warm_hot_path_frame(model: &mut Model, terminal: &mut Terminal<TestBackend>, height: u16) {
+fn warm_hot_path_frame(model: &mut Model, frame_surface: &mut FrameSurfaceHarness, height: u16) {
     let layout = model.build_document_layout();
     let viewport = model.build_document_viewport(&layout);
     assert_eq!(viewport.lines.len(), usize::from(height));
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("hot path warm frame should render");
+    let _ = frame_surface.render_model(model);
 }
 
 fn measure_scroll_hot_path(
     model: &mut Model,
-    terminal: &mut Terminal<TestBackend>,
+    frame_surface: &mut FrameSurfaceHarness,
     height: u16,
     steps: usize,
 ) -> HotPathTimings {
@@ -516,9 +517,7 @@ fn measure_scroll_hot_path(
         timings.viewport_times.push(viewport_started_at.elapsed());
 
         let frame_started_at = std::time::Instant::now();
-        terminal
-            .draw(|frame| model.render(frame))
-            .expect("hot path frame render should succeed");
+        let _ = frame_surface.render_model(model);
         timings.frame_times.push(frame_started_at.elapsed());
 
         timings.tick_times.push(tick_started_at.elapsed());
@@ -529,7 +528,7 @@ fn measure_scroll_hot_path(
 
 fn measure_selection_drag_hot_path(
     model: &mut Model,
-    terminal: &mut Terminal<TestBackend>,
+    frame_surface: &mut FrameSurfaceHarness,
     height: u16,
     steps: usize,
 ) -> HotPathTimings {
@@ -557,9 +556,7 @@ fn measure_selection_drag_hot_path(
         timings.viewport_times.push(viewport_started_at.elapsed());
 
         let frame_started_at = std::time::Instant::now();
-        terminal
-            .draw(|frame| model.render(frame))
-            .expect("selection drag hot path frame render should succeed");
+        let _ = frame_surface.render_model(model);
         timings.frame_times.push(frame_started_at.elapsed());
 
         timings.tick_times.push(tick_started_at.elapsed());
@@ -613,8 +610,6 @@ fn single_100k_user_message_scroll_profile() {
     let width = 100;
     let height = 30;
     let scroll_steps = 600;
-    let mut terminal = Terminal::new(TestBackend::new(width, height))
-        .expect("single 100k user-message profile backend should initialize");
     let mut model = new_hot_path_profile_model(width, height);
     model.transcript_mut().append_message_with_style_mode(
         Sender::User,
@@ -642,9 +637,10 @@ fn single_100k_user_message_scroll_profile() {
     let transcript_lines = layout.transcript_line_count;
     model.apply_document_viewport_position(&layout, 0, 0, false, true);
     drop(layout);
-    warm_hot_path_frame(&mut model, &mut terminal, height);
+    let mut frame_surface = FrameSurfaceHarness::new(width, height);
+    warm_hot_path_frame(&mut model, &mut frame_surface, height);
 
-    let timings = measure_scroll_hot_path(&mut model, &mut terminal, height, scroll_steps);
+    let timings = measure_scroll_hot_path(&mut model, &mut frame_surface, height, scroll_steps);
     print_hot_path_profile(
         "single_100k_user_scroll",
         format!(
@@ -669,8 +665,6 @@ fn huge_assistant_markdown_scroll_profile() {
     let width = 100;
     let height = 30;
     let scroll_steps = 600;
-    let mut terminal = Terminal::new(TestBackend::new(width, height))
-        .expect("huge assistant markdown profile backend should initialize");
     let mut model = new_hot_path_profile_model(width, height);
     model.transcript_mut().append_message_with_style_mode(
         Sender::User,
@@ -698,9 +692,10 @@ fn huge_assistant_markdown_scroll_profile() {
     let transcript_lines = layout.transcript_line_count;
     model.apply_document_viewport_position(&layout, 0, 0, false, true);
     drop(layout);
-    warm_hot_path_frame(&mut model, &mut terminal, height);
+    let mut frame_surface = FrameSurfaceHarness::new(width, height);
+    warm_hot_path_frame(&mut model, &mut frame_surface, height);
 
-    let timings = measure_scroll_hot_path(&mut model, &mut terminal, height, scroll_steps);
+    let timings = measure_scroll_hot_path(&mut model, &mut frame_surface, height, scroll_steps);
     print_hot_path_profile(
         "huge_assistant_markdown_scroll",
         format!(
@@ -726,8 +721,6 @@ fn selection_drag_mixed_long_history_profile() {
     let height = 30;
     let item_count = 3_000;
     let drag_steps = 600;
-    let mut terminal = Terminal::new(TestBackend::new(width, height))
-        .expect("selection drag profile backend should initialize");
     let mut model = new_hot_path_profile_model(width, height);
     let mut raw_text_bytes = 0usize;
     let mut long_item_count = 0usize;
@@ -751,9 +744,11 @@ fn selection_drag_mixed_long_history_profile() {
         model.start_selection(point);
     }
     drop(layout);
-    warm_hot_path_frame(&mut model, &mut terminal, height);
+    let mut frame_surface = FrameSurfaceHarness::new(width, height);
+    warm_hot_path_frame(&mut model, &mut frame_surface, height);
 
-    let timings = measure_selection_drag_hot_path(&mut model, &mut terminal, height, drag_steps);
+    let timings =
+        measure_selection_drag_hot_path(&mut model, &mut frame_surface, height, drag_steps);
     print_hot_path_profile(
         "selection_drag_mixed_long_scroll",
         format!(
@@ -778,8 +773,6 @@ fn mixed_long_history_high_frequency_scroll_profile() {
     let height = 30;
     let item_count = 3_000;
     let scroll_steps = 900;
-    let mut terminal = Terminal::new(TestBackend::new(width, height))
-        .expect("mixed long-history scroll profile backend should initialize");
     let mut model = Model::new_with_options(
         StartupBannerOptions {
             app_name: Some("hunea".to_string()),
@@ -827,9 +820,8 @@ fn mixed_long_history_high_frequency_scroll_profile() {
     let warm_layout = model.build_document_layout();
     let warm_viewport = model.build_document_viewport(&warm_layout);
     assert_eq!(warm_viewport.lines.len(), usize::from(height));
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("mixed long-history warm frame should render");
+    let mut frame_surface = FrameSurfaceHarness::new(width, height);
+    let _ = frame_surface.render_model(&mut model);
 
     let mut scroll_times = Vec::with_capacity(scroll_steps);
     let mut viewport_times = Vec::with_capacity(scroll_steps);
@@ -849,9 +841,7 @@ fn mixed_long_history_high_frequency_scroll_profile() {
         viewport_times.push(viewport_started_at.elapsed());
 
         let frame_started_at = std::time::Instant::now();
-        terminal
-            .draw(|frame| model.render(frame))
-            .expect("mixed long-history frame render should succeed");
+        let _ = frame_surface.render_model(&mut model);
         frame_times.push(frame_started_at.elapsed());
 
         tick_times.push(tick_started_at.elapsed());
@@ -941,8 +931,6 @@ fn document_pipeline_scroll_profile_for_100000_items() {
     let height = 24;
     let item_count = 100_000;
     let scroll_steps = 900;
-    let mut terminal = Terminal::new(TestBackend::new(width, height))
-        .expect("100000-item scroll profile backend should initialize");
     let mut model = new_hot_path_profile_model(width, height);
     let raw_text_bytes = append_standard_benchmark_history(&mut model, item_count);
     prepare_hot_path_profile_model(&mut model, width, height);
@@ -958,9 +946,10 @@ fn document_pipeline_scroll_profile_for_100000_items() {
     let transcript_lines = layout.transcript_line_count;
     model.apply_document_viewport_position(&layout, 0, 0, false, true);
     drop(layout);
-    warm_hot_path_frame(&mut model, &mut terminal, height);
+    let mut frame_surface = FrameSurfaceHarness::new(width, height);
+    warm_hot_path_frame(&mut model, &mut frame_surface, height);
 
-    let timings = measure_scroll_hot_path(&mut model, &mut terminal, height, scroll_steps);
+    let timings = measure_scroll_hot_path(&mut model, &mut frame_surface, height, scroll_steps);
     print_hot_path_profile(
         "document_100000_scroll",
         format!(

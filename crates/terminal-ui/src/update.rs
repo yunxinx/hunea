@@ -11,6 +11,7 @@ use super::{
     composer::chat_message_from_composer_text,
     exit_confirmation::EXIT_CONFIRMATION_PROMPT,
     path_resolve::resolve_configured_current_dir,
+    terminal_text::sanitize_terminal_text,
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},
 };
 
@@ -598,8 +599,9 @@ impl Model {
 }
 
 fn normalize_pasted_text(text: &str) -> String {
-    let mut normalized = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
+    let sanitized_text = sanitize_terminal_text(text);
+    let mut normalized = String::with_capacity(sanitized_text.len());
+    let mut chars = sanitized_text.chars().peekable();
 
     while let Some(character) = chars.next() {
         if character == '\r' {

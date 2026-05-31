@@ -1,6 +1,6 @@
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
+use crate::display_width::grapheme_width;
 use crate::transcript::wrap_assistant_text;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,12 +170,12 @@ fn hard_wrapped_line_count(line: &str, width: usize) -> usize {
     let mut count = 1usize;
     let mut current_width = 0usize;
     for grapheme in UnicodeSegmentation::graphemes(line, true) {
-        let grapheme_width = UnicodeWidthStr::width(grapheme);
-        if current_width > 0 && current_width.saturating_add(grapheme_width) > width {
+        let cluster_width = grapheme_width(grapheme);
+        if current_width > 0 && current_width.saturating_add(cluster_width) > width {
             count = count.saturating_add(1);
             current_width = 0;
         }
-        current_width = current_width.saturating_add(grapheme_width);
+        current_width = current_width.saturating_add(cluster_width);
     }
 
     count

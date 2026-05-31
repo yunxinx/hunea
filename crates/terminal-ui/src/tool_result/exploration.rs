@@ -2,9 +2,9 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    display_width::display_width,
     theme::{TerminalPalette, secondary_text_style},
     transcript::markdown_highlight::{HighlightChunk, wrap_highlight_chunks_soft},
 };
@@ -228,7 +228,7 @@ pub(super) fn wrap_failed_exploration_detail_line(
     width: usize,
     palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
-    let prefix_width = UnicodeWidthStr::width(TOOL_EXPLORATION_BRANCH_PREFIX);
+    let prefix_width = display_width(TOOL_EXPLORATION_BRANCH_PREFIX);
     let content_width = width.saturating_sub(prefix_width).max(1);
     let wrapped = wrap_highlight_chunks_soft(
         &[vec![HighlightChunk {
@@ -269,7 +269,7 @@ pub(super) fn wrap_exploration_display_line(
     width: usize,
     palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
-    let prefix_width = UnicodeWidthStr::width(line_prefix);
+    let prefix_width = display_width(line_prefix);
     let content_width = width.saturating_sub(prefix_width).max(1);
     let mut chunks = vec![HighlightChunk {
         text: display_line.action.to_string(),

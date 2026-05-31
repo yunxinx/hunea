@@ -5,9 +5,9 @@ use std::{
 };
 
 use ratatui::text::Line;
-use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    display_width::display_width,
     stream_activity::format_elapsed_compact,
     styled_text::{lines_to_ansi_text, lines_to_plain_text},
     theme::{TerminalPalette, tertiary_text_style},
@@ -126,7 +126,7 @@ fn work_duration_line(duration: Duration, width: usize) -> String {
         "{WORK_DURATION_PREFIX}{} ",
         format_elapsed_compact(duration.as_secs())
     );
-    let label_width = label.width();
+    let label_width = display_width(&label);
     if label_width >= width {
         return label.chars().take(width).collect();
     }

@@ -12,11 +12,11 @@ use ratatui::{
     text::{Line, Span},
 };
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use runtime_domain::envinfo::short_work_dir;
 
 use crate::{
+    display_width::{display_width, line_display_width},
     styled_text::{line_to_plain_text, lines_to_ansi_text},
     theme::{TerminalPalette, detect_palette},
     transcript::{display_tab_width, wrap_prompt_visual_lines},
@@ -64,7 +64,11 @@ pub fn render_startup_banner_buffer_with_palette(
 }
 
 fn startup_banner_lines_to_buffer(lines: &[Line<'static>]) -> Buffer {
-    let width = lines.iter().map(Line::width).max().unwrap_or_default();
+    let width = lines
+        .iter()
+        .map(line_display_width)
+        .max()
+        .unwrap_or_default();
     let width = to_u16_width(width);
     let height = to_u16_width(lines.len());
     let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
@@ -423,7 +427,7 @@ fn startup_banner_framed_line(
     content_width: usize,
     palette: TerminalPalette,
 ) -> Line<'static> {
-    let padding_width = content_width.saturating_sub(content_line.width());
+    let padding_width = content_width.saturating_sub(line_display_width(&content_line));
     let mut spans = Vec::with_capacity(content_line.spans.len() + 5);
     let border_style = style_for_color(palette.secondary);
     spans.push(Span::styled("│", border_style));
@@ -510,10 +514,6 @@ fn style_for_color(color: Color) -> Style {
     } else {
         Style::new().fg(color)
     }
-}
-
-fn display_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
 }
 
 fn to_u16_width(width: usize) -> u16 {

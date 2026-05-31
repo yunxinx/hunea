@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
 use super::{
     AppEffect, Model,
+    display_width::display_width,
     file_search::{FileSearchMatch, common_path_completion_prefix},
     inline_panel::InlinePanelRenderResult,
     path_resolve::{resolve_configured_current_dir, resolve_path_token},
@@ -209,7 +209,7 @@ impl Model {
         let display_path = file_picker_display_path(&item.path, query);
         let path = truncate_display_width_with_ellipsis(&display_path, path_width);
         let mut plain_line = format!("{}{}", " ".repeat(inset), path);
-        plain_line.push_str(&" ".repeat(width.saturating_sub(plain_line.width())));
+        plain_line.push_str(&" ".repeat(width.saturating_sub(display_width(&plain_line))));
         let style = if selected {
             command_accent_text_style(self.palette).bold()
         } else {
@@ -220,7 +220,7 @@ impl Model {
             Line::from(vec![
                 Span::raw(" ".repeat(inset)),
                 Span::styled(path, style),
-                Span::raw(" ".repeat(width.saturating_sub(plain_line.trim_end().width()))),
+                Span::raw(" ".repeat(width.saturating_sub(display_width(plain_line.trim_end())))),
             ]),
             plain_line,
         )
@@ -344,7 +344,7 @@ fn clamp_picker_scroll(
 }
 
 fn file_picker_selectable_range(plain_line: &str, width: usize) -> SelectableLineRange {
-    let end_column = plain_line.trim_end().width();
+    let end_column = display_width(plain_line.trim_end());
     if end_column <= FILE_PICKER_INSET_WIDTH {
         return SelectableLineRange::blank_hit_range(0, width);
     }
@@ -354,7 +354,7 @@ fn file_picker_selectable_range(plain_line: &str, width: usize) -> SelectableLin
 
 fn pad_display_width_right(text: &str, width: usize) -> String {
     let text = truncate_display_width_with_ellipsis(text, width);
-    let padding = width.saturating_sub(text.width());
+    let padding = width.saturating_sub(display_width(&text));
     format!("{text}{}", " ".repeat(padding))
 }
 

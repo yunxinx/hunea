@@ -1,6 +1,6 @@
 use super::*;
 use crate::{AppEvent, Sender, StartupBannerOptions, theme::default_palette};
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{buffer::Buffer, layout::Rect};
 
 #[test]
 fn preview_layout_omits_labels_and_uses_vertical_numbered_choices() {
@@ -1040,12 +1040,9 @@ fn assert_ordered_plain_lines(lines: &[String], needles: &[&str]) {
 }
 
 fn rendered_model_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {
-    let mut terminal =
-        Terminal::new(TestBackend::new(width, height)).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render into test backend");
-    let buffer = terminal.backend().buffer();
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    let _ = model.render_to_buffer(area, &mut buffer);
     (0..buffer.area.height)
         .map(|row| {
             let mut line = String::new();

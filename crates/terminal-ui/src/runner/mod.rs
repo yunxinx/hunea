@@ -19,6 +19,7 @@ mod external_io;
 mod input;
 mod model_refresh;
 mod terminal;
+pub(crate) mod terminal_surface;
 
 use super::runtime::RuntimeEventApply;
 use effects::apply_effect_if_needed;
@@ -129,7 +130,7 @@ pub fn run_with_runtime_coordinator(
         render_needed |= drain_runtime_coordinator_events(&mut model, runtime_coordinator);
 
         if render_needed {
-            terminal.draw(|frame| model.render(frame))?;
+            terminal.draw(|area, buffer| model.render_to_buffer(area, buffer))?;
             // 覆盖层关闭 mouse capture 以保留原生选区，同时打开 alternate scroll，
             // 让终端把滚轮转成方向键交给 pager 处理。
             let desired_mouse_mode =

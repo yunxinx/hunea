@@ -88,9 +88,9 @@ fn rendered_command_panel_line_respects_available_width() {
         .next()
         .expect("exit item should exist");
     let (_, plain_line, selectable) =
-        model.render_command_panel_line(&item, true, 8, item.name.width());
+        model.render_command_panel_line(&item, true, 8, display_width(&item.name));
 
-    assert_eq!(plain_line.width(), 8);
+    assert_eq!(display_width(&plain_line), 8);
     assert_eq!(
         selectable.content_columns().map(|(start, _)| start),
         Some(2)

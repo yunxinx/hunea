@@ -6,7 +6,7 @@ use std::{
 use super::*;
 use crate::{AppEffect, AppEvent, Sender, StyleMode, document::DocumentAnchorRegion};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{buffer::Buffer, layout::Rect};
 use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
@@ -79,17 +79,88 @@ fn startup_banner_entrance_runs_only_once_across_banner_rebuilds() {
 }
 
 #[test]
+fn model_render_buffer_contains_keycap_grapheme() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.transcript_mut().clear();
+    model.set_window(20, 4);
+    model.set_palette(default_palette(), true);
+    model.composer_mut().set_text_for_test("2️⃣");
+    model.sync_composer_height();
+
+    let buffer = render_model_buffer(&mut model, 20, 4);
+
+    assert!(
+        buffer.content().iter().any(|cell| cell.symbol() == "2️⃣"),
+        "keycap emoji should be written as one visible wide grapheme"
+    );
+}
+
+#[test]
+fn model_render_buffer_replaces_placeholder_when_keycap_draft_appears() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.transcript_mut().clear();
+    model.set_window(32, 4);
+    model.set_palette(default_palette(), true);
+    model.sync_composer_height();
+
+    let placeholder_buffer = render_model_buffer(&mut model, 32, 4);
+    let placeholder_frame = rendered_rows(&placeholder_buffer).join("\n");
+    assert!(
+        placeholder_frame.contains("Enter to send Prompt"),
+        "empty composer should render the placeholder before replacement: {placeholder_frame:?}"
+    );
+
+    model.composer_mut().set_text_for_test("2️⃣");
+    model.sync_composer_height();
+    let keycap_buffer = render_model_buffer(&mut model, 32, 4);
+    let keycap_frame = rendered_rows(&keycap_buffer).join("\n");
+
+    assert!(keycap_frame.contains("2️⃣"));
+    assert!(
+        !keycap_frame.contains("Enter to send Prompt"),
+        "replacing placeholder with a keycap emoji must not leave stale placeholder cells: {keycap_frame:?}"
+    );
+}
+
+#[test]
+fn model_render_normalizes_keycap_trailing_cell() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.transcript_mut().clear();
+    model.set_window(20, 4);
+    model.set_palette(default_palette(), true);
+    model.composer_mut().set_text_for_test("2️⃣");
+    model.sync_composer_height();
+
+    let buffer = render_model_buffer(&mut model, 20, 4);
+    let keycap_position = buffer
+        .content()
+        .iter()
+        .enumerate()
+        .find_map(|(index, cell)| {
+            if cell.symbol() == "2️⃣" {
+                Some(buffer.pos_of(index))
+            } else {
+                None
+            }
+        })
+        .expect("keycap should be rendered");
+    let trailing_cell = &buffer[(keycap_position.0 + 1, keycap_position.1)];
+
+    assert!(!trailing_cell.skip);
+    assert_eq!(trailing_cell.style(), buffer[keycap_position].style());
+}
+
+#[test]
 fn startup_banner_entrance_starts_after_ready_render() {
     let mut model = Model::new(StartupBannerOptions::default());
     let now = Instant::now();
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
-    terminal.draw(|frame| model.render(frame)).unwrap();
+    let _ = render_model_buffer(&mut model, 80, 24);
     assert_eq!(model.startup_banner_entrance_frame_interval_at(now), None);
 
     model.set_window(80, 24);
     model.set_palette(crate::theme::default_palette(), true);
-    terminal.draw(|frame| model.render(frame)).unwrap();
+    let _ = render_model_buffer(&mut model, 80, 24);
 
     assert_eq!(
         model.startup_banner_entrance_frame_interval_at(now),
@@ -115,13 +186,12 @@ fn startup_banner_entrance_does_not_poll_while_transcript_overlay_hides_target()
 fn startup_banner_entrance_completes_when_transcript_overlay_renders_over_target() {
     let mut model = Model::new(StartupBannerOptions::default());
     let now = Instant::now();
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     model.set_window(80, 24);
     model.set_palette(crate::theme::default_palette(), true);
     model.start_startup_banner_entrance_for_test(now);
     model.open_transcript_overlay();
 
-    terminal.draw(|frame| model.render(frame)).unwrap();
+    let _ = render_model_buffer(&mut model, 80, 24);
 
     assert!(model.startup_banner_entrance_completed_for_test());
     assert_eq!(model.startup_banner_entrance_frame_interval_at(now), None);
@@ -984,12 +1054,8 @@ fn file_picker_esc_restores_area_cleared_by_previous_floating_frame() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Right)));
     assert!(model.file_picker_active());
 
-    let mut terminal =
-        Terminal::new(TestBackend::new(40, 8)).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render active popup");
-    let popup_rows = rendered_rows(terminal.backend().buffer());
+    let popup_buffer = render_model_buffer(&mut model, 40, 8);
+    let popup_rows = rendered_rows(&popup_buffer);
     assert!(
         popup_rows.iter().any(|line| line.contains("src/lib.rs")),
         "first frame should render the file picker popup: {popup_rows:?}"
@@ -1003,10 +1069,8 @@ fn file_picker_esc_restores_area_cleared_by_previous_floating_frame() {
 
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
     assert!(!model.file_picker_active());
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render after closing popup");
-    let restored_rows = rendered_rows(terminal.backend().buffer());
+    let restored_buffer = render_model_buffer(&mut model, 40, 8);
+    let restored_rows = rendered_rows(&restored_buffer);
 
     assert!(
         restored_rows
@@ -1031,12 +1095,8 @@ fn file_picker_esc_restores_flipped_popup_area_in_full_composer_viewport() {
     );
     assert!(model.file_picker_active());
 
-    let mut terminal =
-        Terminal::new(TestBackend::new(40, 8)).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render active popup");
-    let popup_rows = rendered_rows(terminal.backend().buffer());
+    let popup_buffer = render_model_buffer(&mut model, 40, 8);
+    let popup_rows = rendered_rows(&popup_buffer);
     assert!(
         popup_rows.iter().any(|line| line.contains("src/lib.rs")),
         "first frame should render the flipped file picker popup: {popup_rows:?}"
@@ -1044,10 +1104,8 @@ fn file_picker_esc_restores_flipped_popup_area_in_full_composer_viewport() {
 
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
     assert!(!model.file_picker_active());
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render after closing popup");
-    let restored_rows = rendered_rows(terminal.backend().buffer());
+    let restored_buffer = render_model_buffer(&mut model, 40, 8);
+    let restored_rows = rendered_rows(&restored_buffer);
 
     assert!(
         restored_rows.iter().any(|line| line.contains("line two")),
@@ -2617,12 +2675,15 @@ fn type_text(model: &mut Model, text: &str) {
 }
 
 fn rendered_rows_for_model(model: &mut Model, width: u16, height: u16) -> Vec<String> {
-    let mut terminal =
-        Terminal::new(TestBackend::new(width, height)).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render into test backend");
-    rendered_rows(terminal.backend().buffer())
+    let buffer = render_model_buffer(model, width, height);
+    rendered_rows(&buffer)
+}
+
+fn render_model_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    let _ = model.render_to_buffer(area, &mut buffer);
+    buffer
 }
 
 fn rendered_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {

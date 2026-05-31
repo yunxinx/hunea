@@ -788,6 +788,13 @@ fn render_markdown_preserves_explicit_edge_blank_lines() {
 }
 
 #[test]
+fn render_markdown_lines_removes_terminal_control_sequences_before_parsing() {
+    let lines = render_markdown_lines("a\u{1b}[31mb\u{1b}[0m", 20, default_palette());
+
+    assert_eq!(lines_to_plain_text(&lines), "ab");
+}
+
+#[test]
 fn render_markdown_does_not_insert_blank_row_before_wide_glyph() {
     let lines = render_markdown_lines("中", 1, default_palette());
     assert_eq!(lines_to_plain_text(&lines), "中");

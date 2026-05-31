@@ -1,10 +1,16 @@
 //! TUI 渲染与滚动性能基准入口。
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::io;
 use std::mem::{size_of, size_of_val};
 use std::rc::Rc;
 
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{
+    backend::{Backend, ClearType, WindowSize},
+    buffer::Cell,
+    layout::{Position, Size},
+};
 
 use super::{
     Model, ModelOptions, Sender, StartupBannerOptions, StyleMode,
@@ -16,6 +22,7 @@ use super::{
         RenderResult, Transcript, TranscriptItem, render_markdown_lines, wrap_prompt_visual_lines,
     },
 };
+use crate::runner::terminal_surface::TerminalSurface;
 
 /// `TextRenderSummary` 收敛一类文本渲染 benchmark 的稳定输出特征。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +86,8 @@ pub struct FrameRenderSummary {
     pub non_empty_cells: usize,
     pub width: u16,
     pub height: u16,
+    pub output_bytes: usize,
+    pub flushes: usize,
 }
 
 /// `DocumentStressScenario` 标记当前 stress summary 对应的测量场景。
@@ -136,6 +145,8 @@ pub struct DocumentStressSummary {
     pub document_layout_time: std::time::Duration,
     pub document_viewport_time: std::time::Duration,
     pub frame_render_time: std::time::Duration,
+    pub frame_output_bytes: usize,
+    pub frame_flushes: usize,
     pub rss_before_kib: Option<usize>,
     pub rss_after_transcript_kib: Option<usize>,
     pub rss_after_layout_kib: Option<usize>,
@@ -176,7 +187,29 @@ pub struct DocumentBench {
 #[derive(Debug)]
 pub struct ModelRenderBench {
     model: Model,
-    terminal: Terminal<TestBackend>,
+    frame_surface: FrameSurfaceHarness,
+}
+
+#[derive(Debug)]
+struct FrameSurfaceHarness {
+    surface: TerminalSurface<FrameSurfaceBackend>,
+    output: FrameSurfaceOutput,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FrameSurfaceOutput(Rc<RefCell<FrameSurfaceOutputState>>);
+
+#[derive(Debug, Default)]
+struct FrameSurfaceOutputState {
+    bytes: usize,
+    flushes: usize,
+}
+
+#[derive(Debug)]
+struct FrameSurfaceBackend {
+    output: FrameSurfaceOutput,
+    size: Size,
+    cursor: Position,
 }
 
 /// `markdown_document_fixture` 返回与 Go benchmark 对齐的 assistant markdown 文本。
@@ -371,9 +404,6 @@ fn measure_document_pipeline_stress_with_model(
     height: u16,
 ) -> DocumentStressSummary {
     let items = model.transcript.items_snapshot();
-    let mut terminal = Terminal::new(TestBackend::new(width, height))
-        .expect("stress benchmark backend should initialize");
-
     let rss_before_kib = process_rss_kib();
 
     let generation_started_at = std::time::Instant::now();
@@ -402,20 +432,12 @@ fn measure_document_pipeline_stress_with_model(
     let rss_after_viewport_kib = process_rss_kib();
 
     let frame_render_started_at = std::time::Instant::now();
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("stress benchmark frame render should succeed");
+    let frame_summary = render_model_frame(&mut model, width, height);
     let frame_render_time = frame_render_started_at.elapsed();
     let rss_after_frame_kib = process_rss_kib();
     let first_visible_time = generation_started_at.elapsed();
 
     let full_settle_time = generation_started_at.elapsed();
-
-    let buffer = terminal.backend().buffer();
-    let frame_non_empty_cells = (0..buffer.area.height)
-        .flat_map(|row| (0..buffer.area.width).map(move |column| (column, row)))
-        .filter(|&(column, row)| buffer[(column, row)].symbol() != " ")
-        .count();
 
     DocumentStressSummary {
         scenario,
@@ -425,7 +447,7 @@ fn measure_document_pipeline_stress_with_model(
         transcript_line_count: model.transcript_render.line_count,
         document_line_count: layout.line_count(),
         viewport_line_count: viewport.lines.len(),
-        frame_non_empty_cells,
+        frame_non_empty_cells: frame_summary.non_empty_cells,
         transcript_render_time,
         estimate_time: sync_profile.estimate_time,
         assistant_estimate_time: sync_profile.estimate_breakdown.assistant_estimate_time,
@@ -449,6 +471,8 @@ fn measure_document_pipeline_stress_with_model(
         document_layout_time,
         document_viewport_time,
         frame_render_time,
+        frame_output_bytes: frame_summary.output_bytes,
+        frame_flushes: frame_summary.flushes,
         rss_before_kib,
         rss_after_transcript_kib,
         rss_after_layout_kib,
@@ -461,7 +485,7 @@ fn measure_document_pipeline_stress_with_model(
 /// `format_document_stress_summary` 输出便于人工比较的 stress 摘要。
 pub fn format_document_stress_summary(summary: &DocumentStressSummary) -> String {
     format!(
-        "scenario={scenario} items={items} size={width}x{height} transcript_lines={transcript_lines} document_lines={document_lines} viewport_lines={viewport_lines} frame_cells={frame_cells} timings_ms={{metrics:{render:.3}, estimate:{estimate:.3}, visible_exact:{visible_exact:.3}, first_visible:{first_visible:.3}, full_settle:{full_settle:.3}, layout:{layout:.3}, viewport:{viewport:.3}, frame:{frame:.3}}} estimate_breakdown_ms={{assistant:{assistant_estimate_ms:.3}, user:{user_estimate_ms:.3}, startup_banner:{startup_banner_estimate_ms:.3}, other_non_assistant:{other_non_assistant_estimate_ms:.3}}} estimate_items={{assistant:{assistant_items}, user:{user_items}, startup_banner:{startup_banner_items}, other_non_assistant:{other_non_assistant_items}, non_assistant:{non_assistant_items}, assistant_resize_reuse:{assistant_resize_reuse}, user_resize_reuse:{user_resize_reuse}}} rss_kib={{before:{rss_before:?}, after_metrics:{rss_render:?}, after_layout:{rss_layout:?}, after_viewport:{rss_viewport:?}, after_frame:{rss_frame:?}}} memory_bytes={{raw_text:{raw_text}, items:{item_bytes}, render_ui:{render_ui}, plain_lines:{plain_lines}, anchors:{anchors}, indexes:{indexes}, estimated_total:{estimated_total}}}",
+        "scenario={scenario} items={items} size={width}x{height} transcript_lines={transcript_lines} document_lines={document_lines} viewport_lines={viewport_lines} frame_cells={frame_cells} frame_output={{bytes:{frame_output_bytes}, flushes:{frame_flushes}}} timings_ms={{metrics:{render:.3}, estimate:{estimate:.3}, visible_exact:{visible_exact:.3}, first_visible:{first_visible:.3}, full_settle:{full_settle:.3}, layout:{layout:.3}, viewport:{viewport:.3}, frame:{frame:.3}}} estimate_breakdown_ms={{assistant:{assistant_estimate_ms:.3}, user:{user_estimate_ms:.3}, startup_banner:{startup_banner_estimate_ms:.3}, other_non_assistant:{other_non_assistant_estimate_ms:.3}}} estimate_items={{assistant:{assistant_items}, user:{user_items}, startup_banner:{startup_banner_items}, other_non_assistant:{other_non_assistant_items}, non_assistant:{non_assistant_items}, assistant_resize_reuse:{assistant_resize_reuse}, user_resize_reuse:{user_resize_reuse}}} rss_kib={{before:{rss_before:?}, after_metrics:{rss_render:?}, after_layout:{rss_layout:?}, after_viewport:{rss_viewport:?}, after_frame:{rss_frame:?}}} memory_bytes={{raw_text:{raw_text}, items:{item_bytes}, render_ui:{render_ui}, plain_lines:{plain_lines}, anchors:{anchors}, indexes:{indexes}, estimated_total:{estimated_total}}}",
         scenario = format_document_stress_scenario(summary.scenario),
         items = summary.item_count,
         width = summary.width,
@@ -470,6 +494,8 @@ pub fn format_document_stress_summary(summary: &DocumentStressSummary) -> String
         document_lines = summary.document_line_count,
         viewport_lines = summary.viewport_line_count,
         frame_cells = summary.frame_non_empty_cells,
+        frame_output_bytes = summary.frame_output_bytes,
+        frame_flushes = summary.frame_flushes,
         render = summary.transcript_render_time.as_secs_f64() * 1000.0,
         estimate = summary.estimate_time.as_secs_f64() * 1000.0,
         visible_exact = summary.visible_exact_time.as_secs_f64() * 1000.0,
@@ -546,7 +572,7 @@ pub fn measure_phase_a_baseline(
 /// `format_phase_a_baseline_summary` 输出便于写入工作记录的 Phase A 摘要。
 pub fn format_phase_a_baseline_summary(summary: &PhaseABaselineSummary) -> String {
     format!(
-        "phase_a items={items} size={width}x{height} cold_resume=[{cold_resume}] width_change=[{width_change}] manual_scroll={{lines:{manual_lines}, plain_text_len:{manual_plain_text_len}, resolved_offset:{manual_offset}}} bottom_follow={{lines:{bottom_lines}, plain_text_len:{bottom_plain_text_len}, resolved_offset:{bottom_offset}}} frame={{cells:{frame_cells}, size:{frame_width}x{frame_height}}}",
+        "phase_a items={items} size={width}x{height} cold_resume=[{cold_resume}] width_change=[{width_change}] manual_scroll={{lines:{manual_lines}, plain_text_len:{manual_plain_text_len}, resolved_offset:{manual_offset}}} bottom_follow={{lines:{bottom_lines}, plain_text_len:{bottom_plain_text_len}, resolved_offset:{bottom_offset}}} frame={{cells:{frame_cells}, size:{frame_width}x{frame_height}, output_bytes:{frame_output_bytes}, flushes:{frame_flushes}}}",
         items = summary.item_count,
         width = summary.width,
         height = summary.height,
@@ -561,6 +587,8 @@ pub fn format_phase_a_baseline_summary(summary: &PhaseABaselineSummary) -> Strin
         frame_cells = summary.frame.non_empty_cells,
         frame_width = summary.frame.width,
         frame_height = summary.frame.height,
+        frame_output_bytes = summary.frame.output_bytes,
+        frame_flushes = summary.frame.flushes,
     )
 }
 
@@ -691,34 +719,138 @@ impl DocumentBench {
     }
 }
 
-impl ModelRenderBench {
-    /// `new` 创建一个整帧 render benchmark 场景。
-    pub fn new(item_count: usize, width: u16, height: u16) -> Self {
-        let model = DocumentBench::new(item_count, width, height).model;
-        let terminal = Terminal::new(TestBackend::new(width, height))
-            .expect("benchmark backend should initialize");
+impl FrameSurfaceHarness {
+    fn new(width: u16, height: u16) -> Self {
+        let output = FrameSurfaceOutput::default();
+        let backend = FrameSurfaceBackend {
+            output: output.clone(),
+            size: Size::new(width, height),
+            cursor: Position::ORIGIN,
+        };
+        let surface =
+            TerminalSurface::new(backend).expect("benchmark terminal surface should initialize");
 
-        Self { model, terminal }
+        Self { surface, output }
     }
 
-    /// `render_frame` 运行一帧 Ratatui 渲染并返回稳定摘要。
-    pub fn render_frame(&mut self) -> FrameRenderSummary {
-        self.terminal
-            .draw(|frame| self.model.render(frame))
-            .expect("benchmark frame render should succeed");
+    fn render_model(&mut self, model: &mut Model) -> FrameRenderSummary {
+        self.output.reset();
+        self.surface
+            .draw(|area, buffer| model.render_to_buffer(area, buffer))
+            .expect("benchmark terminal surface draw should succeed");
 
-        let buffer = self.terminal.backend().buffer();
+        let buffer = self.surface.last_frame_buffer();
         let non_empty_cells = (0..buffer.area.height)
             .flat_map(|row| (0..buffer.area.width).map(move |column| (column, row)))
             .filter(|&(column, row)| buffer[(column, row)].symbol() != " ")
             .count();
+        let (output_bytes, flushes) = self.output.snapshot();
 
         FrameRenderSummary {
             non_empty_cells,
             width: buffer.area.width,
             height: buffer.area.height,
+            output_bytes,
+            flushes,
         }
     }
+}
+
+impl FrameSurfaceOutput {
+    fn reset(&self) {
+        *self.0.borrow_mut() = FrameSurfaceOutputState::default();
+    }
+
+    fn snapshot(&self) -> (usize, usize) {
+        let state = self.0.borrow();
+        (state.bytes, state.flushes)
+    }
+}
+
+impl io::Write for FrameSurfaceBackend {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.output.0.borrow_mut().bytes += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Backend for FrameSurfaceBackend {
+    type Error = io::Error;
+
+    fn draw<'a, I>(&mut self, _content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        Ok(())
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+        Ok(self.cursor)
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
+        self.cursor = position.into();
+        Ok(())
+    }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn clear_region(&mut self, _clear_type: ClearType) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn size(&self) -> Result<Size, Self::Error> {
+        Ok(self.size)
+    }
+
+    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+        Ok(WindowSize {
+            columns_rows: self.size,
+            pixels: Size::new(0, 0),
+        })
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.output.0.borrow_mut().flushes += 1;
+        Ok(())
+    }
+}
+
+impl ModelRenderBench {
+    /// `new` 创建一个整帧 render benchmark 场景。
+    pub fn new(item_count: usize, width: u16, height: u16) -> Self {
+        let model = DocumentBench::new(item_count, width, height).model;
+        let frame_surface = FrameSurfaceHarness::new(width, height);
+
+        Self {
+            model,
+            frame_surface,
+        }
+    }
+
+    /// `render_frame` 通过生产 `TerminalSurface` 运行一帧完整渲染。
+    pub fn render_frame(&mut self) -> FrameRenderSummary {
+        self.frame_surface.render_model(&mut self.model)
+    }
+}
+
+fn render_model_frame(model: &mut Model, width: u16, height: u16) -> FrameRenderSummary {
+    let mut frame_surface = FrameSurfaceHarness::new(width, height);
+    frame_surface.render_model(model)
 }
 
 fn new_stress_document_model(item_count: usize, width: u16, height: u16) -> Model {

@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
+use ratatui::{buffer::Buffer, layout::Rect};
 use terminal_ui::{AppEvent, Model, StartupBannerOptions};
 
 fn ready_model(width: u16, height: u16) -> Model {
@@ -10,13 +10,11 @@ fn ready_model(width: u16, height: u16) -> Model {
 }
 
 fn render_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render on test backend");
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    let _ = model.render_to_buffer(area, &mut buffer);
 
-    buffer_rows(terminal.backend().buffer())
+    buffer_rows(&buffer)
 }
 
 fn buffer_rows(buffer: &Buffer) -> Vec<String> {

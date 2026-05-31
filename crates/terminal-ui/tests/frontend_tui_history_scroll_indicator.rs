@@ -1,5 +1,5 @@
 use crossterm::event::MouseButton;
-use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
+use ratatui::{buffer::Buffer, layout::Rect};
 use terminal_ui::{AppEvent, Model, StartupBannerOptions, theme::default_palette};
 
 #[test]
@@ -62,13 +62,11 @@ fn submit_message(model: &mut Model, text: &str) {
 }
 
 fn render_trimmed_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render on test backend");
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    let _ = model.render_to_buffer(area, &mut buffer);
 
-    trim_rows(terminal.backend().buffer())
+    trim_rows(&buffer)
 }
 
 fn trim_rows(buffer: &Buffer) -> Vec<String> {

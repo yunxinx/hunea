@@ -1,7 +1,7 @@
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use super::layout::VisualLine;
+pub(crate) use crate::display_width::display_width as measure_width;
 
 #[derive(Debug, Clone)]
 pub(crate) struct GraphemeCluster<'a> {
@@ -9,10 +9,6 @@ pub(crate) struct GraphemeCluster<'a> {
     pub(crate) start_char: usize,
     pub(crate) end_char: usize,
     pub(crate) width: usize,
-}
-
-pub(crate) fn measure_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
 }
 
 pub(crate) fn grapheme_range_before_cursor(

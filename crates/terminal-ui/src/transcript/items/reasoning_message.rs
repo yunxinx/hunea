@@ -5,9 +5,9 @@ use std::{
 };
 
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    display_width::display_width,
     message::assistant_message_content_width,
     styled_text::{lines_to_ansi_text, lines_to_plain_text},
     theme::{TerminalPalette, tertiary_text_style},
@@ -84,7 +84,7 @@ impl ReasoningMessageItem {
 
     pub(crate) fn header_display_width(&self) -> usize {
         if self.is_toggleable() {
-            self.header_label().width()
+            display_width(&self.header_label())
         } else {
             0
         }

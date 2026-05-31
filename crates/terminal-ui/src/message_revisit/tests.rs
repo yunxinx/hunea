@@ -393,12 +393,10 @@ fn append_scrollable_turns(model: &mut Model, turn_count: usize) {
 }
 
 fn render_model_buffer(model: &mut Model, width: u16, height: u16) -> ratatui::buffer::Buffer {
-    let backend = ratatui::backend::TestBackend::new(width, height);
-    let mut terminal = ratatui::Terminal::new(backend).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render on test backend");
-    terminal.backend().buffer().clone()
+    let area = ratatui::layout::Rect::new(0, 0, width, height);
+    let mut buffer = ratatui::buffer::Buffer::empty(area);
+    let _ = model.render_to_buffer(area, &mut buffer);
+    buffer
 }
 
 fn buffer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {

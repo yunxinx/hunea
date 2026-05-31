@@ -1,8 +1,8 @@
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use crate::{
     StyleMode,
+    display_width::grapheme_width,
     theme::TerminalPalette,
     transcript::{
         TranscriptEstimateKind, TranscriptEstimateSource, TranscriptFastEstimate,
@@ -272,7 +272,7 @@ fn estimate_prompt_prose_line_count(
         current_width = current_width.saturating_add(match cluster {
             // estimated path 把 tab 当作固定 8 列宽的 stop；可见窗口 exactize 会纠正细节。
             "\t" => 8,
-            _ => cluster.width(),
+            _ => grapheme_width(cluster),
         });
     }
 
@@ -424,7 +424,7 @@ fn estimate_prompt_prose_line_count(
 fn short_indent_requires_prefix_only_fallback(remainder: &str, first_width: usize) -> bool {
     UnicodeSegmentation::graphemes(remainder, true)
         .next()
-        .map(|cluster| cluster.width() > first_width.max(1))
+        .map(|cluster| grapheme_width(cluster) > first_width.max(1))
         .unwrap_or(false)
 }
 
@@ -496,7 +496,7 @@ pub(super) fn estimate_hard_wrap_visible_text(
             continue;
         }
 
-        let cluster_width = cluster.width();
+        let cluster_width = grapheme_width(cluster);
         if current_width_used.saturating_add(cluster_width) > current_limit && current_has_content {
             line_count = line_count.saturating_add(1);
             current_limit = continuation_width;
@@ -547,7 +547,7 @@ fn estimate_hard_wrap_word_block(
         let cluster_width = match cluster {
             // estimated path 把 tab 当作固定 8 列宽的 stop；可见窗口 exactize 会纠正细节。
             "\t" => 8,
-            _ => cluster.width(),
+            _ => grapheme_width(cluster),
         };
         push_width(cluster_width);
     }
@@ -650,7 +650,9 @@ fn estimate_rendered_prompt_text(content: &str) -> PromptTextEstimate {
             estimate.display_width = estimate.display_width.saturating_add(width);
         } else {
             estimate.byte_len = estimate.byte_len.saturating_add(cluster.len());
-            estimate.display_width = estimate.display_width.saturating_add(cluster.width());
+            estimate.display_width = estimate
+                .display_width
+                .saturating_add(grapheme_width(cluster));
         }
     }
     estimate

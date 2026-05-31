@@ -2,9 +2,9 @@ use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 
 use ratatui::text::Line;
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    display_width::grapheme_width,
     styled_text::{line_plain_text_len, line_to_plain_text},
     theme::TerminalPalette,
     transcript::{
@@ -844,12 +844,12 @@ fn hard_wrapped_line_count(line: &str, width: usize) -> usize {
     let mut count = 1usize;
     let mut current_width = 0usize;
     for grapheme in UnicodeSegmentation::graphemes(line, true) {
-        let grapheme_width = UnicodeWidthStr::width(grapheme);
-        if current_width > 0 && current_width.saturating_add(grapheme_width) > width {
+        let cluster_width = grapheme_width(grapheme);
+        if current_width > 0 && current_width.saturating_add(cluster_width) > width {
             count = count.saturating_add(1);
             current_width = 0;
         }
-        current_width = current_width.saturating_add(grapheme_width);
+        current_width = current_width.saturating_add(cluster_width);
     }
 
     count

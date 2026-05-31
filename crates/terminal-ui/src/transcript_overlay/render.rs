@@ -1,5 +1,4 @@
 use ratatui::{
-    Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::Line,
@@ -9,6 +8,7 @@ use ratatui::{
 use crate::{
     Model,
     message::assistant_message_visual_inset,
+    render_frame::RenderFrame,
     styled_text::{line_to_plain_text, render_line_with_full_width_background},
     theme::{TerminalPalette, muted_text_style, tertiary_text_style},
 };
@@ -44,7 +44,7 @@ pub(crate) fn build_percentage_rule(
 
 impl Model {
     /// `render_transcript_overlay` 将完整对话历史渲染为全屏覆盖层。
-    pub(crate) fn render_transcript_overlay(&mut self, frame: &mut Frame<'_>, area: Rect) {
+    pub(crate) fn render_transcript_overlay(&mut self, frame: &mut RenderFrame<'_>, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;
         }

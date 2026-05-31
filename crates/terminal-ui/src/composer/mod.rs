@@ -22,6 +22,7 @@ use self::{
     viewport::{calculate_cursor_visual_position, sync_viewport_offset_for_cursor},
 };
 use super::{style_mode::StyleMode, theme::TerminalPalette};
+use crate::terminal_text::sanitize_terminal_text;
 
 pub(crate) use self::message::chat_message_from_composer_text;
 pub(crate) use self::mouse::{
@@ -118,7 +119,7 @@ impl Composer {
 
     /// `replace_text_and_move_to_end` 用新内容替换当前草稿，并把光标移动到末尾。
     pub fn replace_text_and_move_to_end(&mut self, value: impl Into<String>) {
-        let value = value.into();
+        let value = sanitized_owned_text(value.into());
         if self.value != value {
             self.value = value;
             self.bump_content_revision();
@@ -135,6 +136,8 @@ impl Composer {
 
     /// `insert_text` 在当前光标位置插入一段文本。
     pub fn insert_text(&mut self, text: &str) {
+        let sanitized_text = sanitize_terminal_text(text);
+        let text = sanitized_text.as_ref();
         if text.is_empty() {
             return;
         }
@@ -350,7 +353,7 @@ impl Composer {
 
     #[cfg(test)]
     pub(crate) fn set_text_for_test(&mut self, value: impl Into<String>) {
-        let value = value.into();
+        let value = sanitized_owned_text(value.into());
         if self.value != value {
             self.value = value;
             self.bump_content_revision();
@@ -863,6 +866,13 @@ fn composer_content_width(frame_width: u16) -> usize {
             .saturating_sub(COMPOSER_RIGHT_PADDING_WIDTH),
     )
     .max(1)
+}
+
+fn sanitized_owned_text(value: String) -> String {
+    match sanitize_terminal_text(&value) {
+        std::borrow::Cow::Borrowed(_) => value,
+        std::borrow::Cow::Owned(sanitized) => sanitized,
+    }
 }
 
 fn is_ctrl_only(modifiers: KeyModifiers) -> bool {

@@ -5,10 +5,10 @@ use ratatui::{
     text::Line,
     widgets::{Clear, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget},
 };
-use unicode_width::UnicodeWidthStr;
 
 use super::{
     Model,
+    display_width::display_width,
     document::{DocumentLayout, DocumentViewport},
     theme::{secondary_text_style, tertiary_text_style},
 };
@@ -170,12 +170,13 @@ fn wide_character_safe_clear_area(bounds: Rect, surface_area: Rect, buf: &Buffer
         .checked_sub(1)
         .filter(|left| *left >= bounds.x)
         .is_some_and(|left| {
-            (surface_area.top()..surface_area.bottom()).any(|y| buf[(left, y)].symbol().width() > 1)
+            (surface_area.top()..surface_area.bottom())
+                .any(|y| display_width(buf[(left, y)].symbol()) > 1)
         });
     let clear_right = surface_area.right() < bounds.right()
         && surface_area.width > 0
         && (surface_area.top()..surface_area.bottom())
-            .any(|y| buf[(surface_area.right() - 1, y)].symbol().width() > 1);
+            .any(|y| display_width(buf[(surface_area.right() - 1, y)].symbol()) > 1);
 
     // Ratatui diff 会跳过双宽字符占用的后续单元；若浮窗边界切过双宽字符，
     // 需要把整块清理区域按矩形扩展，避免只在部分行出现锯齿状空白。

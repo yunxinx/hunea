@@ -1,6 +1,6 @@
 use super::grapheme::grapheme_clusters;
 use super::{Composer, LineAnchor, absolute_cursor_for_position, logical_lines};
-use unicode_width::UnicodeWidthStr;
+use crate::display_width::display_width;
 
 /// `cursor_position_for_line_anchor_click` 把 composer 某条视觉行上的点击换算为逻辑光标位置。
 pub(crate) fn cursor_position_for_line_anchor_click(
@@ -12,7 +12,7 @@ pub(crate) fn cursor_position_for_line_anchor_click(
         return None;
     }
 
-    let prompt_width = composer.prompt().width();
+    let prompt_width = display_width(composer.prompt());
     let visual_offset = if mouse_x < prompt_width {
         0
     } else {

@@ -4,9 +4,9 @@ use std::{
 };
 
 use ratatui::text::Line;
-use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    display_width::display_width,
     styled_text::{lines_to_ansi_text, lines_to_plain_text},
     theme::{TerminalPalette, system_error_text_style},
     transcript::{
@@ -135,7 +135,7 @@ impl SystemMessageItem {
             .into_iter()
             .enumerate()
             .flat_map(|(logical_line, display_line)| {
-                let prefix_width = UnicodeWidthStr::width(display_line.prefix);
+                let prefix_width = display_width(display_line.prefix);
                 let content_width = width.saturating_sub(prefix_width).max(1);
                 wrap_prompt_visual_lines(&display_line.text, content_width, 0)
                     .into_iter()

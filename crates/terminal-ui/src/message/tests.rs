@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::{
+    display_width::line_display_width,
     selection::SelectableLineRange,
     theme::{default_palette, secondary_text_style, surface_text_style},
     transcript::{
@@ -46,7 +47,7 @@ fn cx_user_render_adds_surface_padding_lines() {
     assert_eq!(plain_line(lines[2].clone()), "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀");
     assert_eq!(lines[0].style.fg, palette.surface);
     assert_eq!(lines[2].style.fg, palette.surface);
-    assert_eq!(lines[1].width(), 20);
+    assert_eq!(line_display_width(&lines[1]), 20);
     assert_eq!(lines[1].spans.len(), 4);
     assert_eq!(
         lines[1].spans[0].style,
@@ -121,7 +122,7 @@ fn assistant_markdown_table_uses_visual_content_width() {
     let lines = item.render_lines(28, default_palette());
 
     assert!(
-        lines.iter().all(|line| line.width() <= 24),
+        lines.iter().all(|line| line_display_width(line) <= 24),
         "table rows should fit the inset content width: {:?}",
         lines.iter().cloned().map(plain_line).collect::<Vec<_>>()
     );

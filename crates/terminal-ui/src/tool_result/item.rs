@@ -7,7 +7,6 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthStr;
 
 use super::activity::{
     RuntimeDiffDetailLine, RuntimeExecuteFooterLine, RuntimeExecuteFooterStatus,
@@ -33,6 +32,7 @@ use super::state::{
 };
 use crate::transcript::markdown_highlight::HighlightChunk;
 use crate::{
+    display_width::display_width,
     runtime::tool_activity_preview::is_runtime_write_tool_activity,
     styled_text::{line_to_plain_text, lines_to_ansi_text, lines_to_plain_text},
     theme::{TerminalPalette, secondary_text_style},
@@ -613,7 +613,7 @@ impl ToolResultItem {
         } else {
             TOOL_RESULT_CONTINUATION_PREFIX
         };
-        let prefix_width = UnicodeWidthStr::width(initial_prefix);
+        let prefix_width = display_width(initial_prefix);
         let content_width = width.saturating_sub(prefix_width).max(1);
         let logical_lines = self.wrap_content_line(content_line, content_width, palette);
 
@@ -914,7 +914,7 @@ impl ToolResultItem {
                 } else {
                     TOOL_ACTIVITY_DETAIL_CONTINUATION_PREFIX
                 };
-                let prefix_width = UnicodeWidthStr::width(initial_prefix);
+                let prefix_width = display_width(initial_prefix);
                 let content_width = width.saturating_sub(prefix_width).max(1);
                 let wrapped = wrap_prompt_visual_lines(content, content_width, 0);
 
@@ -1042,7 +1042,7 @@ impl ToolResultItem {
                 } else {
                     TOOL_ACTIVITY_DETAIL_CONTINUATION_PREFIX
                 };
-                let prefix_width = UnicodeWidthStr::width(initial_prefix);
+                let prefix_width = display_width(initial_prefix);
                 let content_width = width.saturating_sub(prefix_width).max(1);
                 let wrapped = wrap_highlight_chunks_soft(
                     &[vec![HighlightChunk {
@@ -1085,8 +1085,8 @@ impl ToolResultItem {
             .iter()
             .flat_map(|content| {
                 let prefix = runtime_diff_line_prefix(content.line_number, content.kind);
-                let continuation_prefix = " ".repeat(UnicodeWidthStr::width(prefix.as_str()));
-                let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+                let continuation_prefix = " ".repeat(display_width(prefix.as_str()));
+                let prefix_width = display_width(prefix.as_str());
                 let content_width = width.saturating_sub(prefix_width).max(1);
                 let line_style = runtime_tool_activity_diff_line_style(content.kind, palette);
                 let wrapped = wrap_highlight_chunks(

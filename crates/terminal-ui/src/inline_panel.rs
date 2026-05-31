@@ -3,10 +3,10 @@ use ratatui::{
     text::{Line, Span},
 };
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use super::{
     Model,
+    display_width::{display_width, grapheme_width},
     selection::{SelectableLineRange, selectable_range_for_plain_line},
     styled_text::line_to_plain_text,
     theme::{TerminalPalette, accent_text_style},
@@ -65,7 +65,8 @@ pub(crate) fn append_wrapped_inline_value(
     value_style: Style,
     prefix_style: Style,
 ) {
-    let available_width = width.saturating_sub(2 + prefix.width()).max(1);
+    let prefix_width = display_width(prefix);
+    let available_width = width.saturating_sub(2 + prefix_width).max(1);
     let wrapped = wrap_inline_text(value, available_width);
     if wrapped.is_empty() {
         lines.push(Line::styled(format!("  {prefix}"), prefix_style));
@@ -77,7 +78,7 @@ pub(crate) fn append_wrapped_inline_value(
         Span::styled(prefix.to_string(), prefix_style),
         Span::styled(wrapped[0].clone(), value_style),
     ]));
-    let continuation_prefix = " ".repeat(2 + prefix.width());
+    let continuation_prefix = " ".repeat(2 + prefix_width);
     for line in wrapped.iter().skip(1) {
         lines.push(Line::from(vec![
             Span::raw(continuation_prefix.clone()),
@@ -96,8 +97,8 @@ pub(crate) fn wrap_inline_text(text: &str, width: usize) -> Vec<String> {
     let mut current = String::new();
     let mut current_width = 0usize;
     for grapheme in UnicodeSegmentation::graphemes(text, true) {
-        let grapheme_width = grapheme.width();
-        if current_width > 0 && current_width + grapheme_width > width {
+        let cluster_width = grapheme_width(grapheme);
+        if current_width > 0 && current_width + cluster_width > width {
             lines.push(current.trim_end().to_string());
             current.clear();
             current_width = 0;
@@ -106,7 +107,7 @@ pub(crate) fn wrap_inline_text(text: &str, width: usize) -> Vec<String> {
             continue;
         }
         current.push_str(grapheme);
-        current_width += grapheme_width;
+        current_width += cluster_width;
     }
 
     if !current.is_empty() {

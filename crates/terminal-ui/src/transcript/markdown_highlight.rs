@@ -11,12 +11,12 @@ use syntect::{
     util::LinesWithEndings,
 };
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use super::wrap::{
     WrapSegmentKind, measure_width, should_start_new_wrap_segment, split_text_to_width,
     wrap_segment_kind,
 };
+use crate::display_width::grapheme_width;
 
 const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
 const MAX_HIGHLIGHT_LINES: usize = 10_000;
@@ -163,14 +163,14 @@ fn append_wrapped_highlight_chunk(
     width: usize,
 ) {
     for grapheme in UnicodeSegmentation::graphemes(text, true) {
-        let grapheme_width = grapheme.width();
-        if *current_width > 0 && *current_width + grapheme_width > width {
+        let cluster_width = grapheme_width(grapheme);
+        if *current_width > 0 && *current_width + cluster_width > width {
             lines.push(std::mem::take(current_spans));
             *current_width = 0;
         }
 
         push_highlight_span(current_spans, grapheme, style);
-        *current_width += grapheme_width;
+        *current_width += cluster_width;
     }
 }
 

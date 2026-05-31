@@ -1,12 +1,13 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::MouseButton;
-use ratatui::{Frame, layout::Rect, text::Line};
-use unicode_width::UnicodeWidthStr;
+use ratatui::{layout::Rect, text::Line};
 
 use super::{
     AppEffect, Model,
+    display_width::display_width,
     document::{DocumentLayout, DocumentViewport},
+    render_frame::RenderFrame,
     status_line::truncate_display_width,
     theme::tertiary_text_style,
 };
@@ -56,7 +57,7 @@ impl Model {
 
     pub(crate) fn render_history_scroll_indicator(
         &self,
-        frame: &mut Frame<'_>,
+        frame: &mut RenderFrame<'_>,
         area: Rect,
         layout: &DocumentLayout,
         viewport: &DocumentViewport,
@@ -142,7 +143,7 @@ impl Model {
             return None;
         }
 
-        let width = text.width().min(usize::from(self.width.max(1)));
+        let width = display_width(&text).min(usize::from(self.width.max(1)));
         if width == 0 {
             return None;
         }

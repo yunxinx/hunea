@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
-use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
+use ratatui::{buffer::Buffer, layout::Rect};
 use terminal_ui::{AppEffect, AppEvent, Model, ModelOptions, StartupBannerOptions};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -288,10 +288,8 @@ fn render_rows(model: &mut Model, width: u16, height: u16) -> Vec<String> {
 }
 
 fn render_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("test backend should initialize");
-    terminal
-        .draw(|frame| model.render(frame))
-        .expect("model should render on test backend");
-    terminal.backend().buffer().clone()
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    let _ = model.render_to_buffer(area, &mut buffer);
+    buffer
 }

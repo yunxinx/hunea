@@ -4,10 +4,10 @@ use std::fmt::Write as _;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
 use super::{
     AppEffect, Model, debug,
+    display_width::display_width,
     selection::SelectableLineRange,
     status_line::{
         status_line_gap_before, status_line_pair_height, truncate_display_width_with_ellipsis,
@@ -303,7 +303,8 @@ impl Model {
 
         let command_column_width = command_column_width.min(remaining_width);
         let command_text = truncate_display_width_with_ellipsis(&item.name, command_column_width);
-        let command_padding_width = command_column_width.saturating_sub(command_text.width());
+        let command_padding_width =
+            command_column_width.saturating_sub(display_width(&command_text));
         remaining_width = remaining_width.saturating_sub(command_column_width);
 
         let gap_width = COMMAND_PANEL_DESCRIPTION_GAP.min(remaining_width);
@@ -321,7 +322,7 @@ impl Model {
             gap_text,
             description_text
         );
-        let padding = width.saturating_sub(plain_line.width());
+        let padding = width.saturating_sub(display_width(&plain_line));
         plain_line.push_str(&" ".repeat(padding));
 
         let name_style = if selected {
@@ -419,7 +420,7 @@ fn command_panel_command_column_width(state: &CommandPanelState, visible_rows: u
         .iter()
         .skip(state.scroll)
         .take(visible_rows)
-        .map(|item| item.name.width())
+        .map(|item| display_width(&item.name))
         .max()
         .unwrap_or(0)
 }
@@ -520,12 +521,12 @@ fn normalized_text_matches_subsequence_query(text: &str, query: &str) -> bool {
 
 fn pad_display_width_right(text: &str, width: usize) -> String {
     let text = truncate_display_width_with_ellipsis(text, width);
-    let padding = width.saturating_sub(text.width());
+    let padding = width.saturating_sub(display_width(&text));
     format!("{text}{}", " ".repeat(padding))
 }
 
 fn command_panel_selectable_range(plain_line: &str, width: usize) -> SelectableLineRange {
-    let end_column = plain_line.trim_end().width();
+    let end_column = display_width(plain_line.trim_end());
     if end_column <= COMMAND_PANEL_INSET_WIDTH {
         return SelectableLineRange::blank_hit_range(0, width);
     }

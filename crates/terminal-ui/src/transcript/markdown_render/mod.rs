@@ -9,6 +9,7 @@ use pulldown_cmark::{Options, Parser};
 use ratatui::text::Line;
 
 use crate::{
+    display_width::line_display_width, terminal_text::sanitize_terminal_text,
     theme::TerminalPalette, transcript::markdown_table_source::unwrap_markdown_table_fences,
 };
 use engine::MarkdownRenderer;
@@ -40,7 +41,8 @@ fn render_markdown_lines_with_cwd(
     cwd: Option<&Path>,
 ) -> Vec<Line<'static>> {
     let width = width.max(1);
-    let normalized_markdown = unwrap_markdown_table_fences(markdown);
+    let sanitized_markdown = sanitize_terminal_text(markdown);
+    let normalized_markdown = unwrap_markdown_table_fences(sanitized_markdown.as_ref());
     let markdown = normalized_markdown.as_ref();
     let leading_blank_lines = count_leading_blank_lines(markdown);
     let trailing_blank_lines = count_trailing_blank_lines(markdown);
@@ -61,7 +63,7 @@ fn render_markdown_lines_with_cwd(
         lines.push(Line::raw(""));
     }
 
-    if lines.iter().all(|line| line.width() == 0) {
+    if lines.iter().all(|line| line_display_width(line) == 0) {
         return Vec::new();
     }
 

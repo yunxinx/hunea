@@ -6,10 +6,10 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{
     Model,
+    display_width::{char_display_width, display_width},
     selection::SelectableLineRange,
     shimmer::shimmer_spans_at,
     status_line::{StatusLineRenderResult, truncate_display_width_with_ellipsis},
@@ -349,7 +349,7 @@ impl Model {
         StatusLineRenderResult {
             line: Some(Line::from(spans)),
             plain_line: text.clone(),
-            selectable: SelectableLineRange::new(0, text.width()),
+            selectable: SelectableLineRange::new(0, display_width(&text)),
             has_content: true,
             gap_before: 0,
         }
@@ -728,7 +728,7 @@ fn truncate_activity_spans(spans: Vec<Span<'static>>, content_width: usize) -> V
     'outer: for span in spans {
         ellipsis_style = span.style;
         for ch in span.content.chars() {
-            let width = ch.width().unwrap_or(0);
+            let width = char_display_width(ch);
             if used_width.saturating_add(width) > target_width {
                 break 'outer;
             }

@@ -269,6 +269,9 @@ impl MarkdownRenderer {
             TagEnd::List(_) => {
                 self.flush_current_block();
                 self.list_stack.pop();
+                if self.list_stack.is_empty() {
+                    self.needs_spacing = true;
+                }
             }
             TagEnd::Item => {
                 self.flush_current_block();

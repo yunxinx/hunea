@@ -125,11 +125,10 @@ fn should_insert_markdown_spacing(
     previous_block: Option<AssistantMarkdownBlock>,
     next_block: AssistantMarkdownBlock,
 ) -> bool {
-    let Some(previous_block) = previous_block else {
+    if previous_block.is_none() {
         return false;
-    };
-    if previous_block == AssistantMarkdownBlock::List || next_block == AssistantMarkdownBlock::List
-    {
+    }
+    if next_block == AssistantMarkdownBlock::List {
         return false;
     }
     true

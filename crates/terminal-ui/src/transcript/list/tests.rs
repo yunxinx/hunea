@@ -1015,6 +1015,58 @@ fn projected_assistant_ordered_lists_match_eager_renderer() {
 }
 
 #[test]
+fn projected_assistant_list_followed_by_heading_matches_eager_spacing() {
+    let mut markdown = String::from("# Long Assistant Markdown\n\n");
+    for index in 0..50 {
+        markdown.push_str(&format!(
+            "- 当前共识 {index}：仍待验证。\n\n### 💡 为什么重要 {index}？\n1. 算力策略：提示部署路线。\n\n",
+        ));
+    }
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(80);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(80, default_palette());
+    let expected_plain_lines = expected_lines
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        block.lines.is_empty(),
+        "long assistant Markdown should stay on the projection path"
+    );
+    assert!(
+        expected_plain_lines
+            .windows(3)
+            .any(|lines| lines == ["- 当前共识 0：仍待验证。", "", "### 💡 为什么重要 0？"]),
+        "eager renderer should preserve the list-to-heading blank line: {expected_plain_lines:?}"
+    );
+    assert_eq!(
+        (0..render.line_count)
+            .map(|index| {
+                render
+                    .line_at(index)
+                    .expect("projected assistant block should materialize every visible line")
+                    .plain_line
+            })
+            .collect::<Vec<_>>(),
+        expected_plain_lines
+    );
+}
+
+#[test]
 fn projected_assistant_fenced_code_does_not_close_on_info_text_line() {
     let mut markdown = String::from("```rust\n");
     for index in 0..80 {

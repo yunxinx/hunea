@@ -109,6 +109,20 @@ fn render_markdown_splits_embedded_text_newlines_into_real_lines() {
 }
 
 #[test]
+fn render_markdown_preserves_blank_line_between_list_and_following_heading() {
+    let lines = render_markdown_lines(
+        "- 当前共识：仍待验证。\n\n### 💡 为什么重要？\n1. 算力策略：提示",
+        80,
+        default_palette(),
+    );
+
+    assert_eq!(
+        lines_to_plain_text(&lines),
+        "- 当前共识：仍待验证。\n\n### 💡 为什么重要？\n1. 算力策略：提示"
+    );
+}
+
+#[test]
 fn render_markdown_preserves_link_destinations() {
     let lines = render_markdown_lines("[main.go](<cmd/hunea/main.go>)", 40, default_palette());
     let rendered = lines_to_plain_text(&lines);

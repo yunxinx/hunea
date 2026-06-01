@@ -62,11 +62,20 @@ struct TableBuilder {
     current_row_has_table_pipe_syntax: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ImageRenderMode {
+    Link,
+    // Reasoning Content 对齐 codex-rs：不展示 image target，
+    // 只让 pulldown-cmark 继续把 alt text 当普通文本流处理。
+    AltTextOnly,
+}
+
 pub(super) struct MarkdownRenderer {
     palette: TerminalPalette,
     cwd: Option<PathBuf>,
     width: usize,
     should_highlight_code: bool,
+    image_render_mode: ImageRenderMode,
     output: Vec<LogicalLine>,
     current_block: Option<OpenBlock>,
     list_stack: Vec<ListFrame>,
@@ -84,7 +93,15 @@ pub(super) struct MarkdownRenderer {
 
 impl MarkdownRenderer {
     pub(super) fn new(palette: TerminalPalette, cwd: Option<&Path>, width: usize) -> Self {
-        Self::new_with_code_highlighting(palette, cwd, width, true)
+        Self::new_with_options(palette, cwd, width, true, ImageRenderMode::Link)
+    }
+
+    pub(super) fn new_reasoning(
+        palette: TerminalPalette,
+        cwd: Option<&Path>,
+        width: usize,
+    ) -> Self {
+        Self::new_with_options(palette, cwd, width, true, ImageRenderMode::AltTextOnly)
     }
 
     pub(super) fn new_for_metrics(
@@ -92,20 +109,30 @@ impl MarkdownRenderer {
         cwd: Option<&Path>,
         width: usize,
     ) -> Self {
-        Self::new_with_code_highlighting(palette, cwd, width, false)
+        Self::new_with_options(palette, cwd, width, false, ImageRenderMode::Link)
     }
 
-    fn new_with_code_highlighting(
+    pub(super) fn new_reasoning_for_metrics(
+        palette: TerminalPalette,
+        cwd: Option<&Path>,
+        width: usize,
+    ) -> Self {
+        Self::new_with_options(palette, cwd, width, false, ImageRenderMode::AltTextOnly)
+    }
+
+    fn new_with_options(
         palette: TerminalPalette,
         cwd: Option<&Path>,
         width: usize,
         should_highlight_code: bool,
+        image_render_mode: ImageRenderMode,
     ) -> Self {
         Self {
             palette,
             cwd: cwd.map(Path::to_path_buf),
             width: width.max(1),
             should_highlight_code,
+            image_render_mode,
             output: Vec::new(),
             current_block: None,
             list_stack: Vec::new(),
@@ -215,11 +242,18 @@ impl MarkdownRenderer {
                 rendered_text: String::new(),
                 local_target_display: render_local_link_target(&dest_url, self.cwd.as_deref()),
             }),
-            Tag::Image { dest_url, .. } => self.link_stack.push(LinkState {
-                destination: dest_url.to_string(),
-                rendered_text: String::new(),
-                local_target_display: render_local_link_target(&dest_url, self.cwd.as_deref()),
-            }),
+            Tag::Image { dest_url, .. } => {
+                if matches!(self.image_render_mode, ImageRenderMode::Link) {
+                    self.link_stack.push(LinkState {
+                        destination: dest_url.to_string(),
+                        rendered_text: String::new(),
+                        local_target_display: render_local_link_target(
+                            &dest_url,
+                            self.cwd.as_deref(),
+                        ),
+                    });
+                }
+            }
             Tag::Table(alignments) => {
                 self.flush_current_block();
                 self.table = Some(TableBuilder {
@@ -290,7 +324,14 @@ impl MarkdownRenderer {
             TagEnd::Strikethrough => {
                 self.inline_styles.strike_depth = self.inline_styles.strike_depth.saturating_sub(1);
             }
-            TagEnd::Link | TagEnd::Image => self.finish_link(),
+            TagEnd::Link => self.finish_link(),
+            TagEnd::Image => {
+                // AltTextOnly 在 Start(Image) 不入栈；End(Image) 也必须跳过，
+                // 否则会提前关闭包住图片的外层 link。
+                if matches!(self.image_render_mode, ImageRenderMode::Link) {
+                    self.finish_link();
+                }
+            }
             TagEnd::Table => {
                 if let Some(table) = self.table.take() {
                     self.push_table(table);

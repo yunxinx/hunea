@@ -4,7 +4,10 @@ use std::{
     time::Duration,
 };
 
-use ratatui::text::{Line, Span};
+use ratatui::{
+    style::Style,
+    text::{Line, Span},
+};
 
 use crate::{
     display_width::display_width,
@@ -13,6 +16,7 @@ use crate::{
     theme::{TerminalPalette, tertiary_text_style},
     transcript::{
         ItemLineAnchor, TranscriptEstimateKind, TranscriptFastEstimate, TranscriptItemMetrics,
+        markdown_render::{render_reasoning_markdown_lines, render_reasoning_markdown_metrics},
         wrap_assistant_text,
     },
 };
@@ -66,12 +70,21 @@ impl ReasoningMessageItem {
 
     /// `render_lines` 将思维链渲染为淡色斜体文本行。
     pub fn render_lines(&self, width: u16, palette: TerminalPalette) -> Vec<Line<'static>> {
-        let style = tertiary_text_style(palette).italic();
+        let style = reasoning_content_style(palette);
 
-        self.plain_lines(width)
-            .into_iter()
-            .map(|line| Line::from(Span::styled(line, style)))
-            .collect()
+        match self.display_mode {
+            ReasoningDisplayMode::Collapsed | ReasoningDisplayMode::Snippet => {
+                vec![styled_reasoning_line(self.header_label(), style)]
+            }
+            ReasoningDisplayMode::Expanded => {
+                let mut lines = Vec::new();
+                if self.has_toggle_header {
+                    lines.push(styled_reasoning_line(self.header_label(), style));
+                }
+                lines.extend(self.render_content_lines(width, palette, style));
+                lines
+            }
+        }
     }
 
     pub(crate) fn is_header_line(&self, line_index: usize) -> bool {
@@ -139,12 +152,30 @@ impl ReasoningMessageItem {
     pub(crate) fn measure_render_metrics(
         &self,
         width: u16,
-        _palette: TerminalPalette,
+        palette: TerminalPalette,
     ) -> (usize, usize) {
-        let lines = self.plain_lines(width);
-        let content_char_len = lines.iter().map(String::len).sum::<usize>();
+        match self.display_mode {
+            ReasoningDisplayMode::Collapsed | ReasoningDisplayMode::Snippet => {
+                let label = self.header_label();
+                (1, label.len())
+            }
+            ReasoningDisplayMode::Expanded => {
+                let mut line_count = 0usize;
+                let mut content_char_len = 0usize;
 
-        (lines.len(), content_char_len)
+                if self.has_toggle_header {
+                    let label = self.header_label();
+                    line_count = line_count.saturating_add(1);
+                    content_char_len = content_char_len.saturating_add(label.len());
+                }
+
+                let body_metrics = self.measure_content_metrics(width, palette);
+                line_count = line_count.saturating_add(body_metrics.0);
+                content_char_len = content_char_len.saturating_add(body_metrics.1);
+
+                (line_count, content_char_len)
+            }
+        }
     }
 
     pub(crate) fn estimate_render_metrics_fast(
@@ -184,18 +215,36 @@ impl ReasoningMessageItem {
         Vec::new()
     }
 
-    fn plain_lines(&self, width: u16) -> Vec<String> {
-        match self.display_mode {
-            ReasoningDisplayMode::Collapsed | ReasoningDisplayMode::Snippet => {
-                vec![self.header_label()]
-            }
-            ReasoningDisplayMode::Expanded if self.has_toggle_header => {
-                let mut lines = vec![self.header_label()];
-                lines.extend(self.wrapped_lines(width));
-                lines
-            }
-            ReasoningDisplayMode::Expanded => self.wrapped_lines(width),
+    fn render_content_lines(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+        style: Style,
+    ) -> Vec<Line<'static>> {
+        let content_width = assistant_message_content_width(width);
+        let markdown_lines = render_reasoning_markdown_lines(&self.content, content_width, palette);
+        let lines = if markdown_lines.is_empty() {
+            self.wrapped_lines(width)
+                .into_iter()
+                .map(|line| Line::from(Span::raw(line)))
+                .collect()
+        } else {
+            markdown_lines
+        };
+
+        apply_reasoning_content_style(lines, style)
+    }
+
+    fn measure_content_metrics(&self, width: u16, palette: TerminalPalette) -> (usize, usize) {
+        let content_width = assistant_message_content_width(width);
+        let markdown_metrics =
+            render_reasoning_markdown_metrics(&self.content, content_width, palette);
+        if markdown_metrics.0 > 0 {
+            return markdown_metrics;
         }
+
+        let lines = self.wrapped_lines(width);
+        (lines.len(), lines.iter().map(String::len).sum())
     }
 
     fn wrapped_lines(&self, width: u16) -> Vec<String> {
@@ -227,6 +276,29 @@ impl ReasoningMessageItem {
     fn is_toggleable(&self) -> bool {
         self.has_toggle_header
     }
+}
+
+fn reasoning_content_style(palette: TerminalPalette) -> Style {
+    tertiary_text_style(palette).italic()
+}
+
+fn styled_reasoning_line(content: String, style: Style) -> Line<'static> {
+    Line::from(Span::styled(content, style))
+}
+
+fn apply_reasoning_content_style(
+    mut lines: Vec<Line<'static>>,
+    style: Style,
+) -> Vec<Line<'static>> {
+    for line in &mut lines {
+        line.style = line.style.patch(style);
+        for span in &mut line.spans {
+            // Reasoning Content 的外层视觉语义优先；Markdown 只提供结构和 modifier。
+            // 因此这里保留 bold/strike 等 modifier，但统一覆盖为 reasoning 的低优先级颜色。
+            span.style = span.style.patch(style);
+        }
+    }
+    lines
 }
 
 fn reasoning_message_render_cache_key(
@@ -426,6 +498,85 @@ mod tests {
                 .map(line_to_plain_text)
                 .collect::<Vec<_>>(),
             vec!["• thoughts 3s".to_string()]
+        );
+    }
+
+    #[test]
+    fn reasoning_message_expanded_content_renders_markdown_with_reasoning_style() {
+        let palette = default_palette();
+        let item = ReasoningMessageItem::new(
+            "# Plan\n\nUse **bold** and `code`.\n\n| Key | Value |\n| --- | --- |\n| a | b |",
+            ReasoningDisplayMode::Expanded,
+            None,
+        );
+
+        let lines = item.render_lines(80, palette);
+        let plain_lines = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert!(plain_lines.iter().any(|line| line == "# Plan"));
+        assert!(
+            plain_lines
+                .iter()
+                .any(|line| line.contains("Use bold and code.")),
+            "reasoning Markdown 应移除行内 marker 并保留文本内容: {plain_lines:?}"
+        );
+        assert!(
+            plain_lines
+                .iter()
+                .any(|line| line.contains("Key") && line.contains("Value")),
+            "reasoning Markdown 应渲染 pipe table，而不是保持原始源码: {plain_lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .all(|span| span.style.fg == tertiary_text_style(palette).fg),
+            "reasoning 外层颜色必须覆盖所有 Markdown span"
+        );
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .all(|span| span.style.add_modifier.contains(Modifier::ITALIC)),
+            "reasoning 外层 italic 必须覆盖所有 Markdown span"
+        );
+        assert!(
+            lines.iter().flat_map(|line| line.spans.iter()).any(|span| {
+                span.content.as_ref() == "bold" && span.style.add_modifier.contains(Modifier::BOLD)
+            }),
+            "Markdown bold modifier 应在 reasoning 外层样式叠加后保留"
+        );
+    }
+
+    #[test]
+    fn reasoning_message_markdown_profile_matches_codex_reasoning_summary() {
+        let item = ReasoningMessageItem::new(
+            "- [x] task\n\nenergy $E = mc^2$ now\n\n![diagram](image.png)\n\n<kbd>Ctrl</kbd>",
+            ReasoningDisplayMode::Expanded,
+            None,
+        );
+
+        let plain_text = item.render_plain_text(80, default_palette());
+
+        assert!(
+            plain_text.contains("[x] task"),
+            "Reasoning Content 不启用 task list 扩展，应保留原始 marker"
+        );
+        assert!(
+            plain_text.contains("$E = mc^2$"),
+            "Reasoning Content 不启用 math 扩展，应保留 dollar-delimited 文本"
+        );
+        assert!(
+            plain_text.contains("diagram"),
+            "Image alt text 应作为普通文本保留"
+        );
+        assert!(
+            !plain_text.contains("image.png"),
+            "Image target 不应按 link 或媒体语义渲染"
+        );
+        assert!(
+            plain_text.contains("<kbd>Ctrl</kbd>"),
+            "HTML 应作为 literal text 渲染"
         );
     }
 }

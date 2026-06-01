@@ -31,7 +31,13 @@ pub(crate) fn render_markdown_lines(
     palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
     let cwd = std::env::current_dir().ok();
-    render_markdown_lines_with_cwd(markdown, width, palette, cwd.as_deref())
+    render_markdown_lines_with_cwd(
+        markdown,
+        width,
+        palette,
+        cwd.as_deref(),
+        MarkdownProfile::Assistant,
+    )
 }
 
 fn render_markdown_lines_with_cwd(
@@ -39,15 +45,21 @@ fn render_markdown_lines_with_cwd(
     width: usize,
     palette: TerminalPalette,
     cwd: Option<&Path>,
+    profile: MarkdownProfile,
 ) -> Vec<Line<'static>> {
     let width = width.max(1);
     let sanitized_markdown = sanitize_terminal_text(markdown);
-    let normalized_markdown = unwrap_markdown_table_fences(sanitized_markdown.as_ref());
-    let markdown = normalized_markdown.as_ref();
+    let normalized_markdown = profile
+        .unwraps_markdown_table_fences()
+        .then(|| unwrap_markdown_table_fences(sanitized_markdown.as_ref()));
+    let markdown = normalized_markdown
+        .as_ref()
+        .map(std::borrow::Cow::as_ref)
+        .unwrap_or_else(|| sanitized_markdown.as_ref());
     let leading_blank_lines = count_leading_blank_lines(markdown);
     let trailing_blank_lines = count_trailing_blank_lines(markdown);
-    let mut renderer = MarkdownRenderer::new(palette, cwd, width);
-    let options = markdown_options();
+    let mut renderer = profile.renderer(palette, cwd, width);
+    let options = profile.markdown_options();
 
     renderer.render(
         markdown,
@@ -70,6 +82,26 @@ fn render_markdown_lines_with_cwd(
     lines
 }
 
+/// `render_reasoning_markdown_lines` 使用 codex-rs reasoning summary 的 Markdown profile。
+///
+/// 这里不复用 assistant profile：Reasoning Content 是现有 reasoning 样式的增强，
+/// 只启用 `tables + strikethrough`，不继承 assistant 的 task list/math 语义，也不解包
+/// markdown fence 中的表格。
+pub(crate) fn render_reasoning_markdown_lines(
+    markdown: &str,
+    width: usize,
+    palette: TerminalPalette,
+) -> Vec<Line<'static>> {
+    let cwd = std::env::current_dir().ok();
+    render_markdown_lines_with_cwd(
+        markdown,
+        width,
+        palette,
+        cwd.as_deref(),
+        MarkdownProfile::Reasoning,
+    )
+}
+
 pub(crate) fn render_markdown_metrics(
     markdown: &str,
     width: usize,
@@ -79,6 +111,14 @@ pub(crate) fn render_markdown_metrics(
     RENDER_MARKDOWN_METRICS_CALL_COUNT.with(|count| count.set(count.get() + 1));
 
     measure_markdown_metrics(markdown, width, palette)
+}
+
+pub(crate) fn render_reasoning_markdown_metrics(
+    markdown: &str,
+    width: usize,
+    palette: TerminalPalette,
+) -> (usize, usize) {
+    measure_markdown_metrics_with_profile(markdown, width, palette, MarkdownProfile::Reasoning)
 }
 
 pub(crate) fn estimate_markdown_metrics_for_tabs(
@@ -94,14 +134,28 @@ fn measure_markdown_metrics(
     width: usize,
     palette: TerminalPalette,
 ) -> (usize, usize) {
+    measure_markdown_metrics_with_profile(markdown, width, palette, MarkdownProfile::Assistant)
+}
+
+fn measure_markdown_metrics_with_profile(
+    markdown: &str,
+    width: usize,
+    palette: TerminalPalette,
+    profile: MarkdownProfile,
+) -> (usize, usize) {
     let width = width.max(1);
-    let normalized_markdown = unwrap_markdown_table_fences(markdown);
-    let markdown = normalized_markdown.as_ref();
+    let normalized_markdown = profile
+        .unwraps_markdown_table_fences()
+        .then(|| unwrap_markdown_table_fences(markdown));
+    let markdown = normalized_markdown
+        .as_ref()
+        .map(std::borrow::Cow::as_ref)
+        .unwrap_or(markdown);
     let leading_blank_lines = count_leading_blank_lines(markdown);
     let trailing_blank_lines = count_trailing_blank_lines(markdown);
     let cwd = std::env::current_dir().ok();
-    let mut renderer = MarkdownRenderer::new_for_metrics(palette, cwd.as_deref(), width);
-    let options = markdown_options();
+    let mut renderer = profile.metrics_renderer(palette, cwd.as_deref(), width);
+    let options = profile.markdown_options();
 
     renderer.render(
         markdown,
@@ -119,13 +173,51 @@ fn measure_markdown_metrics(
     )
 }
 
-fn markdown_options() -> Options {
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    options.insert(Options::ENABLE_TASKLISTS);
-    options.insert(Options::ENABLE_MATH);
-    options
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkdownProfile {
+    Assistant,
+    Reasoning,
+}
+
+impl MarkdownProfile {
+    fn markdown_options(self) -> Options {
+        let mut options = Options::empty();
+        options.insert(Options::ENABLE_TABLES);
+        options.insert(Options::ENABLE_STRIKETHROUGH);
+        if matches!(self, Self::Assistant) {
+            options.insert(Options::ENABLE_TASKLISTS);
+            options.insert(Options::ENABLE_MATH);
+        }
+        options
+    }
+
+    fn unwraps_markdown_table_fences(self) -> bool {
+        matches!(self, Self::Assistant)
+    }
+
+    fn renderer(
+        self,
+        palette: TerminalPalette,
+        cwd: Option<&Path>,
+        width: usize,
+    ) -> MarkdownRenderer {
+        match self {
+            Self::Assistant => MarkdownRenderer::new(palette, cwd, width),
+            Self::Reasoning => MarkdownRenderer::new_reasoning(palette, cwd, width),
+        }
+    }
+
+    fn metrics_renderer(
+        self,
+        palette: TerminalPalette,
+        cwd: Option<&Path>,
+        width: usize,
+    ) -> MarkdownRenderer {
+        match self {
+            Self::Assistant => MarkdownRenderer::new_for_metrics(palette, cwd, width),
+            Self::Reasoning => MarkdownRenderer::new_reasoning_for_metrics(palette, cwd, width),
+        }
+    }
 }
 
 #[cfg(test)]

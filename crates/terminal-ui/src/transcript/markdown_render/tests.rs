@@ -1,4 +1,4 @@
-use super::{render_markdown_lines, render_markdown_metrics};
+use super::{render_markdown_lines, render_markdown_metrics, render_reasoning_markdown_lines};
 use crate::{
     styled_text::{line_plain_text_len, lines_to_ansi_text, lines_to_plain_text},
     theme::{default_palette, terminal_default_palette},
@@ -196,6 +196,32 @@ fn render_markdown_web_link_keeps_label_and_destination() {
     let lines = render_markdown_lines("[Example](https://example.com)", 80, default_palette());
 
     assert_eq!(lines_to_plain_text(&lines), "Example (https://example.com)");
+}
+
+#[test]
+fn render_reasoning_image_alt_text_does_not_close_outer_link() {
+    let lines = render_reasoning_markdown_lines(
+        "[![diagram](image.png) docs](https://example.com)",
+        80,
+        default_palette(),
+    );
+    let rendered = lines_to_plain_text(&lines);
+
+    assert_eq!(rendered, "diagram docs (https://example.com)");
+    assert!(
+        !rendered.contains("image.png"),
+        "Reasoning Content 应忽略 image target，只保留 alt text: {rendered:?}"
+    );
+
+    let docs_span = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.contains("docs"))
+        .expect("外层 link 中 image 之后的文本应继续渲染");
+    assert!(
+        docs_span.style.add_modifier.contains(Modifier::UNDERLINED),
+        "End(Image) 不应提前关闭外层 link 样式: {lines:?}"
+    );
 }
 
 #[test]

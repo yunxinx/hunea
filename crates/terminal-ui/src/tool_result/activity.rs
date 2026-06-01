@@ -13,7 +13,7 @@ use crate::{
         should_collapse_runtime_write_tool_activity,
     },
     theme::{TerminalPalette, secondary_text_style},
-    transcript::markdown_highlight::HighlightChunk,
+    transcript::{TRANSCRIPT_DETAIL_HINT, markdown_highlight::HighlightChunk},
 };
 use runtime_domain::envinfo::shorten_home_prefix;
 use runtime_domain::session::{
@@ -23,7 +23,7 @@ use runtime_domain::session::{
 
 use super::{
     TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL, TOOL_ACTIVITY_COMPACT_EDGE_LINES,
-    TOOL_ACTIVITY_DIFF_LINE_NUMBER_WIDTH, TOOL_ACTIVITY_TRANSCRIPT_HINT, ToolActivityRenderMode,
+    TOOL_ACTIVITY_DIFF_LINE_NUMBER_WIDTH, ToolActivityRenderMode,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -569,9 +569,7 @@ fn truncate_detail_block_with_edge(
     let omitted = lines.len().saturating_sub(limit);
     let mut truncated = Vec::with_capacity(limit + 1);
     truncated.extend(lines.iter().take(edge).cloned());
-    truncated.push(format!(
-        "… +{omitted} lines ({TOOL_ACTIVITY_TRANSCRIPT_HINT})"
-    ));
+    truncated.push(format!("… +{omitted} lines ({TRANSCRIPT_DETAIL_HINT})"));
     truncated.extend(lines.iter().skip(lines.len().saturating_sub(edge)).cloned());
     truncated
 }
@@ -594,7 +592,7 @@ fn truncate_diff_detail_block(
     truncated.extend(lines.iter().take(edge).cloned());
     truncated.push(RuntimeDiffDetailLine {
         line_number: None,
-        text: format!("⋮ +{omitted} lines ({TOOL_ACTIVITY_TRANSCRIPT_HINT})"),
+        text: format!("⋮ +{omitted} lines ({TRANSCRIPT_DETAIL_HINT})"),
         kind: RuntimeDiffDetailLineKind::Omitted,
     });
     truncated.extend(lines.iter().skip(lines.len().saturating_sub(edge)).cloned());

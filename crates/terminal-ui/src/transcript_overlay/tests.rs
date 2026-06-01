@@ -147,6 +147,131 @@ fn transcript_overlay_switches_tool_activity_detail_mode() {
     assert!(!compact_again.contains("line 7"));
 }
 
+#[test]
+fn transcript_overlay_switches_expanded_simplified_reasoning_to_detailed_mode() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(40, 10);
+    model.set_palette(default_palette(), true);
+    model.transcript_mut().clear();
+    model
+        .transcript_mut()
+        .append_assistant_message_with_reasoning(
+            "结论",
+            (1..=14)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            crate::ReasoningDisplayMode::ExpandedSimplified,
+            None,
+            crate::StyleMode::Cx,
+        );
+
+    let compact = model.transcript_plain_items().join("\n");
+    assert!(compact.contains("\n\n… +6 lines (ctrl + t to view transcript)\n\n"));
+    assert!(!compact.contains("line 7"));
+
+    model.open_transcript_overlay();
+    let detailed = model.transcript_plain_items().join("\n");
+    assert!(detailed.contains("line 7"));
+    assert!(!detailed.contains("ctrl + t to view transcript"));
+
+    model.close_transcript_overlay();
+    let compact_again = model.transcript_plain_items().join("\n");
+    assert!(compact_again.contains("\n\n… +6 lines (ctrl + t to view transcript)\n\n"));
+    assert!(!compact_again.contains("line 7"));
+}
+
+#[test]
+fn transcript_overlay_open_from_bottom_uses_detailed_reasoning_scroll_range() {
+    let mut model = expanded_simplified_reasoning_model(20);
+    let compact_index = model.transcript.progressive_item_metrics_index();
+    model.document_runtime.viewport_y = compact_index.line_count;
+
+    model.open_transcript_overlay();
+    let expected_offset = overlay_max_offset(&mut model);
+
+    assert_eq!(
+        model.transcript_overlay.as_ref().unwrap().scroll_offset,
+        expected_offset,
+        "从主界面底部打开 overlay 时，应先切 detailed 再钉到完整 transcript 底部"
+    );
+}
+
+#[test]
+fn transcript_overlay_open_remaps_main_viewport_item_after_reasoning_expands() {
+    let mut model = expanded_simplified_reasoning_model(20);
+    let compact_index = model.transcript.progressive_item_metrics_index();
+    let assistant_position = compact_index
+        .position_for_item(1)
+        .expect("assistant body item should exist");
+    model.document_runtime.viewport_y =
+        assistant_position.start_line + assistant_position.gap_before;
+    model.document_runtime.follow_bottom = false;
+    model.document_runtime.manual_scroll = true;
+
+    model.open_transcript_overlay();
+
+    let detailed_index = model.transcript.progressive_item_metrics_index();
+    let detailed_assistant_position = detailed_index
+        .position_for_item(1)
+        .expect("assistant body item should still exist");
+    let startup_banner_lines =
+        model.transcript_overlay_startup_banner_lines_for_index(&detailed_index);
+    let expected_offset = detailed_assistant_position
+        .start_line
+        .saturating_add(detailed_assistant_position.gap_before)
+        .saturating_sub(startup_banner_lines)
+        .min(overlay_max_offset(&mut model));
+
+    assert_eq!(
+        model.transcript_overlay.as_ref().unwrap().scroll_offset,
+        expected_offset,
+        "主界面定位到 reasoning 之后的消息时，overlay 应映射到 detailed metrics 下的同一 item"
+    );
+}
+
+#[test]
+fn transcript_overlay_open_from_reasoning_omission_hint_starts_at_omitted_region() {
+    let mut model = expanded_simplified_reasoning_model_with_height(20, 4);
+    let compact_index = model.transcript.progressive_item_metrics_index();
+    let reasoning_position = compact_index
+        .position_for_item(0)
+        .expect("reasoning item should exist");
+    model.document_runtime.viewport_y = reasoning_position
+        .start_line
+        .saturating_add(reasoning_position.gap_before)
+        .saturating_add(5);
+
+    model.open_transcript_overlay();
+
+    assert_eq!(
+        model.transcript_overlay.as_ref().unwrap().scroll_offset,
+        4,
+        "从省略提示打开 overlay 应进入 detailed 的第一条被省略 reasoning 行"
+    );
+}
+
+#[test]
+fn transcript_overlay_open_from_reasoning_tail_keeps_tail_source_line() {
+    let mut model = expanded_simplified_reasoning_model_with_height(20, 4);
+    let compact_index = model.transcript.progressive_item_metrics_index();
+    let reasoning_position = compact_index
+        .position_for_item(0)
+        .expect("reasoning item should exist");
+    model.document_runtime.viewport_y = reasoning_position
+        .start_line
+        .saturating_add(reasoning_position.gap_before)
+        .saturating_add(7);
+
+    model.open_transcript_overlay();
+
+    assert_eq!(
+        model.transcript_overlay.as_ref().unwrap().scroll_offset,
+        16,
+        "从 compact 尾部保留行打开 overlay 应映射到 detailed 中同一条 source reasoning 行"
+    );
+}
+
 fn assert_contains_transcript_hint(text: &str) {
     let compacted = text
         .chars()
@@ -445,4 +570,32 @@ fn overlay_max_offset(model: &mut Model) -> usize {
         .line_count
         .saturating_sub(startup_banner_lines)
         .saturating_sub(content_height)
+}
+
+fn expanded_simplified_reasoning_model(reasoning_line_count: usize) -> Model {
+    expanded_simplified_reasoning_model_with_height(reasoning_line_count, 8)
+}
+
+fn expanded_simplified_reasoning_model_with_height(
+    reasoning_line_count: usize,
+    height: u16,
+) -> Model {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(40, height);
+    model.set_palette(default_palette(), true);
+    model.transcript_mut().clear();
+    model
+        .transcript_mut()
+        .append_assistant_message_with_reasoning(
+            "结论",
+            (1..=reasoning_line_count)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            crate::ReasoningDisplayMode::ExpandedSimplified,
+            None,
+            crate::StyleMode::Cx,
+        );
+    model.sync_transcript_render();
+    model
 }

@@ -24,6 +24,7 @@ fn reasoning_display_mode_from_config(display: ReasoningContentDisplay) -> Reaso
     match display {
         ReasoningContentDisplay::Collapsed => ReasoningDisplayMode::Collapsed,
         ReasoningContentDisplay::Expanded => ReasoningDisplayMode::Expanded,
+        ReasoningContentDisplay::ExpandedSimplified => ReasoningDisplayMode::ExpandedSimplified,
         ReasoningContentDisplay::Snippet => ReasoningDisplayMode::Snippet,
     }
 }

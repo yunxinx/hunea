@@ -99,7 +99,10 @@ show_reasoning_content = false
 # `reasoning_content_display` 控制 show_reasoning_content = true 时，
 # 思维链内容进入 transcript 后的默认展示状态。
 # 未配置时，show_reasoning_content = true 会默认使用 `expanded`。
-# 可选值：`collapsed`、`expanded`、`snippet`。
+# `expanded-simplified` 是 `expanded` 的长内容 compact 变体：短内容完整显示；
+# 长内容保留前后各 4 行，中间以 `… +N lines (ctrl + t to view transcript)` 提示，
+# Ctrl+T 进入 transcript overlay 后显示完整内容。
+# 可选值：`collapsed`、`expanded`、`expanded-simplified`、`snippet`。
 reasoning_content_display = "collapsed"
 
 [runtime]

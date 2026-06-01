@@ -49,6 +49,7 @@ pub enum UserInputStyle {
 pub enum ReasoningContentDisplay {
     Collapsed,
     Expanded,
+    ExpandedSimplified,
     Snippet,
 }
 
@@ -68,6 +69,7 @@ impl ReasoningContentDisplay {
         match value {
             "collapsed" => Ok(Self::Collapsed),
             "expanded" => Ok(Self::Expanded),
+            "expanded-simplified" => Ok(Self::ExpandedSimplified),
             "snippet" => Ok(Self::Snippet),
             other => Err(super::AppConfigError::InvalidReasoningContentDisplay {
                 path: None,

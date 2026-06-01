@@ -203,6 +203,49 @@ fn runtime_expanded_reasoning_flushes_before_message_finish() {
 }
 
 #[test]
+fn runtime_expanded_simplified_reasoning_flushes_before_message_finish() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            show_reasoning_content: true,
+            reasoning_display_mode: ReasoningDisplayMode::ExpandedSimplified,
+            ..ModelOptions::default()
+        },
+    );
+    let target = RuntimeTarget::provider("local", "qwen3");
+    model.transcript_mut().clear();
+    model.show_stream_activity("qwen3");
+
+    model.apply_runtime_event(RuntimeEvent::ReasoningDelta {
+        target: target.clone(),
+        content: "先分析目录结构".to_string(),
+    });
+    model.apply_runtime_event(RuntimeEvent::AssistantDelta {
+        target: target.clone(),
+        content: "我先看一下 src。".to_string(),
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["先分析目录结构".to_string()]
+    );
+
+    model.apply_runtime_event(RuntimeEvent::MessageFinished {
+        target: Some(target),
+        content: "我先看一下 src。".to_string(),
+        reasoning_content: Some("先分析目录结构".to_string()),
+        reasoning_duration: Some(Duration::from_secs(2)),
+        finish_reason: None,
+        metrics: None,
+    });
+
+    assert_eq!(
+        model.transcript_plain_items(),
+        vec!["先分析目录结构".to_string(), "我先看一下 src。".to_string()]
+    );
+}
+
+#[test]
 fn runtime_final_response_keeps_streamed_reasoning_flushed_across_tool_boundaries() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),

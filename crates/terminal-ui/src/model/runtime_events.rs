@@ -64,7 +64,7 @@ impl Model {
         if self.runtime_response_buffer.is_empty() {
             let _ = self.mark_exploration_tool_activities_complete_from_runtime();
         }
-        self.flush_runtime_reasoning_for_expanded_display();
+        self.flush_runtime_reasoning_for_expanded_family_display();
         self.runtime_response_buffer.push_content(content);
     }
 
@@ -130,11 +130,16 @@ impl Model {
     }
 
     pub(crate) fn streams_reasoning_into_transcript_during_response(&self) -> bool {
+        // expanded-simplified 只是 expanded 的主界面 compact 渲染策略；
+        // reasoning 进入 transcript 的时机必须和 expanded 保持一致。
         self.show_reasoning_content
-            && matches!(self.reasoning_display_mode, ReasoningDisplayMode::Expanded)
+            && matches!(
+                self.reasoning_display_mode,
+                ReasoningDisplayMode::Expanded | ReasoningDisplayMode::ExpandedSimplified
+            )
     }
 
-    pub(crate) fn flush_runtime_reasoning_for_expanded_display(&mut self) {
+    pub(crate) fn flush_runtime_reasoning_for_expanded_family_display(&mut self) {
         if !self.streams_reasoning_into_transcript_during_response() {
             return;
         }

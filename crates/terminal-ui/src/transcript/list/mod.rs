@@ -9,19 +9,18 @@ use std::{
 use ratatui::text::Line;
 
 use super::{
-    DEFAULT_RENDER_WIDTH, FinalBodyDividerItem, ItemLineAnchor, ReasoningDisplayMode,
-    ReasoningMessageItem, RenderResult, SystemMessageItem, TranscriptEstimateBreakdown,
-    TranscriptEstimateKind, TranscriptEstimateSource, TranscriptFastEstimate,
-    TranscriptItemMetrics, TranscriptItemMetricsCache, TranscriptItemMetricsIndex,
-    TranscriptItemMetricsQuality, TranscriptItemPosition, WorkDurationMessageItem,
+    DEFAULT_RENDER_WIDTH, FinalBodyDividerItem, ItemLineAnchor, LineAnchor, LineAnchorKind,
+    ReasoningDisplayMode, ReasoningMessageItem, ReasoningRenderMode, RenderResult,
+    SystemMessageItem, TranscriptEstimateBreakdown, TranscriptEstimateKind,
+    TranscriptEstimateSource, TranscriptFastEstimate, TranscriptItemMetrics,
+    TranscriptItemMetricsCache, TranscriptItemMetricsIndex, TranscriptItemMetricsQuality,
+    TranscriptItemPosition, WorkDurationMessageItem,
     cache::{CachedLineAnchors, CachedRenderBlock, MAX_RECENT_RENDER_BLOCKS, ScreenRenderCache},
     new_render_result_with_append_start,
     render_state::RenderItemSummary,
     viewport_overscan_line_budget,
 };
 
-#[cfg(test)]
-use super::LineAnchorKind;
 #[cfg(test)]
 use super::ViewportRenderResult;
 #[cfg(test)]
@@ -65,6 +64,7 @@ pub(crate) struct Transcript {
     width: u16,
     palette: TerminalPalette,
     tool_activity_render_mode: ToolActivityRenderMode,
+    reasoning_render_mode: ReasoningRenderMode,
     items_version: usize,
     metrics_cache: TranscriptItemMetricsCache,
     screen_cache: ScreenRenderCache,
@@ -77,6 +77,7 @@ impl PartialEq for Transcript {
             && self.width == other.width
             && self.palette == other.palette
             && self.tool_activity_render_mode == other.tool_activity_render_mode
+            && self.reasoning_render_mode == other.reasoning_render_mode
     }
 }
 
@@ -91,6 +92,7 @@ impl Transcript {
             width: DEFAULT_RENDER_WIDTH as u16,
             palette,
             tool_activity_render_mode: ToolActivityRenderMode::Compact,
+            reasoning_render_mode: ReasoningRenderMode::Compact,
             items_version: 1,
             metrics_cache: TranscriptItemMetricsCache::default(),
             screen_cache: ScreenRenderCache::default(),
@@ -210,11 +212,9 @@ impl Transcript {
             return;
         }
 
-        self.push_item(TranscriptItem::Reasoning(ReasoningMessageItem::new(
-            content,
-            display_mode,
-            duration,
-        )));
+        let mut item = ReasoningMessageItem::new(content, display_mode, duration);
+        let _ = item.set_render_mode(self.reasoning_render_mode);
+        self.push_item(TranscriptItem::Reasoning(item));
     }
 
     pub(crate) fn is_reasoning_header_hit(
@@ -451,6 +451,34 @@ impl Transcript {
                 continue;
             }
             *item = Rc::new(TranscriptItem::ToolResult(tool_result));
+            first_dirty = Some(first_dirty.map_or(index, |dirty| dirty.min(index)));
+        }
+        if let Some(first_dirty) = first_dirty {
+            self.items = Rc::new(items);
+            self.items_version = self.items_version.saturating_add(1);
+            self.metrics_cache.mark_metrics_dirty_from(first_dirty);
+            self.screen_cache.mark_dirty_from(first_dirty);
+        }
+    }
+
+    /// `set_reasoning_render_mode` 切换 expanded-simplified reasoning 在主界面与 overlay 中的详略。
+    pub(crate) fn set_reasoning_render_mode(&mut self, mode: ReasoningRenderMode) {
+        if self.reasoning_render_mode == mode {
+            return;
+        }
+
+        self.reasoning_render_mode = mode;
+        let mut first_dirty: Option<usize> = None;
+        let mut items = self.items.as_ref().clone();
+        for (index, item) in items.iter_mut().enumerate() {
+            let TranscriptItem::Reasoning(reasoning) = item.as_ref() else {
+                continue;
+            };
+            let mut reasoning = reasoning.clone();
+            if !reasoning.set_render_mode(mode) {
+                continue;
+            }
+            *item = Rc::new(TranscriptItem::Reasoning(reasoning));
             first_dirty = Some(first_dirty.map_or(index, |dirty| dirty.min(index)));
         }
         if let Some(first_dirty) = first_dirty {

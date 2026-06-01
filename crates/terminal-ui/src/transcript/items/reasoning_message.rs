@@ -12,10 +12,11 @@ use ratatui::{
 use crate::{
     display_width::display_width,
     message::assistant_message_content_width,
-    styled_text::{lines_to_ansi_text, lines_to_plain_text},
+    styled_text::{line_to_plain_text, lines_to_ansi_text, lines_to_plain_text},
     theme::{TerminalPalette, tertiary_text_style},
     transcript::{
-        ItemLineAnchor, TranscriptEstimateKind, TranscriptFastEstimate, TranscriptItemMetrics,
+        ItemLineAnchor, LineAnchorKind, TRANSCRIPT_DETAIL_HINT, TranscriptEstimateKind,
+        TranscriptFastEstimate, TranscriptItemMetrics,
         markdown_render::{render_reasoning_markdown_lines, render_reasoning_markdown_metrics},
         wrap_assistant_text,
     },
@@ -23,6 +24,8 @@ use crate::{
 
 const REASONING_ACTION_SHOW: &str = "Show reasoning";
 const REASONING_ACTION_HIDE: &str = "Hide reasoning";
+const REASONING_SIMPLIFIED_EDGE_LINES: usize = 4;
+const REASONING_SIMPLIFIED_HINT_OVERHEAD_LINES: usize = 3;
 
 /// `ReasoningDisplayMode` 表示思维链消息进入 transcript 时的默认展示状态。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -30,7 +33,17 @@ pub enum ReasoningDisplayMode {
     #[default]
     Collapsed,
     Expanded,
+    /// `ExpandedSimplified` 是 expanded 的主界面 compact 变体：
+    /// 短内容完整展示，长内容保留前后行并由 Ctrl+T overlay 还原全文。
+    ExpandedSimplified,
     Snippet,
+}
+
+/// `ReasoningRenderMode` 控制 `ExpandedSimplified` 在主界面与 overlay 中的详略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ReasoningRenderMode {
+    Compact,
+    Detailed,
 }
 
 /// `ReasoningMessageItem` 表示只用于展示的模型思维链，不参与后续模型上下文。
@@ -38,6 +51,7 @@ pub enum ReasoningDisplayMode {
 pub struct ReasoningMessageItem {
     content: String,
     display_mode: ReasoningDisplayMode,
+    render_mode: ReasoningRenderMode,
     has_toggle_header: bool,
     duration: Option<Duration>,
     render_cache_key: u64,
@@ -56,12 +70,19 @@ impl ReasoningMessageItem {
             content.into()
         };
         let has_toggle_header = matches!(display_mode, ReasoningDisplayMode::Collapsed);
-        let render_cache_key =
-            reasoning_message_render_cache_key(&content, display_mode, has_toggle_header, duration);
+        let render_mode = ReasoningRenderMode::Compact;
+        let render_cache_key = reasoning_message_render_cache_key(
+            &content,
+            display_mode,
+            render_mode,
+            has_toggle_header,
+            duration,
+        );
 
         Self {
             content,
             display_mode,
+            render_mode,
             has_toggle_header,
             duration,
             render_cache_key,
@@ -76,7 +97,7 @@ impl ReasoningMessageItem {
             ReasoningDisplayMode::Collapsed | ReasoningDisplayMode::Snippet => {
                 vec![styled_reasoning_line(self.header_label(), style)]
             }
-            ReasoningDisplayMode::Expanded => {
+            ReasoningDisplayMode::Expanded | ReasoningDisplayMode::ExpandedSimplified => {
                 let mut lines = Vec::new();
                 if self.has_toggle_header {
                     lines.push(styled_reasoning_line(self.header_label(), style));
@@ -111,14 +132,33 @@ impl ReasoningMessageItem {
         self.display_mode = match self.display_mode {
             ReasoningDisplayMode::Collapsed => ReasoningDisplayMode::Expanded,
             ReasoningDisplayMode::Expanded => ReasoningDisplayMode::Collapsed,
-            ReasoningDisplayMode::Snippet => return,
+            ReasoningDisplayMode::ExpandedSimplified | ReasoningDisplayMode::Snippet => return,
         };
         self.render_cache_key = reasoning_message_render_cache_key(
             &self.content,
             self.display_mode,
+            self.render_mode,
             self.has_toggle_header,
             self.duration,
         );
+    }
+
+    pub(crate) fn set_render_mode(&mut self, mode: ReasoningRenderMode) -> bool {
+        if self.render_mode == mode
+            || !matches!(self.display_mode, ReasoningDisplayMode::ExpandedSimplified)
+        {
+            return false;
+        }
+
+        self.render_mode = mode;
+        self.render_cache_key = reasoning_message_render_cache_key(
+            &self.content,
+            self.display_mode,
+            self.render_mode,
+            self.has_toggle_header,
+            self.duration,
+        );
+        true
     }
 
     /// `render_for_terminal_replay` 返回适合退出 AltScreen 后回放到终端的文本。
@@ -159,7 +199,7 @@ impl ReasoningMessageItem {
                 let label = self.header_label();
                 (1, label.len())
             }
-            ReasoningDisplayMode::Expanded => {
+            ReasoningDisplayMode::Expanded | ReasoningDisplayMode::ExpandedSimplified => {
                 let mut line_count = 0usize;
                 let mut content_char_len = 0usize;
 
@@ -209,13 +249,32 @@ impl ReasoningMessageItem {
 
     pub(crate) fn render_line_anchors(
         &self,
-        _width: u16,
-        _palette: TerminalPalette,
+        width: u16,
+        palette: TerminalPalette,
     ) -> Vec<ItemLineAnchor> {
-        Vec::new()
+        let full_lines =
+            self.render_full_content_lines(width, palette, reasoning_content_style(palette));
+        reasoning_content_line_anchors(
+            full_lines.len(),
+            self.should_compact_content_lines(full_lines.len()),
+        )
     }
 
     fn render_content_lines(
+        &self,
+        width: u16,
+        palette: TerminalPalette,
+        style: Style,
+    ) -> Vec<Line<'static>> {
+        let lines = self.render_full_content_lines(width, palette, style);
+        if self.should_compact_content_lines(lines.len()) {
+            compact_reasoning_content_lines(lines, style)
+        } else {
+            lines
+        }
+    }
+
+    fn render_full_content_lines(
         &self,
         width: u16,
         palette: TerminalPalette,
@@ -236,6 +295,18 @@ impl ReasoningMessageItem {
     }
 
     fn measure_content_metrics(&self, width: u16, palette: TerminalPalette) -> (usize, usize) {
+        if matches!(self.display_mode, ReasoningDisplayMode::ExpandedSimplified) {
+            let lines = self.render_content_lines(width, palette, reasoning_content_style(palette));
+            return (
+                lines.len(),
+                lines
+                    .iter()
+                    .map(line_to_plain_text)
+                    .map(|line| line.len())
+                    .sum(),
+            );
+        }
+
         let content_width = assistant_message_content_width(width);
         let markdown_metrics =
             render_reasoning_markdown_metrics(&self.content, content_width, palette);
@@ -264,6 +335,7 @@ impl ReasoningMessageItem {
                 };
                 format!("[{action} · thoughts {duration}]")
             }
+            ReasoningDisplayMode::ExpandedSimplified => String::new(),
             ReasoningDisplayMode::Snippet => {
                 let Some(duration) = self.duration.map(format_reasoning_duration) else {
                     return "• thoughts".to_string();
@@ -275,6 +347,71 @@ impl ReasoningMessageItem {
 
     fn is_toggleable(&self) -> bool {
         self.has_toggle_header
+    }
+
+    fn should_compact_content_lines(&self, line_count: usize) -> bool {
+        // `expanded-simplified` 的省略块包含上方空行、提示行、下方空行。
+        // 只有 compact 后严格更短才折叠，避免 9-11 行内容被“简化”成同样长甚至更长。
+        let compacted_line_count = REASONING_SIMPLIFIED_EDGE_LINES
+            .saturating_mul(2)
+            .saturating_add(REASONING_SIMPLIFIED_HINT_OVERHEAD_LINES);
+        matches!(self.display_mode, ReasoningDisplayMode::ExpandedSimplified)
+            && self.render_mode == ReasoningRenderMode::Compact
+            && line_count > compacted_line_count
+    }
+}
+
+fn compact_reasoning_content_lines(lines: Vec<Line<'static>>, style: Style) -> Vec<Line<'static>> {
+    let edge = REASONING_SIMPLIFIED_EDGE_LINES;
+    let limit = edge.saturating_mul(2);
+    let omitted = lines.len().saturating_sub(limit);
+    let mut compacted = Vec::with_capacity(limit + 3);
+    compacted.extend(lines.iter().take(edge).cloned());
+    compacted.push(styled_reasoning_line(String::new(), style));
+    compacted.push(styled_reasoning_line(
+        format!("… +{omitted} lines ({TRANSCRIPT_DETAIL_HINT})"),
+        style,
+    ));
+    compacted.push(styled_reasoning_line(String::new(), style));
+    compacted.extend(lines.iter().skip(lines.len().saturating_sub(edge)).cloned());
+    compacted
+}
+
+fn reasoning_content_line_anchors(
+    full_line_count: usize,
+    should_compact: bool,
+) -> Vec<ItemLineAnchor> {
+    if !should_compact {
+        return (0..full_line_count)
+            .map(reasoning_source_line_anchor)
+            .collect();
+    }
+
+    let edge = REASONING_SIMPLIFIED_EDGE_LINES;
+    let tail_start = full_line_count.saturating_sub(edge);
+    let omitted_start = edge.min(full_line_count.saturating_sub(1));
+    let mut anchors = Vec::with_capacity(edge.saturating_mul(2).saturating_add(3));
+    anchors.extend((0..edge).map(reasoning_source_line_anchor));
+
+    // 省略提示和两侧空行都锚定到第一条被省略的 source 行。
+    // Ctrl+T overlay 因此会进入被隐藏区域，而不是停在 compact 提示本身。
+    let omitted_anchor = reasoning_source_line_anchor(omitted_start);
+    anchors.push(omitted_anchor);
+    anchors.push(omitted_anchor);
+    anchors.push(omitted_anchor);
+
+    anchors.extend((tail_start..full_line_count).map(reasoning_source_line_anchor));
+    anchors
+}
+
+fn reasoning_source_line_anchor(source_line: usize) -> ItemLineAnchor {
+    ItemLineAnchor {
+        kind: LineAnchorKind::LogicalPosition,
+        logical_line: source_line,
+        range_start: source_line,
+        range_end: source_line.saturating_add(1),
+        rendered_line: source_line,
+        ..ItemLineAnchor::default()
     }
 }
 
@@ -304,12 +441,16 @@ fn apply_reasoning_content_style(
 fn reasoning_message_render_cache_key(
     content: &str,
     display_mode: ReasoningDisplayMode,
+    render_mode: ReasoningRenderMode,
     has_toggle_header: bool,
     duration: Option<Duration>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     "reasoning_message".hash(&mut hasher);
     display_mode.hash(&mut hasher);
+    if matches!(display_mode, ReasoningDisplayMode::ExpandedSimplified) {
+        render_mode.hash(&mut hasher);
+    }
     has_toggle_header.hash(&mut hasher);
     duration.hash(&mut hasher);
     if !matches!(display_mode, ReasoningDisplayMode::Snippet) {
@@ -549,6 +690,127 @@ mod tests {
     }
 
     #[test]
+    fn expanded_simplified_short_reasoning_renders_like_expanded() {
+        let item = ReasoningMessageItem::new(
+            "line 1\nline 2",
+            ReasoningDisplayMode::ExpandedSimplified,
+            None,
+        );
+
+        assert_eq!(
+            item.render_lines(80, default_palette())
+                .iter()
+                .map(line_to_plain_text)
+                .collect::<Vec<_>>(),
+            vec!["line 1".to_string(), "line 2".to_string()]
+        );
+    }
+
+    #[test]
+    fn expanded_simplified_compacts_only_when_output_is_strictly_shorter() {
+        let twelve_line_item = ReasoningMessageItem::new(
+            numbered_lines(12),
+            ReasoningDisplayMode::ExpandedSimplified,
+            None,
+        );
+
+        for line_count in 9..=11 {
+            let item = ReasoningMessageItem::new(
+                numbered_lines(line_count),
+                ReasoningDisplayMode::ExpandedSimplified,
+                None,
+            );
+            assert_eq!(
+                rendered_plain_lines(&item),
+                numbered_plain_lines(line_count),
+                "{line_count} 行内容 compact 后不会更短，主界面应保持完整展示"
+            );
+        }
+
+        let twelve_lines = rendered_plain_lines(&twelve_line_item);
+
+        assert_eq!(
+            twelve_lines,
+            vec![
+                "line 1".to_string(),
+                "line 2".to_string(),
+                "line 3".to_string(),
+                "line 4".to_string(),
+                String::new(),
+                "… +4 lines (ctrl + t to view transcript)".to_string(),
+                String::new(),
+                "line 9".to_string(),
+                "line 10".to_string(),
+                "line 11".to_string(),
+                "line 12".to_string(),
+            ],
+            "12 行内容 compact 后比原文少 1 行，应进入简化展示"
+        );
+    }
+
+    #[test]
+    fn expanded_simplified_long_reasoning_compacts_in_default_render_mode() {
+        let item = ReasoningMessageItem::new(
+            (1..=14)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            ReasoningDisplayMode::ExpandedSimplified,
+            Some(Duration::from_secs(8)),
+        );
+
+        let plain_lines = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            plain_lines,
+            vec![
+                "line 1".to_string(),
+                "line 2".to_string(),
+                "line 3".to_string(),
+                "line 4".to_string(),
+                String::new(),
+                "… +6 lines (ctrl + t to view transcript)".to_string(),
+                String::new(),
+                "line 11".to_string(),
+                "line 12".to_string(),
+                "line 13".to_string(),
+                "line 14".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn expanded_simplified_long_reasoning_renders_full_content_in_detailed_mode() {
+        let mut item = ReasoningMessageItem::new(
+            (1..=14)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            ReasoningDisplayMode::ExpandedSimplified,
+            Some(Duration::from_secs(8)),
+        );
+
+        assert!(item.set_render_mode(ReasoningRenderMode::Detailed));
+
+        let plain_lines = item
+            .render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert!(plain_lines.contains(&"line 7".to_string()));
+        assert!(
+            !plain_lines
+                .iter()
+                .any(|line| line.contains("ctrl + t to view transcript"))
+        );
+    }
+
+    #[test]
     fn reasoning_message_markdown_profile_matches_codex_reasoning_summary() {
         let item = ReasoningMessageItem::new(
             "- [x] task\n\nenergy $E = mc^2$ now\n\n![diagram](image.png)\n\n<kbd>Ctrl</kbd>",
@@ -578,5 +840,20 @@ mod tests {
             plain_text.contains("<kbd>Ctrl</kbd>"),
             "HTML 应作为 literal text 渲染"
         );
+    }
+
+    fn numbered_lines(count: usize) -> String {
+        numbered_plain_lines(count).join("\n")
+    }
+
+    fn numbered_plain_lines(count: usize) -> Vec<String> {
+        (1..=count).map(|line| format!("line {line}")).collect()
+    }
+
+    fn rendered_plain_lines(item: &ReasoningMessageItem) -> Vec<String> {
+        item.render_lines(80, default_palette())
+            .iter()
+            .map(line_to_plain_text)
+            .collect()
     }
 }

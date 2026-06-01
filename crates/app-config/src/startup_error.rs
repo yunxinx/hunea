@@ -160,7 +160,7 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
             "tui.reasoning_content_display",
             value,
             "Unknown reasoning content display mode",
-            "collapsed, expanded, snippet",
+            "collapsed, expanded, expanded-simplified, snippet",
         ),
         AppConfigError::InvalidRuntimeRequestPolicy { path, reason } => rows_with_optional_file(
             path,

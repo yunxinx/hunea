@@ -522,7 +522,11 @@ fn to_u16_width(width: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{StartupBannerOptions, render_startup_banner_buffer};
+    use super::{
+        DEFAULT_APP_NAME, DEFAULT_VERSION, StartupBannerOptions, render_startup_banner_buffer,
+        startup_banner_title_plain_text,
+    };
+    use crate::display_width::display_width;
     use crate::theme::palette_from_background;
 
     #[test]
@@ -530,7 +534,8 @@ mod tests {
         let buffer =
             render_startup_banner_buffer(&StartupBannerOptions::default(), sample_palette(), "");
 
-        assert_eq!(buffer.area.width, 14);
+        let title = startup_banner_title_plain_text(DEFAULT_APP_NAME, DEFAULT_VERSION);
+        assert_eq!(buffer.area.width, display_width(&title) as u16);
         assert_eq!(buffer.area.height, 1);
     }
 

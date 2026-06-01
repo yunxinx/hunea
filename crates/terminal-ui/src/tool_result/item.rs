@@ -60,7 +60,6 @@ pub(crate) const TOOL_ACTIVITY_LINE_NUMBER_WIDTH: usize = 7;
 pub(crate) const TOOL_ACTIVITY_ACTIVE_MARKER_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 pub(super) const TOOL_ACTIVITY_DIFF_LINE_NUMBER_WIDTH: usize = TOOL_ACTIVITY_LINE_NUMBER_WIDTH;
 pub(super) const TOOL_ACTIVITY_COMPACT_EDGE_LINES: usize = 5;
-pub(super) const TOOL_ACTIVITY_TRANSCRIPT_HINT: &str = "ctrl + t to view transcript";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ToolResultKind {

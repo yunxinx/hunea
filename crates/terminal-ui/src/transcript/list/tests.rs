@@ -519,6 +519,37 @@ fn snippet_reasoning_without_duration_is_not_appended() {
 }
 
 #[test]
+fn expanded_simplified_reasoning_switches_between_compact_and_detailed_modes() {
+    let mut transcript = Transcript::new(default_palette());
+    transcript.append_assistant_message_with_reasoning(
+        "结论",
+        (1..=14)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ReasoningDisplayMode::ExpandedSimplified,
+        None,
+        StyleMode::Cx,
+    );
+
+    let compact = transcript.plain_items().join("\n");
+    assert!(compact.contains("line 1"));
+    assert!(compact.contains("line 14"));
+    assert!(compact.contains("\n\n… +6 lines (ctrl + t to view transcript)\n\n"));
+    assert!(!compact.contains("line 7"));
+
+    transcript.set_reasoning_render_mode(ReasoningRenderMode::Detailed);
+    let detailed = transcript.plain_items().join("\n");
+    assert!(detailed.contains("line 7"));
+    assert!(!detailed.contains("ctrl + t to view transcript"));
+
+    transcript.set_reasoning_render_mode(ReasoningRenderMode::Compact);
+    let compact_again = transcript.plain_items().join("\n");
+    assert!(compact_again.contains("\n\n… +6 lines (ctrl + t to view transcript)\n\n"));
+    assert!(!compact_again.contains("line 7"));
+}
+
+#[test]
 fn truncate_before_item_removes_selected_and_later_history() {
     let mut transcript = Transcript::new(default_palette());
     transcript.append_message(Sender::User, "first question");

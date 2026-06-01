@@ -321,6 +321,19 @@ mod tests {
     }
 
     #[test]
+    fn model_options_from_config_carries_expanded_simplified_reasoning_display_mode() {
+        let options = model_options_from_config(&TuiConfig {
+            reasoning_content_display: ReasoningContentDisplay::ExpandedSimplified,
+            ..default_tui_config()
+        });
+
+        assert_eq!(
+            options.reasoning_display_mode,
+            ReasoningDisplayMode::ExpandedSimplified
+        );
+    }
+
+    #[test]
     fn model_options_from_config_carries_debug_command_flag() {
         let options = model_options_from_app_config(&Config {
             tui: default_tui_config(),

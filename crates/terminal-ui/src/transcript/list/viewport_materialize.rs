@@ -16,6 +16,97 @@ pub(crate) struct TranscriptViewportLines {
 }
 
 impl Transcript {
+    /// 物化单条 transcript 行的语义锚点，用于跨展示模式恢复同一 source 位置。
+    pub(crate) fn materialize_line_anchor(
+        &mut self,
+        line_index: usize,
+    ) -> (TranscriptItemMetricsIndex, Option<LineAnchor>) {
+        let mut index = self.progressive_item_metrics_index();
+        if index.line_count == 0 || line_index >= index.line_count {
+            return (index, None);
+        }
+
+        index = self.exactize_line_window_until_stable(
+            index,
+            line_index,
+            1,
+            viewport_overscan_line_budget(1),
+        );
+        let Some(position) = index.position_for_line(line_index) else {
+            return (index, None);
+        };
+        let relative = line_index.saturating_sub(position.start_line);
+        if relative < position.gap_before {
+            return (
+                index,
+                Some(LineAnchor {
+                    item_index: position.gap_owner_item_index.unwrap_or(position.item_index),
+                    item_anchor: ItemLineAnchor {
+                        kind: LineAnchorKind::ItemGap,
+                        gap_offset: relative,
+                        ..ItemLineAnchor::default()
+                    },
+                }),
+            );
+        }
+
+        let block_index = relative.saturating_sub(position.gap_before);
+        self.begin_recent_render_block_batch();
+        let block = self.render_screen_block(position.item_index, self.render_width());
+        let anchor = block.anchor_at(block_index).map(|item_anchor| LineAnchor {
+            item_index: position.item_index,
+            item_anchor,
+        });
+        self.finish_recent_render_block_batch(1);
+        (index, anchor)
+    }
+
+    /// 在当前展示模式下把语义锚点反查回 transcript 行号。
+    pub(crate) fn line_index_for_anchor(
+        &mut self,
+        target: LineAnchor,
+    ) -> (TranscriptItemMetricsIndex, Option<usize>) {
+        let mut index = self.progressive_item_metrics_index();
+        let Some(item_lines) = index.item_lines(target.item_index) else {
+            return (index, None);
+        };
+
+        let content_line_count = item_lines.content_line_count.max(1);
+        index = self.exactize_line_window_until_stable(
+            index,
+            item_lines.content_start_line,
+            content_line_count,
+            viewport_overscan_line_budget(content_line_count),
+        );
+
+        let Some(item_lines) = index.item_lines(target.item_index) else {
+            return (index, None);
+        };
+        if matches!(target.item_anchor.kind, LineAnchorKind::ItemGap) {
+            let gap_line_count = index.trailing_gap_line_count(target.item_index);
+            if target.item_anchor.gap_offset >= gap_line_count {
+                return (index, None);
+            }
+            return (
+                index,
+                Some(
+                    item_lines
+                        .content_start_line
+                        .saturating_add(item_lines.content_line_count)
+                        .saturating_add(target.item_anchor.gap_offset),
+                ),
+            );
+        }
+
+        self.begin_recent_render_block_batch();
+        let block = self.render_screen_block(target.item_index, self.render_width());
+        let line_index = block
+            .anchor_index(target.item_anchor)
+            .map(|block_index| item_lines.content_start_line.saturating_add(block_index));
+        self.finish_recent_render_block_batch(1);
+        (index, line_index)
+    }
+
     /// `materialize_line_window` 只物化指定 transcript 行窗口覆盖到的 item。
     pub(crate) fn materialize_line_window(
         &mut self,

@@ -11,6 +11,9 @@ mod prompt_wrap;
 mod render_state;
 mod wrap;
 
+/// 主 transcript 中可被 Ctrl+T overlay 还原为完整内容的统一提示文案。
+pub(crate) const TRANSCRIPT_DETAIL_HINT: &str = "ctrl + t to view transcript";
+
 #[cfg(test)]
 pub(crate) use cache::CachedLineAnchors;
 pub(crate) use cache::viewport_overscan_line_budget;
@@ -25,6 +28,7 @@ pub(crate) use item_index::{
     TranscriptItemMetricsIndex, TranscriptItemMetricsQuality, TranscriptItemPosition,
 };
 pub use items::ReasoningDisplayMode;
+pub(crate) use items::ReasoningRenderMode;
 pub(crate) use items::{
     FinalBodyDividerItem, ReasoningMessageItem, SystemMessageItem, WorkDurationMessageItem,
 };

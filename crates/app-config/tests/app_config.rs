@@ -380,6 +380,23 @@ fn load_accepts_expanded_reasoning_content_display() {
 }
 
 #[test]
+fn load_accepts_expanded_simplified_reasoning_content_display() {
+    let working_dir = temp_test_dir("load-expanded-simplified-reasoning-display-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nreasoning_content_display = \"expanded-simplified\"\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("reasoning_content_display should accept expanded-simplified");
+
+    assert_eq!(
+        config.tui.reasoning_content_display,
+        ReasoningContentDisplay::ExpandedSimplified
+    );
+}
+
+#[test]
 fn load_accepts_snippet_reasoning_content_display() {
     let working_dir = temp_test_dir("load-snippet-reasoning-display-working");
     write_config(

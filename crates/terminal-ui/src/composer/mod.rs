@@ -196,6 +196,9 @@ impl Composer {
             KeyCode::Up => self.move_vertical(-1),
             KeyCode::Char('n') if is_ctrl_only(key.modifiers) => self.move_vertical(1),
             KeyCode::Down => self.move_vertical(1),
+            KeyCode::Char('u') if is_ctrl_only(key.modifiers) => {
+                self.delete_current_line_before_cursor()
+            }
             KeyCode::Char('a') if is_ctrl_only(key.modifiers) => self.move_line_start(),
             KeyCode::Home if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_line_start()
@@ -419,6 +422,24 @@ impl Composer {
         };
 
         self.delete_absolute_range(line.start_char + start, line.start_char + end);
+    }
+
+    fn delete_current_line_before_cursor(&mut self) {
+        let lines = logical_lines(&self.value);
+        let (row, column) = logical_position(&self.value, self.cursor);
+        if row >= lines.len() {
+            return;
+        }
+
+        let line = lines[row];
+        if column == 0 {
+            if line.start_char > 0 {
+                self.delete_absolute_range(line.start_char - 1, line.start_char);
+            }
+            return;
+        }
+
+        self.delete_absolute_range(line.start_char, line.start_char + column);
     }
 
     fn move_left(&mut self) {

@@ -117,6 +117,10 @@ impl Model {
             KeyCode::Char('u' | 'U') if is_model_refresh_key(key) => {
                 Some(self.refresh_current_model_panel_provider())
             }
+            _ if is_model_search_clear_key(key) => {
+                self.clear_model_panel_search();
+                Some(None)
+            }
             _ if is_model_search_backspace_key(key) => {
                 self.backspace_model_panel_search();
                 Some(None)
@@ -455,6 +459,12 @@ fn is_model_search_backspace_key(key: KeyEvent) -> bool {
         KeyCode::Char('\u{0008}') => !key.modifiers.contains(KeyModifiers::ALT),
         _ => false,
     }
+}
+
+fn is_model_search_clear_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('u')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
 }
 
 fn is_model_plain_search_key(key: KeyEvent) -> bool {

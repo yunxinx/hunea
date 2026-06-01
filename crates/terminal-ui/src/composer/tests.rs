@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::Composer;
 use crate::{StyleMode, theme::default_palette};
@@ -69,6 +69,27 @@ fn end_moves_to_the_current_line_end() {
     composer.handle_key(KeyEvent::from(KeyCode::End));
 
     assert_eq!(composer.cursor_position(), (0, 2));
+}
+
+#[test]
+fn ctrl_u_deletes_current_line_before_cursor_only() {
+    let mut composer = composer_with_cursor(test_composer(80, 4, "alpha\nbeta gamma"), 10);
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+    assert_eq!(composer.value(), "alpha\n gamma");
+    assert_eq!(composer.cursor_position(), (1, 0));
+}
+
+#[test]
+fn repeated_ctrl_u_moves_to_previous_line_end() {
+    let mut composer = composer_with_cursor(test_composer(80, 4, "alpha\nbeta gamma"), 10);
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    composer.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+    assert_eq!(composer.value(), "alpha gamma");
+    assert_eq!(composer.cursor_position(), (0, 5));
 }
 
 #[test]

@@ -185,6 +185,31 @@ fn model_panel_backspace_removes_search_characters() {
 }
 
 #[test]
+fn model_panel_ctrl_u_clears_search_query() {
+    let mut model = ready_model(72, 18, model_options_with_catalog());
+    type_text(&mut model, "/models");
+    model.update(AppEvent::Key(KeyCode::Enter.into()));
+    type_text(&mut model, "qwe");
+
+    model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('u'),
+        KeyModifiers::CONTROL,
+    )));
+
+    let rows = render_trimmed_rows(&mut model, 72, 18);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Available Models(Type to Search):")),
+        "Ctrl+U should clear the model search query, got: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("qwen3"))
+            && rows.iter().any(|row| row.contains("qwen2")),
+        "clearing search should restore all current-provider models, got: {rows:?}"
+    );
+}
+
+#[test]
 fn model_panel_ignores_paste_without_changing_hidden_composer() {
     let mut model = ready_model(72, 18, model_options_with_catalog());
     type_text(&mut model, "/models");

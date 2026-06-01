@@ -115,6 +115,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -160,6 +161,16 @@ mod tests {
     }
 
     #[test]
+    fn model_options_from_config_carries_composer_undo_limit() {
+        let options = model_options_from_config(&TuiConfig {
+            composer_undo_limit: 80,
+            ..default_tui_config()
+        });
+
+        assert_eq!(options.composer_undo_limit, 80);
+    }
+
+    #[test]
     fn model_options_from_config_carries_second_status_line_items() {
         let options = model_options_from_config(&TuiConfig {
             status_line_2: vec!["current-dir".to_string(), "git-branch".to_string()],
@@ -186,6 +197,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -208,6 +220,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -230,6 +243,7 @@ mod tests {
             esc_interrupt_presses: 3,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -252,6 +266,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: false,
             file_picker_popup_height: 7,
+            composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -274,6 +289,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: true,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -296,6 +312,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: true,
             reasoning_content_display: ReasoningContentDisplay::Expanded,
@@ -390,6 +407,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -414,6 +432,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            composer_undo_limit: 50,
             print_transcript_on_exit: true,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
@@ -439,6 +458,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,

@@ -227,7 +227,7 @@ mod tests {
             .transcript_mut()
             .append_message(Sender::Assistant, "a\nb\nc\nd\ne");
         model.sync_transcript_render();
-        model.composer.replace_text_and_move_to_end("x");
+        model.composer.reset_text_and_move_to_end("x");
         model.sync_composer_height();
         model.sync_document_viewport_to_bottom();
         model.scroll_document_by(-3);

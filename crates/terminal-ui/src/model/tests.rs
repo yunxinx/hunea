@@ -1840,7 +1840,7 @@ fn composer_cursor_only_layout_refresh_reuses_long_composer_document() {
     model.set_palette(default_palette(), true);
     model
         .composer_mut()
-        .replace_text_and_move_to_end("中英 mixed long composer text ".repeat(120));
+        .reset_text_and_move_to_end("中英 mixed long composer text ".repeat(120));
     model.sync_composer_height();
     let _ = model.build_document_layout();
 

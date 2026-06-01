@@ -301,7 +301,7 @@ pub fn render_composer_document_with_input(
 ) -> ComposerRenderSummary {
     let mut composer = Composer::new(style_mode);
     composer.set_width(width);
-    composer.replace_text_and_move_to_end(value);
+    composer.reset_text_and_move_to_end(value);
 
     let document = composer.render_document(palette);
     ComposerRenderSummary {
@@ -881,7 +881,7 @@ fn new_warm_stress_document_model(item_count: usize, width: u16, height: u16) ->
     model.set_palette(default_palette(), true);
     model
         .composer_mut()
-        .replace_text_and_move_to_end(benchmark_composer_draft_for_document());
+        .reset_text_and_move_to_end(benchmark_composer_draft_for_document());
     model.sync_composer_height();
     model
 }
@@ -910,7 +910,7 @@ fn new_cold_stress_document_model(item_count: usize, width: u16, height: u16) ->
 
     model
         .composer_mut()
-        .replace_text_and_move_to_end(benchmark_composer_draft_for_document());
+        .reset_text_and_move_to_end(benchmark_composer_draft_for_document());
     model.sync_composer_height();
     model
 }

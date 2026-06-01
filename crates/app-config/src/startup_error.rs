@@ -1,5 +1,6 @@
 use crate::appconfig::{
-    self, AppConfigError, FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT,
+    self, AppConfigError, COMPOSER_UNDO_MAX_LIMIT, COMPOSER_UNDO_MIN_LIMIT,
+    FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -152,6 +153,18 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
                 (
                     "Expected",
                     format!("{FILE_PICKER_POPUP_MIN_HEIGHT}..{FILE_PICKER_POPUP_MAX_HEIGHT}"),
+                ),
+            ],
+        ),
+        AppConfigError::InvalidComposerUndoLimit { path, value } => rows_with_optional_file(
+            path,
+            vec![
+                ("Setting", "tui.composer_undo_limit".to_string()),
+                ("Value", value.to_string()),
+                ("Reason", "Invalid composer undo limit".to_string()),
+                (
+                    "Expected",
+                    format!("{COMPOSER_UNDO_MIN_LIMIT}..{COMPOSER_UNDO_MAX_LIMIT}"),
                 ),
             ],
         ),

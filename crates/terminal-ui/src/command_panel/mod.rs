@@ -358,7 +358,7 @@ impl Model {
         let old_line = self.composer.line();
         let old_column = self.composer.column();
         self.composer
-            .replace_text_and_move_to_end(next_value.to_string());
+            .replace_text_and_move_to_end_for_edit(next_value.to_string());
         self.sync_command_panel_navigation();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();

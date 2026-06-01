@@ -72,6 +72,11 @@ swap_enter_and_send = false
 # 默认开启；关闭后，Ctrl+C 会恢复为退出确认语义。
 ctrl_c_clears_input = true
 
+# `composer_undo_limit` 控制输入框 Ctrl+Z 可撤回的草稿快照数量。
+# 仅保存在当前 TUI 进程内，不会写入会话或配置；Ctrl+Y 的 kill buffer 仍只保存最近一次 kill。
+# 取值范围 1..200，默认 50。
+composer_undo_limit = 50
+
 # `esc_interrupt_presses` 控制当前对话 turn 运行中，
 # 需要连续按多少次 Esc 才会中断当前 native 请求。
 # 可选值为 1、2、3；默认 2。

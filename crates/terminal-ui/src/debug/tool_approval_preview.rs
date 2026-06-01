@@ -6,7 +6,7 @@ impl Model {
         let old_line = self.composer.line();
         let old_column = self.composer.column();
 
-        self.composer.replace_text_and_move_to_end(String::new());
+        self.composer.reset_text_and_move_to_end(String::new());
         self.open_tool_approval_panel(
             ToolApprovalSource::Preview,
             "sed -n '1,80p' src/main.rs".to_string(),

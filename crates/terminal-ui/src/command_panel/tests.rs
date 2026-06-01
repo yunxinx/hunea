@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
-    ModelOptions, StartupBannerOptions, StatusLineItem, StyleMode, document::DocumentAnchorRegion,
+    AppEvent, ModelOptions, StartupBannerOptions, StatusLineItem, StyleMode,
+    document::DocumentAnchorRegion,
 };
 
 #[test]
@@ -33,7 +34,7 @@ fn current_status_notice_still_renders_below_command_panel() {
     );
     model.set_window(24, 6);
     model.show_transient_status_notice("Selection copied");
-    model.composer.replace_text_and_move_to_end("/");
+    model.composer.reset_text_and_move_to_end("/");
     model.sync_command_panel_navigation();
     model.sync_composer_height();
 
@@ -55,7 +56,7 @@ fn command_panel_rows_are_inserted_into_document_before_status_notice() {
         },
     );
     model.set_window(32, 8);
-    model.composer.replace_text_and_move_to_end("/");
+    model.composer.reset_text_and_move_to_end("/");
     model.sync_command_panel_navigation();
     model.show_transient_status_notice("Selection copied");
 
@@ -77,6 +78,22 @@ fn command_panel_rows_are_inserted_into_document_before_status_notice() {
 
     assert!(panel_line < notice_line);
     assert_eq!(command_panel_rows, model.command_panel_list_visible_rows());
+}
+
+#[test]
+fn command_panel_completion_is_undoable_to_the_query() {
+    let mut model = Model::new(StartupBannerOptions::default());
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('/'))));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+    assert_eq!(model.composer_text(), "/exit");
+
+    model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('z'),
+        KeyModifiers::CONTROL,
+    )));
+
+    assert_eq!(model.composer_text(), "/");
 }
 
 #[test]

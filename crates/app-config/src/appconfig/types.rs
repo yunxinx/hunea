@@ -2,6 +2,12 @@
 pub const FILE_PICKER_POPUP_MIN_HEIGHT: u16 = 3;
 /// @ 文件选择浮窗最多显示 21 行，避免覆盖过多上下文。
 pub const FILE_PICKER_POPUP_MAX_HEIGHT: u16 = 21;
+/// Composer undo 至少保留 1 条，确保开启撤回时有明确效果。
+pub const COMPOSER_UNDO_MIN_LIMIT: usize = 1;
+/// Composer undo 最多保留 200 条，避免配置误填导致草稿快照无限增长。
+pub const COMPOSER_UNDO_MAX_LIMIT: usize = 200;
+/// Composer undo 默认保留 50 条，覆盖常见短编辑而不制造过多隐藏状态。
+pub const COMPOSER_UNDO_DEFAULT_LIMIT: usize = 50;
 
 /// `Config` 表示当前 hunea 支持的启动配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +31,7 @@ pub struct TuiConfig {
     pub esc_interrupt_presses: u8,
     pub show_esc_interrupt_hint: bool,
     pub file_picker_popup_height: u16,
+    pub composer_undo_limit: usize,
     pub print_transcript_on_exit: bool,
     pub show_reasoning_content: bool,
     pub reasoning_content_display: ReasoningContentDisplay,

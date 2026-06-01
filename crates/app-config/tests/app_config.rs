@@ -22,6 +22,7 @@ fn load_defaults_to_cx_when_no_config_exists() {
     assert!(config.tui.status_line.is_empty());
     assert!(config.tui.status_line_2.is_empty());
     assert_eq!(config.tui.file_picker_popup_height, 7);
+    assert_eq!(config.tui.composer_undo_limit, 50);
     assert!(!config.debug.enabled);
 }
 
@@ -498,6 +499,58 @@ fn load_accepts_configured_file_picker_popup_height() {
         .expect("file picker popup height should accept values up to 21");
 
     assert_eq!(config.tui.file_picker_popup_height, 21);
+}
+
+#[test]
+fn load_accepts_configured_composer_undo_limit() {
+    let working_dir = temp_test_dir("load-composer-undo-limit-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\ncomposer_undo_limit = 200\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("composer undo limit should accept values up to 200");
+
+    assert_eq!(config.tui.composer_undo_limit, 200);
+}
+
+#[test]
+fn load_rejects_zero_composer_undo_limit() {
+    let working_dir = temp_test_dir("load-zero-composer-undo-limit-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\ncomposer_undo_limit = 0\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("composer undo limit should reject zero");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.composer_undo_limit must be between 1 and 200"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_rejects_composer_undo_limit_above_maximum() {
+    let working_dir = temp_test_dir("load-high-composer-undo-limit-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\ncomposer_undo_limit = 201\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("composer undo limit should reject values above 200");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.composer_undo_limit must be between 1 and 200"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

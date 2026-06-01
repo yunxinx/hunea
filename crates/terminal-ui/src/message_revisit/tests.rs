@@ -60,6 +60,37 @@ fn conversation_message_revisit_prefills_composer_and_truncates_history() {
 }
 
 #[test]
+fn conversation_message_revisit_prefill_is_not_composer_undo_history() {
+    let mut model = conversation_test_model();
+    append_two_turns(&mut model);
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert_eq!(
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter))),
+        Some(AppEffect::TruncateConversation {
+            retained_user_turns: 1,
+        })
+    );
+    assert_eq!(model.composer_text(), "second question");
+
+    // message revisit 同时截断 transcript；composer-only undo 不能伪造“恢复旧草稿”的半截历史。
+    model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('z'),
+        KeyModifiers::CONTROL,
+    )));
+
+    assert_eq!(model.composer_text(), "second question");
+    assert_eq!(
+        model.transcript_mut().source_messages(),
+        vec![
+            (Sender::User, "first question".to_string()),
+            (Sender::Assistant, "first answer".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn conversation_message_revisit_highlight_projects_cx_half_height_frame_to_solid_selection() {
     let mut model = conversation_test_model();
     append_two_turns(&mut model);

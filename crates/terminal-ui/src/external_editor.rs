@@ -85,7 +85,7 @@ impl Model {
         let next_draft = normalize_external_editor_draft(&content);
         if next_draft != original_draft {
             self.composer
-                .replace_text_and_move_to_end(next_draft.clone());
+                .replace_text_and_move_to_end_for_edit(next_draft.clone());
         }
 
         self.sync_command_panel_navigation();
@@ -325,6 +325,8 @@ fn shell_script_arg_index(args: &[String]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AppEvent, Model, StartupBannerOptions};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
     fn external_editor_command_with_draft_adds_shell_name_when_missing() {
@@ -393,5 +395,24 @@ mod tests {
             normalize_external_editor_draft("after\r\nmore\r\n"),
             "after\nmore\n"
         );
+    }
+
+    #[test]
+    fn external_editor_result_is_undoable_to_original_draft() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.composer_mut().insert_text("before");
+        let draft_path =
+            write_external_editor_draft("before").expect("draft file should be written");
+        fs::write(&draft_path, "after").expect("draft file should be editable");
+
+        model.apply_external_editor_finished(&draft_path, "before", false);
+        assert_eq!(model.composer_text(), "after");
+
+        model.update(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+        )));
+
+        assert_eq!(model.composer_text(), "before");
     }
 }

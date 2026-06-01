@@ -120,6 +120,7 @@ fn model_options_from_configs(
         esc_interrupt_presses: tui_config.esc_interrupt_presses,
         show_esc_interrupt_hint: tui_config.show_esc_interrupt_hint,
         file_picker_popup_height: tui_config.file_picker_popup_height,
+        composer_undo_limit: tui_config.composer_undo_limit,
         show_reasoning_content: tui_config.show_reasoning_content,
         reasoning_display_mode: reasoning_display_mode_from_config(
             tui_config.reasoning_content_display,

@@ -1,5 +1,6 @@
 use super::{
-    Config, DebugConfig, ReasoningContentDisplay, RuntimeConfig, TuiConfig, UserInputStyle,
+    COMPOSER_UNDO_DEFAULT_LIMIT, Config, DebugConfig, ReasoningContentDisplay, RuntimeConfig,
+    TuiConfig, UserInputStyle,
 };
 
 impl Config {
@@ -17,6 +18,7 @@ impl Config {
                 esc_interrupt_presses: 2,
                 show_esc_interrupt_hint: true,
                 file_picker_popup_height: 7,
+                composer_undo_limit: COMPOSER_UNDO_DEFAULT_LIMIT,
                 print_transcript_on_exit: false,
                 show_reasoning_content: false,
                 reasoning_content_display: ReasoningContentDisplay::Collapsed,

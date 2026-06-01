@@ -40,6 +40,9 @@ pub(crate) use self::{
 
 const PLACEHOLDER: &str = "Enter to send Prompt";
 const COMPOSER_RIGHT_PADDING_WIDTH: u16 = 2;
+pub const DEFAULT_COMPOSER_UNDO_LIMIT: usize = 50;
+pub const MAX_COMPOSER_UNDO_LIMIT: usize = 200;
+const WORD_SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
 
 /// `Composer` 管理底部输入区的文本、光标和自定义 viewport。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +55,21 @@ pub struct Composer {
     content_revision: usize,
     cursor_revision: usize,
     style_mode: StyleMode,
+    kill_buffer: String,
+    undo_history: Vec<ComposerSnapshot>,
+    undo_limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposerSnapshot {
+    value: String,
+    cursor: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerReplaceUndoMode {
+    Record,
+    Reset,
 }
 
 impl Default for Composer {
@@ -63,6 +81,11 @@ impl Default for Composer {
 impl Composer {
     /// `new` 创建指定样式模式的输入框状态。
     pub fn new(style_mode: StyleMode) -> Self {
+        Self::new_with_undo_limit(style_mode, DEFAULT_COMPOSER_UNDO_LIMIT)
+    }
+
+    /// `new_with_undo_limit` 创建指定 undo 容量的输入框状态。
+    pub fn new_with_undo_limit(style_mode: StyleMode, undo_limit: usize) -> Self {
         Self {
             value: String::new(),
             cursor: 0,
@@ -72,6 +95,9 @@ impl Composer {
             content_revision: 1,
             cursor_revision: 1,
             style_mode: style_mode.normalized(),
+            kill_buffer: String::new(),
+            undo_history: Vec::new(),
+            undo_limit: undo_limit.clamp(1, MAX_COMPOSER_UNDO_LIMIT),
         }
     }
 
@@ -114,13 +140,40 @@ impl Composer {
         self.value.clear();
         self.set_cursor(0);
         self.viewport_y = 0;
+        self.undo_history.clear();
         self.bump_content_revision();
     }
 
-    /// `replace_text_and_move_to_end` 用新内容替换当前草稿，并把光标移动到末尾。
-    pub fn replace_text_and_move_to_end(&mut self, value: impl Into<String>) {
+    /// `replace_text_and_move_to_end_for_edit` 用用户触发的整段编辑替换草稿，并记录 undo。
+    ///
+    /// 外部编辑器回写与命令补全都属于用户可感知的草稿编辑，`Ctrl+Z` 应该回到替换前文本。
+    pub(crate) fn replace_text_and_move_to_end_for_edit(&mut self, value: impl Into<String>) {
+        self.replace_text_and_move_to_end_with_undo_mode(value, ComposerReplaceUndoMode::Record);
+    }
+
+    /// `reset_text_and_move_to_end` 用内部状态切换结果替换草稿，并清空 undo 历史。
+    ///
+    /// message revisit、面板切换和预览初始化这类路径会同步改变草稿外的状态；
+    /// 只撤回 composer 文本会制造和 transcript / panel 状态不一致的假历史，因此这里必须重置 undo。
+    /// 发送与显式清空走 `clear`，但语义同样是重置而不是可撤销编辑。
+    pub(crate) fn reset_text_and_move_to_end(&mut self, value: impl Into<String>) {
+        self.replace_text_and_move_to_end_with_undo_mode(value, ComposerReplaceUndoMode::Reset);
+    }
+
+    fn replace_text_and_move_to_end_with_undo_mode(
+        &mut self,
+        value: impl Into<String>,
+        undo_mode: ComposerReplaceUndoMode,
+    ) {
         let value = sanitized_owned_text(value.into());
-        if self.value != value {
+        let changed = self.value != value;
+        match undo_mode {
+            ComposerReplaceUndoMode::Record if changed => self.push_undo_snapshot(),
+            ComposerReplaceUndoMode::Reset => self.undo_history.clear(),
+            ComposerReplaceUndoMode::Record => {}
+        }
+
+        if changed {
             self.value = value;
             self.bump_content_revision();
         }
@@ -142,6 +195,7 @@ impl Composer {
             return;
         }
 
+        self.push_undo_snapshot();
         let byte_index = char_to_byte_index(&self.value, self.cursor);
         self.value.insert_str(byte_index, text);
         self.set_cursor(self.cursor + total_chars(text));
@@ -174,6 +228,7 @@ impl Composer {
             return true;
         }
 
+        self.push_undo_snapshot();
         self.value.replace_range(byte_start..byte_end, replacement);
         self.set_cursor(token.start_char + total_chars(replacement));
         self.bump_content_revision();
@@ -184,13 +239,24 @@ impl Composer {
     /// `handle_key` 处理输入编辑、导航与分页相关按键。
     pub fn handle_key(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Char('z') if is_ctrl_only(key.modifiers) => self.undo(),
+            KeyCode::Char('k') if is_ctrl_only(key.modifiers) => self.kill_to_end_of_line(),
+            KeyCode::Char('w') if is_ctrl_only(key.modifiers) => self.delete_backward_word(),
+            KeyCode::Char('y') if is_ctrl_only(key.modifiers) => self.yank(),
             KeyCode::Char('h') if is_ctrl_only(key.modifiers) => self.backspace(),
+            KeyCode::Backspace if has_word_modifier(key.modifiers) => self.delete_backward_word(),
             KeyCode::Backspace => self.backspace(),
+            KeyCode::Char('d') if key.modifiers == KeyModifiers::ALT => self.delete_forward_word(),
             KeyCode::Char('d') if is_ctrl_only(key.modifiers) => self.delete_forward(),
+            KeyCode::Delete if has_word_modifier(key.modifiers) => self.delete_forward_word(),
             KeyCode::Delete => self.delete_forward(),
             KeyCode::Char('b') if is_ctrl_only(key.modifiers) => self.move_left(),
+            KeyCode::Char('b') if key.modifiers == KeyModifiers::ALT => self.move_word_left(),
+            KeyCode::Left if has_word_modifier(key.modifiers) => self.move_word_left(),
             KeyCode::Left => self.move_left(),
             KeyCode::Char('f') if is_ctrl_only(key.modifiers) => self.move_right(),
+            KeyCode::Char('f') if key.modifiers == KeyModifiers::ALT => self.move_word_right(),
+            KeyCode::Right if has_word_modifier(key.modifiers) => self.move_word_right(),
             KeyCode::Right => self.move_right(),
             KeyCode::Char('p') if is_ctrl_only(key.modifiers) => self.move_vertical(-1),
             KeyCode::Up => self.move_vertical(-1),
@@ -372,6 +438,7 @@ impl Composer {
     }
 
     fn insert_char(&mut self, character: char) {
+        self.push_undo_snapshot();
         let byte_index = char_to_byte_index(&self.value, self.cursor);
         self.value.insert(byte_index, character);
         self.set_cursor(self.cursor + 1);
@@ -434,12 +501,12 @@ impl Composer {
         let line = lines[row];
         if column == 0 {
             if line.start_char > 0 {
-                self.delete_absolute_range(line.start_char - 1, line.start_char);
+                self.kill_absolute_range(line.start_char - 1, line.start_char);
             }
             return;
         }
 
-        self.delete_absolute_range(line.start_char, line.start_char + column);
+        self.kill_absolute_range(line.start_char, line.start_char + column);
     }
 
     fn move_left(&mut self) {
@@ -540,6 +607,49 @@ impl Composer {
         }
 
         self.set_cursor(lines[row].start_char + lines[row].len_chars());
+    }
+
+    fn move_word_left(&mut self) {
+        self.set_cursor(self.beginning_of_previous_word());
+    }
+
+    fn move_word_right(&mut self) {
+        self.set_cursor(self.end_of_next_word());
+    }
+
+    fn delete_backward_word(&mut self) {
+        let start = self.beginning_of_previous_word();
+        self.kill_absolute_range(start, self.cursor);
+    }
+
+    fn delete_forward_word(&mut self) {
+        let end = self.end_of_next_word();
+        self.kill_absolute_range(self.cursor, end);
+    }
+
+    fn kill_to_end_of_line(&mut self) {
+        let lines = logical_lines(&self.value);
+        let (row, _) = logical_position(&self.value, self.cursor);
+        if row >= lines.len() {
+            return;
+        }
+
+        let line = lines[row];
+        let line_end = line.start_char + line.len_chars();
+        if self.cursor < line_end {
+            self.kill_absolute_range(self.cursor, line_end);
+        } else if row + 1 < lines.len() {
+            self.kill_absolute_range(self.cursor, self.cursor + 1);
+        }
+    }
+
+    fn yank(&mut self) {
+        if self.kill_buffer.is_empty() {
+            return;
+        }
+
+        let text = self.kill_buffer.clone();
+        self.insert_text(&text);
     }
 
     fn page_move(&mut self, direction: isize) {
@@ -679,11 +789,103 @@ impl Composer {
             return;
         }
 
+        self.push_undo_snapshot();
+        self.delete_absolute_range_without_undo(start, end);
+    }
+
+    fn kill_absolute_range(&mut self, start: usize, end: usize) {
+        if end <= start {
+            return;
+        }
+
+        let byte_start = char_to_byte_index(&self.value, start);
+        let byte_end = char_to_byte_index(&self.value, end);
+        let killed_text = self.value[byte_start..byte_end].to_string();
+        if killed_text.is_empty() {
+            return;
+        }
+
+        self.kill_buffer = killed_text;
+        self.push_undo_snapshot();
+        self.delete_absolute_range_without_undo(start, end);
+    }
+
+    fn delete_absolute_range_without_undo(&mut self, start: usize, end: usize) {
         let byte_start = char_to_byte_index(&self.value, start);
         let byte_end = char_to_byte_index(&self.value, end);
         self.value.drain(byte_start..byte_end);
         self.set_cursor(start.min(total_chars(&self.value)));
         self.bump_content_revision();
+    }
+
+    fn push_undo_snapshot(&mut self) {
+        let snapshot = ComposerSnapshot {
+            value: self.value.clone(),
+            cursor: self.cursor,
+        };
+        if self.undo_history.last() == Some(&snapshot) {
+            return;
+        }
+
+        if self.undo_history.len() >= self.undo_limit {
+            self.undo_history.remove(0);
+        }
+        self.undo_history.push(snapshot);
+    }
+
+    fn undo(&mut self) {
+        let Some(snapshot) = self.undo_history.pop() else {
+            return;
+        };
+
+        if self.value != snapshot.value {
+            self.value = snapshot.value;
+            self.bump_content_revision();
+        }
+        self.set_cursor(snapshot.cursor.min(total_chars(&self.value)));
+        self.sync_viewport_to_cursor();
+    }
+
+    fn beginning_of_previous_word(&self) -> usize {
+        let chars = self.value.chars().collect::<Vec<_>>();
+        let mut index = self.cursor.min(chars.len());
+        while index > 0 && chars[index - 1].is_whitespace() {
+            index -= 1;
+        }
+        if index == 0 {
+            return 0;
+        }
+
+        let is_separator_run = is_word_separator(chars[index - 1]);
+        while index > 0 {
+            let previous = chars[index - 1];
+            if previous.is_whitespace() || is_word_separator(previous) != is_separator_run {
+                break;
+            }
+            index -= 1;
+        }
+        index
+    }
+
+    fn end_of_next_word(&self) -> usize {
+        let chars = self.value.chars().collect::<Vec<_>>();
+        let mut index = self.cursor.min(chars.len());
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+        if index >= chars.len() {
+            return chars.len();
+        }
+
+        let is_separator_run = is_word_separator(chars[index]);
+        while index < chars.len() {
+            let character = chars[index];
+            if character.is_whitespace() || is_word_separator(character) != is_separator_run {
+                break;
+            }
+            index += 1;
+        }
+        index
     }
 
     fn bump_content_revision(&mut self) {
@@ -898,6 +1100,14 @@ fn sanitized_owned_text(value: String) -> String {
 
 fn is_ctrl_only(modifiers: KeyModifiers) -> bool {
     modifiers.contains(KeyModifiers::CONTROL) && !modifiers.contains(KeyModifiers::ALT)
+}
+
+fn has_word_modifier(modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT)
+}
+
+fn is_word_separator(character: char) -> bool {
+    WORD_SEPARATORS.contains(character)
 }
 
 fn offset_index(current: usize, direction: isize, len: usize) -> Option<usize> {

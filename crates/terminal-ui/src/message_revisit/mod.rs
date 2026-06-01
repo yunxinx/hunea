@@ -210,7 +210,7 @@ impl Model {
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
         self.composer_mut()
-            .replace_text_and_move_to_end(selection.prefill);
+            .reset_text_and_move_to_end(selection.prefill);
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);

@@ -238,7 +238,7 @@ fn long_user_message_scroll_profile() {
             StyleMode::Cx,
         );
     }
-    model.composer_mut().replace_text_and_move_to_end("");
+    model.composer_mut().reset_text_and_move_to_end("");
     model.sync_composer_height();
 
     let sync_started_at = std::time::Instant::now();
@@ -479,7 +479,7 @@ fn new_hot_path_profile_model(width: u16, height: u16) -> Model {
 fn prepare_hot_path_profile_model(model: &mut Model, _width: u16, _height: u16) {
     model
         .composer_mut()
-        .replace_text_and_move_to_end("ready for high-frequency scroll profile");
+        .reset_text_and_move_to_end("ready for high-frequency scroll profile");
     model.sync_composer_height();
 }
 
@@ -802,7 +802,7 @@ fn mixed_long_history_high_frequency_scroll_profile() {
     }
     model
         .composer_mut()
-        .replace_text_and_move_to_end("ready for high-frequency scroll profile");
+        .reset_text_and_move_to_end("ready for high-frequency scroll profile");
     model.sync_composer_height();
 
     let sync_started_at = std::time::Instant::now();

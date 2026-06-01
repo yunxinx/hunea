@@ -93,6 +93,117 @@ fn repeated_ctrl_u_moves_to_previous_line_end() {
 }
 
 #[test]
+fn alt_word_keys_move_by_word_boundaries() {
+    let mut composer = test_composer(80, 4, "alpha beta gamma");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+    assert_eq!(composer.cursor_position(), (0, 11));
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+    assert_eq!(composer.cursor_position(), (0, 6));
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
+    assert_eq!(composer.cursor_position(), (0, 10));
+}
+
+#[test]
+fn word_delete_updates_yank_buffer() {
+    let mut composer = test_composer(80, 4, "alpha beta gamma");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "alpha beta ");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "alpha beta gamma");
+}
+
+#[test]
+fn forward_word_delete_updates_yank_buffer() {
+    let mut composer = composer_with_cursor(test_composer(80, 4, "alpha beta gamma"), 6);
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT));
+    assert_eq!(composer.value(), "alpha  gamma");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "alpha beta gamma");
+}
+
+#[test]
+fn ctrl_k_kills_to_line_end_and_yanks() {
+    let mut composer = composer_with_cursor(test_composer(80, 4, "alpha beta\ngamma"), 5);
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "alpha\ngamma");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "alpha beta\ngamma");
+}
+
+#[test]
+fn ctrl_u_kill_can_be_yanked() {
+    let mut composer = composer_with_cursor(test_composer(80, 4, "alpha\nbeta gamma"), 10);
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "alpha\n gamma");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "alpha\nbeta gamma");
+}
+
+#[test]
+fn ctrl_z_undoes_composer_edits_without_changing_yank_buffer() {
+    let mut composer = test_composer(80, 4, "alpha beta");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "alpha ");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "alpha beta");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "alpha betabeta");
+}
+
+#[test]
+fn undo_history_keeps_configured_number_of_snapshots() {
+    let mut composer = Composer::new_with_undo_limit(StyleMode::Ms, 2);
+
+    for character in ['a', 'b', 'c'] {
+        composer.handle_key(KeyEvent::from(KeyCode::Char(character)));
+    }
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "ab");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "a");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "a");
+}
+
+#[test]
+fn undoable_replace_restores_previous_draft() {
+    let mut composer = test_composer(80, 4, "draft before edit");
+
+    composer.replace_text_and_move_to_end_for_edit("draft after edit");
+    composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+
+    assert_eq!(composer.value(), "draft before edit");
+}
+
+#[test]
+fn reset_replace_clears_previous_undo_history() {
+    let mut composer = test_composer(80, 4, "draft");
+    composer.handle_key(KeyEvent::from(KeyCode::Char('!')));
+
+    composer.reset_text_and_move_to_end("prefilled from transcript");
+    composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+
+    assert_eq!(composer.value(), "prefilled from transcript");
+}
+
+#[test]
 fn render_wraps_chinese_text_at_the_line_edge() {
     let composer = test_composer(6, 2, "中文中");
 
@@ -288,7 +399,7 @@ fn cursor_position_for_line_anchor_click_does_not_rewrap_long_composer() {
 
     let mut composer = Composer::new(StyleMode::Cx);
     composer.set_width(80);
-    composer.replace_text_and_move_to_end("中英 mixed long composer text ".repeat(120));
+    composer.reset_text_and_move_to_end("中英 mixed long composer text ".repeat(120));
     let document = composer.render_document(default_palette());
     let anchor = document.anchors[0];
 

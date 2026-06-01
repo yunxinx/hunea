@@ -25,6 +25,7 @@ pub(super) struct FileTuiConfig {
     pub(super) esc_interrupt_presses: Option<u8>,
     pub(super) show_esc_interrupt_hint: Option<bool>,
     pub(super) file_picker_popup_height: Option<usize>,
+    pub(super) composer_undo_limit: Option<usize>,
     pub(super) print_transcript_on_exit: Option<bool>,
     pub(super) show_reasoning_content: Option<bool>,
     pub(super) reasoning_content_display: Option<String>,

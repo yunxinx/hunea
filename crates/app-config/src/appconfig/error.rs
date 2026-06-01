@@ -1,6 +1,9 @@
 use std::{fmt, io, path::PathBuf};
 
-use super::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT};
+use super::{
+    COMPOSER_UNDO_MAX_LIMIT, COMPOSER_UNDO_MIN_LIMIT, FILE_PICKER_POPUP_MAX_HEIGHT,
+    FILE_PICKER_POPUP_MIN_HEIGHT,
+};
 
 /// `AppConfigError` 描述配置加载或校验失败。
 #[derive(Debug)]
@@ -41,6 +44,10 @@ pub enum AppConfigError {
         value: u8,
     },
     InvalidFilePickerPopupHeight {
+        path: Option<PathBuf>,
+        value: usize,
+    },
+    InvalidComposerUndoLimit {
         path: Option<PathBuf>,
         value: usize,
     },
@@ -145,6 +152,22 @@ impl fmt::Display for AppConfigError {
                 "tui.file_picker_popup_height must be between {} and {}, got {value}",
                 FILE_PICKER_POPUP_MIN_HEIGHT, FILE_PICKER_POPUP_MAX_HEIGHT
             ),
+            Self::InvalidComposerUndoLimit {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: tui.composer_undo_limit must be between {} and {}, got {}",
+                path.display(),
+                COMPOSER_UNDO_MIN_LIMIT,
+                COMPOSER_UNDO_MAX_LIMIT,
+                value
+            ),
+            Self::InvalidComposerUndoLimit { path: None, value } => write!(
+                f,
+                "tui.composer_undo_limit must be between {} and {}, got {value}",
+                COMPOSER_UNDO_MIN_LIMIT, COMPOSER_UNDO_MAX_LIMIT
+            ),
             Self::InvalidReasoningContentDisplay {
                 path: Some(path),
                 value,
@@ -186,6 +209,7 @@ impl std::error::Error for AppConfigError {
             | Self::ExternalEditorMustWait { .. }
             | Self::InvalidEscInterruptPresses { .. }
             | Self::InvalidFilePickerPopupHeight { .. }
+            | Self::InvalidComposerUndoLimit { .. }
             | Self::InvalidReasoningContentDisplay { .. }
             | Self::InvalidRuntimeRequestPolicy { .. } => None,
         }

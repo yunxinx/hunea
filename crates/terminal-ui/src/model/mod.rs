@@ -219,7 +219,7 @@ impl Model {
             transcript_render_version: 1,
             transcript,
             transcript_render,
-            composer: Composer::new(style_mode),
+            composer: Composer::new_with_undo_limit(style_mode, options.composer_undo_limit),
             width: 0,
             height: 0,
             document_runtime: DocumentRuntimeState {

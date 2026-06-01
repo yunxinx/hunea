@@ -5,6 +5,7 @@ use runtime_domain::{
 
 use crate::{
     ReasoningDisplayMode,
+    composer::DEFAULT_COMPOSER_UNDO_LIMIT,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT},
     status_line::StatusLineItem,
     status_phrases::default_status_phrases,
@@ -26,6 +27,7 @@ pub struct ModelOptions {
     pub esc_interrupt_presses: u8,
     pub show_esc_interrupt_hint: bool,
     pub file_picker_popup_height: u16,
+    pub composer_undo_limit: usize,
     pub show_reasoning_content: bool,
     pub reasoning_display_mode: ReasoningDisplayMode,
     pub debug_commands_enabled: bool,
@@ -52,6 +54,7 @@ impl Default for ModelOptions {
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7
                 .clamp(FILE_PICKER_POPUP_MIN_HEIGHT, FILE_PICKER_POPUP_MAX_HEIGHT),
+            composer_undo_limit: DEFAULT_COMPOSER_UNDO_LIMIT,
             show_reasoning_content: false,
             reasoning_display_mode: ReasoningDisplayMode::Collapsed,
             debug_commands_enabled: false,

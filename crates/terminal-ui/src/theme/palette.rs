@@ -60,10 +60,16 @@ enum PaletteMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RgbColor {
+pub(crate) struct TerminalBackgroundColor {
     red: u8,
     green: u8,
     blue: u8,
+}
+
+impl TerminalBackgroundColor {
+    pub(crate) const fn from_rgb(red: u8, green: u8, blue: u8) -> Self {
+        Self { red, green, blue }
+    }
 }
 
 /// `default_palette` 返回不触发终端探测的稳定默认配色。
@@ -104,16 +110,22 @@ pub fn detect_palette() -> TerminalPalette {
 /// `try_detect_palette` 仅在拿到真实终端背景色时返回显式配色。
 pub fn try_detect_palette() -> Option<PaletteDetection> {
     let background = detect_background()?;
+    Some(palette_detection_from_background(background))
+}
+
+pub(crate) fn palette_detection_from_background(
+    background: TerminalBackgroundColor,
+) -> PaletteDetection {
     let has_dark_background = is_dark_background(background);
 
-    Some(PaletteDetection {
+    PaletteDetection {
         palette: palette_from_background(has_dark_background, Some(rgb_to_color(background))),
         has_dark_background,
-    })
+    }
 }
 
 fn detect_palette_from_sources(
-    background_probe: impl FnOnce() -> Option<RgbColor>,
+    background_probe: impl FnOnce() -> Option<TerminalBackgroundColor>,
     dark_background_probe: impl FnOnce() -> bool,
 ) -> TerminalPalette {
     match background_probe() {
@@ -179,21 +191,23 @@ pub fn palette_from_background(
     }
 }
 
-fn detect_background() -> Option<RgbColor> {
+fn detect_background() -> Option<TerminalBackgroundColor> {
     let color = terminal_light::background_color().ok()?;
 
     match color {
-        terminal_light::Color::Rgb(rgb) => Some(RgbColor {
-            red: rgb.r,
-            green: rgb.g,
-            blue: rgb.b,
-        }),
+        terminal_light::Color::Rgb(rgb) => {
+            Some(TerminalBackgroundColor::from_rgb(rgb.r, rgb.g, rgb.b))
+        }
         _ => None,
     }
 }
 
 fn detect_dark_background_from_env() -> bool {
-    let Some(value) = env::var_os("COLORFGBG") else {
+    detect_dark_background_from_colorfgbg(env::var_os("COLORFGBG").as_deref())
+}
+
+fn detect_dark_background_from_colorfgbg(value: Option<&std::ffi::OsStr>) -> bool {
+    let Some(value) = value else {
         return true;
     };
 
@@ -223,34 +237,22 @@ fn surface_color(has_dark_background: bool, background: Option<Color>) -> Color 
     if has_dark_background {
         blend_toward(
             background,
-            RgbColor {
-                red: 255,
-                green: 255,
-                blue: 255,
-            },
+            TerminalBackgroundColor::from_rgb(255, 255, 255),
             0.12,
         )
     } else {
-        blend_toward(
-            background,
-            RgbColor {
-                red: 0,
-                green: 0,
-                blue: 0,
-            },
-            0.04,
-        )
+        blend_toward(background, TerminalBackgroundColor::from_rgb(0, 0, 0), 0.04)
     }
 }
 
-fn color_to_rgb(color: Color) -> Option<RgbColor> {
+fn color_to_rgb(color: Color) -> Option<TerminalBackgroundColor> {
     match color {
-        Color::Rgb(red, green, blue) => Some(RgbColor { red, green, blue }),
+        Color::Rgb(red, green, blue) => Some(TerminalBackgroundColor::from_rgb(red, green, blue)),
         _ => None,
     }
 }
 
-fn blend_toward(from: RgbColor, to: RgbColor, amount: f32) -> Color {
+fn blend_toward(from: TerminalBackgroundColor, to: TerminalBackgroundColor, amount: f32) -> Color {
     fn blend_channel(from: u8, to: u8, amount: f32) -> u8 {
         let from = from as f32;
         let to = to as f32;
@@ -264,7 +266,7 @@ fn blend_toward(from: RgbColor, to: RgbColor, amount: f32) -> Color {
     )
 }
 
-fn is_dark_background(color: RgbColor) -> bool {
+fn is_dark_background(color: TerminalBackgroundColor) -> bool {
     let luma = (0.2126 * f32::from(color.red))
         + (0.7152 * f32::from(color.green))
         + (0.0722 * f32::from(color.blue));
@@ -272,15 +274,16 @@ fn is_dark_background(color: RgbColor) -> bool {
     luma < 140.0
 }
 
-fn rgb_to_color(color: RgbColor) -> Color {
+fn rgb_to_color(color: TerminalBackgroundColor) -> Color {
     Color::Rgb(color.red, color.green, color.blue)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        RgbColor, default_palette, detect_dark_background_from_env, detect_palette_from_sources,
-        is_dark_background, palette_from_background, terminal_default_palette,
+        TerminalBackgroundColor, default_palette, detect_dark_background_from_colorfgbg,
+        detect_palette_from_sources, is_dark_background, palette_from_background,
+        terminal_default_palette,
     };
     use ratatui::style::Color;
 
@@ -324,23 +327,23 @@ mod tests {
 
     #[test]
     fn colorfgbg_defaults_to_dark_when_the_value_is_missing() {
-        unsafe {
-            std::env::remove_var("COLORFGBG");
-        }
+        assert!(detect_dark_background_from_colorfgbg(None));
+    }
 
-        assert!(detect_dark_background_from_env());
+    #[test]
+    fn colorfgbg_detects_light_background_codes() {
+        assert!(!detect_dark_background_from_colorfgbg(Some(
+            std::ffi::OsStr::new("15;15")
+        )));
+        assert!(!detect_dark_background_from_colorfgbg(Some(
+            std::ffi::OsStr::new("15;8")
+        )));
     }
 
     #[test]
     fn detect_palette_from_sources_prefers_the_detected_background() {
         let palette = detect_palette_from_sources(
-            || {
-                Some(RgbColor {
-                    red: 32,
-                    green: 40,
-                    blue: 48,
-                })
-            },
+            || Some(TerminalBackgroundColor::from_rgb(32, 40, 48)),
             || panic!("fallback should not run when background probe succeeds"),
         );
 
@@ -364,15 +367,11 @@ mod tests {
 
     #[test]
     fn is_dark_background_follows_luma_threshold() {
-        assert!(is_dark_background(RgbColor {
-            red: 17,
-            green: 17,
-            blue: 17,
-        }));
-        assert!(!is_dark_background(RgbColor {
-            red: 240,
-            green: 240,
-            blue: 240,
-        }));
+        assert!(is_dark_background(TerminalBackgroundColor::from_rgb(
+            17, 17, 17
+        )));
+        assert!(!is_dark_background(TerminalBackgroundColor::from_rgb(
+            240, 240, 240
+        )));
     }
 }

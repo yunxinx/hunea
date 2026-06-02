@@ -1630,6 +1630,22 @@ fn ready_input_batch_coalesces_wheel_burst_before_key() {
     );
 }
 
+#[test]
+fn startup_probe_without_background_leaves_palette_for_startup_timeout() {
+    assert!(
+        startup_palette_detection(terminal_probe::TerminalBackgroundProbeResult::unavailable())
+            .is_none()
+    );
+}
+
+#[test]
+fn startup_probe_timeout_does_not_request_event_level_late_response_cleanup() {
+    assert_eq!(
+        terminal_probe::TerminalBackgroundProbeResult::timed_out(),
+        terminal_probe::TerminalBackgroundProbeResult::unavailable()
+    );
+}
+
 fn apply_effect_if_needed_for_test(
     model: &mut Model,
     runtime_coordinator: &mut TestRuntimeCoordinator,

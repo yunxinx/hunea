@@ -19,9 +19,10 @@ mod external_io;
 mod input;
 mod model_refresh;
 mod terminal;
+mod terminal_probe;
 pub(crate) mod terminal_surface;
 
-use super::runtime::RuntimeEventApply;
+use super::{runtime::RuntimeEventApply, theme::palette_detection_from_background};
 use effects::apply_effect_if_needed;
 use input::{TerminalInputAction, coalesced_input_actions, read_ready_terminal_events};
 use model_refresh::apply_model_provider_refresh_event;
@@ -108,14 +109,15 @@ pub fn run_with_runtime_coordinator(
 ) -> Result<Model> {
     let mut model = Model::new_with_options(startup_banner_options, options);
 
-    if let Some(detection) = theme::try_detect_palette() {
+    let (mut terminal, _guard) = TerminalSession::enter()?;
+
+    let background_probe = terminal_probe::query_background(STARTUP_PROBE_TIMEOUT);
+    if let Some(detection) = startup_palette_detection(background_probe) {
         let _ = model.update(AppEvent::DetectedPalette {
             palette: detection.palette,
             has_dark_background: detection.has_dark_background,
         });
     }
-
-    let (mut terminal, _guard) = TerminalSession::enter()?;
     let area = terminal.size()?;
     let _ = model.update(AppEvent::Resized {
         width: area.width,
@@ -167,7 +169,6 @@ pub fn run_with_runtime_coordinator(
             now,
             runtime_coordinator.has_background_runtime(),
         );
-
         let first_event = match wait_for_terminal_event(wait_plan)? {
             Some(event) => event,
             None => {
@@ -179,26 +180,53 @@ pub fn run_with_runtime_coordinator(
         };
 
         let terminal_events = read_ready_terminal_events(first_event)?;
-        for action in coalesced_input_actions(terminal_events) {
-            match action {
-                TerminalInputAction::App(app_event) => {
-                    let effect = model.update(app_event);
-                    apply_effect_if_needed(&mut terminal, &mut model, runtime_coordinator, effect)?;
-                    render_needed = true;
-                }
-                TerminalInputAction::CancelExitConfirmation => {
-                    model.cancel_exit_confirmation();
-                    render_needed = true;
-                }
-            }
-
-            if model.is_quitting() {
-                break;
-            }
+        if apply_terminal_input_actions(
+            coalesced_input_actions(terminal_events),
+            &mut terminal,
+            &mut model,
+            runtime_coordinator,
+        )? {
+            render_needed = true;
         }
     }
 
     Ok(model)
+}
+
+fn startup_palette_detection(
+    background_probe: terminal_probe::TerminalBackgroundProbeResult,
+) -> Option<theme::PaletteDetection> {
+    background_probe
+        .background
+        .map(palette_detection_from_background)
+}
+
+fn apply_terminal_input_actions(
+    actions: Vec<TerminalInputAction>,
+    terminal: &mut terminal::TuiTerminal,
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) -> Result<bool> {
+    let mut changed = false;
+    for action in actions {
+        match action {
+            TerminalInputAction::App(app_event) => {
+                let effect = model.update(app_event);
+                apply_effect_if_needed(terminal, model, runtime_coordinator, effect)?;
+                changed = true;
+            }
+            TerminalInputAction::CancelExitConfirmation => {
+                model.cancel_exit_confirmation();
+                changed = true;
+            }
+        }
+
+        if model.is_quitting() {
+            break;
+        }
+    }
+
+    Ok(changed)
 }
 
 fn drain_runtime_coordinator_events(

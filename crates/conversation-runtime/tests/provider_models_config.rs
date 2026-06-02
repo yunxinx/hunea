@@ -2,17 +2,17 @@ use std::fs;
 
 use conversation_runtime::{
     ProviderApiKey, ProviderKind,
-    models::{ProviderSyncRequest, load_from_paths_with_sync, write_default_model},
+    models::{load_from_paths, write_default_model},
 };
 use runtime_domain::model_catalog::{ModelSelection, ModelSource};
 
 #[test]
-fn models_config_syncs_provider_models_when_allowlist_is_omitted() {
-    let working_dir = temp_test_dir("sync-provider-models");
+fn models_config_keeps_provider_local_when_allowlist_is_omitted() {
+    let working_dir = temp_test_dir("local-provider-models");
     fs::write(
         working_dir.join("models.toml"),
         r#"
-default = ""
+default = "local/qwen3"
 
 [providers.local]
 enabled = true
@@ -23,24 +23,13 @@ base_url = "http://192.168.1.71:1234/v1"
     )
     .expect("models config should be written");
 
-    let loaded = load_from_paths_with_sync(Some(&working_dir), None, |request| {
-        assert_eq!(
-            request,
-            &ProviderSyncRequest {
-                provider_id: "local".to_string(),
-                kind: ProviderKind::OpenAiCompatible,
-                display_name: "LM Studio".to_string(),
-                base_url: Some("http://192.168.1.71:1234/v1".to_string()),
-                api_key: None,
-                api_key_env: None,
-            }
-        );
-        Ok(vec!["qwen3".to_string(), "deepseek-chat".to_string()])
-    })
-    .expect("models config should load");
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
 
     assert!(loaded.requires_model_selection);
-    assert_eq!(loaded.selected_model, None);
+    assert_eq!(
+        loaded.selected_model,
+        Some(ModelSelection::new("local", "qwen3"))
+    );
 
     let provider = loaded
         .catalog
@@ -48,15 +37,9 @@ base_url = "http://192.168.1.71:1234/v1"
         .expect("enabled provider should be visible");
     assert_eq!(provider.id, "local");
     assert_eq!(provider.display_name, "LM Studio");
-    assert_eq!(provider.source, ModelSource::Synced);
-    assert_eq!(
-        provider
-            .models
-            .iter()
-            .map(|model| model.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["qwen3", "deepseek-chat"]
-    );
+    assert_eq!(provider.source, ModelSource::NotLoaded);
+    assert!(provider.models.is_empty());
+    assert_eq!(provider.sync_error, None);
 }
 
 #[test]
@@ -77,21 +60,7 @@ api_key = "sk-test-direct"
     )
     .expect("models config should be written");
 
-    let loaded = load_from_paths_with_sync(Some(&working_dir), None, |request| {
-        assert_eq!(
-            request,
-            &ProviderSyncRequest {
-                provider_id: "remote".to_string(),
-                kind: ProviderKind::OpenAiCompatible,
-                display_name: "Remote".to_string(),
-                base_url: Some("https://api.example.com/v1".to_string()),
-                api_key: Some(ProviderApiKey::new("sk-test-direct")),
-                api_key_env: None,
-            }
-        );
-        Ok(vec!["qwen3".to_string()])
-    })
-    .expect("models config should load");
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
 
     let provider = loaded
         .catalog
@@ -137,10 +106,7 @@ models = ["gemini-2.5-pro"]
     )
     .expect("models config should be written");
 
-    let loaded = load_from_paths_with_sync(Some(&working_dir), None, |_| {
-        panic!("configured model allowlists should not sync")
-    })
-    .expect("provider kinds should load");
+    let loaded = load_from_paths(Some(&working_dir), None).expect("provider kinds should load");
 
     assert_eq!(
         loaded.selected_model,
@@ -162,12 +128,12 @@ models = ["gemini-2.5-pro"]
 }
 
 #[test]
-fn models_config_keeps_sync_error_when_provider_models_fail_to_sync() {
-    let working_dir = temp_test_dir("sync-provider-models-error");
+fn models_config_does_not_record_sync_error_during_startup_load() {
+    let working_dir = temp_test_dir("startup-load-without-sync-error");
     fs::write(
         working_dir.join("models.toml"),
         r#"
-default = ""
+default = "local/qwen3"
 
 [providers.local]
 enabled = true
@@ -178,17 +144,19 @@ base_url = "http://192.168.1.71:1234/v1"
     )
     .expect("models config should be written");
 
-    let loaded = load_from_paths_with_sync(Some(&working_dir), None, |_| {
-        Err("connection refused".to_string())
-    })
-    .expect("models config should load even when model sync fails");
+    let loaded = load_from_paths(Some(&working_dir), None)
+        .expect("models config should load without syncing provider models");
 
     let provider = loaded
         .catalog
         .enabled_provider_at(0)
         .expect("enabled provider should be visible");
     assert_eq!(provider.models.len(), 0);
-    assert_eq!(provider.sync_error.as_deref(), Some("connection refused"));
+    assert_eq!(provider.sync_error, None);
+    assert_eq!(
+        loaded.selected_model,
+        Some(ModelSelection::new("local", "qwen3"))
+    );
 }
 
 #[test]
@@ -210,10 +178,7 @@ models = ["qwen3"]
     )
     .expect("models config should be written");
 
-    let loaded = load_from_paths_with_sync(Some(&working_dir), None, |_| {
-        panic!("configured model allowlist should not sync /models")
-    })
-    .expect("models config should load");
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
 
     assert_eq!(
         loaded.selected_model,
@@ -228,6 +193,29 @@ models = ["qwen3"]
         provider.connection().api_key_env.as_deref(),
         Some("DEEPSEEK_API_KEY")
     );
+}
+
+#[test]
+fn models_config_rejects_default_model_outside_configured_allowlist() {
+    let working_dir = temp_test_dir("default-model-outside-allowlist");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+default = "local/qwen4"
+
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+display_name = "Local"
+base_url = "http://127.0.0.1:1234/v1"
+models = ["qwen3"]
+"#,
+    )
+    .expect("models config should be written");
+
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
+
+    assert_eq!(loaded.selected_model, None);
 }
 
 #[test]

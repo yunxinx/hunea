@@ -51,6 +51,20 @@ impl ModelCatalog {
         })
     }
 
+    /// `accepts_selection` 判断目录是否可以使用指定模型选择。
+    pub fn accepts_selection(&self, selection: &ModelSelection) -> bool {
+        let Some(provider) = self.enabled_provider_by_id(&selection.provider_id) else {
+            return false;
+        };
+        if provider.models.is_empty() && provider.source == ModelSource::NotLoaded {
+            return true;
+        }
+        provider
+            .models
+            .iter()
+            .any(|model| model.id == selection.model_id)
+    }
+
     /// `enabled_provider_index_for` 返回指定 provider 在展示列表中的索引。
     pub fn enabled_provider_index_for(&self, provider_id: &str) -> Option<usize> {
         self.enabled_providers()
@@ -218,6 +232,7 @@ impl ModelSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelSource {
     Configured,
+    NotLoaded,
     Synced,
 }
 
@@ -226,6 +241,7 @@ impl ModelSource {
     pub fn label(self) -> &'static str {
         match self {
             Self::Configured => "configured",
+            Self::NotLoaded => "not loaded",
             Self::Synced => "synced from /v1/models",
         }
     }
@@ -266,5 +282,35 @@ mod tests {
         assert_eq!(providers, vec!["enabled"]);
         assert!(catalog.contains_selection(&ModelSelection::new("enabled", "visible")));
         assert!(!catalog.contains_selection(&ModelSelection::new("disabled", "hidden")));
+    }
+
+    #[test]
+    fn catalog_accepts_selection_when_models_are_not_loaded() {
+        let catalog = ModelCatalog::new(vec![ModelProvider::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "Local",
+            None,
+            ModelSource::NotLoaded,
+            Vec::new(),
+        )]);
+
+        assert!(catalog.accepts_selection(&ModelSelection::new("local", "qwen3")));
+        assert!(!catalog.contains_selection(&ModelSelection::new("local", "qwen3")));
+    }
+
+    #[test]
+    fn catalog_rejects_selection_outside_configured_allowlist() {
+        let catalog = ModelCatalog::new(vec![ModelProvider::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "Local",
+            None,
+            ModelSource::Configured,
+            vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+        )]);
+
+        assert!(catalog.accepts_selection(&ModelSelection::new("local", "qwen3")));
+        assert!(!catalog.accepts_selection(&ModelSelection::new("local", "qwen4")));
     }
 }

@@ -129,19 +129,10 @@ pub fn load() -> Result<LoadedModelCatalog, ModelsConfigError> {
     load_from_paths(working_dir.as_deref(), user_config_directory().as_deref())
 }
 
-/// `load_from_paths` 从指定目录加载模型配置，真实同步 provider 模型列表。
+/// `load_from_paths` 从指定目录加载本地模型配置，不在启动路径同步 provider 模型列表。
 pub fn load_from_paths(
     working_dir: Option<&Path>,
     user_config_dir: Option<&Path>,
-) -> Result<LoadedModelCatalog, ModelsConfigError> {
-    load_from_paths_with_sync(working_dir, user_config_dir, sync_provider_models)
-}
-
-/// `load_from_paths_with_sync` 使用注入的同步函数加载模型配置，便于测试。
-pub fn load_from_paths_with_sync(
-    working_dir: Option<&Path>,
-    user_config_dir: Option<&Path>,
-    mut sync_models: impl FnMut(&ProviderSyncRequest) -> ModelSyncResult,
 ) -> Result<LoadedModelCatalog, ModelsConfigError> {
     let mut merged = MergedModelsConfig::default();
     let mut source_path = None;
@@ -158,7 +149,7 @@ pub fn load_from_paths_with_sync(
         return Ok(LoadedModelCatalog::default());
     }
 
-    let catalog = catalog_from_config(&merged, source_path.as_deref(), &mut sync_models)?;
+    let catalog = catalog_from_config(&merged, source_path.as_deref())?;
     let selected_model = selection_from_default(merged.default.as_deref(), &catalog);
 
     Ok(LoadedModelCatalog {
@@ -259,12 +250,11 @@ fn merge_models_config(target: &mut MergedModelsConfig, source: FileModelsConfig
 fn catalog_from_config(
     config: &MergedModelsConfig,
     source_path: Option<&Path>,
-    sync_models: &mut impl FnMut(&ProviderSyncRequest) -> ModelSyncResult,
 ) -> Result<ModelCatalog, ModelsConfigError> {
     let mut providers = Vec::with_capacity(config.providers.len());
     for (provider_id, provider) in &config.providers {
         validate_provider_kind(provider_id, provider, source_path)?;
-        providers.push(provider_from_config(provider_id, provider, sync_models));
+        providers.push(provider_from_config(provider_id, provider));
     }
 
     Ok(ModelCatalog::new(providers))
@@ -287,11 +277,7 @@ fn validate_provider_kind(
         })
 }
 
-fn provider_from_config(
-    provider_id: &str,
-    provider: &FileModelProviderConfig,
-    sync_models: &mut impl FnMut(&ProviderSyncRequest) -> ModelSyncResult,
-) -> ModelProvider {
+fn provider_from_config(provider_id: &str, provider: &FileModelProviderConfig) -> ModelProvider {
     let kind = provider
         .kind
         .as_deref()
@@ -304,45 +290,21 @@ fn provider_from_config(
     let base_url = provider.base_url.clone();
     let api_key = ProviderApiKey::from_optional_config(provider.api_key.clone());
     let enabled = provider.enabled.unwrap_or(true);
-    let (source, models, sync_error) = match provider.models.as_ref() {
+    let (source, models) = match provider.models.as_ref() {
         Some(models) => (
             ModelSource::Configured,
             models
                 .iter()
                 .map(|model| ModelEntry::new(model.clone(), None, ModelSource::Configured))
                 .collect(),
-            None,
         ),
-        None if enabled => {
-            let sync_result = sync_models(&ProviderSyncRequest {
-                provider_id: provider_id.to_string(),
-                kind,
-                display_name: display_name.clone(),
-                base_url: base_url.clone(),
-                api_key: api_key.clone(),
-                api_key_env: provider.api_key_env.clone(),
-            });
-            let (synced, sync_error) = match sync_result {
-                Ok(models) => (models, None),
-                Err(error) => (Vec::new(), Some(error)),
-            };
-            (
-                ModelSource::Synced,
-                synced
-                    .into_iter()
-                    .map(|model| ModelEntry::new(model, None, ModelSource::Synced))
-                    .collect(),
-                sync_error,
-            )
-        }
-        None => (ModelSource::Synced, Vec::new(), None),
+        None => (ModelSource::NotLoaded, Vec::new()),
     };
 
     let mut model_provider =
         ModelProvider::new(provider_id, kind, display_name, base_url, source, models)
-            .with_api_key(api_key.clone())
+            .with_api_key(api_key)
             .with_api_key_env(provider.api_key_env.clone());
-    model_provider.sync_error = sync_error;
     model_provider.enabled = enabled;
     model_provider
 }
@@ -362,7 +324,7 @@ fn selection_from_default(default: Option<&str>, catalog: &ModelCatalog) -> Opti
             .map(|provider| ModelSelection::new(provider.id.clone(), default.to_string()))?
     };
 
-    catalog.contains_selection(&selection).then_some(selection)
+    catalog.accepts_selection(&selection).then_some(selection)
 }
 
 fn sync_provider_models(request: &ProviderSyncRequest) -> ModelSyncResult {

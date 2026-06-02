@@ -46,6 +46,74 @@ fn startup_banner_uses_the_selected_model_id() {
 }
 
 #[test]
+fn configured_default_model_is_kept_when_provider_models_are_not_loaded() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::NotLoaded,
+                Vec::new(),
+            )]),
+            selected_model: Some(ModelSelection::new("local", "qwen3")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+
+    assert_eq!(
+        model.selected_model(),
+        Some(ModelSelection::new("local", "qwen3"))
+    );
+
+    for character in "hello".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+        panic!("expected conversation turn effect, got {effect:?}");
+    };
+    assert_eq!(request.provider_id(), "local");
+    assert_eq!(request.model_id(), "qwen3");
+}
+
+#[test]
+fn configured_default_model_is_dropped_when_it_is_outside_allowlist() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            model_catalog: single_model_catalog(),
+            selected_model: Some(ModelSelection::new("local", "qwen4")),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.update(AppEvent::Resized {
+        width: 80,
+        height: 24,
+    });
+    model.update(AppEvent::DetectedPalette {
+        palette: terminal_default_palette(),
+        has_dark_background: true,
+    });
+
+    assert_eq!(model.selected_model(), None);
+
+    for character in "hello".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "hello");
+    assert!(rendered_model_text(&mut model).contains("Select a model before sending"));
+}
+
+#[test]
 fn enter_with_required_empty_model_shows_notice_without_sending() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),

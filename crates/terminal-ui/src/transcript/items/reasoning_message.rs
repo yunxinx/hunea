@@ -11,6 +11,7 @@ use ratatui::{
 
 use crate::{
     display_width::display_width,
+    markdown_display::markdown_display_content,
     message::assistant_message_content_width,
     styled_text::{line_to_plain_text, lines_to_ansi_text, lines_to_plain_text},
     theme::{TerminalPalette, tertiary_text_style},
@@ -280,8 +281,9 @@ impl ReasoningMessageItem {
         palette: TerminalPalette,
         style: Style,
     ) -> Vec<Line<'static>> {
+        let content = self.display_content();
         let content_width = assistant_message_content_width(width);
-        let markdown_lines = render_reasoning_markdown_lines(&self.content, content_width, palette);
+        let markdown_lines = render_reasoning_markdown_lines(content, content_width, palette);
         let lines = if markdown_lines.is_empty() {
             self.wrapped_lines(width)
                 .into_iter()
@@ -307,9 +309,9 @@ impl ReasoningMessageItem {
             );
         }
 
+        let content = self.display_content();
         let content_width = assistant_message_content_width(width);
-        let markdown_metrics =
-            render_reasoning_markdown_metrics(&self.content, content_width, palette);
+        let markdown_metrics = render_reasoning_markdown_metrics(content, content_width, palette);
         if markdown_metrics.0 > 0 {
             return markdown_metrics;
         }
@@ -319,7 +321,15 @@ impl ReasoningMessageItem {
     }
 
     fn wrapped_lines(&self, width: u16) -> Vec<String> {
-        wrap_assistant_text(&self.content, assistant_message_content_width(width), 0)
+        wrap_assistant_text(
+            self.display_content(),
+            assistant_message_content_width(width),
+            0,
+        )
+    }
+
+    fn display_content(&self) -> &str {
+        markdown_display_content(&self.content)
     }
 
     fn header_label(&self) -> String {
@@ -687,6 +697,23 @@ mod tests {
             }),
             "Markdown bold modifier 应在 reasoning 外层样式叠加后保留"
         );
+    }
+
+    #[test]
+    fn reasoning_display_trims_outer_blank_lines_without_mutating_source_content() {
+        let palette = default_palette();
+        let source_content = "\n\nthink\n\n";
+
+        for display_mode in [
+            ReasoningDisplayMode::Expanded,
+            ReasoningDisplayMode::ExpandedSimplified,
+        ] {
+            let item = ReasoningMessageItem::new(source_content, display_mode, None);
+
+            assert_eq!(rendered_plain_lines(&item), vec!["think".to_string()]);
+            assert_eq!(item.measure_render_metrics(80, palette), (1, "think".len()));
+            assert_eq!(item.source_text_byte_len(), source_content.len());
+        }
     }
 
     #[test]

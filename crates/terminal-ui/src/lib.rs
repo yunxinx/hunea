@@ -19,6 +19,7 @@ mod file_search;
 mod floating;
 mod history_scroll_indicator;
 mod inline_panel;
+mod markdown_display;
 mod message;
 mod message_revisit;
 mod model;

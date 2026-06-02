@@ -175,10 +175,10 @@ fn assistant_render_uses_markdown_emphasis_rendering() {
 
 #[test]
 fn assistant_display_trims_blank_lines_without_trimming_content_whitespace() {
-    assert_eq!(assistant_display_content("\n\n    code\n\n"), "    code");
-    assert_eq!(assistant_display_content("    code  "), "    code  ");
-    assert_eq!(assistant_display_content(" \t\n\t\ncontent"), "content");
-    assert_eq!(assistant_display_content("line  \n\n"), "line  \n");
+    assert_eq!(markdown_display_content("\n\n    code\n\n"), "    code");
+    assert_eq!(markdown_display_content("    code  "), "    code  ");
+    assert_eq!(markdown_display_content(" \t\n\t\ncontent"), "content");
+    assert_eq!(markdown_display_content("line  \n\n"), "line  \n");
 }
 
 #[test]

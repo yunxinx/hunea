@@ -58,6 +58,7 @@ pub struct Composer {
     kill_buffer: String,
     undo_history: Vec<ComposerSnapshot>,
     undo_limit: usize,
+    has_active_grapheme_undo_group: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +99,7 @@ impl Composer {
             kill_buffer: String::new(),
             undo_history: Vec::new(),
             undo_limit: undo_limit.clamp(1, MAX_COMPOSER_UNDO_LIMIT),
+            has_active_grapheme_undo_group: false,
         }
     }
 
@@ -131,6 +133,7 @@ impl Composer {
 
     /// `clear` 清空输入内容并复位光标与 viewport。
     pub fn clear(&mut self) {
+        self.has_active_grapheme_undo_group = false;
         if self.value.is_empty() {
             self.set_cursor(0);
             self.viewport_y = 0;
@@ -168,8 +171,14 @@ impl Composer {
         let value = sanitized_owned_text(value.into());
         let changed = self.value != value;
         match undo_mode {
-            ComposerReplaceUndoMode::Record if changed => self.push_undo_snapshot(),
-            ComposerReplaceUndoMode::Reset => self.undo_history.clear(),
+            ComposerReplaceUndoMode::Record if changed => {
+                self.finish_grapheme_undo_group();
+                self.push_undo_snapshot();
+            }
+            ComposerReplaceUndoMode::Reset => {
+                self.undo_history.clear();
+                self.has_active_grapheme_undo_group = false;
+            }
             ComposerReplaceUndoMode::Record => {}
         }
 
@@ -183,7 +192,9 @@ impl Composer {
 
     /// `insert_newline` 在当前光标位置插入显式换行。
     pub fn insert_newline(&mut self) {
-        self.insert_char('\n');
+        self.finish_grapheme_undo_group();
+        self.push_undo_snapshot();
+        self.insert_char_without_undo('\n');
         self.sync_viewport_to_cursor();
     }
 
@@ -195,12 +206,21 @@ impl Composer {
             return;
         }
 
+        self.finish_grapheme_undo_group();
         self.push_undo_snapshot();
         let byte_index = char_to_byte_index(&self.value, self.cursor);
         self.value.insert_str(byte_index, text);
         self.set_cursor(self.cursor + total_chars(text));
         self.bump_content_revision();
         self.sync_viewport_to_cursor();
+    }
+
+    /// `finish_current_undo_group` 结束当前普通输入 undo 分组。
+    ///
+    /// 有些高层事件不会进入 `Composer::handle_key`，例如 Ctrl+G 外部编辑器或 Enter 发送。
+    /// 这些事件应当成为 undo 边界，避免后续输入和之前的 grapheme 组合误合并。
+    pub(crate) fn finish_current_undo_group(&mut self) {
+        self.finish_grapheme_undo_group();
     }
 
     /// `current_at_token` 返回当前光标所在的 `@` 文件 token，不含前导 `@`。
@@ -223,11 +243,13 @@ impl Composer {
         let byte_start = char_to_byte_index(&self.value, token.start_char);
         let byte_end = char_to_byte_index(&self.value, token.end_char);
         if self.value.get(byte_start..byte_end) == Some(replacement) {
+            self.finish_grapheme_undo_group();
             self.set_cursor(token.start_char + total_chars(replacement));
             self.sync_viewport_to_cursor();
             return true;
         }
 
+        self.finish_grapheme_undo_group();
         self.push_undo_snapshot();
         self.value.replace_range(byte_start..byte_end, replacement);
         self.set_cursor(token.start_char + total_chars(replacement));
@@ -238,6 +260,14 @@ impl Composer {
 
     /// `handle_key` 处理输入编辑、导航与分页相关按键。
     pub fn handle_key(&mut self, key: KeyEvent) {
+        let is_plain_input = matches!(key.code, KeyCode::Char(_))
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if !is_plain_input {
+            self.finish_grapheme_undo_group();
+        }
+
         match key.code {
             KeyCode::Char('z') if is_ctrl_only(key.modifiers) => self.undo(),
             KeyCode::Char('k') if is_ctrl_only(key.modifiers) => self.kill_to_end_of_line(),
@@ -280,7 +310,7 @@ impl Composer {
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                self.insert_char(character);
+                self.insert_plain_input_char(character);
             }
             _ => {}
         }
@@ -385,11 +415,13 @@ impl Composer {
     }
 
     pub(crate) fn move_to_begin(&mut self) {
+        self.finish_grapheme_undo_group();
         self.set_cursor(0);
         self.sync_viewport_to_cursor();
     }
 
     pub(crate) fn move_to_end(&mut self) {
+        self.finish_grapheme_undo_group();
         self.set_cursor(total_chars(&self.value));
         self.sync_viewport_to_cursor();
     }
@@ -399,6 +431,7 @@ impl Composer {
             return false;
         }
 
+        self.finish_grapheme_undo_group();
         self.page_move(direction);
         true
     }
@@ -423,6 +456,7 @@ impl Composer {
     #[cfg(test)]
     pub(crate) fn set_text_for_test(&mut self, value: impl Into<String>) {
         let value = sanitized_owned_text(value.into());
+        self.has_active_grapheme_undo_group = false;
         if self.value != value {
             self.value = value;
             self.bump_content_revision();
@@ -437,8 +471,54 @@ impl Composer {
         self.sync_viewport_to_cursor();
     }
 
-    fn insert_char(&mut self, character: char) {
-        self.push_undo_snapshot();
+    fn insert_plain_input_char(&mut self, character: char) {
+        if !self.plain_input_char_extends_active_grapheme(character) {
+            self.push_undo_snapshot();
+        }
+        self.has_active_grapheme_undo_group = true;
+        self.insert_char_without_undo(character);
+    }
+
+    fn plain_input_char_extends_active_grapheme(&self, character: char) -> bool {
+        if !self.has_active_grapheme_undo_group || self.cursor == 0 {
+            return false;
+        }
+
+        let lines = logical_lines(&self.value);
+        let (row, column) = logical_position(&self.value, self.cursor);
+        let Some(line) = lines.get(row) else {
+            return false;
+        };
+        if column == 0 {
+            return false;
+        }
+
+        let Some((start, end)) = grapheme_range_before_cursor(line.text, column) else {
+            return false;
+        };
+        if end != column {
+            return false;
+        }
+
+        let previous_grapheme = line
+            .text
+            .chars()
+            .skip(start)
+            .take(end - start)
+            .collect::<String>();
+        let expected_char_count = total_chars(&previous_grapheme) + 1;
+        let mut proposed_grapheme = previous_grapheme;
+        proposed_grapheme.push(character);
+
+        // crossterm 只暴露逐个 `KeyCode::Char`，没有 IME commit 边界。
+        // 因此不能把连续中文输入猜成同一次上屏；这里仅合并新增 scalar
+        // 仍属于同一个 extended grapheme cluster 的情况，避免 undo 恢复半个 emoji /
+        // variation selector / combining sequence。
+        let clusters = grapheme_clusters(&proposed_grapheme);
+        clusters.len() == 1 && clusters[0].end_char == expected_char_count
+    }
+
+    fn insert_char_without_undo(&mut self, character: char) {
         let byte_index = char_to_byte_index(&self.value, self.cursor);
         self.value.insert(byte_index, character);
         self.set_cursor(self.cursor + 1);
@@ -789,6 +869,7 @@ impl Composer {
             return;
         }
 
+        self.finish_grapheme_undo_group();
         self.push_undo_snapshot();
         self.delete_absolute_range_without_undo(start, end);
     }
@@ -806,6 +887,7 @@ impl Composer {
         }
 
         self.kill_buffer = killed_text;
+        self.finish_grapheme_undo_group();
         self.push_undo_snapshot();
         self.delete_absolute_range_without_undo(start, end);
     }
@@ -833,7 +915,12 @@ impl Composer {
         self.undo_history.push(snapshot);
     }
 
+    fn finish_grapheme_undo_group(&mut self) {
+        self.has_active_grapheme_undo_group = false;
+    }
+
     fn undo(&mut self) {
+        self.finish_grapheme_undo_group();
         let Some(snapshot) = self.undo_history.pop() else {
             return;
         };

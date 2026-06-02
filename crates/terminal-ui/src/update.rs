@@ -242,6 +242,14 @@ impl Model {
             return None;
         }
 
+        let is_plain_composer_input = matches!(key.code, KeyCode::Char(_))
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if !is_plain_composer_input {
+            self.composer_mut().finish_current_undo_group();
+        }
+
         let is_plain_esc = key.code == KeyCode::Esc && key.modifiers.is_empty();
         let is_ctrl_c =
             key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);

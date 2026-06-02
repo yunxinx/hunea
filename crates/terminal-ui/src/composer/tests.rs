@@ -168,8 +168,8 @@ fn ctrl_z_undoes_composer_edits_without_changing_yank_buffer() {
 fn undo_history_keeps_configured_number_of_snapshots() {
     let mut composer = Composer::new_with_undo_limit(StyleMode::Ms, 2);
 
-    for character in ['a', 'b', 'c'] {
-        composer.handle_key(KeyEvent::from(KeyCode::Char(character)));
+    for text in ["a", "b", "c"] {
+        composer.insert_text(text);
     }
 
     composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
@@ -177,6 +177,67 @@ fn undo_history_keeps_configured_number_of_snapshots() {
 
     composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
     assert_eq!(composer.value(), "a");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "a");
+}
+
+#[test]
+fn ctrl_z_does_not_restore_partial_emoji_grapheme() {
+    let mut composer = Composer::new(StyleMode::Ms);
+
+    for character in "🈶️".chars() {
+        composer.handle_key(KeyEvent::from(KeyCode::Char(character)));
+    }
+    assert_eq!(composer.value(), "🈶️");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+
+    assert_eq!(composer.value(), "");
+}
+
+#[test]
+fn ctrl_z_does_not_merge_separate_cjk_graphemes_without_ime_boundary() {
+    let mut composer = Composer::new(StyleMode::Ms);
+
+    for character in "你好，今天怎么样".chars() {
+        composer.handle_key(KeyEvent::from(KeyCode::Char(character)));
+    }
+    assert_eq!(composer.value(), "你好，今天怎么样");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "你好，今天怎么");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "你好，今天怎");
+}
+
+#[test]
+fn ctrl_z_keeps_unicode_variation_selector_with_base_emoji() {
+    let mut composer = Composer::new(StyleMode::Ms);
+
+    for character in "☃️".chars() {
+        composer.handle_key(KeyEvent::from(KeyCode::Char(character)));
+    }
+    assert_eq!(composer.value(), "☃️");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "");
+}
+
+#[test]
+fn cursor_movement_starts_a_new_plain_input_undo_step() {
+    let mut composer = Composer::new(StyleMode::Ms);
+
+    for character in "ab".chars() {
+        composer.handle_key(KeyEvent::from(KeyCode::Char(character)));
+    }
+    composer.handle_key(KeyEvent::from(KeyCode::Left));
+    composer.handle_key(KeyEvent::from(KeyCode::Char('X')));
+    assert_eq!(composer.value(), "aXb");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(composer.value(), "ab");
 
     composer.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
     assert_eq!(composer.value(), "a");

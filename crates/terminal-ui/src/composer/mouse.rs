@@ -75,6 +75,7 @@ pub(crate) fn move_cursor_to_logical_position(
     logical_line: usize,
     logical_column: usize,
 ) {
+    composer.finish_current_undo_group();
     let lines = logical_lines(composer.value());
     composer.set_cursor(absolute_cursor_for_position(
         &lines,

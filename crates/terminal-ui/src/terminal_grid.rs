@@ -1,6 +1,5 @@
 use ratatui::{
     buffer::{Buffer, Cell},
-    layout::Position,
     style::Color,
 };
 
@@ -8,8 +7,17 @@ use crate::display_width::display_width;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TerminalDrawCommand<'a> {
-    Put { x: u16, y: u16, cell: &'a Cell },
-    ClearToEnd { x: u16, y: u16, bg: Color },
+    Put {
+        x: u16,
+        y: u16,
+        cell: &'a Cell,
+        prefill_width: usize,
+    },
+    ClearToEnd {
+        x: u16,
+        y: u16,
+        bg: Color,
+    },
 }
 
 pub(crate) fn diff_terminal_buffers<'a>(
@@ -61,6 +69,12 @@ pub(crate) fn diff_terminal_buffers<'a>(
                     x,
                     y,
                     cell: current_cell,
+                    prefill_width: wide_prefill_width(
+                        previous_cells,
+                        current_cells,
+                        index,
+                        current.area.width as usize,
+                    ),
                 });
             }
         }
@@ -82,7 +96,7 @@ fn row_clear_from(row: &[Cell], trailing_bg: Color) -> usize {
     while column < row.len() {
         let cell = &row[column];
         let width = display_width(cell.symbol()).max(1);
-        if cell_requires_visible_cell(cell, trailing_bg) {
+        if !cell.skip && cell_requires_visible_cell(cell, trailing_bg) {
             content_end = column.saturating_add(width).min(row.len());
         }
         column += width;
@@ -96,7 +110,7 @@ fn previous_tail_needs_clear(row: &[Cell], clear_from: usize, clear_bg: Color) -
     while column < row.len() {
         let cell = &row[column];
         let width = display_width(cell.symbol()).max(1);
-        if column < clear_from && column.saturating_add(width) > clear_from {
+        if !cell.skip && column < clear_from && column.saturating_add(width) > clear_from {
             return true;
         }
         column += width;
@@ -104,7 +118,7 @@ fn previous_tail_needs_clear(row: &[Cell], clear_from: usize, clear_bg: Color) -
 
     row[clear_from..]
         .iter()
-        .any(|cell| cell_requires_clear(cell, clear_bg))
+        .any(|cell| !cell.skip && cell_requires_clear(cell, clear_bg))
 }
 
 fn cell_requires_visible_cell(cell: &Cell, trailing_bg: Color) -> bool {
@@ -115,46 +129,51 @@ fn cell_requires_clear(cell: &Cell, clear_bg: Color) -> bool {
     cell.symbol() != " " || cell.bg != clear_bg || !cell.modifier.is_empty()
 }
 
-/// 归一化 Ratatui `Buffer` 中宽 grapheme 的隐藏尾格。
-pub(crate) fn normalize_terminal_buffer(buffer: &mut Buffer) {
-    for cell in &mut buffer.content {
-        cell.set_skip(false);
+fn wide_prefill_width(
+    previous_cells: &[Cell],
+    current_cells: &[Cell],
+    index: usize,
+    row_width: usize,
+) -> usize {
+    let width = display_width(current_cells[index].symbol());
+    if width <= 1 || row_width == 0 {
+        return 0;
     }
 
-    let area = buffer.area;
-    for y in area.top()..area.bottom() {
-        for x in area.left()..area.right() {
-            let symbol = buffer[(x, y)].symbol();
-            let width = display_width(symbol);
-            if width <= 1 {
-                continue;
-            }
-
-            let leading_style = buffer[(x, y)].style();
-            for offset in 1..width {
-                let Ok(offset) = u16::try_from(offset) else {
-                    break;
-                };
-                let Some(trailing_x) = x.checked_add(offset) else {
-                    break;
-                };
-                if trailing_x >= area.right() {
-                    break;
-                }
-
-                let trailing = &mut buffer[Position::new(trailing_x, y)];
-                if trailing.symbol() != " " {
-                    break;
-                }
-                trailing.fg = leading_style.fg.unwrap_or(ratatui::style::Color::Reset);
-                trailing.bg = leading_style.bg.unwrap_or(ratatui::style::Color::Reset);
-                trailing.underline_color = leading_style
-                    .underline_color
-                    .unwrap_or(ratatui::style::Color::Reset);
-                trailing.modifier = leading_style.add_modifier;
-            }
-        }
+    let row_end = (index / row_width + 1) * row_width;
+    let end = index
+        .saturating_add(width)
+        .min(row_end)
+        .min(current_cells.len())
+        .min(previous_cells.len());
+    let leading = &current_cells[index];
+    if current_cells[index + 1..end].iter().any(|cell| {
+        cell.symbol() == " "
+            && tail_has_visible_style(cell)
+            && tail_style_matches_leading(cell, leading)
+    }) || previous_cells[index + 1..end]
+        .iter()
+        .zip(&current_cells[index + 1..end])
+        .any(|(previous, current)| current.symbol() == " " && previous != current)
+    {
+        width
+    } else {
+        0
     }
+}
+
+fn tail_style_matches_leading(tail: &Cell, leading: &Cell) -> bool {
+    tail.fg == leading.fg
+        && tail.bg == leading.bg
+        && tail.underline_color == leading.underline_color
+        && tail.modifier == leading.modifier
+}
+
+fn tail_has_visible_style(cell: &Cell) -> bool {
+    cell.fg != Color::Reset
+        || cell.bg != Color::Reset
+        || cell.underline_color != Color::Reset
+        || !cell.modifier.is_empty()
 }
 
 #[cfg(test)]
@@ -165,49 +184,69 @@ mod tests {
         style::{Color, Modifier, Style},
     };
 
-    use super::normalize_terminal_buffer;
-
     #[test]
-    fn normalize_terminal_buffer_preserves_keycap_trailing_cell_style() {
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
-        buffer.set_string(
-            0,
-            0,
-            "2️⃣",
-            Style::default()
-                .underline_color(Color::Red)
-                .add_modifier(Modifier::REVERSED | Modifier::UNDERLINED),
-        );
-
-        normalize_terminal_buffer(&mut buffer);
-
-        assert_eq!(buffer[(0, 0)].symbol(), "2️⃣");
-        assert_eq!(buffer[(1, 0)].symbol(), " ");
-        assert!(!buffer[(1, 0)].skip);
-        assert!(buffer[(1, 0)].modifier.contains(Modifier::REVERSED));
-        assert!(buffer[(1, 0)].modifier.contains(Modifier::UNDERLINED));
-        assert_eq!(buffer[(1, 0)].underline_color, Color::Red);
-    }
-
-    #[test]
-    fn terminal_grid_diff_skips_keycap_trailing_blank_without_skip() {
+    fn terminal_grid_diff_skips_keycap_trailing_blank_from_ratatui_buffer() {
         let mut previous = Buffer::empty(Rect::new(0, 0, 4, 1));
         previous.set_string(0, 0, "ab", Style::default());
         let mut next = Buffer::empty(Rect::new(0, 0, 4, 1));
         next.set_string(0, 0, "2️⃣", Style::default());
 
-        normalize_terminal_buffer(&mut next);
-        next[(1, 0)].set_skip(false);
         let diff = super::diff_terminal_buffers(&previous, &next);
         let updates = diff
             .iter()
             .filter_map(|command| match command {
-                super::TerminalDrawCommand::Put { x, y, cell } => Some((*x, *y, cell.symbol())),
+                super::TerminalDrawCommand::Put { x, y, cell, .. } => Some((*x, *y, cell.symbol())),
                 super::TerminalDrawCommand::ClearToEnd { .. } => None,
             })
             .collect::<Vec<_>>();
 
         assert_eq!(updates, vec![(0, 0, "2️⃣")]);
+    }
+
+    #[test]
+    fn terminal_grid_diff_does_not_let_styled_hidden_wide_tail_extend_content() {
+        let mut previous = Buffer::empty(Rect::new(0, 0, 6, 1));
+        previous.set_string(0, 0, "abcdef", Style::default());
+        let mut current = Buffer::empty(Rect::new(0, 0, 6, 1));
+        current.set_string(0, 0, "2️⃣", Style::default());
+        current[(1, 0)]
+            .set_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::UNDERLINED));
+
+        let diff = super::diff_terminal_buffers(&previous, &current);
+
+        assert!(diff.iter().any(|command| matches!(
+            command,
+            super::TerminalDrawCommand::ClearToEnd {
+                x: 2,
+                y: 0,
+                bg: Color::Reset,
+            }
+        )));
+        assert!(
+            !diff.iter().any(|command| matches!(
+                command,
+                super::TerminalDrawCommand::Put { x: 1, y: 0, .. }
+            ))
+        );
+    }
+
+    #[test]
+    fn terminal_grid_diff_respects_explicit_skip_cells() {
+        let previous = Buffer::empty(Rect::new(0, 0, 4, 1));
+        let mut current = Buffer::empty(Rect::new(0, 0, 4, 1));
+        current.set_string(0, 0, "abcd", Style::default());
+        current[(1, 0)].set_skip(true);
+
+        let diff = super::diff_terminal_buffers(&previous, &current);
+        let updates = diff
+            .iter()
+            .filter_map(|command| match command {
+                super::TerminalDrawCommand::Put { x, y, cell, .. } => Some((*x, *y, cell.symbol())),
+                super::TerminalDrawCommand::ClearToEnd { .. } => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(updates, vec![(0, 0, "a"), (2, 0, "c"), (3, 0, "d")]);
     }
 
     #[test]
@@ -229,19 +268,6 @@ mod tests {
             })
             .expect("changed cell should be emitted as Put");
         assert!(std::ptr::eq(borrowed_cell, &current[(0, 0)]));
-    }
-
-    #[test]
-    fn normalize_terminal_buffer_keeps_nonblank_adjacent_cell_visible() {
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
-        buffer[(0, 0)].set_symbol("2️⃣");
-        buffer[(1, 0)].set_symbol("x");
-        buffer[(1, 0)].set_skip(true);
-
-        normalize_terminal_buffer(&mut buffer);
-
-        assert_eq!(buffer[(1, 0)].symbol(), "x");
-        assert!(!buffer[(1, 0)].skip);
     }
 
     #[test]
@@ -273,6 +299,51 @@ mod tests {
                 y: 0,
                 bg: Color::Reset,
             }
+        )));
+    }
+
+    #[test]
+    fn terminal_grid_diff_marks_styled_wide_tail_for_prefill() {
+        let previous = Buffer::empty(Rect::new(0, 0, 4, 1));
+        let mut current = Buffer::empty(Rect::new(0, 0, 4, 1));
+        current.set_string(
+            0,
+            0,
+            "2️⃣",
+            Style::default().add_modifier(Modifier::REVERSED),
+        );
+        current[(1, 0)].set_style(Style::default().add_modifier(Modifier::REVERSED));
+
+        let diff = super::diff_terminal_buffers(&previous, &current);
+
+        assert!(diff.iter().any(|command| matches!(
+            command,
+            super::TerminalDrawCommand::Put {
+                x: 0,
+                y: 0,
+                cell,
+                prefill_width: 2,
+            } if cell.symbol() == "2️⃣"
+        )));
+    }
+
+    #[test]
+    fn terminal_grid_diff_marks_changed_wide_tail_for_prefill() {
+        let mut previous = Buffer::empty(Rect::new(0, 0, 4, 1));
+        previous.set_string(0, 0, "ab", Style::default());
+        let mut current = Buffer::empty(Rect::new(0, 0, 4, 1));
+        current.set_string(0, 0, "2️⃣", Style::default());
+
+        let diff = super::diff_terminal_buffers(&previous, &current);
+
+        assert!(diff.iter().any(|command| matches!(
+            command,
+            super::TerminalDrawCommand::Put {
+                x: 0,
+                y: 0,
+                cell,
+                prefill_width: 2,
+            } if cell.symbol() == "2️⃣"
         )));
     }
 }

@@ -123,7 +123,7 @@ fn model_render_buffer_replaces_placeholder_when_keycap_draft_appears() {
 }
 
 #[test]
-fn model_render_normalizes_keycap_trailing_cell() {
+fn model_render_keeps_keycap_trailing_cell_in_ratatui_shape() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.transcript_mut().clear();
     model.set_window(20, 4);
@@ -146,8 +146,11 @@ fn model_render_normalizes_keycap_trailing_cell() {
         .expect("keycap should be rendered");
     let trailing_cell = &buffer[(keycap_position.0 + 1, keycap_position.1)];
 
-    assert!(!trailing_cell.skip);
-    assert_eq!(trailing_cell.style(), buffer[keycap_position].style());
+    assert_eq!(trailing_cell.symbol(), " ");
+    assert_eq!(trailing_cell.fg, ratatui::style::Color::Reset);
+    assert_eq!(trailing_cell.bg, ratatui::style::Color::Reset);
+    assert_eq!(trailing_cell.underline_color, ratatui::style::Color::Reset);
+    assert!(trailing_cell.modifier.is_empty());
 }
 
 #[test]

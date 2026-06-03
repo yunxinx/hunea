@@ -187,6 +187,63 @@ fn composer_selection_can_start_from_prompt_area_without_copying_it() {
 }
 
 #[test]
+fn keycap_selection_highlights_the_full_wide_grapheme() {
+    let mut model = ready_selection_model(false);
+    type_text(&mut model, "2️⃣");
+
+    let before = render_buffer(&mut model, 24, 6);
+    let (row, column) =
+        find_exact_symbol_in_buffer(&before, "2️⃣").expect("keycap should be rendered");
+
+    assert!(
+        model
+            .update(AppEvent::MouseDown {
+                button: MouseButton::Left,
+                column: u16::try_from(column).unwrap(),
+                row: u16::try_from(row).unwrap(),
+            })
+            .is_none()
+    );
+    assert!(
+        model
+            .update(AppEvent::MouseDrag {
+                button: MouseButton::Left,
+                column: u16::try_from(column + 2).unwrap(),
+                row: u16::try_from(row).unwrap(),
+            })
+            .is_none()
+    );
+
+    let after = render_buffer(&mut model, 24, 6);
+    assert_eq!(
+        after[(u16::try_from(column).unwrap(), u16::try_from(row).unwrap())].symbol(),
+        "2️⃣"
+    );
+    assert!(
+        after[(u16::try_from(column).unwrap(), u16::try_from(row).unwrap())]
+            .modifier
+            .contains(Modifier::REVERSED)
+    );
+    assert_eq!(
+        after[(
+            u16::try_from(column + 1).unwrap(),
+            u16::try_from(row).unwrap()
+        )]
+            .symbol(),
+        " "
+    );
+    assert!(
+        after[(
+            u16::try_from(column + 1).unwrap(),
+            u16::try_from(row).unwrap()
+        )]
+            .modifier
+            .contains(Modifier::REVERSED),
+        "hidden tail cell must carry selection style so wide keycaps are highlighted as two columns"
+    );
+}
+
+#[test]
 fn status_line_selection_can_start_from_left_inset_without_copying_it() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
@@ -500,6 +557,18 @@ fn find_symbol_in_buffer(buffer: &Buffer, needle: &str) -> Option<(usize, usize)
         for column in 0..=symbols.len().saturating_sub(needle_symbols.len()) {
             if symbols[column..column + needle_symbols.len()] == needle_symbols {
                 return Some((usize::from(row), column));
+            }
+        }
+    }
+
+    None
+}
+
+fn find_exact_symbol_in_buffer(buffer: &Buffer, needle: &str) -> Option<(usize, usize)> {
+    for row in 0..buffer.area.height {
+        for column in 0..buffer.area.width {
+            if buffer[(column, row)].symbol() == needle {
+                return Some((usize::from(row), usize::from(column)));
             }
         }
     }

@@ -1,10 +1,11 @@
 use ratatui::{
+    buffer::Buffer,
     style::Modifier,
     text::{Line, Span},
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::display_width::grapheme_width;
+use crate::display_width::{display_width, grapheme_width};
 
 pub(crate) fn apply_selection_to_line(
     line: &Line<'static>,
@@ -42,6 +43,39 @@ pub(crate) fn apply_selection_to_line(
     selected_line
 }
 
+pub(crate) fn project_wide_selection_styles(buffer: &mut Buffer) {
+    let row_width = usize::from(buffer.area.width);
+    let row_count = usize::from(buffer.area.height);
+    for row in 0..row_count {
+        let row_start = row * row_width;
+        let row_end = row_start + row_width;
+        let mut column = 0usize;
+        while column < row_width {
+            let index = row_start + column;
+            let cell = &buffer.content[index];
+            let width = display_width(cell.symbol());
+            if width > 1 && cell.modifier.contains(Modifier::REVERSED) {
+                let fg = cell.fg;
+                let bg = cell.bg;
+                let underline_color = cell.underline_color;
+                let modifier = cell.modifier;
+                for offset in 1..width {
+                    let trailing_index = index + offset;
+                    if trailing_index >= row_end || buffer.content[trailing_index].symbol() != " " {
+                        break;
+                    }
+                    let trailing = &mut buffer.content[trailing_index];
+                    trailing.fg = fg;
+                    trailing.bg = bg;
+                    trailing.underline_color = underline_color;
+                    trailing.modifier = modifier;
+                }
+            }
+            column += width.max(1);
+        }
+    }
+}
+
 fn push_span(spans: &mut Vec<Span<'static>>, style: ratatui::style::Style, text: &str) {
     if text.is_empty() {
         return;
@@ -60,11 +94,13 @@ fn push_span(spans: &mut Vec<Span<'static>>, style: ratatui::style::Style, text:
 #[cfg(test)]
 mod tests {
     use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
         style::{Color, Modifier, Style},
         text::Line,
     };
 
-    use super::apply_selection_to_line;
+    use super::{apply_selection_to_line, project_wide_selection_styles};
 
     #[test]
     fn selection_render_marks_only_selected_clusters_as_reversed() {
@@ -164,5 +200,39 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::REVERSED)
         );
+    }
+
+    #[test]
+    fn project_wide_selection_styles_extends_reversed_style_to_hidden_tail() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
+        buffer.set_string(
+            0,
+            0,
+            "2️⃣",
+            Style::default()
+                .fg(Color::Blue)
+                .underline_color(Color::Red)
+                .add_modifier(Modifier::REVERSED | Modifier::UNDERLINED),
+        );
+
+        project_wide_selection_styles(&mut buffer);
+
+        assert_eq!(buffer[(1, 0)].symbol(), " ");
+        assert_eq!(buffer[(1, 0)].fg, Color::Blue);
+        assert_eq!(buffer[(1, 0)].underline_color, Color::Red);
+        assert!(buffer[(1, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(buffer[(1, 0)].modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn project_wide_selection_styles_leaves_unselected_wide_tail_in_ratatui_shape() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
+        buffer.set_string(0, 0, "2️⃣", Style::default().fg(Color::Blue));
+
+        project_wide_selection_styles(&mut buffer);
+
+        assert_eq!(buffer[(1, 0)].symbol(), " ");
+        assert_eq!(buffer[(1, 0)].fg, Color::Reset);
+        assert!(buffer[(1, 0)].modifier.is_empty());
     }
 }

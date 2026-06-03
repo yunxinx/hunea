@@ -24,12 +24,12 @@ use super::{
     message_revisit::MessageRevisitState,
     model_panel::ModelPanelState,
     render_frame::RenderFrame,
+    selection::project_wide_selection_styles,
     startup_banner::StartupBannerEntranceState,
     status_line::StatusLineItem,
     status_phrases::StatusPhraseSelector,
     stream_activity::StreamActivityState,
     style_mode::StyleMode,
-    terminal_grid::normalize_terminal_buffer,
     theme::{TerminalPalette, default_palette},
     tool_approval_panel::ToolApprovalPanelState,
     transcript::{RenderResult, Transcript, index_only_render_result},
@@ -240,7 +240,7 @@ impl Model {
     pub fn render_to_buffer(&mut self, area: Rect, buffer: &mut Buffer) -> Option<Position> {
         let mut frame = RenderFrame::new(area, buffer);
         view::render(self, &mut frame);
-        normalize_terminal_buffer(frame.buffer_mut());
+        project_wide_selection_styles(frame.buffer_mut());
         frame.cursor_position()
     }
 

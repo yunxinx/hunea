@@ -163,8 +163,16 @@ where
         last_pos = Some(Position { x, y });
 
         match command {
-            TerminalDrawCommand::Put { cell, .. } => {
+            TerminalDrawCommand::Put {
+                x,
+                y,
+                cell,
+                prefill_width,
+            } => {
                 style.queue_cell(writer, cell)?;
+                if prefill_width > 1 {
+                    queue!(writer, Print(" ".repeat(prefill_width)), MoveTo(x, y))?;
+                }
                 queue!(writer, Print(cell.symbol()))?;
             }
             TerminalDrawCommand::ClearToEnd { bg: clear_bg, .. } => {
@@ -342,8 +350,6 @@ mod tests {
     use ratatui::{backend::WindowSize, style::Style};
 
     use super::*;
-    use crate::terminal_grid::normalize_terminal_buffer;
-
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum CursorEvent {
         Hide,
@@ -458,7 +464,6 @@ mod tests {
         surface
             .draw(|area, buffer| {
                 buffer.set_string(0, 0, "ab", Style::default());
-                normalize_terminal_buffer(buffer);
                 Some(area.as_position())
             })
             .unwrap();
@@ -467,7 +472,6 @@ mod tests {
         surface
             .draw(|area, buffer| {
                 buffer.set_string(0, 0, "2️⃣", Style::default());
-                normalize_terminal_buffer(buffer);
                 Some(area.as_position())
             })
             .unwrap();
@@ -492,7 +496,6 @@ mod tests {
         surface
             .draw(|_, buffer| {
                 buffer.set_string(0, 0, "placeholder", Style::default());
-                normalize_terminal_buffer(buffer);
                 None
             })
             .unwrap();
@@ -501,7 +504,6 @@ mod tests {
         surface
             .draw(|_, buffer| {
                 buffer.set_string(0, 0, "2️⃣", Style::default());
-                normalize_terminal_buffer(buffer);
                 None
             })
             .unwrap();
@@ -515,6 +517,95 @@ mod tests {
         assert!(
             !output.contains("2️⃣ "),
             "wide keycap trailing cell must not be printed while clearing placeholder tail: {output:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_surface_preserves_skip_semantics_for_wide_keycap_tail() {
+        let (backend, output, _cursor_events) = CaptureBackend::new(8, 1);
+        let mut surface = TerminalSurface::new(backend).unwrap();
+
+        surface
+            .draw(|_, buffer| {
+                buffer.set_string(
+                    0,
+                    0,
+                    "2️⃣",
+                    Style::default().add_modifier(Modifier::REVERSED),
+                );
+                buffer[(1, 0)].set_skip(true);
+                None
+            })
+            .unwrap();
+
+        let output = output.text();
+        assert!(output.contains("2️⃣"));
+        assert!(
+            !output.contains("\u{1b}[2G "),
+            "explicit skip tail must not be rendered as a standalone blank: {output:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_surface_prefills_selected_keycap_width_before_printing_grapheme() {
+        let (backend, output, _cursor_events) = CaptureBackend::new(8, 1);
+        let mut surface = TerminalSurface::new(backend).unwrap();
+
+        surface
+            .draw(|_, buffer| {
+                buffer.set_string(
+                    0,
+                    0,
+                    "2️⃣",
+                    Style::default().add_modifier(Modifier::REVERSED),
+                );
+                buffer[(1, 0)].set_style(Style::default().add_modifier(Modifier::REVERSED));
+                None
+            })
+            .unwrap();
+
+        let output = output.text();
+        let reverse_index = output
+            .find("\u{1b}[7m")
+            .expect("selected keycap should enable reverse video");
+        let prefill_index = output[reverse_index..]
+            .find("  ")
+            .map(|index| reverse_index + index)
+            .expect("selected keycap should prefill both occupied columns");
+        let keycap_index = output
+            .find("2️⃣")
+            .expect("selected keycap should still print the grapheme");
+        assert!(
+            prefill_index < keycap_index,
+            "selection prefill must happen before printing the wide grapheme: {output:?}"
+        );
+        assert!(
+            output[prefill_index..keycap_index].contains("\u{1b}[1;1H"),
+            "renderer must move back to the grapheme start after prefilling its width: {output:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_surface_prints_consecutive_keycaps_without_tail_blanks() {
+        let (backend, output, _cursor_events) = CaptureBackend::new(10, 1);
+        let mut surface = TerminalSurface::new(backend).unwrap();
+
+        surface
+            .draw(|_, buffer| {
+                buffer.set_string(0, 0, "2️⃣2️⃣2️⃣", Style::default());
+                None
+            })
+            .unwrap();
+
+        let output = output.text();
+        assert_eq!(output.matches("2️⃣").count(), 3, "{output:?}");
+        assert!(
+            output.contains("\u{1b}[1;3H") && output.contains("\u{1b}[1;5H"),
+            "consecutive keycaps should keep explicit cell positioning between wide graphemes: {output:?}"
+        );
+        assert!(
+            !output.contains("2️⃣ "),
+            "consecutive keycaps must not render hidden tail blanks: {output:?}"
         );
     }
 
@@ -556,6 +647,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 cell: &first_cell,
+                prefill_width: 0,
             },
             TerminalDrawCommand::ClearToEnd {
                 x: 1,
@@ -566,6 +658,7 @@ mod tests {
                 x: 0,
                 y: 1,
                 cell: &second_cell,
+                prefill_width: 0,
             },
         ];
 
@@ -608,6 +701,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 cell: &cell,
+                prefill_width: 0,
             }]
             .into_iter(),
         )

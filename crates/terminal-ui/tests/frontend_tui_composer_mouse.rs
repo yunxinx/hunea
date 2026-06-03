@@ -106,7 +106,7 @@ fn mouse_release_from_last_grapheme_into_gutter_selects_text() {
 }
 
 #[test]
-fn mouse_drag_keeps_selection_instead_of_moving_cursor() {
+fn typing_replaces_completed_composer_mouse_selection() {
     let mut model = ready_model(24, 8);
     type_text(&mut model, "hello world");
 
@@ -117,7 +117,169 @@ fn mouse_drag_keeps_selection_instead_of_moving_cursor() {
     mouse_up_left(&mut model, end_column, row);
     type_text(&mut model, "X");
 
+    assert_eq!(model.composer_text(), "hXworld");
+}
+
+#[test]
+fn cursor_movement_clears_completed_composer_mouse_selection_before_typing() {
+    let mut model = ready_model(24, 8);
+    type_text(&mut model, "hello world");
+
+    let (row, start_column) = find_cell_containing(&mut model, 24, 8, "e");
+    let (_, end_column) = find_cell_containing(&mut model, 24, 8, "w");
+    mouse_down_left(&mut model, start_column, row);
+    mouse_drag_left(&mut model, end_column, row);
+    mouse_up_left(&mut model, end_column, row);
+    press_key(&mut model, KeyEvent::from(KeyCode::Left));
+    type_text(&mut model, "X");
+
+    assert_eq!(model.composer_text(), "hello worlXd");
+}
+
+#[test]
+fn cursor_movement_key_clears_completed_selection_even_when_cursor_does_not_move() {
+    let mut model = ready_model(24, 8);
+    type_text(&mut model, "hello world");
+
+    let (row, start_column) = find_cell_containing(&mut model, 24, 8, "e");
+    let (_, end_column) = find_cell_containing(&mut model, 24, 8, "w");
+    mouse_down_left(&mut model, start_column, row);
+    mouse_drag_left(&mut model, end_column, row);
+    mouse_up_left(&mut model, end_column, row);
+    press_key(&mut model, KeyEvent::from(KeyCode::Right));
+    type_text(&mut model, "X");
+
     assert_eq!(model.composer_text(), "hello worldX");
+}
+
+#[test]
+fn backspace_deletes_completed_composer_mouse_selection() {
+    let mut model = ready_model(24, 8);
+    type_text(&mut model, "hello world");
+
+    let (row, start_column) = find_cell_containing(&mut model, 24, 8, "e");
+    let (_, end_column) = find_cell_containing(&mut model, 24, 8, "w");
+    mouse_down_left(&mut model, start_column, row);
+    mouse_drag_left(&mut model, end_column, row);
+    mouse_up_left(&mut model, end_column, row);
+    press_key(&mut model, KeyEvent::from(KeyCode::Backspace));
+
+    assert_eq!(model.composer_text(), "hworld");
+}
+
+#[test]
+fn ctrl_z_restores_composer_mouse_selection_replacement() {
+    let mut model = ready_model(24, 8);
+    type_text(&mut model, "hello world");
+
+    let (row, start_column) = find_cell_containing(&mut model, 24, 8, "e");
+    let (_, end_column) = find_cell_containing(&mut model, 24, 8, "w");
+    mouse_down_left(&mut model, start_column, row);
+    mouse_drag_left(&mut model, end_column, row);
+    mouse_up_left(&mut model, end_column, row);
+    type_text(&mut model, "X");
+    assert_eq!(model.composer_text(), "hXworld");
+    press_key(
+        &mut model,
+        KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
+    );
+
+    assert_eq!(model.composer_text(), "hello world");
+}
+
+#[test]
+fn ctrl_z_restores_composer_mouse_selection_deletion() {
+    let mut model = ready_model(24, 8);
+    type_text(&mut model, "hello world");
+
+    let (row, start_column) = find_cell_containing(&mut model, 24, 8, "e");
+    let (_, end_column) = find_cell_containing(&mut model, 24, 8, "w");
+    mouse_down_left(&mut model, start_column, row);
+    mouse_drag_left(&mut model, end_column, row);
+    mouse_up_left(&mut model, end_column, row);
+    press_key(&mut model, KeyEvent::from(KeyCode::Backspace));
+    assert_eq!(model.composer_text(), "hworld");
+    press_key(
+        &mut model,
+        KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
+    );
+
+    assert_eq!(model.composer_text(), "hello world");
+}
+
+#[test]
+fn ctrl_w_deletes_completed_composer_mouse_selection_and_yanks_it() {
+    let mut model = ready_model(24, 8);
+    type_text(&mut model, "hello world");
+
+    let (row, start_column) = find_cell_containing(&mut model, 24, 8, "e");
+    let (_, end_column) = find_cell_containing(&mut model, 24, 8, "w");
+    mouse_down_left(&mut model, start_column, row);
+    mouse_drag_left(&mut model, end_column, row);
+    mouse_up_left(&mut model, end_column, row);
+    press_key(
+        &mut model,
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+    );
+    assert_eq!(model.composer_text(), "hworld");
+
+    press_key(
+        &mut model,
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+    );
+
+    assert_eq!(model.composer_text(), "hello world");
+}
+
+#[test]
+fn ctrl_k_deletes_completed_composer_mouse_selection_and_yanks_it() {
+    let mut model = ready_model(24, 8);
+    type_text(&mut model, "hello world");
+
+    let (row, start_column) = find_cell_containing(&mut model, 24, 8, "e");
+    let (_, end_column) = find_cell_containing(&mut model, 24, 8, "w");
+    mouse_down_left(&mut model, start_column, row);
+    mouse_drag_left(&mut model, end_column, row);
+    mouse_up_left(&mut model, end_column, row);
+    press_key(
+        &mut model,
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+    );
+    assert_eq!(model.composer_text(), "hworld");
+
+    press_key(
+        &mut model,
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+    );
+
+    assert_eq!(model.composer_text(), "hello world");
+}
+
+#[test]
+fn ctrl_y_replaces_completed_composer_mouse_selection_with_yank_buffer() {
+    let mut model = ready_model(24, 8);
+    type_text(&mut model, "alpha beta");
+    press_key(
+        &mut model,
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+    );
+    press_key(
+        &mut model,
+        KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
+    );
+    assert_eq!(model.composer_text(), "alpha beta");
+
+    let (row, start_column) = find_cell_containing(&mut model, 24, 8, "l");
+    let (_, end_column) = find_cell_containing(&mut model, 24, 8, "b");
+    mouse_down_left(&mut model, start_column, row);
+    mouse_drag_left(&mut model, end_column, row);
+    mouse_up_left(&mut model, end_column, row);
+    press_key(
+        &mut model,
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+    );
+
+    assert_eq!(model.composer_text(), "abetabeta");
 }
 
 #[test]

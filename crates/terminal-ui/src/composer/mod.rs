@@ -27,6 +27,7 @@ use crate::terminal_text::sanitize_terminal_text;
 pub(crate) use self::message::chat_message_from_composer_text;
 pub(crate) use self::mouse::{
     cursor_position_for_line_anchor_click, move_cursor_to_logical_position,
+    selection_end_char_for_line_anchor, selection_start_char_for_line_anchor,
 };
 pub(crate) use self::mouse_interaction::{ComposerMouseOutcome, PendingComposerCursorClick};
 pub(crate) use self::render::LineAnchor;
@@ -147,6 +148,23 @@ impl Composer {
         self.bump_content_revision();
     }
 
+    /// `clear_for_edit` 清空用户草稿，并保留一次可撤销编辑。
+    pub(crate) fn clear_for_edit(&mut self) {
+        if self.value.is_empty() {
+            self.finish_grapheme_undo_group();
+            self.set_cursor(0);
+            self.viewport_y = 0;
+            return;
+        }
+
+        self.finish_grapheme_undo_group();
+        self.push_undo_snapshot();
+        self.value.clear();
+        self.set_cursor(0);
+        self.viewport_y = 0;
+        self.bump_content_revision();
+    }
+
     /// `replace_text_and_move_to_end_for_edit` 用用户触发的整段编辑替换草稿，并记录 undo。
     ///
     /// 外部编辑器回写与命令补全都属于用户可感知的草稿编辑，`Ctrl+Z` 应该回到替换前文本。
@@ -213,6 +231,71 @@ impl Composer {
         self.set_cursor(self.cursor + total_chars(text));
         self.bump_content_revision();
         self.sync_viewport_to_cursor();
+    }
+
+    /// `replace_char_range` 用指定文本替换字符范围，并记录一次 undo。
+    pub(crate) fn replace_char_range(
+        &mut self,
+        start: usize,
+        end: usize,
+        replacement: &str,
+    ) -> bool {
+        if start >= end {
+            return false;
+        }
+
+        let sanitized_replacement = sanitize_terminal_text(replacement);
+        let replacement = sanitized_replacement.as_ref();
+        let value_char_count = total_chars(&self.value);
+        let start = start.min(value_char_count);
+        let end = end.min(value_char_count);
+        if start >= end {
+            return false;
+        }
+
+        self.finish_grapheme_undo_group();
+        self.push_undo_snapshot();
+        let byte_start = char_to_byte_index(&self.value, start);
+        let byte_end = char_to_byte_index(&self.value, end);
+        self.value.replace_range(byte_start..byte_end, replacement);
+        self.set_cursor(start + total_chars(replacement));
+        self.bump_content_revision();
+        self.sync_viewport_to_cursor();
+        true
+    }
+
+    /// `kill_char_range` 删除字符范围，并把删除文本放入 kill buffer。
+    pub(crate) fn kill_char_range(&mut self, start: usize, end: usize) -> bool {
+        let total_chars = total_chars(&self.value);
+        let start = start.min(total_chars);
+        let end = end.min(total_chars);
+        if start >= end {
+            return false;
+        }
+
+        let byte_start = char_to_byte_index(&self.value, start);
+        let byte_end = char_to_byte_index(&self.value, end);
+        let killed_text = self.value[byte_start..byte_end].to_string();
+        if killed_text.is_empty() {
+            return false;
+        }
+
+        self.kill_buffer = killed_text;
+        self.finish_grapheme_undo_group();
+        self.push_undo_snapshot();
+        self.delete_absolute_range_without_undo(start, end);
+        self.sync_viewport_to_cursor();
+        true
+    }
+
+    /// `replace_char_range_with_kill_buffer` 用 kill buffer 替换字符范围。
+    pub(crate) fn replace_char_range_with_kill_buffer(&mut self, start: usize, end: usize) -> bool {
+        if self.kill_buffer.is_empty() {
+            return false;
+        }
+
+        let text = self.kill_buffer.clone();
+        self.replace_char_range(start, end, &text)
     }
 
     /// `finish_current_undo_group` 结束当前普通输入 undo 分组。

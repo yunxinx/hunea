@@ -187,6 +187,47 @@ fn composer_selection_can_start_from_prompt_area_without_copying_it() {
 }
 
 #[test]
+fn mixed_transcript_composer_selection_is_not_consumed_by_composer_editing() {
+    let mut model = ready_selection_model(false);
+    submit_message(&mut model, "alpha");
+    type_text(&mut model, "beta");
+
+    let (alpha_row, alpha_column) = find_cell_containing(&mut model, 24, 6, "alpha");
+    let (beta_row, beta_column) = find_cell_containing(&mut model, 24, 6, "beta");
+    assert!(
+        model
+            .update(AppEvent::MouseDown {
+                button: MouseButton::Left,
+                column: u16::try_from(alpha_column + 1).unwrap(),
+                row: u16::try_from(alpha_row).unwrap(),
+            })
+            .is_none()
+    );
+    assert!(
+        model
+            .update(AppEvent::MouseDrag {
+                button: MouseButton::Left,
+                column: u16::try_from(beta_column + 2).unwrap(),
+                row: u16::try_from(beta_row).unwrap(),
+            })
+            .is_none()
+    );
+    assert!(
+        model
+            .update(AppEvent::MouseUp {
+                button: MouseButton::Left,
+                column: u16::try_from(beta_column + 2).unwrap(),
+                row: u16::try_from(beta_row).unwrap(),
+            })
+            .is_none()
+    );
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Backspace)));
+
+    assert_eq!(model.composer_text(), "bet");
+}
+
+#[test]
 fn keycap_selection_highlights_the_full_wide_grapheme() {
     let mut model = ready_selection_model(false);
     type_text(&mut model, "2️⃣");

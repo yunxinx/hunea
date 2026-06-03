@@ -24,6 +24,24 @@ pub(crate) fn cursor_position_for_line_anchor_click(
     Some((anchor.logical_line, logical_column))
 }
 
+/// `selection_start_char_for_line_anchor` 把 composer 选区起点列换算为绝对字符偏移。
+pub(crate) fn selection_start_char_for_line_anchor(
+    composer: &Composer,
+    anchor: LineAnchor,
+    column: usize,
+) -> Option<usize> {
+    selection_char_for_line_anchor(composer, anchor, column, SelectionBoundary::Start)
+}
+
+/// `selection_end_char_for_line_anchor` 把 composer 选区终点列换算为绝对字符偏移。
+pub(crate) fn selection_end_char_for_line_anchor(
+    composer: &Composer,
+    anchor: LineAnchor,
+    column: usize,
+) -> Option<usize> {
+    selection_char_for_line_anchor(composer, anchor, column, SelectionBoundary::End)
+}
+
 fn visual_text_for_anchor(value: &str, anchor: LineAnchor) -> Option<String> {
     let lines = logical_lines(value);
     let line = lines.get(anchor.logical_line)?;
@@ -64,6 +82,67 @@ fn logical_column_for_visual_click(
         if visual_offset <= current_width {
             return anchor.visible_start_char + consumed_chars;
         }
+    }
+
+    anchor.end_char
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionBoundary {
+    Start,
+    End,
+}
+
+fn selection_char_for_line_anchor(
+    composer: &Composer,
+    anchor: LineAnchor,
+    column: usize,
+    boundary: SelectionBoundary,
+) -> Option<usize> {
+    if composer.value().is_empty() {
+        return None;
+    }
+
+    let visual_offset = column.saturating_sub(display_width(composer.prompt()));
+    let line_text = visual_text_for_anchor(composer.value(), anchor)?;
+    let logical_column =
+        logical_column_for_selection_boundary(&line_text, anchor, visual_offset, boundary);
+    Some(absolute_cursor_for_position(
+        &logical_lines(composer.value()),
+        anchor.logical_line,
+        logical_column,
+    ))
+}
+
+fn logical_column_for_selection_boundary(
+    line_text: &str,
+    anchor: LineAnchor,
+    visual_offset: usize,
+    boundary: SelectionBoundary,
+) -> usize {
+    if visual_offset == 0 || line_text.is_empty() {
+        return anchor.visible_start_char;
+    }
+
+    let mut current_width = 0;
+    let mut consumed_chars = 0;
+    for cluster in grapheme_clusters(line_text) {
+        let cluster_chars = cluster.end_char.saturating_sub(cluster.start_char);
+        let cluster_start_width = current_width;
+        let cluster_end_width = current_width + cluster.width;
+
+        match boundary {
+            SelectionBoundary::Start if cluster_end_width > visual_offset => {
+                return anchor.visible_start_char + consumed_chars;
+            }
+            SelectionBoundary::End if cluster_start_width >= visual_offset => {
+                return anchor.visible_start_char + consumed_chars;
+            }
+            _ => {}
+        }
+
+        current_width = cluster_end_width;
+        consumed_chars += cluster_chars;
     }
 
     anchor.end_char

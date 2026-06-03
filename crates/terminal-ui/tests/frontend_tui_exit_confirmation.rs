@@ -94,6 +94,29 @@ fn ctrl_c_clears_existing_draft_before_showing_exit_confirmation() {
 }
 
 #[test]
+fn ctrl_z_restores_draft_cleared_by_ctrl_c() {
+    let mut model = ready_model();
+
+    for character in "hello".chars() {
+        let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
+    }
+
+    let _ = model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+    assert_eq!(model.composer_text(), "");
+
+    let _ = model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('z'),
+        KeyModifiers::CONTROL,
+    )));
+
+    assert_eq!(model.composer_text(), "hello");
+    assert!(!model.is_quitting());
+}
+
+#[test]
 fn ctrl_c_keeps_exit_confirmation_behavior_when_clear_feature_is_disabled() {
     let mut model = ready_model_with_options(ModelOptions {
         ctrl_c_clears_input: false,

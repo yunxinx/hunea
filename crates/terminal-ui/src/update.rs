@@ -8,7 +8,11 @@ use runtime_domain::{
 
 use super::{
     ExternalEditorLaunch, Model, Sender,
-    composer::chat_message_from_composer_text,
+    composer::{
+        chat_message_from_composer_text, selection_end_char_for_line_anchor,
+        selection_start_char_for_line_anchor,
+    },
+    document::DocumentAnchorRegion,
     exit_confirmation::EXIT_CONFIRMATION_PROMPT,
     path_resolve::resolve_configured_current_dir,
     terminal_text::sanitize_terminal_text,
@@ -385,7 +389,7 @@ impl Model {
         let file_picker_manual_viewport_state = (file_picker_was_active
             && self.document_runtime.manual_scroll)
             .then(|| self.current_document_viewport_state());
-        self.composer_mut().handle_key(key);
+        self.handle_composer_editing_key(key);
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();
         let file_picker_closed = file_picker_was_active && !self.file_picker_active();
@@ -444,13 +448,113 @@ impl Model {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
-        self.composer_mut().insert_newline();
+        if !self.replace_completed_composer_selection("\n") {
+            self.composer_mut().insert_newline();
+        }
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
         None
+    }
+
+    fn handle_composer_editing_key(&mut self, key: KeyEvent) {
+        if self.apply_composer_selection_edit_for_key(key) {
+            return;
+        }
+
+        let clears_completed_selection = composer_navigation_key_clears_selection(key);
+        self.composer_mut().handle_key(key);
+        if clears_completed_selection {
+            self.clear_selection_range();
+        }
+    }
+
+    fn apply_composer_selection_edit_for_key(&mut self, key: KeyEvent) -> bool {
+        match composer_selection_edit_for_key(key) {
+            Some(ComposerSelectionEdit::Replace(replacement)) => {
+                self.replace_completed_composer_selection(replacement.as_str())
+            }
+            Some(ComposerSelectionEdit::Delete) => self.replace_completed_composer_selection(""),
+            Some(ComposerSelectionEdit::Kill) => self.kill_completed_composer_selection(),
+            Some(ComposerSelectionEdit::Yank) => {
+                self.replace_completed_composer_selection_with_kill_buffer()
+            }
+            None => false,
+        }
+    }
+
+    fn replace_completed_composer_selection(&mut self, replacement: &str) -> bool {
+        let Some((start, end)) = self.completed_composer_selection_char_range() else {
+            return false;
+        };
+
+        if !self
+            .composer_mut()
+            .replace_char_range(start, end, replacement)
+        {
+            return false;
+        }
+
+        self.clear_selection_range();
+        true
+    }
+
+    fn kill_completed_composer_selection(&mut self) -> bool {
+        let Some((start, end)) = self.completed_composer_selection_char_range() else {
+            return false;
+        };
+
+        if !self.composer_mut().kill_char_range(start, end) {
+            return false;
+        }
+
+        self.clear_selection_range();
+        true
+    }
+
+    fn replace_completed_composer_selection_with_kill_buffer(&mut self) -> bool {
+        let Some((start, end)) = self.completed_composer_selection_char_range() else {
+            return false;
+        };
+
+        if !self
+            .composer_mut()
+            .replace_char_range_with_kill_buffer(start, end)
+        {
+            return false;
+        }
+
+        self.clear_selection_range();
+        true
+    }
+
+    fn completed_composer_selection_char_range(&mut self) -> Option<(usize, usize)> {
+        if !self.selection_runtime.selection.is_active()
+            || self.selection_runtime.selection.is_dragging()
+        {
+            return None;
+        }
+
+        let layout = self.build_document_layout();
+        let (start, end) = self.selection_runtime.selection.ordered_points(&layout)?;
+        let start_anchor = layout.line_anchor_at(start.line())?;
+        let end_anchor = layout.line_anchor_at(end.line())?;
+        if start_anchor.region != DocumentAnchorRegion::Composer
+            || end_anchor.region != DocumentAnchorRegion::Composer
+        {
+            return None;
+        }
+
+        let start_char = selection_start_char_for_line_anchor(
+            &self.composer,
+            start_anchor.composer,
+            start.column(),
+        )?;
+        let end_char =
+            selection_end_char_for_line_anchor(&self.composer, end_anchor.composer, end.column())?;
+        (start_char < end_char).then_some((start_char, end_char))
     }
 
     fn handle_paste(&mut self, text: &str) -> Option<AppEffect> {
@@ -462,8 +566,10 @@ impl Model {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
-        self.composer_mut()
-            .insert_text(&normalize_pasted_text(text));
+        let normalized_text = normalize_pasted_text(text);
+        if !self.replace_completed_composer_selection(&normalized_text) {
+            self.composer_mut().insert_text(&normalized_text);
+        }
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
@@ -476,7 +582,7 @@ impl Model {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
-        self.composer_mut().clear();
+        self.composer_mut().clear_for_edit();
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
@@ -624,4 +730,78 @@ fn normalize_pasted_text(text: &str) -> String {
     }
 
     normalized
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComposerSelectionEdit {
+    Replace(String),
+    Delete,
+    Kill,
+    Yank,
+}
+
+fn composer_selection_edit_for_key(key: KeyEvent) -> Option<ComposerSelectionEdit> {
+    match key.code {
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            Some(ComposerSelectionEdit::Replace(character.to_string()))
+        }
+        KeyCode::Char('y') if is_ctrl_only(key.modifiers) => Some(ComposerSelectionEdit::Yank),
+        KeyCode::Backspace | KeyCode::Delete if has_word_modifier(key.modifiers) => {
+            Some(ComposerSelectionEdit::Kill)
+        }
+        KeyCode::Char('w') | KeyCode::Char('u') | KeyCode::Char('k')
+            if is_ctrl_only(key.modifiers) =>
+        {
+            Some(ComposerSelectionEdit::Kill)
+        }
+        KeyCode::Char('d') if key.modifiers == KeyModifiers::ALT => {
+            Some(ComposerSelectionEdit::Kill)
+        }
+        KeyCode::Char('h') | KeyCode::Char('d') if is_composer_selection_delete_key(key) => {
+            Some(ComposerSelectionEdit::Delete)
+        }
+        KeyCode::Backspace | KeyCode::Delete => Some(ComposerSelectionEdit::Delete),
+        _ => None,
+    }
+}
+
+fn composer_navigation_key_clears_selection(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('a')
+        | KeyCode::Char('b')
+        | KeyCode::Char('e')
+        | KeyCode::Char('f')
+        | KeyCode::Char('n')
+        | KeyCode::Char('p')
+            if is_ctrl_only(key.modifiers) =>
+        {
+            true
+        }
+        KeyCode::Char('b') | KeyCode::Char('f') if key.modifiers == KeyModifiers::ALT => true,
+        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down => true,
+        KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown => true,
+        _ => false,
+    }
+}
+
+fn is_composer_selection_delete_key(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('h') | KeyCode::Char('d') => {
+            key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+        }
+        _ => false,
+    }
+}
+
+fn is_ctrl_only(modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::CONTROL) && !modifiers.contains(KeyModifiers::ALT)
+}
+
+fn has_word_modifier(modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT)
 }

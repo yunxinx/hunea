@@ -2,6 +2,7 @@ target/
 .codex
 .docs/
 .lumos/
+.hunea/
 .planning/
 docs/
 AGENTS.md
@@ -9,3 +10,4 @@ AGENTS.md
 .claude/
 .trellis/
 skills-lock.json
+CONTEXT.md

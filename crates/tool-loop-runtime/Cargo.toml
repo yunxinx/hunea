@@ -1,0 +1,13 @@
+[package]
+name = "tool-loop-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+provider-protocol.workspace = true
+runtime-domain.workspace = true
+tool-runtime.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

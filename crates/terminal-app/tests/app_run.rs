@@ -1,0 +1,26 @@
+use std::io;
+
+use terminal_app::write_terminal_replay_with_context;
+use terminal_ui::{Model, StartupBannerOptions};
+
+#[test]
+fn write_terminal_replay_adds_context_when_output_fails() {
+    let model = Model::new(StartupBannerOptions::default());
+    let error = write_terminal_replay_with_context(&mut BrokenWriter, &model, false)
+        .expect_err("writer failures should be wrapped with app context");
+    let message = format!("{error:?}");
+
+    assert!(message.contains("failed to write terminal replay"));
+}
+
+struct BrokenWriter;
+
+impl io::Write for BrokenWriter {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(io::Error::other("synthetic writer failure"))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}

@@ -1,0 +1,11 @@
+//! OpenAI-compatible `/v1/chat/completions` provider adapter.
+
+mod client;
+mod config;
+mod error_response;
+mod models;
+mod request;
+mod stream;
+
+pub use client::OpenAiChatCompletionsClient;
+pub use config::{DEFAULT_OPENAI_BASE_URL, OpenAiClientConfig};

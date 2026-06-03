@@ -1,12 +1,12 @@
-# lumos 配置示例
+# hunea 配置示例
 #
 # 实际配置文件请放在以下任一位置：
-# 1. 用户级：平台标准配置目录下的 lumos/config.toml
-#    例如 Linux 常见为 ~/.config/lumos/config.toml
-# 2. 项目级：./.lumos/config.toml
+# 1. 用户级：平台标准配置目录下的 hunea/config.toml
+#    例如 Linux 常见为 ~/.config/hunea/config.toml
+# 2. 项目级：./.hunea/config.toml
 #
 # 当两者同时存在时，项目级配置会覆盖用户级配置。
-# 修改配置后需要重启 lumos 才会生效。
+# 修改配置后需要重启 hunea 才会生效。
 
 [tui]
 # 可选值：
@@ -22,7 +22,7 @@ user_input_style = "cx"
 # - "git-branch"：当前工作目录所在 Git 仓库的分支名
 # - "current-dir"：当前工作目录的短路径，home 前缀会缩写为 ~
 # - "current-model"：当前选择的模型，格式为 provider/model
-# - "throughput"：最近一次成功请求的每秒输出 token 数，例如 139tps
+# - "throughput"：最近一次成功请求的 LLM 每秒输出 token 数，例如 139tps
 # - "latency"：最近一次成功请求的首 token 延迟，例如 0.53s
 #
 # 未配置时不显示状态行；如果配置了但当前所有项都拿不到内容，
@@ -44,7 +44,7 @@ status_line_2 = ["current-dir"]
 # - ["nvim"]
 #
 # 对于 VS Code、Cursor、Zed、Sublime Text 这类 GUI 编辑器，
-# 需要显式带上“等待关闭后再返回”的参数；否则 lumos 会在编辑器刚启动时就回到 TUI。
+# 需要显式带上“等待关闭后再返回”的参数；否则 hunea 会在编辑器刚启动时就回到 TUI。
 # macOS 的 `open` 也需要同时带上 `-W` 与 `-n`。
 #
 # 未配置或显式写成 [] 时，会退回到自动探测模式：
@@ -72,8 +72,13 @@ swap_enter_and_send = false
 # 默认开启；关闭后，Ctrl+C 会恢复为退出确认语义。
 ctrl_c_clears_input = true
 
+# `composer_undo_limit` 控制输入框 Ctrl+Z 可撤回的草稿快照数量。
+# 仅保存在当前 TUI 进程内，不会写入会话或配置；Ctrl+Y 的 kill buffer 仍只保存最近一次 kill。
+# 取值范围 1..200，默认 50。
+composer_undo_limit = 50
+
 # `esc_interrupt_presses` 控制当前对话 turn 运行中，
-# 需要连续按多少次 Esc 才会中断当前请求或 ACP prompt。
+# 需要连续按多少次 Esc 才会中断当前 native 请求。
 # 可选值为 1、2、3；默认 2。
 esc_interrupt_presses = 2
 
@@ -99,12 +104,15 @@ show_reasoning_content = false
 # `reasoning_content_display` 控制 show_reasoning_content = true 时，
 # 思维链内容进入 transcript 后的默认展示状态。
 # 未配置时，show_reasoning_content = true 会默认使用 `expanded`。
-# 可选值：`collapsed`、`expanded`、`snippet`。
+# `expanded-simplified` 是 `expanded` 的长内容 compact 变体：短内容完整显示；
+# 长内容保留前后各 4 行，中间以 `… +N lines (ctrl + t to view transcript)` 提示，
+# Ctrl+T 进入 transcript overlay 后显示完整内容。
+# 可选值：`collapsed`、`expanded`、`expanded-simplified`、`snippet`。
 reasoning_content_display = "collapsed"
 
 [runtime]
 # `request_retry_attempts` 控制 runtime 请求失败后最多重试几次。
-# 当前 native chat 会使用该策略；后续 ACP 等 runtime 请求也可以复用。
+# 当前 native chat 会使用该策略。
 # 可选值为 1..10；默认 3。
 request_retry_attempts = 3
 
@@ -122,6 +130,12 @@ request_timeout_seconds = 120
 # `tool_max_turns` 控制 agent multi-turn 工具调用轮次上限。
 # 默认不限制；设置为正整数后，超过该轮次会终止本次请求。
 # tool_max_turns = 32
+
+# `allow_managed_rg` / `allow_managed_fd` 记录是否允许 hunea 在系统 PATH
+# 和 bundled binary 都不可用时，下载、校验并安装 pin 版本的 `rg` / `fd`。
+# 缺省或 false 表示下次实际需要下载时重新询问；true 表示同类下载可直接继续。
+# allow_managed_rg = true
+# allow_managed_fd = true
 
 [debug]
 # `enabled` 控制是否显示仅用于本地调试 TUI 效果的斜杠命令。

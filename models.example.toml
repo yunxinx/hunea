@@ -1,4 +1,4 @@
-# Lumos 原生模型配置示例。
+# Hunea 原生模型配置示例。
 #
 # 将此文件复制为 `models.toml`，并根据你的本地模型服务器、
 # OpenAI 兼容服务或原生 provider 进行调整。`base_url`
@@ -12,8 +12,8 @@
 # 这种情况下需要显式配置 `models = [...]`；自定义原生端点
 # 尚不支持自动模型同步。
 
-# 留空表示 Lumos 启动时不选择任何模型。当你从 /models 选择模型后，
-# Lumos 会将最后选择的模型以 `provider/model` 格式写回此处。
+# 留空表示 Hunea 启动时不选择任何模型。当你从 /models 选择模型后，
+# Hunea 会将最后选择的模型以 `provider/model` 格式写回此处。
 default = ""
 
 [providers.local]

@@ -12,6 +12,9 @@ use uuid::{Timestamp, Uuid, Version};
 pub(crate) mod jsonl;
 pub(crate) mod metadata;
 pub(crate) mod recorder;
+mod store;
+
+pub use store::{InMemorySessionStore, LocalSessionStore, SessionStore};
 
 /// 短 entry id 固定为 8 个 hex 字符。
 const SHORT_ENTRY_ID_HEX_LEN: usize = 8;
@@ -201,6 +204,11 @@ pub enum SessionStoreError {
     ChannelClosed,
     #[error("session writer worker panicked")]
     WorkerPanicked,
+    #[error("failed to resolve session history: {source}")]
+    ResolveFailed {
+        #[source]
+        source: ResolveError,
+    },
 }
 
 /// `ResolveError` 描述 tree resolve 失败原因。
@@ -289,7 +297,7 @@ pub fn resolve(
     leaf_id: &str,
 ) -> Result<Vec<ConversationItem>, ResolveError> {
     let by_id = build_entry_index(entries)?;
-    let effective_leaf_id = effective_leaf_id(entries, leaf_id);
+    let effective_leaf_id = effective_leaf_id(&by_id, leaf_id);
     let mut path = Vec::new();
     let mut visited = HashSet::new();
     let mut current = *by_id
@@ -329,17 +337,15 @@ fn build_entry_index(
     Ok(by_id)
 }
 
-fn effective_leaf_id<'a>(entries: &'a [SessionEntry], requested_leaf_id: &'a str) -> &'a str {
-    match entries.last().map(|entry| &entry.kind) {
+fn effective_leaf_id<'a>(
+    by_id: &HashMap<&'a str, &'a SessionEntry>,
+    requested_leaf_id: &'a str,
+) -> &'a str {
+    match by_id.get(requested_leaf_id).map(|entry| &entry.kind) {
         Some(SessionEntryKind::Leaf {
             target_id: Some(target_id),
         }) => target_id.as_str(),
-        Some(SessionEntryKind::Leaf { target_id: None }) => entries
-            .iter()
-            .rev()
-            .find(|entry| !matches!(entry.kind, SessionEntryKind::Leaf { .. }))
-            .map(|entry| entry.id.as_str())
-            .unwrap_or(requested_leaf_id),
+        Some(SessionEntryKind::Leaf { target_id: None }) => requested_leaf_id,
         _ => requested_leaf_id,
     }
 }
@@ -890,13 +896,29 @@ mod tests {
     }
 
     #[test]
-    fn resolve_follows_trailing_leaf_target() {
+    fn resolve_follows_requested_leaf_entry_target() {
+        let entries = entries_with_trailing_leaf_override();
+
+        let resolved = super::resolve(&entries, "leaf-1")
+            .expect("leaf entry should redirect canonical history");
+
+        assert_eq!(resolved, vec![ConversationItem::text(Role::User, "hello")]);
+    }
+
+    #[test]
+    fn resolve_keeps_explicit_non_leaf_selection_when_a_trailing_leaf_exists() {
         let entries = entries_with_trailing_leaf_override();
 
         let resolved = super::resolve(&entries, "assistant-c")
             .expect("leaf override should redirect canonical history");
 
-        assert_eq!(resolved, vec![ConversationItem::text(Role::User, "hello")]);
+        assert_eq!(
+            resolved,
+            vec![
+                ConversationItem::text(Role::User, "hello"),
+                ConversationItem::text(Role::Assistant, "branch-c"),
+            ]
+        );
     }
 
     #[test]
@@ -936,10 +958,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_uses_latest_non_leaf_entry_when_trailing_leaf_resets_target() {
+    fn resolve_uses_latest_non_leaf_entry_when_requested_leaf_resets_target() {
         let entries = entries_with_trailing_leaf_reset();
 
-        let resolved = super::resolve(&entries, "user-a")
+        let resolved = super::resolve(&entries, "leaf-reset")
             .expect("leaf reset should fall back to the latest concrete entry");
 
         assert_eq!(
@@ -999,10 +1021,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_reports_missing_leaf_target_from_trailing_leaf_entry() {
+    fn resolve_reports_missing_leaf_target_from_requested_leaf_entry() {
         let entries = entries_with_missing_leaf_target();
 
-        let error = super::resolve(&entries, "assistant-c")
+        let error = super::resolve(&entries, "leaf-missing")
             .expect_err("missing leaf target should fail resolve");
 
         assert_eq!(

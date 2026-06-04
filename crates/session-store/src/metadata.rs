@@ -5,11 +5,13 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
+    thread,
+    time::Duration,
     time::UNIX_EPOCH,
 };
 
 use provider_protocol::Role;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use tokio::task;
 
 use crate::{
@@ -18,6 +20,8 @@ use crate::{
 };
 
 const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const SQLITE_INIT_RETRY_ATTEMPTS: usize = 5;
+const SQLITE_INIT_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 /// `MetadataIndex` 管理 session 的 SQLite 元数据索引。
 pub(crate) struct MetadataIndex {
@@ -34,7 +38,7 @@ impl MetadataIndex {
             .unwrap_or_else(|| PathBuf::from("sessions"));
         let init_path = index_path.clone();
 
-        spawn_index_task(move || initialize_database(&init_path)).await?;
+        spawn_index_task(move || initialize_database_with_retry(&init_path)).await?;
 
         Ok(Self {
             index_path: Arc::new(index_path),
@@ -145,6 +149,22 @@ where
 
 fn initialize_database(index_path: &Path) -> Result<(), SessionStoreError> {
     with_connection(index_path, migrate_database)
+}
+
+fn initialize_database_with_retry(index_path: &Path) -> Result<(), SessionStoreError> {
+    for attempt in 0..SQLITE_INIT_RETRY_ATTEMPTS {
+        match initialize_database(index_path) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt + 1 < SQLITE_INIT_RETRY_ATTEMPTS && is_sqlite_busy_error(&error) =>
+            {
+                thread::sleep(SQLITE_INIT_RETRY_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    unreachable!("retry loop should return before exhausting attempts")
 }
 
 fn with_connection<T>(
@@ -725,6 +745,14 @@ fn io_error(source: std::io::Error) -> SessionStoreError {
 
 fn sqlite_error(source: rusqlite::Error) -> SessionStoreError {
     SessionStoreError::SqliteError { source }
+}
+
+fn is_sqlite_busy_error(error: &SessionStoreError) -> bool {
+    matches!(
+        error,
+        SessionStoreError::SqliteError { source }
+            if source.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)
+    )
 }
 
 #[cfg(test)]

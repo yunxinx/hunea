@@ -10,6 +10,7 @@ use thiserror::Error;
 use uuid::{Timestamp, Uuid, Version};
 
 pub(crate) mod jsonl;
+pub(crate) mod recorder;
 
 /// 短 entry id 固定为 8 个 hex 字符。
 const SHORT_ENTRY_ID_HEX_LEN: usize = 8;
@@ -172,6 +173,8 @@ pub enum SessionStoreError {
     IndexInconsistent { message: String },
     #[error("session writer channel closed")]
     ChannelClosed,
+    #[error("session writer worker panicked")]
+    WorkerPanicked,
 }
 
 /// `ResolveError` 描述 tree resolve 失败原因。

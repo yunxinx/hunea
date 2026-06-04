@@ -135,6 +135,20 @@ pub struct SessionMeta {
     pub jsonl_path: PathBuf,
 }
 
+/// 解析后的 provider-visible 条目，保留其在 session 树中的 entry id。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSessionItem {
+    pub entry_id: String,
+    pub item: ConversationItem,
+}
+
+/// 恢复 session 时返回的完整状态。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResolvedSessionState {
+    pub items: Vec<ResolvedSessionItem>,
+    pub latest_config: Option<ConfigSnapshot>,
+}
+
 /// session 持久化条目类型。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
@@ -296,8 +310,29 @@ pub fn resolve(
     entries: &[SessionEntry],
     leaf_id: &str,
 ) -> Result<Vec<ConversationItem>, ResolveError> {
+    Ok(resolve_state(entries, leaf_id)?
+        .items
+        .into_iter()
+        .map(|item| item.item)
+        .collect())
+}
+
+/// 从指定 leaf 解析 provider-visible history 以及恢复所需的附加状态。
+pub fn resolve_state(
+    entries: &[SessionEntry],
+    leaf_id: &str,
+) -> Result<ResolvedSessionState, ResolveError> {
     let by_id = build_entry_index(entries)?;
-    let effective_leaf_id = effective_leaf_id(&by_id, leaf_id);
+    let path = resolve_path(&by_id, leaf_id)?;
+
+    resolve_state_from_path(&path)
+}
+
+fn resolve_path<'a>(
+    by_id: &HashMap<&'a str, &'a SessionEntry>,
+    leaf_id: &'a str,
+) -> Result<Vec<&'a SessionEntry>, ResolveError> {
+    let effective_leaf_id = effective_leaf_id(by_id, leaf_id);
     let mut path = Vec::new();
     let mut visited = HashSet::new();
     let mut current = *by_id
@@ -321,8 +356,7 @@ pub fn resolve(
     }
 
     path.reverse();
-
-    resolve_items_from_path(&path)
+    Ok(path)
 }
 
 fn build_entry_index(
@@ -350,30 +384,47 @@ fn effective_leaf_id<'a>(
     }
 }
 
-fn resolve_items_from_path(path: &[&SessionEntry]) -> Result<Vec<ConversationItem>, ResolveError> {
-    let mut resolved = Vec::new();
-    let start_index = if let Some((summary, first_kept_entry_id)) = latest_compaction(path) {
-        let keep_index = item_entry_position(path, first_kept_entry_id).ok_or_else(|| {
-            ResolveError::InvalidCompactionTarget(first_kept_entry_id.to_string())
-        })?;
-        resolved.push(ConversationItem::system(vec![
-            provider_protocol::ContentBlock::Text(summary.to_string()),
-        ]));
-        keep_index
-    } else {
-        0
-    };
+fn resolve_state_from_path(path: &[&SessionEntry]) -> Result<ResolvedSessionState, ResolveError> {
+    let mut latest_config = None;
+    for entry in path {
+        if let SessionEntryKind::ConfigChange(snapshot) = &entry.kind {
+            latest_config = Some(snapshot.clone());
+        }
+    }
 
-    resolved.extend(
+    let mut resolved_items = Vec::new();
+    let start_index =
+        if let Some((entry_id, summary, first_kept_entry_id)) = latest_compaction(path) {
+            let keep_index = item_entry_position(path, first_kept_entry_id).ok_or_else(|| {
+                ResolveError::InvalidCompactionTarget(first_kept_entry_id.to_string())
+            })?;
+            resolved_items.push(ResolvedSessionItem {
+                entry_id: entry_id.to_string(),
+                item: ConversationItem::system(vec![provider_protocol::ContentBlock::Text(
+                    summary.to_string(),
+                )]),
+            });
+            keep_index
+        } else {
+            0
+        };
+
+    resolved_items.extend(
         path[start_index..]
             .iter()
             .filter_map(|entry| match &entry.kind {
-                SessionEntryKind::Item(item) => Some(item.clone()),
+                SessionEntryKind::Item(item) => Some(ResolvedSessionItem {
+                    entry_id: entry.id.clone(),
+                    item: item.clone(),
+                }),
                 _ => None,
             }),
     );
 
-    Ok(resolved)
+    Ok(ResolvedSessionState {
+        items: resolved_items,
+        latest_config,
+    })
 }
 
 fn item_entry_position(path: &[&SessionEntry], target_id: &str) -> Option<usize> {
@@ -381,13 +432,17 @@ fn item_entry_position(path: &[&SessionEntry], target_id: &str) -> Option<usize>
         .position(|entry| entry.id == target_id && matches!(entry.kind, SessionEntryKind::Item(_)))
 }
 
-fn latest_compaction<'a>(path: &'a [&'a SessionEntry]) -> Option<(&'a str, &'a str)> {
+fn latest_compaction<'a>(path: &'a [&'a SessionEntry]) -> Option<(&'a str, &'a str, &'a str)> {
     path.iter().rev().find_map(|entry| match &entry.kind {
         SessionEntryKind::Compaction {
             summary,
             first_kept_entry_id,
             ..
-        } => Some((summary.as_str(), first_kept_entry_id.as_str())),
+        } => Some((
+            entry.id.as_str(),
+            summary.as_str(),
+            first_kept_entry_id.as_str(),
+        )),
         _ => None,
     })
 }

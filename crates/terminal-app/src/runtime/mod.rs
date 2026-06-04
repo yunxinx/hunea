@@ -1,7 +1,7 @@
 mod event_mapping;
 mod managed_search_authorization;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use conversation_runtime::{
     ConversationWorker, ModelRefreshWorker, ProviderConversation, models as provider_models,
@@ -14,6 +14,7 @@ use runtime_domain::{
         RuntimeEvent, RuntimeTarget,
     },
 };
+use session_store::{SessionHeader, SessionStore};
 use terminal_ui::RuntimeCoordinator;
 use tool_runtime::{ToolExecutorRegistry, builtin::ManagedSearchToolConfig};
 
@@ -27,12 +28,14 @@ use self::{
 };
 
 /// `AppRuntimeOptions` 保存 app 层对话运行时所需的配置。
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct AppRuntimeOptions {
     pub(crate) model_config_path: Option<PathBuf>,
     pub(crate) runtime_request_policy: RuntimeRequestPolicy,
     pub(crate) managed_search_tools: ManagedSearchToolConfig,
     pub(crate) managed_search_authorization_config_path: Option<PathBuf>,
+    pub(crate) session_store: Option<Arc<dyn SessionStore>>,
+    pub(crate) session_header_template: Option<SessionHeader>,
 }
 
 /// `AppRuntimeCoordinator` 负责把 TUI runtime command 连接到对话运行时。
@@ -48,10 +51,20 @@ pub(crate) struct AppRuntimeCoordinator {
 impl AppRuntimeCoordinator {
     pub(crate) fn new(options: AppRuntimeOptions) -> Self {
         let workspace_tools = conversation_workspace_tools(&options.managed_search_tools);
+        let provider_conversation = match (
+            options.session_store.clone(),
+            options.session_header_template.clone(),
+        ) {
+            (Some(store), Some(header_template)) => {
+                ProviderConversation::with_session_store(store, header_template, None)
+                    .expect("session store should initialize without a session id")
+            }
+            _ => ProviderConversation::default(),
+        };
         Self {
             options,
             conversation_worker: ConversationWorker::default(),
-            provider_conversation: ProviderConversation::default(),
+            provider_conversation,
             model_refresh: ModelRefreshWorker::default(),
             workspace_tools,
             pending_runtime_events: Vec::new(),
@@ -76,7 +89,8 @@ impl AppRuntimeCoordinator {
                     );
                 }
                 self.provider_conversation
-                    .truncate_after_user_turns(retained_user_turns);
+                    .truncate_after_user_turns(retained_user_turns)
+                    .map_err(|error| error.to_string())?;
                 Ok(RuntimeCommandReceipt::Accepted)
             }
             RuntimeCommand::Interrupt { target } => self.interrupt_runtime(target),
@@ -266,8 +280,9 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
 
 impl AppRuntimeCoordinator {
     fn reconcile_conversation_updates(&mut self) {
-        if self.conversation_worker.take_provider_turn_started() {
-            self.provider_conversation.commit_pending_user();
+        if let Some(entry_id) = self.conversation_worker.take_pending_user_entry_id() {
+            self.provider_conversation
+                .commit_pending_user(Some(entry_id));
         }
 
         let items = self.conversation_worker.take_session_items();
@@ -275,7 +290,6 @@ impl AppRuntimeCoordinator {
             return;
         }
 
-        self.provider_conversation.commit_pending_user();
         self.provider_conversation.commit_turn_items(items);
     }
 

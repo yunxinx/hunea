@@ -11,6 +11,7 @@ use std::{
 };
 
 use provider_protocol::ConversationItem;
+use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use runtime_domain::{
@@ -20,7 +21,8 @@ use runtime_domain::{
 use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
 
 use super::{
-    ConversationPermissionBroker, ConversationTimeoutPause, TurnExecutionError,
+    ConversationPermissionBroker, ConversationTimeoutPause, PersistedConversationItem,
+    PreparedConversationPersistence, TurnExecutionError,
     turn::run_prepared_conversation_with_progress,
 };
 use crate::PreparedConversationRequest;
@@ -29,7 +31,7 @@ mod context_repair;
 mod progress_mapping;
 mod timeout;
 
-use context_repair::{ProviderContextRepairLedger, emit_provider_context_repair_items};
+use context_repair::{ProviderContextRepairLedger, take_provider_context_repair_items};
 use progress_mapping::{
     conversation_worker_event_from_progress, progress_sender_to_permission_sender,
 };
@@ -51,8 +53,21 @@ enum ConversationWorkerEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConversationDelta {
+    ProviderTurnStarted {
+        user_entry_id: Option<String>,
+    },
+    ProviderContextItem {
+        entry_id: Option<String>,
+        item: ConversationItem,
+    },
+}
+
+enum SessionPersistenceCommand {
     ProviderTurnStarted,
-    ProviderContextItem { item: ConversationItem },
+    ProviderContextItem(ConversationItem),
+    Flush {
+        ack: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 impl ConversationWorkerEvent {
@@ -68,8 +83,8 @@ pub struct ConversationWorker {
     pub cancellation: Option<CancellationToken>,
     pub target: Option<RuntimeTarget>,
     permission_broker: Option<ConversationPermissionBroker>,
-    provider_turn_started: bool,
-    session_items: Vec<ConversationItem>,
+    pending_user_entry_id: Option<String>,
+    session_items: Vec<PersistedConversationItem>,
 }
 
 impl ConversationWorker {
@@ -113,7 +128,7 @@ impl ConversationWorker {
         self.cancellation = Some(cancellation);
         self.target = Some(target);
         self.permission_broker = Some(permission_broker);
-        self.provider_turn_started = false;
+        self.pending_user_entry_id = None;
         self.session_items.clear();
     }
 
@@ -130,7 +145,7 @@ impl ConversationWorker {
         }
         self.receiver = None;
         self.target = None;
-        self.provider_turn_started = false;
+        self.pending_user_entry_id = None;
         self.session_items.clear();
     }
 
@@ -162,11 +177,11 @@ impl ConversationWorker {
         self.target.as_ref()
     }
 
-    pub fn take_provider_turn_started(&mut self) -> bool {
-        std::mem::take(&mut self.provider_turn_started)
+    pub fn take_pending_user_entry_id(&mut self) -> Option<String> {
+        self.pending_user_entry_id.take()
     }
 
-    pub fn take_session_items(&mut self) -> Vec<ConversationItem> {
+    pub fn take_session_items(&mut self) -> Vec<PersistedConversationItem> {
         std::mem::take(&mut self.session_items)
     }
 
@@ -176,12 +191,7 @@ impl ConversationWorker {
                 Ok(event) => event,
                 Err(mpsc::TryRecvError::Empty) => return None,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    self.receiver = None;
-                    self.cancellation = None;
-                    self.target = None;
-                    if let Some(permission_broker) = self.permission_broker.take() {
-                        permission_broker.cancel_all();
-                    }
+                    self.clear_runtime_state();
                     return Some(ConversationEvent::Failed {
                         message: "conversation request stopped before completion".to_string(),
                     });
@@ -191,12 +201,7 @@ impl ConversationWorker {
             match event {
                 ConversationWorkerEvent::Progress(event) => {
                     if event.is_terminal() {
-                        self.receiver = None;
-                        self.cancellation = None;
-                        self.target = None;
-                        if let Some(permission_broker) = self.permission_broker.take() {
-                            permission_broker.cancel_all();
-                        }
+                        self.clear_runtime_state();
                     }
                     return Some(event);
                 }
@@ -204,12 +209,7 @@ impl ConversationWorker {
                     self.apply_session_event(event);
                 }
                 ConversationWorkerEvent::Finished { response, metrics } => {
-                    self.receiver = None;
-                    self.cancellation = None;
-                    self.target = None;
-                    if let Some(permission_broker) = self.permission_broker.take() {
-                        permission_broker.cancel_all();
-                    }
+                    self.clear_runtime_state();
                     return Some(ConversationEvent::Finished { response, metrics });
                 }
             }
@@ -218,12 +218,23 @@ impl ConversationWorker {
 
     fn apply_session_event(&mut self, event: ConversationDelta) {
         match event {
-            ConversationDelta::ProviderTurnStarted => {
-                self.provider_turn_started = true;
+            ConversationDelta::ProviderTurnStarted { user_entry_id } => {
+                self.pending_user_entry_id = user_entry_id;
             }
-            ConversationDelta::ProviderContextItem { item } => {
-                self.session_items.push(item);
+            ConversationDelta::ProviderContextItem { entry_id, item } => {
+                self.session_items
+                    .push(PersistedConversationItem { entry_id, item });
             }
+        }
+    }
+
+    fn clear_runtime_state(&mut self) {
+        self.receiver = None;
+        self.cancellation = None;
+        self.target = None;
+        self.pending_user_entry_id = None;
+        if let Some(permission_broker) = self.permission_broker.take() {
+            permission_broker.cancel_all();
         }
     }
 }
@@ -239,8 +250,17 @@ async fn run_conversation_worker(
     let provider_context_items_started = Arc::new(AtomicBool::new(false));
     let provider_context_repair_ledger =
         Arc::new(Mutex::new(ProviderContextRepairLedger::default()));
+    let (session_sender, session_receiver) = tokio_mpsc::unbounded_channel();
+    let session_actor_cancellation = cancellation.clone();
+    let session_actor = tokio::spawn(run_session_persistence_actor(
+        request.persistence_cloned(),
+        session_receiver,
+        sender.clone(),
+        session_actor_cancellation,
+    ));
     for attempt in 0..=request_policy.attempts() {
         let progress_sender = sender.clone();
+        let progress_session_sender = session_sender.clone();
         let attempt_provider_context_items_started = Arc::clone(&provider_context_items_started);
         let attempt_provider_context_repair_ledger = Arc::clone(&provider_context_repair_ledger);
         let attempt_cancellation = cancellation.child_token();
@@ -262,19 +282,24 @@ async fn run_conversation_worker(
                 &attempt_cancellation,
                 request_policy.tool_max_turns(),
                 Some(permission_handler),
-                move |progress| {
-                    let event = conversation_worker_event_from_progress(progress);
-                    if let ConversationWorkerEvent::Session(
-                        ConversationDelta::ProviderContextItem { item },
-                    ) = &event
-                    {
+                move |progress| match progress {
+                    crate::conversation::ConversationProgress::ProviderTurnStarted => {
+                        let _ = progress_session_sender
+                            .send(SessionPersistenceCommand::ProviderTurnStarted);
+                    }
+                    crate::conversation::ConversationProgress::ProviderContextItem { item } => {
                         attempt_provider_context_items_started.store(true, Ordering::Relaxed);
                         attempt_provider_context_repair_ledger
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .observe(item);
+                            .observe(&item);
+                        let _ = progress_session_sender
+                            .send(SessionPersistenceCommand::ProviderContextItem(item));
                     }
-                    let _ = progress_sender.send(event);
+                    other => {
+                        let _ =
+                            progress_sender.send(conversation_worker_event_from_progress(other));
+                    }
                 },
             ),
         )
@@ -300,9 +325,9 @@ async fn run_conversation_worker(
             }
             TurnAttemptOutcome::TimedOut(Err(_)) | TurnAttemptOutcome::TimedOutAfterGrace => {
                 permission_broker.cancel_all();
-                emit_provider_context_repair_items(
+                send_repair_items(
                     provider_context_repair_ledger.as_ref(),
-                    &sender,
+                    &session_sender,
                     TOOL_EXECUTION_TIMED_OUT,
                 );
                 let _ = sender.send(ConversationWorkerEvent::progress(
@@ -318,34 +343,48 @@ async fn run_conversation_worker(
             TurnAttemptOutcome::Completed(Ok(completion))
             | TurnAttemptOutcome::TimedOut(Ok(completion)) => {
                 permission_broker.cancel_all();
+                if let Err(message) = flush_session_persistence(&session_sender).await {
+                    let _ = sender.send(ConversationWorkerEvent::progress(
+                        ConversationEvent::Failed { message },
+                    ));
+                    drop(session_sender);
+                    let _ = session_actor.await;
+                    return;
+                }
                 let _ = sender.send(ConversationWorkerEvent::Finished {
                     response: completion.response,
                     metrics: completion.metrics,
                 });
+                drop(session_sender);
+                let _ = session_actor.await;
                 return;
             }
             TurnAttemptOutcome::Completed(Err(TurnExecutionError::Cancelled)) => {
                 permission_broker.cancel_all();
-                emit_provider_context_repair_items(
+                send_repair_items(
                     provider_context_repair_ledger.as_ref(),
-                    &sender,
+                    &session_sender,
                     TOOL_EXECUTION_INTERRUPTED,
                 );
                 let _ = sender.send(ConversationWorkerEvent::progress(
                     ConversationEvent::Interrupted,
                 ));
+                drop(session_sender);
+                let _ = session_actor.await;
                 return;
             }
             TurnAttemptOutcome::CancelledAfterGrace => {
                 permission_broker.cancel_all();
-                emit_provider_context_repair_items(
+                send_repair_items(
                     provider_context_repair_ledger.as_ref(),
-                    &sender,
+                    &session_sender,
                     TOOL_EXECUTION_INTERRUPTED,
                 );
                 let _ = sender.send(ConversationWorkerEvent::progress(
                     ConversationEvent::Interrupted,
                 ));
+                drop(session_sender);
+                let _ = session_actor.await;
                 return;
             }
             TurnAttemptOutcome::Completed(Err(_error))
@@ -365,9 +404,9 @@ async fn run_conversation_worker(
             }
             TurnAttemptOutcome::Completed(Err(error)) => {
                 permission_broker.cancel_all();
-                emit_provider_context_repair_items(
+                send_repair_items(
                     provider_context_repair_ledger.as_ref(),
-                    &sender,
+                    &session_sender,
                     TOOL_EXECUTION_INTERRUPTED,
                 );
                 let _ = sender.send(ConversationWorkerEvent::progress(
@@ -375,9 +414,152 @@ async fn run_conversation_worker(
                         message: error.to_string(),
                     },
                 ));
+                drop(session_sender);
+                let _ = session_actor.await;
                 return;
             }
         }
+    }
+
+    drop(session_sender);
+    let _ = session_actor.await;
+}
+
+async fn run_session_persistence_actor(
+    persistence: Option<PreparedConversationPersistence>,
+    mut receiver: tokio_mpsc::UnboundedReceiver<SessionPersistenceCommand>,
+    sender: mpsc::Sender<ConversationWorkerEvent>,
+    cancellation: CancellationToken,
+) {
+    let mut turn_start_persisted = false;
+    while let Some(command) = receiver.recv().await {
+        let result = match command {
+            SessionPersistenceCommand::ProviderTurnStarted => {
+                persist_turn_start(
+                    persistence.as_ref(),
+                    &sender,
+                    &cancellation,
+                    &mut turn_start_persisted,
+                )
+                .await
+            }
+            SessionPersistenceCommand::ProviderContextItem(item) => {
+                persist_context_item(persistence.as_ref(), &sender, &cancellation, item).await
+            }
+            SessionPersistenceCommand::Flush { ack } => {
+                let result = flush_persistence(persistence.as_ref()).await;
+                let _ = ack.send(result.clone());
+                result
+            }
+        };
+
+        if let Err(message) = result {
+            cancellation.cancel();
+            let _ = sender.send(ConversationWorkerEvent::progress(
+                ConversationEvent::Failed { message },
+            ));
+            return;
+        }
+    }
+}
+
+async fn persist_turn_start(
+    persistence: Option<&PreparedConversationPersistence>,
+    sender: &mpsc::Sender<ConversationWorkerEvent>,
+    _cancellation: &CancellationToken,
+    turn_start_persisted: &mut bool,
+) -> Result<(), String> {
+    if *turn_start_persisted {
+        let _ = sender.send(ConversationWorkerEvent::Session(
+            ConversationDelta::ProviderTurnStarted {
+                user_entry_id: None,
+            },
+        ));
+        return Ok(());
+    }
+
+    let user_entry_id = if let Some(persistence) = persistence {
+        persistence
+            .store
+            .append_config_change(&persistence.session_id, persistence.config_snapshot.clone())
+            .await
+            .map_err(|error| format!("persist conversation config change: {error}"))?;
+        Some(
+            persistence
+                .store
+                .append(
+                    &persistence.session_id,
+                    persistence.current_user_message.clone(),
+                )
+                .await
+                .map_err(|error| format!("persist conversation user message: {error}"))?,
+        )
+    } else {
+        None
+    };
+
+    *turn_start_persisted = true;
+    let _ = sender.send(ConversationWorkerEvent::Session(
+        ConversationDelta::ProviderTurnStarted { user_entry_id },
+    ));
+    Ok(())
+}
+
+async fn persist_context_item(
+    persistence: Option<&PreparedConversationPersistence>,
+    sender: &mpsc::Sender<ConversationWorkerEvent>,
+    _cancellation: &CancellationToken,
+    item: ConversationItem,
+) -> Result<(), String> {
+    let entry_id = if let Some(persistence) = persistence {
+        Some(
+            persistence
+                .store
+                .append(&persistence.session_id, item.clone())
+                .await
+                .map_err(|error| format!("persist conversation item: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let _ = sender.send(ConversationWorkerEvent::Session(
+        ConversationDelta::ProviderContextItem { entry_id, item },
+    ));
+    Ok(())
+}
+
+async fn flush_persistence(
+    persistence: Option<&PreparedConversationPersistence>,
+) -> Result<(), String> {
+    if let Some(persistence) = persistence {
+        persistence
+            .store
+            .flush(&persistence.session_id)
+            .await
+            .map_err(|error| format!("persist conversation flush: {error}"))?;
+    }
+    Ok(())
+}
+
+async fn flush_session_persistence(
+    sender: &tokio_mpsc::UnboundedSender<SessionPersistenceCommand>,
+) -> Result<(), String> {
+    let (ack_tx, ack_rx) = oneshot::channel();
+    sender
+        .send(SessionPersistenceCommand::Flush { ack: ack_tx })
+        .map_err(|_| "conversation session persistence worker stopped unexpectedly".to_string())?;
+    ack_rx
+        .await
+        .map_err(|_| "conversation session persistence worker dropped flush ack".to_string())?
+}
+
+fn send_repair_items(
+    ledger: &Mutex<ProviderContextRepairLedger>,
+    sender: &tokio_mpsc::UnboundedSender<SessionPersistenceCommand>,
+    content: &'static str,
+) {
+    for item in take_provider_context_repair_items(ledger, content) {
+        let _ = sender.send(SessionPersistenceCommand::ProviderContextItem(item));
     }
 }
 
@@ -405,16 +587,21 @@ async fn retry_conversation_after_attempt(
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
+        path::{Path, PathBuf},
         sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
             mpsc,
         },
-        time::Duration,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
     use runtime_domain::{request_policy::RuntimeRequestPolicy, session::RuntimeTarget};
+    use session_store::{
+        LocalSessionStore, SessionHeader, SessionId, SessionStore, SessionStoreError,
+    };
     use tokio_util::sync::CancellationToken;
     use tool_runtime::ToolExecutorRegistry;
 
@@ -422,7 +609,10 @@ mod tests {
         ConversationDelta, ConversationEvent, ConversationPermissionBroker, ConversationWorker,
         ConversationWorkerEvent,
     };
-    use crate::{ConversationResponse, PreparedConversationRequest, ProviderKind};
+    use crate::{
+        ConversationResponse, PreparedConversationRequest, ProviderConversation, ProviderKind,
+        conversation::PersistedConversationItem,
+    };
 
     #[test]
     fn conversation_runtime_clears_receiver_after_terminal_event() {
@@ -437,7 +627,7 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
-            provider_turn_started: false,
+            pending_user_entry_id: None,
             session_items: Vec::new(),
         };
 
@@ -457,7 +647,7 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
-            provider_turn_started: false,
+            pending_user_entry_id: None,
             session_items: Vec::new(),
         };
 
@@ -503,7 +693,7 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
-            provider_turn_started: false,
+            pending_user_entry_id: None,
             session_items: Vec::new(),
         };
 
@@ -528,7 +718,7 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
-            provider_turn_started: false,
+            pending_user_entry_id: None,
             session_items: Vec::new(),
         };
 
@@ -557,27 +747,39 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
-            provider_turn_started: false,
+            pending_user_entry_id: None,
             session_items: Vec::new(),
         };
         let message = ConversationItem::text(Role::Assistant, "stored");
 
         sender
             .send(ConversationWorkerEvent::Session(
-                ConversationDelta::ProviderTurnStarted,
+                ConversationDelta::ProviderTurnStarted {
+                    user_entry_id: Some("user-1".to_string()),
+                },
             ))
             .expect("provider event should be queued");
         sender
             .send(ConversationWorkerEvent::Session(
                 ConversationDelta::ProviderContextItem {
+                    entry_id: Some("assistant-1".to_string()),
                     item: message.clone(),
                 },
             ))
             .expect("message event should be queued");
 
         assert_eq!(runtime.try_recv_event(), None);
-        assert!(runtime.take_provider_turn_started());
-        assert_eq!(runtime.take_session_items(), vec![message]);
+        assert_eq!(
+            runtime.take_pending_user_entry_id().as_deref(),
+            Some("user-1")
+        );
+        assert_eq!(
+            runtime.take_session_items(),
+            vec![PersistedConversationItem {
+                entry_id: Some("assistant-1".to_string()),
+                item: message,
+            }]
+        );
         assert!(runtime.is_running());
     }
 
@@ -589,13 +791,90 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
-            provider_turn_started: false,
+            pending_user_entry_id: None,
             session_items: Vec::new(),
         };
 
         assert!(runtime.interrupt());
         assert!(runtime.is_running());
         assert!(runtime.current_target().is_some());
+    }
+
+    #[test]
+    fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
+        let root = tempdir_path("worker-persistence");
+        let work_dir = root.join("workspace");
+        fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+        let store =
+            Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
+        let store_trait: Arc<dyn SessionStore> = store.clone();
+        let mut conversation = ProviderConversation::with_session_store(
+            store_trait,
+            sample_header(&work_dir, "qwen3"),
+            None,
+        )
+        .expect("persisted conversation should initialize");
+        let user = ConversationItem::text(Role::User, "hello");
+        let request = conversation
+            .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "qwen3",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                None,
+                None,
+                user.clone(),
+            ))
+            .expect("turn should prepare");
+        let assistant = ConversationItem::text(Role::Assistant, "hi");
+        let (sender, receiver) = mpsc::channel();
+        let mut runtime = ConversationWorker {
+            receiver: Some(receiver),
+            cancellation: Some(CancellationToken::new()),
+            target: Some(RuntimeTarget::provider("local", "qwen3")),
+            permission_broker: None,
+            pending_user_entry_id: None,
+            session_items: Vec::new(),
+        };
+        let sender_copy = sender.clone();
+        let persistence = request.persistence_cloned();
+        let cancellation = CancellationToken::new();
+        let mut turn_start_persisted = false;
+        run_persistence(super::persist_turn_start(
+            persistence.as_ref(),
+            &sender_copy,
+            &cancellation,
+            &mut turn_start_persisted,
+        ))
+        .expect("turn start should persist config and user");
+        run_persistence(super::persist_context_item(
+            persistence.as_ref(),
+            &sender_copy,
+            &cancellation,
+            assistant.clone(),
+        ))
+        .expect("assistant item should persist");
+        sender
+            .send(ConversationWorkerEvent::Finished {
+                response: ConversationResponse::assistant_text("hi"),
+                metrics: None,
+            })
+            .expect("finish event should queue");
+
+        assert!(matches!(
+            runtime.try_recv_event(),
+            Some(ConversationEvent::Finished { .. })
+        ));
+
+        let metas = run_store(store.list_sessions(work_dir.to_string_lossy().as_ref()))
+            .expect("session meta should list");
+        assert_eq!(metas.len(), 1);
+        let resolved = run_store(store.resolve(&metas[0].session_id, None))
+            .expect("resolved items should be readable");
+        let jsonl = fs::read_to_string(&metas[0].jsonl_path).expect("jsonl should be readable");
+
+        assert_eq!(resolved, vec![user, assistant]);
+        assert!(jsonl.contains("\"type\":\"config_change\""));
     }
 
     #[tokio::test]
@@ -758,14 +1037,19 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_worker_reports_interrupted_when_pre_cancelled() {
-        let request = PreparedConversationRequest::new(
+        let turn = runtime_domain::session::ConversationTurnRequest::new(
             "local",
             ProviderKind::OpenAiCompatible,
             "qwen3",
             Some("http://127.0.0.1:1234/v1".to_string()),
             None,
             None,
+            ConversationItem::text(Role::User, "hello"),
+        );
+        let request = PreparedConversationRequest::from_turn(
+            &turn,
             vec![ConversationItem::text(Role::User, "hello")],
+            None,
         );
         let executor = ToolExecutorRegistry::new();
         let cancellation = CancellationToken::new();
@@ -786,5 +1070,47 @@ mod tests {
             receiver.recv().expect("worker should emit an event"),
             ConversationWorkerEvent::progress(ConversationEvent::Interrupted)
         );
+    }
+
+    fn run_store<T>(
+        future: impl std::future::Future<Output = Result<T, SessionStoreError>>,
+    ) -> Result<T, SessionStoreError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+        runtime.block_on(future)
+    }
+
+    fn run_persistence<T>(
+        future: impl std::future::Future<Output = Result<T, String>>,
+    ) -> Result<T, String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+        runtime.block_on(future)
+    }
+
+    fn sample_header(work_dir: &Path, model: &str) -> SessionHeader {
+        SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.to_path_buf(),
+            session_name: Some("worker-test".to_string()),
+            initial_model: model.to_string(),
+            git_head: Some("abc123".to_string()),
+            cli_version: Some("0.5.7".to_string()),
+        }
+    }
+
+    fn tempdir_path(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "lumos-conversation-worker-{label}-{}-{stamp}",
+            std::process::id()
+        ))
     }
 }

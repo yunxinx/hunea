@@ -16,7 +16,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.5.7"
+version = "0.5.8"
 edition = "2024"
 
 [workspace.dependencies]
@@ -41,6 +41,7 @@ terminal-app = { path = "crates/terminal-app" }
 app-config = { path = "crates/app-config" }
 runtime-domain = { path = "crates/runtime-domain" }
 conversation-runtime = { path = "crates/conversation-runtime" }
+session-store = { path = "crates/session-store" }
 tool-runtime = { path = "crates/tool-runtime" }
 terminal-ui = { path = "crates/terminal-ui" }
 percent-encoding = "2"

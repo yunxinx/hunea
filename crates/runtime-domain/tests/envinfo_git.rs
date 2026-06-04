@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use runtime_domain::envinfo::git_branch;
+use runtime_domain::envinfo::{git_branch, git_head};
 
 #[test]
 fn git_branch_returns_current_branch_name() {
@@ -96,6 +96,49 @@ fn git_branch_resolves_symlinked_working_dir() {
     restore_env_var("PWD", original_pwd);
 }
 
+#[test]
+fn git_head_returns_commit_for_branch_reference() {
+    let _guard = test_environment_lock()
+        .lock()
+        .expect("lock should not be poisoned");
+    let original_dir = env::current_dir().expect("current directory should be available");
+
+    let repo_dir = temp_test_dir("git-head-current");
+    write_git_head(&repo_dir, "ref: refs/heads/main\n");
+    write_git_ref(
+        &repo_dir,
+        "refs/heads/main",
+        "0123456789abcdef0123456789abcdef01234567\n",
+    );
+    env::set_current_dir(&repo_dir).expect("should switch into repo");
+
+    assert_eq!(
+        git_head(),
+        Some("0123456789abcdef0123456789abcdef01234567".to_string())
+    );
+
+    env::set_current_dir(original_dir).expect("should restore original directory");
+}
+
+#[test]
+fn git_head_returns_detached_head_hash() {
+    let _guard = test_environment_lock()
+        .lock()
+        .expect("lock should not be poisoned");
+    let original_dir = env::current_dir().expect("current directory should be available");
+
+    let repo_dir = temp_test_dir("git-head-detached");
+    write_git_head(&repo_dir, "fedcba9876543210fedcba9876543210fedcba98\n");
+    env::set_current_dir(&repo_dir).expect("should switch into repo");
+
+    assert_eq!(
+        git_head(),
+        Some("fedcba9876543210fedcba9876543210fedcba98".to_string())
+    );
+
+    env::set_current_dir(original_dir).expect("should restore original directory");
+}
+
 fn test_environment_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -114,6 +157,14 @@ fn temp_test_dir(prefix: &str) -> PathBuf {
 fn write_git_head(repo_dir: &Path, head: &str) {
     fs::create_dir_all(repo_dir.join(".git")).expect("git dir should exist");
     fs::write(repo_dir.join(".git").join("HEAD"), head).expect("HEAD should be written");
+}
+
+fn write_git_ref(repo_dir: &Path, reference: &str, value: &str) {
+    let reference_path = repo_dir.join(".git").join(reference);
+    if let Some(parent) = reference_path.parent() {
+        fs::create_dir_all(parent).expect("ref directory should exist");
+    }
+    fs::write(reference_path, value).expect("ref should be written");
 }
 
 fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {

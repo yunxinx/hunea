@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -14,51 +15,63 @@ use tokio::{
 };
 
 use crate::{
-    ResolveError, SessionEntry, SessionEntryKind, SessionHeader, SessionId, SessionMeta,
-    SessionStoreError, encode_project_dir, generate_entry_id, hunea_dir, jsonl::JsonlLoader,
-    metadata::MetadataIndex, recorder::SessionRecorder, resolve as resolve_entries,
-    session_filename,
+    ConfigSnapshot, ResolveError, ResolvedSessionState, SessionEntry, SessionEntryKind,
+    SessionHeader, SessionId, SessionMeta, SessionStoreError, encode_project_dir,
+    generate_entry_id, hunea_dir, jsonl::JsonlLoader, metadata::MetadataIndex,
+    recorder::SessionRecorder, resolve as resolve_entries, resolve_state, session_filename,
 };
 
 /// `SessionStore` 定义 conversation-runtime 依赖的持久化接口。
 pub trait SessionStore: Send + Sync {
-    fn create_session(
-        &self,
+    fn create_session<'a>(
+        &'a self,
         header: SessionHeader,
-    ) -> impl Future<Output = Result<SessionId, SessionStoreError>> + Send;
+    ) -> Pin<Box<dyn Future<Output = Result<SessionId, SessionStoreError>> + Send + 'a>>;
 
-    fn append(
-        &self,
-        session_id: &SessionId,
+    fn append<'a>(
+        &'a self,
+        session_id: &'a SessionId,
         item: ConversationItem,
-    ) -> impl Future<Output = Result<(), SessionStoreError>> + Send;
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>>;
 
-    fn set_leaf(
-        &self,
-        session_id: &SessionId,
-        leaf_id: Option<&str>,
-    ) -> impl Future<Output = Result<(), SessionStoreError>> + Send;
+    fn append_config_change<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        snapshot: ConfigSnapshot,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
 
-    fn resolve(
-        &self,
-        session_id: &SessionId,
-        leaf_id: Option<&str>,
-    ) -> impl Future<Output = Result<Vec<ConversationItem>, SessionStoreError>> + Send;
+    fn set_leaf<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
 
-    fn list_sessions(
-        &self,
-        project_dir: &str,
-    ) -> impl Future<Output = Result<Vec<SessionMeta>, SessionStoreError>> + Send;
+    fn resolve<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ConversationItem>, SessionStoreError>> + Send + 'a>>;
 
-    fn get_session_meta(
-        &self,
-        session_id: &SessionId,
-    ) -> impl Future<Output = Result<SessionMeta, SessionStoreError>> + Send;
+    fn load_session<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSessionState, SessionStoreError>> + Send + 'a>>;
 
-    fn flush(
-        &self,
-        session_id: &SessionId,
-    ) -> impl Future<Output = Result<(), SessionStoreError>> + Send;
+    fn list_sessions<'a>(
+        &'a self,
+        project_dir: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SessionMeta>, SessionStoreError>> + Send + 'a>>;
+
+    fn get_session_meta<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionMeta, SessionStoreError>> + Send + 'a>>;
+
+    fn flush<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
 }
 
 /// `LocalSessionStore` 使用 JSONL + SQLite 组合实现本地持久化。
@@ -132,47 +145,12 @@ impl LocalSessionStore {
             .or_insert_with(|| handle.clone())
             .clone())
     }
-}
 
-impl SessionStore for LocalSessionStore {
-    async fn create_session(&self, header: SessionHeader) -> Result<SessionId, SessionStoreError> {
-        let session_id = SessionId::new();
-        let mut header = header;
-        header.session_id = session_id.clone();
-
-        let jsonl_path = session_jsonl_path(&self.hunea_dir, &header.work_dir, &session_id);
-        let header_entry = SessionEntry {
-            id: "header".to_string(),
-            parent_id: None,
-            timestamp: current_timestamp_ms()?,
-            kind: SessionEntryKind::Header(header),
-        };
-        let handle = Arc::new(LocalSessionHandle::new(
-            jsonl_path.clone(),
-            vec![header_entry.clone()],
-        )?);
-
-        {
-            let _guard = handle.operation_lock.lock().await;
-            handle.recorder.buffer(header_entry)?;
-            handle.recorder.persist().await?;
-        }
-
-        let meta = handle.lock_state().session_meta.clone();
-        self.recorders
-            .write()
-            .await
-            .insert(session_id.clone(), handle);
-        self.index.upsert_session(&meta).await?;
-
-        Ok(session_id)
-    }
-
-    async fn append(
+    async fn append_entry(
         &self,
         session_id: &SessionId,
-        item: ConversationItem,
-    ) -> Result<(), SessionStoreError> {
+        kind: SessionEntryKind,
+    ) -> Result<String, SessionStoreError> {
         let session_id = session_id.clone();
         let handle = self.handle_for_session(&session_id).await?;
         let _guard = handle.operation_lock.lock().await;
@@ -187,10 +165,11 @@ impl SessionStore for LocalSessionStore {
                 id: generate_entry_id(&state.entry_ids),
                 parent_id: append_parent_id(&state.entries),
                 timestamp: current_timestamp_ms()?,
-                kind: SessionEntryKind::Item(item),
+                kind,
             }
         };
 
+        let entry_id = entry.id.clone();
         handle.recorder.buffer(entry.clone())?;
         handle.recorder.persist().await?;
 
@@ -200,94 +179,191 @@ impl SessionStore for LocalSessionStore {
             state.session_meta.clone()
         };
 
-        self.index.upsert_session(&meta).await
+        self.index.upsert_session(&meta).await?;
+        Ok(entry_id)
     }
+}
 
-    async fn set_leaf(
-        &self,
-        session_id: &SessionId,
-        leaf_id: Option<&str>,
-    ) -> Result<(), SessionStoreError> {
-        let session_id = session_id.clone();
-        let requested_leaf_id = leaf_id.map(str::to_string);
-        let handle = self.handle_for_session(&session_id).await?;
-        let _guard = handle.operation_lock.lock().await;
+impl SessionStore for LocalSessionStore {
+    fn create_session<'a>(
+        &'a self,
+        header: SessionHeader,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionId, SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            let session_id = SessionId::new();
+            let mut header = header;
+            header.session_id = session_id.clone();
 
-        let entry = {
-            let state = handle.lock_state();
-            if state.entries.is_empty() {
-                return Err(SessionStoreError::SessionNotFound { session_id });
-            }
-
-            if let Some(leaf_id) = requested_leaf_id.as_deref() {
-                state.require_existing_entry(leaf_id)?;
-            }
-
-            SessionEntry {
-                id: generate_entry_id(&state.entry_ids),
-                parent_id: latest_non_leaf_id(&state.entries),
+            let jsonl_path = session_jsonl_path(&self.hunea_dir, &header.work_dir, &session_id);
+            let header_entry = SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
                 timestamp: current_timestamp_ms()?,
-                kind: SessionEntryKind::Leaf {
-                    target_id: requested_leaf_id.clone(),
-                },
+                kind: SessionEntryKind::Header(header),
+            };
+            let handle = Arc::new(LocalSessionHandle::new(
+                jsonl_path.clone(),
+                vec![header_entry.clone()],
+            )?);
+
+            {
+                let _guard = handle.operation_lock.lock().await;
+                handle.recorder.buffer(header_entry)?;
+                handle.recorder.persist().await?;
             }
-        };
 
-        handle.recorder.buffer(entry.clone())?;
-        handle.recorder.persist().await?;
+            let meta = handle.lock_state().session_meta.clone();
+            self.recorders
+                .write()
+                .await
+                .insert(session_id.clone(), handle);
+            self.index.upsert_session(&meta).await?;
 
-        let meta = {
-            let mut state = handle.lock_state();
-            state.push_entry(entry, &handle.jsonl_path)?;
-            state.session_meta.clone()
-        };
-
-        self.index.upsert_session(&meta).await
+            Ok(session_id)
+        })
     }
 
-    async fn resolve(
-        &self,
-        session_id: &SessionId,
-        leaf_id: Option<&str>,
-    ) -> Result<Vec<ConversationItem>, SessionStoreError> {
-        let session_id = session_id.clone();
-        let requested_leaf = leaf_id.map(str::to_string);
-        let handle = self.handle_for_session(&session_id).await?;
-        let _guard = handle.operation_lock.lock().await;
-        let state = handle.lock_state();
-        let requested_leaf_id =
-            requested_leaf_id(state.entries.as_slice(), requested_leaf.as_deref())?;
-        resolve_entries(&state.entries, requested_leaf_id).map_err(resolve_error)
+    fn append<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        item: ConversationItem,
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.append_entry(session_id, SessionEntryKind::Item(item))
+                .await
+        })
     }
 
-    async fn list_sessions(
-        &self,
-        project_dir: &str,
-    ) -> Result<Vec<SessionMeta>, SessionStoreError> {
-        let project_dir = normalize_project_dir(Path::new(project_dir));
-        self.index.list_sessions(&project_dir).await
+    fn append_config_change<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        snapshot: ConfigSnapshot,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.append_entry(session_id, SessionEntryKind::ConfigChange(snapshot))
+                .await
+                .map(|_| ())
+        })
     }
 
-    async fn get_session_meta(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionMeta, SessionStoreError> {
-        let session_id = session_id.clone();
-        if let Some(handle) = self.recorders.read().await.get(&session_id).cloned() {
+    fn set_leaf<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let requested_leaf_id = leaf_id.map(str::to_string);
+            let handle = self.handle_for_session(&session_id).await?;
             let _guard = handle.operation_lock.lock().await;
-            return Ok(handle.lock_state().session_meta.clone());
-        }
 
-        self.index.get_session_meta(&session_id.to_string()).await
+            let entry = {
+                let state = handle.lock_state();
+                if state.entries.is_empty() {
+                    return Err(SessionStoreError::SessionNotFound { session_id });
+                }
+
+                if let Some(leaf_id) = requested_leaf_id.as_deref() {
+                    state.require_existing_entry(leaf_id)?;
+                }
+
+                SessionEntry {
+                    id: generate_entry_id(&state.entry_ids),
+                    parent_id: latest_non_leaf_id(&state.entries),
+                    timestamp: current_timestamp_ms()?,
+                    kind: SessionEntryKind::Leaf {
+                        target_id: requested_leaf_id.clone(),
+                    },
+                }
+            };
+
+            handle.recorder.buffer(entry.clone())?;
+            handle.recorder.persist().await?;
+
+            let meta = {
+                let mut state = handle.lock_state();
+                state.push_entry(entry, &handle.jsonl_path)?;
+                state.session_meta.clone()
+            };
+
+            self.index.upsert_session(&meta).await
+        })
     }
 
-    async fn flush(&self, session_id: &SessionId) -> Result<(), SessionStoreError> {
-        let session_id = session_id.clone();
-        let handle = self.handle_for_session(&session_id).await?;
-        let _guard = handle.operation_lock.lock().await;
-        handle.recorder.flush().await?;
-        let meta = handle.lock_state().session_meta.clone();
-        self.index.upsert_session(&meta).await
+    fn resolve<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ConversationItem>, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let requested_leaf = leaf_id.map(str::to_string);
+            let handle = self.handle_for_session(&session_id).await?;
+            let _guard = handle.operation_lock.lock().await;
+            let state = handle.lock_state();
+            let requested_leaf_id =
+                requested_leaf_id(state.entries.as_slice(), requested_leaf.as_deref())?;
+            resolve_entries(&state.entries, requested_leaf_id).map_err(resolve_error)
+        })
+    }
+
+    fn load_session<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSessionState, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let requested_leaf = leaf_id.map(str::to_string);
+            let handle = self.handle_for_session(&session_id).await?;
+            let _guard = handle.operation_lock.lock().await;
+            let state = handle.lock_state();
+            let requested_leaf_id =
+                requested_leaf_id(state.entries.as_slice(), requested_leaf.as_deref())?;
+            resolve_state(&state.entries, requested_leaf_id).map_err(resolve_error)
+        })
+    }
+
+    fn list_sessions<'a>(
+        &'a self,
+        project_dir: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SessionMeta>, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let project_dir = normalize_project_dir(Path::new(project_dir));
+            self.index.list_sessions(&project_dir).await
+        })
+    }
+
+    fn get_session_meta<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionMeta, SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            if let Some(handle) = self.recorders.read().await.get(&session_id).cloned() {
+                let _guard = handle.operation_lock.lock().await;
+                return Ok(handle.lock_state().session_meta.clone());
+            }
+
+            self.index.get_session_meta(&session_id.to_string()).await
+        })
+    }
+
+    fn flush<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let handle = self.handle_for_session(&session_id).await?;
+            let _guard = handle.operation_lock.lock().await;
+            handle.recorder.flush().await?;
+            let meta = handle.lock_state().session_meta.clone();
+            self.index.upsert_session(&meta).await
+        })
     }
 }
 
@@ -356,42 +432,12 @@ impl InMemorySessionStore {
             sessions: RwLock::new(HashMap::new()),
         }
     }
-}
 
-impl Default for InMemorySessionStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SessionStore for InMemorySessionStore {
-    async fn create_session(&self, header: SessionHeader) -> Result<SessionId, SessionStoreError> {
-        let session_id = SessionId::new();
-        let mut header = header;
-        header.session_id = session_id.clone();
-        let entry = SessionEntry {
-            id: "header".to_string(),
-            parent_id: None,
-            timestamp: current_timestamp_ms()?,
-            kind: SessionEntryKind::Header(header),
-        };
-
-        self.sessions.write().await.insert(
-            session_id.clone(),
-            InMemorySession {
-                entries: vec![entry],
-                jsonl_path: PathBuf::from(session_filename(&session_id)),
-            },
-        );
-
-        Ok(session_id)
-    }
-
-    async fn append(
+    async fn append_entry(
         &self,
         session_id: &SessionId,
-        item: ConversationItem,
-    ) -> Result<(), SessionStoreError> {
+        kind: SessionEntryKind,
+    ) -> Result<String, SessionStoreError> {
         let session_id = session_id.clone();
         let mut sessions = self.sessions.write().await;
         let session =
@@ -404,108 +450,202 @@ impl SessionStore for InMemorySessionStore {
             id: generate_entry_id(&entry_ids(&session.entries)),
             parent_id: append_parent_id(&session.entries),
             timestamp: current_timestamp_ms()?,
-            kind: SessionEntryKind::Item(item),
+            kind,
         };
+        let entry_id = entry.id.clone();
         session.entries.push(entry);
-        Ok(())
+        Ok(entry_id)
+    }
+}
+
+impl Default for InMemorySessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SessionStore for InMemorySessionStore {
+    fn create_session<'a>(
+        &'a self,
+        header: SessionHeader,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionId, SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            let session_id = SessionId::new();
+            let mut header = header;
+            header.session_id = session_id.clone();
+            let entry = SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: current_timestamp_ms()?,
+                kind: SessionEntryKind::Header(header),
+            };
+
+            self.sessions.write().await.insert(
+                session_id.clone(),
+                InMemorySession {
+                    entries: vec![entry],
+                    jsonl_path: PathBuf::from(session_filename(&session_id)),
+                },
+            );
+
+            Ok(session_id)
+        })
     }
 
-    async fn set_leaf(
-        &self,
-        session_id: &SessionId,
-        leaf_id: Option<&str>,
-    ) -> Result<(), SessionStoreError> {
-        let session_id = session_id.clone();
-        let requested_leaf_id = leaf_id.map(str::to_string);
-        let mut sessions = self.sessions.write().await;
-        let session =
-            sessions
-                .get_mut(&session_id)
-                .ok_or_else(|| SessionStoreError::SessionNotFound {
+    fn append<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        item: ConversationItem,
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.append_entry(session_id, SessionEntryKind::Item(item))
+                .await
+        })
+    }
+
+    fn append_config_change<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        snapshot: ConfigSnapshot,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.append_entry(session_id, SessionEntryKind::ConfigChange(snapshot))
+                .await
+                .map(|_| ())
+        })
+    }
+
+    fn set_leaf<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let requested_leaf_id = leaf_id.map(str::to_string);
+            let mut sessions = self.sessions.write().await;
+            let session = sessions.get_mut(&session_id).ok_or_else(|| {
+                SessionStoreError::SessionNotFound {
                     session_id: session_id.clone(),
-                })?;
-        if let Some(leaf_id) = requested_leaf_id.as_deref()
-            && !session.entries.iter().any(|entry| entry.id == leaf_id)
-        {
-            return Err(SessionStoreError::IndexInconsistent {
-                message: format!("leaf target `{leaf_id}` does not exist"),
-            });
-        }
+                }
+            })?;
+            if let Some(leaf_id) = requested_leaf_id.as_deref()
+                && !session.entries.iter().any(|entry| entry.id == leaf_id)
+            {
+                return Err(SessionStoreError::IndexInconsistent {
+                    message: format!("leaf target `{leaf_id}` does not exist"),
+                });
+            }
 
-        let entry = SessionEntry {
-            id: generate_entry_id(&entry_ids(&session.entries)),
-            parent_id: latest_non_leaf_id(&session.entries),
-            timestamp: current_timestamp_ms()?,
-            kind: SessionEntryKind::Leaf {
-                target_id: requested_leaf_id,
-            },
-        };
-        session.entries.push(entry);
-        Ok(())
-    }
-
-    async fn resolve(
-        &self,
-        session_id: &SessionId,
-        leaf_id: Option<&str>,
-    ) -> Result<Vec<ConversationItem>, SessionStoreError> {
-        let session_id = session_id.clone();
-        let requested_leaf = leaf_id.map(str::to_string);
-        let sessions = self.sessions.read().await;
-        let session =
-            sessions
-                .get(&session_id)
-                .ok_or_else(|| SessionStoreError::SessionNotFound {
-                    session_id: session_id.clone(),
-                })?;
-        let requested_leaf_id = requested_leaf_id(&session.entries, requested_leaf.as_deref())?;
-        resolve_entries(&session.entries, requested_leaf_id).map_err(resolve_error)
-    }
-
-    async fn list_sessions(
-        &self,
-        project_dir: &str,
-    ) -> Result<Vec<SessionMeta>, SessionStoreError> {
-        let project_dir = normalize_project_dir(Path::new(project_dir));
-        let sessions = self.sessions.read().await;
-        let mut metas = sessions
-            .values()
-            .map(|session| derive_session_meta(&session.entries, session.jsonl_path.clone()))
-            .collect::<Result<Vec<_>, _>>()?;
-        metas.retain(|meta| meta.project_dir == project_dir);
-        metas.sort_by(|left, right| {
-            right
-                .updated_at
-                .cmp(&left.updated_at)
-                .then_with(|| right.created_at.cmp(&left.created_at))
-                .then_with(|| right.session_id.cmp(&left.session_id))
-        });
-        Ok(metas)
-    }
-
-    async fn get_session_meta(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionMeta, SessionStoreError> {
-        let session_id = session_id.clone();
-        let sessions = self.sessions.read().await;
-        let session =
-            sessions
-                .get(&session_id)
-                .ok_or_else(|| SessionStoreError::SessionNotFound {
-                    session_id: session_id.clone(),
-                })?;
-        derive_session_meta(&session.entries, session.jsonl_path.clone())
-    }
-
-    async fn flush(&self, session_id: &SessionId) -> Result<(), SessionStoreError> {
-        let session_id = session_id.clone();
-        let sessions = self.sessions.read().await;
-        if sessions.contains_key(&session_id) {
+            let entry = SessionEntry {
+                id: generate_entry_id(&entry_ids(&session.entries)),
+                parent_id: latest_non_leaf_id(&session.entries),
+                timestamp: current_timestamp_ms()?,
+                kind: SessionEntryKind::Leaf {
+                    target_id: requested_leaf_id,
+                },
+            };
+            session.entries.push(entry);
             Ok(())
-        } else {
-            Err(SessionStoreError::SessionNotFound { session_id })
-        }
+        })
+    }
+
+    fn resolve<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ConversationItem>, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let requested_leaf = leaf_id.map(str::to_string);
+            let sessions = self.sessions.read().await;
+            let session =
+                sessions
+                    .get(&session_id)
+                    .ok_or_else(|| SessionStoreError::SessionNotFound {
+                        session_id: session_id.clone(),
+                    })?;
+            let requested_leaf_id = requested_leaf_id(&session.entries, requested_leaf.as_deref())?;
+            resolve_entries(&session.entries, requested_leaf_id).map_err(resolve_error)
+        })
+    }
+
+    fn load_session<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSessionState, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let requested_leaf = leaf_id.map(str::to_string);
+            let sessions = self.sessions.read().await;
+            let session =
+                sessions
+                    .get(&session_id)
+                    .ok_or_else(|| SessionStoreError::SessionNotFound {
+                        session_id: session_id.clone(),
+                    })?;
+            let requested_leaf_id = requested_leaf_id(&session.entries, requested_leaf.as_deref())?;
+            resolve_state(&session.entries, requested_leaf_id).map_err(resolve_error)
+        })
+    }
+
+    fn list_sessions<'a>(
+        &'a self,
+        project_dir: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SessionMeta>, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let project_dir = normalize_project_dir(Path::new(project_dir));
+            let sessions = self.sessions.read().await;
+            let mut metas = sessions
+                .values()
+                .map(|session| derive_session_meta(&session.entries, session.jsonl_path.clone()))
+                .collect::<Result<Vec<_>, _>>()?;
+            metas.retain(|meta| meta.project_dir == project_dir);
+            metas.sort_by(|left, right| {
+                right
+                    .updated_at
+                    .cmp(&left.updated_at)
+                    .then_with(|| right.created_at.cmp(&left.created_at))
+                    .then_with(|| right.session_id.cmp(&left.session_id))
+            });
+            Ok(metas)
+        })
+    }
+
+    fn get_session_meta<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionMeta, SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let sessions = self.sessions.read().await;
+            let session =
+                sessions
+                    .get(&session_id)
+                    .ok_or_else(|| SessionStoreError::SessionNotFound {
+                        session_id: session_id.clone(),
+                    })?;
+            derive_session_meta(&session.entries, session.jsonl_path.clone())
+        })
+    }
+
+    fn flush<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let sessions = self.sessions.read().await;
+            if sessions.contains_key(&session_id) {
+                Ok(())
+            } else {
+                Err(SessionStoreError::SessionNotFound { session_id })
+            }
+        })
     }
 }
 

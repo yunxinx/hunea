@@ -1,8 +1,6 @@
-use std::sync::{Mutex, mpsc};
+use std::sync::Mutex;
 
 use provider_protocol::{ContentBlock, ConversationItem, ToolCall};
-
-use super::{ConversationDelta, ConversationWorkerEvent};
 
 #[derive(Debug, Default)]
 pub(super) struct ProviderContextRepairLedger {
@@ -46,19 +44,12 @@ impl ProviderContextRepairLedger {
     }
 }
 
-pub(super) fn emit_provider_context_repair_items(
+pub(super) fn take_provider_context_repair_items(
     ledger: &Mutex<ProviderContextRepairLedger>,
-    sender: &mpsc::Sender<ConversationWorkerEvent>,
     content: &'static str,
-) {
-    let repair_items = ledger
+) -> Vec<ConversationItem> {
+    ledger
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take_repair_items(content);
-
-    for item in repair_items {
-        let _ = sender.send(ConversationWorkerEvent::Session(
-            ConversationDelta::ProviderContextItem { item },
-        ));
-    }
+        .take_repair_items(content)
 }

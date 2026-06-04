@@ -2,7 +2,7 @@ use std::{sync::mpsc, thread};
 
 use runtime_domain::session::ConversationEvent;
 
-use super::{ConversationDelta, ConversationWorkerEvent};
+use super::ConversationWorkerEvent;
 use crate::conversation::ConversationProgress;
 
 pub(super) fn progress_sender_to_permission_sender(
@@ -23,12 +23,6 @@ pub(super) fn conversation_worker_event_from_progress(
     match progress {
         ConversationProgress::SystemMessage { message } => {
             ConversationWorkerEvent::progress(ConversationEvent::SystemMessage { message })
-        }
-        ConversationProgress::ProviderTurnStarted => {
-            ConversationWorkerEvent::Session(ConversationDelta::ProviderTurnStarted)
-        }
-        ConversationProgress::ProviderContextItem { item } => {
-            ConversationWorkerEvent::Session(ConversationDelta::ProviderContextItem { item })
         }
         ConversationProgress::OutputTokens { total_tokens } => {
             ConversationWorkerEvent::progress(ConversationEvent::OutputTokenEstimate {
@@ -62,6 +56,10 @@ pub(super) fn conversation_worker_event_from_progress(
             ConversationWorkerEvent::progress(ConversationEvent::ManagedSearchToolAuthorization {
                 tool,
             })
+        }
+        ConversationProgress::ProviderTurnStarted
+        | ConversationProgress::ProviderContextItem { .. } => {
+            unreachable!("session progress is handled by the persistence actor")
         }
     }
 }

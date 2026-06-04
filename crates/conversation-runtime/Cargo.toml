@@ -9,6 +9,7 @@ tool-loop-runtime.workspace = true
 provider-protocol.workspace = true
 openai-compat-provider.workspace = true
 runtime-domain.workspace = true
+session-store.workspace = true
 tool-runtime.workspace = true
 reqwest.workspace = true
 serde = { workspace = true }

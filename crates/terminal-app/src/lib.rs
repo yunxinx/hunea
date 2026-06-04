@@ -1,9 +1,13 @@
-use std::io::{self, IsTerminal, Write};
+use std::{
+    io::{self, IsTerminal, Write},
+    sync::Arc,
+};
 
 use app_config::appconfig::{self, Config, TuiConfig};
 use color_eyre::eyre::{Result, WrapErr};
 use conversation_runtime::models as provider_models;
-use runtime_domain::phrases;
+use runtime_domain::{envinfo, phrases};
+use session_store::{LocalSessionStore, SessionHeader, SessionId, SessionStore};
 use terminal_ui::{self, StartupBannerOptions};
 
 mod options_mapping;
@@ -64,10 +68,13 @@ pub fn run_with_writer<W: Write>(
 ) -> Result<()> {
     let loaded_models = provider_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
-    let mut runtime_coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut runtime_options = AppRuntimeOptions {
         model_config_path: loaded_models.source_path.clone(),
         ..AppRuntimeOptions::default()
-    });
+    };
+    attach_default_session_persistence(&mut runtime_options, &loaded_models)
+        .wrap_err("failed to initialize session persistence")?;
+    let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options);
     let model = terminal_ui::run_with_runtime_coordinator(
         StartupBannerOptions::default(),
         model_options_from_config_and_models(tui_config, &loaded_models, &loaded_phrases),
@@ -85,9 +92,10 @@ pub fn run_with_config_writer<W: Write>(
 ) -> Result<()> {
     let loaded_models = provider_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
-    let mut runtime_coordinator = AppRuntimeCoordinator::new(
-        runtime_options_from_app_config_and_models(config, &loaded_models),
-    );
+    let mut runtime_options = runtime_options_from_app_config_and_models(config, &loaded_models);
+    attach_default_session_persistence(&mut runtime_options, &loaded_models)
+        .wrap_err("failed to initialize session persistence")?;
+    let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options);
     let model = terminal_ui::run_with_runtime_coordinator(
         StartupBannerOptions::default(),
         model_options_from_app_config_and_models(config, &loaded_models, &loaded_phrases),
@@ -95,6 +103,42 @@ pub fn run_with_config_writer<W: Write>(
     )
     .wrap_err("failed to run tui application")?;
     write_terminal_replay_on_exit(writer, &model, preserve_ansi, &config.tui)
+}
+
+fn attach_default_session_persistence(
+    options: &mut AppRuntimeOptions,
+    loaded_models: &provider_models::LoadedModelCatalog,
+) -> Result<()> {
+    let store = open_local_session_store()?;
+    let work_dir = std::env::current_dir().wrap_err("resolve current working directory")?;
+    let git_head = envinfo::git_head();
+    let initial_model = loaded_models
+        .selected_model
+        .as_ref()
+        .map(|selection| selection.model_id.clone())
+        .unwrap_or_default();
+
+    options.session_store = Some(store);
+    options.session_header_template = Some(SessionHeader {
+        session_id: SessionId::new(),
+        work_dir,
+        session_name: None,
+        initial_model,
+        git_head,
+        cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    });
+    Ok(())
+}
+
+fn open_local_session_store() -> Result<Arc<dyn SessionStore>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .wrap_err("start session store runtime")?;
+    let store = runtime
+        .block_on(LocalSessionStore::open())
+        .wrap_err("open local session store")?;
+    Ok(Arc::new(store))
 }
 
 #[cfg(test)]

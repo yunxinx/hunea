@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -174,6 +174,21 @@ pub enum SessionStoreError {
     ChannelClosed,
 }
 
+/// `ResolveError` 描述 tree resolve 失败原因。
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    #[error("leaf `{0}` was not found")]
+    LeafNotFound(String),
+    #[error("duplicate entry id `{0}` in session")]
+    DuplicateId(String),
+    #[error("entry references missing parent `{0}`")]
+    DanglingParent(String),
+    #[error("entry graph contains a parent cycle")]
+    CycleDetected,
+    #[error("compaction target `{0}` is invalid")]
+    InvalidCompactionTarget(String),
+}
+
 /// 生成 session 内唯一 entry id。
 pub fn generate_entry_id(existing_ids: &HashSet<String>) -> String {
     generate_entry_id_with(existing_ids, Uuid::now_v7)
@@ -237,6 +252,109 @@ pub fn hunea_dir() -> Option<PathBuf> {
 pub fn session_filename(session_id: &SessionId) -> String {
     let timestamp = format_filename_timestamp(session_id.timestamp());
     format!("{timestamp}_{session_id}.jsonl")
+}
+
+/// 从指定 leaf 解析 provider 可见的 canonical history。
+pub fn resolve(
+    entries: &[SessionEntry],
+    leaf_id: &str,
+) -> Result<Vec<ConversationItem>, ResolveError> {
+    let by_id = build_entry_index(entries)?;
+    let effective_leaf_id = effective_leaf_id(entries, leaf_id);
+    let mut path = Vec::new();
+    let mut visited = HashSet::new();
+    let mut current = *by_id
+        .get(effective_leaf_id)
+        .ok_or_else(|| ResolveError::LeafNotFound(effective_leaf_id.to_string()))?;
+
+    loop {
+        if !visited.insert(current.id.as_str()) {
+            return Err(ResolveError::CycleDetected);
+        }
+
+        path.push(current);
+
+        let Some(parent_id) = current.parent_id.as_deref() else {
+            break;
+        };
+
+        current = *by_id
+            .get(parent_id)
+            .ok_or_else(|| ResolveError::DanglingParent(parent_id.to_string()))?;
+    }
+
+    path.reverse();
+
+    resolve_items_from_path(&path)
+}
+
+fn build_entry_index(
+    entries: &[SessionEntry],
+) -> Result<HashMap<&str, &SessionEntry>, ResolveError> {
+    let mut by_id = HashMap::with_capacity(entries.len());
+    for entry in entries {
+        if by_id.insert(entry.id.as_str(), entry).is_some() {
+            return Err(ResolveError::DuplicateId(entry.id.clone()));
+        }
+    }
+    Ok(by_id)
+}
+
+fn effective_leaf_id<'a>(entries: &'a [SessionEntry], requested_leaf_id: &'a str) -> &'a str {
+    match entries.last().map(|entry| &entry.kind) {
+        Some(SessionEntryKind::Leaf {
+            target_id: Some(target_id),
+        }) => target_id.as_str(),
+        Some(SessionEntryKind::Leaf { target_id: None }) => entries
+            .iter()
+            .rev()
+            .find(|entry| !matches!(entry.kind, SessionEntryKind::Leaf { .. }))
+            .map(|entry| entry.id.as_str())
+            .unwrap_or(requested_leaf_id),
+        _ => requested_leaf_id,
+    }
+}
+
+fn resolve_items_from_path(path: &[&SessionEntry]) -> Result<Vec<ConversationItem>, ResolveError> {
+    let mut resolved = Vec::new();
+    let start_index = if let Some((summary, first_kept_entry_id)) = latest_compaction(path) {
+        let keep_index = item_entry_position(path, first_kept_entry_id).ok_or_else(|| {
+            ResolveError::InvalidCompactionTarget(first_kept_entry_id.to_string())
+        })?;
+        resolved.push(ConversationItem::system(vec![
+            provider_protocol::ContentBlock::Text(summary.to_string()),
+        ]));
+        keep_index
+    } else {
+        0
+    };
+
+    resolved.extend(
+        path[start_index..]
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                SessionEntryKind::Item(item) => Some(item.clone()),
+                _ => None,
+            }),
+    );
+
+    Ok(resolved)
+}
+
+fn item_entry_position(path: &[&SessionEntry], target_id: &str) -> Option<usize> {
+    path.iter()
+        .position(|entry| entry.id == target_id && matches!(entry.kind, SessionEntryKind::Item(_)))
+}
+
+fn latest_compaction<'a>(path: &'a [&'a SessionEntry]) -> Option<(&'a str, &'a str)> {
+    path.iter().rev().find_map(|entry| match &entry.kind {
+        SessionEntryKind::Compaction {
+            summary,
+            first_kept_entry_id,
+            ..
+        } => Some((summary.as_str(), first_kept_entry_id.as_str())),
+        _ => None,
+    })
 }
 
 fn format_filename_timestamp(timestamp: Timestamp) -> String {
@@ -683,6 +801,243 @@ mod tests {
         assert_eq!(loaded, entries);
     }
 
+    #[test]
+    fn resolve_returns_linear_history_items_in_order() {
+        let entries = linear_history_entries();
+
+        let resolved = super::resolve(&entries, "user-2").expect("linear history should resolve");
+
+        assert_eq!(
+            resolved,
+            vec![
+                ConversationItem::text(Role::User, "hello"),
+                ConversationItem::text(Role::Assistant, "hi"),
+                ConversationItem::text(Role::User, "follow up"),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_returns_branch_specific_history() {
+        let entries = branching_entries();
+
+        let left_branch =
+            super::resolve(&entries, "assistant-b").expect("left branch should resolve");
+        let right_branch =
+            super::resolve(&entries, "assistant-c").expect("right branch should resolve");
+
+        assert_eq!(
+            left_branch,
+            vec![
+                ConversationItem::text(Role::User, "hello"),
+                ConversationItem::text(Role::Assistant, "branch-b"),
+            ]
+        );
+        assert_eq!(
+            right_branch,
+            vec![
+                ConversationItem::text(Role::User, "hello"),
+                ConversationItem::text(Role::Assistant, "branch-c"),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_keeps_following_appended_entries_on_selected_branch() {
+        let entries = branching_with_append_entries();
+
+        let resolved =
+            super::resolve(&entries, "user-d").expect("appended branch history should resolve");
+
+        assert_eq!(
+            resolved,
+            vec![
+                ConversationItem::text(Role::User, "hello"),
+                ConversationItem::text(Role::Assistant, "branch-c"),
+                ConversationItem::text(Role::User, "branch follow-up"),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_follows_trailing_leaf_target() {
+        let entries = entries_with_trailing_leaf_override();
+
+        let resolved = super::resolve(&entries, "assistant-c")
+            .expect("leaf override should redirect canonical history");
+
+        assert_eq!(resolved, vec![ConversationItem::text(Role::User, "hello")]);
+    }
+
+    #[test]
+    fn resolve_replaces_compacted_history_with_summary_and_kept_tail() {
+        let entries = entries_with_compaction();
+
+        let resolved = super::resolve(&entries, "assistant-d")
+            .expect("compacted history should resolve to summary plus kept tail");
+
+        assert_eq!(
+            resolved,
+            vec![
+                ConversationItem::system(vec![
+                    ContentBlock::Text("compacted summary".to_string(),)
+                ]),
+                ConversationItem::text(Role::Assistant, "keep me"),
+                ConversationItem::text(Role::Assistant, "after compaction"),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_uses_latest_compaction_boundary() {
+        let entries = entries_with_multiple_compactions();
+
+        let resolved =
+            super::resolve(&entries, "assistant-f").expect("latest compaction should win");
+
+        assert_eq!(
+            resolved,
+            vec![
+                ConversationItem::system(vec![ContentBlock::Text("latest summary".to_string(),)]),
+                ConversationItem::text(Role::Assistant, "second keep"),
+                ConversationItem::text(Role::Assistant, "after latest compaction"),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_uses_latest_non_leaf_entry_when_trailing_leaf_resets_target() {
+        let entries = entries_with_trailing_leaf_reset();
+
+        let resolved = super::resolve(&entries, "user-a")
+            .expect("leaf reset should fall back to the latest concrete entry");
+
+        assert_eq!(
+            resolved,
+            vec![
+                ConversationItem::text(Role::User, "hello"),
+                ConversationItem::text(Role::Assistant, "branch-c"),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_returns_empty_history_for_header_only_session() {
+        let entries = header_only_entries();
+
+        let resolved = super::resolve(&entries, "header").expect("header-only session resolves");
+
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn resolve_skips_config_and_branch_summary_entries() {
+        let entries = entries_with_non_history_metadata();
+
+        let resolved = super::resolve(&entries, "assistant-c")
+            .expect("non-history metadata should not appear in canonical history");
+
+        assert_eq!(
+            resolved,
+            vec![
+                ConversationItem::text(Role::User, "hello"),
+                ConversationItem::text(Role::Assistant, "final reply"),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_reports_missing_parent_on_selected_path() {
+        let entries = entries_with_dangling_parent();
+
+        let error = super::resolve(&entries, "assistant-1")
+            .expect_err("dangling parent should fail resolve");
+
+        assert_eq!(
+            error,
+            super::ResolveError::DanglingParent("missing".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_reports_cycle_on_selected_path() {
+        let entries = entries_with_cycle();
+
+        let error = super::resolve(&entries, "assistant-b").expect_err("cycle should fail resolve");
+
+        assert_eq!(error, super::ResolveError::CycleDetected);
+    }
+
+    #[test]
+    fn resolve_reports_missing_leaf_target_from_trailing_leaf_entry() {
+        let entries = entries_with_missing_leaf_target();
+
+        let error = super::resolve(&entries, "assistant-c")
+            .expect_err("missing leaf target should fail resolve");
+
+        assert_eq!(
+            error,
+            super::ResolveError::LeafNotFound("missing-target".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_reports_invalid_compaction_target() {
+        let entries = entries_with_invalid_compaction_target();
+
+        let error = super::resolve(&entries, "assistant-d")
+            .expect_err("unknown compaction target should fail resolve");
+
+        assert_eq!(
+            error,
+            super::ResolveError::InvalidCompactionTarget("missing-target".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_reports_duplicate_entry_id() {
+        let entries = entries_with_duplicate_id();
+
+        let error =
+            super::resolve(&entries, "assistant-1").expect_err("duplicate id should fail resolve");
+
+        assert_eq!(
+            error,
+            super::ResolveError::DuplicateId("assistant-1".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_compaction_target_that_is_not_an_item() {
+        let entries = entries_with_non_item_compaction_target();
+
+        let error = super::resolve(&entries, "assistant-d")
+            .expect_err("non-item compaction target should fail resolve");
+
+        assert_eq!(
+            error,
+            super::ResolveError::InvalidCompactionTarget("config-1".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_handles_large_linear_history() {
+        let entries = long_linear_history_entries(1_000);
+
+        let resolved = super::resolve(&entries, "assistant-999")
+            .expect("large linear history should resolve successfully");
+
+        assert_eq!(resolved.len(), 1_000);
+        assert_eq!(
+            resolved.first(),
+            Some(&ConversationItem::text(Role::Assistant, "message-0"))
+        );
+        assert_eq!(
+            resolved.last(),
+            Some(&ConversationItem::text(Role::Assistant, "message-999"))
+        );
+    }
+
     fn test_uuid(input: &str) -> Uuid {
         Uuid::try_parse(input).expect("test UUID should parse")
     }
@@ -809,5 +1164,401 @@ mod tests {
                 },
             },
         ]
+    }
+
+    fn linear_history_entries() -> Vec<SessionEntry> {
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+
+        vec![
+            SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: 1_717_514_800_000,
+                kind: SessionEntryKind::Header(SessionHeader {
+                    session_id,
+                    work_dir: PathBuf::from("/repo"),
+                    initial_model: "gpt-4.1".to_string(),
+                    git_head: Some("abc123".to_string()),
+                    cli_version: Some("0.5.2".to_string()),
+                }),
+            },
+            SessionEntry {
+                id: "user-1".to_string(),
+                parent_id: Some("header".to_string()),
+                timestamp: 1_717_514_800_001,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "hello")),
+            },
+            SessionEntry {
+                id: "assistant-1".to_string(),
+                parent_id: Some("user-1".to_string()),
+                timestamp: 1_717_514_800_002,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "hi")),
+            },
+            SessionEntry {
+                id: "user-2".to_string(),
+                parent_id: Some("assistant-1".to_string()),
+                timestamp: 1_717_514_800_003,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "follow up")),
+            },
+        ]
+    }
+
+    fn branching_entries() -> Vec<SessionEntry> {
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+
+        vec![
+            SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: 1_717_514_800_000,
+                kind: SessionEntryKind::Header(SessionHeader {
+                    session_id,
+                    work_dir: PathBuf::from("/repo"),
+                    initial_model: "gpt-4.1".to_string(),
+                    git_head: Some("abc123".to_string()),
+                    cli_version: Some("0.5.2".to_string()),
+                }),
+            },
+            SessionEntry {
+                id: "user-a".to_string(),
+                parent_id: Some("header".to_string()),
+                timestamp: 1_717_514_800_001,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "hello")),
+            },
+            SessionEntry {
+                id: "assistant-b".to_string(),
+                parent_id: Some("user-a".to_string()),
+                timestamp: 1_717_514_800_002,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "branch-b")),
+            },
+            SessionEntry {
+                id: "assistant-c".to_string(),
+                parent_id: Some("user-a".to_string()),
+                timestamp: 1_717_514_800_003,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "branch-c")),
+            },
+        ]
+    }
+
+    fn branching_with_append_entries() -> Vec<SessionEntry> {
+        let mut entries = branching_entries();
+        entries.push(SessionEntry {
+            id: "user-d".to_string(),
+            parent_id: Some("assistant-c".to_string()),
+            timestamp: 1_717_514_800_004,
+            kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "branch follow-up")),
+        });
+        entries
+    }
+
+    fn entries_with_trailing_leaf_override() -> Vec<SessionEntry> {
+        let mut entries = branching_entries();
+        entries.push(SessionEntry {
+            id: "leaf-1".to_string(),
+            parent_id: Some("assistant-c".to_string()),
+            timestamp: 1_717_514_800_004,
+            kind: SessionEntryKind::Leaf {
+                target_id: Some("user-a".to_string()),
+            },
+        });
+        entries
+    }
+
+    fn entries_with_compaction() -> Vec<SessionEntry> {
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+
+        vec![
+            SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: 1_717_514_800_000,
+                kind: SessionEntryKind::Header(SessionHeader {
+                    session_id,
+                    work_dir: PathBuf::from("/repo"),
+                    initial_model: "gpt-4.1".to_string(),
+                    git_head: Some("abc123".to_string()),
+                    cli_version: Some("0.5.2".to_string()),
+                }),
+            },
+            SessionEntry {
+                id: "user-a".to_string(),
+                parent_id: Some("header".to_string()),
+                timestamp: 1_717_514_800_001,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "drop me")),
+            },
+            SessionEntry {
+                id: "assistant-b".to_string(),
+                parent_id: Some("user-a".to_string()),
+                timestamp: 1_717_514_800_002,
+                kind: SessionEntryKind::Item(ConversationItem::text(
+                    Role::Assistant,
+                    "drop me too",
+                )),
+            },
+            SessionEntry {
+                id: "assistant-c".to_string(),
+                parent_id: Some("assistant-b".to_string()),
+                timestamp: 1_717_514_800_003,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "keep me")),
+            },
+            SessionEntry {
+                id: "compaction-1".to_string(),
+                parent_id: Some("assistant-c".to_string()),
+                timestamp: 1_717_514_800_004,
+                kind: SessionEntryKind::Compaction {
+                    summary: "compacted summary".to_string(),
+                    first_kept_entry_id: "assistant-c".to_string(),
+                    tokens_before: 64,
+                },
+            },
+            SessionEntry {
+                id: "assistant-d".to_string(),
+                parent_id: Some("compaction-1".to_string()),
+                timestamp: 1_717_514_800_005,
+                kind: SessionEntryKind::Item(ConversationItem::text(
+                    Role::Assistant,
+                    "after compaction",
+                )),
+            },
+        ]
+    }
+
+    fn entries_with_multiple_compactions() -> Vec<SessionEntry> {
+        let mut entries = entries_with_compaction();
+        entries.push(SessionEntry {
+            id: "assistant-e".to_string(),
+            parent_id: Some("assistant-d".to_string()),
+            timestamp: 1_717_514_800_006,
+            kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "second keep")),
+        });
+        entries.push(SessionEntry {
+            id: "compaction-2".to_string(),
+            parent_id: Some("assistant-e".to_string()),
+            timestamp: 1_717_514_800_007,
+            kind: SessionEntryKind::Compaction {
+                summary: "latest summary".to_string(),
+                first_kept_entry_id: "assistant-e".to_string(),
+                tokens_before: 96,
+            },
+        });
+        entries.push(SessionEntry {
+            id: "assistant-f".to_string(),
+            parent_id: Some("compaction-2".to_string()),
+            timestamp: 1_717_514_800_008,
+            kind: SessionEntryKind::Item(ConversationItem::text(
+                Role::Assistant,
+                "after latest compaction",
+            )),
+        });
+        entries
+    }
+
+    fn entries_with_trailing_leaf_reset() -> Vec<SessionEntry> {
+        let mut entries = branching_entries();
+        entries.push(SessionEntry {
+            id: "leaf-reset".to_string(),
+            parent_id: Some("assistant-c".to_string()),
+            timestamp: 1_717_514_800_004,
+            kind: SessionEntryKind::Leaf { target_id: None },
+        });
+        entries
+    }
+
+    fn header_only_entries() -> Vec<SessionEntry> {
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+
+        vec![SessionEntry {
+            id: "header".to_string(),
+            parent_id: None,
+            timestamp: 1_717_514_800_000,
+            kind: SessionEntryKind::Header(SessionHeader {
+                session_id,
+                work_dir: PathBuf::from("/repo"),
+                initial_model: "gpt-4.1".to_string(),
+                git_head: Some("abc123".to_string()),
+                cli_version: Some("0.5.2".to_string()),
+            }),
+        }]
+    }
+
+    fn entries_with_non_history_metadata() -> Vec<SessionEntry> {
+        let mut entries = branching_entries();
+        entries.truncate(2);
+        entries.push(SessionEntry {
+            id: "branch-summary".to_string(),
+            parent_id: Some("user-a".to_string()),
+            timestamp: 1_717_514_800_002,
+            kind: SessionEntryKind::BranchSummary {
+                from_id: "user-a".to_string(),
+                summary: "alternate".to_string(),
+            },
+        });
+        entries.push(SessionEntry {
+            id: "config-change".to_string(),
+            parent_id: Some("branch-summary".to_string()),
+            timestamp: 1_717_514_800_003,
+            kind: SessionEntryKind::ConfigChange(ConfigSnapshot {
+                model: "gpt-4.1-mini".to_string(),
+                system_prompt: Some("be terse".to_string()),
+            }),
+        });
+        entries.push(SessionEntry {
+            id: "assistant-c".to_string(),
+            parent_id: Some("config-change".to_string()),
+            timestamp: 1_717_514_800_004,
+            kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "final reply")),
+        });
+        entries
+    }
+
+    fn entries_with_dangling_parent() -> Vec<SessionEntry> {
+        let mut entries = linear_history_entries();
+        entries[2].parent_id = Some("missing".to_string());
+        entries.truncate(3);
+        entries
+    }
+
+    fn entries_with_cycle() -> Vec<SessionEntry> {
+        let mut entries = branching_entries();
+        entries[1].parent_id = Some("assistant-b".to_string());
+        entries[2].parent_id = Some("user-a".to_string());
+        entries.truncate(3);
+        entries
+    }
+
+    fn entries_with_missing_leaf_target() -> Vec<SessionEntry> {
+        let mut entries = branching_entries();
+        entries.push(SessionEntry {
+            id: "leaf-missing".to_string(),
+            parent_id: Some("assistant-c".to_string()),
+            timestamp: 1_717_514_800_004,
+            kind: SessionEntryKind::Leaf {
+                target_id: Some("missing-target".to_string()),
+            },
+        });
+        entries
+    }
+
+    fn entries_with_invalid_compaction_target() -> Vec<SessionEntry> {
+        let mut entries = entries_with_compaction();
+        entries[4].kind = SessionEntryKind::Compaction {
+            summary: "compacted summary".to_string(),
+            first_kept_entry_id: "missing-target".to_string(),
+            tokens_before: 64,
+        };
+        entries
+    }
+
+    fn entries_with_duplicate_id() -> Vec<SessionEntry> {
+        let mut entries = linear_history_entries();
+        entries.push(SessionEntry {
+            id: "assistant-1".to_string(),
+            parent_id: Some("user-2".to_string()),
+            timestamp: 1_717_514_800_004,
+            kind: SessionEntryKind::Item(ConversationItem::text(
+                Role::Assistant,
+                "shadowed duplicate",
+            )),
+        });
+        entries
+    }
+
+    fn entries_with_non_item_compaction_target() -> Vec<SessionEntry> {
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+
+        vec![
+            SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: 1_717_514_800_000,
+                kind: SessionEntryKind::Header(SessionHeader {
+                    session_id,
+                    work_dir: PathBuf::from("/repo"),
+                    initial_model: "gpt-4.1".to_string(),
+                    git_head: Some("abc123".to_string()),
+                    cli_version: Some("0.5.2".to_string()),
+                }),
+            },
+            SessionEntry {
+                id: "user-a".to_string(),
+                parent_id: Some("header".to_string()),
+                timestamp: 1_717_514_800_001,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "hello")),
+            },
+            SessionEntry {
+                id: "config-1".to_string(),
+                parent_id: Some("user-a".to_string()),
+                timestamp: 1_717_514_800_002,
+                kind: SessionEntryKind::ConfigChange(ConfigSnapshot {
+                    model: "gpt-4.1-mini".to_string(),
+                    system_prompt: Some("be terse".to_string()),
+                }),
+            },
+            SessionEntry {
+                id: "compaction-1".to_string(),
+                parent_id: Some("config-1".to_string()),
+                timestamp: 1_717_514_800_003,
+                kind: SessionEntryKind::Compaction {
+                    summary: "summary".to_string(),
+                    first_kept_entry_id: "config-1".to_string(),
+                    tokens_before: 32,
+                },
+            },
+            SessionEntry {
+                id: "assistant-d".to_string(),
+                parent_id: Some("compaction-1".to_string()),
+                timestamp: 1_717_514_800_004,
+                kind: SessionEntryKind::Item(ConversationItem::text(
+                    Role::Assistant,
+                    "after compaction",
+                )),
+            },
+        ]
+    }
+
+    fn long_linear_history_entries(item_count: usize) -> Vec<SessionEntry> {
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+        let mut entries = Vec::with_capacity(item_count + 1);
+        entries.push(SessionEntry {
+            id: "header".to_string(),
+            parent_id: None,
+            timestamp: 1_717_514_800_000,
+            kind: SessionEntryKind::Header(SessionHeader {
+                session_id,
+                work_dir: PathBuf::from("/repo"),
+                initial_model: "gpt-4.1".to_string(),
+                git_head: Some("abc123".to_string()),
+                cli_version: Some("0.5.2".to_string()),
+            }),
+        });
+
+        let mut parent_id = "header".to_string();
+        for index in 0..item_count {
+            let id = format!("assistant-{index}");
+            entries.push(SessionEntry {
+                id: id.clone(),
+                parent_id: Some(parent_id),
+                timestamp: 1_717_514_800_001 + index as i64,
+                kind: SessionEntryKind::Item(ConversationItem::text(
+                    Role::Assistant,
+                    format!("message-{index}"),
+                )),
+            });
+            parent_id = id;
+        }
+
+        entries
     }
 }

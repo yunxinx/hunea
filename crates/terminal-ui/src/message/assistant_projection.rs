@@ -1,15 +1,19 @@
 use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 
+use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
 use ratatui::text::Line;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     display_width::grapheme_width,
+    markdown_source::{MarkdownSourceBounds, markdown_source_bounds},
     styled_text::{line_plain_text_len, line_to_plain_text},
     theme::TerminalPalette,
     transcript::{
-        markdown_table_source::contains_table_structure, render_markdown_lines,
-        render_markdown_metrics,
+        assistant_markdown_options,
+        markdown_blocks::{MarkdownBlockKind, markdown_block_spacing_before},
+        markdown_table_source::contains_table_structure,
+        render_markdown_lines, render_markdown_metrics,
     },
 };
 
@@ -58,14 +62,6 @@ enum AssistantProjectedBlockKind {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AssistantMarkdownBlock {
-    Heading,
-    List,
-    Paragraph,
-    Code,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct AssistantSourceLine<'a> {
     text: &'a str,
@@ -83,6 +79,41 @@ struct FencedCodePageRender<'a> {
     page_end: usize,
     width: usize,
     palette: TerminalPalette,
+}
+
+#[derive(Debug)]
+struct ParserProjectionBlock {
+    kind: ParserProjectionBlockKind,
+    range: Range<usize>,
+}
+
+#[derive(Debug)]
+enum ParserProjectionBlockKind {
+    Heading,
+    List,
+    Paragraph,
+    FencedCode,
+}
+
+impl ParserProjectionBlockKind {
+    fn markdown_block_kind(&self) -> MarkdownBlockKind {
+        match self {
+            Self::Heading => MarkdownBlockKind::Heading,
+            Self::List => MarkdownBlockKind::List,
+            Self::Paragraph => MarkdownBlockKind::Paragraph,
+            Self::FencedCode => MarkdownBlockKind::Code,
+        }
+    }
+
+    fn is_markdown_structure(&self) -> bool {
+        !matches!(self, Self::Paragraph)
+    }
+}
+
+struct FencedCodeSourceBlock<'a> {
+    marker: &'static str,
+    info_range: Range<usize>,
+    code_lines: Vec<AssistantSourceLine<'a>>,
 }
 
 impl AssistantMessageRenderProjection {
@@ -356,20 +387,12 @@ fn build_common_markdown_projection_blocks(
         return None;
     }
 
-    let split_lines = content.split('\n').collect::<Vec<_>>();
-    let leading_blank_lines = split_lines
-        .iter()
-        .take_while(|line| line.is_empty())
-        .count();
-    let trailing_blank_lines = split_lines
-        .iter()
-        .rev()
-        .take_while(|line| line.is_empty())
-        .count();
-    let source_lines = collect_source_lines(content);
-    let last_content_line = source_lines
-        .iter()
-        .rposition(|line| !line.text.trim().is_empty())?;
+    let source_bounds = markdown_source_bounds(content);
+    if source_bounds.is_empty() {
+        return None;
+    }
+    let leading_blank_lines = source_bounds.leading_blank_lines;
+    let parser_blocks = collect_parser_projection_blocks(content, source_bounds)?;
 
     let mut blocks = Vec::new();
     let mut line_cursor = 0usize;
@@ -381,165 +404,64 @@ fn build_common_markdown_projection_blocks(
 
     let mut saw_markdown_structure = false;
     let mut previous_block = None;
-    let mut index = leading_blank_lines.min(last_content_line.saturating_add(1));
-    while index <= last_content_line {
-        let source_line = source_lines[index];
-        let raw_line = source_line.text;
-        let trimmed = raw_line.trim_start();
-        if trimmed.is_empty() {
-            index += 1;
-            continue;
-        }
-
-        if let Some((marker, info)) = markdown_fence_opener(raw_line) {
-            saw_markdown_structure = true;
-            let leading_blank_lines =
-                markdown_spacing_before(previous_block, AssistantMarkdownBlock::Code);
-
-            let info_range = markdown_fence_info_range(source_line, marker)?;
-            let mut code_lines = Vec::new();
-            index += 1;
-            let mut found_closing_fence = false;
-            while index <= last_content_line {
-                let candidate = source_lines[index];
-                if is_markdown_fence_closer(candidate.text, marker) {
-                    found_closing_fence = true;
-                    break;
+    for parser_block in parser_blocks {
+        saw_markdown_structure |= parser_block.kind.is_markdown_structure();
+        let leading_blank_lines = markdown_block_spacing_before(previous_block);
+        let markdown_block_kind = parser_block.kind.markdown_block_kind();
+        match parser_block.kind {
+            ParserProjectionBlockKind::FencedCode => {
+                let fenced_code = projectable_fenced_code_block(content, parser_block.range)?;
+                let line_ranges = fenced_code
+                    .code_lines
+                    .iter()
+                    .map(|line| line.start..line.end)
+                    .collect::<Vec<_>>();
+                push_block(&mut blocks, &mut line_cursor, |start_line| {
+                    AssistantProjectedBlock::fenced_code(
+                        start_line,
+                        leading_blank_lines,
+                        fenced_code.marker,
+                        content,
+                        fenced_code.info_range,
+                        line_ranges,
+                        width,
+                    )
+                });
+            }
+            ParserProjectionBlockKind::Paragraph => {
+                if !markdown_range_lines_are_projectable(content, parser_block.range.clone()) {
+                    return None;
                 }
-                code_lines.push(candidate);
-                index += 1;
-            }
-            if !found_closing_fence {
-                return None;
-            }
-            if code_lines.iter().all(|line| line.text.is_empty()) {
-                return None;
-            }
-            if fenced_code_requires_full_context(info, &code_lines) {
-                return None;
-            }
-            let line_ranges = code_lines
-                .iter()
-                .map(|line| line.start..line.end)
-                .collect::<Vec<_>>();
-            push_block(&mut blocks, &mut line_cursor, |start_line| {
-                AssistantProjectedBlock::fenced_code(
-                    start_line,
+                let block = AssistantProjectedBlock::markdown_snippet(
+                    line_cursor,
                     leading_blank_lines,
-                    marker,
                     content,
-                    info_range,
-                    line_ranges,
+                    parser_block.range,
                     width,
-                )
-            });
-            previous_block = Some(AssistantMarkdownBlock::Code);
-            index += 1;
-            continue;
-        }
-
-        if is_projectable_markdown_heading(raw_line, trimmed) {
-            saw_markdown_structure = true;
-            let leading_blank_lines =
-                markdown_spacing_before(previous_block, AssistantMarkdownBlock::Heading);
-            let block = AssistantProjectedBlock::markdown_snippet(
-                line_cursor,
-                leading_blank_lines,
-                content,
-                source_line.start..source_line.end,
-                width,
-                palette,
-            )?;
-            push_optional_block(&mut blocks, &mut line_cursor, block);
-            previous_block = Some(AssistantMarkdownBlock::Heading);
-            index += 1;
-            continue;
-        }
-
-        if raw_line == trimmed && is_markdown_list_item(trimmed) {
-            saw_markdown_structure = true;
-            let start = index;
-            index += 1;
-            while index <= last_content_line {
-                let candidate = source_lines[index].text;
-                let candidate_trimmed = candidate.trim_start();
-                if candidate_trimmed.is_empty() {
-                    break;
-                }
-                if candidate != candidate_trimmed || !is_markdown_list_item(candidate_trimmed) {
-                    break;
-                }
-                index += 1;
+                    palette,
+                )?;
+                push_optional_block(&mut blocks, &mut line_cursor, block);
             }
-            let leading_blank_lines =
-                markdown_spacing_before(previous_block, AssistantMarkdownBlock::List);
-            let block = AssistantProjectedBlock::markdown_snippet(
-                line_cursor,
-                leading_blank_lines,
-                content,
-                source_line_range(&source_lines, start, index)?,
-                width,
-                palette,
-            )?;
-            push_optional_block(&mut blocks, &mut line_cursor, block);
-            previous_block = Some(AssistantMarkdownBlock::List);
-            continue;
-        }
-
-        if raw_line != trimmed && is_markdown_list_item(trimmed) {
-            return None;
-        }
-
-        if starts_with_unsupported_fence(raw_line) {
-            return None;
-        }
-
-        if paragraph_line_is_projectable(raw_line) {
-            let start = index;
-            index += 1;
-            while index <= last_content_line {
-                let candidate = source_lines[index].text;
-                let candidate_trimmed = candidate.trim_start();
-                if candidate_trimmed.is_empty()
-                    || markdown_fence_opener(candidate).is_some()
-                    || starts_with_unsupported_fence(candidate)
-                    || is_projectable_markdown_heading(candidate, candidate_trimmed)
-                    || (candidate == candidate_trimmed && is_markdown_list_item(candidate_trimmed))
-                {
-                    break;
-                }
-                if candidate != candidate_trimmed && is_markdown_list_item(candidate_trimmed) {
-                    return None;
-                }
-                if !paragraph_line_is_projectable(candidate) {
-                    return None;
-                }
-                index += 1;
+            ParserProjectionBlockKind::Heading | ParserProjectionBlockKind::List => {
+                let block = AssistantProjectedBlock::markdown_snippet(
+                    line_cursor,
+                    leading_blank_lines,
+                    content,
+                    parser_block.range,
+                    width,
+                    palette,
+                )?;
+                push_optional_block(&mut blocks, &mut line_cursor, block);
             }
-
-            let leading_blank_lines =
-                markdown_spacing_before(previous_block, AssistantMarkdownBlock::Paragraph);
-            let block = AssistantProjectedBlock::markdown_snippet(
-                line_cursor,
-                leading_blank_lines,
-                content,
-                source_line_range(&source_lines, start, index)?,
-                width,
-                palette,
-            )?;
-            push_optional_block(&mut blocks, &mut line_cursor, block);
-            previous_block = Some(AssistantMarkdownBlock::Paragraph);
-            continue;
         }
-
-        return None;
+        previous_block = Some(markdown_block_kind);
     }
 
     if !saw_markdown_structure {
         return None;
     }
 
-    for _ in 0..trailing_blank_lines {
+    for _ in 0..source_bounds.trailing_blank_lines {
         push_block(&mut blocks, &mut line_cursor, |start_line| {
             AssistantProjectedBlock::blank(start_line)
         });
@@ -548,9 +470,83 @@ fn build_common_markdown_projection_blocks(
     Some(blocks)
 }
 
+fn collect_parser_projection_blocks(
+    content: &str,
+    source_bounds: MarkdownSourceBounds,
+) -> Option<Vec<ParserProjectionBlock>> {
+    let mut blocks = Vec::new();
+    let mut depth = 0usize;
+
+    // projection 的顶层 block 边界必须跟 eager renderer 同源，避免重新实现
+    // CommonMark list/paragraph/fence 归属规则；不支持的 parser block 保守回退。
+    for (event, range) in Parser::new_ext(content, assistant_markdown_options()).into_offset_iter()
+    {
+        match event {
+            Event::Start(tag) => {
+                if depth == 0 {
+                    let kind = match tag {
+                        Tag::Paragraph => ParserProjectionBlockKind::Paragraph,
+                        Tag::Heading { .. } => ParserProjectionBlockKind::Heading,
+                        Tag::List(_) => ParserProjectionBlockKind::List,
+                        Tag::CodeBlock(CodeBlockKind::Fenced(_)) => {
+                            ParserProjectionBlockKind::FencedCode
+                        }
+                        _ => return None,
+                    };
+                    blocks.push(ParserProjectionBlock {
+                        kind,
+                        range: trim_parser_block_range(content, range, source_bounds)?,
+                    });
+                }
+                depth = depth.saturating_add(1);
+            }
+            Event::End(_) => {
+                depth = depth.checked_sub(1)?;
+            }
+            Event::Rule | Event::Html(_) | Event::InlineHtml(_) | Event::DisplayMath(_) => {
+                return None;
+            }
+            Event::Text(_)
+            | Event::Code(_)
+            | Event::SoftBreak
+            | Event::HardBreak
+            | Event::InlineMath(_)
+            | Event::TaskListMarker(_)
+            | Event::FootnoteReference(_) => {}
+        }
+    }
+
+    (!blocks.is_empty()).then_some(blocks)
+}
+
+fn trim_parser_block_range(
+    content: &str,
+    range: Range<usize>,
+    source_bounds: MarkdownSourceBounds,
+) -> Option<Range<usize>> {
+    let bounded_start = range.start.max(source_bounds.content_start);
+    let bounded_end = range.end.min(source_bounds.content_end);
+    if bounded_start >= bounded_end {
+        return None;
+    }
+
+    // pulldown-cmark 的 block range 可能包含分隔用的行尾换行。这里复用
+    // Markdown source bounds 去掉 block 外层空白，block 间距仍只由共享 spacing
+    // policy 注入，避免 snippet 自身 trailing blank 与 transition spacing 叠加。
+    let block_bounds = markdown_source_bounds(&content[bounded_start..bounded_end]);
+    if block_bounds.is_empty() {
+        return None;
+    }
+
+    Some(bounded_start + block_bounds.content_start..bounded_start + block_bounds.content_end)
+}
+
 fn collect_source_lines(content: &str) -> Vec<AssistantSourceLine<'_>> {
     let mut lines = Vec::new();
     let mut start = 0usize;
+
+    // `split_inclusive('\n')` 覆盖无结尾换行的最后片段，避免 projection
+    // 和 Markdown source bounds 维护两套尾段扫描语义。
     for segment in content.split_inclusive('\n') {
         let segment_end = start + segment.len();
         let mut text_end = segment_end;
@@ -568,35 +564,50 @@ fn collect_source_lines(content: &str) -> Vec<AssistantSourceLine<'_>> {
         start = segment_end;
     }
 
-    if start < content.len() {
-        lines.push(AssistantSourceLine {
-            text: &content[start..],
-            start,
-            end: content.len(),
-        });
-    }
-
     lines
 }
 
-fn source_line_range(
-    source_lines: &[AssistantSourceLine<'_>],
-    start: usize,
-    end: usize,
-) -> Option<Range<usize>> {
-    let first = source_lines.get(start)?;
-    let last = source_lines.get(end.checked_sub(1)?)?;
-    Some(first.start..last.end)
+fn collect_source_lines_in_range(
+    content: &str,
+    range: Range<usize>,
+) -> Vec<AssistantSourceLine<'_>> {
+    collect_source_lines(&content[range.clone()])
+        .into_iter()
+        .map(|line| AssistantSourceLine {
+            text: line.text,
+            start: range.start + line.start,
+            end: range.start + line.end,
+        })
+        .collect()
 }
 
-fn markdown_fence_info_range(
-    line: AssistantSourceLine<'_>,
-    marker: &'static str,
-) -> Option<Range<usize>> {
-    let trimmed = line.text.trim_start();
-    let indent_len = line.text.len().saturating_sub(trimmed.len());
-    let info_start = line.start + indent_len + marker.len();
-    (info_start <= line.end).then_some(info_start..line.end)
+fn projectable_fenced_code_block(
+    content: &str,
+    range: Range<usize>,
+) -> Option<FencedCodeSourceBlock<'_>> {
+    let source_lines = collect_source_lines_in_range(content, range);
+    let opener = source_lines.first().copied()?;
+    let (marker, info_range) = markdown_fence_opener(opener)?;
+    let closer = source_lines.last().copied()?;
+    if !is_markdown_fence_closer(closer.text, marker) {
+        return None;
+    }
+    let code_lines = source_lines
+        .get(1..source_lines.len().checked_sub(1)?)
+        .unwrap_or_default()
+        .to_vec();
+    if code_lines.iter().all(|line| line.text.is_empty()) {
+        return None;
+    }
+    if fenced_code_requires_full_context(&content[info_range.clone()], &code_lines) {
+        return None;
+    }
+
+    Some(FencedCodeSourceBlock {
+        marker,
+        info_range,
+        code_lines,
+    })
 }
 
 fn fenced_code_requires_full_context(info: &str, lines: &[AssistantSourceLine<'_>]) -> bool {
@@ -655,26 +666,6 @@ fn push_optional_block(
 ) {
     *line_cursor = line_cursor.saturating_add(block.line_count);
     blocks.push(block);
-}
-
-fn markdown_spacing_before(
-    previous_block: Option<AssistantMarkdownBlock>,
-    next_block: AssistantMarkdownBlock,
-) -> usize {
-    usize::from(should_insert_markdown_spacing(previous_block, next_block))
-}
-
-fn should_insert_markdown_spacing(
-    previous_block: Option<AssistantMarkdownBlock>,
-    next_block: AssistantMarkdownBlock,
-) -> bool {
-    if previous_block.is_none() {
-        return false;
-    }
-    if next_block == AssistantMarkdownBlock::List {
-        return false;
-    }
-    true
 }
 
 fn render_fenced_code_page(request: FencedCodePageRender<'_>) -> Vec<Line<'static>> {
@@ -736,33 +727,40 @@ fn estimated_page_bytes(lines: &[Line<'static>]) -> usize {
             .sum::<usize>()
 }
 
-fn paragraph_line_is_projectable(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    !trimmed.is_empty()
-        && leading_space_count(line) < 4
-        && !trimmed.starts_with(['>', '|'])
-        && !trimmed.contains('\t')
-        && !trimmed.contains('<')
-        && !trimmed.contains('|')
-        && !trimmed.contains('$')
+fn markdown_range_lines_are_projectable(content: &str, range: Range<usize>) -> bool {
+    collect_source_lines_in_range(content, range)
+        .iter()
+        .all(|line| {
+            let trimmed = line.text.trim_start();
+            !trimmed.is_empty()
+                && leading_space_count(line.text) < 4
+                && !trimmed.starts_with(['>', '|'])
+                && !trimmed.contains('<')
+                && !trimmed.contains('|')
+                && !trimmed.contains('$')
+        })
 }
 
-fn markdown_fence_opener(line: &str) -> Option<(&'static str, &str)> {
-    if leading_space_count(line) > 3 {
+fn markdown_fence_opener(line: AssistantSourceLine<'_>) -> Option<(&'static str, Range<usize>)> {
+    let line_text = line.text;
+    if leading_space_count(line_text) > 3 {
         return None;
     }
 
-    let trimmed = line.trim_start();
+    let trimmed = line_text.trim_start();
+    let indent_len = line_text.len().saturating_sub(trimmed.len());
     if let Some(info) = trimmed.strip_prefix("```")
         && !info.starts_with('`')
         && !info.contains('`')
     {
-        return Some(("```", info));
+        let info_start = line.start + indent_len + "```".len();
+        return Some(("```", info_start..line.end));
     }
     if let Some(info) = trimmed.strip_prefix("~~~")
         && !info.starts_with('~')
     {
-        return Some(("~~~", info));
+        let info_start = line.start + indent_len + "~~~".len();
+        return Some(("~~~", info_start..line.end));
     }
     None
 }
@@ -782,56 +780,11 @@ fn is_markdown_fence_closer(line: &str, marker: &str) -> bool {
     rest.trim().is_empty()
 }
 
-fn starts_with_unsupported_fence(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with("````") || trimmed.starts_with("~~~~")
-}
-
-fn is_markdown_heading(trimmed_line: &str) -> bool {
-    let marker_len = trimmed_line.chars().take_while(|ch| *ch == '#').count();
-    (1..=6).contains(&marker_len)
-        && trimmed_line
-            .chars()
-            .nth(marker_len)
-            .is_some_and(char::is_whitespace)
-}
-
-fn is_projectable_markdown_heading(line: &str, trimmed_line: &str) -> bool {
-    leading_space_count(line) <= 3 && is_markdown_heading(trimmed_line)
-}
-
 fn leading_space_count(line: &str) -> usize {
     line.as_bytes()
         .iter()
         .take_while(|byte| **byte == b' ')
         .count()
-}
-
-fn is_markdown_list_item(trimmed_line: &str) -> bool {
-    let mut chars = trimmed_line.chars();
-    if matches!(chars.next(), Some('-' | '*' | '+'))
-        && chars.next().is_some_and(char::is_whitespace)
-    {
-        return true;
-    }
-
-    is_ordered_markdown_list_item(trimmed_line)
-}
-
-fn is_ordered_markdown_list_item(trimmed_line: &str) -> bool {
-    let mut digit_count = 0usize;
-    let mut chars = trimmed_line.chars();
-    while matches!(chars.clone().next(), Some(ch) if ch.is_ascii_digit()) {
-        digit_count += 1;
-        chars.next();
-        if digit_count > 9 {
-            return false;
-        }
-    }
-
-    (1..=9).contains(&digit_count)
-        && matches!(chars.next(), Some('.' | ')'))
-        && chars.next().is_some_and(char::is_whitespace)
 }
 
 fn hard_wrapped_line_count(line: &str, width: usize) -> usize {

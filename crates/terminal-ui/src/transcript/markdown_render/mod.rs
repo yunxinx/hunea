@@ -9,11 +9,11 @@ use pulldown_cmark::{Options, Parser};
 use ratatui::text::Line;
 
 use crate::{
-    display_width::line_display_width, terminal_text::sanitize_terminal_text,
-    theme::TerminalPalette, transcript::markdown_table_source::unwrap_markdown_table_fences,
+    display_width::line_display_width, markdown_source::markdown_source_bounds,
+    terminal_text::sanitize_terminal_text, theme::TerminalPalette,
+    transcript::markdown_table_source::unwrap_markdown_table_fences,
 };
 use engine::MarkdownRenderer;
-use wrapping::{count_leading_blank_lines, count_trailing_blank_lines};
 
 mod engine;
 mod table;
@@ -56,10 +56,9 @@ fn render_markdown_lines_with_cwd(
         .as_ref()
         .map(std::borrow::Cow::as_ref)
         .unwrap_or_else(|| sanitized_markdown.as_ref());
-    let leading_blank_lines = count_leading_blank_lines(markdown);
-    let trailing_blank_lines = count_trailing_blank_lines(markdown);
+    let source_bounds = markdown_source_bounds(markdown);
     let mut renderer = profile.renderer(palette, cwd, width);
-    let options = profile.markdown_options();
+    let options = profile.options();
 
     renderer.render(
         markdown,
@@ -67,11 +66,11 @@ fn render_markdown_lines_with_cwd(
     );
 
     let mut lines = Vec::new();
-    for _ in 0..leading_blank_lines {
+    for _ in 0..source_bounds.leading_blank_lines {
         lines.push(Line::raw(""));
     }
     lines.extend(renderer.finish(width));
-    for _ in 0..trailing_blank_lines {
+    for _ in 0..source_bounds.trailing_blank_lines {
         lines.push(Line::raw(""));
     }
 
@@ -151,11 +150,10 @@ fn measure_markdown_metrics_with_profile(
         .as_ref()
         .map(std::borrow::Cow::as_ref)
         .unwrap_or(markdown);
-    let leading_blank_lines = count_leading_blank_lines(markdown);
-    let trailing_blank_lines = count_trailing_blank_lines(markdown);
+    let source_bounds = markdown_source_bounds(markdown);
     let cwd = std::env::current_dir().ok();
     let mut renderer = profile.metrics_renderer(palette, cwd.as_deref(), width);
-    let options = profile.markdown_options();
+    let options = profile.options();
 
     renderer.render(
         markdown,
@@ -168,9 +166,14 @@ fn measure_markdown_metrics_with_profile(
     }
 
     (
-        line_count + leading_blank_lines + trailing_blank_lines,
+        line_count + source_bounds.outer_blank_line_count(),
         plain_text_len,
     )
+}
+
+/// 返回 assistant Markdown renderer 使用的 pulldown-cmark options。
+pub(crate) fn assistant_markdown_options() -> Options {
+    MarkdownProfile::Assistant.options()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,7 +183,7 @@ enum MarkdownProfile {
 }
 
 impl MarkdownProfile {
-    fn markdown_options(self) -> Options {
+    fn options(self) -> Options {
         let mut options = Options::empty();
         options.insert(Options::ENABLE_TABLES);
         options.insert(Options::ENABLE_STRIKETHROUGH);

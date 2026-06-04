@@ -509,17 +509,3 @@ pub(super) fn normalize_space(text: &str) -> String {
 pub(super) fn trim_display_math_text(text: &str) -> &str {
     text.trim_matches(['\n', '\r'])
 }
-
-pub(super) fn count_leading_blank_lines(markdown: &str) -> usize {
-    markdown
-        .split('\n')
-        .take_while(|line| line.is_empty())
-        .count()
-}
-
-pub(super) fn count_trailing_blank_lines(markdown: &str) -> usize {
-    markdown
-        .rsplit('\n')
-        .take_while(|line| line.is_empty())
-        .count()
-}

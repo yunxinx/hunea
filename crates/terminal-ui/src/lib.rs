@@ -20,6 +20,7 @@ mod floating;
 mod history_scroll_indicator;
 mod inline_panel;
 mod markdown_display;
+mod markdown_source;
 mod message;
 mod message_revisit;
 mod model;

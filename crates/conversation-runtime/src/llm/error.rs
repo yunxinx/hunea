@@ -36,7 +36,7 @@ impl fmt::Display for ProviderRequestError {
                 write!(f, "provider {provider_id} requires base_url")
             }
             Self::EmptyPrompt { provider_id } => {
-                write!(f, "provider {provider_id} received no prompt messages")
+                write!(f, "provider {provider_id} received no prompt items")
             }
             Self::MissingApiKey {
                 provider_id,

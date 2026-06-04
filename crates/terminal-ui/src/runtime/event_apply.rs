@@ -94,11 +94,7 @@ impl RuntimeEventApply for Model {
                 self.show_transient_status_notice("Runtime permission request cancelled");
             }
             RuntimeEvent::MessageFinished {
-                content,
-                reasoning_content,
-                reasoning_duration,
-                metrics,
-                ..
+                response, metrics, ..
             } => {
                 self.close_runtime_permission_approval_panel();
                 if let Some(metrics) = metrics {
@@ -110,9 +106,9 @@ impl RuntimeEventApply for Model {
                 }
                 self.set_stream_activity_thinking(false);
                 self.flush_runtime_response_buffer_with_final(
-                    content,
-                    reasoning_content,
-                    reasoning_duration,
+                    response.text_content(),
+                    response.reasoning_content(),
+                    response.reasoning_duration,
                 );
                 self.finish_stream_activity_with_work_summary();
                 self.reset_runtime_final_body_divider_state();

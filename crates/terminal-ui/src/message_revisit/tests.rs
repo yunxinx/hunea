@@ -56,7 +56,7 @@ fn conversation_message_revisit_prefills_composer_and_truncates_history() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    assert_eq!(request.message().content, "second question");
+    assert_eq!(request.message_text(), "second question");
 }
 
 #[test]

@@ -12,7 +12,6 @@ use runtime_domain::model_catalog::{
 };
 use runtime_domain::phrases::StatusPhraseOrder;
 use runtime_domain::provider::ProviderKind;
-use runtime_domain::session::ChatRole;
 use std::path::{Path, PathBuf};
 
 fn progressive_exactization_fixture() -> Model {
@@ -353,8 +352,8 @@ fn conversation_turn_request_carries_only_current_user_message() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    assert_eq!(request.message().role, ChatRole::User);
-    assert_eq!(request.message().content, "follow up");
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "follow up");
 }
 
 #[test]
@@ -390,8 +389,8 @@ fn conversation_turn_request_ignores_runtime_system_messages_in_transcript() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    assert_eq!(request.message().role, ChatRole::User);
-    assert_eq!(request.message().content, "hello");
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "hello");
     assert_eq!(
         model.transcript_plain_items(),
         vec!["■ connection refused".to_string(), "› hello".to_string()]
@@ -416,9 +415,11 @@ fn conversation_turn_request_preserves_at_file_reference_as_text() {
         panic!("expected conversation turn effect");
     };
 
-    let message = request.message();
-    assert_eq!(message.content, "review @assets/sample.png @src/code.py");
-    assert!(message.blocks.is_none());
+    assert!(request.is_user_message());
+    assert_eq!(
+        request.message_text(),
+        "review @assets/sample.png @src/code.py"
+    );
 }
 
 #[test]
@@ -447,8 +448,8 @@ fn conversation_turn_request_does_not_reuse_structured_transcript_history() {
         panic!("expected conversation turn effect");
     };
 
-    assert_eq!(request.message().content, "follow up");
-    assert!(request.message().blocks.is_none());
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "follow up");
 }
 
 #[test]
@@ -649,9 +650,8 @@ fn at_file_picker_enter_on_exact_visible_path_submits_prompt() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    let message = request.message();
-    assert_eq!(message.content, "@src/lib.rs");
-    assert!(message.blocks.is_none());
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "@src/lib.rs");
 }
 
 #[test]
@@ -722,9 +722,8 @@ fn at_file_picker_enter_on_explicit_gitignored_file_submits_prompt() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    let message = request.message();
-    assert_eq!(message.content, "@target/debug.log");
-    assert!(message.blocks.is_none());
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "@target/debug.log");
 }
 
 #[test]
@@ -755,9 +754,11 @@ fn at_file_picker_enter_on_explicit_absolute_file_submits_prompt() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    let message = request.message();
-    assert_eq!(message.content, format!("@{}", outside_path.display()));
-    assert!(message.blocks.is_none());
+    assert!(request.is_user_message());
+    assert_eq!(
+        request.message_text(),
+        format!("@{}", outside_path.display())
+    );
 }
 
 #[test]

@@ -3,10 +3,7 @@ use ratatui::{buffer::Buffer, layout::Rect};
 use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
-use runtime_domain::{
-    provider::{ProviderApiKey, ProviderKind},
-    session::ChatRole,
-};
+use runtime_domain::provider::{ProviderApiKey, ProviderKind};
 use terminal_ui::{
     AppEffect, AppEvent, Model, ModelOptions, StartupBannerOptions,
     theme::{palette_from_background, terminal_default_palette},
@@ -192,8 +189,8 @@ fn enter_with_selected_provider_model_returns_conversation_turn_effect() {
     assert_eq!(request.provider_kind(), ProviderKind::OpenAiCompatible);
     assert_eq!(request.model_id(), "qwen3");
     assert_eq!(request.base_url(), Some("http://127.0.0.1:1234/v1"));
-    assert_eq!(request.message().role, ChatRole::User);
-    assert_eq!(request.message().content, "hello");
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "hello");
 }
 
 #[test]
@@ -298,8 +295,8 @@ fn clear_command_removes_previous_conversation_context() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    assert_eq!(request.message().role, ChatRole::User);
-    assert_eq!(request.message().content, "fresh question");
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "fresh question");
 }
 
 fn single_model_catalog() -> ModelCatalog {

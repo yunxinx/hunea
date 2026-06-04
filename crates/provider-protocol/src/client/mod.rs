@@ -3,7 +3,7 @@ use std::{future::Future, pin::Pin};
 use crate::{
     error::ProviderError,
     model::{ModelDescriptor, ProviderCapabilities},
-    prompt::{PromptRequest, PromptResponse},
+    prompt::{PromptCompletion, PromptRequest},
     stream::StreamEvent,
 };
 
@@ -32,7 +32,7 @@ pub trait ProviderClient: Send + Sync {
         &'a self,
         request: PromptRequest,
         sink: &'a mut (dyn StreamEventSink + Send),
-    ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>>;
+    ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>>;
 
     /// `list_models` returns provider model ids.
     fn list_models<'a>(&'a self)

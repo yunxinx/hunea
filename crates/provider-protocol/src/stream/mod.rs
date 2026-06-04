@@ -1,9 +1,9 @@
-use crate::{prompt::PromptResponse, tool::ToolCall};
+use crate::{prompt::PromptCompletion, tool::ToolCall};
 
 /// `StreamEvent` is the provider-neutral event stream exposed to runtime code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
-    MessageStarted,
+    TurnStarted,
     TextDelta(String),
     ReasoningDelta(String),
     ToolCallStarted {
@@ -20,5 +20,5 @@ pub enum StreamEvent {
         call: ToolCall,
     },
     UsageUpdated(crate::prompt::TokenUsage),
-    MessageCompleted(PromptResponse),
+    TurnCompleted(PromptCompletion),
 }

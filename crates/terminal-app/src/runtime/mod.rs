@@ -270,13 +270,13 @@ impl AppRuntimeCoordinator {
             self.provider_conversation.commit_pending_user();
         }
 
-        let messages = self.conversation_worker.take_session_messages();
-        if messages.is_empty() {
+        let items = self.conversation_worker.take_session_items();
+        if items.is_empty() {
             return;
         }
 
         self.provider_conversation.commit_pending_user();
-        self.provider_conversation.commit_turn_messages(messages);
+        self.provider_conversation.commit_turn_items(items);
     }
 
     #[cfg(test)]
@@ -327,10 +327,11 @@ mod tests {
         AppRuntimeCoordinator, AppRuntimeOptions, ensure_conversation_target,
         should_defer_runtime_event_for_render_barrier,
     };
+    use provider_protocol::{ConversationItem, Role};
     use runtime_domain::{
         provider::ProviderKind,
         session::{
-            ChatMessage, ConversationTurnRequest, ManagedSearchTool, RuntimeCommand, RuntimeEvent,
+            ConversationTurnRequest, ManagedSearchTool, RuntimeCommand, RuntimeEvent,
             RuntimePermissionRequest, RuntimeTarget,
         },
     };
@@ -425,7 +426,7 @@ mod tests {
             None,
             None,
             None,
-            ChatMessage::user("hello".to_string()),
+            ConversationItem::text(Role::User, "hello"),
         );
         let target = request.target();
 
@@ -460,7 +461,7 @@ mod tests {
             Some("http://127.0.0.1:1234/v1".to_string()),
             None,
             None,
-            ChatMessage::user("next".to_string()),
+            ConversationItem::text(Role::User, "next"),
         );
         coordinator
             .provider_conversation

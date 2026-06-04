@@ -1,6 +1,6 @@
 use super::{
-    RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics, RuntimeTarget,
-    RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
+    ConversationResponse, RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics,
+    RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
 };
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
@@ -68,9 +68,7 @@ pub enum RuntimeEvent {
     },
     MessageFinished {
         target: Option<RuntimeTarget>,
-        content: String,
-        reasoning_content: Option<String>,
-        reasoning_duration: Option<std::time::Duration>,
+        response: ConversationResponse,
         finish_reason: Option<String>,
         metrics: Option<RuntimeRequestMetrics>,
     },

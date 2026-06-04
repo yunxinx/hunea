@@ -1,6 +1,6 @@
 use futures_util::StreamExt as _;
 use provider_protocol::{
-    ModelDescriptor, PromptRequest, PromptResponse, ProviderCapabilities, ProviderClient,
+    ModelDescriptor, PromptCompletion, PromptRequest, ProviderCapabilities, ProviderClient,
     ProviderError, ProviderFuture, StreamEventSink,
 };
 
@@ -41,7 +41,7 @@ impl ProviderClient for OpenAiChatCompletionsClient {
         &'a self,
         request: PromptRequest,
         sink: &'a mut (dyn StreamEventSink + Send),
-    ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+    ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
         Box::pin(async move {
             let body = chat_completion_request_body(&request)?;
             let response = self

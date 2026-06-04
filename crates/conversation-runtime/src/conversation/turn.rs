@@ -37,7 +37,7 @@ where
             | ConversationProgress::ReasoningDelta { .. }
             | ConversationProgress::SystemMessage { .. }
             | ConversationProgress::ProviderTurnStarted
-            | ConversationProgress::ProviderContextMessage { .. }
+            | ConversationProgress::ProviderContextItem { .. }
             | ConversationProgress::ToolActivityStarted { .. }
             | ConversationProgress::ToolActivityUpdated { .. }
             | ConversationProgress::TerminalUpdated { .. }

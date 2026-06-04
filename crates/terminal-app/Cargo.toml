@@ -13,3 +13,4 @@ terminal-ui.workspace = true
 
 [dev-dependencies]
 crossterm.workspace = true
+provider-protocol.workspace = true

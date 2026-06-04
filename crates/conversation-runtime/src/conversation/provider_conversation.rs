@@ -1,9 +1,7 @@
 //! Provider-visible conversation assembly.
 
-use provider_protocol::{Message, MessageContent, MessageRole};
-use runtime_domain::session::{
-    ChatMessage, ChatMessageBlock, ChatRole, ConversationTurnRequest, RuntimeTarget,
-};
+use provider_protocol::{ConversationItem, Role};
+use runtime_domain::session::{ConversationTurnRequest, RuntimeTarget};
 
 use crate::{ProviderApiKey, ProviderKind};
 
@@ -25,7 +23,7 @@ pub struct PreparedConversationRequest {
     base_url: Option<String>,
     api_key: Option<ProviderApiKey>,
     api_key_env: Option<String>,
-    messages: Vec<Message>,
+    items: Vec<ConversationItem>,
 }
 
 impl PreparedConversationRequest {
@@ -37,7 +35,7 @@ impl PreparedConversationRequest {
         base_url: Option<String>,
         api_key: Option<ProviderApiKey>,
         api_key_env: Option<String>,
-        messages: Vec<Message>,
+        items: Vec<ConversationItem>,
     ) -> Self {
         Self {
             provider_id: provider_id.into(),
@@ -46,7 +44,7 @@ impl PreparedConversationRequest {
             base_url,
             api_key,
             api_key_env,
-            messages,
+            items,
         }
     }
 
@@ -85,9 +83,9 @@ impl PreparedConversationRequest {
         self.api_key_env.as_deref()
     }
 
-    /// `messages` 返回 provider-visible 完整消息历史。
-    pub fn messages(&self) -> &[Message] {
-        &self.messages
+    /// `items` 返回 provider-visible 完整对话项。
+    pub fn items(&self) -> &[ConversationItem] {
+        &self.items
     }
 }
 
@@ -95,8 +93,8 @@ impl PreparedConversationRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderConversation {
     system_prompt: Option<String>,
-    history: Vec<Message>,
-    pending_user_message: Option<Message>,
+    history: Vec<ConversationItem>,
+    pending_user_message: Option<ConversationItem>,
 }
 
 impl ProviderConversation {
@@ -121,8 +119,8 @@ impl ProviderConversation {
 
         let mut user_turn_count = 0usize;
         let mut truncate_index = self.history.len();
-        for (index, message) in self.history.iter().enumerate() {
-            if message.role != MessageRole::User {
+        for (index, item) in self.history.iter().enumerate() {
+            if item.role() != Some(Role::User) {
                 continue;
             }
             user_turn_count = user_turn_count.saturating_add(1);
@@ -145,7 +143,7 @@ impl ProviderConversation {
     }
 
     /// `history` 返回当前 provider-visible 历史。
-    pub fn history(&self) -> &[Message] {
+    pub fn history(&self) -> &[ConversationItem] {
         &self.history
     }
 
@@ -154,14 +152,14 @@ impl ProviderConversation {
         &mut self,
         turn: &ConversationTurnRequest,
     ) -> Result<PreparedConversationRequest, ProviderConversationError> {
-        if turn.message().role != ChatRole::User {
+        if turn.message().role() != Some(Role::User) {
             return Err(ProviderConversationError::NonUserTurnMessage);
         }
         if self.pending_user_message.is_some() {
             return Err(ProviderConversationError::PendingTurnAlreadyActive);
         }
 
-        let user_message = message_from_chat_message(turn.message().clone());
+        let user_message = turn.message().clone();
         self.pending_user_message = Some(user_message.clone());
 
         Ok(PreparedConversationRequest::new(
@@ -171,7 +169,7 @@ impl ProviderConversation {
             turn.base_url().map(str::to_string),
             turn.api_key().cloned(),
             turn.api_key_env().map(str::to_string),
-            self.provider_messages_with_pending_user(&user_message),
+            self.provider_items_with_pending_user(&user_message),
         ))
     }
 
@@ -189,75 +187,28 @@ impl ProviderConversation {
         self.pending_user_message.take().is_some()
     }
 
-    /// `commit_turn_messages` 把 runtime 生成的 provider-visible 消息写回会话历史。
-    pub fn commit_turn_messages(&mut self, messages: impl IntoIterator<Item = Message>) {
-        self.history.extend(messages);
+    /// `commit_turn_items` 把 runtime 生成的 provider-visible 对话项写回会话历史。
+    pub fn commit_turn_items(&mut self, items: impl IntoIterator<Item = ConversationItem>) {
+        self.history.extend(items);
     }
 
-    fn provider_messages(&self) -> Vec<Message> {
-        let mut messages =
+    fn provider_items(&self) -> Vec<ConversationItem> {
+        let mut items =
             Vec::with_capacity(self.history.len() + usize::from(self.system_prompt.is_some()));
         if let Some(system_prompt) = self.system_prompt.as_deref() {
-            messages.push(Message::text(MessageRole::System, system_prompt));
+            items.push(ConversationItem::text(Role::System, system_prompt));
         }
-        messages.extend(self.history.iter().cloned());
-        messages
+        items.extend(self.history.iter().cloned());
+        items
     }
 
-    fn provider_messages_with_pending_user(&self, user_message: &Message) -> Vec<Message> {
-        let mut messages = self.provider_messages();
-        messages.push(user_message.clone());
-        messages
-    }
-}
-
-pub(crate) fn message_from_chat_message(message: ChatMessage) -> Message {
-    let role = match message.role {
-        ChatRole::User => MessageRole::User,
-        ChatRole::Assistant => MessageRole::Assistant,
-    };
-    let content = match message.blocks {
-        Some(blocks) if !blocks.is_empty() => {
-            blocks.into_iter().map(content_from_chat_block).collect()
-        }
-        _ => vec![MessageContent::Text(message.content)],
-    };
-
-    Message::new(role, content)
-}
-
-fn content_from_chat_block(block: ChatMessageBlock) -> MessageContent {
-    match block {
-        ChatMessageBlock::Text(text) => MessageContent::Text(text),
-        ChatMessageBlock::Image {
-            data_base64,
-            mime_type,
-            uri,
-        } => MessageContent::Image {
-            data_base64,
-            mime_type,
-            uri,
-        },
-        ChatMessageBlock::Audio {
-            data_base64,
-            mime_type,
-            uri,
-        } => MessageContent::Audio {
-            data_base64,
-            mime_type,
-            uri,
-        },
-        ChatMessageBlock::Document {
-            data_base64,
-            mime_type,
-            filename,
-            uri,
-        } => MessageContent::Document {
-            data_base64,
-            mime_type,
-            filename,
-            uri,
-        },
+    fn provider_items_with_pending_user(
+        &self,
+        user_message: &ConversationItem,
+    ) -> Vec<ConversationItem> {
+        let mut items = self.provider_items();
+        items.push(user_message.clone());
+        items
     }
 }
 
@@ -268,17 +219,16 @@ fn normalize_system_prompt(prompt: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use provider_protocol::{Message, MessageContent, MessageRole, ToolCall, ToolResult};
-    use serde_json::json;
+    use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
 
-    use super::{ProviderConversation, ProviderConversationError, message_from_chat_message};
-    use crate::{ChatMessage, ProviderKind};
-    use runtime_domain::session::{ChatMessageBlock, ConversationTurnRequest};
+    use super::{ProviderConversation, ProviderConversationError};
+    use crate::ProviderKind;
+    use runtime_domain::session::ConversationTurnRequest;
 
     #[test]
     fn prepare_turn_uses_session_history_and_current_user_message() {
         let mut session = ProviderConversation::new();
-        session.commit_turn_messages([Message::text(MessageRole::Assistant, "first answer")]);
+        session.commit_turn_items([ConversationItem::text(Role::Assistant, "first answer")]);
 
         let request = session
             .prepare_turn(&ConversationTurnRequest::new(
@@ -288,14 +238,14 @@ mod tests {
                 Some("http://127.0.0.1:1234/v1".to_string()),
                 None,
                 None,
-                ChatMessage::user("follow up".to_string()),
+                ConversationItem::text(Role::User, "follow up"),
             ))
             .expect("turn should prepare");
 
         let visible_text = request
-            .messages()
+            .items()
             .iter()
-            .map(Message::text_content)
+            .map(ConversationItem::text_content)
             .collect::<Vec<_>>();
         assert_eq!(visible_text, vec!["first answer", "follow up"]);
         assert_eq!(session.history().len(), 1);
@@ -314,12 +264,12 @@ mod tests {
                 Some("http://127.0.0.1:1234/v1".to_string()),
                 None,
                 None,
-                ChatMessage::user("hello".to_string()),
+                ConversationItem::text(Role::User, "hello"),
             ))
             .expect("turn should prepare");
 
-        assert_eq!(request.messages()[0].role, MessageRole::System);
-        assert_eq!(request.messages()[0].text_content(), "You are helpful");
+        assert_eq!(request.items()[0].role(), Some(Role::System));
+        assert_eq!(request.items()[0].text_content(), "You are helpful");
         assert!(session.history().is_empty());
     }
 
@@ -335,7 +285,7 @@ mod tests {
                 Some("http://127.0.0.1:1234/v1".to_string()),
                 None,
                 None,
-                ChatMessage::assistant("not a user turn".to_string()),
+                ConversationItem::text(Role::Assistant, "not a user turn"),
             ))
             .expect_err("assistant turn should be rejected");
 
@@ -353,11 +303,11 @@ mod tests {
                 Some("http://127.0.0.1:1234/v1".to_string()),
                 None,
                 None,
-                ChatMessage::user("first question".to_string()),
+                ConversationItem::text(Role::User, "first question"),
             ))
             .expect("first turn should prepare");
         session.commit_pending_user();
-        session.commit_turn_messages([Message::text(MessageRole::Assistant, "first answer")]);
+        session.commit_turn_items([ConversationItem::text(Role::Assistant, "first answer")]);
         session
             .prepare_turn(&ConversationTurnRequest::new(
                 "local",
@@ -366,18 +316,18 @@ mod tests {
                 Some("http://127.0.0.1:1234/v1".to_string()),
                 None,
                 None,
-                ChatMessage::user("second question".to_string()),
+                ConversationItem::text(Role::User, "second question"),
             ))
             .expect("second turn should prepare");
         session.commit_pending_user();
-        session.commit_turn_messages([Message::text(MessageRole::Assistant, "second answer")]);
+        session.commit_turn_items([ConversationItem::text(Role::Assistant, "second answer")]);
 
         session.truncate_after_user_turns(1);
 
         let visible_text = session
             .history()
             .iter()
-            .map(Message::text_content)
+            .map(ConversationItem::text_content)
             .collect::<Vec<_>>();
         assert_eq!(visible_text, vec!["first question", "first answer"]);
     }
@@ -393,7 +343,7 @@ mod tests {
                 Some("http://127.0.0.1:1234/v1".to_string()),
                 None,
                 None,
-                ChatMessage::user("never sent".to_string()),
+                ConversationItem::text(Role::User, "never sent"),
             ))
             .expect("turn should prepare");
 
@@ -412,7 +362,7 @@ mod tests {
                 Some("http://127.0.0.1:1234/v1".to_string()),
                 None,
                 None,
-                ChatMessage::user("sent".to_string()),
+                ConversationItem::text(Role::User, "sent"),
             ))
             .expect("turn should prepare");
 
@@ -423,19 +373,23 @@ mod tests {
     }
 
     #[test]
-    fn commit_turn_messages_keeps_tool_messages_for_future_turns() {
+    fn commit_turn_items_keeps_tool_items_for_future_turns() {
         let mut session = ProviderConversation::new();
-        session.commit_turn_messages([
-            Message::assistant_with_tool_calls(
+        session.commit_turn_items([
+            ConversationItem::assistant_with_tool_calls(
                 String::new(),
                 vec![ToolCall::new(
                     "call-1",
                     "read",
-                    json!({ "path": "Cargo.toml" }),
+                    r#"{"path":"Cargo.toml"}"#.to_string(),
                 )],
             ),
-            Message::tool_result(ToolResult::success("call-1", "read", "1\t[package]", None)),
-            Message::text(MessageRole::Assistant, "done"),
+            ConversationItem::tool_result(
+                "call-1",
+                vec![ContentBlock::Text("1\t[package]".to_string())],
+                false,
+            ),
+            ConversationItem::text(Role::Assistant, "done"),
         ]);
 
         let request = session
@@ -446,36 +400,18 @@ mod tests {
                 Some("http://127.0.0.1:1234/v1".to_string()),
                 None,
                 None,
-                ChatMessage::user("next".to_string()),
+                ConversationItem::text(Role::User, "next"),
             ))
             .expect("turn should prepare");
 
-        assert_eq!(request.messages().len(), 4);
-        assert_eq!(request.messages()[0].role, MessageRole::Assistant);
+        assert_eq!(request.items().len(), 4);
+        assert_eq!(request.items()[0].role(), Some(Role::Assistant));
         assert!(matches!(
-            &request.messages()[1].content[0],
-            MessageContent::ToolResult(result) if result.name == "read"
-        ));
-    }
-
-    #[test]
-    fn chat_message_conversion_preserves_structured_blocks() {
-        let message = message_from_chat_message(ChatMessage::user_with_blocks(
-            "review image".to_string(),
-            Some(vec![
-                ChatMessageBlock::Text("review ".to_string()),
-                ChatMessageBlock::Image {
-                    data_base64: "iVBORw==".to_string(),
-                    mime_type: "image/png".to_string(),
-                    uri: None,
-                },
-            ]),
-        ));
-
-        assert_eq!(message.role, MessageRole::User);
-        assert!(matches!(
-            &message.content[1],
-            MessageContent::Image { mime_type, .. } if mime_type == "image/png"
+            &request.items()[1],
+            ConversationItem::ToolResult {
+                is_error: false,
+                ..
+            }
         ));
     }
 }

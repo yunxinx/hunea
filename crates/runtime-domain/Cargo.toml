@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 directories.workspace = true
+provider-protocol.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 tiktoken.workspace = true

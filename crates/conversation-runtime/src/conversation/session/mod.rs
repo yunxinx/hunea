@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use provider_protocol::Message;
+use provider_protocol::ConversationItem;
 use tokio_util::sync::CancellationToken;
 
 use runtime_domain::{
@@ -29,7 +29,7 @@ mod context_repair;
 mod progress_mapping;
 mod timeout;
 
-use context_repair::{ProviderContextRepairLedger, emit_provider_context_repair_messages};
+use context_repair::{ProviderContextRepairLedger, emit_provider_context_repair_items};
 use progress_mapping::{
     conversation_worker_event_from_progress, progress_sender_to_permission_sender,
 };
@@ -52,7 +52,7 @@ enum ConversationWorkerEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConversationDelta {
     ProviderTurnStarted,
-    ProviderContextMessage { message: Message },
+    ProviderContextItem { item: ConversationItem },
 }
 
 impl ConversationWorkerEvent {
@@ -69,7 +69,7 @@ pub struct ConversationWorker {
     pub target: Option<RuntimeTarget>,
     permission_broker: Option<ConversationPermissionBroker>,
     provider_turn_started: bool,
-    session_messages: Vec<Message>,
+    session_items: Vec<ConversationItem>,
 }
 
 impl ConversationWorker {
@@ -114,7 +114,7 @@ impl ConversationWorker {
         self.target = Some(target);
         self.permission_broker = Some(permission_broker);
         self.provider_turn_started = false;
-        self.session_messages.clear();
+        self.session_items.clear();
     }
 
     pub fn is_running(&self) -> bool {
@@ -131,7 +131,7 @@ impl ConversationWorker {
         self.receiver = None;
         self.target = None;
         self.provider_turn_started = false;
-        self.session_messages.clear();
+        self.session_items.clear();
     }
 
     pub fn interrupt(&mut self) -> bool {
@@ -166,8 +166,8 @@ impl ConversationWorker {
         std::mem::take(&mut self.provider_turn_started)
     }
 
-    pub fn take_session_messages(&mut self) -> Vec<Message> {
-        std::mem::take(&mut self.session_messages)
+    pub fn take_session_items(&mut self) -> Vec<ConversationItem> {
+        std::mem::take(&mut self.session_items)
     }
 
     pub fn try_recv_event(&mut self) -> Option<ConversationEvent> {
@@ -221,8 +221,8 @@ impl ConversationWorker {
             ConversationDelta::ProviderTurnStarted => {
                 self.provider_turn_started = true;
             }
-            ConversationDelta::ProviderContextMessage { message } => {
-                self.session_messages.push(message);
+            ConversationDelta::ProviderContextItem { item } => {
+                self.session_items.push(item);
             }
         }
     }
@@ -236,13 +236,12 @@ async fn run_conversation_worker(
     permission_broker: ConversationPermissionBroker,
     sender: mpsc::Sender<ConversationWorkerEvent>,
 ) {
-    let provider_context_messages_started = Arc::new(AtomicBool::new(false));
+    let provider_context_items_started = Arc::new(AtomicBool::new(false));
     let provider_context_repair_ledger =
         Arc::new(Mutex::new(ProviderContextRepairLedger::default()));
     for attempt in 0..=request_policy.attempts() {
         let progress_sender = sender.clone();
-        let attempt_provider_context_messages_started =
-            Arc::clone(&provider_context_messages_started);
+        let attempt_provider_context_items_started = Arc::clone(&provider_context_items_started);
         let attempt_provider_context_repair_ledger = Arc::clone(&provider_context_repair_ledger);
         let attempt_cancellation = cancellation.child_token();
         let timeout_pause = ConversationTimeoutPause::default();
@@ -266,14 +265,14 @@ async fn run_conversation_worker(
                 move |progress| {
                     let event = conversation_worker_event_from_progress(progress);
                     if let ConversationWorkerEvent::Session(
-                        ConversationDelta::ProviderContextMessage { message },
+                        ConversationDelta::ProviderContextItem { item },
                     ) = &event
                     {
-                        attempt_provider_context_messages_started.store(true, Ordering::Relaxed);
+                        attempt_provider_context_items_started.store(true, Ordering::Relaxed);
                         attempt_provider_context_repair_ledger
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .observe(message);
+                            .observe(item);
                     }
                     let _ = progress_sender.send(event);
                 },
@@ -281,7 +280,7 @@ async fn run_conversation_worker(
         )
         .await;
         let can_retry_from_original_request =
-            !provider_context_messages_started.load(Ordering::Relaxed);
+            !provider_context_items_started.load(Ordering::Relaxed);
 
         match attempt_result {
             TurnAttemptOutcome::TimedOut(Err(_)) | TurnAttemptOutcome::TimedOutAfterGrace
@@ -301,7 +300,7 @@ async fn run_conversation_worker(
             }
             TurnAttemptOutcome::TimedOut(Err(_)) | TurnAttemptOutcome::TimedOutAfterGrace => {
                 permission_broker.cancel_all();
-                emit_provider_context_repair_messages(
+                emit_provider_context_repair_items(
                     provider_context_repair_ledger.as_ref(),
                     &sender,
                     TOOL_EXECUTION_TIMED_OUT,
@@ -327,7 +326,7 @@ async fn run_conversation_worker(
             }
             TurnAttemptOutcome::Completed(Err(TurnExecutionError::Cancelled)) => {
                 permission_broker.cancel_all();
-                emit_provider_context_repair_messages(
+                emit_provider_context_repair_items(
                     provider_context_repair_ledger.as_ref(),
                     &sender,
                     TOOL_EXECUTION_INTERRUPTED,
@@ -339,7 +338,7 @@ async fn run_conversation_worker(
             }
             TurnAttemptOutcome::CancelledAfterGrace => {
                 permission_broker.cancel_all();
-                emit_provider_context_repair_messages(
+                emit_provider_context_repair_items(
                     provider_context_repair_ledger.as_ref(),
                     &sender,
                     TOOL_EXECUTION_INTERRUPTED,
@@ -366,7 +365,7 @@ async fn run_conversation_worker(
             }
             TurnAttemptOutcome::Completed(Err(error)) => {
                 permission_broker.cancel_all();
-                emit_provider_context_repair_messages(
+                emit_provider_context_repair_items(
                     provider_context_repair_ledger.as_ref(),
                     &sender,
                     TOOL_EXECUTION_INTERRUPTED,
@@ -414,7 +413,7 @@ mod tests {
         time::Duration,
     };
 
-    use provider_protocol::{Message, MessageRole, ToolCall, ToolResult};
+    use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
     use runtime_domain::{request_policy::RuntimeRequestPolicy, session::RuntimeTarget};
     use tokio_util::sync::CancellationToken;
     use tool_runtime::ToolExecutorRegistry;
@@ -439,7 +438,7 @@ mod tests {
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
             provider_turn_started: false,
-            session_messages: Vec::new(),
+            session_items: Vec::new(),
         };
 
         assert_eq!(
@@ -459,7 +458,7 @@ mod tests {
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
             provider_turn_started: false,
-            session_messages: Vec::new(),
+            session_items: Vec::new(),
         };
 
         sender
@@ -480,11 +479,7 @@ mod tests {
 
         sender
             .send(ConversationWorkerEvent::Finished {
-                response: ConversationResponse {
-                    content: "完成".to_string(),
-                    reasoning_content: None,
-                    reasoning_duration: None,
-                },
+                response: ConversationResponse::assistant_text("完成"),
                 metrics: None,
             })
             .expect("finish event should be queued");
@@ -492,16 +487,12 @@ mod tests {
         assert_eq!(
             runtime.try_recv_event(),
             Some(ConversationEvent::Finished {
-                response: ConversationResponse {
-                    content: "完成".to_string(),
-                    reasoning_content: None,
-                    reasoning_duration: None,
-                },
+                response: ConversationResponse::assistant_text("完成"),
                 metrics: None,
             })
         );
         assert!(!runtime.is_running());
-        assert!(runtime.take_session_messages().is_empty());
+        assert!(runtime.take_session_items().is_empty());
     }
 
     #[test]
@@ -513,7 +504,7 @@ mod tests {
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
             provider_turn_started: false,
-            session_messages: Vec::new(),
+            session_items: Vec::new(),
         };
 
         sender
@@ -538,7 +529,7 @@ mod tests {
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
             provider_turn_started: false,
-            session_messages: Vec::new(),
+            session_items: Vec::new(),
         };
 
         sender
@@ -567,9 +558,9 @@ mod tests {
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
             provider_turn_started: false,
-            session_messages: Vec::new(),
+            session_items: Vec::new(),
         };
-        let message = Message::text(MessageRole::Assistant, "stored");
+        let message = ConversationItem::text(Role::Assistant, "stored");
 
         sender
             .send(ConversationWorkerEvent::Session(
@@ -578,15 +569,15 @@ mod tests {
             .expect("provider event should be queued");
         sender
             .send(ConversationWorkerEvent::Session(
-                ConversationDelta::ProviderContextMessage {
-                    message: message.clone(),
+                ConversationDelta::ProviderContextItem {
+                    item: message.clone(),
                 },
             ))
             .expect("message event should be queued");
 
         assert_eq!(runtime.try_recv_event(), None);
         assert!(runtime.take_provider_turn_started());
-        assert_eq!(runtime.take_session_messages(), vec![message]);
+        assert_eq!(runtime.take_session_items(), vec![message]);
         assert!(runtime.is_running());
     }
 
@@ -599,7 +590,7 @@ mod tests {
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
             provider_turn_started: false,
-            session_messages: Vec::new(),
+            session_items: Vec::new(),
         };
 
         assert!(runtime.interrupt());
@@ -726,32 +717,41 @@ mod tests {
     }
 
     #[test]
-    fn provider_context_repair_messages_fill_unresolved_tool_calls() {
+    fn provider_context_repair_items_fill_unresolved_tool_calls() {
         let mut ledger = super::ProviderContextRepairLedger::default();
-        let first_call = ToolCall::new("call-1", "read", serde_json::json!({}));
-        let second_call = ToolCall::new("call-2", "search", serde_json::json!({}));
 
-        ledger.observe(&Message::assistant_with_tool_calls(
+        ledger.observe(&ConversationItem::assistant_with_tool_calls(
             String::new(),
-            vec![first_call, second_call],
+            vec![
+                ToolCall::new("call-1", "read", "{}"),
+                ToolCall::new("call-2", "search", "{}"),
+            ],
         ));
-        ledger.observe(&Message::tool_result(ToolResult::success(
-            "call-1", "read", "done", None,
-        )));
+        ledger.observe(&ConversationItem::tool_result(
+            "call-1",
+            vec![ContentBlock::Text("done".into())],
+            false,
+        ));
 
-        let repair_messages = ledger.take_repair_messages(super::TOOL_EXECUTION_TIMED_OUT);
+        let repair_items = ledger.take_repair_items(super::TOOL_EXECUTION_TIMED_OUT);
 
-        assert_eq!(repair_messages.len(), 1);
-        let repair_result = repair_messages[0]
-            .first_tool_result()
-            .expect("repair message should contain a tool result");
-        assert_eq!(repair_result.call_id, "call-2");
-        assert_eq!(repair_result.name, "search");
-        assert!(repair_result.is_error);
-        assert_eq!(repair_result.content, super::TOOL_EXECUTION_TIMED_OUT);
+        assert_eq!(repair_items.len(), 1);
+        let repair_item = &repair_items[0];
+        match repair_item {
+            ConversationItem::ToolResult {
+                call_id,
+                is_error,
+                content,
+            } => {
+                assert_eq!(call_id, "call-2");
+                assert!(*is_error);
+                assert_eq!(content[0].as_text(), Some(super::TOOL_EXECUTION_TIMED_OUT));
+            }
+            _ => panic!("expected ToolResult item"),
+        }
         assert!(
             ledger
-                .take_repair_messages(super::TOOL_EXECUTION_TIMED_OUT)
+                .take_repair_items(super::TOOL_EXECUTION_TIMED_OUT)
                 .is_empty()
         );
     }
@@ -765,7 +765,7 @@ mod tests {
             Some("http://127.0.0.1:1234/v1".to_string()),
             None,
             None,
-            vec![Message::text(MessageRole::User, "hello")],
+            vec![ConversationItem::text(Role::User, "hello")],
         );
         let executor = ToolExecutorRegistry::new();
         let cancellation = CancellationToken::new();

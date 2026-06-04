@@ -59,9 +59,7 @@ pub(crate) fn runtime_event_from_conversation_event(
         },
         ConversationEvent::Finished { response, metrics } => RuntimeEvent::MessageFinished {
             target,
-            content: response.content,
-            reasoning_content: response.reasoning_content,
-            reasoning_duration: response.reasoning_duration,
+            response,
             finish_reason: None,
             metrics: metrics.map(|metrics| {
                 RuntimeRequestMetrics::new(metrics.latency, metrics.output_tokens, metrics.duration)

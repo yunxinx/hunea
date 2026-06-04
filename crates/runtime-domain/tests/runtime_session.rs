@@ -1,14 +1,16 @@
+use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
 use runtime_domain::{
     provider::ProviderKind,
     session::{
-        ChatMessage, ConversationTurnRequest, RuntimeCapability, RuntimeCommand, RuntimeEvent,
-        RuntimeIdentity, RuntimePermissionOption, RuntimePermissionOptionKind,
+        ConversationResponse, ConversationTurnRequest, RuntimeCapability, RuntimeCommand,
+        RuntimeEvent, RuntimeIdentity, RuntimePermissionOption, RuntimePermissionOptionKind,
         RuntimePermissionRequest, RuntimeTarget, RuntimeTerminalExitStatus,
         RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
         RuntimeToolActivityLocation, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
         RuntimeToolActivityUpdate, RuntimeToolKind,
     },
 };
+use std::time::Duration;
 
 #[test]
 fn runtime_permission_request_selects_cancel_reject_fallback() {
@@ -39,7 +41,7 @@ fn runtime_command_and_event_carry_target_identity() {
             None,
             None,
             None,
-            ChatMessage::user("hello".to_string()),
+            ConversationItem::text(Role::User, "hello"),
         ));
     let truncate_command = RuntimeCommand::truncate_conversation(1);
     let permission_command =
@@ -53,6 +55,34 @@ fn runtime_command_and_event_carry_target_identity() {
     assert_eq!(truncate_command.target(), None);
     assert_eq!(permission_command.target(), Some(&target));
     assert_eq!(event.target(), Some(&target));
+}
+
+#[test]
+fn conversation_response_carries_items_and_projects_visible_text() {
+    let response = ConversationResponse {
+        items: vec![
+            ConversationItem::Reasoning {
+                content: "think".to_string(),
+                summary: None,
+                encrypted: None,
+            },
+            ConversationItem::assistant_with_tool_calls(
+                "checking".to_string(),
+                vec![ToolCall::new("call-1", "read", "{}")],
+            ),
+            ConversationItem::tool_result(
+                "call-1",
+                vec![ContentBlock::Text("tool output".to_string())],
+                false,
+            ),
+            ConversationItem::text(Role::Assistant, "done"),
+        ],
+        reasoning_duration: Some(Duration::from_secs(2)),
+    };
+
+    assert_eq!(response.text_content(), "done");
+    assert_eq!(response.reasoning_content().as_deref(), Some("think"));
+    assert_eq!(response.items.len(), 4);
 }
 
 #[test]

@@ -1,5 +1,7 @@
 use crate::provider::{ProviderApiKey, ProviderKind};
 
+use provider_protocol::{ConversationItem, Role};
+
 use std::time::Duration;
 
 use super::{
@@ -22,7 +24,7 @@ impl ConversationRequest {
         base_url: Option<String>,
         api_key: Option<ProviderApiKey>,
         api_key_env: Option<String>,
-        messages: Vec<ChatMessage>,
+        items: Vec<ConversationItem>,
     ) -> Self {
         Self {
             provider_request: ProviderRequest::new(
@@ -32,7 +34,7 @@ impl ConversationRequest {
                 base_url,
                 api_key,
                 api_key_env,
-                messages,
+                items,
             ),
         }
     }
@@ -60,7 +62,7 @@ pub struct ConversationTurnRequest {
     base_url: Option<String>,
     api_key: Option<ProviderApiKey>,
     api_key_env: Option<String>,
-    message: ChatMessage,
+    message: ConversationItem,
 }
 
 impl ConversationTurnRequest {
@@ -72,7 +74,7 @@ impl ConversationTurnRequest {
         base_url: Option<String>,
         api_key: Option<ProviderApiKey>,
         api_key_env: Option<String>,
-        message: ChatMessage,
+        message: ConversationItem,
     ) -> Self {
         Self {
             provider_id: provider_id.into(),
@@ -83,6 +85,27 @@ impl ConversationTurnRequest {
             api_key_env,
             message,
         }
+    }
+
+    /// `new_user_text` 从 UI 原始用户输入创建一次对话轮次提交请求。
+    pub fn new_user_text(
+        provider_id: impl Into<String>,
+        provider_kind: ProviderKind,
+        model_id: impl Into<String>,
+        base_url: Option<String>,
+        api_key: Option<ProviderApiKey>,
+        api_key_env: Option<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            provider_id,
+            provider_kind,
+            model_id,
+            base_url,
+            api_key,
+            api_key_env,
+            ConversationItem::text(Role::User, text),
+        )
     }
 
     /// `target` 返回该 turn 对应的统一 runtime 目标。
@@ -121,8 +144,18 @@ impl ConversationTurnRequest {
     }
 
     /// `message` 返回本轮提交的用户消息。
-    pub fn message(&self) -> &ChatMessage {
+    pub fn message(&self) -> &ConversationItem {
         &self.message
+    }
+
+    /// `is_user_message` 返回本轮消息是否为用户输入。
+    pub fn is_user_message(&self) -> bool {
+        self.message.role() == Some(Role::User)
+    }
+
+    /// `message_text` 返回本轮消息中的可见文本。
+    pub fn message_text(&self) -> String {
+        self.message.text_content()
     }
 }
 
@@ -135,7 +168,7 @@ pub struct ProviderRequest {
     pub base_url: Option<String>,
     pub api_key: Option<ProviderApiKey>,
     pub api_key_env: Option<String>,
-    pub messages: Vec<ChatMessage>,
+    pub items: Vec<ConversationItem>,
 }
 
 impl ProviderRequest {
@@ -147,7 +180,7 @@ impl ProviderRequest {
         base_url: Option<String>,
         api_key: Option<ProviderApiKey>,
         api_key_env: Option<String>,
-        messages: Vec<ChatMessage>,
+        items: Vec<ConversationItem>,
     ) -> Self {
         Self {
             provider_id: provider_id.into(),
@@ -156,89 +189,98 @@ impl ProviderRequest {
             base_url,
             api_key,
             api_key_env,
-            messages,
+            items,
         }
     }
 }
 
-/// `ChatMessageBlock` 描述一条用户消息中的结构化输入块。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChatMessageBlock {
-    Text(String),
-    Image {
-        data_base64: String,
-        mime_type: String,
-        uri: Option<String>,
-    },
-    Audio {
-        data_base64: String,
-        mime_type: String,
-        uri: Option<String>,
-    },
-    Document {
-        data_base64: String,
-        mime_type: String,
-        filename: Option<String>,
-        uri: Option<String>,
-    },
-}
-
-/// `ChatMessage` 是 transcript 到 provider 请求之间的稳定消息形状。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatMessage {
-    pub role: ChatRole,
-    pub content: String,
-    pub blocks: Option<Vec<ChatMessageBlock>>,
-}
-
-impl ChatMessage {
-    /// `user` 创建用户消息。
-    pub fn user(content: String) -> Self {
-        Self::user_with_blocks(content, None)
-    }
-
-    /// `user_with_blocks` 创建带结构化内容块的用户消息。
-    pub fn user_with_blocks(content: String, blocks: Option<Vec<ChatMessageBlock>>) -> Self {
-        Self {
-            role: ChatRole::User,
-            content,
-            blocks,
-        }
-    }
-
-    /// `assistant` 创建助手消息。
-    pub fn assistant(content: String) -> Self {
-        Self {
-            role: ChatRole::Assistant,
-            content,
-            blocks: None,
-        }
-    }
-}
-
-/// `ChatRole` 描述 Hunea 当前会发送给上游的 transcript role。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChatRole {
-    User,
-    Assistant,
-}
-
-impl ChatRole {
-    /// `as_str` 返回上游协议常用的 role 名称。
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Assistant => "assistant",
-        }
-    }
-}
-
-/// `ConversationResponse` 保存单轮对话输出。
+/// `ConversationResponse` 保存单轮对话输出的完整 provider-visible items。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConversationResponse {
-    pub content: String,
-    pub reasoning_content: Option<String>,
+    pub items: Vec<ConversationItem>,
     pub reasoning_duration: Option<Duration>,
+}
+
+impl ConversationResponse {
+    /// `new` 从完整 provider-visible items 创建对话响应。
+    pub fn new(items: Vec<ConversationItem>, reasoning_duration: Option<Duration>) -> Self {
+        Self {
+            items,
+            reasoning_duration,
+        }
+    }
+
+    /// `assistant_text` 创建仅包含最终 assistant 文本的响应。
+    pub fn assistant_text(content: impl Into<String>) -> Self {
+        let content = content.into();
+        let items = if content.is_empty() {
+            Vec::new()
+        } else {
+            vec![ConversationItem::text(Role::Assistant, content)]
+        };
+        Self::new(items, None)
+    }
+
+    /// `with_reasoning` 创建带 reasoning 与最终 assistant 文本的响应。
+    pub fn with_reasoning(
+        content: impl Into<String>,
+        reasoning_content: impl Into<String>,
+        reasoning_duration: Option<Duration>,
+    ) -> Self {
+        let content = content.into();
+        let reasoning_content = reasoning_content.into();
+        let mut items = Vec::new();
+        if !reasoning_content.trim().is_empty() {
+            items.push(ConversationItem::Reasoning {
+                content: reasoning_content,
+                summary: None,
+                encrypted: None,
+            });
+        }
+        if !content.is_empty() {
+            items.push(ConversationItem::text(Role::Assistant, content));
+        }
+        Self::new(items, reasoning_duration)
+    }
+
+    /// `text_content` 返回最终 assistant 消息的可见文本。
+    pub fn text_content(&self) -> String {
+        self.items
+            .iter()
+            .rev()
+            .find(|item| item.role() == Some(Role::Assistant))
+            .map(ConversationItem::text_content)
+            .unwrap_or_default()
+            .trim_end()
+            .to_string()
+    }
+
+    /// `reasoning_content` 返回所有 reasoning item 的拼接内容。
+    pub fn reasoning_content(&self) -> Option<String> {
+        let content = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::Reasoning { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        let content = trim_outer_blank_lines(&content);
+        (!content.is_empty()).then_some(content)
+    }
+}
+
+fn trim_outer_blank_lines(content: &str) -> String {
+    let lines = content.lines().collect::<Vec<_>>();
+    let Some(start) = lines.iter().position(|line| !line.trim().is_empty()) else {
+        return String::new();
+    };
+    let end = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .expect("start exists when at least one non-blank line exists");
+
+    lines[start..=end].join("\n")
 }
 
 /// `ProviderRequestMetrics` 记录一次成功请求中的 LLM 输出性能指标。

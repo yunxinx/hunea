@@ -16,10 +16,10 @@ use runtime_domain::model_catalog::ProviderSyncRequest;
 use runtime_domain::provider::ProviderKind;
 use runtime_domain::request_policy::RuntimeRequestPolicy;
 use runtime_domain::session::{
-    ChatMessage, ConversationEvent, ConversationResponse, ConversationTurnRequest,
-    ProviderRequestMetrics, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
-    RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityStatus,
-    RuntimeToolActivityUpdate, RuntimeToolKind,
+    ConversationEvent, ConversationResponse, ConversationTurnRequest, ProviderRequestMetrics,
+    RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget, RuntimeToolActivity,
+    RuntimeToolActivityContent, RuntimeToolActivityStatus, RuntimeToolActivityUpdate,
+    RuntimeToolKind,
 };
 
 #[derive(Default)]
@@ -30,6 +30,18 @@ struct TestRuntimeCoordinator {
     conversation_request: Option<ConversationTurnRequest>,
     reset_count: usize,
     conversation_retained_user_turns: Option<usize>,
+}
+
+fn assistant_response(content: impl Into<String>) -> ConversationResponse {
+    ConversationResponse::assistant_text(content)
+}
+
+fn reasoned_response(
+    content: impl Into<String>,
+    reasoning_content: impl Into<String>,
+    reasoning_duration: Duration,
+) -> ConversationResponse {
+    ConversationResponse::with_reasoning(content, reasoning_content, Some(reasoning_duration))
 }
 
 impl RuntimeCoordinator for TestRuntimeCoordinator {
@@ -94,11 +106,7 @@ fn conversation_completion_appends_assistant_message_after_request_finishes() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "你好，我是本地模型".to_string(),
-                reasoning_content: None,
-                reasoning_duration: None,
-            },
+            response: assistant_response("你好，我是本地模型"),
             metrics: None,
         },
     );
@@ -189,9 +197,7 @@ fn runtime_expanded_reasoning_flushes_before_message_finish() {
 
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "我先看一下 src。".to_string(),
-        reasoning_content: Some("先分析目录结构".to_string()),
-        reasoning_duration: Some(Duration::from_secs(2)),
+        response: reasoned_response("我先看一下 src。", "先分析目录结构", Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
     });
@@ -232,9 +238,7 @@ fn runtime_expanded_simplified_reasoning_flushes_before_message_finish() {
 
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "我先看一下 src。".to_string(),
-        reasoning_content: Some("先分析目录结构".to_string()),
-        reasoning_duration: Some(Duration::from_secs(2)),
+        response: reasoned_response("我先看一下 src。", "先分析目录结构", Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
     });
@@ -298,11 +302,11 @@ fn runtime_final_response_keeps_streamed_reasoning_flushed_across_tool_boundarie
 
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "当前目录包含 Cargo.toml 和 crates/。".to_string(),
-        reasoning_content: Some(
-            "我已经拿到目录结果，现在只保留最终回复前需要展示的推理。".to_string(),
+        response: reasoned_response(
+            "当前目录包含 Cargo.toml 和 crates/。",
+            "我已经拿到目录结果，现在只保留最终回复前需要展示的推理。",
+            Duration::from_secs(2),
         ),
-        reasoning_duration: Some(Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
     });
@@ -363,11 +367,11 @@ fn runtime_final_response_extends_buffered_reasoning_tail_after_earlier_tool_bou
 
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "当前目录包含 Cargo.toml 和 crates/。".to_string(),
-        reasoning_content: Some(
-            "我需要先查看当前目录。我已经拿到目录结果，接下来整理回复。".to_string(),
+        response: reasoned_response(
+            "当前目录包含 Cargo.toml 和 crates/。",
+            "我需要先查看当前目录。我已经拿到目录结果，接下来整理回复。",
+            Duration::from_secs(2),
         ),
-        reasoning_duration: Some(Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
     });
@@ -441,9 +445,7 @@ fn runtime_final_response_does_not_duplicate_buffered_delta() {
     });
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终结论".to_string(),
-        reasoning_content: None,
-        reasoning_duration: None,
+        response: assistant_response("最终结论"),
         finish_reason: None,
         metrics: None,
     });
@@ -476,9 +478,7 @@ fn runtime_final_response_does_not_overwrite_flushed_streamed_reasoning() {
     });
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终结论".to_string(),
-        reasoning_content: Some("先分析完整".to_string()),
-        reasoning_duration: Some(Duration::from_secs(2)),
+        response: reasoned_response("最终结论", "先分析完整", Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
     });
@@ -510,9 +510,7 @@ fn runtime_final_response_uses_final_reasoning_when_no_boundary_arrives() {
     });
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终结论".to_string(),
-        reasoning_content: Some("先分析完整".to_string()),
-        reasoning_duration: Some(Duration::from_secs(2)),
+        response: reasoned_response("最终结论", "先分析完整", Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
     });
@@ -583,9 +581,7 @@ fn runtime_final_response_after_four_tool_calls_inserts_divider_before_body() {
     apply_runtime_tool_starts(&mut model, &target, 4);
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终正文".to_string(),
-        reasoning_content: None,
-        reasoning_duration: None,
+        response: assistant_response("最终正文"),
         finish_reason: None,
         metrics: None,
     });
@@ -615,9 +611,7 @@ fn runtime_final_response_after_three_tool_calls_does_not_insert_divider() {
     apply_runtime_tool_starts(&mut model, &target, 3);
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终正文".to_string(),
-        reasoning_content: None,
-        reasoning_duration: None,
+        response: assistant_response("最终正文"),
         finish_reason: None,
         metrics: None,
     });
@@ -651,9 +645,7 @@ fn runtime_reasoning_after_four_tool_calls_inserts_divider_before_final_body() {
     apply_runtime_tool_starts(&mut model, &target, 4);
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终正文".to_string(),
-        reasoning_content: Some("最终前的思考".to_string()),
-        reasoning_duration: Some(Duration::from_secs(1)),
+        response: reasoned_response("最终正文", "最终前的思考", Duration::from_secs(1)),
         finish_reason: None,
         metrics: None,
     });
@@ -703,9 +695,7 @@ fn runtime_intermediate_text_after_four_tool_calls_does_not_insert_divider_befor
 
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终正文".to_string(),
-        reasoning_content: None,
-        reasoning_duration: None,
+        response: assistant_response("最终正文"),
         finish_reason: None,
         metrics: None,
     });
@@ -797,11 +787,7 @@ fn conversation_completion_updates_last_request_metrics() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "完成".to_string(),
-                reasoning_content: None,
-                reasoning_duration: None,
-            },
+            response: assistant_response("完成"),
             metrics: Some(ProviderRequestMetrics {
                 latency: std::time::Duration::from_millis(250),
                 output_tokens: 80,
@@ -845,11 +831,7 @@ fn conversation_completion_collapses_reasoning_by_default() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "结论".to_string(),
-                reasoning_content: Some("先分析".to_string()),
-                reasoning_duration: Some(std::time::Duration::from_secs(3)),
-            },
+            response: reasoned_response("结论", "先分析", Duration::from_secs(3)),
             metrics: None,
         },
     );
@@ -885,11 +867,7 @@ fn conversation_completion_keeps_reasoning_body_gap_to_one_line() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "结论".to_string(),
-                reasoning_content: Some("先分析".to_string()),
-                reasoning_duration: Some(std::time::Duration::from_secs(3)),
-            },
+            response: reasoned_response("结论", "先分析", Duration::from_secs(3)),
             metrics: None,
         },
     );
@@ -916,11 +894,7 @@ fn conversation_reasoning_header_click_toggles_visibility_without_changing_sourc
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "结论".to_string(),
-                reasoning_content: Some("先分析".to_string()),
-                reasoning_duration: Some(std::time::Duration::from_secs(3)),
-            },
+            response: reasoned_response("结论", "先分析", Duration::from_secs(3)),
             metrics: None,
         },
     );
@@ -982,11 +956,7 @@ fn conversation_reasoning_header_drag_does_not_toggle() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "结论".to_string(),
-                reasoning_content: Some("先分析".to_string()),
-                reasoning_duration: Some(std::time::Duration::from_secs(3)),
-            },
+            response: reasoned_response("结论", "先分析", Duration::from_secs(3)),
             metrics: None,
         },
     );
@@ -1045,11 +1015,7 @@ fn conversation_reasoning_header_click_outside_label_does_not_toggle() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "结论".to_string(),
-                reasoning_content: Some("先分析".to_string()),
-                reasoning_duration: Some(std::time::Duration::from_secs(3)),
-            },
+            response: reasoned_response("结论", "先分析", Duration::from_secs(3)),
             metrics: None,
         },
     );
@@ -1092,11 +1058,7 @@ fn conversation_completion_hides_reasoning_when_configured_off() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "结论".to_string(),
-                reasoning_content: Some("先分析".to_string()),
-                reasoning_duration: Some(std::time::Duration::from_secs(3)),
-            },
+            response: reasoned_response("结论", "先分析", Duration::from_secs(3)),
             metrics: None,
         },
     );
@@ -1501,14 +1463,14 @@ fn conversation_tool_finished_updates_runtime_tool_activity() {
 fn conversation_send_effect_starts_conversation_target() {
     let mut model = Model::new(StartupBannerOptions::default());
     let mut runtime_coordinator = TestRuntimeCoordinator::default();
-    let request = ConversationTurnRequest::new(
+    let request = ConversationTurnRequest::new_user_text(
         "local",
         ProviderKind::OpenAiCompatible,
         "qwen3",
         None,
         None,
         None,
-        ChatMessage::user("hello".to_string()),
+        "hello",
     );
 
     run_send_conversation_turn_effect(&mut model, &mut runtime_coordinator, request);
@@ -1539,14 +1501,14 @@ fn truncate_conversation_command_records_retained_turns() {
 
 #[test]
 fn conversation_turn_request_keeps_runtime_target_in_core_dto() {
-    let request = ConversationTurnRequest::new(
+    let request = ConversationTurnRequest::new_user_text(
         "local",
         ProviderKind::OpenAiCompatible,
         "qwen3",
         None,
         None,
         None,
-        ChatMessage::user("hello".to_string()),
+        "hello",
     );
 
     assert_eq!(request.target(), RuntimeTarget::provider("local", "qwen3"));

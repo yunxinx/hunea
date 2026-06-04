@@ -27,8 +27,8 @@ pub(super) fn conversation_worker_event_from_progress(
         ConversationProgress::ProviderTurnStarted => {
             ConversationWorkerEvent::Session(ConversationDelta::ProviderTurnStarted)
         }
-        ConversationProgress::ProviderContextMessage { message } => {
-            ConversationWorkerEvent::Session(ConversationDelta::ProviderContextMessage { message })
+        ConversationProgress::ProviderContextItem { item } => {
+            ConversationWorkerEvent::Session(ConversationDelta::ProviderContextItem { item })
         }
         ConversationProgress::OutputTokens { total_tokens } => {
             ConversationWorkerEvent::progress(ConversationEvent::OutputTokenEstimate {

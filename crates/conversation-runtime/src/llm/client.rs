@@ -121,8 +121,8 @@ fn conversation_progress_from_runtime_progress(
         tool_loop_runtime::ToolLoopProgress::SystemMessage { message } => {
             ConversationProgress::SystemMessage { message }
         }
-        tool_loop_runtime::ToolLoopProgress::ProviderContextMessage { message } => {
-            ConversationProgress::ProviderContextMessage { message }
+        tool_loop_runtime::ToolLoopProgress::ProviderContextItem { item } => {
+            ConversationProgress::ProviderContextItem { item }
         }
         tool_loop_runtime::ToolLoopProgress::OutputTokens { total_tokens } => {
             ConversationProgress::OutputTokens { total_tokens }

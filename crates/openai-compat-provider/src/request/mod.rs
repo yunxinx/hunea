@@ -1,16 +1,15 @@
+use std::collections::BTreeSet;
+
 use provider_protocol::{
-    Message, MessageContent, MessageRole, PromptRequest, ProviderError, ToolCall, ToolDefinition,
+    ContentBlock, ConversationItem, PromptRequest, ProviderError, Role, ToolCall, ToolDefinition,
+    visible_text_from_blocks,
 };
 use serde_json::{Value, json};
 
 pub(crate) fn chat_completion_request_body(
     request: &PromptRequest,
 ) -> Result<Value, ProviderError> {
-    let messages = request
-        .messages
-        .iter()
-        .map(openai_message_from_message)
-        .collect::<Result<Vec<_>, _>>()?;
+    let messages = project_items_to_messages(&request.items)?;
     let mut body = serde_json::Map::new();
     body.insert("model".to_string(), Value::String(request.model.clone()));
     body.insert("messages".to_string(), Value::Array(messages));
@@ -51,24 +50,156 @@ pub(crate) fn chat_completion_request_body(
     Ok(Value::Object(body))
 }
 
-fn openai_message_from_message(message: &Message) -> Result<Value, ProviderError> {
-    match message.role {
-        MessageRole::System => Ok(json!({
-            "role": message.role.as_str(),
-            "content": message.text_content(),
-        })),
-        MessageRole::User => Ok(json!({
-            "role": message.role.as_str(),
-            "content": user_content_from_blocks(&message.content)?,
-        })),
-        MessageRole::Assistant => assistant_message_from_message(message),
-        MessageRole::Tool => tool_message_from_message(message),
+fn project_items_to_messages(items: &[ConversationItem]) -> Result<Vec<Value>, ProviderError> {
+    validate_openai_projection_items(items)?;
+
+    let mut messages = Vec::new();
+    let mut pending_reasoning: Option<&str> = None;
+    let mut pending_tool_results: Vec<&ConversationItem> = Vec::new();
+
+    for item in items {
+        match item {
+            ConversationItem::Message {
+                role: Role::System,
+                content,
+            } => {
+                flush_tool_results(&mut pending_tool_results, &mut messages)?;
+                pending_reasoning = None;
+                messages.push(json!({
+                    "role": "system",
+                    "content": non_assistant_visible_text(content)?,
+                }));
+            }
+            ConversationItem::Message {
+                role: Role::User,
+                content,
+            } => {
+                flush_tool_results(&mut pending_tool_results, &mut messages)?;
+                pending_reasoning = None;
+                messages.push(json!({
+                    "role": "user",
+                    "content": user_content_from_blocks(content)?,
+                }));
+            }
+            ConversationItem::Message {
+                role: Role::Assistant,
+                content,
+            } => {
+                flush_tool_results(&mut pending_tool_results, &mut messages)?;
+                let reasoning = pending_reasoning.take();
+                messages.push(assistant_message_from_content(content, reasoning)?);
+            }
+            ConversationItem::ToolResult { .. } => {
+                pending_tool_results.push(item);
+            }
+            ConversationItem::Reasoning { content, .. } => {
+                flush_tool_results(&mut pending_tool_results, &mut messages)?;
+                pending_reasoning = Some(content.as_str());
+            }
+        }
     }
+
+    flush_tool_results(&mut pending_tool_results, &mut messages)?;
+
+    Ok(messages)
 }
 
-fn assistant_message_from_message(message: &Message) -> Result<Value, ProviderError> {
-    let text = message.text_content();
-    let tool_calls = message.tool_calls();
+fn validate_openai_projection_items(items: &[ConversationItem]) -> Result<(), ProviderError> {
+    let mut pending_tool_call_ids = BTreeSet::new();
+    let mut seen_tool_call_ids = BTreeSet::new();
+
+    for (index, item) in items.iter().enumerate() {
+        item.validate().map_err(|source| {
+            ProviderError::Protocol(format!("invalid conversation item {index}: {source}"))
+        })?;
+
+        match item {
+            ConversationItem::Message { role, content } => {
+                ensure_no_pending_tool_calls(index, &pending_tool_call_ids)?;
+
+                if *role == Role::Assistant {
+                    for call in content.iter().filter_map(ContentBlock::as_tool_call) {
+                        if !seen_tool_call_ids.insert(call.call_id.clone()) {
+                            return Err(ProviderError::Protocol(format!(
+                                "duplicate tool call `{}` at conversation item {index}",
+                                call.call_id
+                            )));
+                        }
+                        pending_tool_call_ids.insert(call.call_id.clone());
+                    }
+                }
+            }
+            ConversationItem::ToolResult { call_id, .. } => {
+                if !pending_tool_call_ids.remove(call_id) {
+                    return Err(ProviderError::Protocol(format!(
+                        "tool result item {index} references unknown tool call `{call_id}`"
+                    )));
+                }
+            }
+            ConversationItem::Reasoning { .. } => {
+                ensure_no_pending_tool_calls(index, &pending_tool_call_ids)?;
+            }
+        }
+    }
+
+    ensure_no_pending_tool_calls(items.len(), &pending_tool_call_ids)?;
+
+    Ok(())
+}
+
+fn ensure_no_pending_tool_calls(
+    index: usize,
+    pending_tool_call_ids: &BTreeSet<String>,
+) -> Result<(), ProviderError> {
+    if pending_tool_call_ids.is_empty() {
+        return Ok(());
+    }
+
+    Err(ProviderError::Protocol(format!(
+        "unresolved tool calls before item {index}: {:?}",
+        pending_tool_call_ids.iter().collect::<Vec<_>>()
+    )))
+}
+
+fn flush_tool_results(
+    pending: &mut Vec<&ConversationItem>,
+    messages: &mut Vec<Value>,
+) -> Result<(), ProviderError> {
+    for item in pending.drain(..) {
+        if let ConversationItem::ToolResult {
+            call_id, content, ..
+        } = item
+        {
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": non_assistant_visible_text(content)?,
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn non_assistant_visible_text(blocks: &[ContentBlock]) -> Result<String, ProviderError> {
+    if blocks.iter().any(|block| block.as_tool_call().is_some()) {
+        return Err(ProviderError::Protocol(
+            "tool call content is only valid on assistant messages".to_string(),
+        ));
+    }
+    Ok(visible_text_from_blocks(blocks))
+}
+
+fn assistant_message_from_content(
+    content: &[ContentBlock],
+    reasoning: Option<&str>,
+) -> Result<Value, ProviderError> {
+    let text = visible_text_from_blocks(content);
+    let tool_calls = content
+        .iter()
+        .filter_map(ContentBlock::as_tool_call)
+        .collect::<Vec<_>>();
+    let has_tool_calls = !tool_calls.is_empty();
+
     let mut value = serde_json::Map::new();
     value.insert("role".to_string(), Value::String("assistant".to_string()));
     value.insert(
@@ -79,30 +210,29 @@ fn assistant_message_from_message(message: &Message) -> Result<Value, ProviderEr
             Value::String(text)
         },
     );
-    if !tool_calls.is_empty() {
+    if let Some(reasoning) = reasoning
+        && has_tool_calls
+    {
+        value.insert(
+            "reasoning_content".to_string(),
+            Value::String(reasoning.to_string()),
+        );
+    }
+    if has_tool_calls {
         value.insert(
             "tool_calls".to_string(),
-            Value::Array(tool_calls.iter().map(openai_tool_call_from_call).collect()),
+            Value::Array(
+                tool_calls
+                    .iter()
+                    .map(|call| openai_tool_call_from_call(call))
+                    .collect(),
+            ),
         );
     }
     Ok(Value::Object(value))
 }
 
-fn tool_message_from_message(message: &Message) -> Result<Value, ProviderError> {
-    let Some(result) = message.first_tool_result() else {
-        return Err(ProviderError::Protocol(
-            "tool role message must contain a tool result".to_string(),
-        ));
-    };
-
-    Ok(json!({
-        "role": "tool",
-        "tool_call_id": result.call_id,
-        "content": result.content,
-    }))
-}
-
-fn user_content_from_blocks(blocks: &[MessageContent]) -> Result<Value, ProviderError> {
+fn user_content_from_blocks(blocks: &[ContentBlock]) -> Result<Value, ProviderError> {
     let mut parts = Vec::new();
     for block in blocks {
         if let Some(part) = openai_user_content_part(block)? {
@@ -118,10 +248,10 @@ fn user_content_from_blocks(blocks: &[MessageContent]) -> Result<Value, Provider
     Ok(Value::Array(parts))
 }
 
-fn openai_user_content_part(content: &MessageContent) -> Result<Option<Value>, ProviderError> {
-    match content {
-        MessageContent::Text(text) => Ok(Some(json!({ "type": "text", "text": text }))),
-        MessageContent::Image {
+fn openai_user_content_part(block: &ContentBlock) -> Result<Option<Value>, ProviderError> {
+    match block {
+        ContentBlock::Text(text) => Ok(Some(json!({ "type": "text", "text": text }))),
+        ContentBlock::Image {
             data_base64,
             mime_type,
             ..
@@ -129,7 +259,7 @@ fn openai_user_content_part(content: &MessageContent) -> Result<Option<Value>, P
             "type": "image_url",
             "image_url": { "url": data_uri(mime_type, data_base64) },
         }))),
-        MessageContent::Audio {
+        ContentBlock::Audio {
             data_base64,
             mime_type,
             ..
@@ -140,7 +270,7 @@ fn openai_user_content_part(content: &MessageContent) -> Result<Option<Value>, P
                 "format": audio_format(mime_type)?,
             },
         }))),
-        MessageContent::Document {
+        ContentBlock::Document {
             data_base64,
             filename,
             ..
@@ -151,7 +281,7 @@ fn openai_user_content_part(content: &MessageContent) -> Result<Option<Value>, P
                 "file_data": data_base64,
             },
         }))),
-        MessageContent::ResourceLink {
+        ContentBlock::ResourceLink {
             name,
             uri,
             mime_type,
@@ -160,7 +290,7 @@ fn openai_user_content_part(content: &MessageContent) -> Result<Option<Value>, P
             "type": "text",
             "text": resource_link_text(name, uri, mime_type.as_deref(), *size),
         }))),
-        MessageContent::ResourceText {
+        ContentBlock::ResourceText {
             uri,
             mime_type,
             text,
@@ -168,9 +298,9 @@ fn openai_user_content_part(content: &MessageContent) -> Result<Option<Value>, P
             "type": "text",
             "text": resource_text(uri, mime_type.as_deref(), text),
         }))),
-        MessageContent::Reasoning(_)
-        | MessageContent::ToolCall(_)
-        | MessageContent::ToolResult(_) => Ok(None),
+        ContentBlock::ToolCall(_) => Err(ProviderError::Protocol(
+            "tool call content is only valid on assistant messages".to_string(),
+        )),
     }
 }
 
@@ -191,7 +321,7 @@ fn openai_tool_call_from_call(call: &ToolCall) -> Value {
         "type": "function",
         "function": {
             "name": call.name,
-            "arguments": call.arguments.to_string(),
+            "arguments": call.arguments,
         }
     })
 }
@@ -210,7 +340,7 @@ fn audio_format(mime_type: &str) -> Result<&'static str, ProviderError> {
     }
 }
 
-fn resource_link_text(name: &str, uri: &str, mime_type: Option<&str>, size: Option<i64>) -> String {
+fn resource_link_text(name: &str, uri: &str, mime_type: Option<&str>, size: Option<u64>) -> String {
     let mut text = format!("[Attached resource: {name}]({uri})");
     if let Some(mime_type) = mime_type {
         text.push_str(&format!(" ({mime_type})"));
@@ -230,7 +360,9 @@ fn resource_text(uri: &str, mime_type: Option<&str>, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use provider_protocol::{Message, MessageContent, MessageRole, PromptRequest, ToolDefinition};
+    use provider_protocol::{
+        ContentBlock, ConversationItem, PromptRequest, Role, ToolCall, ToolDefinition,
+    };
 
     use super::chat_completion_request_body;
 
@@ -238,17 +370,14 @@ mod tests {
     fn multimodal_user_blocks_project_to_chat_completion_parts() {
         let request = PromptRequest::new(
             "qwen3",
-            vec![Message::new(
-                MessageRole::User,
-                vec![
-                    MessageContent::Text("review ".to_string()),
-                    MessageContent::Image {
-                        data_base64: "iVBORw==".to_string(),
-                        mime_type: "image/png".to_string(),
-                        uri: None,
-                    },
-                ],
-            )],
+            vec![ConversationItem::user(vec![
+                ContentBlock::Text("review ".to_string()),
+                ContentBlock::Image {
+                    data_base64: "iVBORw==".to_string(),
+                    mime_type: "image/png".to_string(),
+                    uri: None,
+                },
+            ])],
         );
 
         let body = chat_completion_request_body(&request).expect("request should build");
@@ -265,22 +394,19 @@ mod tests {
     fn audio_and_file_blocks_use_chat_completion_provider_payloads() {
         let request = PromptRequest::new(
             "gpt-5-mini",
-            vec![Message::new(
-                MessageRole::User,
-                vec![
-                    MessageContent::Audio {
-                        data_base64: "UklGRg==".to_string(),
-                        mime_type: "audio/wav".to_string(),
-                        uri: None,
-                    },
-                    MessageContent::Document {
-                        data_base64: "eyJrIjoidiJ9".to_string(),
-                        mime_type: "application/json".to_string(),
-                        filename: Some("payload.json".to_string()),
-                        uri: None,
-                    },
-                ],
-            )],
+            vec![ConversationItem::user(vec![
+                ContentBlock::Audio {
+                    data_base64: "UklGRg==".to_string(),
+                    mime_type: "audio/wav".to_string(),
+                    uri: None,
+                },
+                ContentBlock::Document {
+                    data_base64: "eyJrIjoidiJ9".to_string(),
+                    mime_type: "application/json".to_string(),
+                    filename: Some("payload.json".to_string()),
+                    uri: None,
+                },
+            ])],
         );
 
         let body = chat_completion_request_body(&request).expect("request should build");
@@ -298,14 +424,11 @@ mod tests {
     fn unsupported_audio_mime_type_is_a_protocol_error() {
         let request = PromptRequest::new(
             "gpt-5-mini",
-            vec![Message::new(
-                MessageRole::User,
-                vec![MessageContent::Audio {
-                    data_base64: "AAAA".to_string(),
-                    mime_type: "audio/flac".to_string(),
-                    uri: None,
-                }],
-            )],
+            vec![ConversationItem::user(vec![ContentBlock::Audio {
+                data_base64: "AAAA".to_string(),
+                mime_type: "audio/flac".to_string(),
+                uri: None,
+            }])],
         );
 
         let error = chat_completion_request_body(&request).expect_err("flac is not a chat input");
@@ -321,7 +444,7 @@ mod tests {
     fn max_output_tokens_projects_to_current_chat_completion_field() {
         let mut request = PromptRequest::new(
             "gpt-5-mini",
-            vec![Message::text(MessageRole::User, "summarize")],
+            vec![ConversationItem::text(Role::User, "summarize")],
         );
         request.options.max_output_tokens = Some(256);
 
@@ -336,7 +459,7 @@ mod tests {
     fn tool_definitions_project_to_function_tools() {
         let request = PromptRequest::new(
             "qwen3",
-            vec![Message::text(MessageRole::User, "list files")],
+            vec![ConversationItem::text(Role::User, "list files")],
         )
         .with_tools(vec![ToolDefinition::new(
             "list_dir",
@@ -356,5 +479,185 @@ mod tests {
             body["tools"][0]["function"]["parameters"]["required"][0],
             "path"
         );
+    }
+
+    #[test]
+    fn reasoning_embedded_in_assistant_message_with_tool_calls() {
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![
+                ConversationItem::reasoning("thinking about it"),
+                ConversationItem::assistant_with_tool_calls(
+                    String::new(),
+                    vec![ToolCall::new("c1", "bash", "{}")],
+                ),
+                ConversationItem::tool_result("c1", vec![ContentBlock::Text("done".into())], false),
+            ],
+        );
+
+        let body = chat_completion_request_body(&request).expect("request should build");
+        let assistant = &body["messages"][0];
+
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["reasoning_content"], "thinking about it");
+        assert_eq!(assistant["tool_calls"][0]["function"]["name"], "bash");
+    }
+
+    #[test]
+    fn reasoning_discarded_when_no_tool_calls() {
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![
+                ConversationItem::reasoning("internal thought"),
+                ConversationItem::text(Role::Assistant, "the answer"),
+            ],
+        );
+
+        let body = chat_completion_request_body(&request).expect("request should build");
+        let assistant = &body["messages"][0];
+
+        assert_eq!(assistant["role"], "assistant");
+        assert!(assistant.get("reasoning_content").is_none());
+        assert_eq!(assistant["content"], "the answer");
+    }
+
+    #[test]
+    fn tool_result_projects_as_tool_role_message() {
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![
+                ConversationItem::assistant_with_tool_calls(
+                    String::new(),
+                    vec![ToolCall::new("c1", "bash", "{}")],
+                ),
+                ConversationItem::tool_result(
+                    "c1",
+                    vec![ContentBlock::Text("output".into())],
+                    false,
+                ),
+            ],
+        );
+
+        let body = chat_completion_request_body(&request).expect("request should build");
+
+        assert_eq!(body["messages"][1]["role"], "tool");
+        assert_eq!(body["messages"][1]["tool_call_id"], "c1");
+        assert_eq!(body["messages"][1]["content"], "output");
+    }
+
+    #[test]
+    fn system_tool_call_content_is_a_protocol_error() {
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::system(vec![ContentBlock::ToolCall(
+                ToolCall::new("c1", "bash", "{}"),
+            )])],
+        );
+
+        let error =
+            chat_completion_request_body(&request).expect_err("system tool call is invalid");
+
+        assert!(
+            error
+                .to_string()
+                .contains("tool call content is only valid on assistant messages")
+        );
+    }
+
+    #[test]
+    fn tool_result_tool_call_content_is_a_protocol_error() {
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::tool_result(
+                "c1",
+                vec![ContentBlock::ToolCall(ToolCall::new(
+                    "c2",
+                    "bash",
+                    "{}".to_string(),
+                ))],
+                false,
+            )],
+        );
+
+        let error =
+            chat_completion_request_body(&request).expect_err("tool result tool call is invalid");
+
+        assert!(
+            error
+                .to_string()
+                .contains("tool call content is only valid on assistant messages")
+        );
+    }
+
+    #[test]
+    fn orphan_reasoning_is_discarded_by_chat_projection() {
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![
+                ConversationItem::reasoning("thinking"),
+                ConversationItem::text(Role::User, "next"),
+            ],
+        );
+
+        let body = chat_completion_request_body(&request).expect("request should build");
+
+        assert_eq!(
+            body["messages"].as_array().expect("messages array").len(),
+            1
+        );
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "next");
+    }
+
+    #[test]
+    fn duplicate_tool_call_id_is_a_protocol_error() {
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::assistant_with_tool_calls(
+                String::new(),
+                vec![
+                    ToolCall::new("c1", "read", "{}"),
+                    ToolCall::new("c1", "write", "{}"),
+                ],
+            )],
+        );
+
+        let error =
+            chat_completion_request_body(&request).expect_err("duplicate call id should fail");
+
+        assert!(error.to_string().contains("duplicate tool call"));
+    }
+
+    #[test]
+    fn unknown_tool_result_is_a_protocol_error() {
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::tool_result(
+                "missing",
+                vec![ContentBlock::Text("output".into())],
+                false,
+            )],
+        );
+
+        let error =
+            chat_completion_request_body(&request).expect_err("unknown tool result should fail");
+
+        assert!(error.to_string().contains("unknown tool call"));
+    }
+
+    #[test]
+    fn unresolved_tool_call_at_request_end_is_a_protocol_error() {
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::assistant_with_tool_calls(
+                String::new(),
+                vec![ToolCall::new("c1", "bash", "{}")],
+            )],
+        );
+
+        let error =
+            chat_completion_request_body(&request).expect_err("unresolved tool call should fail");
+
+        assert!(error.to_string().contains("unresolved tool calls"));
     }
 }

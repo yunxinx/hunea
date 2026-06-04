@@ -1,6 +1,6 @@
 //! Tool loop runtime 的 provider streaming 与工具轮次编排入口。
 
-use provider_protocol::{Message, PromptRequest, ProviderClient};
+use provider_protocol::{ContentBlock, ConversationItem, PromptRequest, ProviderClient};
 use tokio_util::sync::CancellationToken;
 use tool_runtime::ToolExecutorRegistry;
 
@@ -22,7 +22,9 @@ use state::{
     RuntimeTurnState, runtime_tool_activity_update_duplicates_tool_arguments,
     runtime_tool_activity_update_token_text,
 };
-use streaming::{append_provider_context_message, stream_provider_turn};
+use streaming::{
+    append_provider_context_item, append_provider_context_items, stream_provider_turn,
+};
 
 pub use types::{
     ToolLoopClock, ToolLoopCompletion, ToolLoopOptions, ToolLoopProgress, ToolLoopResponse,
@@ -41,7 +43,7 @@ where
     C: ProviderClient + ?Sized,
     F: FnMut(ToolLoopProgress) + Send,
 {
-    if request.messages.is_empty() {
+    if request.items.is_empty() {
         return Err(ToolLoopError::EmptyPrompt);
     }
     if cancellation.is_cancelled() {
@@ -53,11 +55,11 @@ where
     let mut state = RuntimeTurnState::new(request.model.clone());
     let clock = options.clock.clone();
     let mut tool_turns = 0usize;
-    let mut appended_messages = Vec::new();
+    let mut appended_items = Vec::new();
 
     loop {
         let prompt = request.clone();
-        let provider_response = stream_provider_turn(
+        let provider_completion = stream_provider_turn(
             client,
             prompt,
             cancellation,
@@ -66,15 +68,14 @@ where
             &mut on_progress,
         )
         .await?;
-        state.capture_turn_response(&provider_response);
-        let tool_calls = provider_response.tool_calls.clone();
-        if !provider_response.finish_reason.is_tool_call() || tool_calls.is_empty() {
-            append_provider_context_message(
-                provider_response.message,
-                &mut appended_messages,
+        let tool_calls = extract_tool_calls(&provider_completion.items);
+        if !provider_completion.finish_reason.is_tool_call() || tool_calls.is_empty() {
+            append_provider_context_items(
+                &provider_completion.items,
+                &mut appended_items,
                 &mut on_progress,
             );
-            return Ok(state.finish_at(clock.now(), appended_messages));
+            return Ok(state.finish_at(clock.now(), appended_items));
         }
 
         if let Some(max_turns) = options.tool_max_turns
@@ -83,16 +84,18 @@ where
             return Err(ToolLoopError::ToolTurnLimit { max_turns });
         }
         tool_turns = tool_turns.saturating_add(1);
-        request.messages.push(provider_response.message.clone());
-        append_provider_context_message(
-            provider_response.message,
-            &mut appended_messages,
+        request
+            .items
+            .extend(provider_completion.items.iter().cloned());
+        append_provider_context_items(
+            &provider_completion.items,
+            &mut appended_items,
             &mut on_progress,
         );
 
         let mut tool_result_batch = Vec::new();
-        for call in tool_calls {
-            let activity = runtime_tool_activity_from_call(&call, &tool_definitions);
+        for call in &tool_calls {
+            let activity = runtime_tool_activity_from_call(call, &tool_definitions);
             on_progress(ToolLoopProgress::ToolActivityStarted { activity });
             let mut tool_call_context = ToolCallExecutionContext {
                 executor: &executor,
@@ -104,12 +107,12 @@ where
                 state: &mut state,
             };
             let execution = if cancellation.is_cancelled() {
-                interrupted_tool_execution(&call)
+                interrupted_tool_execution(call)
             } else {
-                execute_tool_call(&call, &mut tool_call_context, &mut on_progress).await
+                execute_tool_call(call, &mut tool_call_context, &mut on_progress).await
             };
             let update = runtime_tool_activity_update_from_result(
-                &call,
+                call,
                 &execution.raw_result,
                 execution.processed_error.as_ref(),
                 &tool_definitions,
@@ -126,42 +129,51 @@ where
                 clock.now(),
                 &mut on_progress,
             );
-            let tool_result_message = Message::tool_result(execution.provider_result);
-            tool_result_batch.push((tool_result_message, execution.raw_result.terminate));
+            let tool_result_item = ConversationItem::tool_result(
+                execution.provider_result.call_id.clone(),
+                vec![ContentBlock::Text(
+                    execution.provider_result.content.clone(),
+                )],
+                execution.provider_result.is_error,
+            );
+            tool_result_batch.push((tool_result_item, execution.raw_result.terminate));
         }
 
         let should_terminate_after_batch = tool_result_batch
             .iter()
             .all(|(_, should_terminate)| *should_terminate);
-        for (tool_result_message, _) in tool_result_batch {
+        for (tool_result_item, _) in tool_result_batch {
             if should_terminate_after_batch {
-                append_provider_context_message(
-                    tool_result_message,
-                    &mut appended_messages,
+                append_provider_context_item(
+                    tool_result_item,
+                    &mut appended_items,
                     &mut on_progress,
                 );
                 continue;
             }
-            let provider_result_content = tool_result_message
-                .first_tool_result()
-                .expect("runtime-created tool result messages should contain a tool result")
-                .content
-                .as_str();
-            state.observe_tool_result_input(provider_result_content, clock.now(), &mut on_progress);
-            request.messages.push(tool_result_message.clone());
-            append_provider_context_message(
-                tool_result_message,
-                &mut appended_messages,
+            let provider_result_content = tool_result_item.text_content();
+            state.observe_tool_result_input(
+                &provider_result_content,
+                clock.now(),
                 &mut on_progress,
             );
+            request.items.push(tool_result_item.clone());
+            append_provider_context_item(tool_result_item, &mut appended_items, &mut on_progress);
         }
         if cancellation.is_cancelled() {
             return Err(ToolLoopError::Cancelled);
         }
         if should_terminate_after_batch {
-            return Ok(state.finish_at(clock.now(), appended_messages));
+            return Ok(state.finish_at(clock.now(), appended_items));
         }
     }
+}
+
+fn extract_tool_calls(items: &[ConversationItem]) -> Vec<provider_protocol::ToolCall> {
+    items
+        .iter()
+        .flat_map(|item| item.tool_calls().cloned())
+        .collect()
 }
 
 #[cfg(test)]
@@ -173,9 +185,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use provider_protocol::{
-        Message, MessageRole, ModelDescriptor, PromptRequest, PromptResponse, ProviderCapabilities,
-        ProviderClient, ProviderError, ProviderFuture, StreamEvent, StreamEventSink, TokenUsage,
-        ToolCall,
+        ContentBlock, ConversationItem, ModelDescriptor, PromptCompletion, PromptRequest,
+        ProviderCapabilities, ProviderClient, ProviderError, ProviderFuture, Role, StreamEvent,
+        StreamEventSink, TokenUsage, ToolCall,
     };
     use runtime_domain::token_count::StreamingTokenProgress;
     use tokio_util::sync::CancellationToken;
@@ -188,6 +200,48 @@ mod tests {
 
     use super::{ToolLoopClock, ToolLoopOptions, ToolLoopProgress, run_tool_loop};
 
+    fn text_completion(role: Role, text: &str) -> PromptCompletion {
+        PromptCompletion::new(
+            vec![ConversationItem::text(role, text)],
+            provider_protocol::FinishReason::Stop,
+            None,
+        )
+    }
+
+    fn text_completion_with_usage(role: Role, text: &str, usage: TokenUsage) -> PromptCompletion {
+        PromptCompletion::new(
+            vec![ConversationItem::text(role, text)],
+            provider_protocol::FinishReason::Stop,
+            Some(usage),
+        )
+    }
+
+    fn tool_call_completion(text: String, calls: Vec<ToolCall>) -> PromptCompletion {
+        PromptCompletion::new(
+            vec![ConversationItem::assistant_with_tool_calls(text, calls)],
+            provider_protocol::FinishReason::ToolCalls,
+            None,
+        )
+    }
+
+    fn tool_call_completion_with_usage(
+        text: String,
+        calls: Vec<ToolCall>,
+        usage: TokenUsage,
+    ) -> PromptCompletion {
+        PromptCompletion::new(
+            vec![ConversationItem::assistant_with_tool_calls(text, calls)],
+            provider_protocol::FinishReason::ToolCalls,
+            Some(usage),
+        )
+    }
+
+    fn has_tool_result(items: &[ConversationItem]) -> bool {
+        items
+            .iter()
+            .any(|item| matches!(item, ConversationItem::ToolResult { .. }))
+    }
+
     struct FakeProvider {
         calls: Mutex<usize>,
     }
@@ -197,33 +251,20 @@ mod tests {
             &'a self,
             _request: PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
-        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
                 let mut calls = self.calls.lock().expect("fake lock should not poison");
                 *calls += 1;
                 if *calls == 1 {
-                    let call = ToolCall::new("call-1", "echo", serde_json::json!({ "text": "hi" }));
+                    let call = ToolCall::new("call-1", "echo", r#"{"text":"hi"}"#);
                     sink.emit(StreamEvent::TextDelta("checking".to_string()));
-                    let response = PromptResponse::new(
-                        Message::assistant_with_tool_calls(
-                            "checking".to_string(),
-                            vec![call.clone()],
-                        ),
-                        provider_protocol::FinishReason::ToolCalls,
-                        None,
-                        vec![call],
-                    );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    let response = tool_call_completion("checking".to_string(), vec![call]);
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 } else {
                     sink.emit(StreamEvent::TextDelta("done".to_string()));
-                    let response = PromptResponse::new(
-                        Message::text(MessageRole::Assistant, "done"),
-                        provider_protocol::FinishReason::Stop,
-                        None,
-                        Vec::new(),
-                    );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    let response = text_completion(Role::Assistant, "done");
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 }
             })
@@ -247,9 +288,9 @@ mod tests {
             &'a self,
             _request: PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
-        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
-                sink.emit(StreamEvent::MessageStarted);
+                sink.emit(StreamEvent::TurnStarted);
                 sink.emit(StreamEvent::TextDelta("done".to_string()));
                 sink.emit(StreamEvent::UsageUpdated(TokenUsage::new(
                     None,
@@ -261,13 +302,12 @@ mod tests {
                     Some(5),
                     None,
                 )));
-                let response = PromptResponse::new(
-                    Message::text(MessageRole::Assistant, "done"),
-                    provider_protocol::FinishReason::Stop,
-                    Some(TokenUsage::new(None, Some(5), None)),
-                    Vec::new(),
+                let response = text_completion_with_usage(
+                    Role::Assistant,
+                    "done",
+                    TokenUsage::new(None, Some(5), None),
                 );
-                sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                sink.emit(StreamEvent::TurnCompleted(response.clone()));
                 Ok(response)
             })
         }
@@ -290,19 +330,14 @@ mod tests {
             &'a self,
             _request: PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
-        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
                 tokio::time::sleep(Duration::from_millis(40)).await;
-                sink.emit(StreamEvent::MessageStarted);
+                sink.emit(StreamEvent::TurnStarted);
                 tokio::time::sleep(Duration::from_millis(40)).await;
                 sink.emit(StreamEvent::TextDelta("done".to_string()));
-                let response = PromptResponse::new(
-                    Message::text(MessageRole::Assistant, "done"),
-                    provider_protocol::FinishReason::Stop,
-                    None,
-                    Vec::new(),
-                );
-                sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                let response = text_completion(Role::Assistant, "done");
+                sink.emit(StreamEvent::TurnCompleted(response.clone()));
                 Ok(response)
             })
         }
@@ -325,31 +360,24 @@ mod tests {
             &'a self,
             request: PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
-        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
-                let has_tool_result = request
-                    .messages
-                    .iter()
-                    .any(|message| message.first_tool_result().is_some());
-                sink.emit(StreamEvent::MessageStarted);
+                let has_tool_result = has_tool_result(&request.items);
+                sink.emit(StreamEvent::TurnStarted);
                 if !has_tool_result {
-                    let call = ToolCall::new("call-1", "echo", serde_json::json!({ "text": "hi" }));
+                    let call = ToolCall::new("call-1", "echo", r#"{"text":"hi"}"#);
                     sink.emit(StreamEvent::TextDelta("hello world".to_string()));
                     sink.emit(StreamEvent::UsageUpdated(TokenUsage::new(
                         None,
                         Some(20),
                         None,
                     )));
-                    let response = PromptResponse::new(
-                        Message::assistant_with_tool_calls(
-                            "hello world".to_string(),
-                            vec![call.clone()],
-                        ),
-                        provider_protocol::FinishReason::ToolCalls,
-                        Some(TokenUsage::new(None, Some(20), None)),
+                    let response = tool_call_completion_with_usage(
+                        "hello world".to_string(),
                         vec![call],
+                        TokenUsage::new(None, Some(20), None),
                     );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 } else {
                     sink.emit(StreamEvent::TextDelta("done".to_string()));
@@ -358,13 +386,12 @@ mod tests {
                         Some(5),
                         None,
                     )));
-                    let response = PromptResponse::new(
-                        Message::text(MessageRole::Assistant, "done"),
-                        provider_protocol::FinishReason::Stop,
-                        Some(TokenUsage::new(None, Some(5), None)),
-                        Vec::new(),
+                    let response = text_completion_with_usage(
+                        Role::Assistant,
+                        "done",
+                        TokenUsage::new(None, Some(5), None),
                     );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 }
             })
@@ -388,41 +415,29 @@ mod tests {
             &'a self,
             request: PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
-        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
-                let has_tool_result = request
-                    .messages
-                    .iter()
-                    .any(|message| message.first_tool_result().is_some());
-                sink.emit(StreamEvent::MessageStarted);
+                let has_tool_result = has_tool_result(&request.items);
+                sink.emit(StreamEvent::TurnStarted);
                 if !has_tool_result {
-                    let call = ToolCall::new("call-1", "echo", serde_json::json!({ "text": "hi" }));
+                    let call = ToolCall::new("call-1", "echo", r#"{"text":"hi"}"#);
                     sink.emit(StreamEvent::TextDelta("hello world".to_string()));
                     sink.emit(StreamEvent::UsageUpdated(TokenUsage::new(
                         None,
                         Some(20),
                         None,
                     )));
-                    let response = PromptResponse::new(
-                        Message::assistant_with_tool_calls(
-                            "hello world".to_string(),
-                            vec![call.clone()],
-                        ),
-                        provider_protocol::FinishReason::ToolCalls,
-                        Some(TokenUsage::new(None, Some(20), None)),
+                    let response = tool_call_completion_with_usage(
+                        "hello world".to_string(),
                         vec![call],
+                        TokenUsage::new(None, Some(20), None),
                     );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 } else {
                     sink.emit(StreamEvent::TextDelta("done".to_string()));
-                    let response = PromptResponse::new(
-                        Message::text(MessageRole::Assistant, "done"),
-                        provider_protocol::FinishReason::Stop,
-                        None,
-                        Vec::new(),
-                    );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    let response = text_completion(Role::Assistant, "done");
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 }
             })
@@ -477,16 +492,13 @@ mod tests {
             &'a self,
             request: PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
-        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
-                let has_tool_result = request
-                    .messages
-                    .iter()
-                    .any(|message| message.first_tool_result().is_some());
-                sink.emit(StreamEvent::MessageStarted);
+                let has_tool_result = has_tool_result(&request.items);
+                sink.emit(StreamEvent::TurnStarted);
                 self.clock.advance(Duration::from_millis(10));
                 if !has_tool_result {
-                    let call = ToolCall::new("call-1", "echo", serde_json::json!({ "text": "hi" }));
+                    let call = ToolCall::new("call-1", "echo", r#"{"text":"hi"}"#);
                     sink.emit(StreamEvent::TextDelta("hello world".to_string()));
                     self.clock.advance(Duration::from_millis(30));
                     sink.emit(StreamEvent::UsageUpdated(TokenUsage::new(
@@ -494,16 +506,12 @@ mod tests {
                         Some(20),
                         None,
                     )));
-                    let response = PromptResponse::new(
-                        Message::assistant_with_tool_calls(
-                            "hello world".to_string(),
-                            vec![call.clone()],
-                        ),
-                        provider_protocol::FinishReason::ToolCalls,
-                        Some(TokenUsage::new(None, Some(20), None)),
+                    let response = tool_call_completion_with_usage(
+                        "hello world".to_string(),
                         vec![call],
+                        TokenUsage::new(None, Some(20), None),
                     );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 } else {
                     sink.emit(StreamEvent::TextDelta("done".to_string()));
@@ -513,13 +521,12 @@ mod tests {
                         Some(5),
                         None,
                     )));
-                    let response = PromptResponse::new(
-                        Message::text(MessageRole::Assistant, "done"),
-                        provider_protocol::FinishReason::Stop,
-                        Some(TokenUsage::new(None, Some(5), None)),
-                        Vec::new(),
+                    let response = text_completion_with_usage(
+                        Role::Assistant,
+                        "done",
+                        TokenUsage::new(None, Some(5), None),
                     );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 }
             })
@@ -545,17 +552,12 @@ mod tests {
             &'a self,
             _request: PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
-        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
-                sink.emit(StreamEvent::MessageStarted);
+                sink.emit(StreamEvent::TurnStarted);
                 self.clock.advance(Duration::from_millis(100));
-                let response = PromptResponse::new(
-                    Message::text(MessageRole::Assistant, "done"),
-                    provider_protocol::FinishReason::Stop,
-                    None,
-                    Vec::new(),
-                );
-                sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                let response = text_completion(Role::Assistant, "done");
+                sink.emit(StreamEvent::TurnCompleted(response.clone()));
                 Ok(response)
             })
         }
@@ -573,14 +575,14 @@ mod tests {
 
     struct MultiToolBatchProvider {
         calls: Mutex<usize>,
-        request_messages: Mutex<Vec<Vec<Message>>>,
+        request_items: Mutex<Vec<Vec<ConversationItem>>>,
     }
 
     impl MultiToolBatchProvider {
         fn new() -> Self {
             Self {
                 calls: Mutex::new(0),
-                request_messages: Mutex::new(Vec::new()),
+                request_items: Mutex::new(Vec::new()),
             }
         }
     }
@@ -590,48 +592,38 @@ mod tests {
             &'a self,
             request: PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
-        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
-                self.request_messages
+                self.request_items
                     .lock()
-                    .expect("request messages lock should not poison")
-                    .push(request.messages.clone());
+                    .expect("request items lock should not poison")
+                    .push(request.items.clone());
                 let call_count = {
                     let mut calls = self.calls.lock().expect("fake lock should not poison");
                     *calls += 1;
                     *calls
                 };
-                sink.emit(StreamEvent::MessageStarted);
+                sink.emit(StreamEvent::TurnStarted);
                 if call_count == 1 {
                     let terminating_call = ToolCall::new(
                         "call-terminate",
                         "echo",
-                        serde_json::json!({ "terminate": true }),
+                        r#"{"terminate":true}"#.to_string(),
                     );
                     let continuing_call = ToolCall::new(
                         "call-continue",
                         "echo",
-                        serde_json::json!({ "terminate": false }),
+                        r#"{"terminate":false}"#.to_string(),
                     );
-                    let calls = vec![terminating_call.clone(), continuing_call.clone()];
+                    let calls = vec![terminating_call, continuing_call];
                     sink.emit(StreamEvent::TextDelta("checking".to_string()));
-                    let response = PromptResponse::new(
-                        Message::assistant_with_tool_calls("checking".to_string(), calls.clone()),
-                        provider_protocol::FinishReason::ToolCalls,
-                        None,
-                        calls,
-                    );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    let response = tool_call_completion("checking".to_string(), calls);
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 } else {
                     sink.emit(StreamEvent::TextDelta("done".to_string()));
-                    let response = PromptResponse::new(
-                        Message::text(MessageRole::Assistant, "done"),
-                        provider_protocol::FinishReason::Stop,
-                        None,
-                        Vec::new(),
-                    );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    let response = text_completion(Role::Assistant, "done");
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 }
             })
@@ -660,11 +652,12 @@ mod tests {
         calls: Mutex<usize>,
     }
 
-    fn write_arguments_for_token_tests() -> serde_json::Value {
+    fn write_arguments_for_token_tests() -> String {
         serde_json::json!({
             "path": "temp.md",
             "content": "generated write content ".repeat(80),
         })
+        .to_string()
     }
 
     impl ProviderClient for WriteArgumentStreamingProvider {
@@ -672,31 +665,25 @@ mod tests {
             &'a self,
             request: PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
-        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
-                let has_tool_result = request
-                    .messages
-                    .iter()
-                    .any(|message| message.first_tool_result().is_some());
+                let has_tool_result = has_tool_result(&request.items);
                 {
                     let mut calls = self.calls.lock().expect("fake lock should not poison");
                     *calls += 1;
                 }
-                sink.emit(StreamEvent::MessageStarted);
+                sink.emit(StreamEvent::TurnStarted);
                 if has_tool_result {
                     sink.emit(StreamEvent::TextDelta("done".to_string()));
-                    let response = PromptResponse::new(
-                        Message::text(MessageRole::Assistant, "done"),
-                        provider_protocol::FinishReason::Stop,
-                        None,
-                        Vec::new(),
-                    );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    let response = text_completion(Role::Assistant, "done");
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     return Ok(response);
                 }
 
                 let arguments = write_arguments_for_token_tests();
-                let content = arguments
+                let arguments_value: serde_json::Value =
+                    serde_json::from_str(&arguments).expect("valid JSON");
+                let content = arguments_value
                     .get("content")
                     .and_then(serde_json::Value::as_str)
                     .expect("write test arguments should contain content")
@@ -719,13 +706,8 @@ mod tests {
                     index: 0,
                     delta: r#""}"#.to_string(),
                 });
-                let response = PromptResponse::new(
-                    Message::assistant_with_tool_calls(String::new(), vec![call.clone()]),
-                    provider_protocol::FinishReason::ToolCalls,
-                    None,
-                    vec![call],
-                );
-                sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                let response = tool_call_completion(String::new(), vec![call]);
+                sink.emit(StreamEvent::TurnCompleted(response.clone()));
                 Ok(response)
             })
         }
@@ -746,26 +728,18 @@ mod tests {
             &'a self,
             request: PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
-        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
-                let has_tool_result = request
-                    .messages
-                    .iter()
-                    .any(|message| message.first_tool_result().is_some());
+                let has_tool_result = has_tool_result(&request.items);
                 {
                     let mut calls = self.calls.lock().expect("fake lock should not poison");
                     *calls += 1;
                 }
-                sink.emit(StreamEvent::MessageStarted);
+                sink.emit(StreamEvent::TurnStarted);
                 if has_tool_result {
                     sink.emit(StreamEvent::TextDelta("done".to_string()));
-                    let response = PromptResponse::new(
-                        Message::text(MessageRole::Assistant, "done"),
-                        provider_protocol::FinishReason::Stop,
-                        None,
-                        Vec::new(),
-                    );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    let response = text_completion(Role::Assistant, "done");
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     return Ok(response);
                 }
 
@@ -779,13 +753,8 @@ mod tests {
                     index: 0,
                     call: call.clone(),
                 });
-                let response = PromptResponse::new(
-                    Message::assistant_with_tool_calls(String::new(), vec![call.clone()]),
-                    provider_protocol::FinishReason::ToolCalls,
-                    None,
-                    vec![call],
-                );
-                sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                let response = tool_call_completion(String::new(), vec![call]);
+                sink.emit(StreamEvent::TurnCompleted(response.clone()));
                 Ok(response)
             })
         }
@@ -806,37 +775,24 @@ mod tests {
             &'a self,
             request: PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
-        ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+        ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
-                let has_tool_result = request
-                    .messages
-                    .iter()
-                    .any(|message| message.first_tool_result().is_some());
+                let has_tool_result = has_tool_result(&request.items);
                 {
                     let mut calls = self.calls.lock().expect("fake lock should not poison");
                     *calls += 1;
                 }
-                sink.emit(StreamEvent::MessageStarted);
+                sink.emit(StreamEvent::TurnStarted);
                 if has_tool_result {
                     sink.emit(StreamEvent::TextDelta("done".to_string()));
-                    let response = PromptResponse::new(
-                        Message::text(MessageRole::Assistant, "done"),
-                        provider_protocol::FinishReason::Stop,
-                        None,
-                        Vec::new(),
-                    );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    let response = text_completion(Role::Assistant, "done");
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     return Ok(response);
                 }
 
                 let call = ToolCall::new("call-write", "write", write_arguments_for_token_tests());
-                let response = PromptResponse::new(
-                    Message::assistant_with_tool_calls(String::new(), vec![call.clone()]),
-                    provider_protocol::FinishReason::ToolCalls,
-                    None,
-                    vec![call],
-                );
-                sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                let response = tool_call_completion(String::new(), vec![call]);
+                sink.emit(StreamEvent::TurnCompleted(response.clone()));
                 Ok(response)
             })
         }
@@ -1281,8 +1237,10 @@ mod tests {
         };
         let mut executor = ToolExecutorRegistry::new();
         executor.insert(EchoTool);
-        let request =
-            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::text(Role::User, "call echo")],
+        );
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
 
@@ -1297,7 +1255,13 @@ mod tests {
         .await
         .expect("runtime should complete");
 
-        assert_eq!(completion.response.content, "done");
+        let final_item = completion
+            .response
+            .items
+            .last()
+            .expect("final assistant item should be preserved");
+        assert_eq!(final_item.role(), Some(Role::Assistant));
+        assert_eq!(final_item.text_content(), "done");
         assert!(events.iter().any(|event| {
             matches!(event, ToolLoopProgress::AssistantDelta { content } if content == "checking")
         }));
@@ -1314,8 +1278,10 @@ mod tests {
         };
         let mut executor = ToolExecutorRegistry::new();
         executor.insert(FailingExecuteTool);
-        let request =
-            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::text(Role::User, "call echo")],
+        );
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
 
@@ -1333,21 +1299,25 @@ mod tests {
         .await
         .expect("runtime should complete");
 
-        let tool_result = completion.appended_messages[1]
-            .first_tool_result()
-            .expect("tool result should be appended");
-        assert!(tool_result.is_error);
+        let ConversationItem::ToolResult {
+            content: tool_result_content,
+            is_error: tool_result_is_error,
+            ..
+        } = &completion.response.items[1]
+        else {
+            panic!("tool result should be appended");
+        };
+        assert!(tool_result_is_error);
         assert_eq!(
-            tool_result.content,
+            tool_result_content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
             "before failure\n\nCommand exited with code 7"
-        );
-        assert_eq!(
-            tool_result
-                .details
-                .as_ref()
-                .and_then(|details| details.get("exit_code"))
-                .and_then(serde_json::Value::as_i64),
-            Some(7)
         );
 
         let raw_output = events.iter().find_map(|event| match event {
@@ -1378,37 +1348,23 @@ mod tests {
                 &'a self,
                 request: PromptRequest,
                 sink: &'a mut (dyn StreamEventSink + Send),
-            ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+            ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
                 Box::pin(async move {
                     let mut calls = self.calls.lock().expect("fake lock should not poison");
                     *calls += 1;
-                    if request
-                        .messages
-                        .iter()
-                        .any(|message| message.first_tool_result().is_some())
-                    {
-                        let response = PromptResponse::new(
-                            Message::text(MessageRole::Assistant, "done"),
-                            provider_protocol::FinishReason::Stop,
-                            None,
-                            Vec::new(),
-                        );
-                        sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    if has_tool_result(&request.items) {
+                        let response = text_completion(Role::Assistant, "done");
+                        sink.emit(StreamEvent::TurnCompleted(response.clone()));
                         return Ok(response);
                     }
 
                     let call = ToolCall::new(
                         "call-run",
                         "run",
-                        serde_json::json!({ "command": "cargo check" }),
+                        r#"{"command":"cargo check"}"#.to_string(),
                     );
-                    let response = PromptResponse::new(
-                        Message::assistant_with_tool_calls(String::new(), vec![call.clone()]),
-                        provider_protocol::FinishReason::ToolCalls,
-                        None,
-                        vec![call],
-                    );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    let response = tool_call_completion(String::new(), vec![call]);
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 })
             }
@@ -1431,7 +1387,7 @@ mod tests {
         executor.insert(TerminalProgressTool);
         let request = PromptRequest::new(
             "qwen3",
-            vec![Message::text(MessageRole::User, "run cargo check")],
+            vec![ConversationItem::text(Role::User, "run cargo check")],
         );
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
@@ -1447,7 +1403,13 @@ mod tests {
         .await
         .expect("runtime should complete");
 
-        assert_eq!(completion.response.content, "done");
+        let final_item = completion
+            .response
+            .items
+            .last()
+            .expect("final assistant item should be preserved");
+        assert_eq!(final_item.role(), Some(Role::Assistant));
+        assert_eq!(final_item.text_content(), "done");
         assert!(events.iter().any(|event| {
             matches!(
                 event,
@@ -1487,7 +1449,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_context_messages_emit_before_follow_up_provider_failure() {
+    async fn provider_context_items_emit_before_follow_up_provider_failure() {
         struct FailingFollowUpProvider {
             calls: Mutex<usize>,
         }
@@ -1497,20 +1459,14 @@ mod tests {
                 &'a self,
                 _request: PromptRequest,
                 sink: &'a mut (dyn StreamEventSink + Send),
-            ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+            ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
                 Box::pin(async move {
                     let mut calls = self.calls.lock().expect("fake lock should not poison");
                     *calls += 1;
                     if *calls == 1 {
-                        let call =
-                            ToolCall::new("call-1", "echo", serde_json::json!({ "text": "hi" }));
-                        let response = PromptResponse::new(
-                            Message::assistant_with_tool_calls(String::new(), vec![call.clone()]),
-                            provider_protocol::FinishReason::ToolCalls,
-                            None,
-                            vec![call],
-                        );
-                        sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                        let call = ToolCall::new("call-1", "echo", r#"{"text":"hi"}"#);
+                        let response = tool_call_completion(String::new(), vec![call]);
+                        sink.emit(StreamEvent::TurnCompleted(response.clone()));
                         Ok(response)
                     } else {
                         Err(ProviderError::Transport("connection dropped".to_string()))
@@ -1534,8 +1490,10 @@ mod tests {
         };
         let mut executor = ToolExecutorRegistry::new();
         executor.insert(EchoTool);
-        let request =
-            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::text(Role::User, "call echo")],
+        );
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
 
@@ -1554,17 +1512,19 @@ mod tests {
             error,
             super::ToolLoopError::Provider(ProviderError::Transport(_))
         ));
-        let committed_roles = events
+        let committed_kinds = events
             .iter()
             .filter_map(|event| match event {
-                ToolLoopProgress::ProviderContextMessage { message } => Some(message.role),
+                ToolLoopProgress::ProviderContextItem { item } => match item {
+                    item if item.role() == Some(Role::Assistant) => Some("assistant"),
+                    item if item.role() == Some(Role::User) => Some("user"),
+                    ConversationItem::ToolResult { .. } => Some("tool_result"),
+                    _ => None,
+                },
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            committed_roles,
-            vec![MessageRole::Assistant, MessageRole::Tool]
-        );
+        assert_eq!(committed_kinds, vec!["assistant", "tool_result"]);
         assert_eq!(*provider.calls.lock().unwrap(), 2);
     }
 
@@ -1579,22 +1539,14 @@ mod tests {
                 &'a self,
                 _request: PromptRequest,
                 sink: &'a mut (dyn StreamEventSink + Send),
-            ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+            ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
                 Box::pin(async move {
                     let mut calls = self.calls.lock().expect("fake lock should not poison");
                     *calls += 1;
-                    let first = ToolCall::new("call-1", "cancel_once", serde_json::json!({}));
-                    let second = ToolCall::new("call-2", "cancel_once", serde_json::json!({}));
-                    let response = PromptResponse::new(
-                        Message::assistant_with_tool_calls(
-                            String::new(),
-                            vec![first.clone(), second.clone()],
-                        ),
-                        provider_protocol::FinishReason::ToolCalls,
-                        None,
-                        vec![first, second],
-                    );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    let first = ToolCall::new("call-1", "cancel_once", "{}");
+                    let second = ToolCall::new("call-2", "cancel_once", "{}");
+                    let response = tool_call_completion(String::new(), vec![first, second]);
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 })
             }
@@ -1639,7 +1591,7 @@ mod tests {
         executor.insert(CancelOnceTool(Arc::clone(&executions)));
         let request = PromptRequest::new(
             "qwen3",
-            vec![Message::text(MessageRole::User, "call tools")],
+            vec![ConversationItem::text(Role::User, "call tools")],
         );
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
@@ -1658,25 +1610,39 @@ mod tests {
         assert!(matches!(error, super::ToolLoopError::Cancelled));
         assert_eq!(*provider.calls.lock().unwrap(), 1);
         assert_eq!(*executions.lock().unwrap(), 1);
-        let committed_messages = events
+        let committed_items = events
             .iter()
             .filter_map(|event| match event {
-                ToolLoopProgress::ProviderContextMessage { message } => Some(message),
+                ToolLoopProgress::ProviderContextItem { item } => Some(item),
                 _ => None,
             })
             .collect::<Vec<_>>();
+        assert_eq!(committed_items.len(), 3);
+        assert_eq!(committed_items[0].role(), Some(Role::Assistant));
+        assert!(matches!(
+            committed_items[1],
+            ConversationItem::ToolResult { .. }
+        ));
+        let ConversationItem::ToolResult {
+            is_error: interrupted_is_error,
+            content: interrupted_content,
+            ..
+        } = &committed_items[2]
+        else {
+            panic!("interrupted tool should have a synthetic result");
+        };
+        assert!(interrupted_is_error);
         assert_eq!(
-            committed_messages
+            interrupted_content
                 .iter()
-                .map(|message| message.role)
-                .collect::<Vec<_>>(),
-            vec![MessageRole::Assistant, MessageRole::Tool, MessageRole::Tool]
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            "Tool execution interrupted"
         );
-        let interrupted_result = committed_messages[2]
-            .first_tool_result()
-            .expect("interrupted tool should have a synthetic result");
-        assert!(interrupted_result.is_error);
-        assert_eq!(interrupted_result.content, "Tool execution interrupted");
     }
 
     #[tokio::test]
@@ -1684,7 +1650,7 @@ mod tests {
         let provider = UsageProvider;
         let request = PromptRequest::new(
             "qwen3",
-            vec![Message::text(MessageRole::User, "count tokens")],
+            vec![ConversationItem::text(Role::User, "count tokens")],
         );
         let cancellation = CancellationToken::new();
 
@@ -1711,7 +1677,8 @@ mod tests {
     #[tokio::test]
     async fn request_latency_starts_before_first_stream_frame() {
         let provider = DelayedFirstTokenProvider;
-        let request = PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "hello")]);
+        let request =
+            PromptRequest::new("qwen3", vec![ConversationItem::text(Role::User, "hello")]);
         let cancellation = CancellationToken::new();
 
         let completion = run_tool_loop(
@@ -1740,8 +1707,10 @@ mod tests {
         };
         let mut executor = ToolExecutorRegistry::new();
         executor.insert(EchoTool);
-        let request =
-            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::text(Role::User, "call echo")],
+        );
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
 
@@ -1768,8 +1737,10 @@ mod tests {
         };
         let mut executor = ToolExecutorRegistry::new();
         executor.insert(LargeOutputTool);
-        let request =
-            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::text(Role::User, "call echo")],
+        );
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
 
@@ -1828,7 +1799,7 @@ mod tests {
         executor.insert(WriteLikeTool);
         let request = PromptRequest::new(
             "qwen3",
-            vec![Message::text(MessageRole::User, "write a file")],
+            vec![ConversationItem::text(Role::User, "write a file")],
         );
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
@@ -1846,7 +1817,7 @@ mod tests {
 
         let first_provider_context_index = events
             .iter()
-            .position(|event| matches!(event, ToolLoopProgress::ProviderContextMessage { .. }))
+            .position(|event| matches!(event, ToolLoopProgress::ProviderContextItem { .. }))
             .expect("assistant tool-call message should be committed");
         let token_progress_before_tool_execution = events[..first_provider_context_index]
             .iter()
@@ -1873,7 +1844,7 @@ mod tests {
         executor.insert(AskWriteLikeTool);
         let request = PromptRequest::new(
             "qwen3",
-            vec![Message::text(MessageRole::User, "write a file")],
+            vec![ConversationItem::text(Role::User, "write a file")],
         );
         let cancellation = CancellationToken::new();
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -1939,7 +1910,7 @@ mod tests {
         executor.insert(AskWriteLikeTool);
         let request = PromptRequest::new(
             "qwen3",
-            vec![Message::text(MessageRole::User, "write a file")],
+            vec![ConversationItem::text(Role::User, "write a file")],
         );
         let cancellation = CancellationToken::new();
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -2005,7 +1976,7 @@ mod tests {
         executor.insert(WriteLikeTool);
         let request = PromptRequest::new(
             "qwen3",
-            vec![Message::text(MessageRole::User, "write a file")],
+            vec![ConversationItem::text(Role::User, "write a file")],
         );
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
@@ -2023,7 +1994,7 @@ mod tests {
 
         let first_provider_context_index = events
             .iter()
-            .position(|event| matches!(event, ToolLoopProgress::ProviderContextMessage { .. }))
+            .position(|event| matches!(event, ToolLoopProgress::ProviderContextItem { .. }))
             .expect("assistant tool-call message should be committed");
         let token_progress_before_tool_execution = events[..first_provider_context_index]
             .iter()
@@ -2066,18 +2037,13 @@ mod tests {
                 &'a self,
                 _request: PromptRequest,
                 sink: &'a mut (dyn StreamEventSink + Send),
-            ) -> ProviderFuture<'a, Result<PromptResponse, ProviderError>> {
+            ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
                 Box::pin(async move {
-                    sink.emit(StreamEvent::MessageStarted);
+                    sink.emit(StreamEvent::TurnStarted);
                     sink.emit(StreamEvent::TextDelta("hello".to_string()));
                     sink.emit(StreamEvent::TextDelta(" world".to_string()));
-                    let response = PromptResponse::new(
-                        Message::text(MessageRole::Assistant, "hello world"),
-                        provider_protocol::FinishReason::Stop,
-                        None,
-                        Vec::new(),
-                    );
-                    sink.emit(StreamEvent::MessageCompleted(response.clone()));
+                    let response = text_completion(Role::Assistant, "hello world");
+                    sink.emit(StreamEvent::TurnCompleted(response.clone()));
                     Ok(response)
                 })
             }
@@ -2094,7 +2060,8 @@ mod tests {
         }
 
         let provider = SplitDeltaProvider;
-        let request = PromptRequest::new("gpt-4o", vec![Message::text(MessageRole::User, "hello")]);
+        let request =
+            PromptRequest::new("gpt-4o", vec![ConversationItem::text(Role::User, "hello")]);
         let cancellation = CancellationToken::new();
 
         let completion = run_tool_loop(
@@ -2123,7 +2090,7 @@ mod tests {
         executor.insert(EchoTool);
         let request = PromptRequest::new(
             "gpt-4o",
-            vec![Message::text(MessageRole::User, "call echo")],
+            vec![ConversationItem::text(Role::User, "call echo")],
         );
         let cancellation = CancellationToken::new();
 
@@ -2153,7 +2120,7 @@ mod tests {
         executor.insert(EchoTool);
         let request = PromptRequest::new(
             "gpt-4o",
-            vec![Message::text(MessageRole::User, "call echo")],
+            vec![ConversationItem::text(Role::User, "call echo")],
         );
         let cancellation = CancellationToken::new();
 
@@ -2193,7 +2160,7 @@ mod tests {
         });
         let request = PromptRequest::new(
             "gpt-4o",
-            vec![Message::text(MessageRole::User, "call echo")],
+            vec![ConversationItem::text(Role::User, "call echo")],
         );
         let cancellation = CancellationToken::new();
 
@@ -2226,7 +2193,8 @@ mod tests {
         let provider = ResponseOnlyTimedTextProvider {
             clock: clock.clone(),
         };
-        let request = PromptRequest::new("gpt-4o", vec![Message::text(MessageRole::User, "hello")]);
+        let request =
+            PromptRequest::new("gpt-4o", vec![ConversationItem::text(Role::User, "hello")]);
         let cancellation = CancellationToken::new();
 
         let completion = run_tool_loop(
@@ -2259,7 +2227,7 @@ mod tests {
         executor.insert(ConditionalTerminatingTool);
         let request = PromptRequest::new(
             "qwen3",
-            vec![Message::text(MessageRole::User, "call both tools")],
+            vec![ConversationItem::text(Role::User, "call both tools")],
         );
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
@@ -2275,44 +2243,44 @@ mod tests {
         .await
         .expect("runtime should complete");
 
-        assert_eq!(completion.response.content, "done");
+        let final_item = completion
+            .response
+            .items
+            .last()
+            .expect("final assistant item should be preserved");
+        assert_eq!(final_item.role(), Some(Role::Assistant));
+        assert_eq!(final_item.text_content(), "done");
         assert_eq!(*provider.calls.lock().unwrap(), 2);
-        assert_eq!(
-            completion
-                .appended_messages
-                .iter()
-                .map(|message| message.role)
-                .collect::<Vec<_>>(),
-            vec![
-                MessageRole::Assistant,
-                MessageRole::Tool,
-                MessageRole::Tool,
-                MessageRole::Assistant,
-            ]
-        );
-        assert_eq!(
-            completion.appended_messages[1]
-                .first_tool_result()
-                .expect("first tool result should be preserved")
-                .call_id,
-            "call-terminate"
-        );
-        assert_eq!(
-            completion.appended_messages[2]
-                .first_tool_result()
-                .expect("second tool result should be preserved")
-                .call_id,
-            "call-continue"
-        );
+        assert_eq!(completion.response.items.len(), 4);
+        assert_eq!(completion.response.items[0].role(), Some(Role::Assistant));
+        let ConversationItem::ToolResult {
+            call_id: first_call_id,
+            ..
+        } = &completion.response.items[1]
+        else {
+            panic!("first tool result should be preserved");
+        };
+        assert_eq!(first_call_id, "call-terminate");
+        let ConversationItem::ToolResult {
+            call_id: second_call_id,
+            ..
+        } = &completion.response.items[2]
+        else {
+            panic!("second tool result should be preserved");
+        };
+        assert_eq!(second_call_id, "call-continue");
+        assert_eq!(completion.response.items[3].role(), Some(Role::Assistant));
 
-        let request_messages = provider
-            .request_messages
+        let request_items = provider
+            .request_items
             .lock()
-            .expect("request messages lock should not poison");
-        let second_request_tool_result_ids = request_messages[1]
+            .expect("request items lock should not poison");
+        let second_request_tool_result_ids = request_items[1]
             .iter()
-            .filter_map(|message| message.first_tool_result())
-            .map(|result| result.call_id.as_str())
+            .filter_map(|item| match item {
+                ConversationItem::ToolResult { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             second_request_tool_result_ids,
@@ -2333,8 +2301,10 @@ mod tests {
         };
         let mut executor = ToolExecutorRegistry::new();
         executor.insert(TerminatingTool);
-        let request =
-            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::text(Role::User, "call echo")],
+        );
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
 
@@ -2349,20 +2319,21 @@ mod tests {
         .await
         .expect("runtime should complete");
 
-        assert_eq!(completion.appended_messages.len(), 2);
-        assert_eq!(completion.appended_messages[0].role, MessageRole::Assistant);
-        assert_eq!(completion.appended_messages[1].role, MessageRole::Tool);
-        assert_eq!(
-            completion.appended_messages[0].tool_calls()[0].call_id,
-            "call-1"
-        );
-        assert_eq!(
-            completion.appended_messages[1]
-                .first_tool_result()
-                .expect("terminating tool result should be preserved")
-                .call_id,
-            "call-1"
-        );
+        assert_eq!(completion.response.items.len(), 2);
+        assert_eq!(completion.response.items[0].role(), Some(Role::Assistant));
+        let assistant_call = completion.response.items[0]
+            .tool_calls()
+            .next()
+            .expect("assistant tool call should be preserved");
+        assert_eq!(assistant_call.call_id, "call-1");
+        let ConversationItem::ToolResult {
+            call_id: result_call_id,
+            ..
+        } = &completion.response.items[1]
+        else {
+            panic!("terminating tool result should be preserved");
+        };
+        assert_eq!(result_call_id, "call-1");
         assert!(
             !events
                 .iter()
@@ -2400,7 +2371,7 @@ mod tests {
         executor.insert(DeniedTool(Arc::clone(&executions)));
         let request = PromptRequest::new(
             "qwen3",
-            vec![Message::text(MessageRole::User, "call denied")],
+            vec![ConversationItem::text(Role::User, "call denied")],
         );
         let cancellation = CancellationToken::new();
         let mut events = Vec::new();
@@ -2432,8 +2403,10 @@ mod tests {
         };
         let mut executor = ToolExecutorRegistry::new();
         executor.insert(AskEchoTool);
-        let request =
-            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::text(Role::User, "call echo")],
+        );
         let cancellation = CancellationToken::new();
         let wall_start = Instant::now();
 
@@ -2474,8 +2447,10 @@ mod tests {
         };
         let mut executor = ToolExecutorRegistry::new();
         executor.insert(AskPreviewTool);
-        let request =
-            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::text(Role::User, "call echo")],
+        );
         let cancellation = CancellationToken::new();
         let captured_preview = Arc::new(Mutex::new(None));
 
@@ -2512,8 +2487,10 @@ mod tests {
         };
         let mut executor = ToolExecutorRegistry::new();
         executor.insert(SlowPreviewTool);
-        let request =
-            PromptRequest::new("qwen3", vec![Message::text(MessageRole::User, "call echo")]);
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![ConversationItem::text(Role::User, "call echo")],
+        );
         let cancellation = CancellationToken::new();
         let captured_preview = Arc::new(Mutex::new(None));
         let timer_fired = Arc::new(AtomicBool::new(false));

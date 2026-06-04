@@ -2,17 +2,40 @@
 
 use std::path::Path;
 
-use runtime_domain::session::ChatMessage;
+/// TUI 内部保存的用户输入源消息。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ComposerSourceMessage {
+    content: String,
+}
 
-/// `chat_message_from_composer_text` 保留用户输入原文。
+impl ComposerSourceMessage {
+    /// 创建用户输入源消息。
+    pub(crate) fn user_text(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+        }
+    }
+
+    /// 返回原始用户输入文本。
+    pub(crate) fn content(&self) -> &str {
+        &self.content
+    }
+
+    /// 消费并返回原始用户输入文本。
+    pub(crate) fn into_content(self) -> String {
+        self.content
+    }
+}
+
+/// `source_message_from_composer_text` 保留用户输入原文。
 ///
 /// `@path` 是给模型看的路径引用，不在 TUI 层展开文件内容；模型需要内容时应显式调用
 /// `read` 工具，避免把文件快照和用户指令混进同一个 prompt。
-pub(crate) fn chat_message_from_composer_text(
+pub(crate) fn source_message_from_composer_text(
     text: &str,
     _current_dir: impl AsRef<Path>,
-) -> ChatMessage {
-    ChatMessage::user(text.to_string())
+) -> ComposerSourceMessage {
+    ComposerSourceMessage::user_text(text)
 }
 
 #[cfg(test)]
@@ -23,7 +46,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::chat_message_from_composer_text;
+    use super::{ComposerSourceMessage, source_message_from_composer_text};
 
     #[test]
     fn composer_message_builder_preserves_at_file_references_as_text() {
@@ -31,10 +54,9 @@ mod tests {
         fs::create_dir_all(root.join("src")).expect("create src dir");
         fs::write(root.join("src/code.py"), b"print('hi')\n").expect("write text fixture");
 
-        let message = chat_message_from_composer_text("review @src/code.py", &root);
+        let message = source_message_from_composer_text("review @src/code.py", &root);
 
-        assert_eq!(message.content, "review @src/code.py");
-        assert!(message.blocks.is_none());
+        assert_eq!(message.content(), "review @src/code.py");
         cleanup(&root);
     }
 
@@ -45,11 +67,17 @@ mod tests {
         fs::write(root.join("assets/sample.png"), [0x89, b'P', b'N', b'G'])
             .expect("write image fixture");
 
-        let message = chat_message_from_composer_text("inspect @assets/sample.png", &root);
+        let message = source_message_from_composer_text("inspect @assets/sample.png", &root);
 
-        assert_eq!(message.content, "inspect @assets/sample.png");
-        assert!(message.blocks.is_none());
+        assert_eq!(message.content(), "inspect @assets/sample.png");
         cleanup(&root);
+    }
+
+    #[test]
+    fn composer_source_message_can_return_owned_content() {
+        let message = ComposerSourceMessage::user_text("hello");
+
+        assert_eq!(message.into_content(), "hello");
     }
 
     fn temp_root(prefix: &str) -> PathBuf {

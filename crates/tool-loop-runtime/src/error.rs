@@ -8,7 +8,7 @@ pub enum ToolLoopError {
     Provider(#[from] ProviderError),
     #[error("tool loop cancelled")]
     Cancelled,
-    #[error("request received no messages")]
+    #[error("request received no items")]
     EmptyPrompt,
     #[error("tool turn limit reached ({max_turns})")]
     ToolTurnLimit { max_turns: usize },

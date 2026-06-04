@@ -1,4 +1,4 @@
-use provider_protocol::ToolCall as AiToolCall;
+use provider_protocol::{ToolCall as AiToolCall, ToolCallArgumentsError};
 use runtime_domain::session::{
     RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityLocation,
     RuntimeToolActivityRawValue, RuntimeToolActivityStatus, RuntimeToolActivityUpdate,
@@ -16,23 +16,23 @@ pub fn runtime_tool_activity_from_call(
     tool_definitions: &ToolRegistry,
 ) -> RuntimeToolActivity {
     let definition = tool_definitions.definition(&call.name);
+    let parsed = ParsedArguments::from_call(call);
+    let arguments = parsed.value();
     let content = if runtime_kind_for(definition) == RuntimeToolKind::Execute {
         vec![RuntimeToolActivityContent::Terminal {
             terminal_id: call.call_id.clone(),
         }]
     } else {
-        vec![RuntimeToolActivityContent::Text(tool_input_summary(
-            &call.arguments,
-        ))]
+        vec![RuntimeToolActivityContent::Text(parsed.input_summary())]
     };
 
     RuntimeToolActivity {
         activity_id: call.call_id.clone(),
-        title: tool_title_for(&call.name, definition, &call.arguments),
+        title: tool_title_for(&call.name, definition, arguments),
         kind: runtime_kind_for(definition),
         status: RuntimeToolActivityStatus::InProgress,
         content,
-        locations: tool_locations_for(&call.arguments),
+        locations: tool_locations_for(arguments),
         raw_input: Some(RuntimeToolActivityRawValue::from(call.arguments.clone())),
         raw_output: None,
     }
@@ -46,6 +46,8 @@ pub fn runtime_tool_activity_update_from_result(
     tool_definitions: &ToolRegistry,
 ) -> RuntimeToolActivityUpdate {
     let definition = tool_definitions.definition(&call.name);
+    let parsed = ParsedArguments::from_call(call);
+    let arguments = parsed.value();
     let status = Some(if processed_error.is_some() || result.is_error {
         RuntimeToolActivityStatus::Failed
     } else {
@@ -55,7 +57,7 @@ pub fn runtime_tool_activity_update_from_result(
         Some(processed) => {
             RuntimeToolActivityContent::Text(format!("Failed: {}", processed.display_reason))
         }
-        None => runtime_tool_activity_content_for_result(&call.arguments, result, definition),
+        None => runtime_tool_activity_content_for_result(arguments, result, definition),
     };
     let raw_input = processed_error
         .is_none()
@@ -70,11 +72,11 @@ pub fn runtime_tool_activity_update_from_result(
 
     RuntimeToolActivityUpdate {
         activity_id: call.call_id.clone(),
-        title: Some(tool_title_for(&call.name, definition, &call.arguments)),
+        title: Some(tool_title_for(&call.name, definition, arguments)),
         kind: Some(runtime_kind_for(definition)),
         status,
         content: Some(vec![content]),
-        locations: Some(tool_locations_for(&call.arguments)),
+        locations: Some(tool_locations_for(arguments)),
         raw_input,
         raw_output,
     }
@@ -232,6 +234,50 @@ fn tool_input_summary(arguments: &Value) -> String {
     serde_json::to_string_pretty(arguments).unwrap_or_else(|_| arguments.to_string())
 }
 
+/// 解析后的 tool call arguments，区分合法 JSON 与解析失败。
+///
+/// 解析失败时保留原始字符串，展示层可显示 raw arguments 或 invalid JSON 标记，
+/// 而不是静默降级为空参数。
+enum ParsedArguments {
+    Valid(Value),
+    Invalid {
+        raw: String,
+        error: ToolCallArgumentsError,
+    },
+}
+
+impl ParsedArguments {
+    /// 从 provider tool call 解析 arguments。
+    fn from_call(call: &AiToolCall) -> Self {
+        match call.parsed_arguments_value() {
+            Ok(value) => Self::Valid(value),
+            Err(error) => Self::Invalid {
+                raw: call.arguments.clone(),
+                error,
+            },
+        }
+    }
+
+    /// 返回解析后的 JSON value 引用；解析失败时返回空对象。
+    fn value(&self) -> &Value {
+        match self {
+            Self::Valid(value) => value,
+            Self::Invalid { .. } => &EMPTY_OBJECT,
+        }
+    }
+
+    /// 返回展示用的输入摘要：合法 JSON 格式化输出，失败时标记原始内容。
+    fn input_summary(&self) -> String {
+        match self {
+            Self::Valid(value) => tool_input_summary(value),
+            Self::Invalid { raw, error } => format!("[invalid JSON] {error}; raw: {raw}"),
+        }
+    }
+}
+
+static EMPTY_OBJECT: std::sync::LazyLock<Value> =
+    std::sync::LazyLock::new(|| Value::Object(serde_json::Map::new()));
+
 #[cfg(test)]
 mod tests {
     use provider_protocol::ToolCall;
@@ -253,11 +299,7 @@ mod tests {
                 .with_label("Read")
                 .with_kind(ToolKind::Read),
         );
-        let call = ToolCall::new(
-            "call-1",
-            "read",
-            serde_json::json!({ "path": "Cargo.toml" }),
-        );
+        let call = ToolCall::new("call-1", "read", r#"{"path":"Cargo.toml"}"#);
 
         let activity = runtime_tool_activity_from_call(&call, &registry);
 
@@ -269,11 +311,7 @@ mod tests {
     fn successful_result_preserves_tool_details() {
         let mut registry = ToolRegistry::new();
         registry.insert(ToolDefinition::new("read").with_label("Read"));
-        let call = ToolCall::new(
-            "call-1",
-            "read",
-            serde_json::json!({ "path": "Cargo.toml" }),
-        );
+        let call = ToolCall::new("call-1", "read", r#"{"path":"Cargo.toml"}"#);
         let mut result = ToolResult::success("call-1", "content");
         result.details = Some(serde_json::json!({ "kind": "text" }));
 
@@ -305,12 +343,8 @@ mod tests {
         let call = ToolCall::new(
             "call-1",
             "edit",
-            serde_json::json!({
-                "path": "test/temp.md",
-                "edits": [
-                    { "old_string": "old\n", "new_string": "new\n" }
-                ]
-            }),
+            r#"{"path":"test/temp.md","edits":[{"old_string":"old\n","new_string":"new\n"}]}"#
+                .to_string(),
         );
         let result = ToolResult::success(
             "call-1",
@@ -361,10 +395,7 @@ mod tests {
         let call = ToolCall::new(
             "call-1",
             "write",
-            serde_json::json!({
-                "path": "test/temp.md",
-                "content": "new\n"
-            }),
+            r#"{"path":"test/temp.md","content":"new\n"}"#.to_string(),
         );
         let result = ToolResult::success(
             "call-1",
@@ -433,5 +464,75 @@ mod tests {
                 && old_text.as_deref() == Some("old\n")
                 && new_text == "new\n"
         ));
+    }
+
+    #[test]
+    fn invalid_json_arguments_shows_raw_content_in_activity() {
+        let registry = ToolRegistry::new();
+        let call = ToolCall::new("call-1", "unknown_tool", "not valid json");
+
+        let activity = super::runtime_tool_activity_from_call(&call, &registry);
+
+        match &activity.content[..] {
+            [RuntimeToolActivityContent::Text(summary)] => {
+                assert!(
+                    summary.contains("[invalid JSON]"),
+                    "expected invalid JSON marker, got: {summary}"
+                );
+                assert!(
+                    summary.contains("not valid json"),
+                    "expected raw arguments preserved, got: {summary}"
+                );
+            }
+            other => panic!("expected Text content, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_json_arguments_preserve_raw_input() {
+        let registry = ToolRegistry::new();
+        let call = ToolCall::new("call-1", "unknown_tool", "not valid json");
+
+        let activity = super::runtime_tool_activity_from_call(&call, &registry);
+        assert_eq!(
+            activity
+                .raw_input
+                .as_ref()
+                .and_then(|raw| raw.display_text())
+                .as_deref(),
+            Some("not valid json")
+        );
+
+        let result = ToolResult::error("call-1", "Invalid tool call arguments");
+        let update =
+            super::runtime_tool_activity_update_from_result(&call, &result, None, &registry);
+        assert_eq!(
+            update
+                .raw_input
+                .as_ref()
+                .and_then(|raw| raw.display_text())
+                .as_deref(),
+            Some("not valid json")
+        );
+    }
+
+    #[test]
+    fn empty_arguments_treated_as_empty_object() {
+        let call = ToolCall::new("call-1", "unknown_tool", String::new());
+        let parsed = super::ParsedArguments::from_call(&call);
+        assert!(parsed.value().is_object());
+        assert_eq!(parsed.input_summary(), "{}");
+    }
+
+    #[test]
+    fn valid_json_arguments_parse_correctly() {
+        let call = ToolCall::new(
+            "call-1",
+            "unknown_tool",
+            r#"{"path":"Cargo.toml"}"#.to_string(),
+        );
+        let parsed = super::ParsedArguments::from_call(&call);
+        assert!(matches!(parsed.value(), serde_json::Value::Object(_)));
+        assert!(parsed.input_summary().contains("Cargo.toml"));
     }
 }

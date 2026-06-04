@@ -5,7 +5,6 @@ mod request;
 mod tool_errors;
 
 pub use error::ProviderRequestError;
-pub use request::{ChatMessage, ChatRole, ProviderRequest};
 pub use runtime_domain::session::ProviderRequestMetrics;
 
 pub(crate) use client::{execute_conversation_request, execute_prepared_conversation_request};

@@ -1,5 +1,6 @@
 use provider_protocol::{
-    ToolCall as AiToolCall, ToolDefinition as AiToolDefinition, ToolResult as AiToolResult,
+    ToolCall as AiToolCall, ToolCallArgumentsError, ToolDefinition as AiToolDefinition,
+    ToolResult as AiToolResult,
 };
 use runtime_domain::session::{
     ManagedSearchTool, RuntimeTerminalExitStatus, RuntimeTerminalSnapshot,
@@ -39,16 +40,39 @@ pub(super) fn interrupted_tool_execution(call: &AiToolCall) -> ToolExecution {
     }
 }
 
+fn invalid_arguments_tool_execution(
+    call: &AiToolCall,
+    error: ToolCallArgumentsError,
+) -> ToolExecution {
+    let message = format!(
+        "Invalid tool call arguments from provider for '{}': {error}",
+        call.name
+    );
+    ToolExecution {
+        raw_result: ToolResult::error(call.call_id.clone(), message.clone()),
+        provider_result: AiToolResult::error(
+            call.call_id.clone(),
+            call.name.clone(),
+            message,
+            None,
+        ),
+        processed_error: None,
+    }
+}
+
 pub(super) async fn execute_tool_call(
     call: &AiToolCall,
     context: &mut ToolCallExecutionContext<'_>,
     on_progress: &mut impl FnMut(ToolLoopProgress),
 ) -> ToolExecution {
-    let runtime_call = tool_runtime::ToolCall::new(
-        call.call_id.clone(),
-        call.name.clone(),
-        call.arguments.clone(),
-    );
+    let arguments = match call.parsed_arguments_value() {
+        Ok(value) => value,
+        Err(error) => {
+            return invalid_arguments_tool_execution(call, error);
+        }
+    };
+    let runtime_call =
+        tool_runtime::ToolCall::new(call.call_id.clone(), call.name.clone(), arguments);
 
     let authorization = authorize_tool_call(&runtime_call, context).await;
     let raw_result = match authorization.denial_message {
@@ -304,4 +328,33 @@ pub(super) fn ai_tool_definitions_from_registry(registry: &ToolRegistry) -> Vec<
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invalid_arguments_tool_execution;
+    use provider_protocol::ToolCall as AiToolCall;
+
+    #[test]
+    fn invalid_arguments_produces_error_tool_execution() {
+        let call = AiToolCall::new("call-1", "bash", "not valid json");
+        let error = call
+            .parsed_arguments_value()
+            .expect_err("invalid arguments should produce parse error");
+
+        let execution = invalid_arguments_tool_execution(&call, error);
+
+        assert!(execution.raw_result.is_error);
+        assert!(execution.processed_error.is_none());
+        assert!(
+            execution
+                .raw_result
+                .content
+                .contains("Invalid tool call arguments")
+        );
+        assert!(execution.raw_result.content.contains("bash"));
+        assert!(execution.provider_result.is_error);
+        assert_eq!(execution.provider_result.call_id, "call-1");
+        assert_eq!(execution.provider_result.name, "bash");
+    }
 }

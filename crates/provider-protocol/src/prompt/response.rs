@@ -1,29 +1,28 @@
-use crate::{message::Message, tool::ToolCall};
+use crate::message::ConversationItem;
 
 use super::{FinishReason, TokenUsage};
 
-/// `PromptResponse` is the aggregate result of one provider call.
+/// item-centric 协议的单 turn 完整产出。
+///
+/// `tool_calls` 字段已删除——从 `items` 中的 assistant item 提取。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PromptResponse {
-    pub message: Message,
+pub struct PromptCompletion {
+    pub items: Vec<ConversationItem>,
     pub finish_reason: FinishReason,
     pub usage: Option<TokenUsage>,
-    pub tool_calls: Vec<ToolCall>,
 }
 
-impl PromptResponse {
-    /// `new` creates an aggregate provider response.
+impl PromptCompletion {
+    /// 创建一个 provider 单 turn 完成结果。
     pub fn new(
-        message: Message,
+        items: Vec<ConversationItem>,
         finish_reason: FinishReason,
         usage: Option<TokenUsage>,
-        tool_calls: Vec<ToolCall>,
     ) -> Self {
         Self {
-            message,
+            items,
             finish_reason,
             usage,
-            tool_calls,
         }
     }
 }

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/provider-protocol",
+    "crates/session-store",
     "crates/openai-compat-provider",
     "crates/tool-loop-runtime",
     "crates/terminal-cli",
@@ -15,7 +16,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 
 [workspace.dependencies]
@@ -66,4 +67,5 @@ unicode-normalization = "0.1.25"
 unicode-segmentation = "1.13.2"
 unicode-width = "0.2.2"
 url = "2"
+uuid = { version = "1", features = ["serde", "std", "v7"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

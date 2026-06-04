@@ -1,9 +1,10 @@
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 /// `ToolDefinition` is the provider-visible schema for a callable tool.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
@@ -26,7 +27,7 @@ impl ToolDefinition {
 }
 
 /// `ToolCall` describes one model-requested function/tool invocation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub call_id: String,
     pub name: String,
@@ -140,7 +141,7 @@ mod tests {
 }
 
 /// `ToolResult` is the provider-context representation of an executed tool result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolResult {
     pub call_id: String,
     pub name: String,

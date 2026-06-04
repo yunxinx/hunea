@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ToolCall;
@@ -5,7 +6,8 @@ use crate::ToolCall;
 /// provider-neutral 角色。
 ///
 /// `Tool` 角色不再存在，工具结果通过 `ConversationItem::ToolResult` 表达。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     System,
     User,
@@ -24,7 +26,8 @@ impl Role {
 }
 
 /// provider-neutral 内容承载单元。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContentBlock {
     Text(String),
     Image {
@@ -88,7 +91,8 @@ pub fn visible_text_from_blocks(blocks: &[ContentBlock]) -> String {
 }
 
 /// provider-neutral 协议的原子语义单元。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConversationItem {
     /// 消息，承载文本、多模态内容与 assistant tool call。
     Message {

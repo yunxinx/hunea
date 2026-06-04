@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::{Timestamp, Uuid, Version};
 
+pub(crate) mod jsonl;
+
 /// 短 entry id 固定为 8 个 hex 字符。
 const SHORT_ENTRY_ID_HEX_LEN: usize = 8;
 
@@ -148,6 +150,12 @@ pub enum SessionStoreError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to serialize session entry `{entry_id}` for persistence: {source}")]
+    SerializeEntry {
+        entry_id: String,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("failed to parse persisted session entry at line {line}: {source}")]
     CorruptedEntry {
         line: usize,
@@ -268,17 +276,20 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
 mod tests {
     use std::{
         collections::HashSet,
+        fs,
+        io::Write,
         path::{Path, PathBuf},
     };
 
     use app_config::config_dir;
-    use provider_protocol::{ContentBlock, ConversationItem, Role};
+    use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
     use serde_json::json;
     use uuid::Uuid;
 
     use super::{
         ConfigSnapshot, SHORT_ENTRY_ID_HEX_LEN, SessionEntry, SessionEntryKind, SessionHeader,
         SessionId, encode_project_dir, generate_entry_id, generate_entry_id_with, hunea_dir,
+        jsonl::{JsonlLoader, JsonlWriter},
         session_filename, short_entry_id,
     };
 
@@ -482,6 +493,196 @@ mod tests {
         assert!(!filename.contains(':'));
     }
 
+    #[test]
+    fn jsonl_writer_delays_file_creation_until_first_write() {
+        let temp_dir = test_temp_dir("delayed-create");
+        let jsonl_path = temp_dir.join("session.jsonl");
+        let mut writer = JsonlWriter::new(jsonl_path.clone());
+
+        assert!(!writer.file_exists());
+        assert!(!jsonl_path.exists());
+
+        writer
+            .write(&sample_entries()[0])
+            .expect("first write should create the JSONL file");
+
+        assert!(writer.file_exists());
+        assert!(jsonl_path.exists());
+    }
+
+    #[test]
+    fn jsonl_writer_and_loader_roundtrip_entries_in_write_order() {
+        let temp_dir = test_temp_dir("roundtrip");
+        let jsonl_path = temp_dir.join("session.jsonl");
+        let entries = sample_entries();
+        let mut writer = JsonlWriter::new(jsonl_path.clone());
+
+        writer
+            .write_batch(&entries)
+            .expect("batch write should persist all entries");
+
+        let loaded = JsonlLoader::load(&jsonl_path).expect("loader should parse persisted entries");
+
+        assert_eq!(loaded, entries);
+    }
+
+    #[test]
+    fn jsonl_loader_skips_truncated_last_line() {
+        let temp_dir = test_temp_dir("truncated-last-line");
+        let jsonl_path = temp_dir.join("session.jsonl");
+        let entries = sample_entries();
+        let mut writer = JsonlWriter::new(jsonl_path.clone());
+
+        writer
+            .write_batch(&entries[..2])
+            .expect("seed entries should persist");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl_path)
+            .expect("jsonl file should exist")
+            .write_all(br#"{"id":"partial""#)
+            .expect("partial line should append");
+
+        let loaded = JsonlLoader::load(&jsonl_path).expect("loader should ignore truncated tail");
+
+        assert_eq!(loaded, entries[..2].to_vec());
+    }
+
+    #[test]
+    fn jsonl_loader_skips_invalid_middle_line_and_keeps_other_entries() {
+        let temp_dir = test_temp_dir("invalid-middle-line");
+        let jsonl_path = temp_dir.join("session.jsonl");
+        let entries = sample_entries();
+        let header_json = serde_json::to_string(&entries[0]).expect("header should serialize");
+        let user_json = serde_json::to_string(&entries[1]).expect("user entry should serialize");
+
+        fs::write(
+            &jsonl_path,
+            format!("{header_json}\n{{not-json}}\n{user_json}\n"),
+        )
+        .expect("fixture file should be writable");
+
+        let loaded = JsonlLoader::load(&jsonl_path).expect("loader should skip invalid middle row");
+
+        assert_eq!(loaded, entries[..2].to_vec());
+    }
+
+    #[test]
+    fn jsonl_loader_skips_invalid_utf8_middle_line_and_keeps_other_entries() {
+        let temp_dir = test_temp_dir("invalid-utf8-middle-line");
+        let jsonl_path = temp_dir.join("session.jsonl");
+        let entries = sample_entries();
+        let header_json = serde_json::to_string(&entries[0]).expect("header should serialize");
+        let user_json = serde_json::to_string(&entries[1]).expect("user entry should serialize");
+        let mut file = fs::File::create(&jsonl_path).expect("fixture file should be creatable");
+
+        file.write_all(header_json.as_bytes())
+            .expect("header should write");
+        file.write_all(b"\n").expect("header newline should write");
+        file.write_all(b"{\"id\":\"broken\",\xff}\n")
+            .expect("invalid utf8 line should write");
+        file.write_all(user_json.as_bytes())
+            .expect("user entry should write");
+        file.write_all(b"\n").expect("user newline should write");
+
+        let loaded =
+            JsonlLoader::load(&jsonl_path).expect("loader should skip invalid UTF-8 middle row");
+
+        assert_eq!(loaded, entries[..2].to_vec());
+    }
+
+    #[test]
+    fn jsonl_loader_skips_truncated_invalid_utf8_tail() {
+        let temp_dir = test_temp_dir("truncated-invalid-utf8-tail");
+        let jsonl_path = temp_dir.join("session.jsonl");
+        let entries = sample_entries();
+        let mut writer = JsonlWriter::new(jsonl_path.clone());
+
+        writer
+            .write_batch(&entries[..2])
+            .expect("seed entries should persist");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl_path)
+            .expect("jsonl file should exist")
+            .write_all(b"{\"id\":\"partial\",\xff")
+            .expect("truncated invalid utf8 tail should append");
+
+        let loaded =
+            JsonlLoader::load(&jsonl_path).expect("loader should ignore truncated invalid UTF-8");
+
+        assert_eq!(loaded, entries[..2].to_vec());
+    }
+
+    #[test]
+    fn jsonl_loader_keeps_first_entry_when_ids_repeat() {
+        let temp_dir = test_temp_dir("duplicate-id");
+        let jsonl_path = temp_dir.join("session.jsonl");
+        let mut entries = sample_entries();
+        let mut duplicate_entry = entries[2].clone();
+        duplicate_entry.kind = SessionEntryKind::Item(ConversationItem::text(
+            Role::Assistant,
+            "different body should be ignored",
+        ));
+        entries.push(duplicate_entry);
+        let mut writer = JsonlWriter::new(jsonl_path.clone());
+
+        writer
+            .write_batch(&entries)
+            .expect("duplicate fixture should persist");
+
+        let loaded =
+            JsonlLoader::load(&jsonl_path).expect("loader should deduplicate repeated ids");
+
+        assert_eq!(loaded.len(), sample_entries().len());
+        assert_eq!(loaded[2], sample_entries()[2]);
+    }
+
+    #[test]
+    fn jsonl_loader_rejects_dangling_parent_reference() {
+        let temp_dir = test_temp_dir("dangling-parent");
+        let jsonl_path = temp_dir.join("session.jsonl");
+        let mut entries = sample_entries();
+        entries[1].parent_id = Some("missing-parent".to_string());
+        let mut writer = JsonlWriter::new(jsonl_path.clone());
+
+        writer
+            .write_batch(&entries[..2])
+            .expect("fixture entries should persist");
+
+        let error = JsonlLoader::load(&jsonl_path).expect_err("dangling parent should fail");
+
+        assert!(matches!(
+            error,
+            super::SessionStoreError::DanglingParent { ref parent_id }
+                if parent_id == "missing-parent"
+        ));
+    }
+
+    #[test]
+    fn jsonl_writer_and_loader_roundtrip_large_entry_payload() {
+        let temp_dir = test_temp_dir("large-entry");
+        let jsonl_path = temp_dir.join("session.jsonl");
+        let large_text = "x".repeat(12 * 1024);
+        let large_entry = SessionEntry {
+            id: "large-user".to_string(),
+            parent_id: Some("header".to_string()),
+            timestamp: 1_717_514_800_099,
+            kind: SessionEntryKind::Item(ConversationItem::text(Role::User, large_text)),
+        };
+        let mut entries = sample_entries();
+        entries.push(large_entry);
+        let mut writer = JsonlWriter::new(jsonl_path.clone());
+
+        writer
+            .write_batch(&entries)
+            .expect("large entry batch should persist");
+
+        let loaded = JsonlLoader::load(&jsonl_path).expect("loader should parse large payload");
+
+        assert_eq!(loaded, entries);
+    }
+
     fn test_uuid(input: &str) -> Uuid {
         Uuid::try_parse(input).expect("test UUID should parse")
     }
@@ -490,5 +691,123 @@ mod tests {
         test_uuid(&format!(
             "00000000-0000-7{index:03x}-8{index:03x}-0000{suffix}"
         ))
+    }
+
+    #[test]
+    fn serialize_entry_error_mentions_write_side_context() {
+        let source = serde_json::from_str::<serde_json::Value>("{")
+            .expect_err("fixture JSON should be invalid");
+        let error = super::SessionStoreError::SerializeEntry {
+            entry_id: "entry-42".to_string(),
+            source,
+        };
+
+        let message = error.to_string();
+
+        assert!(message.contains("serialize session entry `entry-42`"));
+        assert!(!message.contains("line 0"));
+    }
+
+    fn test_temp_dir(label: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("hunea-session-store-{label}-{}", Uuid::now_v7()));
+        fs::create_dir_all(&dir).expect("test temp dir should be creatable");
+        dir
+    }
+
+    fn sample_entries() -> Vec<SessionEntry> {
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+
+        vec![
+            SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: 1_717_514_800_000,
+                kind: SessionEntryKind::Header(SessionHeader {
+                    session_id,
+                    work_dir: PathBuf::from("/repo"),
+                    initial_model: "gpt-4.1".to_string(),
+                    git_head: Some("abc123".to_string()),
+                    cli_version: Some("0.5.2".to_string()),
+                }),
+            },
+            SessionEntry {
+                id: "user-1".to_string(),
+                parent_id: Some("header".to_string()),
+                timestamp: 1_717_514_800_001,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "hello")),
+            },
+            SessionEntry {
+                id: "assistant-1".to_string(),
+                parent_id: Some("user-1".to_string()),
+                timestamp: 1_717_514_800_002,
+                kind: SessionEntryKind::Item(ConversationItem::assistant_with_tool_calls(
+                    "working".to_string(),
+                    vec![ToolCall::new(
+                        "call-1",
+                        "read_file",
+                        r#"{"path":"Cargo.toml"}"#,
+                    )],
+                )),
+            },
+            SessionEntry {
+                id: "tool-1".to_string(),
+                parent_id: Some("assistant-1".to_string()),
+                timestamp: 1_717_514_800_003,
+                kind: SessionEntryKind::Item(ConversationItem::tool_result(
+                    "call-1",
+                    vec![ContentBlock::Text("done".to_string())],
+                    false,
+                )),
+            },
+            SessionEntry {
+                id: "reasoning-1".to_string(),
+                parent_id: Some("tool-1".to_string()),
+                timestamp: 1_717_514_800_004,
+                kind: SessionEntryKind::Item(ConversationItem::Reasoning {
+                    content: "internal chain".to_string(),
+                    summary: Some("brief".to_string()),
+                    encrypted: Some("cipher".to_string()),
+                }),
+            },
+            SessionEntry {
+                id: "compaction-1".to_string(),
+                parent_id: Some("reasoning-1".to_string()),
+                timestamp: 1_717_514_800_005,
+                kind: SessionEntryKind::Compaction {
+                    summary: "summary".to_string(),
+                    first_kept_entry_id: "tool-1".to_string(),
+                    tokens_before: 128,
+                },
+            },
+            SessionEntry {
+                id: "branch-1".to_string(),
+                parent_id: Some("assistant-1".to_string()),
+                timestamp: 1_717_514_800_006,
+                kind: SessionEntryKind::BranchSummary {
+                    from_id: "assistant-1".to_string(),
+                    summary: "alternate".to_string(),
+                },
+            },
+            SessionEntry {
+                id: "config-1".to_string(),
+                parent_id: Some("branch-1".to_string()),
+                timestamp: 1_717_514_800_007,
+                kind: SessionEntryKind::ConfigChange(ConfigSnapshot {
+                    model: "gpt-4.1-mini".to_string(),
+                    system_prompt: Some("be terse".to_string()),
+                }),
+            },
+            SessionEntry {
+                id: "leaf-1".to_string(),
+                parent_id: Some("config-1".to_string()),
+                timestamp: 1_717_514_800_008,
+                kind: SessionEntryKind::Leaf {
+                    target_id: Some("tool-1".to_string()),
+                },
+            },
+        ]
     }
 }

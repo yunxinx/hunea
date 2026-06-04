@@ -9,4 +9,5 @@ provider-protocol.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
+tracing = "0.1"
 uuid.workspace = true

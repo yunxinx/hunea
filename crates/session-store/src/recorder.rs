@@ -519,6 +519,7 @@ mod tests {
             kind: SessionEntryKind::Header(SessionHeader {
                 session_id: fixture_session_id(),
                 work_dir: PathBuf::from("/repo"),
+                session_name: None,
                 initial_model: "gpt-4.1".to_string(),
                 git_head: Some("abc123".to_string()),
                 cli_version: Some("0.5.4".to_string()),

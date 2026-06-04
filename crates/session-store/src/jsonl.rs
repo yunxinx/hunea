@@ -80,78 +80,97 @@ pub(crate) struct JsonlLoader;
 #[allow(dead_code)]
 impl JsonlLoader {
     pub(crate) fn load(path: &Path) -> Result<Vec<SessionEntry>, SessionStoreError> {
-        let file = File::open(path).map_err(io_error)?;
-        let mut reader = BufReader::new(file);
         let mut loaded_entries = Vec::new();
-        let mut seen_ids = HashSet::new();
-        let mut line_number = 1;
-        let mut line_bytes = Vec::new();
-
-        loop {
-            line_bytes.clear();
-            let bytes_read = reader
-                .read_until(b'\n', &mut line_bytes)
-                .map_err(io_error)?;
-            if bytes_read == 0 {
-                break;
-            }
-
-            let has_newline = line_bytes.last() == Some(&b'\n');
-            if has_newline {
-                line_bytes.pop();
-                if line_bytes.last() == Some(&b'\r') {
-                    line_bytes.pop();
-                }
-            }
-
-            if line_bytes.is_empty() {
-                line_number += 1;
-                continue;
-            }
-
-            let line = match std::str::from_utf8(&line_bytes) {
-                Ok(line) => line,
-                Err(_) if !has_newline => break,
-                Err(error) => {
-                    warn!(
-                        line = line_number,
-                        error = %error,
-                        "skipping session entry line with invalid UTF-8"
-                    );
-                    line_number += 1;
-                    continue;
-                }
-            };
-
-            match serde_json::from_str::<SessionEntry>(line) {
-                Ok(entry) => {
-                    if seen_ids.insert(entry.id.clone()) {
-                        loaded_entries.push(entry);
-                    } else {
-                        warn!(
-                            id = %entry.id,
-                            line = line_number,
-                            "duplicate session entry id detected; keeping first occurrence"
-                        );
-                    }
-                }
-                Err(_) if !has_newline => break,
-                Err(error) => {
-                    warn!(
-                        line = line_number,
-                        error = %error,
-                        "skipping corrupted session entry line"
-                    );
-                }
-            }
-
-            line_number += 1;
-        }
+        let seen_ids = scan_entries(path, |entry| {
+            loaded_entries.push(entry);
+            Ok(())
+        })?;
 
         validate_parent_links(&loaded_entries, &seen_ids)?;
 
         Ok(loaded_entries)
     }
+
+    pub(crate) fn scan(
+        path: &Path,
+        mut visit: impl FnMut(SessionEntry) -> Result<(), SessionStoreError>,
+    ) -> Result<(), SessionStoreError> {
+        scan_entries(path, &mut visit).map(|_| ())
+    }
+}
+
+fn scan_entries(
+    path: &Path,
+    mut on_entry: impl FnMut(SessionEntry) -> Result<(), SessionStoreError>,
+) -> Result<HashSet<String>, SessionStoreError> {
+    let file = File::open(path).map_err(io_error)?;
+    let mut reader = BufReader::new(file);
+    let mut seen_ids = HashSet::new();
+    let mut line_number = 1;
+    let mut line_bytes = Vec::new();
+
+    loop {
+        line_bytes.clear();
+        let bytes_read = reader
+            .read_until(b'\n', &mut line_bytes)
+            .map_err(io_error)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        let has_newline = line_bytes.last() == Some(&b'\n');
+        if has_newline {
+            line_bytes.pop();
+            if line_bytes.last() == Some(&b'\r') {
+                line_bytes.pop();
+            }
+        }
+
+        if line_bytes.is_empty() {
+            line_number += 1;
+            continue;
+        }
+
+        let line = match std::str::from_utf8(&line_bytes) {
+            Ok(line) => line,
+            Err(_) if !has_newline => break,
+            Err(error) => {
+                warn!(
+                    line = line_number,
+                    error = %error,
+                    "skipping session entry line with invalid UTF-8"
+                );
+                line_number += 1;
+                continue;
+            }
+        };
+
+        match serde_json::from_str::<SessionEntry>(line) {
+            Ok(entry) => {
+                if seen_ids.insert(entry.id.clone()) {
+                    on_entry(entry)?;
+                } else {
+                    warn!(
+                        id = %entry.id,
+                        line = line_number,
+                        "duplicate session entry id detected; keeping first occurrence"
+                    );
+                }
+            }
+            Err(_) if !has_newline => break,
+            Err(error) => {
+                warn!(
+                    line = line_number,
+                    error = %error,
+                    "skipping corrupted session entry line"
+                );
+            }
+        }
+
+        line_number += 1;
+    }
+
+    Ok(seen_ids)
 }
 
 #[allow(dead_code)]

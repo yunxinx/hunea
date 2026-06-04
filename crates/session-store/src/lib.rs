@@ -10,6 +10,7 @@ use thiserror::Error;
 use uuid::{Timestamp, Uuid, Version};
 
 pub(crate) mod jsonl;
+pub(crate) mod metadata;
 pub(crate) mod recorder;
 
 /// 短 entry id 固定为 8 个 hex 字符。
@@ -101,6 +102,8 @@ impl<'de> Deserialize<'de> for SessionId {
 pub struct SessionHeader {
     pub session_id: SessionId,
     pub work_dir: PathBuf,
+    #[serde(default)]
+    pub session_name: Option<String>,
     pub initial_model: String,
     pub git_head: Option<String>,
     pub cli_version: Option<String>,
@@ -111,6 +114,22 @@ pub struct SessionHeader {
 pub struct ConfigSnapshot {
     pub model: String,
     pub system_prompt: Option<String>,
+}
+
+/// session 列表与恢复所需的元数据快照。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMeta {
+    pub session_id: SessionId,
+    pub project_dir: String,
+    pub title: String,
+    pub preview: Option<String>,
+    pub total_tokens: u64,
+    pub model: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub git_head: Option<String>,
+    pub work_dir: PathBuf,
+    pub jsonl_path: PathBuf,
 }
 
 /// session 持久化条目类型。
@@ -171,6 +190,13 @@ pub enum SessionStoreError {
     SessionNotFound { session_id: SessionId },
     #[error("session metadata index is inconsistent: {message}")]
     IndexInconsistent { message: String },
+    #[error("failed to access session metadata sqlite index: {source}")]
+    SqliteError {
+        #[source]
+        source: rusqlite::Error,
+    },
+    #[error("session metadata index task panicked")]
+    MetadataTaskPanicked,
     #[error("session writer channel closed")]
     ChannelClosed,
     #[error("session writer worker panicked")]
@@ -445,6 +471,7 @@ mod tests {
             kind: SessionEntryKind::Header(SessionHeader {
                 session_id: session_id.clone(),
                 work_dir: PathBuf::from("/repo"),
+                session_name: None,
                 initial_model: "gpt-4.1".to_string(),
                 git_head: Some("abc123".to_string()),
                 cli_version: Some("0.5.1".to_string()),
@@ -1086,6 +1113,7 @@ mod tests {
                 kind: SessionEntryKind::Header(SessionHeader {
                     session_id,
                     work_dir: PathBuf::from("/repo"),
+                    session_name: None,
                     initial_model: "gpt-4.1".to_string(),
                     git_head: Some("abc123".to_string()),
                     cli_version: Some("0.5.2".to_string()),
@@ -1182,6 +1210,7 @@ mod tests {
                 kind: SessionEntryKind::Header(SessionHeader {
                     session_id,
                     work_dir: PathBuf::from("/repo"),
+                    session_name: None,
                     initial_model: "gpt-4.1".to_string(),
                     git_head: Some("abc123".to_string()),
                     cli_version: Some("0.5.2".to_string()),
@@ -1221,6 +1250,7 @@ mod tests {
                 kind: SessionEntryKind::Header(SessionHeader {
                     session_id,
                     work_dir: PathBuf::from("/repo"),
+                    session_name: None,
                     initial_model: "gpt-4.1".to_string(),
                     git_head: Some("abc123".to_string()),
                     cli_version: Some("0.5.2".to_string()),
@@ -1284,6 +1314,7 @@ mod tests {
                 kind: SessionEntryKind::Header(SessionHeader {
                     session_id,
                     work_dir: PathBuf::from("/repo"),
+                    session_name: None,
                     initial_model: "gpt-4.1".to_string(),
                     git_head: Some("abc123".to_string()),
                     cli_version: Some("0.5.2".to_string()),
@@ -1385,6 +1416,7 @@ mod tests {
             kind: SessionEntryKind::Header(SessionHeader {
                 session_id,
                 work_dir: PathBuf::from("/repo"),
+                session_name: None,
                 initial_model: "gpt-4.1".to_string(),
                 git_head: Some("abc123".to_string()),
                 cli_version: Some("0.5.2".to_string()),
@@ -1487,6 +1519,7 @@ mod tests {
                 kind: SessionEntryKind::Header(SessionHeader {
                     session_id,
                     work_dir: PathBuf::from("/repo"),
+                    session_name: None,
                     initial_model: "gpt-4.1".to_string(),
                     git_head: Some("abc123".to_string()),
                     cli_version: Some("0.5.2".to_string()),
@@ -1541,6 +1574,7 @@ mod tests {
             kind: SessionEntryKind::Header(SessionHeader {
                 session_id,
                 work_dir: PathBuf::from("/repo"),
+                session_name: None,
                 initial_model: "gpt-4.1".to_string(),
                 git_head: Some("abc123".to_string()),
                 cli_version: Some("0.5.2".to_string()),

@@ -5,6 +5,7 @@ use std::{
 };
 
 use provider_protocol::ConversationItem;
+use runtime_domain::paths::hunea_config_dir;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::{Timestamp, Uuid, Version};
@@ -296,7 +297,7 @@ pub fn encode_project_dir(cwd: &Path) -> String {
 
 /// 返回 hunea 配置根目录。
 pub fn hunea_dir() -> Option<PathBuf> {
-    app_config::config_dir()
+    hunea_config_dir()
 }
 
 /// 生成 session JSONL 文件名。
@@ -489,8 +490,8 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use app_config::config_dir;
     use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
+    use runtime_domain::paths::hunea_config_dir;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -687,8 +688,8 @@ mod tests {
     }
 
     #[test]
-    fn hunea_dir_matches_app_config_directory() {
-        assert_eq!(hunea_dir(), config_dir());
+    fn hunea_dir_matches_runtime_domain_directory() {
+        assert_eq!(hunea_dir(), hunea_config_dir());
     }
 
     #[test]

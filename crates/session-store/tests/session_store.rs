@@ -1,24 +1,17 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{fs, time::Duration};
+
+#[path = "support/common.rs"]
+mod support;
 
 use provider_protocol::{ConversationItem, Role};
-use session_store::{
-    InMemorySessionStore, LocalSessionStore, SessionHeader, SessionId, SessionStore,
-    SessionStoreError,
-};
-use uuid::Uuid;
+use session_store::{InMemorySessionStore, SessionStore};
+use support::{TestSessionRoot, first_item_entry_id, item_entry_ids, open_store, sample_header};
 
 #[tokio::test]
 async fn local_store_creates_appends_and_resolves_history() {
-    let root = tempdir_path("local-store-e2e");
-    let work_dir = root.join("workspace").join("repo");
-    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
-    let store = LocalSessionStore::open_in(root.clone())
-        .await
-        .expect("local store should open temp root");
+    let root = TestSessionRoot::new("local-store-e2e");
+    let work_dir = root.workspace_path("repo");
+    let store = open_store(&root).await;
     let header = sample_header(&work_dir, "gpt-4.1", Some("session-a"));
     let user_item = ConversationItem::text(Role::User, "hello");
     let assistant_item = ConversationItem::text(Role::Assistant, "hi");
@@ -46,12 +39,9 @@ async fn local_store_creates_appends_and_resolves_history() {
 
 #[tokio::test]
 async fn local_store_isolates_multiple_sessions() {
-    let root = tempdir_path("local-store-isolation");
-    let work_dir = root.join("workspace").join("repo");
-    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
-    let store = LocalSessionStore::open_in(root)
-        .await
-        .expect("local store should open temp root");
+    let root = TestSessionRoot::new("local-store-isolation");
+    let work_dir = root.workspace_path("repo");
+    let store = open_store(&root).await;
     let first_id = store
         .create_session(sample_header(&work_dir, "gpt-4.1", Some("first")))
         .await
@@ -87,12 +77,9 @@ async fn local_store_isolates_multiple_sessions() {
 
 #[tokio::test]
 async fn local_store_branches_after_leaf_override() {
-    let root = tempdir_path("local-store-branch");
-    let work_dir = root.join("workspace").join("repo");
-    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
-    let store = LocalSessionStore::open_in(root)
-        .await
-        .expect("local store should open temp root");
+    let root = TestSessionRoot::new("local-store-branch");
+    let work_dir = root.workspace_path("repo");
+    let store = open_store(&root).await;
     let session_id = store
         .create_session(sample_header(&work_dir, "gpt-4.1", Some("branching")))
         .await
@@ -142,12 +129,9 @@ async fn local_store_branches_after_leaf_override() {
 
 #[tokio::test]
 async fn local_store_resolves_explicit_leaf_even_after_branch_override() {
-    let root = tempdir_path("local-store-explicit-leaf");
-    let work_dir = root.join("workspace").join("repo");
-    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
-    let store = LocalSessionStore::open_in(root)
-        .await
-        .expect("local store should open temp root");
+    let root = TestSessionRoot::new("local-store-explicit-leaf");
+    let work_dir = root.workspace_path("repo");
+    let store = open_store(&root).await;
     let session_id = store
         .create_session(sample_header(&work_dir, "gpt-4.1", Some("explicit-leaf")))
         .await
@@ -195,12 +179,9 @@ async fn local_store_resolves_explicit_leaf_even_after_branch_override() {
 
 #[tokio::test]
 async fn local_store_flush_persists_complete_jsonl() {
-    let root = tempdir_path("local-store-flush");
-    let work_dir = root.join("workspace").join("repo");
-    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
-    let store = LocalSessionStore::open_in(root)
-        .await
-        .expect("local store should open temp root");
+    let root = TestSessionRoot::new("local-store-flush");
+    let work_dir = root.workspace_path("repo");
+    let store = open_store(&root).await;
     let session_id = store
         .create_session(sample_header(&work_dir, "gpt-4.1", Some("flush")))
         .await
@@ -230,14 +211,10 @@ async fn local_store_flush_persists_complete_jsonl() {
 
 #[tokio::test]
 async fn local_store_lists_sessions_by_project_and_updated_order() {
-    let root = tempdir_path("local-store-list");
-    let repo_a = root.join("workspace").join("repo-a");
-    let repo_b = root.join("workspace").join("repo-b");
-    fs::create_dir_all(&repo_a).expect("repo A should be creatable");
-    fs::create_dir_all(&repo_b).expect("repo B should be creatable");
-    let store = LocalSessionStore::open_in(root)
-        .await
-        .expect("local store should open temp root");
+    let root = TestSessionRoot::new("local-store-list");
+    let repo_a = root.workspace_path("repo-a");
+    let repo_b = root.workspace_path("repo-b");
+    let store = open_store(&root).await;
 
     let older_id = store
         .create_session(sample_header(&repo_a, "gpt-4.1", Some("older")))
@@ -295,12 +272,9 @@ async fn local_store_lists_sessions_by_project_and_updated_order() {
 
 #[tokio::test]
 async fn in_memory_store_matches_local_store_for_same_linear_history() {
-    let root = tempdir_path("local-store-consistency");
-    let work_dir = root.join("workspace").join("repo");
-    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
-    let local_store = LocalSessionStore::open_in(root)
-        .await
-        .expect("local store should open temp root");
+    let root = TestSessionRoot::new("local-store-consistency");
+    let work_dir = root.workspace_path("repo");
+    let local_store = open_store(&root).await;
     let memory_store = InMemorySessionStore::new();
     let local_header = sample_header(&work_dir, "gpt-4.1", Some("consistent"));
     let memory_header = sample_header(&work_dir, "gpt-4.1", Some("consistent"));
@@ -353,45 +327,4 @@ async fn in_memory_store_matches_local_store_for_same_linear_history() {
     assert_eq!(local_meta.title, memory_meta.title);
     assert_eq!(local_meta.preview, memory_meta.preview);
     assert_eq!(local_meta.model, memory_meta.model);
-}
-
-fn sample_header(work_dir: &Path, model: &str, session_name: Option<&str>) -> SessionHeader {
-    SessionHeader {
-        session_id: SessionId::new(),
-        work_dir: work_dir.to_path_buf(),
-        session_name: session_name.map(str::to_string),
-        initial_model: model.to_string(),
-        git_head: Some("abc123".to_string()),
-        cli_version: Some("0.5.6".to_string()),
-    }
-}
-
-fn first_item_entry_id(path: &Path) -> Result<String, SessionStoreError> {
-    Ok(item_entry_ids(path)?
-        .into_iter()
-        .next()
-        .expect("session fixture should include first item"))
-}
-
-fn item_entry_ids(path: &Path) -> Result<Vec<String>, SessionStoreError> {
-    let jsonl = fs::read_to_string(path).map_err(|source| SessionStoreError::IoError { source })?;
-    jsonl
-        .lines()
-        .skip(1)
-        .map(|line| {
-            let value: serde_json::Value =
-                serde_json::from_str(line).expect("item line should parse");
-            Ok(value["id"]
-                .as_str()
-                .expect("entry id should exist")
-                .to_string())
-        })
-        .collect()
-}
-
-fn tempdir_path(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "hunea-session-store-test-{label}-{}",
-        Uuid::now_v7()
-    ))
 }

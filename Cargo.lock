@@ -61,7 +61,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "app-config"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "directories",
  "runtime-domain",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "conversation-runtime"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "directories",
  "openai-compat-provider",
@@ -844,6 +844,12 @@ dependencies = [
  "bit-set",
  "regex",
 ]
+
+[[package]]
+name = "fastrand"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "fax"
@@ -1913,7 +1919,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openai-compat-provider"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "futures-util",
  "provider-protocol",
@@ -2208,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "provider-protocol"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -2587,7 +2593,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-domain"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "directories",
  "provider-protocol",
@@ -2850,13 +2856,14 @@ dependencies = [
 
 [[package]]
 name = "session-store"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "app-config",
  "provider-protocol",
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3101,8 +3108,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.2",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "terminal-app"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "app-config",
  "color-eyre",
@@ -3118,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-cli"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "app-config",
  "color-eyre",
@@ -3139,7 +3159,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-ui"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "arboard",
  "base64",
@@ -3462,7 +3482,7 @@ checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
 name = "tool-loop-runtime"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "provider-protocol",
  "runtime-domain",
@@ -3475,7 +3495,7 @@ dependencies = [
 
 [[package]]
 name = "tool-runtime"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "directories",
  "flate2",
@@ -4430,7 +4450,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "anyhow",
  "semver",

@@ -315,16 +315,38 @@ fn selection_from_default(default: Option<&str>, catalog: &ModelCatalog) -> Opti
         return None;
     }
 
-    let selection = if let Some((provider_id, model_id)) = default.split_once('/') {
-        ModelSelection::new(provider_id.trim(), model_id.trim())
-    } else {
-        catalog
-            .enabled_providers()
-            .find(|provider| provider.models.iter().any(|model| model.id == default))
-            .map(|provider| ModelSelection::new(provider.id.clone(), default.to_string()))?
-    };
+    if let Some((provider_id, model_id)) = default.split_once('/') {
+        let provider_id = provider_id.trim();
+        let model_id = model_id.trim();
+        if provider_id.is_empty() || model_id.is_empty() {
+            return None;
+        }
+        return Some(ModelSelection::new(provider_id, model_id));
+    }
 
-    catalog.accepts_selection(&selection).then_some(selection)
+    let mut matches = catalog
+        .enabled_providers()
+        .filter(|provider| provider.models.iter().any(|model| model.id == default));
+    if let Some(provider) = matches.next() {
+        if matches.next().is_none() {
+            return Some(ModelSelection::new(
+                provider.id.clone(),
+                default.to_string(),
+            ));
+        }
+        return None;
+    }
+
+    let mut enabled_providers = catalog.enabled_providers();
+    let provider = enabled_providers.next()?;
+    if enabled_providers.next().is_some() {
+        None
+    } else {
+        Some(ModelSelection::new(
+            provider.id.clone(),
+            default.to_string(),
+        ))
+    }
 }
 
 fn sync_provider_models(request: &ProviderSyncRequest) -> ModelSyncResult {

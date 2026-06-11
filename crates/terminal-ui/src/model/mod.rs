@@ -147,9 +147,7 @@ impl Model {
         let style_mode = options.style_mode.normalized();
         let status_line_items = options.status_line_items;
         let status_line_2_items = options.status_line_2_items;
-        let selected_model = options
-            .selected_model
-            .filter(|selection| options.model_catalog.accepts_selection(selection));
+        let selected_model = options.selected_model;
         if startup_banner_options.model_name.is_none() {
             startup_banner_options.model_name = selected_model
                 .as_ref()

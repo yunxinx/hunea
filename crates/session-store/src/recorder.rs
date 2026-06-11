@@ -22,7 +22,7 @@ pub(crate) struct SessionRecorder {
 }
 
 enum RecordCommand {
-    Buffer(SessionEntry),
+    Buffer(Box<SessionEntry>),
     Persist {
         ack: oneshot::Sender<Result<(), SessionStoreError>>,
     },
@@ -64,7 +64,7 @@ impl SessionRecorder {
 
     pub(crate) fn buffer(&self, entry: SessionEntry) -> Result<(), SessionStoreError> {
         self.sender()?
-            .try_send(RecordCommand::Buffer(entry))
+            .try_send(RecordCommand::Buffer(Box::new(entry)))
             .map_err(|_| SessionStoreError::ChannelClosed)
     }
 
@@ -222,7 +222,7 @@ impl RecorderWorker {
     fn handle(&mut self, command: RecordCommand) -> bool {
         match command {
             RecordCommand::Buffer(entry) => {
-                self.pending_entries.push(entry);
+                self.pending_entries.push(*entry);
                 false
             }
             RecordCommand::Persist { ack } | RecordCommand::Flush { ack } => {

@@ -349,12 +349,13 @@ impl Model {
                 tertiary_text_style(self.palette),
             ));
         } else if state.filtered_indices.is_empty() {
+            let empty_message = if state.search_query.is_empty() {
+                "No sessions"
+            } else {
+                "No sessions match search"
+            };
             lines.push(Line::styled(
-                if state.search_query.is_empty() {
-                    "No sessions"
-                } else {
-                    "No sessions match search"
-                },
+                truncate_display_width_with_ellipsis(&format!("  {empty_message}"), width),
                 tertiary_text_style(self.palette),
             ));
         } else {

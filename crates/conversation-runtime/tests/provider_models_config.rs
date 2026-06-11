@@ -196,7 +196,7 @@ models = ["qwen3"]
 }
 
 #[test]
-fn models_config_rejects_default_model_outside_configured_allowlist() {
+fn models_config_trusts_default_model_outside_configured_allowlist() {
     let working_dir = temp_test_dir("default-model-outside-allowlist");
     fs::write(
         working_dir.join("models.toml"),
@@ -215,7 +215,10 @@ models = ["qwen3"]
 
     let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
 
-    assert_eq!(loaded.selected_model, None);
+    assert_eq!(
+        loaded.selected_model,
+        Some(ModelSelection::new("local", "qwen4"))
+    );
 }
 
 #[test]

@@ -1,7 +1,8 @@
 use runtime_domain::session::{
     RuntimeEvent, RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeTarget,
-    RuntimeToolActivity, RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
-    SessionResumePayload, TranscriptReplayItem, TranscriptReplayRole,
+    RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityStatus,
+    RuntimeToolActivityUpdate, RuntimeToolKind, SessionResumePayload, TranscriptReplayItem,
+    TranscriptReplayRole,
 };
 
 use super::super::{
@@ -204,7 +205,10 @@ impl Model {
 
     fn rebuild_transcript_from_replay(&mut self, items: Vec<TranscriptReplayItem>) {
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
-        self.transcript = self.transcript_from_replay_items(items);
+        let (transcript, terminal_snapshots) =
+            self.transcript_from_replay_items_with_terminal_snapshots(items);
+        self.transcript = transcript;
+        self.runtime_terminal_snapshots = terminal_snapshots;
         self.refresh_status_line_after_transcript_change();
         self.sync_transcript_render();
         self.document_runtime.follow_bottom = true;
@@ -215,35 +219,48 @@ impl Model {
         &self,
         items: Vec<TranscriptReplayItem>,
     ) -> crate::transcript::Transcript {
+        self.transcript_from_replay_items_with_terminal_snapshots(items)
+            .0
+    }
+
+    fn transcript_from_replay_items_with_terminal_snapshots(
+        &self,
+        items: Vec<TranscriptReplayItem>,
+    ) -> (crate::transcript::Transcript, Vec<RuntimeTerminalSnapshot>) {
         let mut transcript = crate::transcript::Transcript::new(self.palette);
         transcript.set_gap(1);
         if self.has_window {
             transcript.set_width(self.width);
         }
+        let mut terminal_snapshots = Vec::new();
         for item in items {
-            append_transcript_replay_item(&mut transcript, item, self.style_mode);
+            if let TranscriptReplayItem::TerminalSnapshot { snapshot } = &item {
+                upsert_replay_terminal_snapshot(&mut terminal_snapshots, snapshot.clone());
+            }
+            append_transcript_replay_item(
+                &mut transcript,
+                item,
+                self.style_mode,
+                self.reasoning_display_mode,
+            );
         }
-        transcript
+        for snapshot in terminal_snapshots.iter().cloned() {
+            let _ = transcript.set_runtime_terminal_snapshot(snapshot);
+        }
+        (transcript, terminal_snapshots)
     }
 
-    fn apply_resumed_model(&mut self, restored_model: Option<String>) {
-        let Some(model_id) = restored_model.filter(|model_id| !model_id.trim().is_empty()) else {
+    fn apply_resumed_model(
+        &mut self,
+        restored_model: Option<runtime_domain::model_catalog::ModelSelection>,
+    ) {
+        let Some(selection) = restored_model else {
             return;
         };
 
-        if let Some(selection) = self.model_catalog.selection_for_model_id(&model_id) {
-            self.selected_model = Some(selection);
-            self.requires_model_selection = true;
-            self.bump_status_line_revision();
-            return;
-        }
-
-        self.selected_model = None;
+        self.selected_model = Some(selection);
         self.requires_model_selection = true;
         self.bump_status_line_revision();
-        self.append_system_message_from_runtime(format!(
-            "Model from resumed session is unavailable: {model_id}"
-        ));
     }
 }
 
@@ -251,26 +268,56 @@ fn append_transcript_replay_item(
     transcript: &mut crate::transcript::Transcript,
     item: TranscriptReplayItem,
     style_mode: crate::style_mode::StyleMode,
+    reasoning_display_mode: crate::ReasoningDisplayMode,
 ) {
-    match item.role {
-        TranscriptReplayRole::User => {
-            transcript.append_message_with_style_mode(
-                crate::Sender::User,
-                item.content,
-                style_mode,
-            );
+    match item {
+        TranscriptReplayItem::Message {
+            role: TranscriptReplayRole::User,
+            content,
+        } => {
+            transcript.append_message_with_style_mode(crate::Sender::User, content, style_mode);
         }
-        TranscriptReplayRole::Assistant => {
+        TranscriptReplayItem::Message {
+            role: TranscriptReplayRole::Assistant,
+            content,
+        } => {
             transcript.append_message_with_style_mode(
                 crate::Sender::Assistant,
-                item.content,
+                content,
                 style_mode,
             );
         }
-        TranscriptReplayRole::System | TranscriptReplayRole::Tool => {
-            transcript.append_system_message(item.content);
+        TranscriptReplayItem::Reasoning { content } => {
+            transcript.append_reasoning_message(content, reasoning_display_mode, None);
+        }
+        TranscriptReplayItem::ToolActivity { activity } => {
+            transcript.append_runtime_tool_activity(activity);
+        }
+        TranscriptReplayItem::TerminalSnapshot { snapshot } => {
+            let _ = transcript.set_runtime_terminal_snapshot(snapshot);
+        }
+        TranscriptReplayItem::ToolResult { content } => {
+            transcript.append_tool_result(content, crate::tool_result::ToolResultKind::Ran);
+        }
+        TranscriptReplayItem::System { content } => {
+            transcript.append_system_message(content);
         }
     }
+}
+
+fn upsert_replay_terminal_snapshot(
+    snapshots: &mut Vec<RuntimeTerminalSnapshot>,
+    snapshot: RuntimeTerminalSnapshot,
+) {
+    if let Some(existing) = snapshots
+        .iter_mut()
+        .find(|existing| existing.terminal_id == snapshot.terminal_id)
+    {
+        *existing = snapshot;
+        return;
+    }
+
+    snapshots.push(snapshot);
 }
 
 fn split_error_description_and_json_body(message: &str) -> (String, Option<String>) {

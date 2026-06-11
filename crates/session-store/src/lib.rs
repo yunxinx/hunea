@@ -5,7 +5,7 @@ use std::{
 };
 
 use provider_protocol::{ConversationItem, Role};
-use runtime_domain::paths::hunea_config_dir;
+use runtime_domain::{paths::hunea_config_dir, session::TranscriptReplayItem};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::{Timestamp, Uuid, Version};
@@ -119,6 +119,7 @@ pub struct SessionHeader {
 /// 会话配置快照。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigSnapshot {
+    pub provider_id: String,
     pub model: String,
     pub system_prompt: Option<String>,
 }
@@ -152,6 +153,7 @@ pub struct ResolvedSessionItem {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResolvedSessionState {
     pub items: Vec<ResolvedSessionItem>,
+    pub transcript: Vec<TranscriptReplayItem>,
     pub latest_config: Option<ConfigSnapshot>,
 }
 
@@ -205,6 +207,7 @@ pub enum SessionEntryKind {
         summary: String,
     },
     ConfigChange(ConfigSnapshot),
+    TranscriptReplay(TranscriptReplayItem),
     Leaf {
         target_id: Option<String>,
     },
@@ -461,6 +464,7 @@ fn resolve_state_from_path(path: &[&SessionEntry]) -> Result<ResolvedSessionStat
     }
 
     let mut resolved_items = Vec::new();
+    let compaction_summary;
     let start_index =
         if let Some((entry_id, summary, first_kept_entry_id)) = latest_compaction(path) {
             let keep_index = item_entry_position(path, first_kept_entry_id).ok_or_else(|| {
@@ -472,8 +476,10 @@ fn resolve_state_from_path(path: &[&SessionEntry]) -> Result<ResolvedSessionStat
                     summary.to_string(),
                 )]),
             });
+            compaction_summary = Some(summary.to_string());
             keep_index
         } else {
+            compaction_summary = None;
             0
         };
 
@@ -489,10 +495,63 @@ fn resolve_state_from_path(path: &[&SessionEntry]) -> Result<ResolvedSessionStat
             }),
     );
 
+    let mut transcript = explicit_transcript_from_path(&path[start_index..]);
+    if !transcript.is_empty()
+        && let Some(summary) = compaction_summary
+    {
+        transcript.insert(0, TranscriptReplayItem::System { content: summary });
+    }
+
     Ok(ResolvedSessionState {
         items: resolved_items,
+        transcript,
         latest_config,
     })
+}
+
+fn explicit_transcript_from_path(path: &[&SessionEntry]) -> Vec<TranscriptReplayItem> {
+    let mut transcript = Vec::new();
+    for entry in path {
+        if let SessionEntryKind::TranscriptReplay(item) = &entry.kind {
+            push_transcript_replay_snapshot(&mut transcript, item.clone());
+        }
+    }
+    transcript
+}
+
+fn push_transcript_replay_snapshot(
+    transcript: &mut Vec<TranscriptReplayItem>,
+    item: TranscriptReplayItem,
+) {
+    match &item {
+        TranscriptReplayItem::ToolActivity { activity } => {
+            if let Some(existing) = transcript.iter_mut().find(|existing| {
+                matches!(
+                    existing,
+                    TranscriptReplayItem::ToolActivity { activity: existing_activity }
+                        if existing_activity.activity_id == activity.activity_id
+                )
+            }) {
+                *existing = item;
+                return;
+            }
+        }
+        TranscriptReplayItem::TerminalSnapshot { snapshot } => {
+            if let Some(existing) = transcript.iter_mut().find(|existing| {
+                matches!(
+                    existing,
+                    TranscriptReplayItem::TerminalSnapshot { snapshot: existing_snapshot }
+                        if existing_snapshot.terminal_id == snapshot.terminal_id
+                )
+            }) {
+                *existing = item;
+                return;
+            }
+        }
+        _ => {}
+    }
+
+    transcript.push(item);
 }
 
 fn entry_depths(entries: &[SessionEntry]) -> Result<HashMap<String, usize>, ResolveError> {
@@ -560,6 +619,21 @@ fn session_tree_snapshot_entry_kind(entry: &SessionEntry) -> SessionTreeSnapshot
             },
         },
         SessionEntryKind::ConfigChange(_) => SessionTreeSnapshotEntryKind::Config,
+        SessionEntryKind::TranscriptReplay(item) => match item {
+            TranscriptReplayItem::Message {
+                role: runtime_domain::session::TranscriptReplayRole::User,
+                ..
+            } => SessionTreeSnapshotEntryKind::User,
+            TranscriptReplayItem::Message {
+                role: runtime_domain::session::TranscriptReplayRole::Assistant,
+                ..
+            } => SessionTreeSnapshotEntryKind::Assistant,
+            TranscriptReplayItem::Reasoning { .. } => SessionTreeSnapshotEntryKind::Reasoning,
+            TranscriptReplayItem::ToolActivity { .. }
+            | TranscriptReplayItem::TerminalSnapshot { .. }
+            | TranscriptReplayItem::ToolResult { .. } => SessionTreeSnapshotEntryKind::Tool,
+            TranscriptReplayItem::System { .. } => SessionTreeSnapshotEntryKind::Other,
+        },
         SessionEntryKind::Leaf { .. } => SessionTreeSnapshotEntryKind::Leaf,
         SessionEntryKind::Compaction { .. } | SessionEntryKind::BranchSummary { .. } => {
             SessionTreeSnapshotEntryKind::Other
@@ -580,6 +654,7 @@ fn session_tree_entry_content(entry: &SessionEntry) -> String {
         SessionEntryKind::Compaction { summary, .. } => summary.clone(),
         SessionEntryKind::BranchSummary { summary, .. } => summary.clone(),
         SessionEntryKind::ConfigChange(snapshot) => snapshot.model.clone(),
+        SessionEntryKind::TranscriptReplay(item) => item.content_text().to_string(),
         SessionEntryKind::Leaf {
             target_id: Some(target_id),
         } => format!("target {target_id}"),
@@ -627,6 +702,10 @@ fn session_tree_rewind_target(
     kind: SessionTreeSnapshotEntryKind,
     content: &str,
 ) -> (Option<String>, Option<String>) {
+    if matches!(entry.kind, SessionEntryKind::TranscriptReplay(_)) {
+        return (Some(entry.id.clone()), None);
+    }
+
     if kind == SessionTreeSnapshotEntryKind::User {
         return (
             entry
@@ -703,7 +782,14 @@ mod tests {
     };
 
     use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
-    use runtime_domain::paths::hunea_config_dir;
+    use runtime_domain::{
+        paths::hunea_config_dir,
+        session::{
+            RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
+            RuntimeToolActivityRawValue, RuntimeToolActivityStatus, RuntimeToolKind,
+            TranscriptReplayItem,
+        },
+    };
     use serde_json::json;
     use uuid::Uuid;
 
@@ -795,8 +881,23 @@ mod tests {
                 summary: "alternate branch".to_string(),
             },
             SessionEntryKind::ConfigChange(ConfigSnapshot {
+                provider_id: "local".to_string(),
                 model: "gpt-4.1-mini".to_string(),
                 system_prompt: Some("be terse".to_string()),
+            }),
+            SessionEntryKind::TranscriptReplay(TranscriptReplayItem::ToolActivity {
+                activity: sample_tool_activity("call-1", "first"),
+            }),
+            SessionEntryKind::TranscriptReplay(TranscriptReplayItem::TerminalSnapshot {
+                snapshot: RuntimeTerminalSnapshot {
+                    terminal_id: "call-1".to_string(),
+                    command: Some("cargo test".to_string()),
+                    cwd: Some("/repo".to_string()),
+                    output: "running tests".to_string(),
+                    truncated: false,
+                    exit_status: None,
+                    released: true,
+                },
             }),
             SessionEntryKind::Leaf {
                 target_id: Some("entry-5".to_string()),
@@ -1122,6 +1223,108 @@ mod tests {
     }
 
     #[test]
+    fn resolve_state_returns_explicit_transcript_replay_items() {
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+        let expected_activity = sample_tool_activity("call-1", "final");
+        let expected_snapshot = RuntimeTerminalSnapshot {
+            terminal_id: "call-1".to_string(),
+            command: Some("cargo test".to_string()),
+            cwd: Some("/repo".to_string()),
+            output: "test output".to_string(),
+            truncated: false,
+            exit_status: None,
+            released: true,
+        };
+        let entries = vec![
+            SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: 1_717_514_800_000,
+                kind: SessionEntryKind::Header(SessionHeader {
+                    session_id,
+                    work_dir: PathBuf::from("/repo"),
+                    session_name: None,
+                    initial_model: "qwen3".to_string(),
+                    git_head: None,
+                    cli_version: None,
+                }),
+            },
+            SessionEntry {
+                id: "assistant-1".to_string(),
+                parent_id: Some("header".to_string()),
+                timestamp: 1_717_514_800_001,
+                kind: SessionEntryKind::Item(ConversationItem::assistant_with_tool_calls(
+                    "editing".to_string(),
+                    vec![ToolCall::new(
+                        "call-1",
+                        "write_file",
+                        r#"{"path":"src/lib.rs"}"#,
+                    )],
+                )),
+            },
+            SessionEntry {
+                id: "tool-1".to_string(),
+                parent_id: Some("assistant-1".to_string()),
+                timestamp: 1_717_514_800_002,
+                kind: SessionEntryKind::Item(ConversationItem::tool_result(
+                    "call-1",
+                    vec![ContentBlock::Text("plain provider output".to_string())],
+                    false,
+                )),
+            },
+            SessionEntry {
+                id: "replay-start".to_string(),
+                parent_id: Some("tool-1".to_string()),
+                timestamp: 1_717_514_800_003,
+                kind: SessionEntryKind::TranscriptReplay(TranscriptReplayItem::ToolActivity {
+                    activity: sample_tool_activity("call-1", "started"),
+                }),
+            },
+            SessionEntry {
+                id: "replay-final".to_string(),
+                parent_id: Some("replay-start".to_string()),
+                timestamp: 1_717_514_800_004,
+                kind: SessionEntryKind::TranscriptReplay(TranscriptReplayItem::ToolActivity {
+                    activity: expected_activity.clone(),
+                }),
+            },
+            SessionEntry {
+                id: "terminal-final".to_string(),
+                parent_id: Some("replay-final".to_string()),
+                timestamp: 1_717_514_800_005,
+                kind: SessionEntryKind::TranscriptReplay(TranscriptReplayItem::TerminalSnapshot {
+                    snapshot: expected_snapshot.clone(),
+                }),
+            },
+        ];
+
+        let resolved =
+            super::resolve_state(&entries, "terminal-final").expect("state should resolve");
+
+        assert_eq!(
+            resolved
+                .items
+                .iter()
+                .map(|item| item.item.text_content())
+                .collect::<Vec<_>>(),
+            vec!["editing", "plain provider output"]
+        );
+        assert_eq!(
+            resolved.transcript,
+            vec![
+                TranscriptReplayItem::ToolActivity {
+                    activity: expected_activity
+                },
+                TranscriptReplayItem::TerminalSnapshot {
+                    snapshot: expected_snapshot
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn resolve_returns_branch_specific_history() {
         let entries = branching_entries();
 
@@ -1189,6 +1392,70 @@ mod tests {
             .expect("assistant-1 should exist");
         assert_eq!(assistant.rewind_target_id.as_deref(), Some("assistant-1"));
         assert_eq!(assistant.rewind_prefill, None);
+    }
+
+    #[test]
+    fn session_tree_snapshot_rewinds_replay_entries_to_themselves() {
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+        let entries = vec![
+            SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: 1_717_514_800_000,
+                kind: SessionEntryKind::Header(SessionHeader {
+                    session_id,
+                    work_dir: PathBuf::from("/repo"),
+                    session_name: None,
+                    initial_model: "qwen3".to_string(),
+                    git_head: None,
+                    cli_version: None,
+                }),
+            },
+            SessionEntry {
+                id: "user-1".to_string(),
+                parent_id: Some("header".to_string()),
+                timestamp: 1_717_514_800_001,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "hello")),
+            },
+            SessionEntry {
+                id: "user-replay".to_string(),
+                parent_id: Some("user-1".to_string()),
+                timestamp: 1_717_514_800_002,
+                kind: SessionEntryKind::TranscriptReplay(TranscriptReplayItem::Message {
+                    role: runtime_domain::session::TranscriptReplayRole::User,
+                    content: "hello".to_string(),
+                }),
+            },
+            SessionEntry {
+                id: "assistant-1".to_string(),
+                parent_id: Some("user-replay".to_string()),
+                timestamp: 1_717_514_800_003,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "answer")),
+            },
+            SessionEntry {
+                id: "assistant-replay".to_string(),
+                parent_id: Some("assistant-1".to_string()),
+                timestamp: 1_717_514_800_004,
+                kind: SessionEntryKind::TranscriptReplay(TranscriptReplayItem::Message {
+                    role: runtime_domain::session::TranscriptReplayRole::Assistant,
+                    content: "answer".to_string(),
+                }),
+            },
+        ];
+
+        let snapshot = super::session_tree_snapshot(&entries).expect("replay tree should snapshot");
+
+        for replay_id in ["user-replay", "assistant-replay"] {
+            let replay_entry = snapshot
+                .entries
+                .iter()
+                .find(|entry| entry.id == replay_id)
+                .expect("replay entry should exist");
+            assert_eq!(replay_entry.rewind_target_id.as_deref(), Some(replay_id));
+            assert_eq!(replay_entry.rewind_prefill, None);
+        }
     }
 
     #[test]
@@ -1500,6 +1767,7 @@ mod tests {
                 parent_id: Some("branch-1".to_string()),
                 timestamp: 1_717_514_800_007,
                 kind: SessionEntryKind::ConfigChange(ConfigSnapshot {
+                    provider_id: "local".to_string(),
                     model: "gpt-4.1-mini".to_string(),
                     system_prompt: Some("be terse".to_string()),
                 }),
@@ -1513,6 +1781,29 @@ mod tests {
                 },
             },
         ]
+    }
+
+    fn sample_tool_activity(activity_id: &str, text: &str) -> RuntimeToolActivity {
+        RuntimeToolActivity {
+            activity_id: activity_id.to_string(),
+            title: format!("Write {text}"),
+            kind: RuntimeToolKind::Write,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Diff {
+                path: "src/lib.rs".to_string(),
+                old_text: Some("old".to_string()),
+                new_text: text.to_string(),
+                is_truncated: false,
+            }],
+            locations: Vec::new(),
+            raw_input: Some(RuntimeToolActivityRawValue::from(
+                serde_json::json!({"path":"src/lib.rs"}),
+            )),
+            raw_output: Some(RuntimeToolActivityRawValue::tool_result(
+                text.to_string(),
+                None,
+            )),
+        }
     }
 
     fn linear_history_entries() -> Vec<SessionEntry> {
@@ -1759,6 +2050,7 @@ mod tests {
             parent_id: Some("branch-summary".to_string()),
             timestamp: 1_717_514_800_003,
             kind: SessionEntryKind::ConfigChange(ConfigSnapshot {
+                provider_id: "local".to_string(),
                 model: "gpt-4.1-mini".to_string(),
                 system_prompt: Some("be terse".to_string()),
             }),
@@ -1854,6 +2146,7 @@ mod tests {
                 parent_id: Some("user-a".to_string()),
                 timestamp: 1_717_514_800_002,
                 kind: SessionEntryKind::ConfigChange(ConfigSnapshot {
+                    provider_id: "local".to_string(),
                     model: "gpt-4.1-mini".to_string(),
                     system_prompt: Some("be terse".to_string()),
                 }),

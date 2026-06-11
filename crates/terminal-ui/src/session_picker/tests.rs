@@ -109,6 +109,20 @@ fn session_picker_search_mode_treats_space_as_query_text() {
 }
 
 #[test]
+fn session_picker_empty_list_keeps_shared_left_inset() {
+    let mut model = ready_model();
+    model.open_session_picker_loading();
+    model.apply_session_picker_rows(Vec::new());
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 60, 8));
+
+    assert!(
+        rows[2].starts_with("  No sessions"),
+        "empty-list copy should align with the shared two-space inset: {rows:?}"
+    );
+}
+
+#[test]
 fn session_preview_opens_on_latest_page_and_space_returns_to_picker() {
     let mut model = ready_model();
     model.open_session_picker_loading();
@@ -124,7 +138,7 @@ fn session_preview_opens_on_latest_page_and_space_returns_to_picker() {
         payload: SessionPreviewPayload {
             session_id: "session-a".to_string(),
             transcript: (0..12)
-                .map(|index| TranscriptReplayItem {
+                .map(|index| TranscriptReplayItem::Message {
                     role: TranscriptReplayRole::Assistant,
                     content: format!("preview answer {index}"),
                 })
@@ -151,6 +165,33 @@ fn session_preview_opens_on_latest_page_and_space_returns_to_picker() {
     assert!(
         model.session_picker_active(),
         "space should return from preview to the picker"
+    );
+}
+
+#[test]
+fn session_preview_footer_names_vertical_and_horizontal_page_keys() {
+    let mut model = ready_model();
+    model.set_window(60, 8);
+    model.open_session_picker_loading();
+    model.apply_session_picker_rows(vec![picker_row(
+        "session-a",
+        "alpha work",
+        "first alpha",
+        "answer alpha",
+        "/tmp/alpha",
+    )]);
+    model.apply_runtime_event(preview_loaded_event("session-a", 12));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 60, 8));
+    let footer = rows.last().expect("preview should render a footer row");
+
+    assert!(
+        footer.starts_with("  "),
+        "preview footer should keep the shared two-space left inset: {rows:?}"
+    );
+    assert!(
+        footer.contains("↑/←/h") && footer.contains("↓/→/l"),
+        "preview footer should name both vertical and horizontal page keys: {rows:?}"
     );
 }
 
@@ -190,7 +231,7 @@ fn session_preview_enter_resumes_preview_session() {
     model.apply_runtime_event(RuntimeEvent::SessionPreviewLoaded {
         payload: SessionPreviewPayload {
             session_id: "session-a".to_string(),
-            transcript: vec![TranscriptReplayItem {
+            transcript: vec![TranscriptReplayItem::Message {
                 role: TranscriptReplayRole::Assistant,
                 content: "preview answer".to_string(),
             }],
@@ -928,7 +969,7 @@ fn preview_loaded_event(session_id: &str, message_count: usize) -> RuntimeEvent 
         payload: SessionPreviewPayload {
             session_id: session_id.to_string(),
             transcript: (0..message_count)
-                .map(|index| TranscriptReplayItem {
+                .map(|index| TranscriptReplayItem::Message {
                     role: TranscriptReplayRole::Assistant,
                     content: format!("preview answer {index}"),
                 })

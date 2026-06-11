@@ -294,6 +294,7 @@ impl ProviderConversation {
                     .clone()
                     .expect("session should exist after ensure_persistence"),
                 config_snapshot: ConfigSnapshot {
+                    provider_id: turn.provider_id().to_string(),
                     model: turn.model_id().to_string(),
                     system_prompt,
                 },
@@ -816,6 +817,7 @@ mod tests {
         block_on_session(store.append_config_change(
             &session_id,
             session_store::ConfigSnapshot {
+                provider_id: "local".to_string(),
                 model: "qwen3".to_string(),
                 system_prompt: Some("keep it sharp".to_string()),
             },
@@ -948,6 +950,14 @@ mod tests {
             _snapshot: session_store::ConfigSnapshot,
         ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
             Box::pin(async { Ok(()) })
+        }
+
+        fn append_transcript_replay<'a>(
+            &'a self,
+            _session_id: &'a SessionId,
+            _item: runtime_domain::session::TranscriptReplayItem,
+        ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>> {
+            Box::pin(async { Ok("replay-1".to_string()) })
         }
 
         fn set_leaf<'a>(

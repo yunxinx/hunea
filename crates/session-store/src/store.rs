@@ -8,6 +8,7 @@ use std::{
 };
 
 use provider_protocol::{ConversationItem, Role};
+use runtime_domain::session::TranscriptReplayItem;
 use tokio::{
     fs,
     sync::{Mutex, RwLock},
@@ -40,6 +41,12 @@ pub trait SessionStore: Send + Sync {
         session_id: &'a SessionId,
         snapshot: ConfigSnapshot,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
+
+    fn append_transcript_replay<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        item: TranscriptReplayItem,
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>>;
 
     fn set_leaf<'a>(
         &'a self,
@@ -254,6 +261,17 @@ impl SessionStore for LocalSessionStore {
             self.append_entry(session_id, SessionEntryKind::ConfigChange(snapshot))
                 .await
                 .map(|_| ())
+        })
+    }
+
+    fn append_transcript_replay<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        item: TranscriptReplayItem,
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.append_entry(session_id, SessionEntryKind::TranscriptReplay(item))
+                .await
         })
     }
 
@@ -572,6 +590,17 @@ impl SessionStore for InMemorySessionStore {
             self.append_entry(session_id, SessionEntryKind::ConfigChange(snapshot))
                 .await
                 .map(|_| ())
+        })
+    }
+
+    fn append_transcript_replay<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        item: TranscriptReplayItem,
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.append_entry(session_id, SessionEntryKind::TranscriptReplay(item))
+                .await
         })
     }
 

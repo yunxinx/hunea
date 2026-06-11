@@ -996,6 +996,7 @@ mod tests {
                     parent_id: Some("assistant-1".to_string()),
                     timestamp: 1_717_514_800_090,
                     kind: SessionEntryKind::ConfigChange(crate::ConfigSnapshot {
+                        provider_id: "local".to_string(),
                         model: "gpt-4.1-mini".to_string(),
                         system_prompt: None,
                     }),

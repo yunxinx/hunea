@@ -4,8 +4,7 @@ mod managed_search_authorization;
 use std::{path::PathBuf, sync::Arc};
 
 use conversation_runtime::{
-    ConversationItem, ConversationWorker, ModelRefreshWorker, ProviderConversation, Role,
-    models as provider_models,
+    ConversationWorker, ModelRefreshWorker, ProviderConversation, models as provider_models,
 };
 use runtime_domain::{
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
@@ -13,8 +12,7 @@ use runtime_domain::{
     session::{
         ConversationEvent, ConversationTurnRequest, RuntimeCommand, RuntimeCommandReceipt,
         RuntimeEvent, RuntimeTarget, SessionPickerRow, SessionPreviewPayload, SessionResumePayload,
-        SessionTreeEntry, SessionTreeEntryKind, SessionTreePayload, TranscriptReplayItem,
-        TranscriptReplayRole,
+        SessionTreeEntry, SessionTreeEntryKind, SessionTreePayload,
     },
 };
 use session_store::{
@@ -410,19 +408,16 @@ fn session_resume_payload(
     session_id: SessionId,
     restored_state: ResolvedSessionState,
 ) -> SessionResumePayload {
-    let restored_model = restored_state
-        .latest_config
-        .as_ref()
-        .map(|config| config.model.clone());
+    let ResolvedSessionState {
+        transcript,
+        latest_config,
+        ..
+    } = restored_state;
+    let restored_model = restored_model_selection(latest_config.as_ref());
     SessionResumePayload {
         session_id: session_id.to_string(),
-        transcript: restored_state
-            .items
-            .into_iter()
-            .filter_map(|item| transcript_replay_item_from_conversation_item(item.item))
-            .collect(),
+        transcript,
         restored_model,
-        missing_model: None,
     }
 }
 
@@ -430,13 +425,10 @@ fn session_preview_payload(
     session_id: SessionId,
     restored_state: ResolvedSessionState,
 ) -> SessionPreviewPayload {
+    let ResolvedSessionState { transcript, .. } = restored_state;
     SessionPreviewPayload {
         session_id: session_id.to_string(),
-        transcript: restored_state
-            .items
-            .into_iter()
-            .filter_map(|item| transcript_replay_item_from_conversation_item(item.item))
-            .collect(),
+        transcript,
     }
 }
 
@@ -486,46 +478,20 @@ fn session_tree_entry_kind(kind: SessionTreeSnapshotEntryKind) -> SessionTreeEnt
     }
 }
 
-fn transcript_replay_item_from_conversation_item(
-    item: ConversationItem,
-) -> Option<TranscriptReplayItem> {
-    match item {
-        ConversationItem::Message { role, content } => {
-            let content = ConversationItem::Message { role, content }.text_content();
-            (!content.trim().is_empty()).then_some(TranscriptReplayItem {
-                role: transcript_role_from_message_role(role),
-                content,
-            })
-        }
-        ConversationItem::ToolResult {
-            call_id, content, ..
-        } => {
-            let content = ConversationItem::ToolResult {
-                call_id,
-                content,
-                is_error: false,
-            }
-            .text_content();
-            (!content.trim().is_empty()).then_some(TranscriptReplayItem {
-                role: TranscriptReplayRole::Tool,
-                content,
-            })
-        }
-        ConversationItem::Reasoning { content, .. } => {
-            (!content.trim().is_empty()).then_some(TranscriptReplayItem {
-                role: TranscriptReplayRole::System,
-                content,
-            })
-        }
-    }
-}
+fn restored_model_selection(
+    config: Option<&session_store::ConfigSnapshot>,
+) -> Option<ModelSelection> {
+    let model_id = config
+        .map(|config| config.model.trim())
+        .filter(|model| !model.is_empty())?;
+    let provider_id = config
+        .map(|config| config.provider_id.trim())
+        .filter(|provider_id| !provider_id.trim().is_empty())?;
 
-fn transcript_role_from_message_role(role: Role) -> TranscriptReplayRole {
-    match role {
-        Role::System => TranscriptReplayRole::System,
-        Role::User => TranscriptReplayRole::User,
-        Role::Assistant => TranscriptReplayRole::Assistant,
-    }
+    Some(ModelSelection::new(
+        provider_id.to_string(),
+        model_id.to_string(),
+    ))
 }
 
 fn block_on_session_store<T>(
@@ -678,12 +644,15 @@ mod tests {
         AppRuntimeCoordinator, AppRuntimeOptions, ensure_conversation_target,
         should_defer_runtime_event_for_render_barrier,
     };
-    use provider_protocol::{ConversationItem, Role};
+    use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
     use runtime_domain::{
+        model_catalog::ModelSelection,
         provider::ProviderKind,
         session::{
             ConversationTurnRequest, ManagedSearchTool, RuntimeCommand, RuntimeEvent,
-            RuntimePermissionRequest, RuntimeTarget, SessionTreeEntryKind,
+            RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity,
+            RuntimeToolActivityContent, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
+            RuntimeToolKind, SessionTreeEntryKind, TranscriptReplayItem, TranscriptReplayRole,
         },
     };
     use session_store::{
@@ -726,6 +695,14 @@ mod tests {
             snapshot: ConfigSnapshot,
         ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
             self.inner.append_config_change(session_id, snapshot)
+        }
+
+        fn append_transcript_replay<'a>(
+            &'a self,
+            session_id: &'a SessionId,
+            item: TranscriptReplayItem,
+        ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>> {
+            self.inner.append_transcript_replay(session_id, item)
         }
 
         fn set_leaf<'a>(
@@ -1084,15 +1061,34 @@ mod tests {
                     )
                     .await?;
                 store
+                    .append_transcript_replay(
+                        &session_id,
+                        TranscriptReplayItem::Message {
+                            role: TranscriptReplayRole::User,
+                            content: "hello resume".to_string(),
+                        },
+                    )
+                    .await?;
+                store
                     .append(
                         &session_id,
                         ConversationItem::text(Role::Assistant, "resume answer"),
                     )
                     .await?;
                 store
+                    .append_transcript_replay(
+                        &session_id,
+                        TranscriptReplayItem::Message {
+                            role: TranscriptReplayRole::Assistant,
+                            content: "resume answer".to_string(),
+                        },
+                    )
+                    .await?;
+                store
                     .append_config_change(
                         &session_id,
                         ConfigSnapshot {
+                            provider_id: "local".to_string(),
                             model: "qwen3".to_string(),
                             system_prompt: Some("historical prompt".to_string()),
                         },
@@ -1118,13 +1114,15 @@ mod tests {
             panic!("expected session resumed event");
         };
         assert_eq!(payload.session_id, session_id.to_string());
-        assert_eq!(payload.restored_model.as_deref(), Some("qwen3"));
-        assert_eq!(payload.missing_model, None);
+        assert_eq!(
+            payload.restored_model,
+            Some(ModelSelection::new("local", "qwen3"))
+        );
         assert_eq!(
             payload
                 .transcript
                 .iter()
-                .map(|item| item.content.as_str())
+                .map(TranscriptReplayItem::content_text)
                 .collect::<Vec<_>>(),
             vec!["hello resume", "resume answer"]
         );
@@ -1140,6 +1138,261 @@ mod tests {
         assert_eq!(
             coordinator.provider_conversation.system_prompt(),
             Some("historical prompt")
+        );
+        cleanup(&work_dir);
+    }
+
+    #[test]
+    fn resume_session_payload_does_not_label_reasoning_as_system() {
+        let work_dir = temp_test_dir("resume-session-reasoning-work");
+        let store = Arc::new(InMemorySessionStore::new());
+        let store_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("session store runtime should start");
+        let header = SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        };
+        let session_id = store_runtime
+            .block_on(async {
+                let session_id = store.create_session(header.clone()).await?;
+                store
+                    .append(&session_id, ConversationItem::text(Role::User, "hello"))
+                    .await?;
+                store
+                    .append_transcript_replay(
+                        &session_id,
+                        TranscriptReplayItem::Message {
+                            role: TranscriptReplayRole::User,
+                            content: "hello".to_string(),
+                        },
+                    )
+                    .await?;
+                store
+                    .append(&session_id, ConversationItem::reasoning("private chain"))
+                    .await?;
+                store
+                    .append_transcript_replay(
+                        &session_id,
+                        TranscriptReplayItem::Reasoning {
+                            content: "private chain".to_string(),
+                        },
+                    )
+                    .await?;
+                store
+                    .append(&session_id, ConversationItem::text(Role::Assistant, "done"))
+                    .await?;
+                store
+                    .append_transcript_replay(
+                        &session_id,
+                        TranscriptReplayItem::Message {
+                            role: TranscriptReplayRole::Assistant,
+                            content: "done".to_string(),
+                        },
+                    )
+                    .await?;
+                Ok::<SessionId, session_store::SessionStoreError>(session_id)
+            })
+            .expect("session fixture should persist");
+        let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+            session_store: Some(store),
+            session_header_template: Some(header),
+            ..AppRuntimeOptions::default()
+        });
+
+        coordinator
+            .handle_runtime_command(RuntimeCommand::ResumeSession {
+                session_id: session_id.to_string(),
+            })
+            .expect("resume session should succeed");
+
+        let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+        let Some(RuntimeEvent::SessionResumed { payload }) = events.into_iter().next() else {
+            panic!("expected session resumed event");
+        };
+        let reasoning = payload
+            .transcript
+            .iter()
+            .find(|item| {
+                matches!(item, TranscriptReplayItem::Reasoning { content } if content == "private chain")
+            })
+            .expect("reasoning replay item should be present");
+        assert!(
+            !matches!(reasoning, TranscriptReplayItem::System { .. }),
+            "reasoning must not be replayed as a system message"
+        );
+        cleanup(&work_dir);
+    }
+
+    #[test]
+    fn resume_session_payload_does_not_reconstruct_transcript_from_provider_history() {
+        let work_dir = temp_test_dir("resume-session-provider-only-work");
+        let store = Arc::new(InMemorySessionStore::new());
+        let store_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("session store runtime should start");
+        let header = SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        };
+        let session_id = store_runtime
+            .block_on(async {
+                let session_id = store.create_session(header.clone()).await?;
+                store
+                    .append(
+                        &session_id,
+                        ConversationItem::text(Role::User, "provider-only user"),
+                    )
+                    .await?;
+                store
+                    .append(
+                        &session_id,
+                        ConversationItem::text(Role::Assistant, "provider-only answer"),
+                    )
+                    .await?;
+                Ok::<SessionId, session_store::SessionStoreError>(session_id)
+            })
+            .expect("session fixture should persist");
+        let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+            session_store: Some(store),
+            session_header_template: Some(header),
+            ..AppRuntimeOptions::default()
+        });
+
+        coordinator
+            .handle_runtime_command(RuntimeCommand::ResumeSession {
+                session_id: session_id.to_string(),
+            })
+            .expect("resume session should succeed");
+
+        let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+        let Some(RuntimeEvent::SessionResumed { payload }) = events.into_iter().next() else {
+            panic!("expected session resumed event");
+        };
+        assert!(payload.transcript.is_empty());
+        cleanup(&work_dir);
+    }
+
+    #[test]
+    fn resume_session_payload_prefers_persisted_transcript_replay() {
+        let work_dir = temp_test_dir("resume-session-explicit-replay-work");
+        let store = Arc::new(InMemorySessionStore::new());
+        let store_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("session store runtime should start");
+        let header = SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        };
+        let replay_activity = RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "Write src/lib.rs".to_string(),
+            kind: RuntimeToolKind::Write,
+            status: RuntimeToolActivityStatus::Completed,
+            content: vec![RuntimeToolActivityContent::Diff {
+                path: "src/lib.rs".to_string(),
+                old_text: Some("old".to_string()),
+                new_text: "new".to_string(),
+                is_truncated: false,
+            }],
+            locations: Vec::new(),
+            raw_input: Some(RuntimeToolActivityRawValue::from(
+                r#"{"path":"src/lib.rs"}"#,
+            )),
+            raw_output: Some(RuntimeToolActivityRawValue::tool_result(
+                "plain provider output",
+                None,
+            )),
+        };
+        let session_id = store_runtime
+            .block_on(async {
+                let session_id = store.create_session(header.clone()).await?;
+                store
+                    .append(
+                        &session_id,
+                        ConversationItem::assistant_with_tool_calls(
+                            "editing".to_string(),
+                            vec![ToolCall::new(
+                                "call-1",
+                                "write_file",
+                                r#"{"path":"src/lib.rs"}"#,
+                            )],
+                        ),
+                    )
+                    .await?;
+                store
+                    .append(
+                        &session_id,
+                        ConversationItem::tool_result(
+                            "call-1",
+                            vec![ContentBlock::Text("plain provider output".to_string())],
+                            false,
+                        ),
+                    )
+                    .await?;
+                store
+                    .append_transcript_replay(
+                        &session_id,
+                        TranscriptReplayItem::Message {
+                            role: TranscriptReplayRole::Assistant,
+                            content: "editing".to_string(),
+                        },
+                    )
+                    .await?;
+                store
+                    .append_transcript_replay(
+                        &session_id,
+                        TranscriptReplayItem::ToolActivity {
+                            activity: replay_activity.clone(),
+                        },
+                    )
+                    .await?;
+                Ok::<SessionId, session_store::SessionStoreError>(session_id)
+            })
+            .expect("session fixture should persist");
+        let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+            session_store: Some(store),
+            session_header_template: Some(header),
+            ..AppRuntimeOptions::default()
+        });
+
+        coordinator
+            .handle_runtime_command(RuntimeCommand::ResumeSession {
+                session_id: session_id.to_string(),
+            })
+            .expect("resume session should succeed");
+
+        let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+        let Some(RuntimeEvent::SessionResumed { payload }) = events.into_iter().next() else {
+            panic!("expected session resumed event");
+        };
+        assert_eq!(
+            payload.transcript,
+            vec![
+                TranscriptReplayItem::Message {
+                    role: TranscriptReplayRole::Assistant,
+                    content: "editing".to_string(),
+                },
+                TranscriptReplayItem::ToolActivity {
+                    activity: replay_activity,
+                },
+            ],
+            "explicit replay should preserve rich diff content instead of fallback text"
         );
         cleanup(&work_dir);
     }
@@ -1183,9 +1436,27 @@ mod tests {
                     )
                     .await?;
                 store
+                    .append_transcript_replay(
+                        &preview_session_id,
+                        TranscriptReplayItem::Message {
+                            role: TranscriptReplayRole::User,
+                            content: "preview user".to_string(),
+                        },
+                    )
+                    .await?;
+                store
                     .append(
                         &preview_session_id,
                         ConversationItem::text(Role::Assistant, "preview answer"),
+                    )
+                    .await?;
+                store
+                    .append_transcript_replay(
+                        &preview_session_id,
+                        TranscriptReplayItem::Message {
+                            role: TranscriptReplayRole::Assistant,
+                            content: "preview answer".to_string(),
+                        },
                     )
                     .await?;
                 Ok::<SessionId, session_store::SessionStoreError>(preview_session_id)
@@ -1212,7 +1483,7 @@ mod tests {
             payload
                 .transcript
                 .iter()
-                .map(|item| item.content.as_str())
+                .map(TranscriptReplayItem::content_text)
                 .collect::<Vec<_>>(),
             vec!["preview user", "preview answer"]
         );
@@ -1313,24 +1584,51 @@ mod tests {
             git_head: None,
             cli_version: None,
         };
-        let (session_id, assistant_entry_id) = store_runtime
+        let (session_id, assistant_replay_entry_id) = store_runtime
             .block_on(async {
                 let session_id = store.create_session(header.clone()).await?;
                 store
                     .append(&session_id, ConversationItem::text(Role::User, "first"))
                     .await?;
-                let assistant_entry_id = store
+                store
+                    .append_transcript_replay(
+                        &session_id,
+                        TranscriptReplayItem::Message {
+                            role: TranscriptReplayRole::User,
+                            content: "first".to_string(),
+                        },
+                    )
+                    .await?;
+                store
                     .append(
                         &session_id,
                         ConversationItem::text(Role::Assistant, "answer"),
                     )
                     .await?;
+                let assistant_replay_entry_id = store
+                    .append_transcript_replay(
+                        &session_id,
+                        TranscriptReplayItem::Message {
+                            role: TranscriptReplayRole::Assistant,
+                            content: "answer".to_string(),
+                        },
+                    )
+                    .await?;
                 store
                     .append(&session_id, ConversationItem::text(Role::User, "second"))
                     .await?;
+                store
+                    .append_transcript_replay(
+                        &session_id,
+                        TranscriptReplayItem::Message {
+                            role: TranscriptReplayRole::User,
+                            content: "second".to_string(),
+                        },
+                    )
+                    .await?;
                 Ok::<(SessionId, String), session_store::SessionStoreError>((
                     session_id,
-                    assistant_entry_id,
+                    assistant_replay_entry_id,
                 ))
             })
             .expect("session fixture should persist");
@@ -1348,7 +1646,7 @@ mod tests {
 
         coordinator
             .handle_runtime_command(RuntimeCommand::SelectEntryRewind {
-                entry_id: assistant_entry_id,
+                entry_id: assistant_replay_entry_id,
             })
             .expect("select entry rewind should succeed");
 
@@ -1369,7 +1667,7 @@ mod tests {
             payload
                 .transcript
                 .iter()
-                .map(|item| item.content.as_str())
+                .map(TranscriptReplayItem::content_text)
                 .collect::<Vec<_>>(),
             vec!["first", "answer"]
         );

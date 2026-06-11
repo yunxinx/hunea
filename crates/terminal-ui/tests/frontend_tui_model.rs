@@ -79,7 +79,7 @@ fn configured_default_model_is_kept_when_provider_models_are_not_loaded() {
 }
 
 #[test]
-fn configured_default_model_is_dropped_when_it_is_outside_allowlist() {
+fn configured_default_model_is_trusted_when_it_is_outside_allowlist() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
         ModelOptions {
@@ -98,16 +98,21 @@ fn configured_default_model_is_dropped_when_it_is_outside_allowlist() {
         has_dark_background: true,
     });
 
-    assert_eq!(model.selected_model(), None);
+    assert_eq!(
+        model.selected_model(),
+        Some(ModelSelection::new("local", "qwen4"))
+    );
 
     for character in "hello".chars() {
         model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
     }
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    assert_eq!(effect, None);
-    assert_eq!(model.composer_text(), "hello");
-    assert!(rendered_model_text(&mut model).contains("Select a model before sending"));
+    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+        panic!("expected conversation turn effect, got {effect:?}");
+    };
+    assert_eq!(request.provider_id(), "local");
+    assert_eq!(request.model_id(), "qwen4");
 }
 
 #[test]

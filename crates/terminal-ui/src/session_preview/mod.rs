@@ -12,7 +12,9 @@ use crate::{
     },
 };
 
-const FOOTER_HINT: &str = "  Esc/Space back · Enter resume · ←/h previous page · →/l next page";
+const COMPACT_FOOTER_HINT: &str = "  Esc/Space back · Enter resume · ↑/←/h prev · ↓/→/l next";
+const FULL_FOOTER_HINT: &str =
+    "  Esc/Space back · Enter resume · ↑/←/h previous page · ↓/→/l next page";
 
 /// `SessionPreviewState` 保存 resume picker 的完整 session 预览状态。
 #[derive(Debug, Clone)]
@@ -112,7 +114,7 @@ impl Model {
             TranscriptOverlayRenderOptions {
                 palette,
                 content_height,
-                footer_hint: FOOTER_HINT,
+                footer_hint: session_preview_footer_hint(area.width),
                 progress_style: TranscriptOverlayProgressStyle::Page,
             },
         );
@@ -130,6 +132,14 @@ impl Model {
             direction,
         );
         preview.is_following_bottom = false;
+    }
+}
+
+fn session_preview_footer_hint(width: u16) -> &'static str {
+    if width < 76 {
+        COMPACT_FOOTER_HINT
+    } else {
+        FULL_FOOTER_HINT
     }
 }
 

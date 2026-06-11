@@ -3,7 +3,7 @@ use std::{fs, io, path::Path};
 use super::{
     error::AppConfigError,
     file_config::{FileConfig, FileRuntimeConfig},
-    types::{Config, ReasoningContentDisplay, RuntimeConfig, UserInputStyle},
+    types::{Config, EscRewindMode, ReasoningContentDisplay, RuntimeConfig, UserInputStyle},
     validate::{
         normalize_request_retry_delays, validate_composer_undo_limit, validate_external_editor,
         validate_file_picker_popup_height, validate_request_retry_attempts,
@@ -102,6 +102,19 @@ pub(super) fn merge_config_file(
             });
         }
         config.tui.esc_interrupt_presses = esc_interrupt_presses;
+    }
+
+    if let Some(esc_rewind_mode) = file_config.tui.esc_rewind_mode {
+        config.tui.esc_rewind_mode =
+            EscRewindMode::parse(&esc_rewind_mode).map_err(|error| match error {
+                AppConfigError::InvalidEscRewindMode { value, .. } => {
+                    AppConfigError::InvalidEscRewindMode {
+                        path: Some(path.to_path_buf()),
+                        value,
+                    }
+                }
+                other => other,
+            })?;
     }
 
     if let Some(show_esc_interrupt_hint) = file_config.tui.show_esc_interrupt_hint {

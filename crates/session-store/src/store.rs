@@ -15,10 +15,11 @@ use tokio::{
 };
 
 use crate::{
-    ConfigSnapshot, ResolveError, ResolvedSessionState, SessionEntry, SessionEntryKind,
-    SessionHeader, SessionId, SessionMeta, SessionStoreError, encode_project_dir,
-    generate_entry_id, hunea_dir, jsonl::JsonlLoader, metadata::MetadataIndex,
-    recorder::SessionRecorder, resolve as resolve_entries, resolve_state, session_filename,
+    ConfigSnapshot, ResolveError, ResolvedSessionState, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT,
+    SESSION_TITLE_FALLBACK_CHAR_LIMIT, SessionEntry, SessionEntryKind, SessionHeader, SessionId,
+    SessionMeta, SessionStoreError, SessionTreeSnapshot, encode_project_dir, generate_entry_id,
+    hunea_dir, jsonl::JsonlLoader, metadata::MetadataIndex, recorder::SessionRecorder,
+    resolve as resolve_entries, resolve_state, session_filename, session_tree_snapshot,
 };
 
 /// `SessionStore` 定义 conversation-runtime 依赖的持久化接口。
@@ -58,6 +59,11 @@ pub trait SessionStore: Send + Sync {
         leaf_id: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSessionState, SessionStoreError>> + Send + 'a>>;
 
+    fn load_session_tree<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>;
+
     fn list_sessions<'a>(
         &'a self,
         project_dir: &'a str,
@@ -91,6 +97,7 @@ struct LocalSessionHandle {
 struct LocalSessionState {
     entries: Vec<SessionEntry>,
     entry_ids: HashSet<String>,
+    pending_state_entries: Vec<SessionEntry>,
     session_meta: SessionMeta,
 }
 
@@ -171,7 +178,11 @@ impl LocalSessionStore {
 
         let entry_id = entry.id.clone();
         handle.recorder.buffer(entry.clone())?;
-        handle.recorder.persist().await?;
+        if let Err(error) = handle.recorder.persist().await {
+            let mut state = handle.lock_state();
+            state.push_pending_state_entry(entry)?;
+            return Err(error);
+        }
 
         let meta = {
             let mut state = handle.lock_state();
@@ -278,7 +289,11 @@ impl SessionStore for LocalSessionStore {
             };
 
             handle.recorder.buffer(entry.clone())?;
-            handle.recorder.persist().await?;
+            if let Err(error) = handle.recorder.persist().await {
+                let mut state = handle.lock_state();
+                state.push_pending_state_entry(entry)?;
+                return Err(error);
+            }
 
             let meta = {
                 let mut state = handle.lock_state();
@@ -326,6 +341,20 @@ impl SessionStore for LocalSessionStore {
         })
     }
 
+    fn load_session_tree<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let handle = self.handle_for_session(&session_id).await?;
+            let _guard = handle.operation_lock.lock().await;
+            let state = handle.lock_state();
+            session_tree_snapshot(&state.entries).map_err(resolve_error)
+        })
+    }
+
     fn list_sessions<'a>(
         &'a self,
         project_dir: &'a str,
@@ -361,7 +390,11 @@ impl SessionStore for LocalSessionStore {
             let handle = self.handle_for_session(&session_id).await?;
             let _guard = handle.operation_lock.lock().await;
             handle.recorder.flush().await?;
-            let meta = handle.lock_state().session_meta.clone();
+            let meta = {
+                let mut state = handle.lock_state();
+                state.commit_pending_state_entries(&handle.jsonl_path)?;
+                state.session_meta.clone()
+            };
             self.index.upsert_session(&meta).await
         })
     }
@@ -377,6 +410,7 @@ impl LocalSessionHandle {
             state: StdMutex::new(LocalSessionState {
                 entry_ids: entries.iter().map(|entry| entry.id.clone()).collect(),
                 entries,
+                pending_state_entries: Vec::new(),
                 session_meta,
             }),
         })
@@ -401,6 +435,32 @@ impl LocalSessionState {
 
         self.entries.push(entry);
         self.session_meta = derive_session_meta(&self.entries, jsonl_path.to_path_buf())?;
+        Ok(())
+    }
+
+    fn push_pending_state_entry(&mut self, entry: SessionEntry) -> Result<(), SessionStoreError> {
+        if self.entry_ids.contains(&entry.id)
+            || self
+                .pending_state_entries
+                .iter()
+                .any(|pending| pending.id == entry.id)
+        {
+            return Err(SessionStoreError::DuplicateId { id: entry.id });
+        }
+
+        self.pending_state_entries.push(entry);
+        Ok(())
+    }
+
+    fn commit_pending_state_entries(&mut self, jsonl_path: &Path) -> Result<(), SessionStoreError> {
+        if self.pending_state_entries.is_empty() {
+            return Ok(());
+        }
+
+        let pending_entries = std::mem::take(&mut self.pending_state_entries);
+        for entry in pending_entries {
+            self.push_entry(entry, jsonl_path)?;
+        }
         Ok(())
     }
 
@@ -592,6 +652,24 @@ impl SessionStore for InMemorySessionStore {
         })
     }
 
+    fn load_session_tree<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let sessions = self.sessions.read().await;
+            let session =
+                sessions
+                    .get(&session_id)
+                    .ok_or_else(|| SessionStoreError::SessionNotFound {
+                        session_id: session_id.clone(),
+                    })?;
+            session_tree_snapshot(&session.entries).map_err(resolve_error)
+        })
+    }
+
     fn list_sessions<'a>(
         &'a self,
         project_dir: &'a str,
@@ -702,6 +780,7 @@ fn derive_session_meta(
     let mut header_entry = None;
     let mut first_user_message = None;
     let mut latest_user_message = None;
+    let mut latest_assistant_message = None;
     let mut latest_model = None;
 
     for entry in entries {
@@ -715,6 +794,9 @@ fn derive_session_meta(
                     first_user_message = Some(text.clone());
                 }
                 latest_user_message = Some(text);
+            }
+            SessionEntryKind::Item(item) if item.role() == Some(Role::Assistant) => {
+                latest_assistant_message = Some(item.text_content());
             }
             SessionEntryKind::ConfigChange(snapshot) => {
                 latest_model = Some(snapshot.model.clone());
@@ -740,13 +822,21 @@ fn derive_session_meta(
         .or_else(|| {
             first_user_message
                 .as_deref()
-                .map(|text| truncate_chars(text, 50))
+                .map(|text| truncate_chars(text, SESSION_TITLE_FALLBACK_CHAR_LIMIT))
         })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| header.session_id.to_string());
     let preview = latest_user_message
         .as_deref()
-        .map(|text| truncate_chars(text, 100))
+        .map(|text| truncate_chars(text, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT))
+        .filter(|value| !value.is_empty());
+    let first_user_preview = first_user_message
+        .as_deref()
+        .map(|text| truncate_chars(text, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT))
+        .filter(|value| !value.is_empty());
+    let last_assistant_preview = latest_assistant_message
+        .as_deref()
+        .map(|text| truncate_chars(text, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT))
         .filter(|value| !value.is_empty());
 
     Ok(SessionMeta {
@@ -754,6 +844,8 @@ fn derive_session_meta(
         project_dir: normalize_project_dir(&header.work_dir),
         title,
         preview,
+        first_user_preview,
+        last_assistant_preview,
         total_tokens: 0,
         model: latest_model.or_else(|| Some(header.initial_model.clone())),
         created_at,

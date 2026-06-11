@@ -4,7 +4,7 @@ use std::{
     str::FromStr,
 };
 
-use provider_protocol::ConversationItem;
+use provider_protocol::{ConversationItem, Role};
 use runtime_domain::paths::hunea_config_dir;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -24,6 +24,9 @@ const SHORT_ENTRY_ID_HEX_LEN: usize = 8;
 ///
 /// 超过这个阈值后直接回退到完整 UUID，避免在热点时间窗口里反复生成相同短 id。
 const ENTRY_ID_RETRY_LIMIT: usize = 100;
+
+const SESSION_TITLE_FALLBACK_CHAR_LIMIT: usize = 50;
+const SESSION_MESSAGE_PREVIEW_CHAR_LIMIT: usize = 256;
 
 /// `SessionIdParseError` 描述 session id 解析失败原因。
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -127,6 +130,8 @@ pub struct SessionMeta {
     pub project_dir: String,
     pub title: String,
     pub preview: Option<String>,
+    pub first_user_preview: Option<String>,
+    pub last_assistant_preview: Option<String>,
     pub total_tokens: u64,
     pub model: Option<String>,
     pub created_at: i64,
@@ -148,6 +153,40 @@ pub struct ResolvedSessionItem {
 pub struct ResolvedSessionState {
     pub items: Vec<ResolvedSessionItem>,
     pub latest_config: Option<ConfigSnapshot>,
+}
+
+/// `SessionTreeSnapshot` 是 entry rewind 所需的完整 entry 图快照。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionTreeSnapshot {
+    pub entries: Vec<SessionTreeSnapshotEntry>,
+    pub current_leaf_id: Option<String>,
+    pub active_path_ids: HashSet<String>,
+}
+
+/// `SessionTreeSnapshotEntry` 描述单个持久化 entry 的树展示与回溯语义。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTreeSnapshotEntry {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub depth: usize,
+    pub kind: SessionTreeSnapshotEntryKind,
+    pub label: String,
+    pub content: String,
+    pub rewind_target_id: Option<String>,
+    pub rewind_prefill: Option<String>,
+}
+
+/// `SessionTreeSnapshotEntryKind` 是 session-store 层的 entry 类型分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTreeSnapshotEntryKind {
+    Header,
+    User,
+    Assistant,
+    Tool,
+    Reasoning,
+    Config,
+    Leaf,
+    Other,
 }
 
 /// session 持久化条目类型。
@@ -329,6 +368,34 @@ pub fn resolve_state(
     resolve_state_from_path(&path)
 }
 
+/// 生成 entry rewind 使用的扁平树快照。
+pub fn session_tree_snapshot(
+    entries: &[SessionEntry],
+) -> Result<SessionTreeSnapshot, ResolveError> {
+    let by_id = build_entry_index(entries)?;
+    let current_leaf_id = entries
+        .last()
+        .map(|entry| effective_leaf_id(&by_id, &entry.id));
+    let active_path_ids = if let Some(leaf_id) = current_leaf_id {
+        resolve_path(&by_id, leaf_id)?
+            .into_iter()
+            .map(|entry| entry.id.clone())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let depth_by_id = entry_depths(entries)?;
+
+    Ok(SessionTreeSnapshot {
+        entries: entries
+            .iter()
+            .map(|entry| session_tree_snapshot_entry(entry, &depth_by_id))
+            .collect(),
+        current_leaf_id: current_leaf_id.map(str::to_string),
+        active_path_ids,
+    })
+}
+
 fn resolve_path<'a>(
     by_id: &HashMap<&'a str, &'a SessionEntry>,
     leaf_id: &'a str,
@@ -426,6 +493,151 @@ fn resolve_state_from_path(path: &[&SessionEntry]) -> Result<ResolvedSessionStat
         items: resolved_items,
         latest_config,
     })
+}
+
+fn entry_depths(entries: &[SessionEntry]) -> Result<HashMap<String, usize>, ResolveError> {
+    let by_id = build_entry_index(entries)?;
+    let mut depths = HashMap::with_capacity(entries.len());
+    for entry in entries {
+        let depth = entry_depth(entry, &by_id, &mut HashMap::new())?;
+        depths.insert(entry.id.clone(), depth);
+    }
+    Ok(depths)
+}
+
+fn entry_depth<'a>(
+    entry: &'a SessionEntry,
+    by_id: &HashMap<&'a str, &'a SessionEntry>,
+    visiting: &mut HashMap<&'a str, bool>,
+) -> Result<usize, ResolveError> {
+    if visiting.get(entry.id.as_str()) == Some(&true) {
+        return Err(ResolveError::CycleDetected);
+    }
+    visiting.insert(entry.id.as_str(), true);
+    let depth = if let Some(parent_id) = entry.parent_id.as_deref() {
+        let parent = by_id
+            .get(parent_id)
+            .ok_or_else(|| ResolveError::DanglingParent(parent_id.to_string()))?;
+        entry_depth(parent, by_id, visiting)?.saturating_add(1)
+    } else {
+        0
+    };
+    visiting.insert(entry.id.as_str(), false);
+    Ok(depth)
+}
+
+fn session_tree_snapshot_entry(
+    entry: &SessionEntry,
+    depth_by_id: &HashMap<String, usize>,
+) -> SessionTreeSnapshotEntry {
+    let kind = session_tree_snapshot_entry_kind(entry);
+    let content = session_tree_entry_content(entry);
+    let label = session_tree_entry_label(entry, kind, &content);
+    let (rewind_target_id, rewind_prefill) = session_tree_rewind_target(entry, kind, &content);
+    SessionTreeSnapshotEntry {
+        id: entry.id.clone(),
+        parent_id: entry.parent_id.clone(),
+        depth: depth_by_id.get(&entry.id).copied().unwrap_or_default(),
+        kind,
+        label,
+        content,
+        rewind_target_id,
+        rewind_prefill,
+    }
+}
+
+fn session_tree_snapshot_entry_kind(entry: &SessionEntry) -> SessionTreeSnapshotEntryKind {
+    match &entry.kind {
+        SessionEntryKind::Header(_) => SessionTreeSnapshotEntryKind::Header,
+        SessionEntryKind::Item(item) => match item.role() {
+            Some(Role::User) => SessionTreeSnapshotEntryKind::User,
+            Some(Role::Assistant) => SessionTreeSnapshotEntryKind::Assistant,
+            Some(Role::System) => SessionTreeSnapshotEntryKind::Other,
+            None => match item {
+                ConversationItem::ToolResult { .. } => SessionTreeSnapshotEntryKind::Tool,
+                ConversationItem::Reasoning { .. } => SessionTreeSnapshotEntryKind::Reasoning,
+                ConversationItem::Message { .. } => SessionTreeSnapshotEntryKind::Other,
+            },
+        },
+        SessionEntryKind::ConfigChange(_) => SessionTreeSnapshotEntryKind::Config,
+        SessionEntryKind::Leaf { .. } => SessionTreeSnapshotEntryKind::Leaf,
+        SessionEntryKind::Compaction { .. } | SessionEntryKind::BranchSummary { .. } => {
+            SessionTreeSnapshotEntryKind::Other
+        }
+    }
+}
+
+fn session_tree_entry_content(entry: &SessionEntry) -> String {
+    match &entry.kind {
+        SessionEntryKind::Header(header) => header
+            .session_name
+            .clone()
+            .unwrap_or_else(|| header.work_dir.display().to_string()),
+        SessionEntryKind::Item(item) => match item {
+            ConversationItem::Reasoning { content, .. } => content.clone(),
+            _ => item.text_content(),
+        },
+        SessionEntryKind::Compaction { summary, .. } => summary.clone(),
+        SessionEntryKind::BranchSummary { summary, .. } => summary.clone(),
+        SessionEntryKind::ConfigChange(snapshot) => snapshot.model.clone(),
+        SessionEntryKind::Leaf {
+            target_id: Some(target_id),
+        } => format!("target {target_id}"),
+        SessionEntryKind::Leaf { target_id: None } => "latest concrete entry".to_string(),
+    }
+}
+
+fn session_tree_entry_label(
+    entry: &SessionEntry,
+    kind: SessionTreeSnapshotEntryKind,
+    content: &str,
+) -> String {
+    let fallback = match kind {
+        SessionTreeSnapshotEntryKind::Header => "session header",
+        SessionTreeSnapshotEntryKind::User => "user message",
+        SessionTreeSnapshotEntryKind::Assistant => "assistant message",
+        SessionTreeSnapshotEntryKind::Tool => "tool result",
+        SessionTreeSnapshotEntryKind::Reasoning => "reasoning",
+        SessionTreeSnapshotEntryKind::Config => "config change",
+        SessionTreeSnapshotEntryKind::Leaf => "leaf marker",
+        SessionTreeSnapshotEntryKind::Other => "entry",
+    };
+    let label = truncate_chars(content.trim(), 80);
+    if label.is_empty() {
+        format!("{fallback} {}", entry.id)
+    } else {
+        label
+    }
+}
+
+fn truncate_chars(text: &str, limit: usize) -> String {
+    let mut output = String::new();
+    for (index, character) in text.chars().enumerate() {
+        if index >= limit {
+            output.push('…');
+            break;
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn session_tree_rewind_target(
+    entry: &SessionEntry,
+    kind: SessionTreeSnapshotEntryKind,
+    content: &str,
+) -> (Option<String>, Option<String>) {
+    if kind == SessionTreeSnapshotEntryKind::User {
+        return (
+            entry
+                .parent_id
+                .clone()
+                .or_else(|| Some("header".to_string())),
+            Some(content.to_string()),
+        );
+    }
+
+    (Some(entry.id.clone()), None)
 }
 
 fn item_entry_position(path: &[&SessionEntry], target_id: &str) -> Option<usize> {
@@ -949,6 +1161,34 @@ mod tests {
                 ConversationItem::text(Role::User, "branch follow-up"),
             ]
         );
+    }
+
+    #[test]
+    fn session_tree_snapshot_marks_active_path_and_user_rewind_prefill() {
+        let entries = linear_history_entries();
+
+        let snapshot = super::session_tree_snapshot(&entries).expect("linear tree should snapshot");
+
+        assert_eq!(snapshot.current_leaf_id.as_deref(), Some("user-2"));
+        assert!(snapshot.active_path_ids.contains("header"));
+        assert!(snapshot.active_path_ids.contains("user-1"));
+        assert!(snapshot.active_path_ids.contains("assistant-1"));
+        assert!(snapshot.active_path_ids.contains("user-2"));
+        let user = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.id == "user-2")
+            .expect("user-2 should exist");
+        assert_eq!(user.kind, super::SessionTreeSnapshotEntryKind::User);
+        assert_eq!(user.rewind_target_id.as_deref(), Some("assistant-1"));
+        assert_eq!(user.rewind_prefill.as_deref(), Some("follow up"));
+        let assistant = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.id == "assistant-1")
+            .expect("assistant-1 should exist");
+        assert_eq!(assistant.rewind_target_id.as_deref(), Some("assistant-1"));
+        assert_eq!(assistant.rewind_prefill, None);
     }
 
     #[test]

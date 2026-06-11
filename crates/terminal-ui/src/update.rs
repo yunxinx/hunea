@@ -33,6 +33,18 @@ pub enum AppEffect {
         request_id: String,
         option_id: Option<String>,
     },
+    OpenResumePicker,
+    OpenSessionPreview {
+        session_id: String,
+    },
+    ResumeSession {
+        session_id: String,
+    },
+    OpenEntryRewind,
+    SelectEntryRewind {
+        entry_id: String,
+        prefill: Option<String>,
+    },
     TruncateConversation {
         retained_user_turns: usize,
     },
@@ -106,6 +118,13 @@ pub enum AppEvent {
 }
 
 impl Model {
+    pub(crate) fn terminal_input_coalescing(&self) -> crate::runner::TerminalInputCoalescing {
+        crate::runner::TerminalInputCoalescing {
+            has_page_scroll_burst_coalescing: self.session_preview_active()
+                || self.session_picker_active(),
+        }
+    }
+
     /// `update` 根据事件推进模型状态。
     pub fn update(&mut self, event: AppEvent) -> Option<AppEffect> {
         match event {
@@ -113,6 +132,9 @@ impl Model {
             AppEvent::Paste(text) => {
                 if self.transcript_overlay_active()
                     || self.tool_approval_fullscreen_preview_active()
+                    || self.session_preview_active()
+                    || self.session_picker_active()
+                    || self.entry_tree_active()
                     || self.model_panel_active()
                 {
                     self.cancel_exit_confirmation();
@@ -131,7 +153,15 @@ impl Model {
                     self.scroll_tool_approval_fullscreen_preview_by(delta_lines);
                     return None;
                 }
-                if self.transcript_overlay_active() {
+                if self.session_preview_active() {
+                    self.move_session_preview_page(delta_lines.signum());
+                    return None;
+                }
+                if self.session_picker_active() {
+                    self.move_session_picker_selection(delta_lines.signum());
+                    return None;
+                }
+                if self.transcript_overlay_active() || self.entry_tree_active() {
                     return None;
                 }
                 let before_document_viewport_y = self.document_runtime.viewport_y;
@@ -160,6 +190,9 @@ impl Model {
             } => {
                 if self.transcript_overlay_active()
                     || self.tool_approval_fullscreen_preview_active()
+                    || self.session_preview_active()
+                    || self.session_picker_active()
+                    || self.entry_tree_active()
                 {
                     return None;
                 }
@@ -172,6 +205,9 @@ impl Model {
             } => {
                 if self.transcript_overlay_active()
                     || self.tool_approval_fullscreen_preview_active()
+                    || self.session_preview_active()
+                    || self.session_picker_active()
+                    || self.entry_tree_active()
                 {
                     return None;
                 }
@@ -184,6 +220,9 @@ impl Model {
             } => {
                 if self.transcript_overlay_active()
                     || self.tool_approval_fullscreen_preview_active()
+                    || self.session_preview_active()
+                    || self.session_picker_active()
+                    || self.entry_tree_active()
                 {
                     return None;
                 }
@@ -295,6 +334,18 @@ impl Model {
         }
 
         if let Some(effect) = self.handle_tool_approval_panel_key(key) {
+            return effect;
+        }
+
+        if let Some(effect) = self.handle_session_preview_key(key) {
+            return effect;
+        }
+
+        if let Some(effect) = self.handle_session_picker_key(key) {
+            return effect;
+        }
+
+        if let Some(effect) = self.handle_entry_tree_key(key) {
             return effect;
         }
 

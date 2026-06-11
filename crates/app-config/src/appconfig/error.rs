@@ -43,6 +43,10 @@ pub enum AppConfigError {
         path: Option<PathBuf>,
         value: u8,
     },
+    InvalidEscRewindMode {
+        path: Option<PathBuf>,
+        value: String,
+    },
     InvalidFilePickerPopupHeight {
         path: Option<PathBuf>,
         value: usize,
@@ -136,6 +140,19 @@ impl fmt::Display for AppConfigError {
                 f,
                 "tui.esc_interrupt_presses must be 1, 2, or 3, got {value}"
             ),
+            Self::InvalidEscRewindMode {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: tui.esc_rewind_mode must be \"coarse\" or \"entry\", got {:?}",
+                path.display(),
+                value
+            ),
+            Self::InvalidEscRewindMode { path: None, value } => write!(
+                f,
+                "tui.esc_rewind_mode must be \"coarse\" or \"entry\", got {value:?}"
+            ),
             Self::InvalidFilePickerPopupHeight {
                 path: Some(path),
                 value,
@@ -208,6 +225,7 @@ impl std::error::Error for AppConfigError {
             | Self::InvalidExternalEditorCommand { .. }
             | Self::ExternalEditorMustWait { .. }
             | Self::InvalidEscInterruptPresses { .. }
+            | Self::InvalidEscRewindMode { .. }
             | Self::InvalidFilePickerPopupHeight { .. }
             | Self::InvalidComposerUndoLimit { .. }
             | Self::InvalidReasoningContentDisplay { .. }

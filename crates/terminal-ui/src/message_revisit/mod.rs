@@ -22,6 +22,23 @@ struct MessageRevisitSelection {
 }
 
 impl Model {
+    pub(crate) fn open_coarse_rewind_from_command(&mut self) -> Option<AppEffect> {
+        self.reset_message_revisit_state();
+        if self.stream_activity.is_some() || !self.composer_text().is_empty() {
+            return None;
+        }
+        if !self.has_message_revisit_target() {
+            self.show_transient_status_notice("No previous user message");
+            return None;
+        }
+
+        self.clear_message_revisit_notice();
+        self.open_transcript_overlay();
+        self.message_revisit.is_overlay_active = true;
+        self.select_latest_message_revisit_target();
+        None
+    }
+
     pub(crate) fn handle_message_revisit_main_esc_key(&mut self) -> Option<Option<AppEffect>> {
         if self.message_revisit.is_armed
             && self.current_status_notice_text() != MESSAGE_REVISIT_HINT
@@ -46,6 +63,12 @@ impl Model {
             return Some(None);
         }
 
+        if matches!(self.esc_rewind_mode, crate::EscRewindMode::Entry) {
+            self.clear_message_revisit_notice();
+            self.reset_message_revisit_state();
+            return Some(Some(AppEffect::OpenEntryRewind));
+        }
+
         self.clear_message_revisit_notice();
         self.open_transcript_overlay();
         self.message_revisit.is_overlay_active = true;
@@ -67,10 +90,6 @@ impl Model {
                 Some(None)
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.close_transcript_overlay();
-                Some(None)
-            }
-            KeyCode::Char('q') if key.modifiers.is_empty() => {
                 self.close_transcript_overlay();
                 Some(None)
             }

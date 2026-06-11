@@ -263,6 +263,13 @@ impl ProviderConversation {
         &self.history
     }
 
+    /// `session_id` 返回当前持久化 session id。
+    pub fn session_id(&self) -> Option<&SessionId> {
+        self.persistence
+            .as_ref()
+            .and_then(|persistence| persistence.session_id.as_ref())
+    }
+
     /// `prepare_turn` 接受一个用户 turn，并构造完整执行请求。
     pub fn prepare_turn(
         &mut self,
@@ -975,6 +982,19 @@ mod tests {
             Box::pin(async { Ok(session_store::ResolvedSessionState::default()) })
         }
 
+        fn load_session_tree<'a>(
+            &'a self,
+            _session_id: &'a SessionId,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<session_store::SessionTreeSnapshot, SessionStoreError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Ok(session_store::SessionTreeSnapshot::default()) })
+        }
+
         fn list_sessions<'a>(
             &'a self,
             _project_dir: &'a str,
@@ -995,6 +1015,8 @@ mod tests {
                     project_dir: String::new(),
                     title: String::new(),
                     preview: None,
+                    first_user_preview: None,
+                    last_assistant_preview: None,
                     total_tokens: 0,
                     model: None,
                     created_at: 0,

@@ -83,8 +83,8 @@ fn transcript_overlay_footer_omits_non_footer_shortcuts() {
     let rows = render_rows(&mut model, 40, 10);
     let footer_row = &rows[9];
     assert!(
-        footer_row.contains("Esc/q"),
-        "footer should keep the visible close hint: {:?}",
+        footer_row.contains("Esc close") && !footer_row.contains("Esc/q"),
+        "footer should advertise only Esc as the close hint: {:?}",
         footer_row
     );
     assert!(
@@ -181,8 +181,16 @@ fn transcript_overlay_scrolls_and_closes() {
         "scrolling back to top should restore initial view"
     );
 
-    // 按 q 关闭
+    // q 不再关闭 overlay，避免和文本输入习惯混淆。
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('q'))));
+    let rows_after_q = render_rows(&mut model, 20, 10);
+    assert_eq!(
+        rows_back_top, rows_after_q,
+        "q should be ignored as a close key while overlay is active"
+    );
+
+    // Esc 关闭
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
 
     // 关闭后 composer 应重新出现
     for character in "x".chars() {

@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use super::conversation::{apply_conversation_event, run_send_conversation_turn_effect};
 use super::effects::run_interrupt_current_turn_effect;
-use super::input::{TerminalInputAction, coalesced_input_actions};
+use super::input::{
+    TerminalInputAction, TerminalInputCoalescing, coalesced_input_actions,
+    coalesced_input_actions_with_options,
+};
 use super::*;
 use crate::{
     AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem, runtime::RuntimeEventApply,
@@ -28,6 +31,7 @@ struct TestRuntimeCoordinator {
     conversation_running: bool,
     conversation_interrupted: bool,
     conversation_request: Option<ConversationTurnRequest>,
+    last_command: Option<RuntimeCommand>,
     reset_count: usize,
     conversation_retained_user_turns: Option<usize>,
 }
@@ -53,6 +57,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
         &mut self,
         command: RuntimeCommand,
     ) -> Result<RuntimeCommandReceipt, String> {
+        self.last_command = Some(command.clone());
         match command {
             RuntimeCommand::Reset => {
                 self.runtime_events.clear();
@@ -88,6 +93,11 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                 })
             }
             RuntimeCommand::RespondPermission { .. } => Ok(RuntimeCommandReceipt::Accepted),
+            RuntimeCommand::ListSessions
+            | RuntimeCommand::LoadSessionPreview { .. }
+            | RuntimeCommand::ResumeSession { .. }
+            | RuntimeCommand::LoadEntryTree
+            | RuntimeCommand::SelectEntryRewind { .. } => Ok(RuntimeCommandReceipt::Accepted),
         }
     }
 
@@ -1589,6 +1599,82 @@ fn ready_input_batch_coalesces_wheel_burst_before_key() {
     assert_eq!(
         actions[1],
         TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Char('x'))))
+    );
+}
+
+#[test]
+fn ready_input_batch_keeps_arrow_keys_uncoalesced_by_default() {
+    let events = vec![
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+    ];
+
+    let actions = coalesced_input_actions(events);
+
+    assert_eq!(
+        actions,
+        vec![
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Up))),
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Up))),
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Up))),
+        ]
+    );
+}
+
+#[test]
+fn ready_input_batch_coalesces_alternate_scroll_arrow_burst_when_enabled() {
+    let events = vec![
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+        Event::Key(KeyEvent::from(KeyCode::Char('x'))),
+        Event::Key(KeyEvent::from(KeyCode::Down)),
+        Event::Key(KeyEvent::from(KeyCode::Down)),
+    ];
+
+    let actions = coalesced_input_actions_with_options(
+        events,
+        TerminalInputCoalescing {
+            has_page_scroll_burst_coalescing: true,
+        },
+    );
+
+    assert_eq!(
+        actions,
+        vec![
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Up))),
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Char('x')))),
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Down))),
+        ]
+    );
+}
+
+#[test]
+fn ready_input_batch_coalesces_preview_wheel_burst_to_single_page_delta() {
+    let events = (0..128)
+        .map(|_| {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::empty(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let actions = coalesced_input_actions_with_options(
+        events,
+        TerminalInputCoalescing {
+            has_page_scroll_burst_coalescing: true,
+        },
+    );
+
+    assert_eq!(
+        actions,
+        vec![TerminalInputAction::App(AppEvent::MouseWheel {
+            delta_lines: Model::document_mouse_wheel_delta().signum(),
+        })]
     );
 }
 

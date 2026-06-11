@@ -6,7 +6,8 @@ use app_config::appconfig::{
 use conversation_runtime::models::LoadedModelCatalog;
 use runtime_domain::{envinfo, phrases::LoadedStatusPhrases};
 use terminal_ui::{
-    ModelOptions, ReasoningDisplayMode, RuntimeRequestPolicy, StatusLineItem, StyleMode,
+    EscRewindMode as TuiEscRewindMode, ModelOptions, ReasoningDisplayMode, RuntimeRequestPolicy,
+    StatusLineItem, StyleMode,
 };
 use tool_runtime::builtin::ManagedSearchToolConfig;
 
@@ -120,6 +121,7 @@ fn model_options_from_configs(
         swap_enter_and_send: tui_config.swap_enter_and_send,
         ctrl_c_clears_input: tui_config.ctrl_c_clears_input,
         esc_interrupt_presses: tui_config.esc_interrupt_presses,
+        esc_rewind_mode: esc_rewind_mode_from_config(tui_config.esc_rewind_mode),
         show_esc_interrupt_hint: tui_config.show_esc_interrupt_hint,
         file_picker_popup_height: tui_config.file_picker_popup_height,
         composer_undo_limit: tui_config.composer_undo_limit,
@@ -133,6 +135,13 @@ fn model_options_from_configs(
         requires_model_selection: loaded_models.requires_model_selection,
         status_phrases: loaded_phrases.phrases.clone(),
         status_phrase_order: loaded_phrases.order,
+    }
+}
+
+fn esc_rewind_mode_from_config(mode: app_config::appconfig::EscRewindMode) -> TuiEscRewindMode {
+    match mode {
+        app_config::appconfig::EscRewindMode::Coarse => TuiEscRewindMode::Coarse,
+        app_config::appconfig::EscRewindMode::Entry => TuiEscRewindMode::Entry,
     }
 }
 

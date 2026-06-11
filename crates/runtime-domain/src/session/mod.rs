@@ -6,6 +6,7 @@ mod event;
 mod identity;
 mod metrics;
 mod permission;
+mod recovery;
 mod target;
 
 pub use activity::{
@@ -24,5 +25,9 @@ pub use identity::{RuntimeAgentCapabilities, RuntimeIdentity, RuntimePromptCapab
 pub use metrics::RuntimeRequestMetrics;
 pub use permission::{
     RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,
+};
+pub use recovery::{
+    SessionPickerRow, SessionPreviewPayload, SessionResumePayload, SessionTreeEntry,
+    SessionTreeEntryKind, SessionTreePayload, TranscriptReplayItem, TranscriptReplayRole,
 };
 pub use target::{ProviderTarget, RuntimeTarget};

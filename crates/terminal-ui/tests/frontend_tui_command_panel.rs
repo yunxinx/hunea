@@ -12,8 +12,8 @@ use ratatui::{
     style::{Color, Modifier},
 };
 use terminal_ui::{
-    AppEffect, AppEvent, Model, ModelOptions, StartupBannerOptions, StatusLineItem, StyleMode,
-    theme::default_palette,
+    AppEffect, AppEvent, EscRewindMode, Model, ModelOptions, StartupBannerOptions, StatusLineItem,
+    StyleMode, theme::default_palette,
 };
 
 #[test]
@@ -120,6 +120,77 @@ fn command_panel_enter_executes_new_alias_as_clear() {
             .all(|item| !item.contains("hello")),
         "clear should remove previous conversation context"
     );
+}
+
+#[test]
+fn command_panel_shows_resume_and_tree_by_default() {
+    let mut model = ready_model(80, 16, ModelOptions::default());
+    type_text(&mut model, "/");
+
+    let rows = render_trimmed_rows(&mut model, 80, 16);
+
+    assert!(
+        rows.iter().any(|row| row.contains("/resume")),
+        "default slash menu should expose /resume: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("/tree")),
+        "default slash menu should expose /tree for entry rewind: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("/sends-back")),
+        "default slash menu should not expose swapped coarse rewind command: {rows:?}"
+    );
+}
+
+#[test]
+fn command_panel_swaps_tree_command_when_esc_opens_entry_rewind() {
+    let mut model = ready_model(
+        80,
+        16,
+        ModelOptions {
+            esc_rewind_mode: EscRewindMode::Entry,
+            ..ModelOptions::default()
+        },
+    );
+    type_text(&mut model, "/");
+
+    let rows = render_trimmed_rows(&mut model, 80, 16);
+
+    assert!(
+        rows.iter().any(|row| row.contains("/resume")),
+        "swapped slash menu should still expose /resume: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("/sends-back")),
+        "swapped slash menu should expose /sends-back for coarse rewind: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("/tree")),
+        "swapped slash menu should not expose /tree: {rows:?}"
+    );
+}
+
+#[test]
+fn command_panel_resume_emits_open_resume_effect() {
+    let mut model = ready_model(80, 16, ModelOptions::default());
+    type_text(&mut model, "/resume");
+
+    let effect = model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    assert_eq!(effect, Some(AppEffect::OpenResumePicker));
+    assert_eq!(model.composer_text(), "");
+}
+
+#[test]
+fn command_panel_tree_emits_open_entry_rewind_effect_by_default() {
+    let mut model = ready_model(80, 16, ModelOptions::default());
+    type_text(&mut model, "/tree");
+
+    let effect = model.update(AppEvent::Key(KeyCode::Enter.into()));
+
+    assert_eq!(effect, Some(AppEffect::OpenEntryRewind));
+    assert_eq!(model.composer_text(), "");
 }
 
 #[test]

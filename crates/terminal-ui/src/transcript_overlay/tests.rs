@@ -39,8 +39,11 @@ fn overlay_scroll_boundary() {
         max_offset
     );
 
-    // q 关闭
+    // q 不再作为关闭快捷键；只保留 Esc。
     model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Char('q')));
+    assert!(model.transcript_overlay_active());
+
+    model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Esc));
     assert!(!model.transcript_overlay_active());
 }
 

@@ -16,6 +16,7 @@ impl Config {
                 swap_enter_and_send: false,
                 ctrl_c_clears_input: true,
                 esc_interrupt_presses: 2,
+                esc_rewind_mode: super::EscRewindMode::Coarse,
                 show_esc_interrupt_hint: true,
                 file_picker_popup_height: 7,
                 composer_undo_limit: COMPOSER_UNDO_DEFAULT_LIMIT,

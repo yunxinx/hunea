@@ -65,6 +65,24 @@ impl ModelCatalog {
             .any(|model| model.id == selection.model_id)
     }
 
+    /// `selection_for_model_id` 从当前目录中按 model id 解析可用模型选择。
+    ///
+    /// 历史 session 只持久化 model id；如果多个 provider 暴露同名 model，恢复时不猜测 provider。
+    pub fn selection_for_model_id(&self, model_id: &str) -> Option<ModelSelection> {
+        let mut matches = self.enabled_providers().filter(|provider| {
+            provider.models.is_empty() && provider.source == ModelSource::NotLoaded
+                || provider.models.iter().any(|model| model.id == model_id)
+        });
+        let provider = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(ModelSelection::new(
+            provider.id.clone(),
+            model_id.to_string(),
+        ))
+    }
+
     /// `enabled_provider_index_for` 返回指定 provider 在展示列表中的索引。
     pub fn enabled_provider_index_for(&self, provider_id: &str) -> Option<usize> {
         self.enabled_providers()
@@ -312,5 +330,47 @@ mod tests {
 
         assert!(catalog.accepts_selection(&ModelSelection::new("local", "qwen3")));
         assert!(!catalog.accepts_selection(&ModelSelection::new("local", "qwen4")));
+    }
+
+    #[test]
+    fn catalog_resolves_unique_model_id_to_selection() {
+        let catalog = ModelCatalog::new(vec![ModelProvider::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "Local",
+            None,
+            ModelSource::Configured,
+            vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+        )]);
+
+        assert_eq!(
+            catalog.selection_for_model_id("qwen3"),
+            Some(ModelSelection::new("local", "qwen3"))
+        );
+        assert_eq!(catalog.selection_for_model_id("missing"), None);
+    }
+
+    #[test]
+    fn catalog_does_not_guess_ambiguous_model_id() {
+        let catalog = ModelCatalog::new(vec![
+            ModelProvider::new(
+                "first",
+                ProviderKind::OpenAiCompatible,
+                "First",
+                None,
+                ModelSource::Configured,
+                vec![ModelEntry::new("shared", None, ModelSource::Configured)],
+            ),
+            ModelProvider::new(
+                "second",
+                ProviderKind::OpenAiCompatible,
+                "Second",
+                None,
+                ModelSource::Configured,
+                vec![ModelEntry::new("shared", None, ModelSource::Configured)],
+            ),
+        ]);
+
+        assert_eq!(catalog.selection_for_model_id("shared"), None);
     }
 }

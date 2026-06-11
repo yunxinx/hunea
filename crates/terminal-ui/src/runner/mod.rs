@@ -24,8 +24,12 @@ pub(crate) mod terminal_surface;
 
 use super::{runtime::RuntimeEventApply, theme::palette_detection_from_background};
 use effects::apply_effect_if_needed;
-use input::{TerminalInputAction, coalesced_input_actions, read_ready_terminal_events};
+pub(crate) use input::TerminalInputCoalescing;
+use input::{
+    TerminalInputAction, coalesced_input_actions_with_options, read_ready_terminal_events,
+};
 use model_refresh::apply_model_provider_refresh_event;
+pub(crate) use terminal::TerminalMouseModePreference;
 use terminal::{TerminalMouseMode, TerminalSession, apply_mouse_mode, wait_for_terminal_event};
 
 /// `RuntimeCoordinator` 是 TUI runner 与具体对话运行时之间的最小边界。
@@ -133,10 +137,10 @@ pub fn run_with_runtime_coordinator(
 
         if render_needed {
             terminal.draw(|area, buffer| model.render_to_buffer(area, buffer))?;
-            // 覆盖层关闭 mouse capture 以保留原生选区，同时打开 alternate scroll，
-            // 让终端把滚轮转成方向键交给 pager 处理。
+            // 不同全屏界面对鼠标的需求不同：transcript 需要滚轮转方向键，
+            // resume picker 则完全交还给终端以保留原生选区和滚动。
             let desired_mouse_mode =
-                TerminalMouseMode::for_mouse_capture(model.wants_mouse_capture());
+                TerminalMouseMode::from_preference(model.mouse_mode_preference());
             if desired_mouse_mode != mouse_mode {
                 apply_mouse_mode(&mut terminal, desired_mouse_mode)?;
                 mouse_mode = desired_mouse_mode;
@@ -179,9 +183,10 @@ pub fn run_with_runtime_coordinator(
             }
         };
 
-        let terminal_events = read_ready_terminal_events(first_event)?;
+        let input_coalescing = model.terminal_input_coalescing();
+        let terminal_events = read_ready_terminal_events(first_event, input_coalescing)?;
         if apply_terminal_input_actions(
-            coalesced_input_actions(terminal_events),
+            coalesced_input_actions_with_options(terminal_events, input_coalescing),
             &mut terminal,
             &mut model,
             runtime_coordinator,

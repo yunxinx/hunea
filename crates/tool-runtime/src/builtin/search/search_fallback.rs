@@ -87,6 +87,7 @@ pub(crate) fn build_workspace_walker(
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
+        .require_git(false)
         .hidden(!include_hidden)
         .sort_by_file_name(|left, right| left.cmp(right))
         .filter_entry(|entry| !is_vcs_directory_name(entry.file_name()));

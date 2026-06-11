@@ -246,6 +246,20 @@ async fn local_store_flushes_pending_entries_after_recovering_from_io_error() {
         .await
         .expect("flush should retry the pending entry after permissions recover");
 
+    let same_process_resolved = reopened_store
+        .resolve(&session_id, None)
+        .await
+        .expect("history should resolve in the same process after recovered flush");
+    assert_eq!(
+        same_process_resolved,
+        vec![
+            ConversationItem::text(Role::User, "message-1"),
+            ConversationItem::text(Role::Assistant, "message-2"),
+            ConversationItem::text(Role::User, "message-3"),
+        ],
+        "recovered flush must also commit the pending entry to in-memory state"
+    );
+
     let final_store = open_store(&root).await;
     let resolved = final_store
         .resolve(&session_id, None)

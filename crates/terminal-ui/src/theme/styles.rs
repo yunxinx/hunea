@@ -91,6 +91,11 @@ pub(crate) fn surface_half_block_plain_line(width: usize) -> String {
     " ".repeat(width.max(1))
 }
 
+/// `subtle_rule_line` 返回全屏预览内部使用的弱分隔线。
+pub(crate) fn subtle_rule_line(width: usize, palette: TerminalPalette) -> Line<'static> {
+    Line::styled("╌".repeat(width.max(1)), tertiary_text_style(palette))
+}
+
 /// `panel_block` 返回用于启动欢迎块容器的统一边框样式。
 pub fn panel_block(palette: TerminalPalette) -> Block<'static> {
     let block = Block::bordered()

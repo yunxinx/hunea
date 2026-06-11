@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    AppEvent, ModelOptions, StartupBannerOptions, StatusLineItem, StyleMode,
+    AppEvent, ModelOptions, Sender, StartupBannerOptions, StatusLineItem, StyleMode,
     document::DocumentAnchorRegion,
 };
 
@@ -112,4 +112,29 @@ fn rendered_command_panel_line_respects_available_width() {
         selectable.content_columns().map(|(start, _)| start),
         Some(2)
     );
+}
+
+#[test]
+fn sends_back_command_opens_coarse_rewind_when_esc_mode_is_entry() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            esc_rewind_mode: crate::EscRewindMode::Entry,
+            ..ModelOptions::default()
+        },
+    );
+    model
+        .transcript_mut()
+        .append_message(Sender::User, "first question");
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "first answer");
+    model.composer.reset_text_and_move_to_end("/sends-back");
+    model.sync_command_panel_navigation();
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert!(model.transcript_overlay_active());
+    assert_eq!(model.composer_text(), "");
 }

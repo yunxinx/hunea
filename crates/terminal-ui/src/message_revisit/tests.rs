@@ -6,7 +6,8 @@ use runtime_domain::model_catalog::{
 use runtime_domain::provider::ProviderKind;
 
 use crate::{
-    AppEffect, AppEvent, Model, ModelOptions, Sender, StartupBannerOptions, theme::default_palette,
+    AppEffect, AppEvent, EscRewindMode, Model, ModelOptions, Sender, StartupBannerOptions,
+    theme::default_palette,
 };
 use ratatui::style::Modifier;
 
@@ -57,6 +58,32 @@ fn conversation_message_revisit_prefills_composer_and_truncates_history() {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert_eq!(request.message_text(), "second question");
+}
+
+#[test]
+fn entry_esc_rewind_mode_opens_entry_rewind_instead_of_coarse_overlay() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            esc_rewind_mode: EscRewindMode::Entry,
+            ..ModelOptions::default()
+        },
+    );
+    model.set_palette(default_palette(), true);
+    model.set_window(48, 12);
+    model
+        .transcript_mut()
+        .append_message(Sender::User, "first question");
+
+    assert_eq!(
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc))),
+        None
+    );
+    assert_eq!(
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc))),
+        Some(AppEffect::OpenEntryRewind)
+    );
+    assert!(!model.transcript_overlay_active());
 }
 
 #[test]
@@ -193,6 +220,29 @@ fn conversation_message_revisit_overlay_esc_closes_without_selecting_older_messa
     assert_eq!(
         model.transcript_mut().source_messages(),
         two_turn_source_messages()
+    );
+}
+
+#[test]
+fn conversation_message_revisit_overlay_ignores_q_as_close_key() {
+    let mut model = conversation_test_model();
+    append_two_turns(&mut model);
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('q'))));
+
+    assert!(
+        model.transcript_overlay_active(),
+        "q should not close the message revisit overlay"
+    );
+    assert_eq!(
+        model
+            .transcript_overlay
+            .as_ref()
+            .and_then(|overlay| overlay.highlight_item_index),
+        Some(2),
+        "q should not change the selected revisit target"
     );
 }
 

@@ -5,7 +5,7 @@ use std::{
 };
 
 use app_config::appconfig::{
-    AppConfigError, ReasoningContentDisplay, UserInputStyle, load_from_paths,
+    AppConfigError, EscRewindMode, ReasoningContentDisplay, UserInputStyle, load_from_paths,
     persist_managed_search_tool_authorization_to_path,
 };
 use runtime_domain::session::ManagedSearchTool;
@@ -280,6 +280,17 @@ fn load_defaults_show_esc_interrupt_hint_to_true() {
 }
 
 #[test]
+fn load_defaults_esc_rewind_mode_to_coarse() {
+    let working_dir = temp_test_dir("load-default-esc-rewind-mode-working");
+    let user_config_dir = temp_test_dir("load-default-esc-rewind-mode-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep esc rewind mode at coarse");
+
+    assert_eq!(config.tui.esc_rewind_mode, EscRewindMode::Coarse);
+}
+
+#[test]
 fn load_defaults_print_transcript_on_exit_to_false() {
     let working_dir = temp_test_dir("load-default-print-transcript-working");
     let user_config_dir = temp_test_dir("load-default-print-transcript-config");
@@ -485,6 +496,20 @@ fn load_accepts_configured_esc_interrupt_presses() {
         .expect("esc_interrupt_presses should accept 3");
 
     assert_eq!(config.tui.esc_interrupt_presses, 3);
+}
+
+#[test]
+fn load_accepts_configured_entry_esc_rewind_mode() {
+    let working_dir = temp_test_dir("load-entry-esc-rewind-mode-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nesc_rewind_mode = \"entry\"\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("esc_rewind_mode should accept entry");
+
+    assert_eq!(config.tui.esc_rewind_mode, EscRewindMode::Entry);
 }
 
 #[test]
@@ -812,6 +837,20 @@ fn load_rejects_invalid_esc_interrupt_presses() {
         .expect_err("esc_interrupt_presses should only accept 1, 2, or 3");
 
     assert!(error.to_string().contains("tui.esc_interrupt_presses"));
+}
+
+#[test]
+fn load_rejects_invalid_esc_rewind_mode() {
+    let working_dir = temp_test_dir("load-invalid-esc-rewind-mode-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nesc_rewind_mode = \"fine\"\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("esc_rewind_mode should only accept coarse or entry");
+
+    assert!(error.to_string().contains("tui.esc_rewind_mode"));
 }
 
 #[test]

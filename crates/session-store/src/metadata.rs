@@ -15,8 +15,9 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use tokio::task;
 
 use crate::{
-    SessionEntryKind, SessionMeta, SessionStoreError, SessionStoreError::IndexInconsistent,
-    encode_project_dir, jsonl::JsonlLoader,
+    SESSION_MESSAGE_PREVIEW_CHAR_LIMIT, SESSION_TITLE_FALLBACK_CHAR_LIMIT, SessionEntryKind,
+    SessionMeta, SessionStoreError, SessionStoreError::IndexInconsistent, encode_project_dir,
+    jsonl::JsonlLoader,
 };
 
 const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -148,7 +149,7 @@ where
 }
 
 fn initialize_database(index_path: &Path) -> Result<(), SessionStoreError> {
-    with_connection(index_path, migrate_database)
+    with_connection(index_path, initialize_database_schema)
 }
 
 fn initialize_database_with_retry(index_path: &Path) -> Result<(), SessionStoreError> {
@@ -179,7 +180,7 @@ fn with_connection<T>(
     conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
         .map_err(sqlite_error)?;
     enable_wal_mode(&conn)?;
-    migrate_database(&conn)?;
+    initialize_database_schema(&conn)?;
 
     operation(&conn)
 }
@@ -199,7 +200,7 @@ fn enable_wal_mode(conn: &Connection) -> Result<(), SessionStoreError> {
     Ok(())
 }
 
-fn migrate_database(conn: &Connection) -> Result<(), SessionStoreError> {
+fn initialize_database_schema(conn: &Connection) -> Result<(), SessionStoreError> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS sessions (
@@ -207,6 +208,8 @@ fn migrate_database(conn: &Connection) -> Result<(), SessionStoreError> {
             project_dir TEXT NOT NULL,
             title TEXT NOT NULL,
             preview TEXT,
+            first_user_preview TEXT,
+            last_assistant_preview TEXT,
             total_tokens INTEGER NOT NULL DEFAULT 0,
             model TEXT,
             created_at INTEGER NOT NULL,
@@ -244,6 +247,8 @@ fn upsert_session_row(conn: &Connection, meta: &SessionMeta) -> Result<(), Sessi
             project_dir,
             title,
             preview,
+            first_user_preview,
+            last_assistant_preview,
             total_tokens,
             model,
             created_at,
@@ -251,11 +256,13 @@ fn upsert_session_row(conn: &Connection, meta: &SessionMeta) -> Result<(), Sessi
             git_head,
             work_dir,
             jsonl_path
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
         ON CONFLICT(session_id) DO UPDATE SET
             project_dir = excluded.project_dir,
             title = excluded.title,
             preview = excluded.preview,
+            first_user_preview = excluded.first_user_preview,
+            last_assistant_preview = excluded.last_assistant_preview,
             total_tokens = excluded.total_tokens,
             model = excluded.model,
             created_at = excluded.created_at,
@@ -269,6 +276,8 @@ fn upsert_session_row(conn: &Connection, meta: &SessionMeta) -> Result<(), Sessi
             meta.project_dir,
             meta.title,
             meta.preview,
+            meta.first_user_preview,
+            meta.last_assistant_preview,
             checked_i64(
                 meta.total_tokens,
                 &format!("session `{}` total_tokens", meta.session_id)
@@ -338,6 +347,8 @@ fn get_session_meta_row(
                 project_dir,
                 title,
                 preview,
+                first_user_preview,
+                last_assistant_preview,
                 total_tokens,
                 model,
                 created_at,
@@ -371,6 +382,8 @@ fn list_session_rows(
                 project_dir,
                 title,
                 preview,
+                first_user_preview,
+                last_assistant_preview,
                 total_tokens,
                 model,
                 created_at,
@@ -563,6 +576,7 @@ fn extract_session_meta(
     let mut header_entry: Option<(crate::SessionHeader, i64)> = None;
     let mut first_user_message = None;
     let mut latest_user_message = None;
+    let mut latest_assistant_message = None;
     let mut latest_model = None;
     let mut updated_at = None;
 
@@ -580,6 +594,9 @@ fn extract_session_meta(
                     first_user_message = Some(text.clone());
                 }
                 latest_user_message = Some(text);
+            }
+            SessionEntryKind::Item(item) if item.role() == Some(Role::Assistant) => {
+                latest_assistant_message = Some(item.text_content());
             }
             SessionEntryKind::ConfigChange(snapshot) => {
                 latest_model = Some(snapshot.model);
@@ -605,19 +622,29 @@ fn extract_session_meta(
         .or_else(|| {
             first_user_message
                 .as_deref()
-                .map(|text| truncate_chars(text, 50))
+                .map(|text| truncate_chars(text, SESSION_TITLE_FALLBACK_CHAR_LIMIT))
         })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| header.session_id.to_string());
     let preview = latest_user_message
         .as_deref()
-        .map(|text| truncate_chars(text, 100))
+        .map(|text| truncate_chars(text, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT))
+        .filter(|value| !value.is_empty());
+    let first_user_preview = first_user_message
+        .as_deref()
+        .map(|text| truncate_chars(text, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT))
+        .filter(|value| !value.is_empty());
+    let last_assistant_preview = latest_assistant_message
+        .as_deref()
+        .map(|text| truncate_chars(text, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT))
         .filter(|value| !value.is_empty());
     let meta = SessionMeta {
         session_id: header.session_id.clone(),
         project_dir: normalize_project_dir(&header.work_dir),
         title,
         preview,
+        first_user_preview,
+        last_assistant_preview,
         total_tokens: 0,
         model: latest_model.or_else(|| Some(header.initial_model.clone())),
         created_at,
@@ -709,7 +736,7 @@ fn checked_i64(value: u64, label: &str) -> Result<i64, SessionStoreError> {
 }
 
 fn row_to_session_meta(row: &rusqlite::Row<'_>) -> Result<SessionMeta, rusqlite::Error> {
-    let total_tokens = row.get::<_, i64>(4)?;
+    let total_tokens = row.get::<_, i64>(6)?;
     let session_id_text: String = row.get(0)?;
 
     Ok(SessionMeta {
@@ -723,19 +750,21 @@ fn row_to_session_meta(row: &rusqlite::Row<'_>) -> Result<SessionMeta, rusqlite:
         project_dir: row.get(1)?,
         title: row.get(2)?,
         preview: row.get(3)?,
+        first_user_preview: row.get(4)?,
+        last_assistant_preview: row.get(5)?,
         total_tokens: u64::try_from(total_tokens).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                4,
+                6,
                 rusqlite::types::Type::Integer,
                 Box::new(error),
             )
         })?,
-        model: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
-        git_head: row.get(8)?,
-        work_dir: PathBuf::from(row.get::<_, String>(9)?),
-        jsonl_path: PathBuf::from(row.get::<_, String>(10)?),
+        model: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        git_head: row.get(10)?,
+        work_dir: PathBuf::from(row.get::<_, String>(11)?),
+        jsonl_path: PathBuf::from(row.get::<_, String>(12)?),
     })
 }
 
@@ -1012,12 +1041,96 @@ mod tests {
             loaded.preview.as_deref(),
             Some("Add persistence hooks after that.")
         );
+        assert_eq!(
+            loaded.first_user_preview.as_deref(),
+            Some("Please inspect src/main.rs and explain startup wiring in detail.")
+        );
+        assert_eq!(
+            loaded.last_assistant_preview.as_deref(),
+            Some("The startup path is straightforward.")
+        );
         assert_eq!(loaded.model.as_deref(), Some("gpt-4.1-mini"));
         assert_eq!(loaded.created_at, 1_717_514_800_000);
         assert_eq!(loaded.updated_at, 1_717_514_800_100);
         assert_eq!(loaded.git_head.as_deref(), Some("abc123"));
         assert_eq!(loaded.work_dir, work_dir);
         assert_eq!(loaded.jsonl_path, jsonl_path);
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[tokio::test]
+    async fn backfill_keeps_session_message_previews_to_256_chars() {
+        let root = tempdir_path("metadata-index-long-previews");
+        let sessions_dir = root.join("sessions");
+        let work_dir = root.join("workspace").join("repo");
+        fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+        let long_user_message = "u".repeat(320);
+        let long_assistant_message = "a".repeat(320);
+        write_session_jsonl(
+            &sessions_dir,
+            &work_dir,
+            &session_id,
+            vec![
+                SessionEntry {
+                    id: "header".to_string(),
+                    parent_id: None,
+                    timestamp: 1_717_514_800_000,
+                    kind: SessionEntryKind::Header(SessionHeader {
+                        session_id: session_id.clone(),
+                        work_dir: work_dir.clone(),
+                        session_name: None,
+                        initial_model: "gpt-4.1".to_string(),
+                        git_head: None,
+                        cli_version: None,
+                    }),
+                },
+                SessionEntry {
+                    id: "user-1".to_string(),
+                    parent_id: Some("header".to_string()),
+                    timestamp: 1_717_514_800_050,
+                    kind: SessionEntryKind::Item(ConversationItem::text(
+                        Role::User,
+                        long_user_message,
+                    )),
+                },
+                SessionEntry {
+                    id: "assistant-1".to_string(),
+                    parent_id: Some("user-1".to_string()),
+                    timestamp: 1_717_514_800_075,
+                    kind: SessionEntryKind::Item(ConversationItem::text(
+                        Role::Assistant,
+                        long_assistant_message,
+                    )),
+                },
+            ],
+        );
+        let index = MetadataIndex::open(&root.join("index.sqlite"))
+            .await
+            .expect("metadata index should open sqlite file");
+
+        index
+            .backfill_from_jsonl(&sessions_dir)
+            .await
+            .expect("backfill should parse session jsonl");
+        let loaded = index
+            .get_session_meta(&session_id.to_string())
+            .await
+            .expect("backfilled metadata should be queryable");
+
+        let expected_user_preview = "u".repeat(256);
+        let expected_assistant_preview = "a".repeat(256);
+        assert_eq!(
+            loaded.first_user_preview.as_deref(),
+            Some(expected_user_preview.as_str())
+        );
+        assert_eq!(
+            loaded.last_assistant_preview.as_deref(),
+            Some(expected_assistant_preview.as_str())
+        );
 
         fs::remove_dir_all(root).expect("temp root should be removable");
     }
@@ -1385,6 +1498,8 @@ mod tests {
             project_dir: "/repo".to_string(),
             title: "Inspect session index".to_string(),
             preview: Some("please persist this metadata".to_string()),
+            first_user_preview: Some("first user preview".to_string()),
+            last_assistant_preview: Some("last assistant preview".to_string()),
             total_tokens: 512,
             model: Some("gpt-4.1".to_string()),
             created_at: 1_717_514_800_000,

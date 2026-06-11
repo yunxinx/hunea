@@ -26,7 +26,9 @@ pub use replay::{
 use runtime::{AppRuntimeCoordinator, AppRuntimeOptions};
 
 #[cfg(test)]
-use app_config::appconfig::{DebugConfig, ReasoningContentDisplay, RuntimeConfig, UserInputStyle};
+use app_config::appconfig::{
+    DebugConfig, EscRewindMode, ReasoningContentDisplay, RuntimeConfig, UserInputStyle,
+};
 #[cfg(test)]
 use options_mapping::{
     model_options_from_app_config, model_options_from_config, runtime_options_from_app_config,
@@ -163,6 +165,7 @@ mod tests {
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert!(options.copy_on_mouse_selection_release);
@@ -245,6 +248,7 @@ mod tests {
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert!(options.swap_enter_and_send);
@@ -268,6 +272,7 @@ mod tests {
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert!(!options.ctrl_c_clears_input);
@@ -291,6 +296,7 @@ mod tests {
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert_eq!(options.esc_interrupt_presses, 3);
@@ -314,6 +320,7 @@ mod tests {
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert!(!options.show_esc_interrupt_hint);
@@ -337,6 +344,7 @@ mod tests {
             print_transcript_on_exit: false,
             show_reasoning_content: true,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert!(options.show_reasoning_content);
@@ -360,6 +368,7 @@ mod tests {
             print_transcript_on_exit: false,
             show_reasoning_content: true,
             reasoning_content_display: ReasoningContentDisplay::Expanded,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert_eq!(
@@ -455,6 +464,7 @@ mod tests {
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         };
 
         write_terminal_replay_on_exit(&mut FailingWriter, &model, false, &config)
@@ -480,6 +490,7 @@ mod tests {
             print_transcript_on_exit: true,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         };
         let mut output = Vec::new();
 
@@ -506,6 +517,7 @@ mod tests {
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         }
     }
 

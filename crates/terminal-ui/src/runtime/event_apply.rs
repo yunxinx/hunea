@@ -1,6 +1,7 @@
 use runtime_domain::session::{
     RuntimeEvent, RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeTarget,
     RuntimeToolActivity, RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
+    SessionResumePayload, TranscriptReplayItem, TranscriptReplayRole,
 };
 
 use super::super::{
@@ -93,6 +94,18 @@ impl RuntimeEventApply for Model {
                 self.close_tool_approval_panel();
                 self.show_transient_status_notice("Runtime permission request cancelled");
             }
+            RuntimeEvent::SessionListLoaded { rows } => {
+                self.apply_session_picker_rows(rows);
+            }
+            RuntimeEvent::SessionPreviewLoaded { payload } => {
+                self.apply_session_preview_payload(payload);
+            }
+            RuntimeEvent::SessionTreeLoaded { payload } => {
+                self.apply_entry_tree_payload(payload);
+            }
+            RuntimeEvent::SessionResumed { payload } => {
+                self.apply_session_resume_payload(payload);
+            }
             RuntimeEvent::MessageFinished {
                 response, metrics, ..
             } => {
@@ -174,6 +187,89 @@ impl Model {
                 .map(RuntimeTarget::display_label)
                 .unwrap_or("Working"),
         );
+    }
+
+    fn apply_session_resume_payload(&mut self, payload: SessionResumePayload) {
+        self.close_runtime_permission_approval_panel();
+        self.clear_runtime_response_buffer();
+        self.accept_streamed_runtime_reasoning_from_runtime();
+        self.clear_stream_activity();
+        self.reset_runtime_final_body_divider_state();
+
+        let restored_model = payload.restored_model.clone();
+        self.rebuild_transcript_from_replay(payload.transcript);
+        self.apply_resumed_model(restored_model);
+        self.show_transient_status_notice(&format!("Resumed session {}", payload.session_id));
+    }
+
+    fn rebuild_transcript_from_replay(&mut self, items: Vec<TranscriptReplayItem>) {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        self.transcript = self.transcript_from_replay_items(items);
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+    }
+
+    pub(crate) fn transcript_from_replay_items(
+        &self,
+        items: Vec<TranscriptReplayItem>,
+    ) -> crate::transcript::Transcript {
+        let mut transcript = crate::transcript::Transcript::new(self.palette);
+        transcript.set_gap(1);
+        if self.has_window {
+            transcript.set_width(self.width);
+        }
+        for item in items {
+            append_transcript_replay_item(&mut transcript, item, self.style_mode);
+        }
+        transcript
+    }
+
+    fn apply_resumed_model(&mut self, restored_model: Option<String>) {
+        let Some(model_id) = restored_model.filter(|model_id| !model_id.trim().is_empty()) else {
+            return;
+        };
+
+        if let Some(selection) = self.model_catalog.selection_for_model_id(&model_id) {
+            self.selected_model = Some(selection);
+            self.requires_model_selection = true;
+            self.bump_status_line_revision();
+            return;
+        }
+
+        self.selected_model = None;
+        self.requires_model_selection = true;
+        self.bump_status_line_revision();
+        self.append_system_message_from_runtime(format!(
+            "Model from resumed session is unavailable: {model_id}"
+        ));
+    }
+}
+
+fn append_transcript_replay_item(
+    transcript: &mut crate::transcript::Transcript,
+    item: TranscriptReplayItem,
+    style_mode: crate::style_mode::StyleMode,
+) {
+    match item.role {
+        TranscriptReplayRole::User => {
+            transcript.append_message_with_style_mode(
+                crate::Sender::User,
+                item.content,
+                style_mode,
+            );
+        }
+        TranscriptReplayRole::Assistant => {
+            transcript.append_message_with_style_mode(
+                crate::Sender::Assistant,
+                item.content,
+                style_mode,
+            );
+        }
+        TranscriptReplayRole::System | TranscriptReplayRole::Tool => {
+            transcript.append_system_message(item.content);
+        }
     }
 }
 

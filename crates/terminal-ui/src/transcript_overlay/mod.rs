@@ -1,14 +1,18 @@
 mod input;
-mod render;
+pub(crate) mod render;
 mod scroll;
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) use render::build_percentage_rule;
+pub(crate) use render::{
+    TranscriptOverlayProgressStyle, TranscriptOverlayRenderOptions, build_percentage_rule,
+    render_transcript_overlay_view,
+};
 
 use crate::{
     Model,
+    runner::TerminalMouseModePreference,
     tool_result::ToolActivityRenderMode,
     transcript::{LineAnchor, ReasoningRenderMode, TranscriptItemMetricsIndex},
 };
@@ -55,8 +59,23 @@ impl Model {
     }
 
     /// 覆盖层激活时禁用鼠标捕获，以恢复终端模拟器原生选区能力。
+    #[cfg(test)]
     pub(crate) fn wants_mouse_capture(&self) -> bool {
-        !self.transcript_overlay_active() && !self.tool_approval_fullscreen_preview_active()
+        matches!(
+            self.mouse_mode_preference(),
+            TerminalMouseModePreference::Capture
+        )
+    }
+
+    pub(crate) fn mouse_mode_preference(&self) -> TerminalMouseModePreference {
+        if self.transcript_overlay_active()
+            || self.session_preview_active()
+            || self.session_picker_active()
+            || self.tool_approval_fullscreen_preview_active()
+        {
+            return TerminalMouseModePreference::NativeWithAlternateScroll;
+        }
+        TerminalMouseModePreference::Capture
     }
 
     pub(crate) fn open_transcript_overlay(&mut self) {

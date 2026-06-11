@@ -144,6 +144,13 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
                 ("Expected", "1, 2, or 3".to_string()),
             ],
         ),
+        AppConfigError::InvalidEscRewindMode { path, value } => validation_rows(
+            path,
+            "tui.esc_rewind_mode",
+            value,
+            "Unknown Esc rewind mode",
+            "coarse, entry",
+        ),
         AppConfigError::InvalidFilePickerPopupHeight { path, value } => rows_with_optional_file(
             path,
             vec![

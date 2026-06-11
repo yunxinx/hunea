@@ -23,6 +23,7 @@ pub(super) struct FileTuiConfig {
     pub(super) swap_enter_and_send: Option<bool>,
     pub(super) ctrl_c_clears_input: Option<bool>,
     pub(super) esc_interrupt_presses: Option<u8>,
+    pub(super) esc_rewind_mode: Option<String>,
     pub(super) show_esc_interrupt_hint: Option<bool>,
     pub(super) file_picker_popup_height: Option<usize>,
     pub(super) composer_undo_limit: Option<usize>,

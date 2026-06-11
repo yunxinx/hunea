@@ -12,6 +12,13 @@ use crate::{
     style_mode::StyleMode,
 };
 
+/// `EscRewindMode` 表示空 composer 下 `Esc` 进入哪类回溯交互。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscRewindMode {
+    Coarse,
+    Entry,
+}
+
 /// `ModelOptions` 表示创建 TUI 模型时可配置的样式与状态行选项。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelOptions {
@@ -25,6 +32,7 @@ pub struct ModelOptions {
     pub swap_enter_and_send: bool,
     pub ctrl_c_clears_input: bool,
     pub esc_interrupt_presses: u8,
+    pub esc_rewind_mode: EscRewindMode,
     pub show_esc_interrupt_hint: bool,
     pub file_picker_popup_height: u16,
     pub composer_undo_limit: usize,
@@ -51,6 +59,7 @@ impl Default for ModelOptions {
             swap_enter_and_send: false,
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
+            esc_rewind_mode: EscRewindMode::Coarse,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7
                 .clamp(FILE_PICKER_POPUP_MIN_HEIGHT, FILE_PICKER_POPUP_MAX_HEIGHT),

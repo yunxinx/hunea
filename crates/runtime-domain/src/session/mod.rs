@@ -27,7 +27,7 @@ pub use permission::{
     RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,
 };
 pub use recovery::{
-    SessionPickerRow, SessionPreviewPayload, SessionResumePayload, SessionTreeEntry,
-    SessionTreeEntryKind, SessionTreePayload, TranscriptReplayItem, TranscriptReplayRole,
+    SessionPickerRow, SessionPreviewPayload, SessionResumePayload, SessionTreePayload,
+    SessionTreeRow, SessionTreeRowKind, TranscriptReplayItem, TranscriptReplayRole,
 };
 pub use target::{ProviderTarget, RuntimeTarget};

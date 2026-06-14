@@ -68,6 +68,12 @@ impl Model {
     }
 
     pub(crate) fn mouse_mode_preference(&self) -> TerminalMouseModePreference {
+        if self.entry_tree_preview_active() {
+            return TerminalMouseModePreference::NativeWithAlternateScroll;
+        }
+        if self.entry_tree_active() {
+            return TerminalMouseModePreference::CaptureWithAlternateScroll;
+        }
         if self.transcript_overlay_active()
             || self.session_preview_active()
             || self.session_picker_active()

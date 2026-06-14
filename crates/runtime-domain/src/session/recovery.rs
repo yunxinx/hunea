@@ -83,36 +83,33 @@ pub struct SessionPreviewPayload {
     pub transcript: Vec<TranscriptReplayItem>,
 }
 
-/// `SessionTreeEntryKind` 描述 entry rewind tree 中一行 entry 的类型。
+/// `SessionTreeRowKind` 描述 `/tree` 逻辑消息行的类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionTreeEntryKind {
-    Header,
+pub enum SessionTreeRowKind {
     User,
     Assistant,
     Tool,
     Reasoning,
-    Config,
-    Leaf,
-    Other,
 }
 
-/// `SessionTreeEntry` 是 entry rewind tree 的扁平展示节点。
+/// `SessionTreeRow` 是 `/tree` 的扁平逻辑展示节点。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionTreeEntry {
-    pub entry_id: String,
+pub struct SessionTreeRow {
+    pub row_id: String,
     pub parent_id: Option<String>,
-    pub depth: usize,
-    pub kind: SessionTreeEntryKind,
-    pub label: String,
-    pub content: String,
+    pub display_depth: usize,
+    pub kind: SessionTreeRowKind,
+    pub display_text: String,
+    pub summary: String,
+    pub preview_content: String,
     pub rewind_target_id: Option<String>,
     pub rewind_prefill: Option<String>,
     pub is_active_path: bool,
-    pub is_current_leaf: bool,
+    pub is_current: bool,
 }
 
-/// `SessionTreePayload` 是当前 session entry tree 的 TUI 展示数据。
+/// `SessionTreePayload` 是当前 session 逻辑消息树的 TUI 展示数据。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionTreePayload {
-    pub entries: Vec<SessionTreeEntry>,
+    pub rows: Vec<SessionTreeRow>,
 }

@@ -20,6 +20,7 @@ pub(super) type TuiTerminal = TerminalSurface<CrosstermBackend<io::Stdout>>;
 pub(crate) enum TerminalMouseModePreference {
     Capture,
     NativeWithAlternateScroll,
+    CaptureWithAlternateScroll,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,10 @@ impl TerminalMouseMode {
             },
             TerminalMouseModePreference::NativeWithAlternateScroll => Self {
                 has_mouse_capture: false,
+                has_alternate_scroll: true,
+            },
+            TerminalMouseModePreference::CaptureWithAlternateScroll => Self {
+                has_mouse_capture: true,
                 has_alternate_scroll: true,
             },
         }
@@ -226,6 +231,15 @@ mod tests {
             TerminalMouseMode::for_mouse_capture(false),
             TerminalMouseMode {
                 has_mouse_capture: false,
+                has_alternate_scroll: true,
+            }
+        );
+        assert_eq!(
+            TerminalMouseMode::from_preference(
+                super::TerminalMouseModePreference::CaptureWithAlternateScroll
+            ),
+            TerminalMouseMode {
+                has_mouse_capture: true,
                 has_alternate_scroll: true,
             }
         );

@@ -121,7 +121,8 @@ impl Model {
     pub(crate) fn terminal_input_coalescing(&self) -> crate::runner::TerminalInputCoalescing {
         crate::runner::TerminalInputCoalescing {
             has_page_scroll_burst_coalescing: self.session_preview_active()
-                || self.session_picker_active(),
+                || self.session_picker_active()
+                || self.entry_tree_active(),
         }
     }
 
@@ -161,7 +162,15 @@ impl Model {
                     self.move_session_picker_selection(delta_lines.signum());
                     return None;
                 }
-                if self.transcript_overlay_active() || self.entry_tree_active() {
+                if self.entry_tree_active() {
+                    if self.entry_tree_preview_active() {
+                        self.move_entry_tree_preview_page(delta_lines.signum());
+                    } else {
+                        self.move_entry_tree_selection(delta_lines.signum());
+                    }
+                    return None;
+                }
+                if self.transcript_overlay_active() {
                     return None;
                 }
                 let before_document_viewport_y = self.document_runtime.viewport_y;
@@ -188,11 +197,13 @@ impl Model {
                 column,
                 row,
             } => {
+                if self.entry_tree_active() {
+                    return self.handle_entry_tree_mouse_down(button, column, row);
+                }
                 if self.transcript_overlay_active()
                     || self.tool_approval_fullscreen_preview_active()
                     || self.session_preview_active()
                     || self.session_picker_active()
-                    || self.entry_tree_active()
                 {
                     return None;
                 }

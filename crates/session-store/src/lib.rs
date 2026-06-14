@@ -157,38 +157,35 @@ pub struct ResolvedSessionState {
     pub latest_config: Option<ConfigSnapshot>,
 }
 
-/// `SessionTreeSnapshot` 是 entry rewind 所需的完整 entry 图快照。
+/// `SessionTreeSnapshot` 是 `/tree` 所需的逻辑消息行投影。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SessionTreeSnapshot {
-    pub entries: Vec<SessionTreeSnapshotEntry>,
-    pub current_leaf_id: Option<String>,
-    pub active_path_ids: HashSet<String>,
+    pub rows: Vec<SessionTreeSnapshotRow>,
+    pub current_row_id: Option<String>,
+    pub active_row_ids: HashSet<String>,
 }
 
-/// `SessionTreeSnapshotEntry` 描述单个持久化 entry 的树展示与回溯语义。
+/// `SessionTreeSnapshotRow` 描述单条用户可见逻辑消息的树展示与回溯语义。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionTreeSnapshotEntry {
+pub struct SessionTreeSnapshotRow {
     pub id: String,
     pub parent_id: Option<String>,
-    pub depth: usize,
-    pub kind: SessionTreeSnapshotEntryKind,
-    pub label: String,
-    pub content: String,
+    pub display_depth: usize,
+    pub kind: SessionTreeSnapshotRowKind,
+    pub display_text: String,
+    pub summary: String,
+    pub preview_content: String,
     pub rewind_target_id: Option<String>,
     pub rewind_prefill: Option<String>,
 }
 
-/// `SessionTreeSnapshotEntryKind` 是 session-store 层的 entry 类型分类。
+/// `SessionTreeSnapshotRowKind` 是 session-store 层的逻辑消息行类型分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionTreeSnapshotEntryKind {
-    Header,
+pub enum SessionTreeSnapshotRowKind {
     User,
     Assistant,
     Tool,
     Reasoning,
-    Config,
-    Leaf,
-    Other,
 }
 
 /// session 持久化条目类型。
@@ -371,31 +368,81 @@ pub fn resolve_state(
     resolve_state_from_path(&path)
 }
 
-/// 生成 entry rewind 使用的扁平树快照。
+/// 生成 `/tree` 使用的逻辑消息行快照。
 pub fn session_tree_snapshot(
     entries: &[SessionEntry],
 ) -> Result<SessionTreeSnapshot, ResolveError> {
     let by_id = build_entry_index(entries)?;
+    validate_entry_parents(entries, &by_id)?;
+    let children_by_parent = build_children_by_parent(entries);
     let current_leaf_id = entries
         .last()
         .map(|entry| effective_leaf_id(&by_id, &entry.id));
-    let active_path_ids = if let Some(leaf_id) = current_leaf_id {
+    let active_path = if let Some(leaf_id) = current_leaf_id {
         resolve_path(&by_id, leaf_id)?
-            .into_iter()
-            .map(|entry| entry.id.clone())
-            .collect()
     } else {
-        HashSet::new()
+        Vec::new()
     };
-    let depth_by_id = entry_depths(entries)?;
+    let active_path_ids = active_path
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<HashSet<_>>();
+    let visible_entry_ids = entries
+        .iter()
+        .filter(|entry| session_tree_row_kind(entry).is_some())
+        .map(|entry| entry.id.as_str())
+        .collect::<HashSet<_>>();
+    let rewind_target_by_id = entries
+        .iter()
+        .filter(|entry| visible_entry_ids.contains(entry.id.as_str()))
+        .map(|entry| {
+            (
+                entry.id.clone(),
+                restore_target_for_visible_row(
+                    entry,
+                    &visible_entry_ids,
+                    &children_by_parent,
+                    &active_path_ids,
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut rows = entries
+        .iter()
+        .filter_map(|entry| {
+            session_tree_snapshot_row(
+                entry,
+                &by_id,
+                &visible_entry_ids,
+                &rewind_target_by_id,
+                &children_by_parent,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let display_depth_by_id = visible_display_depths(&rows);
+    for row in &mut rows {
+        row.display_depth = display_depth_by_id
+            .get(&row.id)
+            .copied()
+            .unwrap_or_default();
+    }
+
+    let active_row_ids = active_path
+        .iter()
+        .filter(|entry| visible_entry_ids.contains(entry.id.as_str()))
+        .map(|entry| entry.id.clone())
+        .collect::<HashSet<_>>();
+    let current_row_id = active_path
+        .iter()
+        .rev()
+        .find(|entry| visible_entry_ids.contains(entry.id.as_str()))
+        .map(|entry| entry.id.clone());
 
     Ok(SessionTreeSnapshot {
-        entries: entries
-            .iter()
-            .map(|entry| session_tree_snapshot_entry(entry, &depth_by_id))
-            .collect(),
-        current_leaf_id: current_leaf_id.map(str::to_string),
-        active_path_ids,
+        rows,
+        current_row_id,
+        active_row_ids,
     })
 }
 
@@ -440,6 +487,33 @@ fn build_entry_index(
         }
     }
     Ok(by_id)
+}
+
+fn validate_entry_parents<'a>(
+    entries: &'a [SessionEntry],
+    by_id: &HashMap<&'a str, &'a SessionEntry>,
+) -> Result<(), ResolveError> {
+    for entry in entries {
+        if let Some(parent_id) = entry.parent_id.as_deref()
+            && !by_id.contains_key(parent_id)
+        {
+            return Err(ResolveError::DanglingParent(parent_id.to_string()));
+        }
+    }
+    Ok(())
+}
+
+fn build_children_by_parent(entries: &[SessionEntry]) -> HashMap<&str, Vec<&SessionEntry>> {
+    let mut children_by_parent = HashMap::new();
+    for entry in entries {
+        if let Some(parent_id) = entry.parent_id.as_deref() {
+            children_by_parent
+                .entry(parent_id)
+                .or_insert_with(Vec::new)
+                .push(entry);
+        }
+    }
+    children_by_parent
 }
 
 fn effective_leaf_id<'a>(
@@ -554,134 +628,91 @@ fn push_transcript_replay_snapshot(
     transcript.push(item);
 }
 
-fn entry_depths(entries: &[SessionEntry]) -> Result<HashMap<String, usize>, ResolveError> {
-    let by_id = build_entry_index(entries)?;
-    let mut depths = HashMap::with_capacity(entries.len());
-    for entry in entries {
-        let depth = entry_depth(entry, &by_id, &mut HashMap::new())?;
-        depths.insert(entry.id.clone(), depth);
-    }
-    Ok(depths)
-}
-
-fn entry_depth<'a>(
-    entry: &'a SessionEntry,
-    by_id: &HashMap<&'a str, &'a SessionEntry>,
-    visiting: &mut HashMap<&'a str, bool>,
-) -> Result<usize, ResolveError> {
-    if visiting.get(entry.id.as_str()) == Some(&true) {
-        return Err(ResolveError::CycleDetected);
-    }
-    visiting.insert(entry.id.as_str(), true);
-    let depth = if let Some(parent_id) = entry.parent_id.as_deref() {
-        let parent = by_id
-            .get(parent_id)
-            .ok_or_else(|| ResolveError::DanglingParent(parent_id.to_string()))?;
-        entry_depth(parent, by_id, visiting)?.saturating_add(1)
-    } else {
-        0
-    };
-    visiting.insert(entry.id.as_str(), false);
-    Ok(depth)
-}
-
-fn session_tree_snapshot_entry(
+fn session_tree_snapshot_row(
     entry: &SessionEntry,
-    depth_by_id: &HashMap<String, usize>,
-) -> SessionTreeSnapshotEntry {
-    let kind = session_tree_snapshot_entry_kind(entry);
-    let content = session_tree_entry_content(entry);
-    let label = session_tree_entry_label(entry, kind, &content);
-    let (rewind_target_id, rewind_prefill) = session_tree_rewind_target(entry, kind, &content);
-    SessionTreeSnapshotEntry {
-        id: entry.id.clone(),
-        parent_id: entry.parent_id.clone(),
-        depth: depth_by_id.get(&entry.id).copied().unwrap_or_default(),
+    by_id: &HashMap<&str, &SessionEntry>,
+    visible_entry_ids: &HashSet<&str>,
+    rewind_target_by_id: &HashMap<String, String>,
+    children_by_parent: &HashMap<&str, Vec<&SessionEntry>>,
+) -> Option<Result<SessionTreeSnapshotRow, ResolveError>> {
+    let kind = session_tree_row_kind(entry)?;
+    let preview_content = session_tree_row_preview_content(entry, kind);
+    let display_text = single_line_display_text(&preview_content);
+    let summary = truncate_chars(&display_text, SESSION_TREE_SUMMARY_CHAR_LIMIT);
+    let parent_id = match nearest_visible_parent_id(entry, by_id, visible_entry_ids) {
+        Ok(parent_id) => parent_id,
+        Err(error) => return Some(Err(error)),
+    };
+    let rewind_target_id = rewind_target_for_tree_row(
+        entry,
         kind,
-        label,
-        content,
+        visible_entry_ids,
+        rewind_target_by_id,
+        children_by_parent,
+    );
+    let rewind_prefill =
+        (kind == SessionTreeSnapshotRowKind::User).then(|| preview_content.clone());
+
+    Some(Ok(SessionTreeSnapshotRow {
+        id: entry.id.clone(),
+        parent_id,
+        display_depth: 0,
+        kind,
+        display_text,
+        summary,
+        preview_content,
         rewind_target_id,
         rewind_prefill,
-    }
+    }))
 }
 
-fn session_tree_snapshot_entry_kind(entry: &SessionEntry) -> SessionTreeSnapshotEntryKind {
+const SESSION_TREE_SUMMARY_CHAR_LIMIT: usize = 120;
+
+fn session_tree_row_kind(entry: &SessionEntry) -> Option<SessionTreeSnapshotRowKind> {
     match &entry.kind {
-        SessionEntryKind::Header(_) => SessionTreeSnapshotEntryKind::Header,
         SessionEntryKind::Item(item) => match item.role() {
-            Some(Role::User) => SessionTreeSnapshotEntryKind::User,
-            Some(Role::Assistant) => SessionTreeSnapshotEntryKind::Assistant,
-            Some(Role::System) => SessionTreeSnapshotEntryKind::Other,
+            Some(Role::User) => Some(SessionTreeSnapshotRowKind::User),
+            Some(Role::Assistant) => Some(SessionTreeSnapshotRowKind::Assistant),
+            Some(Role::System) => None,
             None => match item {
-                ConversationItem::ToolResult { .. } => SessionTreeSnapshotEntryKind::Tool,
-                ConversationItem::Reasoning { .. } => SessionTreeSnapshotEntryKind::Reasoning,
-                ConversationItem::Message { .. } => SessionTreeSnapshotEntryKind::Other,
+                ConversationItem::ToolResult { .. } => Some(SessionTreeSnapshotRowKind::Tool),
+                ConversationItem::Reasoning { .. } => Some(SessionTreeSnapshotRowKind::Reasoning),
+                ConversationItem::Message { .. } => None,
             },
         },
-        SessionEntryKind::ConfigChange(_) => SessionTreeSnapshotEntryKind::Config,
-        SessionEntryKind::TranscriptReplay(item) => match item {
-            TranscriptReplayItem::Message {
-                role: runtime_domain::session::TranscriptReplayRole::User,
-                ..
-            } => SessionTreeSnapshotEntryKind::User,
-            TranscriptReplayItem::Message {
-                role: runtime_domain::session::TranscriptReplayRole::Assistant,
-                ..
-            } => SessionTreeSnapshotEntryKind::Assistant,
-            TranscriptReplayItem::Reasoning { .. } => SessionTreeSnapshotEntryKind::Reasoning,
-            TranscriptReplayItem::ToolActivity { .. }
-            | TranscriptReplayItem::TerminalSnapshot { .. }
-            | TranscriptReplayItem::ToolResult { .. } => SessionTreeSnapshotEntryKind::Tool,
-            TranscriptReplayItem::System { .. } => SessionTreeSnapshotEntryKind::Other,
-        },
-        SessionEntryKind::Leaf { .. } => SessionTreeSnapshotEntryKind::Leaf,
-        SessionEntryKind::Compaction { .. } | SessionEntryKind::BranchSummary { .. } => {
-            SessionTreeSnapshotEntryKind::Other
-        }
+        SessionEntryKind::Header(_)
+        | SessionEntryKind::Compaction { .. }
+        | SessionEntryKind::BranchSummary { .. }
+        | SessionEntryKind::ConfigChange(_)
+        | SessionEntryKind::TranscriptReplay(_)
+        | SessionEntryKind::Leaf { .. } => None,
     }
 }
 
-fn session_tree_entry_content(entry: &SessionEntry) -> String {
+fn session_tree_row_preview_content(
+    entry: &SessionEntry,
+    kind: SessionTreeSnapshotRowKind,
+) -> String {
     match &entry.kind {
-        SessionEntryKind::Header(header) => header
-            .session_name
-            .clone()
-            .unwrap_or_else(|| header.work_dir.display().to_string()),
         SessionEntryKind::Item(item) => match item {
             ConversationItem::Reasoning { content, .. } => content.clone(),
+            ConversationItem::Message {
+                role: Role::Assistant,
+                ..
+            } if item.text_content().trim().is_empty() => assistant_tool_call_summary(item),
+            ConversationItem::ToolResult { call_id, .. }
+                if item.text_content().trim().is_empty() =>
+            {
+                format!("tool result {call_id}")
+            }
             _ => item.text_content(),
         },
-        SessionEntryKind::Compaction { summary, .. } => summary.clone(),
-        SessionEntryKind::BranchSummary { summary, .. } => summary.clone(),
-        SessionEntryKind::ConfigChange(snapshot) => snapshot.model.clone(),
-        SessionEntryKind::TranscriptReplay(item) => item.content_text().to_string(),
-        SessionEntryKind::Leaf {
-            target_id: Some(target_id),
-        } => format!("target {target_id}"),
-        SessionEntryKind::Leaf { target_id: None } => "latest concrete entry".to_string(),
-    }
-}
-
-fn session_tree_entry_label(
-    entry: &SessionEntry,
-    kind: SessionTreeSnapshotEntryKind,
-    content: &str,
-) -> String {
-    let fallback = match kind {
-        SessionTreeSnapshotEntryKind::Header => "session header",
-        SessionTreeSnapshotEntryKind::User => "user message",
-        SessionTreeSnapshotEntryKind::Assistant => "assistant message",
-        SessionTreeSnapshotEntryKind::Tool => "tool result",
-        SessionTreeSnapshotEntryKind::Reasoning => "reasoning",
-        SessionTreeSnapshotEntryKind::Config => "config change",
-        SessionTreeSnapshotEntryKind::Leaf => "leaf marker",
-        SessionTreeSnapshotEntryKind::Other => "entry",
-    };
-    let label = truncate_chars(content.trim(), 80);
-    if label.is_empty() {
-        format!("{fallback} {}", entry.id)
-    } else {
-        label
+        _ => match kind {
+            SessionTreeSnapshotRowKind::User => "user message".to_string(),
+            SessionTreeSnapshotRowKind::Assistant => "assistant message".to_string(),
+            SessionTreeSnapshotRowKind::Tool => "tool result".to_string(),
+            SessionTreeSnapshotRowKind::Reasoning => "reasoning".to_string(),
+        },
     }
 }
 
@@ -697,26 +728,203 @@ fn truncate_chars(text: &str, limit: usize) -> String {
     output
 }
 
-fn session_tree_rewind_target(
+fn assistant_tool_call_summary(item: &ConversationItem) -> String {
+    let tool_names = item
+        .tool_calls()
+        .map(|tool_call| tool_call.name.as_str())
+        .collect::<Vec<_>>();
+    if tool_names.is_empty() {
+        "assistant message".to_string()
+    } else {
+        format!("tool call: {}", tool_names.join(", "))
+    }
+}
+
+fn single_line_display_text(content: &str) -> String {
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn nearest_visible_parent_id(
     entry: &SessionEntry,
-    kind: SessionTreeSnapshotEntryKind,
-    content: &str,
-) -> (Option<String>, Option<String>) {
-    if matches!(entry.kind, SessionEntryKind::TranscriptReplay(_)) {
-        return (Some(entry.id.clone()), None);
+    by_id: &HashMap<&str, &SessionEntry>,
+    visible_entry_ids: &HashSet<&str>,
+) -> Result<Option<String>, ResolveError> {
+    let mut current_id = entry.parent_id.as_deref();
+    while let Some(parent_id) = current_id {
+        if visible_entry_ids.contains(parent_id) {
+            return Ok(Some(parent_id.to_string()));
+        }
+        let parent = by_id
+            .get(parent_id)
+            .ok_or_else(|| ResolveError::DanglingParent(parent_id.to_string()))?;
+        current_id = parent.parent_id.as_deref();
+    }
+    Ok(None)
+}
+
+fn rewind_target_before_user_row(entry: &SessionEntry) -> String {
+    entry
+        .parent_id
+        .clone()
+        .unwrap_or_else(|| "header".to_string())
+}
+
+fn rewind_target_for_tree_row(
+    entry: &SessionEntry,
+    kind: SessionTreeSnapshotRowKind,
+    visible_entry_ids: &HashSet<&str>,
+    rewind_target_by_id: &HashMap<String, String>,
+    children_by_parent: &HashMap<&str, Vec<&SessionEntry>>,
+) -> Option<String> {
+    match kind {
+        SessionTreeSnapshotRowKind::User => Some(rewind_target_before_user_row(entry)),
+        SessionTreeSnapshotRowKind::Reasoning => owning_assistant_for_reasoning(
+            entry,
+            visible_entry_ids,
+            children_by_parent,
+            rewind_target_by_id,
+        ),
+        SessionTreeSnapshotRowKind::Assistant | SessionTreeSnapshotRowKind::Tool => Some(
+            default_rewind_target_for_visible_row(entry, rewind_target_by_id),
+        ),
+    }
+}
+
+fn default_rewind_target_for_visible_row(
+    entry: &SessionEntry,
+    rewind_target_by_id: &HashMap<String, String>,
+) -> String {
+    rewind_target_by_id
+        .get(&entry.id)
+        .cloned()
+        .unwrap_or_else(|| entry.id.clone())
+}
+
+fn owning_assistant_for_reasoning(
+    reasoning: &SessionEntry,
+    visible_entry_ids: &HashSet<&str>,
+    children_by_parent: &HashMap<&str, Vec<&SessionEntry>>,
+    rewind_target_by_id: &HashMap<String, String>,
+) -> Option<String> {
+    let mut current = reasoning;
+    let mut visited = HashSet::new();
+
+    while visited.insert(current.id.as_str()) {
+        let children = children_by_parent
+            .get(current.id.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let logical_children = children
+            .iter()
+            .copied()
+            .filter(|child| {
+                visible_entry_ids.contains(child.id.as_str())
+                    || is_recoverable_hidden_tree_entry(child)
+            })
+            .collect::<Vec<_>>();
+
+        let [next] = logical_children.as_slice() else {
+            return None;
+        };
+
+        if visible_entry_ids.contains(next.id.as_str()) {
+            return match session_tree_row_kind(next) {
+                Some(SessionTreeSnapshotRowKind::Assistant) => Some(
+                    default_rewind_target_for_visible_row(next, rewind_target_by_id),
+                ),
+                _ => None,
+            };
+        }
+
+        current = next;
     }
 
-    if kind == SessionTreeSnapshotEntryKind::User {
-        return (
-            entry
-                .parent_id
-                .clone()
-                .or_else(|| Some("header".to_string())),
-            Some(content.to_string()),
-        );
+    None
+}
+
+fn restore_target_for_visible_row(
+    entry: &SessionEntry,
+    visible_entry_ids: &HashSet<&str>,
+    children_by_parent: &HashMap<&str, Vec<&SessionEntry>>,
+    active_path_ids: &HashSet<&str>,
+) -> String {
+    let mut target = entry;
+    let mut visited = HashSet::new();
+
+    while visited.insert(target.id.as_str()) {
+        let Some(hidden_children) = children_by_parent.get(target.id.as_str()).map(|children| {
+            children
+                .iter()
+                .copied()
+                .filter(|child| !visible_entry_ids.contains(child.id.as_str()))
+                .filter(|child| is_recoverable_hidden_tree_entry(child))
+                .collect::<Vec<_>>()
+        }) else {
+            break;
+        };
+
+        let Some(next_target) = hidden_children
+            .iter()
+            .find(|child| active_path_ids.contains(child.id.as_str()))
+            .copied()
+            .or_else(|| hidden_children.last().copied())
+        else {
+            break;
+        };
+
+        target = next_target;
     }
 
-    (Some(entry.id.clone()), None)
+    target.id.clone()
+}
+
+fn is_recoverable_hidden_tree_entry(entry: &SessionEntry) -> bool {
+    matches!(
+        entry.kind,
+        SessionEntryKind::Compaction { .. }
+            | SessionEntryKind::BranchSummary { .. }
+            | SessionEntryKind::ConfigChange(_)
+            | SessionEntryKind::TranscriptReplay(_)
+    )
+}
+
+fn visible_display_depths(rows: &[SessionTreeSnapshotRow]) -> HashMap<String, usize> {
+    let mut children_by_parent: HashMap<Option<&str>, Vec<&SessionTreeSnapshotRow>> =
+        HashMap::new();
+    for row in rows {
+        children_by_parent
+            .entry(row.parent_id.as_deref())
+            .or_default()
+            .push(row);
+    }
+
+    let mut display_depths = HashMap::new();
+    let mut stack = children_by_parent
+        .get(&None)
+        .into_iter()
+        .flat_map(|roots| roots.iter().rev())
+        .map(|row| (*row, 0usize, false))
+        .collect::<Vec<_>>();
+
+    while let Some((row, display_depth, just_branched)) = stack.pop() {
+        display_depths.insert(row.id.clone(), display_depth);
+        let children = children_by_parent
+            .get(&Some(row.id.as_str()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let has_sibling_branch = children.len() > 1;
+        let child_depth = if has_sibling_branch || (just_branched && display_depth > 0) {
+            display_depth.saturating_add(1)
+        } else {
+            display_depth
+        };
+
+        for child in children.iter().rev() {
+            stack.push((*child, child_depth, has_sibling_branch));
+        }
+    }
+
+    display_depths
 }
 
 fn item_entry_position(path: &[&SessionEntry], target_id: &str) -> Option<usize> {
@@ -1372,30 +1580,126 @@ mod tests {
 
         let snapshot = super::session_tree_snapshot(&entries).expect("linear tree should snapshot");
 
-        assert_eq!(snapshot.current_leaf_id.as_deref(), Some("user-2"));
-        assert!(snapshot.active_path_ids.contains("header"));
-        assert!(snapshot.active_path_ids.contains("user-1"));
-        assert!(snapshot.active_path_ids.contains("assistant-1"));
-        assert!(snapshot.active_path_ids.contains("user-2"));
+        assert_eq!(snapshot.current_row_id.as_deref(), Some("user-2"));
+        assert!(snapshot.active_row_ids.contains("user-1"));
+        assert!(snapshot.active_row_ids.contains("assistant-1"));
+        assert!(snapshot.active_row_ids.contains("user-2"));
         let user = snapshot
-            .entries
+            .rows
             .iter()
-            .find(|entry| entry.id == "user-2")
+            .find(|row| row.id == "user-2")
             .expect("user-2 should exist");
-        assert_eq!(user.kind, super::SessionTreeSnapshotEntryKind::User);
+        assert_eq!(user.kind, super::SessionTreeSnapshotRowKind::User);
         assert_eq!(user.rewind_target_id.as_deref(), Some("assistant-1"));
         assert_eq!(user.rewind_prefill.as_deref(), Some("follow up"));
         let assistant = snapshot
-            .entries
+            .rows
             .iter()
-            .find(|entry| entry.id == "assistant-1")
+            .find(|row| row.id == "assistant-1")
             .expect("assistant-1 should exist");
         assert_eq!(assistant.rewind_target_id.as_deref(), Some("assistant-1"));
         assert_eq!(assistant.rewind_prefill, None);
     }
 
     #[test]
-    fn session_tree_snapshot_rewinds_replay_entries_to_themselves() {
+    fn session_tree_snapshot_maps_reasoning_rewind_to_following_assistant() {
+        let entries = vec![
+            SessionEntry {
+                id: "user-1".to_string(),
+                parent_id: None,
+                timestamp: 1,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "hello")),
+            },
+            SessionEntry {
+                id: "reasoning-1".to_string(),
+                parent_id: Some("user-1".to_string()),
+                timestamp: 2,
+                kind: SessionEntryKind::Item(ConversationItem::Reasoning {
+                    content: "thinking".to_string(),
+                    summary: None,
+                    encrypted: None,
+                }),
+            },
+            SessionEntry {
+                id: "assistant-1".to_string(),
+                parent_id: Some("reasoning-1".to_string()),
+                timestamp: 3,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "answer")),
+            },
+            SessionEntry {
+                id: "assistant-replay".to_string(),
+                parent_id: Some("assistant-1".to_string()),
+                timestamp: 4,
+                kind: SessionEntryKind::TranscriptReplay(TranscriptReplayItem::Message {
+                    role: runtime_domain::session::TranscriptReplayRole::Assistant,
+                    content: "answer".to_string(),
+                }),
+            },
+        ];
+
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("reasoning tree should snapshot");
+        let reasoning = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "reasoning-1")
+            .expect("reasoning row should remain visible");
+        let assistant = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "assistant-1")
+            .expect("assistant row should exist");
+
+        assert_eq!(reasoning.kind, super::SessionTreeSnapshotRowKind::Reasoning);
+        assert_eq!(
+            reasoning.rewind_target_id, assistant.rewind_target_id,
+            "reasoning should rewind to its owning assistant turn, not to itself"
+        );
+        assert_eq!(
+            reasoning.rewind_target_id.as_deref(),
+            Some("assistant-replay"),
+            "reasoning should reuse the assistant row's final restore target"
+        );
+    }
+
+    #[test]
+    fn session_tree_snapshot_marks_trailing_reasoning_as_not_rewindable() {
+        let entries = vec![
+            SessionEntry {
+                id: "user-1".to_string(),
+                parent_id: None,
+                timestamp: 1,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "hello")),
+            },
+            SessionEntry {
+                id: "reasoning-1".to_string(),
+                parent_id: Some("user-1".to_string()),
+                timestamp: 2,
+                kind: SessionEntryKind::Item(ConversationItem::Reasoning {
+                    content: "thinking".to_string(),
+                    summary: None,
+                    encrypted: None,
+                }),
+            },
+        ];
+
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("reasoning tree should snapshot");
+        let reasoning = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "reasoning-1")
+            .expect("reasoning row should remain visible");
+
+        assert_eq!(reasoning.kind, super::SessionTreeSnapshotRowKind::Reasoning);
+        assert_eq!(
+            reasoning.rewind_target_id, None,
+            "trailing reasoning without an assistant answer should be visible but not rewindable"
+        );
+    }
+
+    #[test]
+    fn session_tree_snapshot_projects_only_logical_rows_without_replay_duplicates() {
         let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
             .parse()
             .expect("fixture session id should parse");
@@ -1443,19 +1747,81 @@ mod tests {
                     content: "answer".to_string(),
                 }),
             },
+            SessionEntry {
+                id: "config-1".to_string(),
+                parent_id: Some("assistant-replay".to_string()),
+                timestamp: 1_717_514_800_005,
+                kind: SessionEntryKind::ConfigChange(ConfigSnapshot {
+                    provider_id: "local".to_string(),
+                    model: "qwen3".to_string(),
+                    system_prompt: None,
+                }),
+            },
+            SessionEntry {
+                id: "leaf-1".to_string(),
+                parent_id: Some("config-1".to_string()),
+                timestamp: 1_717_514_800_006,
+                kind: SessionEntryKind::Leaf {
+                    target_id: Some("assistant-1".to_string()),
+                },
+            },
         ];
 
         let snapshot = super::session_tree_snapshot(&entries).expect("replay tree should snapshot");
 
-        for replay_id in ["user-replay", "assistant-replay"] {
-            let replay_entry = snapshot
-                .entries
+        assert_eq!(
+            snapshot
+                .rows
                 .iter()
-                .find(|entry| entry.id == replay_id)
-                .expect("replay entry should exist");
-            assert_eq!(replay_entry.rewind_target_id.as_deref(), Some(replay_id));
-            assert_eq!(replay_entry.rewind_prefill, None);
-        }
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user-1", "assistant-1"],
+            "tree projection should show one logical row per user-visible message only"
+        );
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|row| row.preview_content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hello", "answer"],
+            "provider items and transcript replay records with the same visible content must not duplicate"
+        );
+    }
+
+    #[test]
+    fn session_tree_snapshot_keeps_linear_logical_rows_flat() {
+        let entries = linear_history_entries();
+
+        let snapshot = super::session_tree_snapshot(&entries).expect("linear tree should snapshot");
+
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|row| (row.id.as_str(), row.display_depth))
+                .collect::<Vec<_>>(),
+            vec![("user-1", 0), ("assistant-1", 0), ("user-2", 0)],
+            "linear visible history should not inherit physical parent-chain depth as visual indent"
+        );
+    }
+
+    #[test]
+    fn session_tree_snapshot_indents_true_sibling_branches() {
+        let entries = branching_entries();
+
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("branching tree should snapshot");
+
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|row| (row.id.as_str(), row.display_depth))
+                .collect::<Vec<_>>(),
+            vec![("user-a", 0), ("assistant-b", 1), ("assistant-c", 1)],
+            "only real sibling branches should increase visual indent"
+        );
     }
 
     #[test]

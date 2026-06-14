@@ -12,12 +12,12 @@ use runtime_domain::{
     session::{
         ConversationEvent, ConversationTurnRequest, RuntimeCommand, RuntimeCommandReceipt,
         RuntimeEvent, RuntimeTarget, SessionPickerRow, SessionPreviewPayload, SessionResumePayload,
-        SessionTreeEntry, SessionTreeEntryKind, SessionTreePayload,
+        SessionTreePayload, SessionTreeRow, SessionTreeRowKind,
     },
 };
 use session_store::{
     ResolvedSessionState, SessionHeader, SessionId, SessionMeta, SessionStore, SessionStoreError,
-    SessionTreeSnapshot, SessionTreeSnapshotEntry, SessionTreeSnapshotEntryKind,
+    SessionTreeSnapshot, SessionTreeSnapshotRow, SessionTreeSnapshotRowKind,
 };
 use terminal_ui::RuntimeCoordinator;
 use tool_runtime::{ToolExecutorRegistry, builtin::ManagedSearchToolConfig};
@@ -266,13 +266,15 @@ impl AppRuntimeCoordinator {
             .ok_or_else(|| "Session header template is not available".to_string())?;
         let snapshot = block_on_session_store(store.load_session_tree(&session_id))
             .map_err(|error| error.to_string())?;
-        let selected_entry = snapshot
-            .entries
+        let selected_row = snapshot
+            .rows
             .iter()
-            .find(|entry| entry.id == entry_id)
-            .ok_or_else(|| format!("Entry `{entry_id}` was not found"))?;
-        let target_id = selected_entry.rewind_target_id.as_deref();
-        block_on_session_store(store.set_leaf(&session_id, target_id))
+            .find(|row| row.id == entry_id)
+            .ok_or_else(|| format!("Tree row `{entry_id}` was not found"))?;
+        let Some(rewind_target_id) = selected_row.rewind_target_id.as_deref() else {
+            return Ok(RuntimeCommandReceipt::Accepted);
+        };
+        block_on_session_store(store.set_leaf(&session_id, Some(rewind_target_id)))
             .map_err(|error| error.to_string())?;
         self.provider_conversation = ProviderConversation::with_session_store(
             store.clone(),
@@ -433,48 +435,45 @@ fn session_preview_payload(
 }
 
 fn session_tree_payload(snapshot: SessionTreeSnapshot) -> SessionTreePayload {
-    let current_leaf_id = snapshot.current_leaf_id;
-    let active_path_ids = snapshot.active_path_ids;
+    let current_row_id = snapshot.current_row_id;
+    let active_row_ids = snapshot.active_row_ids;
     SessionTreePayload {
-        entries: snapshot
-            .entries
+        rows: snapshot
+            .rows
             .into_iter()
-            .map(|entry| session_tree_entry(entry, current_leaf_id.as_deref(), &active_path_ids))
+            .map(|row| session_tree_row(row, current_row_id.as_deref(), &active_row_ids))
             .collect(),
     }
 }
 
-fn session_tree_entry(
-    entry: SessionTreeSnapshotEntry,
-    current_leaf_id: Option<&str>,
-    active_path_ids: &std::collections::HashSet<String>,
-) -> SessionTreeEntry {
-    let is_current_leaf = current_leaf_id == Some(entry.id.as_str());
-    let is_active_path = active_path_ids.contains(&entry.id);
-    SessionTreeEntry {
-        entry_id: entry.id,
-        parent_id: entry.parent_id,
-        depth: entry.depth,
-        kind: session_tree_entry_kind(entry.kind),
-        label: entry.label,
-        content: entry.content,
-        rewind_target_id: entry.rewind_target_id,
-        rewind_prefill: entry.rewind_prefill,
+fn session_tree_row(
+    row: SessionTreeSnapshotRow,
+    current_row_id: Option<&str>,
+    active_row_ids: &std::collections::HashSet<String>,
+) -> SessionTreeRow {
+    let is_current = current_row_id == Some(row.id.as_str());
+    let is_active_path = active_row_ids.contains(&row.id);
+    SessionTreeRow {
+        row_id: row.id,
+        parent_id: row.parent_id,
+        display_depth: row.display_depth,
+        kind: session_tree_row_kind(row.kind),
+        display_text: row.display_text,
+        summary: row.summary,
+        preview_content: row.preview_content,
+        rewind_target_id: row.rewind_target_id,
+        rewind_prefill: row.rewind_prefill,
         is_active_path,
-        is_current_leaf,
+        is_current,
     }
 }
 
-fn session_tree_entry_kind(kind: SessionTreeSnapshotEntryKind) -> SessionTreeEntryKind {
+fn session_tree_row_kind(kind: SessionTreeSnapshotRowKind) -> SessionTreeRowKind {
     match kind {
-        SessionTreeSnapshotEntryKind::Header => SessionTreeEntryKind::Header,
-        SessionTreeSnapshotEntryKind::User => SessionTreeEntryKind::User,
-        SessionTreeSnapshotEntryKind::Assistant => SessionTreeEntryKind::Assistant,
-        SessionTreeSnapshotEntryKind::Tool => SessionTreeEntryKind::Tool,
-        SessionTreeSnapshotEntryKind::Reasoning => SessionTreeEntryKind::Reasoning,
-        SessionTreeSnapshotEntryKind::Config => SessionTreeEntryKind::Config,
-        SessionTreeSnapshotEntryKind::Leaf => SessionTreeEntryKind::Leaf,
-        SessionTreeSnapshotEntryKind::Other => SessionTreeEntryKind::Other,
+        SessionTreeSnapshotRowKind::User => SessionTreeRowKind::User,
+        SessionTreeSnapshotRowKind::Assistant => SessionTreeRowKind::Assistant,
+        SessionTreeSnapshotRowKind::Tool => SessionTreeRowKind::Tool,
+        SessionTreeSnapshotRowKind::Reasoning => SessionTreeRowKind::Reasoning,
     }
 }
 
@@ -652,7 +651,7 @@ mod tests {
             ConversationTurnRequest, ManagedSearchTool, RuntimeCommand, RuntimeEvent,
             RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity,
             RuntimeToolActivityContent, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
-            RuntimeToolKind, SessionTreeEntryKind, TranscriptReplayItem, TranscriptReplayRole,
+            RuntimeToolKind, SessionTreeRowKind, TranscriptReplayItem, TranscriptReplayRole,
         },
     };
     use session_store::{
@@ -1549,22 +1548,22 @@ mod tests {
             panic!("expected session tree loaded event");
         };
         let second_user = payload
-            .entries
+            .rows
             .iter()
-            .find(|entry| entry.content == "second")
-            .expect("second user entry should be present");
-        assert_eq!(second_user.kind, SessionTreeEntryKind::User);
+            .find(|row| row.preview_content == "second")
+            .expect("second user row should be present");
+        assert_eq!(second_user.kind, SessionTreeRowKind::User);
         assert_eq!(second_user.rewind_prefill.as_deref(), Some("second"));
         let assistant = payload
-            .entries
+            .rows
             .iter()
-            .find(|entry| entry.content == "answer")
-            .expect("assistant entry should be present");
+            .find(|row| row.preview_content == "answer")
+            .expect("assistant row should be present");
         assert_eq!(
             second_user.rewind_target_id.as_deref(),
-            Some(assistant.entry_id.as_str())
+            Some(assistant.row_id.as_str())
         );
-        assert!(payload.entries.iter().any(|entry| entry.is_current_leaf));
+        assert!(payload.rows.iter().any(|row| row.is_current));
         cleanup(&work_dir);
     }
 
@@ -1645,8 +1644,30 @@ mod tests {
         RuntimeCoordinator::drain_runtime_events(&mut coordinator);
 
         coordinator
+            .handle_runtime_command(RuntimeCommand::LoadEntryTree)
+            .expect("load entry tree should succeed");
+        let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+        let payload = events
+            .into_iter()
+            .find_map(|event| match event {
+                RuntimeEvent::SessionTreeLoaded { payload } => Some(payload),
+                _ => None,
+            })
+            .expect("session tree payload should be loaded");
+        let assistant_row = payload
+            .rows
+            .iter()
+            .find(|row| row.preview_content == "answer")
+            .expect("assistant row should be present");
+        assert_eq!(
+            assistant_row.rewind_target_id.as_deref(),
+            Some(assistant_replay_entry_id.as_str()),
+            "visible assistant row should rewind through hidden transcript replay"
+        );
+
+        coordinator
             .handle_runtime_command(RuntimeCommand::SelectEntryRewind {
-                entry_id: assistant_replay_entry_id,
+                entry_id: assistant_row.row_id.clone(),
             })
             .expect("select entry rewind should succeed");
 
@@ -1670,6 +1691,96 @@ mod tests {
                 .map(TranscriptReplayItem::content_text)
                 .collect::<Vec<_>>(),
             vec!["first", "answer"]
+        );
+        cleanup(&work_dir);
+    }
+
+    #[test]
+    fn select_entry_rewind_ignores_reasoning_without_restore_target() {
+        let work_dir = temp_test_dir("select-entry-rewind-reasoning-work");
+        let store = Arc::new(InMemorySessionStore::new());
+        let store_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("session store runtime should start");
+        let header = SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        };
+        let session_id = store_runtime
+            .block_on(async {
+                let session_id = store.create_session(header.clone()).await?;
+                store
+                    .append(&session_id, ConversationItem::text(Role::User, "first"))
+                    .await?;
+                store
+                    .append(
+                        &session_id,
+                        ConversationItem::Reasoning {
+                            content: "thinking".to_string(),
+                            summary: None,
+                            encrypted: None,
+                        },
+                    )
+                    .await?;
+                Ok::<SessionId, session_store::SessionStoreError>(session_id)
+            })
+            .expect("session fixture should persist");
+        let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+            session_store: Some(store),
+            session_header_template: Some(header),
+            ..AppRuntimeOptions::default()
+        });
+        coordinator
+            .handle_runtime_command(RuntimeCommand::ResumeSession {
+                session_id: session_id.to_string(),
+            })
+            .expect("resume session should succeed");
+        RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+
+        coordinator
+            .handle_runtime_command(RuntimeCommand::LoadEntryTree)
+            .expect("load entry tree should succeed");
+        let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+        let payload = events
+            .into_iter()
+            .find_map(|event| match event {
+                RuntimeEvent::SessionTreeLoaded { payload } => Some(payload),
+                _ => None,
+            })
+            .expect("session tree payload should be loaded");
+        let reasoning_row = payload
+            .rows
+            .iter()
+            .find(|row| row.kind == SessionTreeRowKind::Reasoning)
+            .expect("reasoning row should be present");
+        assert_eq!(reasoning_row.rewind_target_id, None);
+
+        coordinator
+            .handle_runtime_command(RuntimeCommand::SelectEntryRewind {
+                entry_id: reasoning_row.row_id.clone(),
+            })
+            .expect("non-rewindable reasoning should be accepted as a no-op");
+
+        assert_eq!(
+            coordinator.provider_conversation.history(),
+            &[
+                ConversationItem::text(Role::User, "first"),
+                ConversationItem::Reasoning {
+                    content: "thinking".to_string(),
+                    summary: None,
+                    encrypted: None,
+                },
+            ]
+        );
+        assert_eq!(
+            RuntimeCoordinator::drain_runtime_events(&mut coordinator),
+            Vec::<RuntimeEvent>::new(),
+            "non-rewindable reasoning should not emit a resumed payload"
         );
         cleanup(&work_dir);
     }

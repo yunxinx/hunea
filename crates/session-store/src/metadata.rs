@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::{
     collections::BTreeMap,
     fs,
@@ -165,7 +163,9 @@ fn initialize_database_with_retry(index_path: &Path) -> Result<(), SessionStoreE
         }
     }
 
-    unreachable!("retry loop should return before exhausting attempts")
+    Err(IndexInconsistent {
+        message: "sqlite initialization retry loop exhausted without a result".to_string(),
+    })
 }
 
 fn with_connection<T>(
@@ -343,21 +343,24 @@ fn get_session_meta_row(
         .query_row(
             "
             SELECT
-                session_id,
-                project_dir,
-                title,
-                preview,
-                first_user_preview,
-                last_assistant_preview,
-                total_tokens,
-                model,
-                created_at,
-                updated_at,
-                git_head,
-                work_dir,
-                jsonl_path
+                sessions.session_id,
+                sessions.project_dir,
+                sessions.title,
+                sessions.preview,
+                sessions.first_user_preview,
+                sessions.last_assistant_preview,
+                sessions.total_tokens,
+                sessions.model,
+                sessions.created_at,
+                sessions.updated_at,
+                sessions.git_head,
+                sessions.work_dir,
+                sessions.jsonl_path,
+                session_repair_state.file_size
             FROM sessions
-            WHERE session_id = ?1
+            LEFT JOIN session_repair_state
+                ON session_repair_state.session_id = sessions.session_id
+            WHERE sessions.session_id = ?1
             ",
             params![session_id],
             row_to_session_meta,
@@ -378,22 +381,25 @@ fn list_session_rows(
         .prepare(
             "
             SELECT
-                session_id,
-                project_dir,
-                title,
-                preview,
-                first_user_preview,
-                last_assistant_preview,
-                total_tokens,
-                model,
-                created_at,
-                updated_at,
-                git_head,
-                work_dir,
-                jsonl_path
+                sessions.session_id,
+                sessions.project_dir,
+                sessions.title,
+                sessions.preview,
+                sessions.first_user_preview,
+                sessions.last_assistant_preview,
+                sessions.total_tokens,
+                sessions.model,
+                sessions.created_at,
+                sessions.updated_at,
+                sessions.git_head,
+                sessions.work_dir,
+                sessions.jsonl_path,
+                session_repair_state.file_size
             FROM sessions
-            WHERE project_dir = ?1
-            ORDER BY updated_at DESC, created_at DESC, session_id DESC
+            LEFT JOIN session_repair_state
+                ON session_repair_state.session_id = sessions.session_id
+            WHERE sessions.project_dir = ?1
+            ORDER BY updated_at DESC, created_at DESC, sessions.session_id DESC
             ",
         )
         .map_err(sqlite_error)?;
@@ -652,6 +658,7 @@ fn extract_session_meta(
         git_head: header.git_head.clone(),
         work_dir: header.work_dir.clone(),
         jsonl_path: discovered_file.path.clone(),
+        size_bytes: Some(discovered_file.fingerprint.file_size),
     };
 
     Ok(ExtractedSessionMeta {
@@ -765,6 +772,18 @@ fn row_to_session_meta(row: &rusqlite::Row<'_>) -> Result<SessionMeta, rusqlite:
         git_head: row.get(10)?,
         work_dir: PathBuf::from(row.get::<_, String>(11)?),
         jsonl_path: PathBuf::from(row.get::<_, String>(12)?),
+        size_bytes: row
+            .get::<_, Option<i64>>(13)?
+            .map(|size| {
+                u64::try_from(size).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        13,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -1508,6 +1527,7 @@ mod tests {
             git_head: Some("abc123".to_string()),
             work_dir: PathBuf::from("/repo"),
             jsonl_path: PathBuf::from("/tmp/session.jsonl"),
+            size_bytes: None,
         }
     }
 

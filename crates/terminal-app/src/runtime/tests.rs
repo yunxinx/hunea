@@ -30,6 +30,10 @@ use session_store::{
 };
 use terminal_ui::RuntimeCoordinator;
 
+fn runtime_coordinator(options: AppRuntimeOptions) -> AppRuntimeCoordinator {
+    AppRuntimeCoordinator::new(options).expect("runtime coordinator should initialize")
+}
+
 struct LoadCountingSessionStore {
     inner: Arc<InMemorySessionStore>,
     load_session_calls: AtomicUsize,
@@ -55,6 +59,14 @@ impl SessionStore for LoadCountingSessionStore {
         item: ConversationItem,
     ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>> {
         self.inner.append(session_id, item)
+    }
+
+    fn append_many<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        items: Vec<ConversationItem>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, SessionStoreError>> + Send + 'a>> {
+        self.inner.append_many(session_id, items)
     }
 
     fn append_config_change<'a>(
@@ -161,6 +173,12 @@ impl SessionStore for LoadCountingSessionStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.flush(session_id)
     }
+
+    fn flush_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.flush_all()
+    }
 }
 
 struct CommittedLoadFailsAfterSetLeafStore {
@@ -191,6 +209,14 @@ impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
         item: ConversationItem,
     ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>> {
         self.inner.append(session_id, item)
+    }
+
+    fn append_many<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        items: Vec<ConversationItem>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, SessionStoreError>> + Send + 'a>> {
+        self.inner.append_many(session_id, items)
     }
 
     fn append_config_change<'a>(
@@ -307,6 +333,12 @@ impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.flush(session_id)
     }
+
+    fn flush_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.flush_all()
+    }
 }
 
 #[test]
@@ -362,7 +394,7 @@ fn token_estimate_creates_render_barrier_before_permission_request() {
 fn app_layer_persists_managed_search_tool_authorization() {
     let root = temp_test_dir("managed-search-authorization");
     let config_path = root.join("config.toml");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         managed_search_authorization_config_path: Some(config_path.clone()),
         ..AppRuntimeOptions::default()
     });
@@ -431,7 +463,7 @@ fn list_sessions_emits_session_picker_rows_for_current_project() {
             Ok::<(), session_store::SessionStoreError>(())
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -498,7 +530,7 @@ fn list_sessions_builds_rows_from_metadata_without_loading_full_sessions() {
         inner: inner_store,
         load_session_calls: AtomicUsize::new(0),
     });
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store.clone()),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -550,7 +582,7 @@ fn list_sessions_excludes_active_session() {
             ))
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(SessionHeader {
             session_id: active_session_id.clone(),
@@ -638,7 +670,7 @@ fn resume_session_emits_transcript_and_restored_model() {
             Ok::<SessionId, session_store::SessionStoreError>(session_id)
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -740,7 +772,7 @@ fn resume_session_payload_does_not_label_reasoning_as_system() {
             Ok::<SessionId, session_store::SessionStoreError>(session_id)
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -804,7 +836,7 @@ fn resume_session_payload_does_not_reconstruct_transcript_from_provider_history(
             Ok::<SessionId, session_store::SessionStoreError>(session_id)
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -906,7 +938,7 @@ fn resume_session_payload_prefers_persisted_transcript_replay() {
             Ok::<SessionId, session_store::SessionStoreError>(session_id)
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -1003,7 +1035,7 @@ fn load_session_preview_emits_transcript_without_resuming_runtime_session() {
             Ok::<SessionId, session_store::SessionStoreError>(preview_session_id)
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -1069,7 +1101,7 @@ fn load_entry_tree_emits_rewind_targets_for_active_session() {
             Ok::<SessionId, session_store::SessionStoreError>(session_id)
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -1126,7 +1158,7 @@ fn load_entry_tree_emits_empty_tree_for_new_unpersisted_session() {
         git_head: None,
         cli_version: None,
     };
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -1207,7 +1239,7 @@ fn load_branch_tree_emits_branch_roots_for_active_session() {
             ))
         })
         .expect("branch tree fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -1297,7 +1329,7 @@ fn load_branch_preview_emits_delta_for_requested_branch_without_switching() {
             ))
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -1436,7 +1468,7 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
             Ok::<SessionId, session_store::SessionStoreError>(session_id)
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -1598,7 +1630,7 @@ fn switch_branch_is_blocked_while_provider_turn_is_running() {
             ))
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -1680,7 +1712,7 @@ fn switch_branch_failure_keeps_committed_leaf_unchanged() {
             Ok::<SessionId, session_store::SessionStoreError>(session_id)
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -1791,7 +1823,7 @@ fn switch_branch_uses_prepared_leaf_restore_instead_of_committed_reload() {
         })
         .expect("session fixture should persist");
     let failing_store = Arc::new(CommittedLoadFailsAfterSetLeafStore::new(inner_store));
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(failing_store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -1908,7 +1940,7 @@ fn select_entry_rewind_rebuilds_provider_history_to_selected_entry() {
             ))
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -2007,7 +2039,7 @@ fn select_entry_rewind_ignores_reasoning_without_restore_target() {
             Ok::<SessionId, session_store::SessionStoreError>(session_id)
         })
         .expect("session fixture should persist");
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),
         ..AppRuntimeOptions::default()
@@ -2064,7 +2096,7 @@ fn select_entry_rewind_ignores_reasoning_without_restore_target() {
 
 #[test]
 fn conversation_failure_before_provider_request_rolls_back_pending_user() {
-    let mut coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
             0,
             Vec::new(),

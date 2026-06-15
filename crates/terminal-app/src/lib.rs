@@ -77,13 +77,19 @@ pub fn run_with_writer<W: Write>(
     };
     attach_default_session_persistence(&mut runtime_options, &loaded_models)
         .wrap_err("failed to initialize session persistence")?;
-    let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options);
+    let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options)
+        .map_err(color_eyre::eyre::Report::msg)
+        .wrap_err("failed to initialize app runtime coordinator")?;
     let model = terminal_ui::run_with_runtime_coordinator(
         StartupBannerOptions::default(),
         model_options_from_config_and_models(tui_config, &loaded_models, &loaded_phrases),
         &mut runtime_coordinator,
     )
     .wrap_err("failed to run tui application")?;
+    runtime_coordinator
+        .shutdown()
+        .map_err(color_eyre::eyre::Report::msg)
+        .wrap_err("failed to flush session persistence")?;
     write_terminal_replay_on_exit(writer, &model, preserve_ansi, tui_config)
 }
 
@@ -98,13 +104,19 @@ pub fn run_with_config_writer<W: Write>(
     let mut runtime_options = runtime_options_from_app_config_and_models(config, &loaded_models);
     attach_default_session_persistence(&mut runtime_options, &loaded_models)
         .wrap_err("failed to initialize session persistence")?;
-    let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options);
+    let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options)
+        .map_err(color_eyre::eyre::Report::msg)
+        .wrap_err("failed to initialize app runtime coordinator")?;
     let model = terminal_ui::run_with_runtime_coordinator(
         StartupBannerOptions::default(),
         model_options_from_app_config_and_models(config, &loaded_models, &loaded_phrases),
         &mut runtime_coordinator,
     )
     .wrap_err("failed to run tui application")?;
+    runtime_coordinator
+        .shutdown()
+        .map_err(color_eyre::eyre::Report::msg)
+        .wrap_err("failed to flush session persistence")?;
     write_terminal_replay_on_exit(writer, &model, preserve_ansi, &config.tui)
 }
 

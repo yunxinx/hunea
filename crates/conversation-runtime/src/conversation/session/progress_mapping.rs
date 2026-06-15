@@ -19,47 +19,71 @@ pub(super) fn progress_sender_to_permission_sender(
 
 pub(super) fn conversation_worker_event_from_progress(
     progress: ConversationProgress,
-) -> ConversationWorkerEvent {
+) -> Option<ConversationWorkerEvent> {
     match progress {
-        ConversationProgress::SystemMessage { message } => {
-            ConversationWorkerEvent::progress(ConversationEvent::SystemMessage { message })
-        }
+        ConversationProgress::SystemMessage { message } => Some(ConversationWorkerEvent::progress(
+            ConversationEvent::SystemMessage { message },
+        )),
         ConversationProgress::OutputTokens { total_tokens } => {
-            ConversationWorkerEvent::progress(ConversationEvent::OutputTokenEstimate {
-                total_tokens,
-            })
+            Some(ConversationWorkerEvent::progress(
+                ConversationEvent::OutputTokenEstimate { total_tokens },
+            ))
         }
         ConversationProgress::InputTokens { total_tokens } => {
-            ConversationWorkerEvent::progress(ConversationEvent::InputTokenEstimate {
-                total_tokens,
-            })
+            Some(ConversationWorkerEvent::progress(
+                ConversationEvent::InputTokenEstimate { total_tokens },
+            ))
         }
-        ConversationProgress::Thinking { is_thinking } => {
-            ConversationWorkerEvent::progress(ConversationEvent::Thinking { is_thinking })
-        }
-        ConversationProgress::AssistantDelta { content } => {
-            ConversationWorkerEvent::progress(ConversationEvent::AssistantDelta { content })
-        }
-        ConversationProgress::ReasoningDelta { content } => {
-            ConversationWorkerEvent::progress(ConversationEvent::ReasoningDelta { content })
-        }
-        ConversationProgress::ToolActivityStarted { activity } => {
-            ConversationWorkerEvent::progress(ConversationEvent::ToolActivityStarted { activity })
-        }
-        ConversationProgress::ToolActivityUpdated { update } => {
-            ConversationWorkerEvent::progress(ConversationEvent::ToolActivityUpdated { update })
-        }
-        ConversationProgress::TerminalUpdated { snapshot } => {
-            ConversationWorkerEvent::progress(ConversationEvent::TerminalUpdated { snapshot })
-        }
+        ConversationProgress::Thinking { is_thinking } => Some(ConversationWorkerEvent::progress(
+            ConversationEvent::Thinking { is_thinking },
+        )),
+        ConversationProgress::AssistantDelta { content } => Some(
+            ConversationWorkerEvent::progress(ConversationEvent::AssistantDelta { content }),
+        ),
+        ConversationProgress::ReasoningDelta { content } => Some(
+            ConversationWorkerEvent::progress(ConversationEvent::ReasoningDelta { content }),
+        ),
+        ConversationProgress::ToolActivityStarted { activity } => Some(
+            ConversationWorkerEvent::progress(ConversationEvent::ToolActivityStarted { activity }),
+        ),
+        ConversationProgress::ToolActivityUpdated { update } => Some(
+            ConversationWorkerEvent::progress(ConversationEvent::ToolActivityUpdated { update }),
+        ),
+        ConversationProgress::TerminalUpdated { snapshot } => Some(
+            ConversationWorkerEvent::progress(ConversationEvent::TerminalUpdated { snapshot }),
+        ),
         ConversationProgress::ManagedSearchToolAuthorization { tool } => {
-            ConversationWorkerEvent::progress(ConversationEvent::ManagedSearchToolAuthorization {
-                tool,
-            })
+            Some(ConversationWorkerEvent::progress(
+                ConversationEvent::ManagedSearchToolAuthorization { tool },
+            ))
         }
         ConversationProgress::ProviderTurnStarted
-        | ConversationProgress::ProviderContextItem { .. } => {
-            unreachable!("session progress is handled by the persistence actor")
-        }
+        | ConversationProgress::ProviderContextItem { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use provider_protocol::{ConversationItem, Role};
+
+    use super::conversation_worker_event_from_progress;
+    use crate::conversation::ConversationProgress;
+
+    #[test]
+    fn session_only_progress_does_not_panic_when_seen_by_ui_mapper() {
+        let turn_started = std::panic::catch_unwind(|| {
+            let _ =
+                conversation_worker_event_from_progress(ConversationProgress::ProviderTurnStarted);
+        });
+        assert!(turn_started.is_ok());
+
+        let context_item = std::panic::catch_unwind(|| {
+            let _ = conversation_worker_event_from_progress(
+                ConversationProgress::ProviderContextItem {
+                    item: ConversationItem::text(Role::Assistant, "persisted"),
+                },
+            );
+        });
+        assert!(context_item.is_ok());
     }
 }

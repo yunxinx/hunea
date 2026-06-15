@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::{
     mem,
     path::PathBuf,
@@ -22,7 +20,7 @@ pub(crate) struct SessionRecorder {
 }
 
 enum RecordCommand {
-    Buffer(Box<SessionEntry>),
+    Buffer(Vec<SessionEntry>),
     Persist {
         ack: oneshot::Sender<Result<(), SessionStoreError>>,
     },
@@ -58,13 +56,21 @@ struct RunningRecorder {
 }
 
 impl SessionRecorder {
-    pub(crate) fn new(jsonl_path: PathBuf) -> Self {
+    pub(crate) fn new(jsonl_path: PathBuf) -> Result<Self, SessionStoreError> {
         Self::new_with_capacity(jsonl_path, RECORD_COMMAND_CAPACITY)
     }
 
     pub(crate) fn buffer(&self, entry: SessionEntry) -> Result<(), SessionStoreError> {
+        self.buffer_many(vec![entry])
+    }
+
+    pub(crate) fn buffer_many(&self, entries: Vec<SessionEntry>) -> Result<(), SessionStoreError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
         self.sender()?
-            .try_send(RecordCommand::Buffer(Box::new(entry)))
+            .try_send(RecordCommand::Buffer(entries))
             .map_err(|_| SessionStoreError::ChannelClosed)
     }
 
@@ -108,30 +114,30 @@ impl SessionRecorder {
         ack_rx.await.map_err(|_| SessionStoreError::ChannelClosed)?
     }
 
-    fn new_with_capacity(jsonl_path: PathBuf, capacity: usize) -> Self {
+    fn new_with_capacity(jsonl_path: PathBuf, capacity: usize) -> Result<Self, SessionStoreError> {
         let (tx, rx) = mpsc::channel(capacity);
         let worker_path = jsonl_path.clone();
-        let worker_thread = spawn_worker_thread(move || run_worker(rx, worker_path));
+        let worker_thread = spawn_worker_thread(move || run_worker(rx, worker_path))?;
 
-        Self {
+        Ok(Self {
             jsonl_path,
             runtime: Mutex::new(RecorderRuntime {
                 state: RecorderState::Running { tx, worker_thread },
             }),
-        }
+        })
     }
 
     #[cfg(test)]
-    fn new_paused(jsonl_path: PathBuf) -> (Self, oneshot::Sender<()>) {
+    fn new_paused(jsonl_path: PathBuf) -> Result<(Self, oneshot::Sender<()>), SessionStoreError> {
         let (tx, rx) = mpsc::channel(RECORD_COMMAND_CAPACITY);
         let worker_path = jsonl_path.clone();
         let (start_tx, start_rx) = oneshot::channel();
         let worker_thread = spawn_worker_thread(move || {
             let _ = start_rx.blocking_recv();
             run_worker(rx, worker_path);
-        });
+        })?;
 
-        (
+        Ok((
             Self {
                 jsonl_path,
                 runtime: Mutex::new(RecorderRuntime {
@@ -139,7 +145,7 @@ impl SessionRecorder {
                 }),
             },
             start_tx,
-        )
+        ))
     }
 
     fn sender(&self) -> Result<mpsc::Sender<RecordCommand>, SessionStoreError> {
@@ -221,8 +227,8 @@ impl RecorderWorker {
 
     fn handle(&mut self, command: RecordCommand) -> bool {
         match command {
-            RecordCommand::Buffer(entry) => {
-                self.pending_entries.push(*entry);
+            RecordCommand::Buffer(entries) => {
+                self.pending_entries.extend(entries);
                 false
             }
             RecordCommand::Persist { ack } | RecordCommand::Flush { ack } => {
@@ -272,11 +278,13 @@ fn run_worker(mut rx: mpsc::Receiver<RecordCommand>, jsonl_path: PathBuf) {
     }
 }
 
-fn spawn_worker_thread(run: impl FnOnce() + Send + 'static) -> JoinHandle<()> {
+fn spawn_worker_thread(
+    run: impl FnOnce() + Send + 'static,
+) -> Result<JoinHandle<()>, SessionStoreError> {
     thread::Builder::new()
         .name("session-recorder".to_string())
         .spawn(run)
-        .expect("session recorder worker thread should spawn")
+        .map_err(|source| SessionStoreError::IoError { source })
 }
 
 async fn join_worker(worker_thread: JoinHandle<()>) -> Result<(), SessionStoreError> {
@@ -307,7 +315,7 @@ mod tests {
     async fn recorder_delays_file_creation_until_persist() {
         let temp_dir = test_temp_dir("delayed-create");
         let jsonl_path = temp_dir.join("session.jsonl");
-        let recorder = SessionRecorder::new(jsonl_path.clone());
+        let recorder = SessionRecorder::new(jsonl_path.clone()).expect("recorder should start");
 
         recorder
             .buffer(header_entry())
@@ -331,7 +339,7 @@ mod tests {
     async fn recorder_flush_persists_all_buffered_entries_in_order() {
         let temp_dir = test_temp_dir("flush-all");
         let jsonl_path = temp_dir.join("session.jsonl");
-        let recorder = SessionRecorder::new(jsonl_path.clone());
+        let recorder = SessionRecorder::new(jsonl_path.clone()).expect("recorder should start");
         let entries = vec![
             header_entry(),
             item_entry("user-1", "header", Role::User, "hello"),
@@ -359,7 +367,7 @@ mod tests {
     async fn recorder_persist_writes_buffered_batch() {
         let temp_dir = test_temp_dir("persist-batch");
         let jsonl_path = temp_dir.join("session.jsonl");
-        let recorder = SessionRecorder::new(jsonl_path.clone());
+        let recorder = SessionRecorder::new(jsonl_path.clone()).expect("recorder should start");
         let entries = vec![
             header_entry(),
             item_entry("assistant-1", "header", Role::Assistant, "first"),
@@ -387,7 +395,8 @@ mod tests {
     async fn recorder_reports_backpressure_when_channel_capacity_is_exhausted() {
         let temp_dir = test_temp_dir("backpressure");
         let jsonl_path = temp_dir.join("session.jsonl");
-        let (recorder, start_tx) = SessionRecorder::new_paused(jsonl_path);
+        let (recorder, start_tx) =
+            SessionRecorder::new_paused(jsonl_path).expect("paused recorder should start");
 
         for index in 0..256 {
             recorder
@@ -424,7 +433,7 @@ mod tests {
         let blocking_path = temp_dir.join("blocking-parent");
         fs::write(&blocking_path, "not a directory").expect("fixture file should exist");
         let jsonl_path = blocking_path.join("session.jsonl");
-        let recorder = SessionRecorder::new(jsonl_path.clone());
+        let recorder = SessionRecorder::new(jsonl_path.clone()).expect("recorder should start");
         let header = header_entry();
 
         recorder
@@ -456,7 +465,7 @@ mod tests {
     async fn recorder_shutdown_drains_pending_entries() {
         let temp_dir = test_temp_dir("shutdown-drain");
         let jsonl_path = temp_dir.join("session.jsonl");
-        let recorder = SessionRecorder::new(jsonl_path.clone());
+        let recorder = SessionRecorder::new(jsonl_path.clone()).expect("recorder should start");
         let entries = vec![
             header_entry(),
             item_entry(
@@ -494,7 +503,7 @@ mod tests {
         ];
 
         timeout(Duration::from_secs(2), async {
-            let recorder = SessionRecorder::new(jsonl_path.clone());
+            let recorder = SessionRecorder::new(jsonl_path.clone()).expect("recorder should start");
             for entry in &entries {
                 recorder
                     .buffer(entry.clone())

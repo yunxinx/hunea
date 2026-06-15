@@ -22,6 +22,8 @@ pub enum ProviderConversationError {
         #[source]
         source: SessionStoreError,
     },
+    #[error("Session persistence was initialized without an active session id")]
+    MissingSessionId,
     #[error("Failed to start blocking session runtime: {message}")]
     SessionRuntime { message: String },
 }
@@ -319,21 +321,19 @@ impl ProviderConversation {
         let user_message = turn.message().clone();
         self.pending_user_message = Some(user_message.clone());
         let system_prompt = self.system_prompt.clone();
-        let persistence = self
-            .ensure_persistence(turn.model_id())?
-            .map(|persistence| PreparedConversationPersistence {
+        let persistence = match self.ensure_persistence(turn.model_id())? {
+            Some(persistence) => Some(PreparedConversationPersistence {
                 store: persistence.store.clone(),
-                session_id: persistence
-                    .session_id
-                    .clone()
-                    .expect("session should exist after ensure_persistence"),
+                session_id: persistence.active_session_id()?.clone(),
                 config_snapshot: ConfigSnapshot {
                     provider_id: turn.provider_id().to_string(),
                     model: turn.model_id().to_string(),
                     system_prompt,
                 },
                 current_user_message: user_message.clone(),
-            });
+            }),
+            None => None,
+        };
 
         Ok(PreparedConversationRequest::from_turn(
             turn,
@@ -381,20 +381,29 @@ impl ProviderConversation {
         }
 
         if let Some(persistence) = self.ensure_persistence_with_template_model()? {
-            let mut persisted_items = Vec::with_capacity(items.len());
-            for item in items {
-                let session_id = persistence
-                    .session_id
-                    .as_ref()
-                    .expect("session should exist after ensure_persistence");
-                let entry_id = persistence
-                    .bridge
-                    .block_on(persistence.store.append(session_id, item.clone()))?;
-                persisted_items.push(PersistedConversationItem {
-                    entry_id: Some(entry_id),
-                    item,
+            let session_id = persistence.active_session_id()?.clone();
+            let entry_ids = persistence
+                .bridge
+                .block_on(persistence.store.append_many(&session_id, items.clone()))?;
+            if entry_ids.len() != items.len() {
+                return Err(ProviderConversationError::SessionStore {
+                    source: SessionStoreError::IndexInconsistent {
+                        message: format!(
+                            "session store returned {} entry ids for {} appended items",
+                            entry_ids.len(),
+                            items.len()
+                        ),
+                    },
                 });
             }
+            let persisted_items = items
+                .into_iter()
+                .zip(entry_ids)
+                .map(|(item, entry_id)| PersistedConversationItem {
+                    entry_id: Some(entry_id),
+                    item,
+                })
+                .collect::<Vec<_>>();
             self.commit_turn_items(persisted_items);
             return Ok(());
         }
@@ -508,6 +517,14 @@ impl SessionStoreBridge {
         self.runtime
             .block_on(future)
             .map_err(|source| ProviderConversationError::SessionStore { source })
+    }
+}
+
+impl ProviderConversationPersistence {
+    fn active_session_id(&self) -> Result<&SessionId, ProviderConversationError> {
+        self.session_id
+            .as_ref()
+            .ok_or(ProviderConversationError::MissingSessionId)
     }
 }
 
@@ -978,6 +995,19 @@ mod tests {
             })
         }
 
+        fn append_many<'a>(
+            &'a self,
+            _session_id: &'a SessionId,
+            _items: Vec<ConversationItem>,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, SessionStoreError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                Err(SessionStoreError::IoError {
+                    source: std::io::Error::other("append failed"),
+                })
+            })
+        }
+
         fn append_config_change<'a>(
             &'a self,
             _session_id: &'a SessionId,
@@ -1113,6 +1143,7 @@ mod tests {
                     git_head: None,
                     work_dir: PathBuf::new(),
                     jsonl_path: PathBuf::new(),
+                    size_bytes: None,
                 })
             })
         }
@@ -1120,6 +1151,12 @@ mod tests {
         fn flush<'a>(
             &'a self,
             _session_id: &'a SessionId,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn flush_all<'a>(
+            &'a self,
         ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
             Box::pin(async { Ok(()) })
         }

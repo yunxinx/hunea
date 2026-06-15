@@ -10,18 +10,17 @@ use tracing::warn;
 use crate::{SessionEntry, SessionStoreError};
 
 /// append-only JSONL writer。
-#[allow(dead_code)]
 pub(crate) struct JsonlWriter {
     path: PathBuf,
     file: Option<BufWriter<File>>,
 }
 
-#[allow(dead_code)]
 impl JsonlWriter {
     pub(crate) fn new(path: PathBuf) -> Self {
         Self { path, file: None }
     }
 
+    #[cfg(test)]
     pub(crate) fn write(&mut self, entry: &SessionEntry) -> Result<(), SessionStoreError> {
         self.write_batch(std::slice::from_ref(entry))
     }
@@ -51,6 +50,7 @@ impl JsonlWriter {
         file.get_ref().sync_all().map_err(io_error)
     }
 
+    #[cfg(test)]
     pub(crate) fn file_exists(&self) -> bool {
         self.path.exists()
     }
@@ -69,15 +69,17 @@ impl JsonlWriter {
             self.file = Some(BufWriter::new(file));
         }
 
-        Ok(self.file.as_mut().expect("writer should initialize file"))
+        self.file
+            .as_mut()
+            .ok_or_else(|| SessionStoreError::IndexInconsistent {
+                message: "session JSONL writer did not initialize its file".to_string(),
+            })
     }
 }
 
 /// JSONL loader。
-#[allow(dead_code)]
 pub(crate) struct JsonlLoader;
 
-#[allow(dead_code)]
 impl JsonlLoader {
     pub(crate) fn load(path: &Path) -> Result<Vec<SessionEntry>, SessionStoreError> {
         let mut loaded_entries = Vec::new();
@@ -173,7 +175,6 @@ fn scan_entries(
     Ok(seen_ids)
 }
 
-#[allow(dead_code)]
 fn validate_parent_links(
     entries: &[SessionEntry],
     seen_ids: &HashSet<String>,
@@ -191,7 +192,6 @@ fn validate_parent_links(
     Ok(())
 }
 
-#[allow(dead_code)]
 fn io_error(source: std::io::Error) -> SessionStoreError {
     SessionStoreError::IoError { source }
 }

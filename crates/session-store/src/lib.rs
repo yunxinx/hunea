@@ -140,6 +140,7 @@ pub struct SessionMeta {
     pub git_head: Option<String>,
     pub work_dir: PathBuf,
     pub jsonl_path: PathBuf,
+    pub size_bytes: Option<u64>,
 }
 
 /// 解析后的 provider-visible 条目，保留其在 session 树中的 entry id。

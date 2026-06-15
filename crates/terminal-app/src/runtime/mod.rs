@@ -109,21 +109,21 @@ impl std::fmt::Display for SessionRestoreError {
 }
 
 impl AppRuntimeCoordinator {
-    pub(crate) fn new(options: AppRuntimeOptions) -> Self {
+    pub(crate) fn new(options: AppRuntimeOptions) -> Result<Self, String> {
         let workspace_tools = conversation_workspace_tools(&options.managed_search_tools);
         let session_store_runtime =
-            SessionStoreRuntime::new().expect("session store runtime should initialize");
+            SessionStoreRuntime::new().map_err(|error| error.to_string())?;
         let provider_conversation = match (
             options.session_store.clone(),
             options.session_header_template.clone(),
         ) {
             (Some(store), Some(header_template)) => {
                 ProviderConversation::with_session_store(store, header_template, None)
-                    .expect("session store should initialize without a session id")
+                    .map_err(|error| error.to_string())?
             }
             _ => ProviderConversation::default(),
         };
-        Self {
+        Ok(Self {
             options,
             conversation_worker: ConversationWorker::default(),
             provider_conversation,
@@ -131,7 +131,7 @@ impl AppRuntimeCoordinator {
             workspace_tools,
             session_store_runtime,
             pending_runtime_events: Vec::new(),
-        }
+        })
     }
 
     fn handle_runtime_command(
@@ -548,6 +548,16 @@ impl AppRuntimeCoordinator {
         }
     }
 
+    pub(crate) fn shutdown(&mut self) -> Result<(), String> {
+        self.conversation_worker.reset_after_clear();
+        if let Some(store) = self.options.session_store.as_ref() {
+            self.session_store_runtime
+                .block_on(store.flush_all())
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     fn start_conversation_turn(
         &mut self,
         target: RuntimeTarget,
@@ -611,9 +621,6 @@ impl AppRuntimeCoordinator {
 }
 
 fn session_picker_row_from_meta(meta: SessionMeta) -> SessionPickerRow {
-    let size_bytes = std::fs::metadata(&meta.jsonl_path)
-        .ok()
-        .map(|metadata| metadata.len());
     let first_user_message = meta
         .first_user_preview
         .as_deref()
@@ -631,7 +638,7 @@ fn session_picker_row_from_meta(meta: SessionMeta) -> SessionPickerRow {
         last_assistant_message,
         updated_at_ms: meta.updated_at,
         work_dir: meta.work_dir.display().to_string(),
-        size_bytes,
+        size_bytes: meta.size_bytes,
         model: meta.model,
     }
 }

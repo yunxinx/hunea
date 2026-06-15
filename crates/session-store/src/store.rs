@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    fs as std_fs,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -37,6 +38,12 @@ pub trait SessionStore: Send + Sync {
         session_id: &'a SessionId,
         item: ConversationItem,
     ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>>;
+
+    fn append_many<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        items: Vec<ConversationItem>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, SessionStoreError>> + Send + 'a>>;
 
     fn append_config_change<'a>(
         &'a self,
@@ -106,6 +113,10 @@ pub trait SessionStore: Send + Sync {
         &'a self,
         session_id: &'a SessionId,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
+
+    fn flush_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
 }
 
 /// `LocalSessionStore` 使用 JSONL + SQLite 组合实现本地持久化。
@@ -157,6 +168,19 @@ impl LocalSessionStore {
         })
     }
 
+    /// 显式关闭所有已打开的 session recorder，并把 pending state 同步到索引。
+    pub async fn shutdown(self) -> Result<(), SessionStoreError> {
+        let recorders = self.recorders.into_inner();
+        for handle in recorders.into_values() {
+            let meta = match Arc::try_unwrap(handle) {
+                Ok(handle) => handle.shutdown().await?,
+                Err(handle) => flush_handle(&handle).await?,
+            };
+            self.index.upsert_session(&meta).await?;
+        }
+        Ok(())
+    }
+
     async fn handle_for_session(
         &self,
         session_id: &SessionId,
@@ -186,41 +210,83 @@ impl LocalSessionStore {
         session_id: &SessionId,
         kind: SessionEntryKind,
     ) -> Result<String, SessionStoreError> {
+        let mut entry_ids = self.append_entries(session_id, vec![kind]).await?;
+        entry_ids
+            .pop()
+            .ok_or_else(|| SessionStoreError::IndexInconsistent {
+                message: "session append did not produce an entry id".to_string(),
+            })
+    }
+
+    async fn append_entries(
+        &self,
+        session_id: &SessionId,
+        kinds: Vec<SessionEntryKind>,
+    ) -> Result<Vec<String>, SessionStoreError> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let session_id = session_id.clone();
         let handle = self.handle_for_session(&session_id).await?;
         let _guard = handle.operation_lock.lock().await;
 
-        let entry = {
+        let entries = {
             let state = handle.lock_state();
             if state.entries.is_empty() {
                 return Err(SessionStoreError::SessionNotFound { session_id });
             }
 
-            SessionEntry {
-                id: generate_entry_id(&state.entry_ids),
-                parent_id: append_parent_id(&state.entries),
-                timestamp: current_timestamp_ms()?,
-                kind,
+            let mut projected_entries = state.entries.clone();
+            let mut entry_ids = state.entry_ids.clone();
+            let mut entries = Vec::with_capacity(kinds.len());
+            for kind in kinds {
+                let id = generate_entry_id(&entry_ids);
+                entry_ids.insert(id.clone());
+                let entry = SessionEntry {
+                    id,
+                    parent_id: append_parent_id(&projected_entries),
+                    timestamp: current_timestamp_ms()?,
+                    kind,
+                };
+                projected_entries.push(entry.clone());
+                entries.push(entry);
             }
+            entries
         };
 
-        let entry_id = entry.id.clone();
-        handle.recorder.buffer(entry.clone())?;
+        let entry_ids = entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        handle.recorder.buffer_many(entries.clone())?;
         if let Err(error) = handle.recorder.persist().await {
             let mut state = handle.lock_state();
-            state.push_pending_state_entry(entry)?;
+            for entry in entries {
+                state.push_pending_state_entry(entry)?;
+            }
             return Err(error);
         }
 
         let meta = {
             let mut state = handle.lock_state();
-            state.push_entry(entry, &handle.jsonl_path)?;
+            for entry in entries {
+                state.push_entry(entry, &handle.jsonl_path)?;
+            }
             state.session_meta.clone()
         };
 
         self.index.upsert_session(&meta).await?;
-        Ok(entry_id)
+        Ok(entry_ids)
     }
+}
+
+async fn flush_handle(handle: &LocalSessionHandle) -> Result<SessionMeta, SessionStoreError> {
+    let _guard = handle.operation_lock.lock().await;
+    handle.recorder.flush().await?;
+    let mut state = handle.lock_state();
+    state.commit_pending_state_entries(&handle.jsonl_path)?;
+    Ok(state.session_meta.clone())
 }
 
 impl SessionStore for LocalSessionStore {
@@ -270,6 +336,20 @@ impl SessionStore for LocalSessionStore {
         Box::pin(async move {
             self.append_entry(session_id, SessionEntryKind::Item(item))
                 .await
+        })
+    }
+
+    fn append_many<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        items: Vec<ConversationItem>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.append_entries(
+                session_id,
+                items.into_iter().map(SessionEntryKind::Item).collect(),
+            )
+            .await
         })
     }
 
@@ -485,13 +565,32 @@ impl SessionStore for LocalSessionStore {
             self.index.upsert_session(&meta).await
         })
     }
+
+    fn flush_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            let handles = self
+                .recorders
+                .read()
+                .await
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            for handle in handles {
+                let meta = flush_handle(&handle).await?;
+                self.index.upsert_session(&meta).await?;
+            }
+            Ok(())
+        })
+    }
 }
 
 impl LocalSessionHandle {
     fn new(jsonl_path: PathBuf, entries: Vec<SessionEntry>) -> Result<Self, SessionStoreError> {
         let session_meta = derive_session_meta(&entries, jsonl_path.clone())?;
         Ok(Self {
-            recorder: Arc::new(SessionRecorder::new(jsonl_path.clone())),
+            recorder: Arc::new(SessionRecorder::new(jsonl_path.clone())?),
             jsonl_path,
             operation_lock: Mutex::new(()),
             state: StdMutex::new(LocalSessionState {
@@ -507,6 +606,19 @@ impl LocalSessionHandle {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    async fn shutdown(self) -> Result<SessionMeta, SessionStoreError> {
+        match Arc::try_unwrap(self.recorder) {
+            Ok(recorder) => recorder.shutdown().await?,
+            Err(recorder) => recorder.flush().await?,
+        }
+        let mut state = self
+            .state
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.commit_pending_state_entries(&self.jsonl_path)?;
+        Ok(state.session_meta.clone())
     }
 }
 
@@ -585,6 +697,23 @@ impl InMemorySessionStore {
         session_id: &SessionId,
         kind: SessionEntryKind,
     ) -> Result<String, SessionStoreError> {
+        let mut entry_ids = self.append_entries(session_id, vec![kind]).await?;
+        entry_ids
+            .pop()
+            .ok_or_else(|| SessionStoreError::IndexInconsistent {
+                message: "session append did not produce an entry id".to_string(),
+            })
+    }
+
+    async fn append_entries(
+        &self,
+        session_id: &SessionId,
+        kinds: Vec<SessionEntryKind>,
+    ) -> Result<Vec<String>, SessionStoreError> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let session_id = session_id.clone();
         let mut sessions = self.sessions.write().await;
         let session =
@@ -593,15 +722,21 @@ impl InMemorySessionStore {
                 .ok_or_else(|| SessionStoreError::SessionNotFound {
                     session_id: session_id.clone(),
                 })?;
-        let entry = SessionEntry {
-            id: generate_entry_id(&entry_ids(&session.entries)),
-            parent_id: append_parent_id(&session.entries),
-            timestamp: current_timestamp_ms()?,
-            kind,
-        };
-        let entry_id = entry.id.clone();
-        session.entries.push(entry);
-        Ok(entry_id)
+        let mut ids = entry_ids(&session.entries);
+        let mut new_entry_ids = Vec::with_capacity(kinds.len());
+        for kind in kinds {
+            let id = generate_entry_id(&ids);
+            ids.insert(id.clone());
+            let entry = SessionEntry {
+                id: id.clone(),
+                parent_id: append_parent_id(&session.entries),
+                timestamp: current_timestamp_ms()?,
+                kind,
+            };
+            session.entries.push(entry);
+            new_entry_ids.push(id);
+        }
+        Ok(new_entry_ids)
     }
 }
 
@@ -647,6 +782,20 @@ impl SessionStore for InMemorySessionStore {
         Box::pin(async move {
             self.append_entry(session_id, SessionEntryKind::Item(item))
                 .await
+        })
+    }
+
+    fn append_many<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        items: Vec<ConversationItem>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.append_entries(
+                session_id,
+                items.into_iter().map(SessionEntryKind::Item).collect(),
+            )
+            .await
         })
     }
 
@@ -883,6 +1032,12 @@ impl SessionStore for InMemorySessionStore {
             }
         })
     }
+
+    fn flush_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 fn session_jsonl_path(hunea_dir: &Path, work_dir: &Path, session_id: &SessionId) -> PathBuf {
@@ -1010,6 +1165,9 @@ fn derive_session_meta(
         updated_at,
         git_head: header.git_head.clone(),
         work_dir: header.work_dir.clone(),
+        size_bytes: std_fs::metadata(&jsonl_path)
+            .ok()
+            .map(|metadata| metadata.len()),
         jsonl_path,
     })
 }

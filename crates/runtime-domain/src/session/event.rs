@@ -1,7 +1,8 @@
 use super::{
     ConversationResponse, RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics,
     RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
-    SessionPickerRow, SessionPreviewPayload, SessionResumePayload, SessionTreePayload,
+    SessionBranchTreePayload, SessionPickerRow, SessionPreviewPayload, SessionResumePayload,
+    SessionTreePayload,
 };
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
@@ -79,6 +80,12 @@ pub enum RuntimeEvent {
     SessionTreeLoaded {
         payload: SessionTreePayload,
     },
+    SessionBranchTreeLoaded {
+        payload: SessionBranchTreePayload,
+    },
+    SessionTreePreviewLoaded {
+        payload: SessionTreePayload,
+    },
     MessageFinished {
         target: Option<RuntimeTarget>,
         response: ConversationResponse,
@@ -124,7 +131,9 @@ impl RuntimeEvent {
             Self::SessionListLoaded { .. }
             | Self::SessionPreviewLoaded { .. }
             | Self::SessionResumed { .. }
-            | Self::SessionTreeLoaded { .. } => None,
+            | Self::SessionTreeLoaded { .. }
+            | Self::SessionBranchTreeLoaded { .. }
+            | Self::SessionTreePreviewLoaded { .. } => None,
         }
     }
 }

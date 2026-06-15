@@ -293,7 +293,8 @@ impl Transcript {
             call.clone(),
             self.tool_activity_render_mode,
         ) {
-            if let Some((last_index, last_item)) = self.items.iter().enumerate().next_back()
+            if exploration.is_exploration_group()
+                && let Some((last_index, last_item)) = self.items.iter().enumerate().next_back()
                 && let TranscriptItem::ToolResult(tool_result) = last_item.as_ref()
             {
                 let mut tool_result = tool_result.clone();

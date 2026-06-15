@@ -26,6 +26,13 @@ pub enum RuntimeCommand {
         session_id: String,
     },
     LoadEntryTree,
+    LoadBranchTree,
+    LoadBranchPreview {
+        branch_row_id: String,
+    },
+    SwitchBranch {
+        leaf_id: String,
+    },
     SelectEntryRewind {
         entry_id: String,
     },
@@ -84,6 +91,9 @@ impl RuntimeCommand {
             | Self::LoadSessionPreview { .. }
             | Self::ResumeSession { .. }
             | Self::LoadEntryTree
+            | Self::LoadBranchTree
+            | Self::LoadBranchPreview { .. }
+            | Self::SwitchBranch { .. }
             | Self::SelectEntryRewind { .. }
             | Self::Reset => None,
         }

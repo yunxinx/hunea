@@ -43,6 +43,9 @@ mod style_mode;
 mod styled_text;
 mod terminal_grid;
 mod terminal_text;
+#[cfg(test)]
+mod test_helpers;
+mod time;
 mod tool_approval_panel;
 mod tool_result;
 mod transcript;

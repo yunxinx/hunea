@@ -1,15 +1,18 @@
 use std::time::Duration;
 
 use super::conversation::{apply_conversation_event, run_send_conversation_turn_effect};
-use super::effects::run_interrupt_current_turn_effect;
+use super::effects::{run_interrupt_current_turn_effect, run_switch_branch_effect};
 use super::input::{
     TerminalInputAction, TerminalInputCoalescing, coalesced_input_actions,
     coalesced_input_actions_with_options,
 };
 use super::*;
 use crate::{
-    AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem, runtime::RuntimeEventApply,
-    theme::default_palette, transcript::TranscriptItem,
+    AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem,
+    runtime::RuntimeEventApply,
+    test_helpers::{branch_choice, render_model_buffer, rendered_rows},
+    theme::default_palette,
+    transcript::TranscriptItem,
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -22,7 +25,7 @@ use runtime_domain::session::{
     ConversationEvent, ConversationResponse, ConversationTurnRequest, ProviderRequestMetrics,
     RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget, RuntimeToolActivity,
     RuntimeToolActivityContent, RuntimeToolActivityStatus, RuntimeToolActivityUpdate,
-    RuntimeToolKind,
+    RuntimeToolKind, SessionTreePayload, SessionTreeRow, SessionTreeRowKind,
 };
 
 #[derive(Default)]
@@ -32,6 +35,7 @@ struct TestRuntimeCoordinator {
     conversation_interrupted: bool,
     conversation_request: Option<ConversationTurnRequest>,
     last_command: Option<RuntimeCommand>,
+    next_runtime_error: Option<String>,
     reset_count: usize,
     conversation_retained_user_turns: Option<usize>,
 }
@@ -58,6 +62,9 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
         command: RuntimeCommand,
     ) -> Result<RuntimeCommandReceipt, String> {
         self.last_command = Some(command.clone());
+        if let Some(message) = self.next_runtime_error.take() {
+            return Err(message);
+        }
         match command {
             RuntimeCommand::Reset => {
                 self.runtime_events.clear();
@@ -97,6 +104,9 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             | RuntimeCommand::LoadSessionPreview { .. }
             | RuntimeCommand::ResumeSession { .. }
             | RuntimeCommand::LoadEntryTree
+            | RuntimeCommand::LoadBranchTree
+            | RuntimeCommand::LoadBranchPreview { .. }
+            | RuntimeCommand::SwitchBranch { .. }
             | RuntimeCommand::SelectEntryRewind { .. } => Ok(RuntimeCommandReceipt::Accepted),
         }
     }
@@ -1572,6 +1582,71 @@ fn interrupt_receipt_and_runtime_event_append_single_system_message() {
 }
 
 #[test]
+fn switch_branch_effect_preserves_composer_and_reopens_entry_tree_loading() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(72, 12);
+    model.composer_mut().reset_text_and_move_to_end("draft");
+    model.sync_composer_height();
+    open_branch_picker_for_switch_test(&mut model);
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+
+    run_switch_branch_effect(&mut model, &mut runtime_coordinator, "leaf-b");
+
+    assert_eq!(
+        runtime_coordinator.last_command,
+        Some(RuntimeCommand::SwitchBranch {
+            leaf_id: "leaf-b".to_string()
+        })
+    );
+    assert_eq!(
+        model.composer_text(),
+        "draft",
+        "switch branch must preserve the unsent composer draft"
+    );
+    assert!(model.entry_tree_active());
+    assert!(
+        !model.entry_tree_branch_picker_active(),
+        "accepted switch should close L2/L3/L4 while the refreshed L1 tree loads"
+    );
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 12));
+    assert!(
+        rows.iter().any(|row| row.contains("Loading session tree")),
+        "accepted switch should show the L1 loading state until runtime refresh arrives: {rows:?}"
+    );
+}
+
+#[test]
+fn switch_branch_effect_keeps_picker_open_and_shows_error_on_rejection() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(72, 12);
+    model.composer_mut().reset_text_and_move_to_end("draft");
+    model.sync_composer_height();
+    open_branch_picker_for_switch_test(&mut model);
+    let mut runtime_coordinator = TestRuntimeCoordinator {
+        next_runtime_error: Some("Cannot switch branch while a request is running".to_string()),
+        ..TestRuntimeCoordinator::default()
+    };
+
+    run_switch_branch_effect(&mut model, &mut runtime_coordinator, "leaf-b");
+
+    assert_eq!(
+        model.composer_text(),
+        "draft",
+        "failed switch must not modify the composer draft"
+    );
+    assert!(
+        model.entry_tree_branch_picker_active(),
+        "rejected switch should leave the branch picker available for correction"
+    );
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 12));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Cannot switch branch while a request is running")),
+        "rejected switch should render a visible picker error: {rows:?}"
+    );
+}
+
+#[test]
 fn ready_input_batch_coalesces_wheel_burst_before_key() {
     let events = (0..128)
         .map(|_| {
@@ -1692,6 +1767,41 @@ fn startup_probe_timeout_does_not_request_event_level_late_response_cleanup() {
         terminal_probe::TerminalBackgroundProbeResult::timed_out(),
         terminal_probe::TerminalBackgroundProbeResult::unavailable()
     );
+}
+
+fn open_branch_picker_for_switch_test(model: &mut Model) {
+    model.set_palette(default_palette(), true);
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(switch_branch_tree_payload());
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+    assert!(
+        model.entry_tree_branch_picker_active(),
+        "fixture should open the branch picker"
+    );
+}
+
+fn switch_branch_tree_payload() -> SessionTreePayload {
+    SessionTreePayload {
+        rows: vec![SessionTreeRow {
+            row_id: "user-a".to_string(),
+            parent_id: None,
+            display_depth: 0,
+            kind: SessionTreeRowKind::User,
+            display_text: "root question".to_string(),
+            summary: "root question".to_string(),
+            preview_content: "root question".to_string(),
+            preview_replay_items: Vec::new(),
+            rewind_target_id: Some("user-a".to_string()),
+            rewind_prefill: None,
+            is_active_path: true,
+            is_current: true,
+            branch_choices: vec![
+                branch_choice("assistant-b", "leaf-b", "inactive answer", false),
+                branch_choice("assistant-c", "leaf-c", "current answer", true),
+            ],
+        }],
+        current_row_id: Some("user-a".to_string()),
+    }
 }
 
 fn apply_effect_if_needed_for_test(

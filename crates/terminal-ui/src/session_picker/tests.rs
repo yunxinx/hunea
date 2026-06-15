@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+use ratatui::{buffer::Buffer, style::Color};
 use runtime_domain::session::{
     RuntimeEvent, SessionPickerRow, SessionPreviewPayload, TranscriptReplayItem,
     TranscriptReplayRole,
@@ -7,6 +7,7 @@ use runtime_domain::session::{
 
 use crate::runner::TerminalMouseModePreference;
 use crate::runtime::RuntimeEventApply;
+use crate::test_helpers::{render_model_buffer, rendered_rows};
 use crate::{AppEffect, AppEvent, Model, StartupBannerOptions, theme::default_palette};
 
 #[test]
@@ -856,25 +857,6 @@ fn session_picker_meta_uses_picker_open_time_as_relative_age_reference() {
             .any(|row| row.contains("5m · /tmp/project · 1.5 KiB")),
         "relative age should use the picker opening time, not the current render time: {rows:?}"
     );
-}
-
-fn render_model_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
-    let area = Rect::new(0, 0, width, height);
-    let mut buffer = Buffer::empty(area);
-    let _ = model.render_to_buffer(area, &mut buffer);
-    buffer
-}
-
-fn rendered_rows(buffer: &Buffer) -> Vec<String> {
-    (0..buffer.area.height)
-        .map(|row| {
-            let mut line = String::new();
-            for column in 0..buffer.area.width {
-                line.push_str(buffer[(column, row)].symbol());
-            }
-            line
-        })
-        .collect()
 }
 
 fn assert_text_cells_use_color(buffer: &Buffer, text: &str, expected: Color) {

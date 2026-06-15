@@ -1,10 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
     str::FromStr,
 };
 
-use provider_protocol::{ConversationItem, Role};
+use provider_protocol::ConversationItem;
 use runtime_domain::{paths::hunea_config_dir, session::TranscriptReplayItem};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -157,36 +157,14 @@ pub struct ResolvedSessionState {
     pub latest_config: Option<ConfigSnapshot>,
 }
 
-/// `SessionTreeSnapshot` 是 `/tree` 所需的逻辑消息行投影。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct SessionTreeSnapshot {
-    pub rows: Vec<SessionTreeSnapshotRow>,
-    pub current_row_id: Option<String>,
-    pub active_row_ids: HashSet<String>,
-}
+mod session_tree;
 
-/// `SessionTreeSnapshotRow` 描述单条用户可见逻辑消息的树展示与回溯语义。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionTreeSnapshotRow {
-    pub id: String,
-    pub parent_id: Option<String>,
-    pub display_depth: usize,
-    pub kind: SessionTreeSnapshotRowKind,
-    pub display_text: String,
-    pub summary: String,
-    pub preview_content: String,
-    pub rewind_target_id: Option<String>,
-    pub rewind_prefill: Option<String>,
-}
-
-/// `SessionTreeSnapshotRowKind` 是 session-store 层的逻辑消息行类型分类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionTreeSnapshotRowKind {
-    User,
-    Assistant,
-    Tool,
-    Reasoning,
-}
+pub use session_tree::{
+    SessionBranchTreeSnapshot, SessionBranchTreeSnapshotNode, SessionTreeSnapshot,
+    SessionTreeSnapshotBranchChoice, SessionTreeSnapshotRow, SessionTreeSnapshotRowKind, resolve,
+    resolve_state, session_branch_preview_snapshot, session_branch_tree_snapshot,
+    session_tree_snapshot, session_tree_snapshot_for_leaf,
+};
 
 /// session 持久化条目类型。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,6 +256,8 @@ pub enum ResolveError {
     CycleDetected,
     #[error("compaction target `{0}` is invalid")]
     InvalidCompactionTarget(String),
+    #[error("entry `{0}` cannot be projected as a session tree row")]
+    InvalidTreeRow(String),
 }
 
 /// 生成 session 内唯一 entry id。
@@ -343,608 +323,6 @@ pub fn hunea_dir() -> Option<PathBuf> {
 pub fn session_filename(session_id: &SessionId) -> String {
     let timestamp = format_filename_timestamp(session_id.timestamp());
     format!("{timestamp}_{session_id}.jsonl")
-}
-
-/// 从指定 leaf 解析 provider 可见的 canonical history。
-pub fn resolve(
-    entries: &[SessionEntry],
-    leaf_id: &str,
-) -> Result<Vec<ConversationItem>, ResolveError> {
-    Ok(resolve_state(entries, leaf_id)?
-        .items
-        .into_iter()
-        .map(|item| item.item)
-        .collect())
-}
-
-/// 从指定 leaf 解析 provider-visible history 以及恢复所需的附加状态。
-pub fn resolve_state(
-    entries: &[SessionEntry],
-    leaf_id: &str,
-) -> Result<ResolvedSessionState, ResolveError> {
-    let by_id = build_entry_index(entries)?;
-    let path = resolve_path(&by_id, leaf_id)?;
-
-    resolve_state_from_path(&path)
-}
-
-/// 生成 `/tree` 使用的逻辑消息行快照。
-pub fn session_tree_snapshot(
-    entries: &[SessionEntry],
-) -> Result<SessionTreeSnapshot, ResolveError> {
-    let by_id = build_entry_index(entries)?;
-    validate_entry_parents(entries, &by_id)?;
-    let children_by_parent = build_children_by_parent(entries);
-    let current_leaf_id = entries
-        .last()
-        .map(|entry| effective_leaf_id(&by_id, &entry.id));
-    let active_path = if let Some(leaf_id) = current_leaf_id {
-        resolve_path(&by_id, leaf_id)?
-    } else {
-        Vec::new()
-    };
-    let active_path_ids = active_path
-        .iter()
-        .map(|entry| entry.id.as_str())
-        .collect::<HashSet<_>>();
-    let visible_entry_ids = entries
-        .iter()
-        .filter(|entry| session_tree_row_kind(entry).is_some())
-        .map(|entry| entry.id.as_str())
-        .collect::<HashSet<_>>();
-    let rewind_target_by_id = entries
-        .iter()
-        .filter(|entry| visible_entry_ids.contains(entry.id.as_str()))
-        .map(|entry| {
-            (
-                entry.id.clone(),
-                restore_target_for_visible_row(
-                    entry,
-                    &visible_entry_ids,
-                    &children_by_parent,
-                    &active_path_ids,
-                ),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-
-    let mut rows = entries
-        .iter()
-        .filter_map(|entry| {
-            session_tree_snapshot_row(
-                entry,
-                &by_id,
-                &visible_entry_ids,
-                &rewind_target_by_id,
-                &children_by_parent,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let display_depth_by_id = visible_display_depths(&rows);
-    for row in &mut rows {
-        row.display_depth = display_depth_by_id
-            .get(&row.id)
-            .copied()
-            .unwrap_or_default();
-    }
-
-    let active_row_ids = active_path
-        .iter()
-        .filter(|entry| visible_entry_ids.contains(entry.id.as_str()))
-        .map(|entry| entry.id.clone())
-        .collect::<HashSet<_>>();
-    let current_row_id = active_path
-        .iter()
-        .rev()
-        .find(|entry| visible_entry_ids.contains(entry.id.as_str()))
-        .map(|entry| entry.id.clone());
-
-    Ok(SessionTreeSnapshot {
-        rows,
-        current_row_id,
-        active_row_ids,
-    })
-}
-
-fn resolve_path<'a>(
-    by_id: &HashMap<&'a str, &'a SessionEntry>,
-    leaf_id: &'a str,
-) -> Result<Vec<&'a SessionEntry>, ResolveError> {
-    let effective_leaf_id = effective_leaf_id(by_id, leaf_id);
-    let mut path = Vec::new();
-    let mut visited = HashSet::new();
-    let mut current = *by_id
-        .get(effective_leaf_id)
-        .ok_or_else(|| ResolveError::LeafNotFound(effective_leaf_id.to_string()))?;
-
-    loop {
-        if !visited.insert(current.id.as_str()) {
-            return Err(ResolveError::CycleDetected);
-        }
-
-        path.push(current);
-
-        let Some(parent_id) = current.parent_id.as_deref() else {
-            break;
-        };
-
-        current = *by_id
-            .get(parent_id)
-            .ok_or_else(|| ResolveError::DanglingParent(parent_id.to_string()))?;
-    }
-
-    path.reverse();
-    Ok(path)
-}
-
-fn build_entry_index(
-    entries: &[SessionEntry],
-) -> Result<HashMap<&str, &SessionEntry>, ResolveError> {
-    let mut by_id = HashMap::with_capacity(entries.len());
-    for entry in entries {
-        if by_id.insert(entry.id.as_str(), entry).is_some() {
-            return Err(ResolveError::DuplicateId(entry.id.clone()));
-        }
-    }
-    Ok(by_id)
-}
-
-fn validate_entry_parents<'a>(
-    entries: &'a [SessionEntry],
-    by_id: &HashMap<&'a str, &'a SessionEntry>,
-) -> Result<(), ResolveError> {
-    for entry in entries {
-        if let Some(parent_id) = entry.parent_id.as_deref()
-            && !by_id.contains_key(parent_id)
-        {
-            return Err(ResolveError::DanglingParent(parent_id.to_string()));
-        }
-    }
-    Ok(())
-}
-
-fn build_children_by_parent(entries: &[SessionEntry]) -> HashMap<&str, Vec<&SessionEntry>> {
-    let mut children_by_parent = HashMap::new();
-    for entry in entries {
-        if let Some(parent_id) = entry.parent_id.as_deref() {
-            children_by_parent
-                .entry(parent_id)
-                .or_insert_with(Vec::new)
-                .push(entry);
-        }
-    }
-    children_by_parent
-}
-
-fn effective_leaf_id<'a>(
-    by_id: &HashMap<&'a str, &'a SessionEntry>,
-    requested_leaf_id: &'a str,
-) -> &'a str {
-    match by_id.get(requested_leaf_id).map(|entry| &entry.kind) {
-        Some(SessionEntryKind::Leaf {
-            target_id: Some(target_id),
-        }) => target_id.as_str(),
-        Some(SessionEntryKind::Leaf { target_id: None }) => requested_leaf_id,
-        _ => requested_leaf_id,
-    }
-}
-
-fn resolve_state_from_path(path: &[&SessionEntry]) -> Result<ResolvedSessionState, ResolveError> {
-    let mut latest_config = None;
-    for entry in path {
-        if let SessionEntryKind::ConfigChange(snapshot) = &entry.kind {
-            latest_config = Some(snapshot.clone());
-        }
-    }
-
-    let mut resolved_items = Vec::new();
-    let compaction_summary;
-    let start_index =
-        if let Some((entry_id, summary, first_kept_entry_id)) = latest_compaction(path) {
-            let keep_index = item_entry_position(path, first_kept_entry_id).ok_or_else(|| {
-                ResolveError::InvalidCompactionTarget(first_kept_entry_id.to_string())
-            })?;
-            resolved_items.push(ResolvedSessionItem {
-                entry_id: entry_id.to_string(),
-                item: ConversationItem::system(vec![provider_protocol::ContentBlock::Text(
-                    summary.to_string(),
-                )]),
-            });
-            compaction_summary = Some(summary.to_string());
-            keep_index
-        } else {
-            compaction_summary = None;
-            0
-        };
-
-    resolved_items.extend(
-        path[start_index..]
-            .iter()
-            .filter_map(|entry| match &entry.kind {
-                SessionEntryKind::Item(item) => Some(ResolvedSessionItem {
-                    entry_id: entry.id.clone(),
-                    item: item.clone(),
-                }),
-                _ => None,
-            }),
-    );
-
-    let mut transcript = explicit_transcript_from_path(&path[start_index..]);
-    if !transcript.is_empty()
-        && let Some(summary) = compaction_summary
-    {
-        transcript.insert(0, TranscriptReplayItem::System { content: summary });
-    }
-
-    Ok(ResolvedSessionState {
-        items: resolved_items,
-        transcript,
-        latest_config,
-    })
-}
-
-fn explicit_transcript_from_path(path: &[&SessionEntry]) -> Vec<TranscriptReplayItem> {
-    let mut transcript = Vec::new();
-    for entry in path {
-        if let SessionEntryKind::TranscriptReplay(item) = &entry.kind {
-            push_transcript_replay_snapshot(&mut transcript, item.clone());
-        }
-    }
-    transcript
-}
-
-fn push_transcript_replay_snapshot(
-    transcript: &mut Vec<TranscriptReplayItem>,
-    item: TranscriptReplayItem,
-) {
-    match &item {
-        TranscriptReplayItem::ToolActivity { activity } => {
-            if let Some(existing) = transcript.iter_mut().find(|existing| {
-                matches!(
-                    existing,
-                    TranscriptReplayItem::ToolActivity { activity: existing_activity }
-                        if existing_activity.activity_id == activity.activity_id
-                )
-            }) {
-                *existing = item;
-                return;
-            }
-        }
-        TranscriptReplayItem::TerminalSnapshot { snapshot } => {
-            if let Some(existing) = transcript.iter_mut().find(|existing| {
-                matches!(
-                    existing,
-                    TranscriptReplayItem::TerminalSnapshot { snapshot: existing_snapshot }
-                        if existing_snapshot.terminal_id == snapshot.terminal_id
-                )
-            }) {
-                *existing = item;
-                return;
-            }
-        }
-        _ => {}
-    }
-
-    transcript.push(item);
-}
-
-fn session_tree_snapshot_row(
-    entry: &SessionEntry,
-    by_id: &HashMap<&str, &SessionEntry>,
-    visible_entry_ids: &HashSet<&str>,
-    rewind_target_by_id: &HashMap<String, String>,
-    children_by_parent: &HashMap<&str, Vec<&SessionEntry>>,
-) -> Option<Result<SessionTreeSnapshotRow, ResolveError>> {
-    let kind = session_tree_row_kind(entry)?;
-    let preview_content = session_tree_row_preview_content(entry, kind);
-    let display_text = single_line_display_text(&preview_content);
-    let summary = truncate_chars(&display_text, SESSION_TREE_SUMMARY_CHAR_LIMIT);
-    let parent_id = match nearest_visible_parent_id(entry, by_id, visible_entry_ids) {
-        Ok(parent_id) => parent_id,
-        Err(error) => return Some(Err(error)),
-    };
-    let rewind_target_id = rewind_target_for_tree_row(
-        entry,
-        kind,
-        visible_entry_ids,
-        rewind_target_by_id,
-        children_by_parent,
-    );
-    let rewind_prefill =
-        (kind == SessionTreeSnapshotRowKind::User).then(|| preview_content.clone());
-
-    Some(Ok(SessionTreeSnapshotRow {
-        id: entry.id.clone(),
-        parent_id,
-        display_depth: 0,
-        kind,
-        display_text,
-        summary,
-        preview_content,
-        rewind_target_id,
-        rewind_prefill,
-    }))
-}
-
-const SESSION_TREE_SUMMARY_CHAR_LIMIT: usize = 120;
-
-fn session_tree_row_kind(entry: &SessionEntry) -> Option<SessionTreeSnapshotRowKind> {
-    match &entry.kind {
-        SessionEntryKind::Item(item) => match item.role() {
-            Some(Role::User) => Some(SessionTreeSnapshotRowKind::User),
-            Some(Role::Assistant) => Some(SessionTreeSnapshotRowKind::Assistant),
-            Some(Role::System) => None,
-            None => match item {
-                ConversationItem::ToolResult { .. } => Some(SessionTreeSnapshotRowKind::Tool),
-                ConversationItem::Reasoning { .. } => Some(SessionTreeSnapshotRowKind::Reasoning),
-                ConversationItem::Message { .. } => None,
-            },
-        },
-        SessionEntryKind::Header(_)
-        | SessionEntryKind::Compaction { .. }
-        | SessionEntryKind::BranchSummary { .. }
-        | SessionEntryKind::ConfigChange(_)
-        | SessionEntryKind::TranscriptReplay(_)
-        | SessionEntryKind::Leaf { .. } => None,
-    }
-}
-
-fn session_tree_row_preview_content(
-    entry: &SessionEntry,
-    kind: SessionTreeSnapshotRowKind,
-) -> String {
-    match &entry.kind {
-        SessionEntryKind::Item(item) => match item {
-            ConversationItem::Reasoning { content, .. } => content.clone(),
-            ConversationItem::Message {
-                role: Role::Assistant,
-                ..
-            } if item.text_content().trim().is_empty() => assistant_tool_call_summary(item),
-            ConversationItem::ToolResult { call_id, .. }
-                if item.text_content().trim().is_empty() =>
-            {
-                format!("tool result {call_id}")
-            }
-            _ => item.text_content(),
-        },
-        _ => match kind {
-            SessionTreeSnapshotRowKind::User => "user message".to_string(),
-            SessionTreeSnapshotRowKind::Assistant => "assistant message".to_string(),
-            SessionTreeSnapshotRowKind::Tool => "tool result".to_string(),
-            SessionTreeSnapshotRowKind::Reasoning => "reasoning".to_string(),
-        },
-    }
-}
-
-fn truncate_chars(text: &str, limit: usize) -> String {
-    let mut output = String::new();
-    for (index, character) in text.chars().enumerate() {
-        if index >= limit {
-            output.push('…');
-            break;
-        }
-        output.push(character);
-    }
-    output
-}
-
-fn assistant_tool_call_summary(item: &ConversationItem) -> String {
-    let tool_names = item
-        .tool_calls()
-        .map(|tool_call| tool_call.name.as_str())
-        .collect::<Vec<_>>();
-    if tool_names.is_empty() {
-        "assistant message".to_string()
-    } else {
-        format!("tool call: {}", tool_names.join(", "))
-    }
-}
-
-fn single_line_display_text(content: &str) -> String {
-    content.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn nearest_visible_parent_id(
-    entry: &SessionEntry,
-    by_id: &HashMap<&str, &SessionEntry>,
-    visible_entry_ids: &HashSet<&str>,
-) -> Result<Option<String>, ResolveError> {
-    let mut current_id = entry.parent_id.as_deref();
-    while let Some(parent_id) = current_id {
-        if visible_entry_ids.contains(parent_id) {
-            return Ok(Some(parent_id.to_string()));
-        }
-        let parent = by_id
-            .get(parent_id)
-            .ok_or_else(|| ResolveError::DanglingParent(parent_id.to_string()))?;
-        current_id = parent.parent_id.as_deref();
-    }
-    Ok(None)
-}
-
-fn rewind_target_before_user_row(entry: &SessionEntry) -> String {
-    entry
-        .parent_id
-        .clone()
-        .unwrap_or_else(|| "header".to_string())
-}
-
-fn rewind_target_for_tree_row(
-    entry: &SessionEntry,
-    kind: SessionTreeSnapshotRowKind,
-    visible_entry_ids: &HashSet<&str>,
-    rewind_target_by_id: &HashMap<String, String>,
-    children_by_parent: &HashMap<&str, Vec<&SessionEntry>>,
-) -> Option<String> {
-    match kind {
-        SessionTreeSnapshotRowKind::User => Some(rewind_target_before_user_row(entry)),
-        SessionTreeSnapshotRowKind::Reasoning => owning_assistant_for_reasoning(
-            entry,
-            visible_entry_ids,
-            children_by_parent,
-            rewind_target_by_id,
-        ),
-        SessionTreeSnapshotRowKind::Assistant | SessionTreeSnapshotRowKind::Tool => Some(
-            default_rewind_target_for_visible_row(entry, rewind_target_by_id),
-        ),
-    }
-}
-
-fn default_rewind_target_for_visible_row(
-    entry: &SessionEntry,
-    rewind_target_by_id: &HashMap<String, String>,
-) -> String {
-    rewind_target_by_id
-        .get(&entry.id)
-        .cloned()
-        .unwrap_or_else(|| entry.id.clone())
-}
-
-fn owning_assistant_for_reasoning(
-    reasoning: &SessionEntry,
-    visible_entry_ids: &HashSet<&str>,
-    children_by_parent: &HashMap<&str, Vec<&SessionEntry>>,
-    rewind_target_by_id: &HashMap<String, String>,
-) -> Option<String> {
-    let mut current = reasoning;
-    let mut visited = HashSet::new();
-
-    while visited.insert(current.id.as_str()) {
-        let children = children_by_parent
-            .get(current.id.as_str())
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let logical_children = children
-            .iter()
-            .copied()
-            .filter(|child| {
-                visible_entry_ids.contains(child.id.as_str())
-                    || is_recoverable_hidden_tree_entry(child)
-            })
-            .collect::<Vec<_>>();
-
-        let [next] = logical_children.as_slice() else {
-            return None;
-        };
-
-        if visible_entry_ids.contains(next.id.as_str()) {
-            return match session_tree_row_kind(next) {
-                Some(SessionTreeSnapshotRowKind::Assistant) => Some(
-                    default_rewind_target_for_visible_row(next, rewind_target_by_id),
-                ),
-                _ => None,
-            };
-        }
-
-        current = next;
-    }
-
-    None
-}
-
-fn restore_target_for_visible_row(
-    entry: &SessionEntry,
-    visible_entry_ids: &HashSet<&str>,
-    children_by_parent: &HashMap<&str, Vec<&SessionEntry>>,
-    active_path_ids: &HashSet<&str>,
-) -> String {
-    let mut target = entry;
-    let mut visited = HashSet::new();
-
-    while visited.insert(target.id.as_str()) {
-        let Some(hidden_children) = children_by_parent.get(target.id.as_str()).map(|children| {
-            children
-                .iter()
-                .copied()
-                .filter(|child| !visible_entry_ids.contains(child.id.as_str()))
-                .filter(|child| is_recoverable_hidden_tree_entry(child))
-                .collect::<Vec<_>>()
-        }) else {
-            break;
-        };
-
-        let Some(next_target) = hidden_children
-            .iter()
-            .find(|child| active_path_ids.contains(child.id.as_str()))
-            .copied()
-            .or_else(|| hidden_children.last().copied())
-        else {
-            break;
-        };
-
-        target = next_target;
-    }
-
-    target.id.clone()
-}
-
-fn is_recoverable_hidden_tree_entry(entry: &SessionEntry) -> bool {
-    matches!(
-        entry.kind,
-        SessionEntryKind::Compaction { .. }
-            | SessionEntryKind::BranchSummary { .. }
-            | SessionEntryKind::ConfigChange(_)
-            | SessionEntryKind::TranscriptReplay(_)
-    )
-}
-
-fn visible_display_depths(rows: &[SessionTreeSnapshotRow]) -> HashMap<String, usize> {
-    let mut children_by_parent: HashMap<Option<&str>, Vec<&SessionTreeSnapshotRow>> =
-        HashMap::new();
-    for row in rows {
-        children_by_parent
-            .entry(row.parent_id.as_deref())
-            .or_default()
-            .push(row);
-    }
-
-    let mut display_depths = HashMap::new();
-    let mut stack = children_by_parent
-        .get(&None)
-        .into_iter()
-        .flat_map(|roots| roots.iter().rev())
-        .map(|row| (*row, 0usize, false))
-        .collect::<Vec<_>>();
-
-    while let Some((row, display_depth, just_branched)) = stack.pop() {
-        display_depths.insert(row.id.clone(), display_depth);
-        let children = children_by_parent
-            .get(&Some(row.id.as_str()))
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let has_sibling_branch = children.len() > 1;
-        let child_depth = if has_sibling_branch || (just_branched && display_depth > 0) {
-            display_depth.saturating_add(1)
-        } else {
-            display_depth
-        };
-
-        for child in children.iter().rev() {
-            stack.push((*child, child_depth, has_sibling_branch));
-        }
-    }
-
-    display_depths
-}
-
-fn item_entry_position(path: &[&SessionEntry], target_id: &str) -> Option<usize> {
-    path.iter()
-        .position(|entry| entry.id == target_id && matches!(entry.kind, SessionEntryKind::Item(_)))
-}
-
-fn latest_compaction<'a>(path: &'a [&'a SessionEntry]) -> Option<(&'a str, &'a str, &'a str)> {
-    path.iter().rev().find_map(|entry| match &entry.kind {
-        SessionEntryKind::Compaction {
-            summary,
-            first_kept_entry_id,
-            ..
-        } => Some((
-            entry.id.as_str(),
-            summary.as_str(),
-            first_kept_entry_id.as_str(),
-        )),
-        _ => None,
-    })
 }
 
 fn format_filename_timestamp(timestamp: Timestamp) -> String {
@@ -1602,6 +980,79 @@ mod tests {
     }
 
     #[test]
+    fn session_tree_snapshot_allows_rewind_only_after_single_tool_call_result() {
+        let entries = assistant_tool_batch_entries(&["call-1"], &["call-1"], true);
+
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("single tool batch should snapshot");
+        let assistant = snapshot_row(&snapshot, "assistant-1");
+        let tool = snapshot_row(&snapshot, "tool-1");
+
+        assert_eq!(
+            assistant.rewind_target_id, None,
+            "assistant tool-call rows are attached to the following tool results"
+        );
+        assert_eq!(
+            tool.rewind_target_id.as_deref(),
+            Some("tool-1"),
+            "the only tool result closes the provider-visible batch and is rewindable"
+        );
+    }
+
+    #[test]
+    fn session_tree_snapshot_allows_rewind_only_after_final_tool_call_result() {
+        let entries = assistant_tool_batch_entries(
+            &["call-1", "call-2", "call-3"],
+            &["call-1", "call-2", "call-3"],
+            true,
+        );
+
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("multi tool batch should snapshot");
+        let assistant = snapshot_row(&snapshot, "assistant-1");
+        let first_tool = snapshot_row(&snapshot, "tool-1");
+        let second_tool = snapshot_row(&snapshot, "tool-2");
+        let final_tool = snapshot_row(&snapshot, "tool-3");
+
+        assert_eq!(
+            assistant.rewind_target_id, None,
+            "assistant tool-call rows must not be independently rewindable"
+        );
+        assert_eq!(
+            first_tool.rewind_target_id, None,
+            "intermediate tool results leave unresolved provider tool calls"
+        );
+        assert_eq!(
+            second_tool.rewind_target_id, None,
+            "intermediate tool results leave unresolved provider tool calls"
+        );
+        assert_eq!(
+            final_tool.rewind_target_id.as_deref(),
+            Some("tool-3"),
+            "only the final tool result that resolves every call in the batch is rewindable"
+        );
+    }
+
+    #[test]
+    fn session_tree_snapshot_does_not_rewind_incomplete_tool_call_batch() {
+        let entries = assistant_tool_batch_entries(&["call-1", "call-2"], &["call-1"], true);
+
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("incomplete tool batch should snapshot");
+        let assistant = snapshot_row(&snapshot, "assistant-1");
+        let tool = snapshot_row(&snapshot, "tool-1");
+
+        assert_eq!(
+            assistant.rewind_target_id, None,
+            "assistant tool-call rows are not safe restore targets without all results"
+        );
+        assert_eq!(
+            tool.rewind_target_id, None,
+            "a partial tool-result batch would still leave unresolved provider tool calls"
+        );
+    }
+
+    #[test]
     fn session_tree_snapshot_maps_reasoning_rewind_to_following_assistant() {
         let entries = vec![
             SessionEntry {
@@ -1790,6 +1241,216 @@ mod tests {
     }
 
     #[test]
+    fn session_tree_snapshot_prefers_assistant_replay_content_for_preview() {
+        let collapsed_hint = "… +26 lines (ctrl + t to view transcript)";
+        let full_content = "assistant full line 1\nassistant full line 2";
+        let entries = vec![
+            SessionEntry {
+                id: "user-1".to_string(),
+                parent_id: None,
+                timestamp: 1,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "hello")),
+            },
+            SessionEntry {
+                id: "assistant-1".to_string(),
+                parent_id: Some("user-1".to_string()),
+                timestamp: 2,
+                kind: SessionEntryKind::Item(ConversationItem::text(
+                    Role::Assistant,
+                    collapsed_hint,
+                )),
+            },
+            SessionEntry {
+                id: "assistant-replay".to_string(),
+                parent_id: Some("assistant-1".to_string()),
+                timestamp: 3,
+                kind: SessionEntryKind::TranscriptReplay(TranscriptReplayItem::Message {
+                    role: runtime_domain::session::TranscriptReplayRole::Assistant,
+                    content: full_content.to_string(),
+                }),
+            },
+        ];
+
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("assistant replay tree should snapshot");
+        let assistant = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "assistant-1")
+            .expect("assistant row should exist");
+
+        assert_eq!(assistant.preview_content, full_content);
+        assert!(
+            !assistant.summary.contains("ctrl + t"),
+            "tree preview summary should be derived from full replay content, not collapsed UI text"
+        );
+    }
+
+    #[test]
+    fn session_tree_snapshot_prefers_tool_replay_content_for_preview() {
+        let collapsed_hint = "… +8 lines (ctrl + t to view transcript)";
+        let entries = vec![
+            SessionEntry {
+                id: "assistant-1".to_string(),
+                parent_id: None,
+                timestamp: 1,
+                kind: SessionEntryKind::Item(ConversationItem::assistant_with_tool_calls(
+                    "checking".to_string(),
+                    vec![ToolCall::new(
+                        "call-1",
+                        "read_file",
+                        r#"{"path":"src/lib.rs"}"#,
+                    )],
+                )),
+            },
+            SessionEntry {
+                id: "tool-1".to_string(),
+                parent_id: Some("assistant-1".to_string()),
+                timestamp: 2,
+                kind: SessionEntryKind::Item(ConversationItem::tool_result(
+                    "call-1",
+                    vec![ContentBlock::Text(collapsed_hint.to_string())],
+                    false,
+                )),
+            },
+            SessionEntry {
+                id: "tool-replay".to_string(),
+                parent_id: Some("tool-1".to_string()),
+                timestamp: 3,
+                kind: SessionEntryKind::TranscriptReplay(TranscriptReplayItem::ToolActivity {
+                    activity: sample_tool_activity("call-1", "full provider output"),
+                }),
+            },
+        ];
+
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("tool replay tree should snapshot");
+        let tool = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "tool-1")
+            .expect("tool row should exist");
+
+        assert_eq!(tool.preview_content, "full provider output");
+        assert!(
+            !tool.summary.contains("ctrl + t"),
+            "tool preview summary should be derived from replay output, not collapsed UI text"
+        );
+    }
+
+    #[test]
+    fn session_tree_snapshot_projects_assistant_tool_calls_into_debug_preview_replay() {
+        let entries = vec![
+            SessionEntry {
+                id: "user-1".to_string(),
+                parent_id: None,
+                timestamp: 1,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "inspect")),
+            },
+            SessionEntry {
+                id: "assistant-1".to_string(),
+                parent_id: Some("user-1".to_string()),
+                timestamp: 2,
+                kind: SessionEntryKind::Item(ConversationItem::assistant_with_tool_calls(
+                    "I will inspect the file.".to_string(),
+                    vec![ToolCall::new(
+                        "call-1",
+                        "read_file",
+                        r#"{"path":"Cargo.toml","limit":20}"#,
+                    )],
+                )),
+            },
+        ];
+
+        let snapshot = super::session_tree_snapshot(&entries)
+            .expect("assistant tool call tree should snapshot");
+        let assistant = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "assistant-1")
+            .expect("assistant row should exist");
+
+        assert_eq!(assistant.preview_replay_items.len(), 1);
+        assert!(matches!(
+            &assistant.preview_replay_items[0],
+            TranscriptReplayItem::Message {
+                role: runtime_domain::session::TranscriptReplayRole::Assistant,
+                content,
+            } if content.contains("I will inspect the file.")
+                && content.contains("Tool call `read_file` (call-1)")
+                && content.contains("```json")
+                && content.contains("\"path\": \"Cargo.toml\"")
+                && content.contains("\"limit\": 20")
+        ));
+    }
+
+    #[test]
+    fn session_tree_snapshot_projects_tool_activity_into_debug_preview_replay() {
+        let activity = RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "Run cargo test".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(r#"{"command":"cargo test"}"#.into()),
+            raw_output: Some(
+                (1..=8)
+                    .map(|line| format!("test output line {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into(),
+            ),
+        };
+        let entries = vec![
+            SessionEntry {
+                id: "assistant-1".to_string(),
+                parent_id: None,
+                timestamp: 1,
+                kind: SessionEntryKind::Item(ConversationItem::assistant_with_tool_calls(
+                    "running tests".to_string(),
+                    vec![ToolCall::new(
+                        "call-1",
+                        "bash",
+                        r#"{"command":"cargo test"}"#,
+                    )],
+                )),
+            },
+            SessionEntry {
+                id: "tool-1".to_string(),
+                parent_id: Some("assistant-1".to_string()),
+                timestamp: 2,
+                kind: SessionEntryKind::Item(ConversationItem::tool_result(
+                    "call-1",
+                    vec![ContentBlock::Text("compact result".to_string())],
+                    false,
+                )),
+            },
+            SessionEntry {
+                id: "tool-replay".to_string(),
+                parent_id: Some("tool-1".to_string()),
+                timestamp: 3,
+                kind: SessionEntryKind::TranscriptReplay(TranscriptReplayItem::ToolActivity {
+                    activity: activity.clone(),
+                }),
+            },
+        ];
+
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("tool activity tree should snapshot");
+        let tool = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "tool-1")
+            .expect("tool row should exist");
+
+        assert_eq!(
+            tool.preview_replay_items,
+            vec![TranscriptReplayItem::ToolActivity { activity }]
+        );
+    }
+
+    #[test]
     fn session_tree_snapshot_keeps_linear_logical_rows_flat() {
         let entries = linear_history_entries();
 
@@ -1807,6 +1468,178 @@ mod tests {
     }
 
     #[test]
+    fn session_tree_snapshot_lists_only_current_leaf_path_rows() {
+        let entries = branching_with_append_entries();
+
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("branch path tree should snapshot");
+
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user-a", "assistant-c", "user-d"],
+            "path tree must not include messages exclusive to sibling branches"
+        );
+        assert_eq!(snapshot.current_row_id.as_deref(), Some("user-d"));
+    }
+
+    #[test]
+    fn session_tree_snapshot_lists_branch_choices_at_fork_parent() {
+        let entries = branching_with_append_entries();
+
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("branch choices should snapshot");
+        let branch_parent = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "user-a")
+            .expect("fork parent should be visible on the active path");
+
+        assert_eq!(
+            branch_parent
+                .branch_choices
+                .iter()
+                .map(|branch| {
+                    (
+                        branch.branch.branch_row_id.as_str(),
+                        branch.branch.subtree_leaf_id.as_str(),
+                        branch.branch.latest_row_id.as_str(),
+                        branch.branch.display_summary.as_str(),
+                        branch.branch.kind,
+                        branch.branch.is_current,
+                        branch.branch.message_count,
+                        branch.branch.branch_created_at_ms,
+                        branch.branch.latest_updated_at_ms,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "assistant-b",
+                    "assistant-b",
+                    "assistant-b",
+                    "branch-b",
+                    super::SessionTreeSnapshotRowKind::Assistant,
+                    false,
+                    1,
+                    1_717_514_800_002,
+                    1_717_514_800_002,
+                ),
+                (
+                    "assistant-c",
+                    "user-d",
+                    "user-d",
+                    "branch follow-up",
+                    super::SessionTreeSnapshotRowKind::User,
+                    true,
+                    2,
+                    1_717_514_800_003,
+                    1_717_514_800_004,
+                ),
+            ],
+            "branch picker choices should summarize each sibling branch by its subtree leaf"
+        );
+    }
+
+    #[test]
+    fn session_branch_preview_snapshot_starts_at_fork_parent() {
+        let entries = branching_after_visible_context_entries();
+
+        let preview = super::session_branch_preview_snapshot(&entries, "assistant-b")
+            .expect("branch preview should snapshot");
+
+        assert_eq!(
+            preview
+                .rows
+                .iter()
+                .map(|row| (row.id.as_str(), row.display_depth))
+                .collect::<Vec<_>>(),
+            vec![("user-a", 0), ("assistant-b", 1)],
+            "branch preview should skip visible ancestors before the fork point"
+        );
+        assert_eq!(preview.current_row_id.as_deref(), Some("assistant-b"));
+    }
+
+    #[test]
+    fn session_tree_snapshot_for_hypothetical_leaf_matches_after_switch() {
+        let entries = branching_with_append_entries();
+
+        let preview = super::session_tree_snapshot_for_leaf(&entries, "assistant-b")
+            .expect("hypothetical branch should snapshot");
+        let mut switched_entries = entries.clone();
+        switched_entries.push(SessionEntry {
+            id: "leaf-switch".to_string(),
+            parent_id: Some("user-d".to_string()),
+            timestamp: 1_717_514_800_005,
+            kind: SessionEntryKind::Leaf {
+                target_id: Some("assistant-b".to_string()),
+            },
+        });
+        let switched = super::session_tree_snapshot(&switched_entries)
+            .expect("switched branch should snapshot");
+
+        assert_eq!(
+            preview
+                .rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            switched
+                .rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            "preview path must match the committed path after switching to that branch"
+        );
+        assert_eq!(preview.current_row_id, switched.current_row_id);
+    }
+
+    #[test]
+    fn session_branch_tree_snapshot_lists_branch_roots_with_tree_parents() {
+        let entries = nested_branch_tree_entries();
+
+        let snapshot = super::session_branch_tree_snapshot(&entries)
+            .expect("branch tree should snapshot nested branches");
+
+        assert_eq!(snapshot.nodes.len(), 5);
+        assert_eq!(snapshot.total_message_count, 7);
+        assert_eq!(
+            snapshot.current_branch_row_id.as_deref(),
+            Some("user-b-alt")
+        );
+
+        let root = branch_tree_node(&snapshot, "user-root");
+        assert_eq!(root.parent_branch_row_id, None);
+        assert_eq!(root.branch.message_count, 7);
+
+        let alpha = branch_tree_node(&snapshot, "assistant-a");
+        assert_eq!(alpha.parent_branch_row_id.as_deref(), Some("user-root"));
+        assert_eq!(alpha.branch.subtree_leaf_id, "assistant-a");
+        assert_eq!(alpha.branch.message_count, 1);
+
+        let beta = branch_tree_node(&snapshot, "assistant-b");
+        assert_eq!(beta.parent_branch_row_id.as_deref(), Some("user-root"));
+        assert_eq!(beta.branch.message_count, 5);
+
+        let follow = branch_tree_node(&snapshot, "user-b-follow");
+        assert_eq!(follow.parent_branch_row_id.as_deref(), Some("assistant-b"));
+        assert_eq!(follow.branch.message_count, 2);
+        assert!(!follow.branch.is_current);
+
+        let alternate = branch_tree_node(&snapshot, "user-b-alt");
+        assert_eq!(
+            alternate.parent_branch_row_id.as_deref(),
+            Some("assistant-b")
+        );
+        assert_eq!(alternate.branch.message_count, 2);
+        assert!(alternate.branch.is_current);
+        assert_eq!(alternate.branch.display_summary, "alt answer");
+    }
+
+    #[test]
     fn session_tree_snapshot_indents_true_sibling_branches() {
         let entries = branching_entries();
 
@@ -1819,8 +1652,76 @@ mod tests {
                 .iter()
                 .map(|row| (row.id.as_str(), row.display_depth))
                 .collect::<Vec<_>>(),
-            vec![("user-a", 0), ("assistant-b", 1), ("assistant-c", 1)],
-            "only real sibling branches should increase visual indent"
+            vec![("user-a", 0), ("assistant-c", 1)],
+            "path tree should keep current branch indent while omitting sibling-only rows"
+        );
+    }
+
+    #[test]
+    fn session_tree_snapshot_indents_rewinded_user_branch_under_outer_assistant() {
+        let entries = nested_rewind_user_branch_entries();
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("nested rewind tree should snapshot");
+
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|row| (row.id.as_str(), row.display_depth))
+                .collect::<Vec<_>>(),
+            vec![
+                ("user-root", 0),
+                ("reason-root", 0),
+                ("assistant-root", 0),
+                ("user-a", 1),
+                ("reason-a", 1),
+                ("assistant-a", 1),
+                ("user-c", 2),
+                ("reason-c", 2),
+                ("assistant-c", 2),
+            ],
+            "path tree should preserve nested branch depth without listing inactive sibling paths"
+        );
+    }
+
+    #[test]
+    fn session_tree_snapshot_indents_each_rewind_branch_progressively_through_config_chain() {
+        let entries = nested_config_rewind_chain_entries();
+        let snapshot = super::session_tree_snapshot(&entries)
+            .expect("nested config rewind tree should snapshot");
+
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|row| (row.id.as_str(), row.display_depth))
+                .collect::<Vec<_>>(),
+            vec![
+                ("user-root", 0),
+                ("reason-root", 0),
+                ("assistant-root", 0),
+                ("user-branch-4", 3),
+                ("reason-branch-4", 3),
+                ("assistant-branch-4", 3),
+            ],
+            "path tree should keep the active rewind branch's full computed depth"
+        );
+    }
+
+    #[test]
+    fn session_tree_snapshot_keeps_linear_follow_up_after_branch_at_branch_depth() {
+        let entries = branching_with_append_entries();
+        let snapshot =
+            super::session_tree_snapshot(&entries).expect("branch append tree should snapshot");
+
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|row| (row.id.as_str(), row.display_depth))
+                .collect::<Vec<_>>(),
+            vec![("user-a", 0), ("assistant-c", 1), ("user-d", 1)],
+            "linear follow-up after a selected branch should stay at the branch depth"
         );
     }
 
@@ -2051,6 +1952,156 @@ mod tests {
         dir
     }
 
+    fn snapshot_row<'a>(
+        snapshot: &'a super::SessionTreeSnapshot,
+        row_id: &str,
+    ) -> &'a super::SessionTreeSnapshotRow {
+        snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == row_id)
+            .unwrap_or_else(|| panic!("{row_id} should exist in tree snapshot"))
+    }
+
+    fn branch_tree_node<'a>(
+        snapshot: &'a super::SessionBranchTreeSnapshot,
+        branch_row_id: &str,
+    ) -> &'a super::SessionBranchTreeSnapshotNode {
+        snapshot
+            .nodes
+            .iter()
+            .find(|node| node.branch.branch_row_id == branch_row_id)
+            .unwrap_or_else(|| panic!("{branch_row_id} should exist in branch tree snapshot"))
+    }
+
+    fn assistant_tool_batch_entries(
+        call_ids: &[&str],
+        result_call_ids: &[&str],
+        include_replay_before_results: bool,
+    ) -> Vec<SessionEntry> {
+        let mut entries = vec![
+            SessionEntry {
+                id: "user-1".to_string(),
+                parent_id: None,
+                timestamp: 1,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "read files")),
+            },
+            SessionEntry {
+                id: "assistant-1".to_string(),
+                parent_id: Some("user-1".to_string()),
+                timestamp: 2,
+                kind: SessionEntryKind::Item(ConversationItem::assistant_with_tool_calls(
+                    "reading".to_string(),
+                    call_ids
+                        .iter()
+                        .map(|call_id| ToolCall::new(*call_id, "read", "{}"))
+                        .collect(),
+                )),
+            },
+        ];
+
+        let mut parent_id = "assistant-1".to_string();
+        let mut timestamp = 3;
+        if include_replay_before_results {
+            for call_id in call_ids {
+                let replay_id = format!("replay-{call_id}");
+                entries.push(SessionEntry {
+                    id: replay_id.clone(),
+                    parent_id: Some(parent_id),
+                    timestamp,
+                    kind: SessionEntryKind::TranscriptReplay(TranscriptReplayItem::ToolActivity {
+                        activity: sample_tool_activity(call_id, "completed"),
+                    }),
+                });
+                parent_id = replay_id;
+                timestamp += 1;
+            }
+        }
+
+        for (index, call_id) in result_call_ids.iter().enumerate() {
+            let tool_id = format!("tool-{}", index + 1);
+            entries.push(SessionEntry {
+                id: tool_id.clone(),
+                parent_id: Some(parent_id),
+                timestamp,
+                kind: SessionEntryKind::Item(ConversationItem::tool_result(
+                    *call_id,
+                    vec![ContentBlock::Text(format!("result {}", index + 1))],
+                    false,
+                )),
+            });
+            parent_id = tool_id;
+            timestamp += 1;
+        }
+
+        entries
+    }
+
+    fn nested_branch_tree_entries() -> Vec<SessionEntry> {
+        vec![
+            SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: 1_717_514_800_000,
+                kind: SessionEntryKind::Header(SessionHeader {
+                    session_id: "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+                        .parse()
+                        .expect("fixture session id should parse"),
+                    work_dir: PathBuf::from("/repo"),
+                    session_name: None,
+                    initial_model: "qwen3".to_string(),
+                    git_head: None,
+                    cli_version: None,
+                }),
+            },
+            SessionEntry {
+                id: "user-root".to_string(),
+                parent_id: Some("header".to_string()),
+                timestamp: 1_717_514_800_001,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "root question")),
+            },
+            SessionEntry {
+                id: "assistant-a".to_string(),
+                parent_id: Some("user-root".to_string()),
+                timestamp: 1_717_514_800_002,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "alpha")),
+            },
+            SessionEntry {
+                id: "assistant-b".to_string(),
+                parent_id: Some("user-root".to_string()),
+                timestamp: 1_717_514_800_003,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "beta")),
+            },
+            SessionEntry {
+                id: "user-b-follow".to_string(),
+                parent_id: Some("assistant-b".to_string()),
+                timestamp: 1_717_514_800_004,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "follow")),
+            },
+            SessionEntry {
+                id: "assistant-b-follow".to_string(),
+                parent_id: Some("user-b-follow".to_string()),
+                timestamp: 1_717_514_800_005,
+                kind: SessionEntryKind::Item(ConversationItem::text(
+                    Role::Assistant,
+                    "follow answer",
+                )),
+            },
+            SessionEntry {
+                id: "user-b-alt".to_string(),
+                parent_id: Some("assistant-b".to_string()),
+                timestamp: 1_717_514_800_006,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "alt")),
+            },
+            SessionEntry {
+                id: "assistant-b-alt".to_string(),
+                parent_id: Some("user-b-alt".to_string()),
+                timestamp: 1_717_514_800_007,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "alt answer")),
+            },
+        ]
+    }
+
     fn sample_entries() -> Vec<SessionEntry> {
         let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
             .parse()
@@ -2260,6 +2311,315 @@ mod tests {
             timestamp: 1_717_514_800_004,
             kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "branch follow-up")),
         });
+        entries
+    }
+
+    fn branching_after_visible_context_entries() -> Vec<SessionEntry> {
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+
+        vec![
+            SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: 1_717_514_800_000,
+                kind: SessionEntryKind::Header(SessionHeader {
+                    session_id,
+                    work_dir: PathBuf::from("/repo"),
+                    session_name: None,
+                    initial_model: "gpt-4.1".to_string(),
+                    git_head: Some("abc123".to_string()),
+                    cli_version: Some("0.5.2".to_string()),
+                }),
+            },
+            SessionEntry {
+                id: "user-context".to_string(),
+                parent_id: Some("header".to_string()),
+                timestamp: 1_717_514_800_001,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "context")),
+            },
+            SessionEntry {
+                id: "assistant-context".to_string(),
+                parent_id: Some("user-context".to_string()),
+                timestamp: 1_717_514_800_002,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "not shown")),
+            },
+            SessionEntry {
+                id: "user-a".to_string(),
+                parent_id: Some("assistant-context".to_string()),
+                timestamp: 1_717_514_800_003,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "hello")),
+            },
+            SessionEntry {
+                id: "assistant-b".to_string(),
+                parent_id: Some("user-a".to_string()),
+                timestamp: 1_717_514_800_004,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "branch-b")),
+            },
+            SessionEntry {
+                id: "assistant-c".to_string(),
+                parent_id: Some("user-a".to_string()),
+                timestamp: 1_717_514_800_005,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "branch-c")),
+            },
+            SessionEntry {
+                id: "user-d".to_string(),
+                parent_id: Some("assistant-c".to_string()),
+                timestamp: 1_717_514_800_006,
+                kind: SessionEntryKind::Item(ConversationItem::text(
+                    Role::User,
+                    "branch follow-up",
+                )),
+            },
+        ]
+    }
+
+    fn nested_rewind_user_branch_entries() -> Vec<SessionEntry> {
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+
+        vec![
+            SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: 1_717_514_800_000,
+                kind: SessionEntryKind::Header(SessionHeader {
+                    session_id,
+                    work_dir: PathBuf::from("/repo"),
+                    session_name: None,
+                    initial_model: "gpt-4.1".to_string(),
+                    git_head: Some("abc123".to_string()),
+                    cli_version: Some("0.5.2".to_string()),
+                }),
+            },
+            SessionEntry {
+                id: "user-root".to_string(),
+                parent_id: Some("header".to_string()),
+                timestamp: 1_717_514_800_001,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "你好哦")),
+            },
+            SessionEntry {
+                id: "reason-root".to_string(),
+                parent_id: Some("user-root".to_string()),
+                timestamp: 1_717_514_800_002,
+                kind: SessionEntryKind::Item(ConversationItem::Reasoning {
+                    content: "think root".to_string(),
+                    summary: None,
+                    encrypted: None,
+                }),
+            },
+            SessionEntry {
+                id: "assistant-root".to_string(),
+                parent_id: Some("reason-root".to_string()),
+                timestamp: 1_717_514_800_003,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "root reply")),
+            },
+            SessionEntry {
+                id: "user-inactive".to_string(),
+                parent_id: Some("assistant-root".to_string()),
+                timestamp: 1_717_514_800_004,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "skipped branch")),
+            },
+            SessionEntry {
+                id: "user-a".to_string(),
+                parent_id: Some("assistant-root".to_string()),
+                timestamp: 1_717_514_800_005,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "你是谁")),
+            },
+            SessionEntry {
+                id: "reason-a".to_string(),
+                parent_id: Some("user-a".to_string()),
+                timestamp: 1_717_514_800_005,
+                kind: SessionEntryKind::Item(ConversationItem::Reasoning {
+                    content: "think a".to_string(),
+                    summary: None,
+                    encrypted: None,
+                }),
+            },
+            SessionEntry {
+                id: "assistant-a".to_string(),
+                parent_id: Some("reason-a".to_string()),
+                timestamp: 1_717_514_800_006,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::Assistant, "你好！")),
+            },
+            SessionEntry {
+                id: "user-b".to_string(),
+                parent_id: Some("assistant-a".to_string()),
+                timestamp: 1_717_514_800_007,
+                kind: SessionEntryKind::Item(ConversationItem::text(
+                    Role::User,
+                    "linear follow up",
+                )),
+            },
+            SessionEntry {
+                id: "reason-b".to_string(),
+                parent_id: Some("user-b".to_string()),
+                timestamp: 1_717_514_800_008,
+                kind: SessionEntryKind::Item(ConversationItem::Reasoning {
+                    content: "think b".to_string(),
+                    summary: None,
+                    encrypted: None,
+                }),
+            },
+            SessionEntry {
+                id: "assistant-b".to_string(),
+                parent_id: Some("reason-b".to_string()),
+                timestamp: 1_717_514_800_009,
+                kind: SessionEntryKind::Item(ConversationItem::text(
+                    Role::Assistant,
+                    "linear reply",
+                )),
+            },
+            SessionEntry {
+                id: "leaf-1".to_string(),
+                parent_id: Some("assistant-b".to_string()),
+                timestamp: 1_717_514_800_010,
+                kind: SessionEntryKind::Leaf {
+                    target_id: Some("assistant-a".to_string()),
+                },
+            },
+            SessionEntry {
+                id: "user-c".to_string(),
+                parent_id: Some("assistant-a".to_string()),
+                timestamp: 1_717_514_800_011,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "你能做什么")),
+            },
+            SessionEntry {
+                id: "reason-c".to_string(),
+                parent_id: Some("user-c".to_string()),
+                timestamp: 1_717_514_800_012,
+                kind: SessionEntryKind::Item(ConversationItem::Reasoning {
+                    content: "think c".to_string(),
+                    summary: None,
+                    encrypted: None,
+                }),
+            },
+            SessionEntry {
+                id: "assistant-c".to_string(),
+                parent_id: Some("reason-c".to_string()),
+                timestamp: 1_717_514_800_013,
+                kind: SessionEntryKind::Item(ConversationItem::text(
+                    Role::Assistant,
+                    "nested tail",
+                )),
+            },
+        ]
+    }
+
+    fn nested_config_rewind_chain_entries() -> Vec<SessionEntry> {
+        let session_id: SessionId = "01914a5c-3c7e-7a2b-8abc-1234567890ab"
+            .parse()
+            .expect("fixture session id should parse");
+
+        let mut timestamp = 1_717_514_800_000i64;
+        let mut next_timestamp = || {
+            let value = timestamp;
+            timestamp += 1;
+            value
+        };
+
+        let config_snapshot = || ConfigSnapshot {
+            provider_id: "opencode".to_string(),
+            model: "gpt-4.1".to_string(),
+            system_prompt: None,
+        };
+
+        // 复刻真实 session：rewind 时新建的 ConfigChange 总是挂到上一次 ConfigChange，
+        // 形成隐藏的 fork 链——这是触发本次 bug 的关键拓扑。
+        let mut entries = vec![
+            SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: next_timestamp(),
+                kind: SessionEntryKind::Header(SessionHeader {
+                    session_id,
+                    work_dir: PathBuf::from("/repo"),
+                    session_name: None,
+                    initial_model: "gpt-4.1".to_string(),
+                    git_head: Some("abc123".to_string()),
+                    cli_version: Some("0.6.0".to_string()),
+                }),
+            },
+            SessionEntry {
+                id: "config-root".to_string(),
+                parent_id: Some("header".to_string()),
+                timestamp: next_timestamp(),
+                kind: SessionEntryKind::ConfigChange(config_snapshot()),
+            },
+        ];
+
+        let push_user_assistant_chain = |entries: &mut Vec<SessionEntry>,
+                                         ts: &mut dyn FnMut() -> i64,
+                                         slug: &str,
+                                         parent: &str|
+         -> String {
+            let user_id = format!("user-{slug}");
+            entries.push(SessionEntry {
+                id: user_id.clone(),
+                parent_id: Some(parent.to_string()),
+                timestamp: ts(),
+                kind: SessionEntryKind::Item(ConversationItem::text(
+                    Role::User,
+                    format!("question {slug}"),
+                )),
+            });
+            let reason_id = format!("reason-{slug}");
+            entries.push(SessionEntry {
+                id: reason_id.clone(),
+                parent_id: Some(user_id),
+                timestamp: ts(),
+                kind: SessionEntryKind::Item(ConversationItem::Reasoning {
+                    content: format!("think {slug}"),
+                    summary: None,
+                    encrypted: None,
+                }),
+            });
+            let assistant_id = format!("assistant-{slug}");
+            entries.push(SessionEntry {
+                id: assistant_id.clone(),
+                parent_id: Some(reason_id),
+                timestamp: ts(),
+                kind: SessionEntryKind::Item(ConversationItem::text(
+                    Role::Assistant,
+                    format!("answer {slug}"),
+                )),
+            });
+            assistant_id
+        };
+
+        let root_assistant_id =
+            push_user_assistant_chain(&mut entries, &mut next_timestamp, "root", "config-root");
+
+        entries.push(SessionEntry {
+            id: "tr-root".to_string(),
+            parent_id: Some(root_assistant_id),
+            timestamp: next_timestamp(),
+            kind: SessionEntryKind::TranscriptReplay(TranscriptReplayItem::Message {
+                role: runtime_domain::session::TranscriptReplayRole::Assistant,
+                content: "answer root".to_string(),
+            }),
+        });
+
+        let mut config_chain_parent = "tr-root".to_string();
+        for branch_index in 1..=4 {
+            let config_id = format!("config-{branch_index}");
+            entries.push(SessionEntry {
+                id: config_id.clone(),
+                parent_id: Some(config_chain_parent.clone()),
+                timestamp: next_timestamp(),
+                kind: SessionEntryKind::ConfigChange(config_snapshot()),
+            });
+            push_user_assistant_chain(
+                &mut entries,
+                &mut next_timestamp,
+                &format!("branch-{branch_index}"),
+                &config_id,
+            );
+            config_chain_parent = config_id;
+        }
+
         entries
     }
 

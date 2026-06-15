@@ -10,6 +10,7 @@ use super::super::{
     model::RequestMetrics,
     runtime::tool_activity_preview::ToolApprovalPreview,
     tool_approval_panel::{ToolApprovalDetail, ToolApprovalSource},
+    tool_result::ToolActivityRenderMode,
 };
 use serde_json::Value;
 
@@ -103,6 +104,12 @@ impl RuntimeEventApply for Model {
             }
             RuntimeEvent::SessionTreeLoaded { payload } => {
                 self.apply_entry_tree_payload(payload);
+            }
+            RuntimeEvent::SessionBranchTreeLoaded { payload } => {
+                self.apply_entry_tree_branch_tree_payload(payload);
+            }
+            RuntimeEvent::SessionTreePreviewLoaded { payload } => {
+                self.apply_entry_tree_branch_preview_payload(payload);
             }
             RuntimeEvent::SessionResumed { payload } => {
                 self.apply_session_resume_payload(payload);
@@ -206,7 +213,7 @@ impl Model {
     fn rebuild_transcript_from_replay(&mut self, items: Vec<TranscriptReplayItem>) {
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let (transcript, terminal_snapshots) =
-            self.transcript_from_replay_items_with_terminal_snapshots(items);
+            self.transcript_from_replay_items_with_terminal_snapshots(items, None);
         self.transcript = transcript;
         self.runtime_terminal_snapshots = terminal_snapshots;
         self.refresh_status_line_after_transcript_change();
@@ -219,18 +226,34 @@ impl Model {
         &self,
         items: Vec<TranscriptReplayItem>,
     ) -> crate::transcript::Transcript {
-        self.transcript_from_replay_items_with_terminal_snapshots(items)
+        self.transcript_from_replay_items_with_terminal_snapshots(items, None)
             .0
+    }
+
+    pub(crate) fn transcript_from_replay_items_with_tool_activity_render_mode(
+        &self,
+        items: Vec<TranscriptReplayItem>,
+        tool_activity_render_mode: ToolActivityRenderMode,
+    ) -> crate::transcript::Transcript {
+        self.transcript_from_replay_items_with_terminal_snapshots(
+            items,
+            Some(tool_activity_render_mode),
+        )
+        .0
     }
 
     fn transcript_from_replay_items_with_terminal_snapshots(
         &self,
         items: Vec<TranscriptReplayItem>,
+        tool_activity_render_mode: Option<ToolActivityRenderMode>,
     ) -> (crate::transcript::Transcript, Vec<RuntimeTerminalSnapshot>) {
         let mut transcript = crate::transcript::Transcript::new(self.palette);
         transcript.set_gap(1);
         if self.has_window {
             transcript.set_width(self.width);
+        }
+        if let Some(tool_activity_render_mode) = tool_activity_render_mode {
+            transcript.set_tool_activity_render_mode(tool_activity_render_mode);
         }
         let mut terminal_snapshots = Vec::new();
         for item in items {

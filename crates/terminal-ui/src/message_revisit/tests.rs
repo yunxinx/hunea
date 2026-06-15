@@ -7,6 +7,7 @@ use runtime_domain::provider::ProviderKind;
 
 use crate::{
     AppEffect, AppEvent, EscRewindMode, Model, ModelOptions, Sender, StartupBannerOptions,
+    test_helpers::{render_model_buffer, rendered_rows},
     theme::default_palette,
 };
 use ratatui::style::Modifier;
@@ -126,7 +127,7 @@ fn conversation_message_revisit_highlight_projects_cx_half_height_frame_to_solid
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
 
     let buffer = render_model_buffer(&mut model, 40, 8);
-    let rows = buffer_rows(&buffer);
+    let rows = rendered_rows(&buffer);
     let message_row = rows
         .iter()
         .position(|row| row.contains("› second question"))
@@ -471,23 +472,6 @@ fn append_scrollable_turns(model: &mut Model, turn_count: usize) {
             .append_message(Sender::Assistant, format!("answer {index}"));
     }
     model.sync_transcript_render();
-}
-
-fn render_model_buffer(model: &mut Model, width: u16, height: u16) -> ratatui::buffer::Buffer {
-    let area = ratatui::layout::Rect::new(0, 0, width, height);
-    let mut buffer = ratatui::buffer::Buffer::empty(area);
-    let _ = model.render_to_buffer(area, &mut buffer);
-    buffer
-}
-
-fn buffer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
-    (0..buffer.area.height)
-        .map(|row| {
-            (0..buffer.area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
-        .collect()
 }
 
 fn two_turn_source_messages() -> Vec<(Sender, String)> {

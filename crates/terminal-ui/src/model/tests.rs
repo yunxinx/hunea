@@ -4,9 +4,12 @@ use std::{
 };
 
 use super::*;
-use crate::{AppEffect, AppEvent, Sender, StyleMode, document::DocumentAnchorRegion};
+use crate::{
+    AppEffect, AppEvent, Sender, StyleMode,
+    document::DocumentAnchorRegion,
+    test_helpers::{render_model_buffer, rendered_rows},
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{buffer::Buffer, layout::Rect};
 use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
@@ -2681,25 +2684,6 @@ fn type_text(model: &mut Model, text: &str) {
 fn rendered_rows_for_model(model: &mut Model, width: u16, height: u16) -> Vec<String> {
     let buffer = render_model_buffer(model, width, height);
     rendered_rows(&buffer)
-}
-
-fn render_model_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
-    let area = Rect::new(0, 0, width, height);
-    let mut buffer = Buffer::empty(area);
-    let _ = model.render_to_buffer(area, &mut buffer);
-    buffer
-}
-
-fn rendered_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
-    (0..buffer.area.height)
-        .map(|row| {
-            let mut line = String::new();
-            for column in 0..buffer.area.width {
-                line.push_str(buffer[(column, row)].symbol());
-            }
-            line
-        })
-        .collect()
 }
 
 fn rendered_column(row: &str, needle: &str) -> Option<usize> {

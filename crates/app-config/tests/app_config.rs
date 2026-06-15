@@ -22,6 +22,7 @@ fn load_defaults_to_cx_when_no_config_exists() {
     assert!(config.tui.status_line.is_empty());
     assert!(config.tui.status_line_2.is_empty());
     assert_eq!(config.tui.file_picker_popup_height, 7);
+    assert_eq!(config.tui.branch_picker_list_rows, 7);
     assert_eq!(config.tui.composer_undo_limit, 50);
     assert!(!config.debug.enabled);
 }
@@ -527,6 +528,20 @@ fn load_accepts_configured_file_picker_popup_height() {
 }
 
 #[test]
+fn load_accepts_configured_branch_picker_list_rows() {
+    let working_dir = temp_test_dir("load-branch-picker-list-rows-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nbranch_picker_list_rows = 14\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("branch picker list rows should accept values up to 14");
+
+    assert_eq!(config.tui.branch_picker_list_rows, 14);
+}
+
+#[test]
 fn load_accepts_configured_composer_undo_limit() {
     let working_dir = temp_test_dir("load-composer-undo-limit-working");
     write_config(
@@ -593,6 +608,20 @@ fn load_accepts_minimum_file_picker_popup_height() {
 }
 
 #[test]
+fn load_accepts_minimum_branch_picker_list_rows() {
+    let working_dir = temp_test_dir("load-min-branch-picker-list-rows-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nbranch_picker_list_rows = 3\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("branch picker list rows should accept the minimum value");
+
+    assert_eq!(config.tui.branch_picker_list_rows, 3);
+}
+
+#[test]
 fn load_rejects_file_picker_popup_height_below_minimum() {
     let working_dir = temp_test_dir("load-low-file-picker-popup-height-working");
     write_config(
@@ -612,6 +641,25 @@ fn load_rejects_file_picker_popup_height_below_minimum() {
 }
 
 #[test]
+fn load_rejects_branch_picker_list_rows_below_minimum() {
+    let working_dir = temp_test_dir("load-low-branch-picker-list-rows-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nbranch_picker_list_rows = 2\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("branch picker list rows should reject values below 3");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.branch_picker_list_rows must be between 3 and 14"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn load_rejects_file_picker_popup_height_above_maximum() {
     let working_dir = temp_test_dir("load-high-file-picker-popup-height-working");
     write_config(
@@ -626,6 +674,25 @@ fn load_rejects_file_picker_popup_height_above_maximum() {
         error
             .to_string()
             .contains("tui.file_picker_popup_height must be between 3 and 21"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_rejects_branch_picker_list_rows_above_maximum() {
+    let working_dir = temp_test_dir("load-high-branch-picker-list-rows-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nbranch_picker_list_rows = 15\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("branch picker list rows should reject values above 14");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.branch_picker_list_rows must be between 3 and 14"),
         "unexpected error: {error}"
     );
 }

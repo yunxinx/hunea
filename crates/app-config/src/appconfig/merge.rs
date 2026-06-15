@@ -5,10 +5,10 @@ use super::{
     file_config::{FileConfig, FileRuntimeConfig},
     types::{Config, EscRewindMode, ReasoningContentDisplay, RuntimeConfig, UserInputStyle},
     validate::{
-        normalize_request_retry_delays, validate_composer_undo_limit, validate_external_editor,
-        validate_file_picker_popup_height, validate_request_retry_attempts,
-        validate_request_timeout_seconds, validate_status_line_items_for_path,
-        validate_tool_max_turns,
+        normalize_request_retry_delays, validate_branch_picker_list_rows,
+        validate_composer_undo_limit, validate_external_editor, validate_file_picker_popup_height,
+        validate_request_retry_attempts, validate_request_timeout_seconds,
+        validate_status_line_items_for_path, validate_tool_max_turns,
     },
 };
 
@@ -123,6 +123,10 @@ pub(super) fn merge_config_file(
 
     if let Some(height) = file_config.tui.file_picker_popup_height {
         config.tui.file_picker_popup_height = validate_file_picker_popup_height(height, path)?;
+    }
+
+    if let Some(rows) = file_config.tui.branch_picker_list_rows {
+        config.tui.branch_picker_list_rows = validate_branch_picker_list_rows(rows, path)?;
     }
 
     if let Some(limit) = file_config.tui.composer_undo_limit {

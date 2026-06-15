@@ -41,9 +41,16 @@ pub enum AppEffect {
         session_id: String,
     },
     OpenEntryRewind,
+    OpenBranchTree,
     SelectEntryRewind {
         entry_id: String,
         prefill: Option<String>,
+    },
+    OpenBranchPreview {
+        branch_row_id: String,
+    },
+    SwitchBranch {
+        leaf_id: String,
     },
     TruncateConversation {
         retained_user_turns: usize,

@@ -27,7 +27,8 @@ use runtime::{AppRuntimeCoordinator, AppRuntimeOptions};
 
 #[cfg(test)]
 use app_config::appconfig::{
-    DebugConfig, EscRewindMode, ReasoningContentDisplay, RuntimeConfig, UserInputStyle,
+    BRANCH_PICKER_LIST_ROWS_DEFAULT, DebugConfig, EscRewindMode, ReasoningContentDisplay,
+    RuntimeConfig, UserInputStyle,
 };
 #[cfg(test)]
 use options_mapping::{
@@ -161,6 +162,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: BRANCH_PICKER_LIST_ROWS_DEFAULT,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
@@ -208,6 +210,16 @@ mod tests {
     }
 
     #[test]
+    fn model_options_from_config_carries_branch_picker_list_rows() {
+        let options = model_options_from_config(&TuiConfig {
+            branch_picker_list_rows: 9,
+            ..default_tui_config()
+        });
+
+        assert_eq!(options.branch_picker_list_rows, 9);
+    }
+
+    #[test]
     fn model_options_from_config_carries_composer_undo_limit() {
         let options = model_options_from_config(&TuiConfig {
             composer_undo_limit: 80,
@@ -244,6 +256,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
@@ -268,6 +281,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
@@ -292,6 +306,7 @@ mod tests {
             esc_interrupt_presses: 3,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
@@ -316,6 +331,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: false,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
@@ -340,6 +356,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: true,
@@ -364,6 +381,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: true,
@@ -460,6 +478,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
@@ -486,6 +505,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: true,
             show_reasoning_content: false,
@@ -513,6 +533,7 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,

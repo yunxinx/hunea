@@ -53,6 +53,23 @@ pub(super) fn validate_file_picker_popup_height(
     Ok(value as u16)
 }
 
+pub(super) fn validate_branch_picker_list_rows(
+    value: usize,
+    path: &Path,
+) -> Result<u16, AppConfigError> {
+    if !(usize::from(super::BRANCH_PICKER_LIST_ROWS_MIN)
+        ..=usize::from(super::BRANCH_PICKER_LIST_ROWS_MAX))
+        .contains(&value)
+    {
+        return Err(AppConfigError::InvalidBranchPickerListRows {
+            path: Some(path.to_path_buf()),
+            value,
+        });
+    }
+
+    Ok(value as u16)
+}
+
 pub(super) fn validate_composer_undo_limit(
     value: usize,
     path: &Path,

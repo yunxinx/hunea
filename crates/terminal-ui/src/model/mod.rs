@@ -18,6 +18,7 @@ use runtime_domain::{
 use super::{
     ReasoningDisplayMode, StartupBannerOptions,
     composer::{Composer, PendingComposerCursorClick},
+    entry_tree::{BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN},
     external_editor::ExternalEditorLaunch,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT, FilePickerState},
     file_search::FileSearchCache,
@@ -91,6 +92,7 @@ pub struct Model {
     pub(super) esc_rewind_mode: EscRewindMode,
     pub(super) show_esc_interrupt_hint: bool,
     pub(super) file_picker_popup_height: u16,
+    pub(super) branch_picker_list_rows: u16,
     pub(super) show_reasoning_content: bool,
     pub(super) reasoning_display_mode: ReasoningDisplayMode,
     pub(super) debug_commands_enabled: bool,
@@ -210,6 +212,9 @@ impl Model {
             file_picker_popup_height: options
                 .file_picker_popup_height
                 .clamp(FILE_PICKER_POPUP_MIN_HEIGHT, FILE_PICKER_POPUP_MAX_HEIGHT),
+            branch_picker_list_rows: options
+                .branch_picker_list_rows
+                .clamp(BRANCH_PICKER_LIST_ROWS_MIN, BRANCH_PICKER_LIST_ROWS_MAX),
             show_reasoning_content: options.show_reasoning_content,
             reasoning_display_mode: options.reasoning_display_mode,
             debug_commands_enabled: options.debug_commands_enabled,

@@ -93,23 +93,36 @@ struct RuntimeDiffSummary {
 
 const TOOL_ACTIVITY_EXECUTE_COMPACT_EDGE_LINES: usize = 2;
 
+fn is_full_detail_render_mode(render_mode: ToolActivityRenderMode) -> bool {
+    matches!(
+        render_mode,
+        ToolActivityRenderMode::Detailed | ToolActivityRenderMode::DebugDetailed
+    )
+}
+
+fn is_debug_detailed_render_mode(render_mode: ToolActivityRenderMode) -> bool {
+    render_mode == ToolActivityRenderMode::DebugDetailed
+}
+
 pub(super) fn runtime_tool_activity_detail_blocks(
     call: &RuntimeToolActivity,
     render_mode: ToolActivityRenderMode,
     permission_waiting: bool,
     terminal_snapshots: &BTreeMap<String, RuntimeTerminalSnapshot>,
 ) -> Vec<RuntimeToolActivityDetailBlock> {
-    if should_collapse_runtime_read_tool_activity(call) {
-        return Vec::new();
-    }
-    if should_collapse_runtime_write_tool_activity(call) {
-        return Vec::new();
-    }
-    if should_collapse_list_dir_tool_call(call) {
-        return Vec::new();
-    }
-    if should_collapse_specific_search_tool_activity(call) {
-        return Vec::new();
+    if !is_debug_detailed_render_mode(render_mode) {
+        if should_collapse_runtime_read_tool_activity(call) {
+            return Vec::new();
+        }
+        if should_collapse_runtime_write_tool_activity(call) {
+            return Vec::new();
+        }
+        if should_collapse_list_dir_tool_call(call) {
+            return Vec::new();
+        }
+        if should_collapse_specific_search_tool_activity(call) {
+            return Vec::new();
+        }
     }
 
     if is_execute_like_tool_call(call) {
@@ -176,7 +189,7 @@ fn execute_tool_call_detail_blocks(
 
     if let Some(raw_output) = call.raw_output.as_ref().and_then(|raw| raw.display_text()) {
         let output_lines = execute_tool_call_output_lines(&raw_output);
-        if render_mode == ToolActivityRenderMode::Detailed {
+        if is_full_detail_render_mode(render_mode) {
             let mut blocks = vec![RuntimeToolActivityDetailBlock::ExecuteTranscript(
                 RuntimeExecuteTranscriptBlock {
                     command: execute_tool_call_display_command(call),
@@ -242,7 +255,7 @@ fn active_execute_terminal_blocks(
                 unreachable!("content is filtered to terminal blocks");
             };
             let snapshot = terminal_snapshots.get(terminal_id);
-            if render_mode == ToolActivityRenderMode::Detailed {
+            if is_full_detail_render_mode(render_mode) {
                 return RuntimeToolActivityDetailBlock::ExecuteTranscript(
                     RuntimeExecuteTranscriptBlock {
                         command: execute_terminal_snapshot_command(call, snapshot),
@@ -330,7 +343,7 @@ fn execute_result_footer_line(
     call: &RuntimeToolActivity,
     render_mode: ToolActivityRenderMode,
 ) -> Option<RuntimeExecuteFooterLine> {
-    if render_mode != ToolActivityRenderMode::Detailed {
+    if !is_full_detail_render_mode(render_mode) {
         return None;
     }
     let details = call.raw_output.as_ref()?.tool_result_details()?;
@@ -558,7 +571,7 @@ fn truncate_detail_block_with_edge(
     render_mode: ToolActivityRenderMode,
     edge: usize,
 ) -> Vec<String> {
-    if render_mode == ToolActivityRenderMode::Detailed {
+    if is_full_detail_render_mode(render_mode) {
         return lines;
     }
     let limit = edge.saturating_mul(2);
@@ -578,7 +591,7 @@ fn truncate_diff_detail_block(
     lines: Vec<RuntimeDiffDetailLine>,
     render_mode: ToolActivityRenderMode,
 ) -> Vec<RuntimeDiffDetailLine> {
-    if render_mode == ToolActivityRenderMode::Detailed {
+    if is_full_detail_render_mode(render_mode) {
         return lines;
     }
     let edge = TOOL_ACTIVITY_COMPACT_EDGE_LINES;

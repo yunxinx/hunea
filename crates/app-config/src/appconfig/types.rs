@@ -2,6 +2,12 @@
 pub const FILE_PICKER_POPUP_MIN_HEIGHT: u16 = 3;
 /// @ 文件选择浮窗最多显示 21 行，避免覆盖过多上下文。
 pub const FILE_PICKER_POPUP_MAX_HEIGHT: u16 = 21;
+/// Branch picker 至少显示 3 个分支行，保证有可导航空间。
+pub const BRANCH_PICKER_LIST_ROWS_MIN: u16 = 3;
+/// Branch picker 最多显示 14 个分支行，避免遮挡 `/tree` 过多上下文。
+pub const BRANCH_PICKER_LIST_ROWS_MAX: u16 = 14;
+/// Branch picker 默认显示 7 个分支行，与 file picker 默认密度一致。
+pub const BRANCH_PICKER_LIST_ROWS_DEFAULT: u16 = 7;
 /// Composer undo 至少保留 1 条，确保开启撤回时有明确效果。
 pub const COMPOSER_UNDO_MIN_LIMIT: usize = 1;
 /// Composer undo 最多保留 200 条，避免配置误填导致草稿快照无限增长。
@@ -32,6 +38,7 @@ pub struct TuiConfig {
     pub esc_rewind_mode: EscRewindMode,
     pub show_esc_interrupt_hint: bool,
     pub file_picker_popup_height: u16,
+    pub branch_picker_list_rows: u16,
     pub composer_undo_limit: usize,
     pub print_transcript_on_exit: bool,
     pub show_reasoning_content: bool,

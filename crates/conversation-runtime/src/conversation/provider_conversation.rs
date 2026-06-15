@@ -171,6 +171,39 @@ impl ProviderConversation {
         } else {
             ResolvedSessionState::default()
         };
+        Ok(Self::from_resolved_session_store(
+            bridge,
+            store,
+            header_template,
+            session_id,
+            &restored_state,
+        ))
+    }
+
+    /// `with_resolved_session_store` 使用调用方已显式解析的 session state 构造对话。
+    pub fn with_resolved_session_store(
+        store: Arc<dyn SessionStore>,
+        header_template: SessionHeader,
+        session_id: Option<SessionId>,
+        restored_state: &ResolvedSessionState,
+    ) -> Result<Self, ProviderConversationError> {
+        let bridge = SessionStoreBridge::new()?;
+        Ok(Self::from_resolved_session_store(
+            bridge,
+            store,
+            header_template,
+            session_id,
+            restored_state,
+        ))
+    }
+
+    fn from_resolved_session_store(
+        bridge: SessionStoreBridge,
+        store: Arc<dyn SessionStore>,
+        header_template: SessionHeader,
+        session_id: Option<SessionId>,
+        restored_state: &ResolvedSessionState,
+    ) -> Self {
         let history = restored_state
             .items
             .iter()
@@ -178,16 +211,17 @@ impl ProviderConversation {
             .collect::<Vec<_>>();
         let persisted_history = restored_state
             .items
-            .into_iter()
+            .iter()
             .map(|entry| PersistedConversationItem {
-                entry_id: Some(entry.entry_id),
-                item: entry.item,
+                entry_id: Some(entry.entry_id.clone()),
+                item: entry.item.clone(),
             })
             .collect::<Vec<_>>();
 
-        Ok(Self {
+        Self {
             system_prompt: restored_state
                 .latest_config
+                .clone()
                 .and_then(|config| config.system_prompt)
                 .and_then(normalize_system_prompt),
             history,
@@ -199,7 +233,7 @@ impl ProviderConversation {
                 session_id,
                 header_template,
             }),
-        })
+        }
     }
 
     /// `clear` 清空当前会话。
@@ -1003,6 +1037,51 @@ mod tests {
             >,
         > {
             Box::pin(async { Ok(session_store::SessionTreeSnapshot::default()) })
+        }
+
+        fn load_session_tree_for_leaf<'a>(
+            &'a self,
+            _session_id: &'a SessionId,
+            _leaf_id: &'a str,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<session_store::SessionTreeSnapshot, SessionStoreError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Ok(session_store::SessionTreeSnapshot::default()) })
+        }
+
+        fn load_session_branch_preview<'a>(
+            &'a self,
+            _session_id: &'a SessionId,
+            _branch_row_id: &'a str,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<session_store::SessionTreeSnapshot, SessionStoreError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Ok(session_store::SessionTreeSnapshot::default()) })
+        }
+
+        fn load_session_branch_tree<'a>(
+            &'a self,
+            _session_id: &'a SessionId,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            session_store::SessionBranchTreeSnapshot,
+                            SessionStoreError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Ok(session_store::SessionBranchTreeSnapshot::default()) })
         }
 
         fn list_sessions<'a>(

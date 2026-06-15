@@ -17,10 +17,12 @@ use tokio::{
 
 use crate::{
     ConfigSnapshot, ResolveError, ResolvedSessionState, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT,
-    SESSION_TITLE_FALLBACK_CHAR_LIMIT, SessionEntry, SessionEntryKind, SessionHeader, SessionId,
-    SessionMeta, SessionStoreError, SessionTreeSnapshot, encode_project_dir, generate_entry_id,
-    hunea_dir, jsonl::JsonlLoader, metadata::MetadataIndex, recorder::SessionRecorder,
-    resolve as resolve_entries, resolve_state, session_filename, session_tree_snapshot,
+    SESSION_TITLE_FALLBACK_CHAR_LIMIT, SessionBranchTreeSnapshot, SessionEntry, SessionEntryKind,
+    SessionHeader, SessionId, SessionMeta, SessionStoreError, SessionTreeSnapshot,
+    encode_project_dir, generate_entry_id, hunea_dir, jsonl::JsonlLoader, metadata::MetadataIndex,
+    recorder::SessionRecorder, resolve as resolve_entries, resolve_state,
+    session_branch_preview_snapshot, session_branch_tree_snapshot, session_filename,
+    session_tree_snapshot, session_tree_snapshot_for_leaf,
 };
 
 /// `SessionStore` 定义 conversation-runtime 依赖的持久化接口。
@@ -70,6 +72,25 @@ pub trait SessionStore: Send + Sync {
         &'a self,
         session_id: &'a SessionId,
     ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>;
+
+    fn load_session_tree_for_leaf<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>;
+
+    fn load_session_branch_preview<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        branch_row_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>;
+
+    fn load_session_branch_tree<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<SessionBranchTreeSnapshot, SessionStoreError>> + Send + 'a>,
+    >;
 
     fn list_sessions<'a>(
         &'a self,
@@ -370,6 +391,54 @@ impl SessionStore for LocalSessionStore {
             let _guard = handle.operation_lock.lock().await;
             let state = handle.lock_state();
             session_tree_snapshot(&state.entries).map_err(resolve_error)
+        })
+    }
+
+    fn load_session_tree_for_leaf<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let requested_leaf = leaf_id.to_string();
+            let handle = self.handle_for_session(&session_id).await?;
+            let _guard = handle.operation_lock.lock().await;
+            let state = handle.lock_state();
+            session_tree_snapshot_for_leaf(&state.entries, &requested_leaf).map_err(resolve_error)
+        })
+    }
+
+    fn load_session_branch_preview<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        branch_row_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let requested_branch = branch_row_id.to_string();
+            let handle = self.handle_for_session(&session_id).await?;
+            let _guard = handle.operation_lock.lock().await;
+            let state = handle.lock_state();
+            session_branch_preview_snapshot(&state.entries, &requested_branch)
+                .map_err(resolve_error)
+        })
+    }
+
+    fn load_session_branch_tree<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<SessionBranchTreeSnapshot, SessionStoreError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let handle = self.handle_for_session(&session_id).await?;
+            let _guard = handle.operation_lock.lock().await;
+            let state = handle.lock_state();
+            session_branch_tree_snapshot(&state.entries).map_err(resolve_error)
         })
     }
 
@@ -699,6 +768,66 @@ impl SessionStore for InMemorySessionStore {
         })
     }
 
+    fn load_session_tree_for_leaf<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let requested_leaf = leaf_id.to_string();
+            let sessions = self.sessions.read().await;
+            let session =
+                sessions
+                    .get(&session_id)
+                    .ok_or_else(|| SessionStoreError::SessionNotFound {
+                        session_id: session_id.clone(),
+                    })?;
+            session_tree_snapshot_for_leaf(&session.entries, &requested_leaf).map_err(resolve_error)
+        })
+    }
+
+    fn load_session_branch_preview<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        branch_row_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let requested_branch = branch_row_id.to_string();
+            let sessions = self.sessions.read().await;
+            let session =
+                sessions
+                    .get(&session_id)
+                    .ok_or_else(|| SessionStoreError::SessionNotFound {
+                        session_id: session_id.clone(),
+                    })?;
+            session_branch_preview_snapshot(&session.entries, &requested_branch)
+                .map_err(resolve_error)
+        })
+    }
+
+    fn load_session_branch_tree<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<SessionBranchTreeSnapshot, SessionStoreError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let session_id = session_id.clone();
+            let sessions = self.sessions.read().await;
+            let session =
+                sessions
+                    .get(&session_id)
+                    .ok_or_else(|| SessionStoreError::SessionNotFound {
+                        session_id: session_id.clone(),
+                    })?;
+            session_branch_tree_snapshot(&session.entries).map_err(resolve_error)
+        })
+    }
+
     fn list_sessions<'a>(
         &'a self,
         project_dir: &'a str,
@@ -920,6 +1049,9 @@ fn resolve_error(error: ResolveError) -> SessionStoreError {
         },
         ResolveError::InvalidCompactionTarget(target_id) => SessionStoreError::IndexInconsistent {
             message: format!("resolve failed because compaction target `{target_id}` is invalid"),
+        },
+        ResolveError::InvalidTreeRow(entry_id) => SessionStoreError::IndexInconsistent {
+            message: format!("resolve failed because entry `{entry_id}` is not a tree row"),
         },
     }
 }

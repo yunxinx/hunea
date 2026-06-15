@@ -1,6 +1,7 @@
 use crate::appconfig::{
-    self, AppConfigError, COMPOSER_UNDO_MAX_LIMIT, COMPOSER_UNDO_MIN_LIMIT,
-    FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT,
+    self, AppConfigError, BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN,
+    COMPOSER_UNDO_MAX_LIMIT, COMPOSER_UNDO_MIN_LIMIT, FILE_PICKER_POPUP_MAX_HEIGHT,
+    FILE_PICKER_POPUP_MIN_HEIGHT,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -160,6 +161,18 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
                 (
                     "Expected",
                     format!("{FILE_PICKER_POPUP_MIN_HEIGHT}..{FILE_PICKER_POPUP_MAX_HEIGHT}"),
+                ),
+            ],
+        ),
+        AppConfigError::InvalidBranchPickerListRows { path, value } => rows_with_optional_file(
+            path,
+            vec![
+                ("Setting", "tui.branch_picker_list_rows".to_string()),
+                ("Value", value.to_string()),
+                ("Reason", "Invalid branch picker list rows".to_string()),
+                (
+                    "Expected",
+                    format!("{BRANCH_PICKER_LIST_ROWS_MIN}..{BRANCH_PICKER_LIST_ROWS_MAX}"),
                 ),
             ],
         ),

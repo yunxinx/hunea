@@ -17,6 +17,7 @@ use runtime_domain::{
     request_policy::RuntimeRequestPolicy,
     session::{ConversationEvent, RuntimeTarget},
 };
+use session_store::SessionId;
 use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
 
 use super::{
@@ -73,6 +74,7 @@ pub struct ConversationWorker {
     pub cancellation: Option<CancellationToken>,
     pub target: Option<RuntimeTarget>,
     permission_broker: Option<ConversationPermissionBroker>,
+    pending_session_id: Option<SessionId>,
     pending_user_entry_id: Option<String>,
     session_items: Vec<PersistedConversationItem>,
 }
@@ -118,6 +120,7 @@ impl ConversationWorker {
         self.cancellation = Some(cancellation);
         self.target = Some(target);
         self.permission_broker = Some(permission_broker);
+        self.pending_session_id = None;
         self.pending_user_entry_id = None;
         self.session_items.clear();
     }
@@ -135,6 +138,7 @@ impl ConversationWorker {
         }
         self.receiver = None;
         self.target = None;
+        self.pending_session_id = None;
         self.pending_user_entry_id = None;
         self.session_items.clear();
     }
@@ -169,6 +173,10 @@ impl ConversationWorker {
 
     pub fn take_pending_user_entry_id(&mut self) -> Option<String> {
         self.pending_user_entry_id.take()
+    }
+
+    pub fn take_pending_session_id(&mut self) -> Option<SessionId> {
+        self.pending_session_id.take()
     }
 
     pub fn take_session_items(&mut self) -> Vec<PersistedConversationItem> {
@@ -208,8 +216,20 @@ impl ConversationWorker {
 
     fn apply_session_event(&mut self, event: ConversationDelta) {
         match event {
-            ConversationDelta::ProviderTurnStarted { user_entry_id } => {
-                self.pending_user_entry_id = user_entry_id;
+            ConversationDelta::ProviderTurnStarted {
+                session_id,
+                user_entry_id: Some(user_entry_id),
+            } => {
+                if let Some(session_id) = session_id {
+                    self.pending_session_id = Some(session_id);
+                }
+                self.pending_user_entry_id = Some(user_entry_id);
+            }
+            ConversationDelta::ProviderTurnStarted { session_id, .. } => {
+                if let Some(session_id) = session_id {
+                    self.pending_session_id = Some(session_id);
+                }
+                // retry 重放可能只表示“turn 已经持久化过”，不能清掉首次 entry id。
             }
             ConversationDelta::ProviderContextItem { entry_id, item } => {
                 self.session_items
@@ -222,6 +242,7 @@ impl ConversationWorker {
         self.receiver = None;
         self.cancellation = None;
         self.target = None;
+        self.pending_session_id = None;
         self.pending_user_entry_id = None;
         if let Some(permission_broker) = self.permission_broker.take() {
             permission_broker.cancel_all();
@@ -546,6 +567,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use tool_runtime::ToolExecutorRegistry;
 
+    use super::persistence::SessionPersistenceError;
     use super::{
         ConversationDelta, ConversationEvent, ConversationPermissionBroker, ConversationWorker,
         ConversationWorkerEvent,
@@ -568,6 +590,7 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
+            pending_session_id: None,
             pending_user_entry_id: None,
             session_items: Vec::new(),
         };
@@ -588,6 +611,7 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
+            pending_session_id: None,
             pending_user_entry_id: None,
             session_items: Vec::new(),
         };
@@ -634,6 +658,7 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
+            pending_session_id: None,
             pending_user_entry_id: None,
             session_items: Vec::new(),
         };
@@ -659,6 +684,7 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
+            pending_session_id: None,
             pending_user_entry_id: None,
             session_items: Vec::new(),
         };
@@ -688,6 +714,7 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
+            pending_session_id: None,
             pending_user_entry_id: None,
             session_items: Vec::new(),
         };
@@ -696,6 +723,7 @@ mod tests {
         sender
             .send(ConversationWorkerEvent::Session(
                 ConversationDelta::ProviderTurnStarted {
+                    session_id: None,
                     user_entry_id: Some("user-1".to_string()),
                 },
             ))
@@ -725,6 +753,43 @@ mod tests {
     }
 
     #[test]
+    fn conversation_runtime_preserves_turn_entry_id_when_retry_replays_turn_start() {
+        let (sender, receiver) = mpsc::channel();
+        let mut runtime = ConversationWorker {
+            receiver: Some(receiver),
+            cancellation: Some(CancellationToken::new()),
+            target: Some(RuntimeTarget::provider("provider", "model")),
+            permission_broker: None,
+            pending_session_id: None,
+            pending_user_entry_id: None,
+            session_items: Vec::new(),
+        };
+
+        sender
+            .send(ConversationWorkerEvent::Session(
+                ConversationDelta::ProviderTurnStarted {
+                    session_id: None,
+                    user_entry_id: Some("user-1".to_string()),
+                },
+            ))
+            .expect("first provider turn start should queue");
+        sender
+            .send(ConversationWorkerEvent::Session(
+                ConversationDelta::ProviderTurnStarted {
+                    session_id: None,
+                    user_entry_id: None,
+                },
+            ))
+            .expect("retry provider turn start should queue");
+
+        assert_eq!(runtime.try_recv_event(), None);
+        assert_eq!(
+            runtime.take_pending_user_entry_id().as_deref(),
+            Some("user-1")
+        );
+    }
+
+    #[test]
     fn conversation_interrupt_keeps_receiver_until_worker_terminal_event() {
         let (_sender, receiver) = mpsc::channel();
         let mut runtime = ConversationWorker {
@@ -732,6 +797,7 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("provider", "model")),
             permission_broker: None,
+            pending_session_id: None,
             pending_user_entry_id: None,
             session_items: Vec::new(),
         };
@@ -752,7 +818,6 @@ mod tests {
         let mut conversation = ProviderConversation::with_session_store(
             store_trait,
             sample_header(&work_dir, "qwen3"),
-            None,
         )
         .expect("persisted conversation should initialize");
         let user = ConversationItem::text(Role::User, "hello");
@@ -774,6 +839,7 @@ mod tests {
             cancellation: Some(CancellationToken::new()),
             target: Some(RuntimeTarget::provider("local", "qwen3")),
             permission_broker: None,
+            pending_session_id: None,
             pending_user_entry_id: None,
             session_items: Vec::new(),
         };
@@ -830,7 +896,6 @@ mod tests {
         let mut conversation = ProviderConversation::with_session_store(
             store_trait,
             sample_header(&work_dir, "qwen3"),
-            None,
         )
         .expect("persisted conversation should initialize");
         let request = conversation
@@ -912,6 +977,7 @@ mod tests {
         run_persistence(super::persist_terminal_snapshot(
             persistence.as_ref(),
             terminal_snapshot.clone(),
+            &state,
         ))
         .expect("terminal snapshot should persist");
         run_persistence(super::persist_context_item(
@@ -1170,8 +1236,8 @@ mod tests {
     }
 
     fn run_persistence<T>(
-        future: impl std::future::Future<Output = Result<T, String>>,
-    ) -> Result<T, String> {
+        future: impl std::future::Future<Output = Result<T, SessionPersistenceError>>,
+    ) -> Result<T, SessionPersistenceError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

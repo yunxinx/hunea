@@ -4,7 +4,7 @@ use std::{
     str::FromStr,
 };
 
-use provider_protocol::ConversationItem;
+use provider_protocol::{ConversationItem, ConversationItemValidationError};
 use runtime_domain::{paths::hunea_config_dir, session::TranscriptReplayItem};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -222,6 +222,11 @@ pub enum SessionStoreError {
     DanglingParent { parent_id: String },
     #[error("duplicate entry id `{id}` in session")]
     DuplicateId { id: String },
+    #[error("invalid conversation item: {source}")]
+    InvalidConversationItem {
+        #[source]
+        source: ConversationItemValidationError,
+    },
     #[error("session `{session_id}` does not exist")]
     SessionNotFound { session_id: SessionId },
     #[error("session metadata index is inconsistent: {message}")]
@@ -235,6 +240,8 @@ pub enum SessionStoreError {
     MetadataTaskPanicked,
     #[error("session writer channel closed")]
     ChannelClosed,
+    #[error("session writer queue is full")]
+    QueueFull,
     #[error("session writer worker panicked")]
     WorkerPanicked,
     #[error("failed to resolve session history: {source}")]

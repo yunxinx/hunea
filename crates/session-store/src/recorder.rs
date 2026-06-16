@@ -71,7 +71,10 @@ impl SessionRecorder {
 
         self.sender()?
             .try_send(RecordCommand::Buffer(entries))
-            .map_err(|_| SessionStoreError::ChannelClosed)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => SessionStoreError::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => SessionStoreError::ChannelClosed,
+            })
     }
 
     pub(crate) async fn persist(&self) -> Result<(), SessionStoreError> {
@@ -418,7 +421,7 @@ mod tests {
             ))
             .expect_err("extra buffer should fail once the channel is full");
 
-        assert!(matches!(error, crate::SessionStoreError::ChannelClosed));
+        assert!(matches!(error, crate::SessionStoreError::QueueFull));
 
         let _ = start_tx.send(());
         recorder

@@ -3,7 +3,7 @@ use std::{fs, time::Duration};
 #[path = "support/common.rs"]
 mod support;
 
-use provider_protocol::{ConversationItem, Role};
+use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
 use session_store::{InMemorySessionStore, SessionStore};
 use support::{TestSessionRoot, first_item_entry_id, item_entry_ids, open_store, sample_header};
 
@@ -35,6 +35,38 @@ async fn local_store_creates_appends_and_resolves_history() {
         .expect("resolve should return canonical history");
 
     assert_eq!(resolved, vec![user_item, assistant_item]);
+}
+
+#[tokio::test]
+async fn local_store_rejects_invalid_conversation_item() {
+    let root = TestSessionRoot::new("local-store-invalid-item");
+    let work_dir = root.workspace_path("repo");
+    let store = open_store(&root).await;
+    let session_id = store
+        .create_session(sample_header(&work_dir, "gpt-4.1", Some("invalid-item")))
+        .await
+        .expect("session should be created");
+    let invalid_user_item = ConversationItem::user(vec![ContentBlock::ToolCall(ToolCall::new(
+        "call-1", "read", "{}",
+    ))]);
+
+    let error = store
+        .append(&session_id, invalid_user_item)
+        .await
+        .expect_err("invalid item should be rejected before persistence");
+
+    assert!(
+        error.to_string().contains("invalid conversation item"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        store
+            .resolve(&session_id, None)
+            .await
+            .expect("session should still resolve")
+            .is_empty(),
+        "invalid item should not be visible after rejection"
+    );
 }
 
 #[tokio::test]

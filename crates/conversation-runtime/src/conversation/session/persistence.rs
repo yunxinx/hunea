@@ -13,10 +13,12 @@ use tokio_util::sync::CancellationToken;
 
 use super::ConversationWorkerEvent;
 use crate::conversation::PreparedConversationPersistence;
+use session_store::{SessionId, SessionStoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ConversationDelta {
     ProviderTurnStarted {
+        session_id: Option<SessionId>,
         user_entry_id: Option<String>,
     },
     ProviderContextItem {
@@ -39,8 +41,48 @@ pub(super) enum SessionPersistenceCommand {
 #[derive(Default)]
 pub(super) struct SessionPersistenceState {
     has_persisted_turn_start: bool,
+    session_id: Option<SessionId>,
+    user_entry_id: Option<String>,
     tool_activities: HashMap<String, RuntimeToolActivity>,
     final_tool_activity_ids: HashSet<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SessionPersistenceError {
+    #[error("persist conversation config change failed: {source}")]
+    PersistConfigChange {
+        #[source]
+        source: SessionStoreError,
+    },
+    #[error("persist conversation user message failed: {source}")]
+    PersistUserMessage {
+        #[source]
+        source: SessionStoreError,
+    },
+    #[error("persist conversation item failed: {source}")]
+    PersistConversationItem {
+        #[source]
+        source: SessionStoreError,
+    },
+    #[error("persist transcript replay item failed: {source}")]
+    PersistTranscriptReplay {
+        #[source]
+        source: SessionStoreError,
+    },
+    #[error("create conversation session failed: {source}")]
+    CreateSession {
+        #[source]
+        source: SessionStoreError,
+    },
+    #[error("persist conversation flush failed: {source}")]
+    Flush {
+        #[source]
+        source: SessionStoreError,
+    },
+    #[error("conversation session has not started persistence")]
+    MissingSession,
+    #[error("{message}")]
+    FlushActorFailed { message: String },
 }
 
 pub(super) async fn run_session_persistence_actor(
@@ -72,16 +114,26 @@ pub(super) async fn run_session_persistence_actor(
                 persist_tool_activity_update(persistence.as_ref(), update, &mut state).await
             }
             SessionPersistenceCommand::TerminalSnapshot(snapshot) => {
-                persist_terminal_snapshot(persistence.as_ref(), snapshot).await
+                persist_terminal_snapshot(persistence.as_ref(), snapshot, &state).await
             }
             SessionPersistenceCommand::Flush { ack } => {
-                let result = flush_persistence(persistence.as_ref()).await;
-                let _ = ack.send(result.clone());
-                result
+                let result = flush_persistence(persistence.as_ref(), &state).await;
+                match result {
+                    Ok(()) => {
+                        let _ = ack.send(Ok(()));
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        let _ = ack.send(Err(message.clone()));
+                        Err(SessionPersistenceError::FlushActorFailed { message })
+                    }
+                }
             }
         };
 
-        if let Err(message) = result {
+        if let Err(error) = result {
+            let message = error.to_string();
             cancellation.cancel();
             let _ = sender.send(ConversationWorkerEvent::progress(
                 ConversationEvent::Failed { message },
@@ -96,47 +148,51 @@ pub(super) async fn persist_turn_start(
     sender: &mpsc::Sender<ConversationWorkerEvent>,
     _cancellation: &CancellationToken,
     state: &mut SessionPersistenceState,
-) -> Result<(), String> {
+) -> Result<(), SessionPersistenceError> {
     if state.has_persisted_turn_start {
         let _ = sender.send(ConversationWorkerEvent::Session(
             ConversationDelta::ProviderTurnStarted {
-                user_entry_id: None,
+                session_id: state.session_id.clone(),
+                user_entry_id: state.user_entry_id.clone(),
             },
         ));
         return Ok(());
     }
 
-    let user_entry_id = if let Some(persistence) = persistence {
+    let (session_id, user_entry_id) = if let Some(persistence) = persistence {
+        let session_id = ensure_persistence_session(persistence).await?;
         persistence
             .store
-            .append_config_change(&persistence.session_id, persistence.config_snapshot.clone())
+            .append_config_change(&session_id, persistence.config_snapshot.clone())
             .await
-            .map_err(|error| format!("persist conversation config change: {error}"))?;
-        Some(
-            persistence
-                .store
-                .append(
-                    &persistence.session_id,
-                    persistence.current_user_message.clone(),
-                )
-                .await
-                .map_err(|error| format!("persist conversation user message: {error}"))?,
-        )
+            .map_err(|source| SessionPersistenceError::PersistConfigChange { source })?;
+        let user_entry_id = persistence
+            .store
+            .append(&session_id, persistence.current_user_message.clone())
+            .await
+            .map_err(|source| SessionPersistenceError::PersistUserMessage { source })?;
+        (Some(session_id), Some(user_entry_id))
     } else {
-        None
+        (None, None)
     };
 
-    if let Some(persistence) = persistence {
+    if let (Some(persistence), Some(session_id)) = (persistence, session_id.as_ref()) {
         append_transcript_replay_items(
             persistence,
+            session_id,
             transcript_replay_items_from_context_item(&persistence.current_user_message, state),
         )
         .await?;
     }
 
     state.has_persisted_turn_start = true;
+    state.session_id = session_id.clone();
+    state.user_entry_id = user_entry_id.clone();
     let _ = sender.send(ConversationWorkerEvent::Session(
-        ConversationDelta::ProviderTurnStarted { user_entry_id },
+        ConversationDelta::ProviderTurnStarted {
+            session_id,
+            user_entry_id,
+        },
     ));
     Ok(())
 }
@@ -147,21 +203,29 @@ pub(super) async fn persist_context_item(
     _cancellation: &CancellationToken,
     item: ConversationItem,
     state: &mut SessionPersistenceState,
-) -> Result<(), String> {
-    let entry_id = if let Some(persistence) = persistence {
+) -> Result<(), SessionPersistenceError> {
+    let active_session_id = if let Some(persistence) = persistence {
+        Some(active_session_id(persistence, state)?)
+    } else {
+        None
+    };
+    let entry_id = if let (Some(persistence), Some(session_id)) =
+        (persistence, active_session_id.as_ref())
+    {
         Some(
             persistence
                 .store
-                .append(&persistence.session_id, item.clone())
+                .append(session_id, item.clone())
                 .await
-                .map_err(|error| format!("persist conversation item: {error}"))?,
+                .map_err(|source| SessionPersistenceError::PersistConversationItem { source })?,
         )
     } else {
         None
     };
-    if let Some(persistence) = persistence {
+    if let (Some(persistence), Some(session_id)) = (persistence, active_session_id.as_ref()) {
         append_transcript_replay_items(
             persistence,
+            session_id,
             transcript_replay_items_from_context_item(&item, state),
         )
         .await?;
@@ -176,13 +240,18 @@ pub(super) async fn persist_tool_activity_started(
     persistence: Option<&PreparedConversationPersistence>,
     activity: RuntimeToolActivity,
     state: &mut SessionPersistenceState,
-) -> Result<(), String> {
+) -> Result<(), SessionPersistenceError> {
     state
         .tool_activities
         .insert(activity.activity_id.clone(), activity.clone());
     if let Some(persistence) = persistence {
-        append_transcript_replay_item(persistence, TranscriptReplayItem::ToolActivity { activity })
-            .await?;
+        let session_id = active_session_id(persistence, state)?;
+        append_transcript_replay_item(
+            persistence,
+            &session_id,
+            TranscriptReplayItem::ToolActivity { activity },
+        )
+        .await?;
     }
     Ok(())
 }
@@ -191,7 +260,7 @@ pub(super) async fn persist_tool_activity_update(
     persistence: Option<&PreparedConversationPersistence>,
     update: RuntimeToolActivityUpdate,
     state: &mut SessionPersistenceState,
-) -> Result<(), String> {
+) -> Result<(), SessionPersistenceError> {
     let activity_id = update.activity_id.clone();
     let is_final = matches!(
         update.status,
@@ -209,8 +278,13 @@ pub(super) async fn persist_tool_activity_update(
     }
     state.tool_activities.insert(activity_id, activity.clone());
     if let Some(persistence) = persistence {
-        append_transcript_replay_item(persistence, TranscriptReplayItem::ToolActivity { activity })
-            .await?;
+        let session_id = active_session_id(persistence, state)?;
+        append_transcript_replay_item(
+            persistence,
+            &session_id,
+            TranscriptReplayItem::ToolActivity { activity },
+        )
+        .await?;
     }
     Ok(())
 }
@@ -218,10 +292,13 @@ pub(super) async fn persist_tool_activity_update(
 pub(super) async fn persist_terminal_snapshot(
     persistence: Option<&PreparedConversationPersistence>,
     snapshot: RuntimeTerminalSnapshot,
-) -> Result<(), String> {
+    state: &SessionPersistenceState,
+) -> Result<(), SessionPersistenceError> {
     if let Some(persistence) = persistence {
+        let session_id = active_session_id(persistence, state)?;
         append_transcript_replay_item(
             persistence,
+            &session_id,
             TranscriptReplayItem::TerminalSnapshot { snapshot },
         )
         .await?;
@@ -231,24 +308,53 @@ pub(super) async fn persist_terminal_snapshot(
 
 async fn append_transcript_replay_items(
     persistence: &PreparedConversationPersistence,
+    session_id: &SessionId,
     items: Vec<TranscriptReplayItem>,
-) -> Result<(), String> {
+) -> Result<(), SessionPersistenceError> {
     for item in items {
-        append_transcript_replay_item(persistence, item).await?;
+        append_transcript_replay_item(persistence, session_id, item).await?;
     }
     Ok(())
 }
 
 async fn append_transcript_replay_item(
     persistence: &PreparedConversationPersistence,
+    session_id: &SessionId,
     item: TranscriptReplayItem,
-) -> Result<(), String> {
+) -> Result<(), SessionPersistenceError> {
     persistence
         .store
-        .append_transcript_replay(&persistence.session_id, item)
+        .append_transcript_replay(session_id, item)
         .await
         .map(|_| ())
-        .map_err(|error| format!("persist transcript replay item: {error}"))
+        .map_err(|source| SessionPersistenceError::PersistTranscriptReplay { source })
+}
+
+async fn ensure_persistence_session(
+    persistence: &PreparedConversationPersistence,
+) -> Result<SessionId, SessionPersistenceError> {
+    if let Some(session_id) = persistence.session_id.as_ref() {
+        return Ok(session_id.clone());
+    }
+
+    let mut header = persistence.header_template.clone();
+    header.initial_model = persistence.config_snapshot.model.clone();
+    persistence
+        .store
+        .create_session(header)
+        .await
+        .map_err(|source| SessionPersistenceError::CreateSession { source })
+}
+
+fn active_session_id(
+    persistence: &PreparedConversationPersistence,
+    state: &SessionPersistenceState,
+) -> Result<SessionId, SessionPersistenceError> {
+    state
+        .session_id
+        .clone()
+        .or_else(|| persistence.session_id.clone())
+        .ok_or(SessionPersistenceError::MissingSession)
 }
 
 fn transcript_replay_items_from_context_item(
@@ -344,13 +450,21 @@ fn runtime_tool_activity_from_update(update: RuntimeToolActivityUpdate) -> Runti
 
 async fn flush_persistence(
     persistence: Option<&PreparedConversationPersistence>,
-) -> Result<(), String> {
+    state: &SessionPersistenceState,
+) -> Result<(), SessionPersistenceError> {
     if let Some(persistence) = persistence {
+        let Some(session_id) = state
+            .session_id
+            .as_ref()
+            .or(persistence.session_id.as_ref())
+        else {
+            return Ok(());
+        };
         persistence
             .store
-            .flush(&persistence.session_id)
+            .flush(session_id)
             .await
-            .map_err(|error| format!("persist conversation flush: {error}"))?;
+            .map_err(|source| SessionPersistenceError::Flush { source })?;
     }
     Ok(())
 }

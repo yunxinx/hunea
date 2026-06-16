@@ -26,6 +26,8 @@ use crate::{
     session_tree_snapshot, session_tree_snapshot_for_leaf,
 };
 
+const MAX_OPEN_SESSION_HANDLES: usize = 64;
+
 /// `SessionStore` 定义 conversation-runtime 依赖的持久化接口。
 pub trait SessionStore: Send + Sync {
     fn create_session<'a>(
@@ -197,12 +199,17 @@ impl LocalSessionStore {
             });
         }
 
-        let handle = Arc::new(LocalSessionHandle::new(meta.jsonl_path, entries)?);
         let mut recorders = self.recorders.write().await;
-        Ok(recorders
-            .entry(session_id.clone())
-            .or_insert_with(|| handle.clone())
-            .clone())
+        if let Some(handle) = recorders.get(session_id).cloned() {
+            return Ok(handle);
+        }
+
+        let handle = Arc::new(LocalSessionHandle::new(meta.jsonl_path, entries)?);
+        recorders.insert(session_id.clone(), handle.clone());
+        let evicted_handles = evict_idle_recorders(&mut recorders, session_id);
+        drop(recorders);
+        self.shutdown_evicted_recorders(evicted_handles).await?;
+        Ok(handle)
     }
 
     async fn append_entry(
@@ -226,6 +233,7 @@ impl LocalSessionStore {
         if kinds.is_empty() {
             return Ok(Vec::new());
         }
+        validate_append_kinds(&kinds)?;
 
         let session_id = session_id.clone();
         let handle = self.handle_for_session(&session_id).await?;
@@ -237,19 +245,23 @@ impl LocalSessionStore {
                 return Err(SessionStoreError::SessionNotFound { session_id });
             }
 
-            let mut projected_entries = state.entries.clone();
-            let mut entry_ids = state.entry_ids.clone();
+            let mut batch_entry_ids = HashSet::with_capacity(kinds.len());
+            let mut next_parent_id = append_parent_id(&state.entries);
+            let mut latest_non_leaf = latest_non_leaf_id(&state.entries);
             let mut entries = Vec::with_capacity(kinds.len());
             for kind in kinds {
-                let id = generate_entry_id(&entry_ids);
-                entry_ids.insert(id.clone());
+                let mut id = generate_entry_id(&state.entry_ids);
+                while batch_entry_ids.contains(&id) {
+                    id = generate_entry_id(&state.entry_ids);
+                }
+                batch_entry_ids.insert(id.clone());
                 let entry = SessionEntry {
-                    id,
-                    parent_id: append_parent_id(&projected_entries),
+                    id: id.clone(),
+                    parent_id: next_parent_id.clone(),
                     timestamp: current_timestamp_ms()?,
                     kind,
                 };
-                projected_entries.push(entry.clone());
+                update_append_projection(&entry, &mut next_parent_id, &mut latest_non_leaf);
                 entries.push(entry);
             }
             entries
@@ -279,6 +291,17 @@ impl LocalSessionStore {
         self.index.upsert_session(&meta).await?;
         Ok(entry_ids)
     }
+
+    async fn shutdown_evicted_recorders(
+        &self,
+        handles: Vec<Arc<LocalSessionHandle>>,
+    ) -> Result<(), SessionStoreError> {
+        for handle in handles {
+            let meta = shutdown_handle(handle).await?;
+            self.index.upsert_session(&meta).await?;
+        }
+        Ok(())
+    }
 }
 
 async fn flush_handle(handle: &LocalSessionHandle) -> Result<SessionMeta, SessionStoreError> {
@@ -287,6 +310,39 @@ async fn flush_handle(handle: &LocalSessionHandle) -> Result<SessionMeta, Sessio
     let mut state = handle.lock_state();
     state.commit_pending_state_entries(&handle.jsonl_path)?;
     Ok(state.session_meta.clone())
+}
+
+async fn shutdown_handle(
+    handle: Arc<LocalSessionHandle>,
+) -> Result<SessionMeta, SessionStoreError> {
+    match Arc::try_unwrap(handle) {
+        Ok(handle) => handle.shutdown().await,
+        Err(handle) => flush_handle(&handle).await,
+    }
+}
+
+fn evict_idle_recorders(
+    recorders: &mut HashMap<SessionId, Arc<LocalSessionHandle>>,
+    keep_session_id: &SessionId,
+) -> Vec<Arc<LocalSessionHandle>> {
+    let overflow = recorders.len().saturating_sub(MAX_OPEN_SESSION_HANDLES);
+    if overflow == 0 {
+        return Vec::new();
+    }
+
+    let session_ids = recorders
+        .iter()
+        .filter(|(session_id, handle)| {
+            *session_id != keep_session_id && Arc::strong_count(handle) == 1
+        })
+        .map(|(session_id, _)| session_id.clone())
+        .take(overflow)
+        .collect::<Vec<_>>();
+
+    session_ids
+        .into_iter()
+        .filter_map(|session_id| recorders.remove(&session_id))
+        .collect()
 }
 
 impl SessionStore for LocalSessionStore {
@@ -318,10 +374,12 @@ impl SessionStore for LocalSessionStore {
             }
 
             let meta = handle.lock_state().session_meta.clone();
-            self.recorders
-                .write()
-                .await
-                .insert(session_id.clone(), handle);
+            let evicted_handles = {
+                let mut recorders = self.recorders.write().await;
+                recorders.insert(session_id.clone(), handle);
+                evict_idle_recorders(&mut recorders, &session_id)
+            };
+            self.shutdown_evicted_recorders(evicted_handles).await?;
             self.index.upsert_session(&meta).await?;
 
             Ok(session_id)
@@ -434,7 +492,6 @@ impl SessionStore for LocalSessionStore {
             let session_id = session_id.clone();
             let requested_leaf = leaf_id.map(str::to_string);
             let handle = self.handle_for_session(&session_id).await?;
-            let _guard = handle.operation_lock.lock().await;
             let state = handle.lock_state();
             let requested_leaf_id =
                 requested_leaf_id(state.entries.as_slice(), requested_leaf.as_deref())?;
@@ -452,7 +509,6 @@ impl SessionStore for LocalSessionStore {
             let session_id = session_id.clone();
             let requested_leaf = leaf_id.map(str::to_string);
             let handle = self.handle_for_session(&session_id).await?;
-            let _guard = handle.operation_lock.lock().await;
             let state = handle.lock_state();
             let requested_leaf_id =
                 requested_leaf_id(state.entries.as_slice(), requested_leaf.as_deref())?;
@@ -468,7 +524,6 @@ impl SessionStore for LocalSessionStore {
         Box::pin(async move {
             let session_id = session_id.clone();
             let handle = self.handle_for_session(&session_id).await?;
-            let _guard = handle.operation_lock.lock().await;
             let state = handle.lock_state();
             session_tree_snapshot(&state.entries).map_err(resolve_error)
         })
@@ -484,7 +539,6 @@ impl SessionStore for LocalSessionStore {
             let session_id = session_id.clone();
             let requested_leaf = leaf_id.to_string();
             let handle = self.handle_for_session(&session_id).await?;
-            let _guard = handle.operation_lock.lock().await;
             let state = handle.lock_state();
             session_tree_snapshot_for_leaf(&state.entries, &requested_leaf).map_err(resolve_error)
         })
@@ -500,7 +554,6 @@ impl SessionStore for LocalSessionStore {
             let session_id = session_id.clone();
             let requested_branch = branch_row_id.to_string();
             let handle = self.handle_for_session(&session_id).await?;
-            let _guard = handle.operation_lock.lock().await;
             let state = handle.lock_state();
             session_branch_preview_snapshot(&state.entries, &requested_branch)
                 .map_err(resolve_error)
@@ -516,7 +569,6 @@ impl SessionStore for LocalSessionStore {
         Box::pin(async move {
             let session_id = session_id.clone();
             let handle = self.handle_for_session(&session_id).await?;
-            let _guard = handle.operation_lock.lock().await;
             let state = handle.lock_state();
             session_branch_tree_snapshot(&state.entries).map_err(resolve_error)
         })
@@ -540,7 +592,6 @@ impl SessionStore for LocalSessionStore {
         Box::pin(async move {
             let session_id = session_id.clone();
             if let Some(handle) = self.recorders.read().await.get(&session_id).cloned() {
-                let _guard = handle.operation_lock.lock().await;
                 return Ok(handle.lock_state().session_meta.clone());
             }
 
@@ -713,6 +764,7 @@ impl InMemorySessionStore {
         if kinds.is_empty() {
             return Ok(Vec::new());
         }
+        validate_append_kinds(&kinds)?;
 
         let session_id = session_id.clone();
         let mut sessions = self.sessions.write().await;
@@ -1082,6 +1134,37 @@ fn latest_non_leaf_id(entries: &[SessionEntry]) -> Option<String> {
         .map(|entry| entry.id.clone())
 }
 
+fn update_append_projection(
+    entry: &SessionEntry,
+    next_parent_id: &mut Option<String>,
+    latest_non_leaf_id: &mut Option<String>,
+) {
+    match &entry.kind {
+        SessionEntryKind::Leaf {
+            target_id: Some(target_id),
+        } => {
+            *next_parent_id = Some(target_id.clone());
+        }
+        SessionEntryKind::Leaf { target_id: None } => {
+            *next_parent_id = latest_non_leaf_id.clone();
+        }
+        _ => {
+            *latest_non_leaf_id = Some(entry.id.clone());
+            *next_parent_id = Some(entry.id.clone());
+        }
+    }
+}
+
+fn validate_append_kinds(kinds: &[SessionEntryKind]) -> Result<(), SessionStoreError> {
+    for kind in kinds {
+        if let SessionEntryKind::Item(item) = kind {
+            item.validate()
+                .map_err(|source| SessionStoreError::InvalidConversationItem { source })?;
+        }
+    }
+    Ok(())
+}
+
 fn entry_ids(entries: &[SessionEntry]) -> HashSet<String> {
     entries.iter().map(|entry| entry.id.clone()).collect()
 }
@@ -1223,4 +1306,109 @@ async fn load_entries(path: &Path) -> Result<Vec<SessionEntry>, SessionStoreErro
 
 fn io_error(source: std::io::Error) -> SessionStoreError {
     SessionStoreError::IoError { source }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap,
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use provider_protocol::{ConversationItem, Role};
+    use tokio::time::{Duration, timeout};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn local_session_read_paths_do_not_wait_for_write_operation_lock() {
+        let root = temp_test_dir("read-with-pending-write-lock");
+        let work_dir = root.join("workspace");
+        fs::create_dir_all(&work_dir).expect("workspace should be created");
+        let session_id = SessionId::new();
+        let jsonl_path = session_jsonl_path(&root, &work_dir, &session_id);
+        let entries = vec![
+            SessionEntry {
+                id: "header".to_string(),
+                parent_id: None,
+                timestamp: 1,
+                kind: SessionEntryKind::Header(SessionHeader {
+                    session_id: session_id.clone(),
+                    work_dir,
+                    session_name: Some("locked-read".to_string()),
+                    initial_model: "qwen3".to_string(),
+                    git_head: None,
+                    cli_version: None,
+                }),
+            },
+            SessionEntry {
+                id: "user-1".to_string(),
+                parent_id: Some("header".to_string()),
+                timestamp: 2,
+                kind: SessionEntryKind::Item(ConversationItem::text(Role::User, "hello")),
+            },
+        ];
+        let handle = Arc::new(
+            LocalSessionHandle::new(jsonl_path, entries).expect("session handle should initialize"),
+        );
+        let _write_guard = handle.operation_lock.lock().await;
+        let store = LocalSessionStore {
+            hunea_dir: root.clone(),
+            recorders: RwLock::new(HashMap::from([(session_id.clone(), handle.clone())])),
+            index: MetadataIndex::open(&root.join("index.sqlite"))
+                .await
+                .expect("index should open"),
+        };
+
+        let resolved = timeout(Duration::from_millis(50), store.resolve(&session_id, None))
+            .await
+            .expect("read path should not wait for the write operation lock")
+            .expect("session should resolve");
+
+        assert_eq!(resolved, vec![ConversationItem::text(Role::User, "hello")]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn local_store_evicts_idle_recorders_after_open_limit() {
+        let root = temp_test_dir("recorder-eviction");
+        let work_dir = root.join("workspace");
+        fs::create_dir_all(&work_dir).expect("workspace should be created");
+        let store = LocalSessionStore::open_in(root.clone())
+            .await
+            .expect("store should open");
+
+        for index in 0..(MAX_OPEN_SESSION_HANDLES + 3) {
+            store
+                .create_session(SessionHeader {
+                    session_id: SessionId::new(),
+                    work_dir: work_dir.clone(),
+                    session_name: Some(format!("session-{index}")),
+                    initial_model: "qwen3".to_string(),
+                    git_head: None,
+                    cli_version: None,
+                })
+                .await
+                .expect("session should be created");
+        }
+
+        let open_recorders = store.recorders.read().await.len();
+        assert!(
+            open_recorders <= MAX_OPEN_SESSION_HANDLES,
+            "idle recorder cache should stay bounded, found {open_recorders}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn temp_test_dir(prefix: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "hunea-session-store-{prefix}-{}-{stamp}",
+            std::process::id()
+        ))
+    }
 }

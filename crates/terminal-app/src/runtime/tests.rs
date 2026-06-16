@@ -3,8 +3,8 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -18,10 +18,12 @@ use runtime_domain::{
     model_catalog::ModelSelection,
     provider::ProviderKind,
     session::{
-        ConversationTurnRequest, ManagedSearchTool, RuntimeCommand, RuntimeEvent,
-        RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity, RuntimeToolActivityContent,
-        RuntimeToolActivityRawValue, RuntimeToolActivityStatus, RuntimeToolKind,
-        SessionTreeRowKind, TranscriptReplayItem, TranscriptReplayRole,
+        ConversationTurnRequest, ManagedSearchTool, RuntimeCommand, RuntimeCommandReceipt,
+        RuntimeEvent, RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity,
+        RuntimeToolActivityContent, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
+        RuntimeToolKind, SessionBranchTreePayload, SessionPickerRow, SessionPreviewPayload,
+        SessionResumePayload, SessionTreePayload, SessionTreeRowKind, TranscriptReplayItem,
+        TranscriptReplayRole,
     },
 };
 use session_store::{
@@ -37,6 +39,176 @@ fn runtime_coordinator(options: AppRuntimeOptions) -> AppRuntimeCoordinator {
 struct LoadCountingSessionStore {
     inner: Arc<InMemorySessionStore>,
     load_session_calls: AtomicUsize,
+}
+
+struct DelayedListSessionStore {
+    inner: Arc<InMemorySessionStore>,
+    list_started: Mutex<Option<mpsc::Sender<()>>>,
+    list_release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl DelayedListSessionStore {
+    fn new(
+        inner: Arc<InMemorySessionStore>,
+        list_started: mpsc::Sender<()>,
+        list_release: mpsc::Receiver<()>,
+    ) -> Self {
+        Self {
+            inner,
+            list_started: Mutex::new(Some(list_started)),
+            list_release: Mutex::new(list_release),
+        }
+    }
+}
+
+impl SessionStore for DelayedListSessionStore {
+    fn create_session<'a>(
+        &'a self,
+        header: SessionHeader,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionId, SessionStoreError>> + Send + 'a>> {
+        self.inner.create_session(header)
+    }
+
+    fn append<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        item: ConversationItem,
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>> {
+        self.inner.append(session_id, item)
+    }
+
+    fn append_many<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        items: Vec<ConversationItem>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, SessionStoreError>> + Send + 'a>> {
+        self.inner.append_many(session_id, items)
+    }
+
+    fn append_config_change<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        snapshot: ConfigSnapshot,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.append_config_change(session_id, snapshot)
+    }
+
+    fn append_transcript_replay<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        item: TranscriptReplayItem,
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>> {
+        self.inner.append_transcript_replay(session_id, item)
+    }
+
+    fn set_leaf<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.set_leaf(session_id, leaf_id)
+    }
+
+    fn resolve<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ConversationItem>, SessionStoreError>> + Send + 'a>>
+    {
+        self.inner.resolve(session_id, leaf_id)
+    }
+
+    fn load_session<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSessionState, SessionStoreError>> + Send + 'a>>
+    {
+        self.inner.load_session(session_id, leaf_id)
+    }
+
+    fn load_session_tree<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>
+    {
+        self.inner.load_session_tree(session_id)
+    }
+
+    fn load_session_tree_for_leaf<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        leaf_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>
+    {
+        self.inner.load_session_tree_for_leaf(session_id, leaf_id)
+    }
+
+    fn load_session_branch_preview<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        branch_row_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>
+    {
+        self.inner
+            .load_session_branch_preview(session_id, branch_row_id)
+    }
+
+    fn load_session_branch_tree<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<session_store::SessionBranchTreeSnapshot, SessionStoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        self.inner.load_session_branch_tree(session_id)
+    }
+
+    fn list_sessions<'a>(
+        &'a self,
+        project_dir: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SessionMeta>, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            if let Some(sender) = self
+                .list_started
+                .lock()
+                .expect("list_started mutex should not be poisoned")
+                .take()
+            {
+                let _ = sender.send(());
+            }
+            self.list_release
+                .lock()
+                .expect("list_release mutex should not be poisoned")
+                .recv()
+                .expect("test should release delayed list");
+            self.inner.list_sessions(project_dir).await
+        })
+    }
+
+    fn get_session_meta<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<Box<dyn Future<Output = Result<SessionMeta, SessionStoreError>> + Send + 'a>> {
+        self.inner.get_session_meta(session_id)
+    }
+
+    fn flush<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.flush(session_id)
+    }
+
+    fn flush_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.flush_all()
+    }
 }
 
 impl LoadCountingSessionStore {
@@ -473,10 +645,7 @@ fn list_sessions_emits_session_picker_rows_for_current_project() {
         .handle_runtime_command(RuntimeCommand::ListSessions)
         .expect("list sessions should succeed");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let Some(RuntimeEvent::SessionListLoaded { rows }) = events.into_iter().next() else {
-        panic!("expected session list event");
-    };
+    let rows = wait_for_session_list_rows(&mut coordinator);
     assert_eq!(rows.len(), 2);
     let row = rows
         .iter()
@@ -489,6 +658,77 @@ fn list_sessions_emits_session_picker_rows_for_current_project() {
         .expect("named session row should be present");
     assert_eq!(named_row.first_user_message, "first named user");
     assert_eq!(named_row.last_assistant_message, "last named assistant");
+    cleanup(&work_dir);
+}
+
+#[test]
+fn list_sessions_dispatch_does_not_wait_for_store_io() {
+    let work_dir = temp_test_dir("list-sessions-nonblocking-work");
+    let inner_store = Arc::new(InMemorySessionStore::new());
+    let store_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("session store runtime should start");
+    let header = SessionHeader {
+        session_id: SessionId::new(),
+        work_dir: work_dir.clone(),
+        session_name: None,
+        initial_model: "qwen3".to_string(),
+        git_head: None,
+        cli_version: None,
+    };
+    store_runtime
+        .block_on(async {
+            let session_id = inner_store.create_session(header.clone()).await?;
+            inner_store
+                .append(&session_id, ConversationItem::text(Role::User, "hello"))
+                .await?;
+            Ok::<(), SessionStoreError>(())
+        })
+        .expect("session fixture should persist");
+    let (list_started_tx, list_started_rx) = mpsc::channel();
+    let (list_release_tx, list_release_rx) = mpsc::channel();
+    let store = Arc::new(DelayedListSessionStore::new(
+        inner_store,
+        list_started_tx,
+        list_release_rx,
+    ));
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(header),
+        ..AppRuntimeOptions::default()
+    });
+
+    let (dispatch_done_tx, dispatch_done_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let receipt = coordinator.handle_runtime_command(RuntimeCommand::ListSessions);
+        let _ = dispatch_done_tx.send((receipt, coordinator));
+    });
+    list_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("session list worker should start");
+    let early_dispatch = dispatch_done_rx.recv_timeout(Duration::from_millis(100));
+    if early_dispatch.is_err() {
+        let _ = list_release_tx.send(());
+        let _ = dispatch_done_rx.recv_timeout(Duration::from_secs(1));
+        panic!("list sessions dispatch should not wait for store IO");
+    }
+    let (receipt, mut coordinator) = early_dispatch.expect("dispatch result should be available");
+    assert_eq!(
+        receipt.expect("list sessions command should be accepted"),
+        RuntimeCommandReceipt::Accepted
+    );
+    assert!(
+        RuntimeCoordinator::drain_runtime_events(&mut coordinator).is_empty(),
+        "no result event should be available before store IO completes"
+    );
+    list_release_tx
+        .send(())
+        .expect("delayed list should be releasable");
+
+    let rows = wait_for_session_list_rows(&mut coordinator);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].first_user_message, "hello");
     cleanup(&work_dir);
 }
 
@@ -540,10 +780,7 @@ fn list_sessions_builds_rows_from_metadata_without_loading_full_sessions() {
         .handle_runtime_command(RuntimeCommand::ListSessions)
         .expect("list sessions should succeed");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let Some(RuntimeEvent::SessionListLoaded { rows }) = events.into_iter().next() else {
-        panic!("expected session list event");
-    };
+    let rows = wait_for_session_list_rows(&mut coordinator);
     assert_eq!(store.load_session_calls(), 0);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].first_user_message, "metadata first user");
@@ -595,10 +832,7 @@ fn list_sessions_excludes_active_session() {
         .handle_runtime_command(RuntimeCommand::ListSessions)
         .expect("list sessions should succeed");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let Some(RuntimeEvent::SessionListLoaded { rows }) = events.into_iter().next() else {
-        panic!("expected session list event");
-    };
+    let rows = wait_for_session_list_rows(&mut coordinator);
     assert_eq!(
         rows.iter()
             .map(|row| row.session_id.as_str())
@@ -682,10 +916,7 @@ fn resume_session_emits_transcript_and_restored_model() {
         })
         .expect("resume session should succeed");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let Some(RuntimeEvent::SessionResumed { payload }) = events.into_iter().next() else {
-        panic!("expected session resumed event");
-    };
+    let payload = wait_for_session_resumed(&mut coordinator);
     assert_eq!(payload.session_id, session_id.to_string());
     assert_eq!(
         payload.restored_model,
@@ -784,10 +1015,7 @@ fn resume_session_payload_does_not_label_reasoning_as_system() {
         })
         .expect("resume session should succeed");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let Some(RuntimeEvent::SessionResumed { payload }) = events.into_iter().next() else {
-        panic!("expected session resumed event");
-    };
+    let payload = wait_for_session_resumed(&mut coordinator);
     let reasoning = payload
             .transcript
             .iter()
@@ -848,10 +1076,7 @@ fn resume_session_payload_does_not_reconstruct_transcript_from_provider_history(
         })
         .expect("resume session should succeed");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let Some(RuntimeEvent::SessionResumed { payload }) = events.into_iter().next() else {
-        panic!("expected session resumed event");
-    };
+    let payload = wait_for_session_resumed(&mut coordinator);
     assert!(payload.transcript.is_empty());
     cleanup(&work_dir);
 }
@@ -950,10 +1175,7 @@ fn resume_session_payload_prefers_persisted_transcript_replay() {
         })
         .expect("resume session should succeed");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let Some(RuntimeEvent::SessionResumed { payload }) = events.into_iter().next() else {
-        panic!("expected session resumed event");
-    };
+    let payload = wait_for_session_resumed(&mut coordinator);
     assert_eq!(
         payload.transcript,
         vec![
@@ -1047,10 +1269,7 @@ fn load_session_preview_emits_transcript_without_resuming_runtime_session() {
         })
         .expect("load preview should succeed");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let Some(RuntimeEvent::SessionPreviewLoaded { payload }) = events.into_iter().next() else {
-        panic!("expected session preview event");
-    };
+    let payload = wait_for_session_preview(&mut coordinator);
     assert_eq!(payload.session_id, preview_session_id.to_string());
     assert_eq!(
         payload
@@ -1111,16 +1330,13 @@ fn load_entry_tree_emits_rewind_targets_for_active_session() {
             session_id: session_id.to_string(),
         })
         .expect("resume session should succeed");
-    RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    wait_for_session_resumed(&mut coordinator);
 
     coordinator
         .handle_runtime_command(RuntimeCommand::LoadEntryTree)
         .expect("load entry tree should succeed");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let Some(RuntimeEvent::SessionTreeLoaded { payload }) = events.into_iter().next() else {
-        panic!("expected session tree loaded event");
-    };
+    let payload = wait_for_session_tree(&mut coordinator);
     let second_user = payload
         .rows
         .iter()
@@ -1168,10 +1384,7 @@ fn load_entry_tree_emits_empty_tree_for_new_unpersisted_session() {
         .handle_runtime_command(RuntimeCommand::LoadEntryTree)
         .expect("empty new session tree should load as an empty payload");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let Some(RuntimeEvent::SessionTreeLoaded { payload }) = events.into_iter().next() else {
-        panic!("expected empty session tree loaded event");
-    };
+    let payload = wait_for_session_tree(&mut coordinator);
     assert!(
         payload.rows.is_empty(),
         "new sessions without messages should render an empty tree"
@@ -1249,16 +1462,13 @@ fn load_branch_tree_emits_branch_roots_for_active_session() {
             session_id: session_id.to_string(),
         })
         .expect("resume session should succeed");
-    RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    wait_for_session_resumed(&mut coordinator);
 
     coordinator
         .handle_runtime_command(RuntimeCommand::LoadBranchTree)
         .expect("load branch tree should succeed");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let Some(RuntimeEvent::SessionBranchTreeLoaded { payload }) = events.into_iter().next() else {
-        panic!("expected branch tree loaded event");
-    };
+    let payload = wait_for_session_branch_tree(&mut coordinator);
     assert_eq!(payload.nodes.len(), 5);
     assert_eq!(payload.total_message_count, 7);
     assert_eq!(
@@ -1339,7 +1549,7 @@ fn load_branch_preview_emits_delta_for_requested_branch_without_switching() {
             session_id: session_id.to_string(),
         })
         .expect("resume session should succeed");
-    RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    wait_for_session_resumed(&mut coordinator);
 
     coordinator
         .handle_runtime_command(RuntimeCommand::LoadBranchPreview {
@@ -1347,10 +1557,7 @@ fn load_branch_preview_emits_delta_for_requested_branch_without_switching() {
         })
         .expect("load branch preview should succeed");
 
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let Some(RuntimeEvent::SessionTreePreviewLoaded { payload }) = events.into_iter().next() else {
-        panic!("expected branch preview loaded event");
-    };
+    let payload = wait_for_session_tree_preview(&mut coordinator);
     assert_eq!(
         payload
             .rows
@@ -1368,14 +1575,7 @@ fn load_branch_preview_emits_delta_for_requested_branch_without_switching() {
     coordinator
         .handle_runtime_command(RuntimeCommand::LoadEntryTree)
         .expect("load committed tree should still succeed");
-    let committed_events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let committed_payload = committed_events
-        .into_iter()
-        .find_map(|event| match event {
-            RuntimeEvent::SessionTreeLoaded { payload } => Some(payload),
-            _ => None,
-        })
-        .expect("committed session tree should load");
+    let committed_payload = wait_for_session_tree(&mut coordinator);
     assert_eq!(
         committed_payload.current_row_id.as_deref(),
         committed_payload
@@ -1478,18 +1678,25 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
             session_id: session_id.to_string(),
         })
         .expect("resume session should succeed");
-    RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::SessionResumed { .. } => Some(()),
+            _ => None,
+        },
+        "session resume event",
+    );
     coordinator
         .handle_runtime_command(RuntimeCommand::LoadEntryTree)
         .expect("load entry tree should succeed");
-    let tree_events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let current_tree = tree_events
-        .into_iter()
-        .find_map(|event| match event {
+    let current_tree = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
             RuntimeEvent::SessionTreeLoaded { payload } => Some(payload),
             _ => None,
-        })
-        .expect("session tree payload should be loaded");
+        },
+        "session tree payload",
+    );
     let branch_choice = current_tree
         .rows
         .iter()
@@ -1506,19 +1713,11 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
     coordinator
         .handle_runtime_command(RuntimeCommand::LoadBranchPreview { branch_row_id })
         .expect("branch preview should load");
-    let preview_rows = RuntimeCoordinator::drain_runtime_events(&mut coordinator)
+    let preview_rows = wait_for_session_tree_preview(&mut coordinator)
+        .rows
         .into_iter()
-        .find_map(|event| match event {
-            RuntimeEvent::SessionTreePreviewLoaded { payload } => Some(
-                payload
-                    .rows
-                    .into_iter()
-                    .map(|row| row.preview_content)
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        })
-        .expect("preview payload should be emitted");
+        .map(|row| row.preview_content)
+        .collect::<Vec<_>>();
 
     coordinator
         .handle_runtime_command(RuntimeCommand::SwitchBranch {
@@ -1526,6 +1725,7 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
         })
         .expect("switch branch should succeed");
 
+    let events = wait_for_runtime_events(&mut coordinator, "branch switch events");
     assert_eq!(
         coordinator
             .provider_conversation
@@ -1534,9 +1734,8 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
             .map(ConversationItem::text_content)
             .collect::<Vec<_>>(),
         vec!["hello", "branch-b"],
-        "provider history should immediately move to the switched branch"
+        "provider history should move after the switch event is applied"
     );
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
     let resumed_payload = events
         .iter()
         .find_map(|event| match event {
@@ -1640,7 +1839,7 @@ fn switch_branch_is_blocked_while_provider_turn_is_running() {
             session_id: session_id.to_string(),
         })
         .expect("resume session should succeed");
-    RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    wait_for_session_resumed(&mut coordinator);
     let request = ConversationTurnRequest::new_user_text(
         "local",
         ProviderKind::OpenAiCompatible,
@@ -1722,30 +1921,31 @@ fn switch_branch_failure_keeps_committed_leaf_unchanged() {
             session_id: session_id.to_string(),
         })
         .expect("resume session should succeed");
-    RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    wait_for_session_resumed(&mut coordinator);
     coordinator
         .handle_runtime_command(RuntimeCommand::LoadEntryTree)
         .expect("load entry tree should succeed");
-    let before_rows = RuntimeCoordinator::drain_runtime_events(&mut coordinator)
+    let before_rows = wait_for_session_tree(&mut coordinator)
+        .rows
         .into_iter()
-        .find_map(|event| match event {
-            RuntimeEvent::SessionTreeLoaded { payload } => Some(
-                payload
-                    .rows
-                    .into_iter()
-                    .map(|row| row.preview_content)
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        })
-        .expect("before tree should load");
+        .map(|row| row.preview_content)
+        .collect::<Vec<_>>();
 
-    let error = coordinator
+    let receipt = coordinator
         .handle_runtime_command(RuntimeCommand::SwitchBranch {
             leaf_id: "missing-leaf".to_string(),
         })
-        .expect_err("invalid leaf should fail");
+        .expect("invalid leaf switch should be accepted for async execution");
+    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
 
+    let error = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::Failed { message, .. } => Some(message),
+            _ => None,
+        },
+        "invalid leaf failure",
+    );
     assert!(
         error.contains("missing-leaf"),
         "failure should include the missing leaf id: {error}"
@@ -1753,19 +1953,11 @@ fn switch_branch_failure_keeps_committed_leaf_unchanged() {
     coordinator
         .handle_runtime_command(RuntimeCommand::LoadEntryTree)
         .expect("load entry tree should still succeed");
-    let after_rows = RuntimeCoordinator::drain_runtime_events(&mut coordinator)
+    let after_rows = wait_for_session_tree(&mut coordinator)
+        .rows
         .into_iter()
-        .find_map(|event| match event {
-            RuntimeEvent::SessionTreeLoaded { payload } => Some(
-                payload
-                    .rows
-                    .into_iter()
-                    .map(|row| row.preview_content)
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        })
-        .expect("after tree should load");
+        .map(|row| row.preview_content)
+        .collect::<Vec<_>>();
     assert_eq!(
         after_rows, before_rows,
         "failed switch must leave the committed path unchanged"
@@ -1833,34 +2025,23 @@ fn switch_branch_uses_prepared_leaf_restore_instead_of_committed_reload() {
             session_id: session_id.to_string(),
         })
         .expect("resume session should succeed");
-    RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    wait_for_session_resumed(&mut coordinator);
     coordinator
         .handle_runtime_command(RuntimeCommand::LoadEntryTree)
         .expect("load entry tree should succeed");
-    let before_rows = RuntimeCoordinator::drain_runtime_events(&mut coordinator)
+    let before_rows = wait_for_session_tree(&mut coordinator)
+        .rows
         .into_iter()
-        .find_map(|event| match event {
-            RuntimeEvent::SessionTreeLoaded { payload } => Some(
-                payload
-                    .rows
-                    .into_iter()
-                    .map(|row| row.preview_content)
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        })
-        .expect("before tree should load");
+        .map(|row| row.preview_content)
+        .collect::<Vec<_>>();
     coordinator
         .handle_runtime_command(RuntimeCommand::SwitchBranch {
             leaf_id: inactive_branch_leaf_id,
         })
         .expect("switch should not reload from the committed leaf after set_leaf");
-    coordinator
-        .handle_runtime_command(RuntimeCommand::LoadEntryTree)
-        .expect("load entry tree should still succeed");
-    let after_rows = RuntimeCoordinator::drain_runtime_events(&mut coordinator)
-        .into_iter()
-        .find_map(|event| match event {
+    let after_rows = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
             RuntimeEvent::SessionTreeLoaded { payload } => Some(
                 payload
                     .rows
@@ -1869,8 +2050,9 @@ fn switch_branch_uses_prepared_leaf_restore_instead_of_committed_reload() {
                     .collect::<Vec<_>>(),
             ),
             _ => None,
-        })
-        .expect("after tree should load");
+        },
+        "switch tree payload",
+    );
     assert_eq!(before_rows, vec!["hello", "branch-c", "branch follow-up"]);
     assert_eq!(after_rows, vec!["hello", "branch-b"]);
     cleanup(&work_dir);
@@ -1950,19 +2132,12 @@ fn select_entry_rewind_rebuilds_provider_history_to_selected_entry() {
             session_id: session_id.to_string(),
         })
         .expect("resume session should succeed");
-    RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    wait_for_session_resumed(&mut coordinator);
 
     coordinator
         .handle_runtime_command(RuntimeCommand::LoadEntryTree)
         .expect("load entry tree should succeed");
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let payload = events
-        .into_iter()
-        .find_map(|event| match event {
-            RuntimeEvent::SessionTreeLoaded { payload } => Some(payload),
-            _ => None,
-        })
-        .expect("session tree payload should be loaded");
+    let payload = wait_for_session_tree(&mut coordinator);
     let assistant_row = payload
         .rows
         .iter()
@@ -1980,6 +2155,7 @@ fn select_entry_rewind_rebuilds_provider_history_to_selected_entry() {
         })
         .expect("select entry rewind should succeed");
 
+    let events = wait_for_runtime_events(&mut coordinator, "entry rewind events");
     assert_eq!(
         coordinator
             .provider_conversation
@@ -1989,7 +2165,6 @@ fn select_entry_rewind_rebuilds_provider_history_to_selected_entry() {
             .collect::<Vec<_>>(),
         vec!["first", "answer"]
     );
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
     let Some(RuntimeEvent::SessionResumed { payload }) = events.into_iter().next() else {
         panic!("expected resumed payload after entry rewind");
     };
@@ -2049,19 +2224,12 @@ fn select_entry_rewind_ignores_reasoning_without_restore_target() {
             session_id: session_id.to_string(),
         })
         .expect("resume session should succeed");
-    RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    wait_for_session_resumed(&mut coordinator);
 
     coordinator
         .handle_runtime_command(RuntimeCommand::LoadEntryTree)
         .expect("load entry tree should succeed");
-    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
-    let payload = events
-        .into_iter()
-        .find_map(|event| match event {
-            RuntimeEvent::SessionTreeLoaded { payload } => Some(payload),
-            _ => None,
-        })
-        .expect("session tree payload should be loaded");
+    let payload = wait_for_session_tree(&mut coordinator);
     let reasoning_row = payload
         .rows
         .iter()
@@ -2074,6 +2242,7 @@ fn select_entry_rewind_ignores_reasoning_without_restore_target() {
             entry_id: reasoning_row.row_id.clone(),
         })
         .expect("non-rewindable reasoning should be accepted as a no-op");
+    wait_for_runtime_idle(&mut coordinator);
 
     assert_eq!(
         coordinator.provider_conversation.history(),
@@ -2086,10 +2255,9 @@ fn select_entry_rewind_ignores_reasoning_without_restore_target() {
             },
         ]
     );
-    assert_eq!(
-        RuntimeCoordinator::drain_runtime_events(&mut coordinator),
-        Vec::<RuntimeEvent>::new(),
-        "non-rewindable reasoning should not emit a resumed payload"
+    assert_no_runtime_events(
+        &mut coordinator,
+        "non-rewindable reasoning should not emit a resumed payload",
     );
     cleanup(&work_dir);
 }
@@ -2166,4 +2334,125 @@ fn temp_test_dir(prefix: &str) -> PathBuf {
 
 fn cleanup(path: &Path) {
     let _ = fs::remove_dir_all(path);
+}
+
+fn wait_for_session_list_rows(coordinator: &mut AppRuntimeCoordinator) -> Vec<SessionPickerRow> {
+    wait_for_runtime_event(
+        coordinator,
+        |event| match event {
+            RuntimeEvent::SessionListLoaded { rows } => Some(rows),
+            _ => None,
+        },
+        "session list rows",
+    )
+}
+
+fn wait_for_session_preview(coordinator: &mut AppRuntimeCoordinator) -> SessionPreviewPayload {
+    wait_for_runtime_event(
+        coordinator,
+        |event| match event {
+            RuntimeEvent::SessionPreviewLoaded { payload } => Some(payload),
+            _ => None,
+        },
+        "session preview payload",
+    )
+}
+
+fn wait_for_session_resumed(coordinator: &mut AppRuntimeCoordinator) -> SessionResumePayload {
+    wait_for_runtime_event(
+        coordinator,
+        |event| match event {
+            RuntimeEvent::SessionResumed { payload } => Some(payload),
+            _ => None,
+        },
+        "session resumed payload",
+    )
+}
+
+fn wait_for_session_tree(coordinator: &mut AppRuntimeCoordinator) -> SessionTreePayload {
+    wait_for_runtime_event(
+        coordinator,
+        |event| match event {
+            RuntimeEvent::SessionTreeLoaded { payload } => Some(payload),
+            _ => None,
+        },
+        "session tree payload",
+    )
+}
+
+fn wait_for_session_branch_tree(
+    coordinator: &mut AppRuntimeCoordinator,
+) -> SessionBranchTreePayload {
+    wait_for_runtime_event(
+        coordinator,
+        |event| match event {
+            RuntimeEvent::SessionBranchTreeLoaded { payload } => Some(payload),
+            _ => None,
+        },
+        "session branch tree payload",
+    )
+}
+
+fn wait_for_session_tree_preview(coordinator: &mut AppRuntimeCoordinator) -> SessionTreePayload {
+    wait_for_runtime_event(
+        coordinator,
+        |event| match event {
+            RuntimeEvent::SessionTreePreviewLoaded { payload } => Some(payload),
+            _ => None,
+        },
+        "session tree preview payload",
+    )
+}
+
+fn wait_for_runtime_events(
+    coordinator: &mut AppRuntimeCoordinator,
+    expected: &str,
+) -> Vec<RuntimeEvent> {
+    for _ in 0..100 {
+        let events = RuntimeCoordinator::drain_runtime_events(coordinator);
+        if !events.is_empty() {
+            return events;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("{expected} should be emitted");
+}
+
+fn wait_for_runtime_idle(coordinator: &mut AppRuntimeCoordinator) {
+    for _ in 0..100 {
+        let events = RuntimeCoordinator::drain_runtime_events(coordinator);
+        assert!(
+            events.is_empty(),
+            "runtime should not emit events while waiting for no-op command: {events:?}"
+        );
+        if !RuntimeCoordinator::has_background_runtime(coordinator) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("runtime should become idle");
+}
+
+fn assert_no_runtime_events(coordinator: &mut AppRuntimeCoordinator, message: &str) {
+    assert_eq!(
+        RuntimeCoordinator::drain_runtime_events(coordinator),
+        Vec::<RuntimeEvent>::new(),
+        "{message}"
+    );
+}
+
+fn wait_for_runtime_event<T>(
+    coordinator: &mut AppRuntimeCoordinator,
+    mut select: impl FnMut(RuntimeEvent) -> Option<T>,
+    expected: &str,
+) -> T {
+    for _ in 0..100 {
+        for event in RuntimeCoordinator::drain_runtime_events(coordinator) {
+            if let Some(value) = select(event) {
+                return value;
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("{expected} should be emitted");
 }

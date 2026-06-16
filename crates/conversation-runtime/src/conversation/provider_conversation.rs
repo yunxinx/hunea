@@ -1,6 +1,6 @@
 //! Provider-visible conversation assembly.
 
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 use provider_protocol::{ConversationItem, Role};
 use runtime_domain::session::{ConversationTurnRequest, RuntimeTarget};
@@ -24,8 +24,6 @@ pub enum ProviderConversationError {
     },
     #[error("Session persistence was initialized without an active session id")]
     MissingSessionId,
-    #[error("Failed to start blocking session runtime: {message}")]
-    SessionRuntime { message: String },
 }
 
 /// `PreparedConversationRequest` 是运行时实际执行时使用的完整请求。
@@ -58,7 +56,8 @@ impl std::fmt::Debug for PreparedConversationRequest {
 #[derive(Clone)]
 pub(crate) struct PreparedConversationPersistence {
     pub(crate) store: Arc<dyn SessionStore>,
-    pub(crate) session_id: SessionId,
+    pub(crate) session_id: Option<SessionId>,
+    pub(crate) header_template: SessionHeader,
     pub(crate) config_snapshot: ConfigSnapshot,
     pub(crate) current_user_message: ConversationItem,
 }
@@ -144,15 +143,9 @@ pub struct ProviderConversation {
 }
 
 struct ProviderConversationPersistence {
-    bridge: SessionStoreBridge,
     store: Arc<dyn SessionStore>,
     session_id: Option<SessionId>,
     header_template: SessionHeader,
-}
-
-#[derive(Clone)]
-struct SessionStoreBridge {
-    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl ProviderConversation {
@@ -165,20 +158,12 @@ impl ProviderConversation {
     pub fn with_session_store(
         store: Arc<dyn SessionStore>,
         header_template: SessionHeader,
-        session_id: Option<SessionId>,
     ) -> Result<Self, ProviderConversationError> {
-        let bridge = SessionStoreBridge::new()?;
-        let restored_state = if let Some(session_id) = session_id.as_ref() {
-            bridge.block_on(store.load_session(session_id, None))?
-        } else {
-            ResolvedSessionState::default()
-        };
         Ok(Self::from_resolved_session_store(
-            bridge,
             store,
             header_template,
-            session_id,
-            &restored_state,
+            None,
+            &ResolvedSessionState::default(),
         ))
     }
 
@@ -189,9 +174,7 @@ impl ProviderConversation {
         session_id: Option<SessionId>,
         restored_state: &ResolvedSessionState,
     ) -> Result<Self, ProviderConversationError> {
-        let bridge = SessionStoreBridge::new()?;
         Ok(Self::from_resolved_session_store(
-            bridge,
             store,
             header_template,
             session_id,
@@ -200,7 +183,6 @@ impl ProviderConversation {
     }
 
     fn from_resolved_session_store(
-        bridge: SessionStoreBridge,
         store: Arc<dyn SessionStore>,
         header_template: SessionHeader,
         session_id: Option<SessionId>,
@@ -230,7 +212,6 @@ impl ProviderConversation {
             persisted_history,
             pending_user_message: None,
             persistence: Some(ProviderConversationPersistence {
-                bridge,
                 store,
                 session_id,
                 header_template,
@@ -252,7 +233,7 @@ impl ProviderConversation {
     pub fn truncate_after_user_turns(
         &mut self,
         retained_user_turns: usize,
-    ) -> Result<(), ProviderConversationError> {
+    ) -> Result<Option<(SessionId, String)>, ProviderConversationError> {
         self.pending_user_message = None;
         let mut user_turn_count = 0usize;
         let mut truncate_index = self.history.len();
@@ -269,19 +250,20 @@ impl ProviderConversation {
         self.history.truncate(truncate_index);
         self.persisted_history.truncate(truncate_index);
 
-        if let Some(persistence) = self.persistence.as_mut()
+        let leaf_update = if let Some(persistence) = self.persistence.as_ref()
             && let Some(session_id) = persistence.session_id.as_ref()
         {
             let leaf_id = self
                 .persisted_history
                 .last()
                 .and_then(|item| item.entry_id.as_deref())
-                .unwrap_or("header");
-            persistence
-                .bridge
-                .block_on(persistence.store.set_leaf(session_id, Some(leaf_id)))?;
-        }
-        Ok(())
+                .unwrap_or("header")
+                .to_string();
+            Some((session_id.clone(), leaf_id))
+        } else {
+            None
+        };
+        Ok(leaf_update)
     }
 
     /// `set_system_prompt` 设置会话级 system prompt。
@@ -306,6 +288,13 @@ impl ProviderConversation {
             .and_then(|persistence| persistence.session_id.as_ref())
     }
 
+    /// `set_session_id` 记录 persistence actor 新建的 active session。
+    pub fn set_session_id(&mut self, session_id: SessionId) {
+        if let Some(persistence) = self.persistence.as_mut() {
+            persistence.session_id = Some(session_id);
+        }
+    }
+
     /// `prepare_turn` 接受一个用户 turn，并构造完整执行请求。
     pub fn prepare_turn(
         &mut self,
@@ -321,19 +310,20 @@ impl ProviderConversation {
         let user_message = turn.message().clone();
         self.pending_user_message = Some(user_message.clone());
         let system_prompt = self.system_prompt.clone();
-        let persistence = match self.ensure_persistence(turn.model_id())? {
-            Some(persistence) => Some(PreparedConversationPersistence {
-                store: persistence.store.clone(),
-                session_id: persistence.active_session_id()?.clone(),
-                config_snapshot: ConfigSnapshot {
-                    provider_id: turn.provider_id().to_string(),
-                    model: turn.model_id().to_string(),
-                    system_prompt,
-                },
-                current_user_message: user_message.clone(),
-            }),
-            None => None,
-        };
+        let persistence =
+            self.persistence
+                .as_ref()
+                .map(|persistence| PreparedConversationPersistence {
+                    store: persistence.store.clone(),
+                    session_id: persistence.session_id.clone(),
+                    header_template: persistence.header_template.clone(),
+                    config_snapshot: ConfigSnapshot {
+                        provider_id: turn.provider_id().to_string(),
+                        model: turn.model_id().to_string(),
+                        system_prompt,
+                    },
+                    current_user_message: user_message.clone(),
+                });
 
         Ok(PreparedConversationRequest::from_turn(
             turn,
@@ -343,7 +333,14 @@ impl ProviderConversation {
     }
 
     /// `commit_pending_user` 把已开始发送给 provider 的当前用户消息写回会话历史。
-    pub fn commit_pending_user(&mut self, entry_id: Option<String>) -> bool {
+    pub fn commit_pending_user(
+        &mut self,
+        entry_id: Option<String>,
+        session_id: Option<SessionId>,
+    ) -> bool {
+        if let Some(session_id) = session_id {
+            self.set_session_id(session_id);
+        }
         let Some(user_message) = self.pending_user_message.take() else {
             return false;
         };
@@ -371,40 +368,12 @@ impl ProviderConversation {
         }
     }
 
-    /// `append_items` 同步持久化并追加 provider-visible 对话项。
+    /// `append_items` 追加 provider-visible 对话项。
     pub fn append_items(
         &mut self,
         items: Vec<ConversationItem>,
     ) -> Result<(), ProviderConversationError> {
         if items.is_empty() {
-            return Ok(());
-        }
-
-        if let Some(persistence) = self.ensure_persistence_with_template_model()? {
-            let session_id = persistence.active_session_id()?.clone();
-            let entry_ids = persistence
-                .bridge
-                .block_on(persistence.store.append_many(&session_id, items.clone()))?;
-            if entry_ids.len() != items.len() {
-                return Err(ProviderConversationError::SessionStore {
-                    source: SessionStoreError::IndexInconsistent {
-                        message: format!(
-                            "session store returned {} entry ids for {} appended items",
-                            entry_ids.len(),
-                            items.len()
-                        ),
-                    },
-                });
-            }
-            let persisted_items = items
-                .into_iter()
-                .zip(entry_ids)
-                .map(|(item, entry_id)| PersistedConversationItem {
-                    entry_id: Some(entry_id),
-                    item,
-                })
-                .collect::<Vec<_>>();
-            self.commit_turn_items(persisted_items);
             return Ok(());
         }
 
@@ -433,48 +402,6 @@ impl ProviderConversation {
         items.push(user_message.clone());
         items
     }
-
-    fn ensure_persistence(
-        &mut self,
-        model_id: &str,
-    ) -> Result<Option<&ProviderConversationPersistence>, ProviderConversationError> {
-        let Some(persistence) = self.persistence.as_mut() else {
-            return Ok(None);
-        };
-        if persistence.session_id.is_none() {
-            let mut header = persistence.header_template.clone();
-            header.initial_model = model_id.to_string();
-            let session_id = persistence
-                .bridge
-                .block_on(persistence.store.create_session(header))?;
-            persistence.session_id = Some(session_id.clone());
-            if !self.persisted_history.is_empty() {
-                let mut replayed_history = Vec::with_capacity(self.persisted_history.len());
-                for item in &self.persisted_history {
-                    let entry_id = persistence
-                        .bridge
-                        .block_on(persistence.store.append(&session_id, item.item.clone()))?;
-                    replayed_history.push(PersistedConversationItem {
-                        entry_id: Some(entry_id),
-                        item: item.item.clone(),
-                    });
-                }
-                self.persisted_history = replayed_history;
-            }
-        }
-        Ok(Some(persistence))
-    }
-
-    fn ensure_persistence_with_template_model(
-        &mut self,
-    ) -> Result<Option<&ProviderConversationPersistence>, ProviderConversationError> {
-        let model_id = self
-            .persistence
-            .as_ref()
-            .map(|persistence| persistence.header_template.initial_model.clone())
-            .unwrap_or_default();
-        self.ensure_persistence(&model_id)
-    }
 }
 
 fn normalize_system_prompt(prompt: String) -> Option<String> {
@@ -483,70 +410,18 @@ fn normalize_system_prompt(prompt: String) -> Option<String> {
 }
 
 #[cfg(test)]
-fn block_on_session<T>(
-    future: impl Future<Output = Result<T, SessionStoreError>>,
-) -> Result<T, ProviderConversationError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| ProviderConversationError::SessionRuntime {
-            message: error.to_string(),
-        })?;
-    runtime
-        .block_on(future)
-        .map_err(|source| ProviderConversationError::SessionStore { source })
-}
-
-impl SessionStoreBridge {
-    fn new() -> Result<Self, ProviderConversationError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| ProviderConversationError::SessionRuntime {
-                message: error.to_string(),
-            })?;
-        Ok(Self {
-            runtime: Arc::new(runtime),
-        })
-    }
-
-    fn block_on<T>(
-        &self,
-        future: impl Future<Output = Result<T, SessionStoreError>>,
-    ) -> Result<T, ProviderConversationError> {
-        self.runtime
-            .block_on(future)
-            .map_err(|source| ProviderConversationError::SessionStore { source })
-    }
-}
-
-impl ProviderConversationPersistence {
-    fn active_session_id(&self) -> Result<&SessionId, ProviderConversationError> {
-        self.session_id
-            .as_ref()
-            .ok_or(ProviderConversationError::MissingSessionId)
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use std::{
-        future::Future,
         path::{Path, PathBuf},
-        pin::Pin,
-        sync::{Arc, Mutex},
+        sync::Arc,
     };
 
     use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
     use session_store::{
-        InMemorySessionStore, SessionHeader, SessionId, SessionMeta, SessionStore,
-        SessionStoreError,
+        InMemorySessionStore, SessionHeader, SessionId, SessionStore, SessionStoreError,
     };
 
-    use super::{
-        PersistedConversationItem, ProviderConversation, ProviderConversationError,
-        block_on_session,
-    };
+    use super::{PersistedConversationItem, ProviderConversation, ProviderConversationError};
     use crate::ProviderKind;
     use runtime_domain::session::ConversationTurnRequest;
 
@@ -637,7 +512,7 @@ mod tests {
                 ConversationItem::text(Role::User, "first question"),
             ))
             .expect("first turn should prepare");
-        session.commit_pending_user(None);
+        session.commit_pending_user(None, None);
         session.commit_turn_items([cached_item(ConversationItem::text(
             Role::Assistant,
             "first answer",
@@ -653,7 +528,7 @@ mod tests {
                 ConversationItem::text(Role::User, "second question"),
             ))
             .expect("second turn should prepare");
-        session.commit_pending_user(None);
+        session.commit_pending_user(None, None);
         session.commit_turn_items([cached_item(ConversationItem::text(
             Role::Assistant,
             "second answer",
@@ -705,8 +580,8 @@ mod tests {
             ))
             .expect("turn should prepare");
 
-        assert!(session.commit_pending_user(None));
-        assert!(!session.commit_pending_user(None));
+        assert!(session.commit_pending_user(None, None));
+        assert!(!session.commit_pending_user(None, None));
         assert_eq!(session.history()[0].text_content(), "sent");
         assert_eq!(session.history().len(), 1);
     }
@@ -768,11 +643,14 @@ mod tests {
             block_on_session(store.append(&session_id, item.clone()))
                 .expect("history item should persist");
         }
+        let restored_state = block_on_session(store.load_session(&session_id, None))
+            .expect("session state should load");
         let store_trait: Arc<dyn SessionStore> = store;
-        let mut session = ProviderConversation::with_session_store(
+        let mut session = ProviderConversation::with_resolved_session_store(
             store_trait,
             sample_header(&work_dir, "qwen3"),
             Some(session_id),
+            &restored_state,
         )
         .expect("persisted conversation should load history");
 
@@ -798,14 +676,12 @@ mod tests {
     }
 
     #[test]
-    fn append_items_keeps_history_and_resolve_in_sync() {
+    fn append_items_keeps_provider_history_in_sync() {
         let work_dir = tempdir_path("append-items");
-        let store = Arc::new(InMemorySessionStore::new());
-        let store_trait: Arc<dyn SessionStore> = store.clone();
+        let store_trait: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
         let mut session = ProviderConversation::with_session_store(
             store_trait,
             sample_header(&work_dir, "qwen3"),
-            None,
         )
         .expect("persisted conversation should initialize");
         let items = vec![
@@ -823,38 +699,9 @@ mod tests {
 
         session
             .append_items(items.clone())
-            .expect("items should append to store");
+            .expect("items should append to provider history");
 
-        let metas = block_on_session(store.list_sessions(work_dir.to_string_lossy().as_ref()))
-            .expect("session meta should list");
-        assert_eq!(metas.len(), 1);
-        let resolved = block_on_session(store.resolve(&metas[0].session_id, None))
-            .expect("session should resolve appended items");
-
-        assert_eq!(resolved, items);
         assert_eq!(session.history(), items.as_slice());
-    }
-
-    #[test]
-    fn append_items_error_does_not_pollute_cached_history() {
-        let work_dir = tempdir_path("append-failure");
-        let store: Arc<dyn SessionStore> = Arc::new(FailingAppendStore::new());
-        let mut session = ProviderConversation::with_session_store(
-            store,
-            sample_header(&work_dir, "qwen3"),
-            None,
-        )
-        .expect("persisted conversation should initialize");
-
-        let error = session
-            .append_items(vec![ConversationItem::text(Role::Assistant, "fail")])
-            .expect_err("append should surface store error");
-
-        assert!(matches!(
-            error,
-            ProviderConversationError::SessionStore { .. }
-        ));
-        assert!(session.history().is_empty());
     }
 
     #[test]
@@ -875,11 +722,14 @@ mod tests {
         ))
         .expect("config snapshot should persist");
 
+        let restored_state = block_on_session(store.load_session(&session_id, None))
+            .expect("session state should load");
         let store_trait: Arc<dyn SessionStore> = store;
-        let session = ProviderConversation::with_session_store(
+        let session = ProviderConversation::with_resolved_session_store(
             store_trait,
             sample_header(&work_dir, "qwen3"),
             Some(session_id),
+            &restored_state,
         )
         .expect("persisted conversation should load config");
 
@@ -890,43 +740,46 @@ mod tests {
     fn truncate_after_user_turns_branches_within_existing_session() {
         let work_dir = tempdir_path("truncate-branch");
         let store = Arc::new(InMemorySessionStore::new());
-        let store_trait: Arc<dyn SessionStore> = store.clone();
-        let mut session = ProviderConversation::with_session_store(
-            store_trait,
-            sample_header(&work_dir, "qwen3"),
-            None,
-        )
-        .expect("persisted conversation should initialize");
         let initial_history = vec![
             ConversationItem::text(Role::User, "first"),
             ConversationItem::text(Role::Assistant, "alpha"),
             ConversationItem::text(Role::User, "second"),
             ConversationItem::text(Role::Assistant, "beta"),
         ];
-        session
-            .append_items(initial_history)
-            .expect("initial history should persist");
+        let session_id = block_on_session(store.create_session(sample_header(&work_dir, "qwen3")))
+            .expect("session should be created");
+        for item in &initial_history {
+            block_on_session(store.append(&session_id, item.clone()))
+                .expect("history item should persist");
+        }
+        let restored_state = block_on_session(store.load_session(&session_id, None))
+            .expect("session state should load");
+        let first_assistant_entry_id = restored_state.items[1].entry_id.clone();
+        let store_trait: Arc<dyn SessionStore> = store;
+        let mut session = ProviderConversation::with_resolved_session_store(
+            store_trait,
+            sample_header(&work_dir, "qwen3"),
+            Some(session_id.clone()),
+            &restored_state,
+        )
+        .expect("persisted conversation should initialize");
 
-        session
+        let leaf_update = session
             .truncate_after_user_turns(1)
             .expect("truncate should keep original session");
-        session
-            .append_items(vec![ConversationItem::text(Role::Assistant, "branched")])
-            .expect("branched item should persist");
 
-        let metas = block_on_session(store.list_sessions(work_dir.to_string_lossy().as_ref()))
-            .expect("session meta should list");
-        assert_eq!(metas.len(), 1, "truncate should keep a single session");
-
-        let resolved = block_on_session(store.resolve(&metas[0].session_id, None))
-            .expect("session should resolve branched items");
         assert_eq!(
-            resolved,
+            leaf_update,
+            Some((session_id, first_assistant_entry_id)),
+            "truncate should report the leaf update for async persistence"
+        );
+        assert_eq!(
+            session.history(),
             vec![
                 ConversationItem::text(Role::User, "first"),
                 ConversationItem::text(Role::Assistant, "alpha"),
-                ConversationItem::text(Role::Assistant, "branched"),
             ]
+            .as_slice()
         );
     }
 
@@ -955,210 +808,13 @@ mod tests {
         }
     }
 
-    struct FailingAppendStore {
-        session_id: Mutex<Option<SessionId>>,
-    }
-
-    impl FailingAppendStore {
-        fn new() -> Self {
-            Self {
-                session_id: Mutex::new(None),
-            }
-        }
-    }
-
-    impl SessionStore for FailingAppendStore {
-        fn create_session<'a>(
-            &'a self,
-            _header: SessionHeader,
-        ) -> Pin<Box<dyn Future<Output = Result<SessionId, SessionStoreError>> + Send + 'a>>
-        {
-            Box::pin(async move {
-                let session_id = SessionId::new();
-                *self
-                    .session_id
-                    .lock()
-                    .expect("session id lock should not poison") = Some(session_id.clone());
-                Ok(session_id)
-            })
-        }
-
-        fn append<'a>(
-            &'a self,
-            _session_id: &'a SessionId,
-            _item: ConversationItem,
-        ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>> {
-            Box::pin(async move {
-                Err(SessionStoreError::IoError {
-                    source: std::io::Error::other("append failed"),
-                })
-            })
-        }
-
-        fn append_many<'a>(
-            &'a self,
-            _session_id: &'a SessionId,
-            _items: Vec<ConversationItem>,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, SessionStoreError>> + Send + 'a>>
-        {
-            Box::pin(async move {
-                Err(SessionStoreError::IoError {
-                    source: std::io::Error::other("append failed"),
-                })
-            })
-        }
-
-        fn append_config_change<'a>(
-            &'a self,
-            _session_id: &'a SessionId,
-            _snapshot: session_store::ConfigSnapshot,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn append_transcript_replay<'a>(
-            &'a self,
-            _session_id: &'a SessionId,
-            _item: runtime_domain::session::TranscriptReplayItem,
-        ) -> Pin<Box<dyn Future<Output = Result<String, SessionStoreError>> + Send + 'a>> {
-            Box::pin(async { Ok("replay-1".to_string()) })
-        }
-
-        fn set_leaf<'a>(
-            &'a self,
-            _session_id: &'a SessionId,
-            _leaf_id: Option<&'a str>,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn resolve<'a>(
-            &'a self,
-            _session_id: &'a SessionId,
-            _leaf_id: Option<&'a str>,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<ConversationItem>, SessionStoreError>> + Send + 'a>,
-        > {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn load_session<'a>(
-            &'a self,
-            _session_id: &'a SessionId,
-            _leaf_id: Option<&'a str>,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = Result<session_store::ResolvedSessionState, SessionStoreError>>
-                    + Send
-                    + 'a,
-            >,
-        > {
-            Box::pin(async { Ok(session_store::ResolvedSessionState::default()) })
-        }
-
-        fn load_session_tree<'a>(
-            &'a self,
-            _session_id: &'a SessionId,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = Result<session_store::SessionTreeSnapshot, SessionStoreError>>
-                    + Send
-                    + 'a,
-            >,
-        > {
-            Box::pin(async { Ok(session_store::SessionTreeSnapshot::default()) })
-        }
-
-        fn load_session_tree_for_leaf<'a>(
-            &'a self,
-            _session_id: &'a SessionId,
-            _leaf_id: &'a str,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = Result<session_store::SessionTreeSnapshot, SessionStoreError>>
-                    + Send
-                    + 'a,
-            >,
-        > {
-            Box::pin(async { Ok(session_store::SessionTreeSnapshot::default()) })
-        }
-
-        fn load_session_branch_preview<'a>(
-            &'a self,
-            _session_id: &'a SessionId,
-            _branch_row_id: &'a str,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = Result<session_store::SessionTreeSnapshot, SessionStoreError>>
-                    + Send
-                    + 'a,
-            >,
-        > {
-            Box::pin(async { Ok(session_store::SessionTreeSnapshot::default()) })
-        }
-
-        fn load_session_branch_tree<'a>(
-            &'a self,
-            _session_id: &'a SessionId,
-        ) -> Pin<
-            Box<
-                dyn Future<
-                        Output = Result<
-                            session_store::SessionBranchTreeSnapshot,
-                            SessionStoreError,
-                        >,
-                    > + Send
-                    + 'a,
-            >,
-        > {
-            Box::pin(async { Ok(session_store::SessionBranchTreeSnapshot::default()) })
-        }
-
-        fn list_sessions<'a>(
-            &'a self,
-            _project_dir: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<SessionMeta>, SessionStoreError>> + Send + 'a>>
-        {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn get_session_meta<'a>(
-            &'a self,
-            session_id: &'a SessionId,
-        ) -> Pin<Box<dyn Future<Output = Result<SessionMeta, SessionStoreError>> + Send + 'a>>
-        {
-            let session_id = session_id.clone();
-            Box::pin(async move {
-                Ok(SessionMeta {
-                    session_id,
-                    project_dir: String::new(),
-                    title: String::new(),
-                    preview: None,
-                    first_user_preview: None,
-                    last_assistant_preview: None,
-                    total_tokens: 0,
-                    model: None,
-                    created_at: 0,
-                    updated_at: 0,
-                    git_head: None,
-                    work_dir: PathBuf::new(),
-                    jsonl_path: PathBuf::new(),
-                    size_bytes: None,
-                })
-            })
-        }
-
-        fn flush<'a>(
-            &'a self,
-            _session_id: &'a SessionId,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn flush_all<'a>(
-            &'a self,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
-            Box::pin(async { Ok(()) })
-        }
+    fn block_on_session<T>(
+        future: impl std::future::Future<Output = Result<T, SessionStoreError>>,
+    ) -> Result<T, SessionStoreError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+        runtime.block_on(future)
     }
 }

@@ -1,0 +1,567 @@
+use std::{
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
+    thread,
+    time::Duration,
+};
+
+use conversation_runtime::ProviderConversation;
+use runtime_domain::session::{
+    RuntimeEvent, SessionPickerRow, SessionResumePayload, SessionTreePayload,
+};
+use session_store::{SessionHeader, SessionId, SessionStore};
+
+use super::{
+    session_branch_tree_payload, session_picker_row_from_meta, session_preview_payload,
+    session_resume_payload, session_tree_payload,
+};
+
+const SESSION_EVENT_DRAIN_WAIT: Duration = Duration::from_millis(2);
+const SESSION_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
+
+pub(super) struct SessionStoreWorker {
+    command_sender: Sender<SessionStoreCommand>,
+    event_receiver: Receiver<SessionStoreWorkerEvent>,
+    pending_commands: usize,
+    pending_mutations: usize,
+}
+
+pub(super) enum SessionStoreWorkerEvent {
+    Runtime(RuntimeEvent),
+    Restored {
+        conversation: ProviderConversation,
+        payload: SessionResumePayload,
+    },
+    RestoredWithTree {
+        conversation: ProviderConversation,
+        resume_payload: SessionResumePayload,
+        tree_payload: SessionTreePayload,
+    },
+    Noop,
+    Failed {
+        message: String,
+        is_mutation: bool,
+    },
+}
+
+enum SessionStoreCommand {
+    ListSessions {
+        store: Arc<dyn SessionStore>,
+        project_dir: String,
+        active_session_id: Option<SessionId>,
+    },
+    LoadSessionPreview {
+        store: Arc<dyn SessionStore>,
+        session_id: SessionId,
+    },
+    ResumeSession {
+        store: Arc<dyn SessionStore>,
+        header: SessionHeader,
+        session_id: SessionId,
+    },
+    LoadEntryTree {
+        store: Arc<dyn SessionStore>,
+        session_id: SessionId,
+    },
+    LoadBranchTree {
+        store: Arc<dyn SessionStore>,
+        session_id: SessionId,
+    },
+    LoadBranchPreview {
+        store: Arc<dyn SessionStore>,
+        session_id: SessionId,
+        branch_row_id: String,
+    },
+    SwitchBranch {
+        store: Arc<dyn SessionStore>,
+        header: SessionHeader,
+        session_id: SessionId,
+        leaf_id: String,
+    },
+    SelectEntryRewind {
+        store: Arc<dyn SessionStore>,
+        header: SessionHeader,
+        session_id: SessionId,
+        entry_id: String,
+    },
+    SetLeaf {
+        store: Arc<dyn SessionStore>,
+        session_id: SessionId,
+        leaf_id: String,
+    },
+    FlushAll {
+        store: Arc<dyn SessionStore>,
+        ack: Sender<Result<(), String>>,
+    },
+}
+
+impl Default for SessionStoreWorker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SessionStoreWorker {
+    pub(super) fn new() -> Self {
+        let (command_sender, command_receiver) = mpsc::channel();
+        let (event_sender, event_receiver) = mpsc::channel();
+        thread::spawn(move || run_session_worker(command_receiver, event_sender));
+        Self {
+            command_sender,
+            event_receiver,
+            pending_commands: 0,
+            pending_mutations: 0,
+        }
+    }
+
+    pub(super) fn has_pending_work(&self) -> bool {
+        self.pending_commands > 0
+    }
+
+    pub(super) fn has_pending_mutation(&self) -> bool {
+        self.pending_mutations > 0
+    }
+
+    pub(super) fn drain_events(&mut self) -> Vec<SessionStoreWorkerEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.event_receiver.try_recv() {
+            self.mark_event_drained(&event);
+            events.push(event);
+        }
+
+        if events.is_empty()
+            && self.pending_commands > 0
+            && let Ok(event) = self.event_receiver.recv_timeout(SESSION_EVENT_DRAIN_WAIT)
+        {
+            self.mark_event_drained(&event);
+            events.push(event);
+            while let Ok(event) = self.event_receiver.try_recv() {
+                self.mark_event_drained(&event);
+                events.push(event);
+            }
+        }
+
+        events
+    }
+
+    pub(super) fn list_sessions(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        project_dir: String,
+        active_session_id: Option<SessionId>,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::ListSessions {
+                store,
+                project_dir,
+                active_session_id,
+            },
+            false,
+        )
+    }
+
+    pub(super) fn load_session_preview(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        session_id: SessionId,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::LoadSessionPreview { store, session_id },
+            false,
+        )
+    }
+
+    pub(super) fn resume_session(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        header: SessionHeader,
+        session_id: SessionId,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::ResumeSession {
+                store,
+                header,
+                session_id,
+            },
+            true,
+        )
+    }
+
+    pub(super) fn load_entry_tree(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        session_id: SessionId,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::LoadEntryTree { store, session_id },
+            false,
+        )
+    }
+
+    pub(super) fn load_branch_tree(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        session_id: SessionId,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::LoadBranchTree { store, session_id },
+            false,
+        )
+    }
+
+    pub(super) fn load_branch_preview(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        session_id: SessionId,
+        branch_row_id: String,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::LoadBranchPreview {
+                store,
+                session_id,
+                branch_row_id,
+            },
+            false,
+        )
+    }
+
+    pub(super) fn switch_branch(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        header: SessionHeader,
+        session_id: SessionId,
+        leaf_id: String,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::SwitchBranch {
+                store,
+                header,
+                session_id,
+                leaf_id,
+            },
+            true,
+        )
+    }
+
+    pub(super) fn select_entry_rewind(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        header: SessionHeader,
+        session_id: SessionId,
+        entry_id: String,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::SelectEntryRewind {
+                store,
+                header,
+                session_id,
+                entry_id,
+            },
+            true,
+        )
+    }
+
+    pub(super) fn set_leaf(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        session_id: SessionId,
+        leaf_id: String,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::SetLeaf {
+                store,
+                session_id,
+                leaf_id,
+            },
+            true,
+        )
+    }
+
+    pub(super) fn flush_all(&self, store: Arc<dyn SessionStore>) -> Result<(), String> {
+        let (ack, receiver) = mpsc::channel();
+        self.command_sender
+            .send(SessionStoreCommand::FlushAll { store, ack })
+            .map_err(|_| "session store worker stopped".to_string())?;
+        receiver
+            .recv_timeout(SESSION_SHUTDOWN_WAIT)
+            .map_err(|_| "session store flush timed out".to_string())?
+    }
+
+    fn send_command(
+        &mut self,
+        command: SessionStoreCommand,
+        is_mutation: bool,
+    ) -> Result<(), String> {
+        self.command_sender
+            .send(command)
+            .map_err(|_| "session store worker stopped".to_string())?;
+        self.pending_commands = self.pending_commands.saturating_add(1);
+        if is_mutation {
+            self.pending_mutations = self.pending_mutations.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn mark_event_drained(&mut self, event: &SessionStoreWorkerEvent) {
+        self.pending_commands = self.pending_commands.saturating_sub(1);
+        if event.is_mutation_result() {
+            self.pending_mutations = self.pending_mutations.saturating_sub(1);
+        }
+    }
+}
+
+impl SessionStoreWorkerEvent {
+    fn is_mutation_result(&self) -> bool {
+        matches!(
+            self,
+            Self::Restored { .. }
+                | Self::RestoredWithTree { .. }
+                | Self::Noop
+                | Self::Failed {
+                    is_mutation: true,
+                    ..
+                }
+        )
+    }
+}
+
+fn run_session_worker(
+    command_receiver: Receiver<SessionStoreCommand>,
+    event_sender: Sender<SessionStoreWorkerEvent>,
+) {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = event_sender.send(SessionStoreWorkerEvent::Failed {
+                message: format!("start session store worker runtime: {error}"),
+                is_mutation: false,
+            });
+            return;
+        }
+    };
+
+    while let Ok(command) = command_receiver.recv() {
+        if let SessionStoreCommand::FlushAll { store, ack } = command {
+            let result = runtime
+                .block_on(store.flush_all())
+                .map_err(|error| error.to_string());
+            let _ = ack.send(result);
+            continue;
+        }
+
+        let event = runtime.block_on(handle_session_command(command));
+        let _ = event_sender.send(event);
+    }
+}
+
+async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWorkerEvent {
+    match command {
+        SessionStoreCommand::ListSessions {
+            store,
+            project_dir,
+            active_session_id,
+        } => match store.list_sessions(&project_dir).await {
+            Ok(metas) => {
+                let rows = metas
+                    .into_iter()
+                    .filter(|meta| {
+                        active_session_id
+                            .as_ref()
+                            .map(|session_id| meta.session_id != *session_id)
+                            .unwrap_or(true)
+                    })
+                    .map(session_picker_row_from_meta)
+                    .collect::<Vec<SessionPickerRow>>();
+                SessionStoreWorkerEvent::Runtime(RuntimeEvent::SessionListLoaded { rows })
+            }
+            Err(error) => failed(error.to_string(), false),
+        },
+        SessionStoreCommand::LoadSessionPreview { store, session_id } => {
+            match store.load_session(&session_id, None).await {
+                Ok(restored_state) => {
+                    SessionStoreWorkerEvent::Runtime(RuntimeEvent::SessionPreviewLoaded {
+                        payload: session_preview_payload(session_id, restored_state),
+                    })
+                }
+                Err(error) => failed(error.to_string(), false),
+            }
+        }
+        SessionStoreCommand::ResumeSession {
+            store,
+            header,
+            session_id,
+        } => match restore_conversation(store, header, session_id, None).await {
+            Ok((conversation, payload)) => SessionStoreWorkerEvent::Restored {
+                conversation,
+                payload,
+            },
+            Err(message) => failed(message, true),
+        },
+        SessionStoreCommand::LoadEntryTree { store, session_id } => {
+            match store.load_session_tree(&session_id).await {
+                Ok(snapshot) => SessionStoreWorkerEvent::Runtime(RuntimeEvent::SessionTreeLoaded {
+                    payload: session_tree_payload(snapshot),
+                }),
+                Err(error) => failed(error.to_string(), false),
+            }
+        }
+        SessionStoreCommand::LoadBranchTree { store, session_id } => {
+            match store.load_session_branch_tree(&session_id).await {
+                Ok(snapshot) => {
+                    SessionStoreWorkerEvent::Runtime(RuntimeEvent::SessionBranchTreeLoaded {
+                        payload: session_branch_tree_payload(snapshot),
+                    })
+                }
+                Err(error) => failed(error.to_string(), false),
+            }
+        }
+        SessionStoreCommand::LoadBranchPreview {
+            store,
+            session_id,
+            branch_row_id,
+        } => match store
+            .load_session_branch_preview(&session_id, &branch_row_id)
+            .await
+        {
+            Ok(snapshot) => {
+                SessionStoreWorkerEvent::Runtime(RuntimeEvent::SessionTreePreviewLoaded {
+                    payload: session_tree_payload(snapshot),
+                })
+            }
+            Err(error) => failed(error.to_string(), false),
+        },
+        SessionStoreCommand::SwitchBranch {
+            store,
+            header,
+            session_id,
+            leaf_id,
+        } => match switch_branch(store, header, session_id, leaf_id).await {
+            Ok((conversation, resume_payload, tree_payload)) => {
+                SessionStoreWorkerEvent::RestoredWithTree {
+                    conversation,
+                    resume_payload,
+                    tree_payload,
+                }
+            }
+            Err(message) => failed(message, true),
+        },
+        SessionStoreCommand::SelectEntryRewind {
+            store,
+            header,
+            session_id,
+            entry_id,
+        } => match select_entry_rewind(store, header, session_id, entry_id).await {
+            Ok(Some((conversation, payload))) => SessionStoreWorkerEvent::Restored {
+                conversation,
+                payload,
+            },
+            Ok(None) => SessionStoreWorkerEvent::Noop,
+            Err(message) => failed(message, true),
+        },
+        SessionStoreCommand::SetLeaf {
+            store,
+            session_id,
+            leaf_id,
+        } => match store.set_leaf(&session_id, Some(&leaf_id)).await {
+            Ok(()) => SessionStoreWorkerEvent::Noop,
+            Err(error) => failed(error.to_string(), true),
+        },
+        SessionStoreCommand::FlushAll { .. } => unreachable!("flush is handled by worker loop"),
+    }
+}
+
+async fn restore_conversation(
+    store: Arc<dyn SessionStore>,
+    header: SessionHeader,
+    session_id: SessionId,
+    leaf_id: Option<&str>,
+) -> Result<(ProviderConversation, SessionResumePayload), String> {
+    let restored_state = store
+        .load_session(&session_id, leaf_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let conversation = ProviderConversation::with_resolved_session_store(
+        store,
+        header,
+        Some(session_id.clone()),
+        &restored_state,
+    )
+    .map_err(|error| error.to_string())?;
+    let payload = session_resume_payload(session_id, restored_state);
+    Ok((conversation, payload))
+}
+
+async fn switch_branch(
+    store: Arc<dyn SessionStore>,
+    header: SessionHeader,
+    session_id: SessionId,
+    leaf_id: String,
+) -> Result<
+    (
+        ProviderConversation,
+        SessionResumePayload,
+        SessionTreePayload,
+    ),
+    String,
+> {
+    let (conversation, resume_payload) =
+        restore_conversation(store.clone(), header, session_id.clone(), Some(&leaf_id)).await?;
+    let tree_snapshot = store
+        .load_session_tree_for_leaf(&session_id, &leaf_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    store
+        .set_leaf(&session_id, Some(&leaf_id))
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok((
+        conversation,
+        resume_payload,
+        session_tree_payload(tree_snapshot),
+    ))
+}
+
+async fn select_entry_rewind(
+    store: Arc<dyn SessionStore>,
+    header: SessionHeader,
+    session_id: SessionId,
+    entry_id: String,
+) -> Result<Option<(ProviderConversation, SessionResumePayload)>, String> {
+    let snapshot = store
+        .load_session_tree(&session_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let selected_row = snapshot
+        .rows
+        .iter()
+        .find(|row| row.id == entry_id)
+        .ok_or_else(|| format!("Tree row `{entry_id}` was not found"))?;
+    let Some(rewind_target_id) = selected_row.rewind_target_id.as_deref() else {
+        return Ok(None);
+    };
+    let rewind_target_id = rewind_target_id.to_string();
+    let (conversation, payload) = restore_conversation(
+        store.clone(),
+        header,
+        session_id.clone(),
+        Some(&rewind_target_id),
+    )
+    .await?;
+    store
+        .set_leaf(&session_id, Some(&rewind_target_id))
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(Some((conversation, payload)))
+}
+
+fn failed(message: String, is_mutation: bool) -> SessionStoreWorkerEvent {
+    SessionStoreWorkerEvent::Failed {
+        message,
+        is_mutation,
+    }
+}

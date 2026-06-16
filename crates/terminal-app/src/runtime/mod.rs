@@ -1,11 +1,11 @@
 mod event_mapping;
 mod managed_search_authorization;
+mod session_worker;
 
-use std::{future::Future, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use conversation_runtime::{
-    ConversationWorker, ModelRefreshWorker, ProviderConversation, ProviderConversationError,
-    models as provider_models,
+    ConversationWorker, ModelRefreshWorker, ProviderConversation, models as provider_models,
 };
 use runtime_domain::{
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
@@ -18,7 +18,7 @@ use runtime_domain::{
 };
 use session_store::{
     ResolvedSessionState, SessionBranchTreeSnapshot, SessionHeader, SessionId, SessionMeta,
-    SessionStore, SessionStoreError, SessionTreeSnapshot, SessionTreeSnapshotRow,
+    SessionStore, SessionTreeSnapshot, SessionTreeSnapshotRow,
 };
 use terminal_ui::RuntimeCoordinator;
 use tool_runtime::{ToolExecutorRegistry, builtin::ManagedSearchToolConfig};
@@ -30,6 +30,7 @@ use self::{
     managed_search_authorization::{
         conversation_workspace_tools, persist_managed_search_tool_authorization,
     },
+    session_worker::{SessionStoreWorker, SessionStoreWorkerEvent},
 };
 
 /// `AppRuntimeOptions` 保存 app 层对话运行时所需的配置。
@@ -50,75 +51,19 @@ pub(crate) struct AppRuntimeCoordinator {
     provider_conversation: ProviderConversation,
     model_refresh: ModelRefreshWorker,
     workspace_tools: ToolExecutorRegistry,
-    session_store_runtime: SessionStoreRuntime,
+    session_store_worker: SessionStoreWorker,
     pending_runtime_events: Vec<RuntimeEvent>,
-}
-
-struct SessionStoreRuntime {
-    runtime: tokio::runtime::Runtime,
-}
-
-struct PreparedSessionRestore {
-    session_id: SessionId,
-    conversation: ProviderConversation,
-    restored_state: ResolvedSessionState,
-}
-
-#[derive(Debug)]
-enum SessionRestoreError {
-    Store(SessionStoreError),
-    ProviderConversation(ProviderConversationError),
-}
-
-impl SessionStoreRuntime {
-    fn new() -> Result<Self, SessionStoreError> {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map(|runtime| Self { runtime })
-            .map_err(|source| SessionStoreError::IoError { source })
-    }
-
-    fn block_on<T>(
-        &self,
-        future: impl Future<Output = Result<T, SessionStoreError>>,
-    ) -> Result<T, SessionStoreError> {
-        self.runtime.block_on(future)
-    }
-}
-
-impl From<SessionStoreError> for SessionRestoreError {
-    fn from(error: SessionStoreError) -> Self {
-        Self::Store(error)
-    }
-}
-
-impl From<ProviderConversationError> for SessionRestoreError {
-    fn from(error: ProviderConversationError) -> Self {
-        Self::ProviderConversation(error)
-    }
-}
-
-impl std::fmt::Display for SessionRestoreError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Store(error) => error.fmt(formatter),
-            Self::ProviderConversation(error) => error.fmt(formatter),
-        }
-    }
 }
 
 impl AppRuntimeCoordinator {
     pub(crate) fn new(options: AppRuntimeOptions) -> Result<Self, String> {
         let workspace_tools = conversation_workspace_tools(&options.managed_search_tools);
-        let session_store_runtime =
-            SessionStoreRuntime::new().map_err(|error| error.to_string())?;
         let provider_conversation = match (
             options.session_store.clone(),
             options.session_header_template.clone(),
         ) {
             (Some(store), Some(header_template)) => {
-                ProviderConversation::with_session_store(store, header_template, None)
+                ProviderConversation::with_session_store(store, header_template)
                     .map_err(|error| error.to_string())?
             }
             _ => ProviderConversation::default(),
@@ -129,7 +74,7 @@ impl AppRuntimeCoordinator {
             provider_conversation,
             model_refresh: ModelRefreshWorker::default(),
             workspace_tools,
-            session_store_runtime,
+            session_store_worker: SessionStoreWorker::new(),
             pending_runtime_events: Vec::new(),
         })
     }
@@ -151,9 +96,16 @@ impl AppRuntimeCoordinator {
                             .to_string(),
                     );
                 }
-                self.provider_conversation
+                self.ensure_session_mutation_available("truncate conversation")?;
+                if let Some((session_id, leaf_id)) = self
+                    .provider_conversation
                     .truncate_after_user_turns(retained_user_turns)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| error.to_string())?
+                {
+                    let store = self.session_store()?;
+                    self.session_store_worker
+                        .set_leaf(store, session_id, leaf_id)?;
+                }
                 Ok(RuntimeCommandReceipt::Accepted)
             }
             RuntimeCommand::Interrupt { target } => self.interrupt_runtime(target),
@@ -166,12 +118,7 @@ impl AppRuntimeCoordinator {
                 self.respond_permission(target.as_ref(), &request_id, option_id)?;
                 Ok(RuntimeCommandReceipt::Accepted)
             }
-            RuntimeCommand::ListSessions => {
-                let rows = self.session_picker_rows()?;
-                self.pending_runtime_events
-                    .push(RuntimeEvent::SessionListLoaded { rows });
-                Ok(RuntimeCommandReceipt::Accepted)
-            }
+            RuntimeCommand::ListSessions => self.list_sessions(),
             RuntimeCommand::LoadSessionPreview { session_id } => {
                 self.load_session_preview(&session_id)
             }
@@ -195,110 +142,43 @@ impl AppRuntimeCoordinator {
         }
     }
 
-    fn session_picker_rows(&self) -> Result<Vec<SessionPickerRow>, String> {
-        let store = self
-            .options
-            .session_store
-            .as_ref()
-            .ok_or_else(|| "Session store is not available".to_string())?;
-        let header = self
-            .options
-            .session_header_template
-            .as_ref()
-            .ok_or_else(|| "Session header template is not available".to_string())?;
-        let project_dir = header.work_dir.to_string_lossy();
-        let metas = self
-            .session_store_runtime
-            .block_on(store.list_sessions(project_dir.as_ref()))
-            .map_err(|error| error.to_string())?;
+    fn list_sessions(&mut self) -> Result<RuntimeCommandReceipt, String> {
+        let store = self.session_store()?;
+        let header = self.session_header()?;
+        let project_dir = header.work_dir.to_string_lossy().to_string();
         let active_session_id = self
             .provider_conversation
             .session_id()
-            .or(Some(&header.session_id));
-        Ok(metas
-            .into_iter()
-            .filter(|meta| {
-                active_session_id
-                    .map(|session_id| meta.session_id != *session_id)
-                    .unwrap_or(true)
-            })
-            .map(session_picker_row_from_meta)
-            .collect())
+            .cloned()
+            .or(Some(header.session_id));
+        self.session_store_worker
+            .list_sessions(store, project_dir, active_session_id)?;
+        Ok(RuntimeCommandReceipt::Accepted)
     }
 
     fn resume_session(&mut self, session_id: &str) -> Result<RuntimeCommandReceipt, String> {
         if self.conversation_worker.is_running() {
             return Err("Cannot resume session while a request is running".to_string());
         }
+        self.ensure_session_mutation_available("resume session")?;
 
         let session_id = session_id
             .parse::<SessionId>()
             .map_err(|error| format!("Invalid session id: {error}"))?;
-        let store = self
-            .options
-            .session_store
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "Session store is not available".to_string())?;
-        let header = self
-            .options
-            .session_header_template
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "Session header template is not available".to_string())?;
-
-        let restore = self
-            .prepare_committed_session_restore(store, header, session_id)
-            .map_err(|error| error.to_string())?;
-        let payload = self.apply_prepared_session_leaf_restore(restore);
-
-        self.conversation_worker.reset_after_clear();
-        self.pending_runtime_events
-            .push(RuntimeEvent::SessionResumed { payload });
+        let store = self.session_store()?;
+        let header = self.session_header()?;
+        self.session_store_worker
+            .resume_session(store, header, session_id)?;
         Ok(RuntimeCommandReceipt::Accepted)
-    }
-
-    fn prepare_committed_session_restore(
-        &self,
-        store: Arc<dyn SessionStore>,
-        header: SessionHeader,
-        session_id: SessionId,
-    ) -> Result<PreparedSessionRestore, SessionRestoreError> {
-        let restored_state = self
-            .session_store_runtime
-            .block_on(store.load_session(&session_id, None))?;
-        let conversation = ProviderConversation::with_resolved_session_store(
-            store,
-            header,
-            Some(session_id.clone()),
-            &restored_state,
-        )?;
-
-        Ok(PreparedSessionRestore {
-            session_id,
-            conversation,
-            restored_state,
-        })
     }
 
     fn load_session_preview(&mut self, session_id: &str) -> Result<RuntimeCommandReceipt, String> {
         let session_id = session_id
             .parse::<SessionId>()
             .map_err(|error| format!("Invalid session id: {error}"))?;
-        let store = self
-            .options
-            .session_store
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "Session store is not available".to_string())?;
-        let restored_state = self
-            .session_store_runtime
-            .block_on(store.load_session(&session_id, None))
-            .map_err(|error| error.to_string())?;
-        let payload = session_preview_payload(session_id, restored_state);
-
-        self.pending_runtime_events
-            .push(RuntimeEvent::SessionPreviewLoaded { payload });
+        let store = self.session_store()?;
+        self.session_store_worker
+            .load_session_preview(store, session_id)?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
@@ -316,20 +196,9 @@ impl AppRuntimeCoordinator {
             }
             return Err("No active persisted session to show tree".to_string());
         };
-        let store = self
-            .options
-            .session_store
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "Session store is not available".to_string())?;
-        let snapshot = self
-            .session_store_runtime
-            .block_on(store.load_session_tree(&session_id))
-            .map_err(|error| error.to_string())?;
-        self.pending_runtime_events
-            .push(RuntimeEvent::SessionTreeLoaded {
-                payload: session_tree_payload(snapshot),
-            });
+        let store = self.session_store()?;
+        self.session_store_worker
+            .load_entry_tree(store, session_id)?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
@@ -342,20 +211,12 @@ impl AppRuntimeCoordinator {
             .session_id()
             .cloned()
             .ok_or_else(|| "No active persisted session to preview".to_string())?;
-        let store = self
-            .options
-            .session_store
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "Session store is not available".to_string())?;
-        let snapshot = self
-            .session_store_runtime
-            .block_on(store.load_session_branch_preview(&session_id, branch_row_id))
-            .map_err(|error| error.to_string())?;
-        self.pending_runtime_events
-            .push(RuntimeEvent::SessionTreePreviewLoaded {
-                payload: session_tree_payload(snapshot),
-            });
+        let store = self.session_store()?;
+        self.session_store_worker.load_branch_preview(
+            store,
+            session_id,
+            branch_row_id.to_string(),
+        )?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
@@ -374,20 +235,9 @@ impl AppRuntimeCoordinator {
             }
             return Err("No active persisted session to show branch tree".to_string());
         };
-        let store = self
-            .options
-            .session_store
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "Session store is not available".to_string())?;
-        let snapshot = self
-            .session_store_runtime
-            .block_on(store.load_session_branch_tree(&session_id))
-            .map_err(|error| error.to_string())?;
-        self.pending_runtime_events
-            .push(RuntimeEvent::SessionBranchTreeLoaded {
-                payload: session_branch_tree_payload(snapshot),
-            });
+        let store = self.session_store()?;
+        self.session_store_worker
+            .load_branch_tree(store, session_id)?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
@@ -395,45 +245,16 @@ impl AppRuntimeCoordinator {
         if self.conversation_worker.is_running() {
             return Err("Cannot switch branch while a request is running".to_string());
         }
+        self.ensure_session_mutation_available("switch branch")?;
         let session_id = self
             .provider_conversation
             .session_id()
             .cloned()
             .ok_or_else(|| "No active persisted session to switch branch".to_string())?;
-        let store = self
-            .options
-            .session_store
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "Session store is not available".to_string())?;
-        let header = self
-            .options
-            .session_header_template
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "Session header template is not available".to_string())?;
-
-        let restore = self
-            .prepare_session_leaf_restore(store.clone(), header, session_id.clone(), leaf_id)
-            .map_err(|error| error.to_string())?;
-        let snapshot = self
-            .session_store_runtime
-            .block_on(store.load_session_tree_for_leaf(&session_id, leaf_id))
-            .map_err(|error| error.to_string())?;
-        self.session_store_runtime
-            .block_on(store.set_leaf(&session_id, Some(leaf_id)))
-            .map_err(|error| error.to_string())?;
-
-        let resume_payload = self.apply_prepared_session_leaf_restore(restore);
-        let tree_payload = session_tree_payload(snapshot);
-        self.pending_runtime_events
-            .push(RuntimeEvent::SessionResumed {
-                payload: resume_payload,
-            });
-        self.pending_runtime_events
-            .push(RuntimeEvent::SessionTreeLoaded {
-                payload: tree_payload,
-            });
+        let store = self.session_store()?;
+        let header = self.session_header()?;
+        self.session_store_worker
+            .switch_branch(store, header, session_id, leaf_id.to_string())?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
@@ -441,83 +262,46 @@ impl AppRuntimeCoordinator {
         if self.conversation_worker.is_running() {
             return Err("Cannot rewind session while a request is running".to_string());
         }
+        self.ensure_session_mutation_available("rewind session")?;
         let session_id = self
             .provider_conversation
             .session_id()
             .cloned()
             .ok_or_else(|| "No active persisted session to rewind".to_string())?;
-        let store = self
-            .options
-            .session_store
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "Session store is not available".to_string())?;
-        let header = self
-            .options
-            .session_header_template
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "Session header template is not available".to_string())?;
-        let snapshot = self
-            .session_store_runtime
-            .block_on(store.load_session_tree(&session_id))
-            .map_err(|error| error.to_string())?;
-        let selected_row = snapshot
-            .rows
-            .iter()
-            .find(|row| row.id == entry_id)
-            .ok_or_else(|| format!("Tree row `{entry_id}` was not found"))?;
-        let Some(rewind_target_id) = selected_row.rewind_target_id.as_deref() else {
-            return Ok(RuntimeCommandReceipt::Accepted);
-        };
-        let rewind_target_id = rewind_target_id.to_string();
-        let restore = self
-            .prepare_session_leaf_restore(
-                store.clone(),
-                header,
-                session_id.clone(),
-                &rewind_target_id,
-            )
-            .map_err(|error| error.to_string())?;
-        self.session_store_runtime
-            .block_on(store.set_leaf(&session_id, Some(&rewind_target_id)))
-            .map_err(|error| error.to_string())?;
-        let payload = self.apply_prepared_session_leaf_restore(restore);
-        self.pending_runtime_events
-            .push(RuntimeEvent::SessionResumed { payload });
+        let store = self.session_store()?;
+        let header = self.session_header()?;
+        self.session_store_worker.select_entry_rewind(
+            store,
+            header,
+            session_id,
+            entry_id.to_string(),
+        )?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
-    fn prepare_session_leaf_restore(
-        &self,
-        store: Arc<dyn SessionStore>,
-        header: SessionHeader,
-        session_id: SessionId,
-        leaf_id: &str,
-    ) -> Result<PreparedSessionRestore, SessionRestoreError> {
-        let restored_state = self
-            .session_store_runtime
-            .block_on(store.load_session(&session_id, Some(leaf_id)))?;
-        let conversation = ProviderConversation::with_resolved_session_store(
-            store,
-            header,
-            Some(session_id.clone()),
-            &restored_state,
-        )?;
-
-        Ok(PreparedSessionRestore {
-            session_id,
-            conversation,
-            restored_state,
-        })
+    fn session_store(&self) -> Result<Arc<dyn SessionStore>, String> {
+        self.options
+            .session_store
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "Session store is not available".to_string())
     }
 
-    fn apply_prepared_session_leaf_restore(
-        &mut self,
-        restore: PreparedSessionRestore,
-    ) -> SessionResumePayload {
-        self.provider_conversation = restore.conversation;
-        session_resume_payload(restore.session_id, restore.restored_state)
+    fn session_header(&self) -> Result<SessionHeader, String> {
+        self.options
+            .session_header_template
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "Session header template is not available".to_string())
+    }
+
+    fn ensure_session_mutation_available(&self, action: &str) -> Result<(), String> {
+        if self.session_store_worker.has_pending_mutation() {
+            return Err(format!(
+                "Cannot {action} while a session mutation is running"
+            ));
+        }
+        Ok(())
     }
 
     fn respond_conversation_permission(
@@ -551,9 +335,7 @@ impl AppRuntimeCoordinator {
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
         self.conversation_worker.reset_after_clear();
         if let Some(store) = self.options.session_store.as_ref() {
-            self.session_store_runtime
-                .block_on(store.flush_all())
-                .map_err(|error| error.to_string())?;
+            self.session_store_worker.flush_all(store.clone())?;
         }
         Ok(())
     }
@@ -739,6 +521,7 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
         }
 
         let mut events = Vec::new();
+        self.drain_session_store_events_into(&mut events);
         loop {
             let target = self.conversation_worker.current_target().cloned();
             let Some(event) = self.conversation_worker.try_recv_event() else {
@@ -779,7 +562,9 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
     }
 
     fn has_background_runtime(&self) -> bool {
-        self.conversation_worker.is_running() || self.model_refresh.is_running()
+        self.conversation_worker.is_running()
+            || self.model_refresh.is_running()
+            || self.session_store_worker.has_pending_work()
     }
 
     fn dispatch_runtime_command(
@@ -806,10 +591,50 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
 }
 
 impl AppRuntimeCoordinator {
+    fn drain_session_store_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
+        for event in self.session_store_worker.drain_events() {
+            match event {
+                SessionStoreWorkerEvent::Runtime(event) => events.push(event),
+                SessionStoreWorkerEvent::Restored {
+                    conversation,
+                    payload,
+                } => {
+                    self.provider_conversation = conversation;
+                    self.conversation_worker.reset_after_clear();
+                    events.push(RuntimeEvent::SessionResumed { payload });
+                }
+                SessionStoreWorkerEvent::RestoredWithTree {
+                    conversation,
+                    resume_payload,
+                    tree_payload,
+                } => {
+                    self.provider_conversation = conversation;
+                    self.conversation_worker.reset_after_clear();
+                    events.push(RuntimeEvent::SessionResumed {
+                        payload: resume_payload,
+                    });
+                    events.push(RuntimeEvent::SessionTreeLoaded {
+                        payload: tree_payload,
+                    });
+                }
+                SessionStoreWorkerEvent::Noop => {}
+                SessionStoreWorkerEvent::Failed { message, .. } => {
+                    events.push(RuntimeEvent::Failed {
+                        target: None,
+                        message,
+                    });
+                }
+            }
+        }
+    }
+
     fn reconcile_conversation_updates(&mut self) {
+        let session_id = self.conversation_worker.take_pending_session_id();
         if let Some(entry_id) = self.conversation_worker.take_pending_user_entry_id() {
             self.provider_conversation
-                .commit_pending_user(Some(entry_id));
+                .commit_pending_user(Some(entry_id), session_id);
+        } else if let Some(session_id) = session_id {
+            self.provider_conversation.set_session_id(session_id);
         }
 
         let items = self.conversation_worker.take_session_items();

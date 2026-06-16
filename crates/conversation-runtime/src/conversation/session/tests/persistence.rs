@@ -1,0 +1,280 @@
+use super::support::*;
+
+#[test]
+fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
+    let root = tempdir_path("worker-persistence");
+    let work_dir = root.join("workspace");
+    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+    let store =
+        Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
+    let store_trait: Arc<dyn SessionStore> = store.clone();
+    let mut conversation =
+        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    let user = ConversationItem::text(Role::User, "hello");
+    let request = conversation
+        .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "qwen3",
+            Some("http://127.0.0.1:1234/v1".to_string()),
+            None,
+            None,
+            user.clone(),
+        ))
+        .expect("turn should prepare");
+    let assistant = ConversationItem::text(Role::Assistant, "hi");
+    let (sender, receiver) = mpsc::channel();
+    let mut runtime = ConversationWorker {
+        receiver: Some(receiver),
+        cancellation: Some(CancellationToken::new()),
+        target: Some(RuntimeTarget::provider("local", "qwen3")),
+        permission_broker: None,
+        pending_session_id: None,
+        pending_user_entry_id: None,
+        session_items: Vec::new(),
+    };
+    let sender_copy = sender.clone();
+    let persistence = request.persistence_cloned();
+    let cancellation = CancellationToken::new();
+    let mut state = SessionPersistenceState::default();
+    run_persistence(persist_turn_start(
+        persistence.as_ref(),
+        &sender_copy,
+        &cancellation,
+        &mut state,
+    ))
+    .expect("turn start should persist config and user");
+    run_persistence(persist_context_item(
+        persistence.as_ref(),
+        &sender_copy,
+        &cancellation,
+        assistant.clone(),
+        &mut state,
+    ))
+    .expect("assistant item should persist");
+    sender
+        .send(ConversationWorkerEvent::Finished {
+            response: ConversationResponse::assistant_text("hi"),
+            metrics: None,
+        })
+        .expect("finish event should queue");
+
+    assert!(matches!(
+        runtime.try_recv_event(),
+        Some(ConversationEvent::Finished { .. })
+    ));
+
+    let metas = run_store(store.list_sessions(
+        &ProjectDir::from_work_dir(&work_dir),
+        SessionListOptions::default(),
+    ))
+    .expect("session meta should list");
+    assert_eq!(metas.len(), 1);
+    let resolved = run_store(store.resolve(&metas[0].session_id, None))
+        .expect("resolved items should be readable");
+    let jsonl = fs::read_to_string(&metas[0].jsonl_path).expect("jsonl should be readable");
+
+    assert_eq!(resolved, vec![user, assistant]);
+    assert!(jsonl.contains("\"type\":\"config_change\""));
+}
+
+#[test]
+fn flush_session_persistence_preserves_store_error_source() {
+    let root = tempdir_path("worker-flush-error-source");
+    let work_dir = root.join("workspace");
+    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+    let store =
+        Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
+    let missing_session_id = SessionId::new();
+    let store_trait: Arc<dyn SessionStore> = store;
+    let mut conversation =
+        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    conversation.set_session_id(missing_session_id.clone());
+    let request = conversation
+        .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "qwen3",
+            Some("http://127.0.0.1:1234/v1".to_string()),
+            None,
+            None,
+            ConversationItem::text(Role::User, "hello"),
+        ))
+        .expect("turn should prepare");
+
+    let error = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build")
+        .block_on(async {
+            let (command_sender, command_receiver) = tokio_mpsc::unbounded_channel();
+            let (event_sender, _event_receiver) = mpsc::channel();
+            let actor = tokio::spawn(run_session_persistence_actor(
+                request.persistence_cloned(),
+                command_receiver,
+                event_sender,
+                CancellationToken::new(),
+            ));
+            let error = flush_session_persistence(&command_sender)
+                .await
+                .expect_err("flush failure should preserve typed source");
+            drop(command_sender);
+            actor.await.expect("persistence actor should stop cleanly");
+            error
+        });
+
+    assert!(matches!(
+        error.as_ref(),
+        SessionPersistenceError::Flush {
+            source: SessionStoreError::SessionNotFound { session_id }
+        } if session_id == &missing_session_id
+    ));
+}
+
+#[test]
+fn persistence_helpers_store_rich_tool_replay_without_duplicate_tool_result() {
+    let root = tempdir_path("worker-tool-replay-persistence");
+    let work_dir = root.join("workspace");
+    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+    let store =
+        Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
+    let store_trait: Arc<dyn SessionStore> = store.clone();
+    let mut conversation =
+        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    let request = conversation
+        .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "qwen3",
+            Some("http://127.0.0.1:1234/v1".to_string()),
+            None,
+            None,
+            ConversationItem::text(Role::User, "edit file"),
+        ))
+        .expect("turn should prepare");
+    let (sender, _receiver) = mpsc::channel();
+    let persistence = request.persistence_cloned();
+    let cancellation = CancellationToken::new();
+    let mut state = SessionPersistenceState::default();
+    let started_activity = RuntimeToolActivity {
+        activity_id: "call-1".to_string(),
+        title: "Write src/lib.rs".to_string(),
+        kind: RuntimeToolKind::Write,
+        status: RuntimeToolActivityStatus::InProgress,
+        content: vec![RuntimeToolActivityContent::Text("src/lib.rs".to_string())],
+        locations: Vec::new(),
+        raw_input: Some(RuntimeToolActivityRawValue::from(
+            r#"{"path":"src/lib.rs"}"#,
+        )),
+        raw_output: None,
+    };
+    let final_update = RuntimeToolActivityUpdate {
+        activity_id: "call-1".to_string(),
+        title: Some("Write src/lib.rs".to_string()),
+        kind: Some(RuntimeToolKind::Write),
+        status: Some(RuntimeToolActivityStatus::Completed),
+        content: Some(vec![RuntimeToolActivityContent::Diff {
+            path: "src/lib.rs".to_string(),
+            old_text: Some("old".to_string()),
+            new_text: "new".to_string(),
+            is_truncated: false,
+        }]),
+        locations: Some(Vec::new()),
+        raw_input: Some(RuntimeToolActivityRawValue::from(
+            r#"{"path":"src/lib.rs"}"#,
+        )),
+        raw_output: Some(RuntimeToolActivityRawValue::tool_result(
+            "plain provider output",
+            None,
+        )),
+    };
+    let terminal_snapshot = RuntimeTerminalSnapshot {
+        terminal_id: "call-1".to_string(),
+        command: Some("write src/lib.rs".to_string()),
+        cwd: Some(work_dir.display().to_string()),
+        output: "terminal output".to_string(),
+        truncated: false,
+        exit_status: None,
+        released: true,
+    };
+
+    run_persistence(persist_turn_start(
+        persistence.as_ref(),
+        &sender,
+        &cancellation,
+        &mut state,
+    ))
+    .expect("turn start should persist");
+    run_persistence(persist_tool_activity_started(
+        persistence.as_ref(),
+        started_activity,
+        &mut state,
+    ))
+    .expect("started activity should persist");
+    run_persistence(persist_tool_activity_update(
+        persistence.as_ref(),
+        final_update,
+        &mut state,
+    ))
+    .expect("final activity should persist");
+    run_persistence(persist_terminal_snapshot(
+        persistence.as_ref(),
+        terminal_snapshot.clone(),
+        &state,
+    ))
+    .expect("terminal snapshot should persist");
+    run_persistence(persist_context_item(
+        persistence.as_ref(),
+        &sender,
+        &cancellation,
+        ConversationItem::tool_result(
+            "call-1",
+            vec![ContentBlock::Text("plain provider output".to_string())],
+            false,
+        ),
+        &mut state,
+    ))
+    .expect("tool result item should persist");
+
+    let meta = run_store(store.list_sessions(
+        &ProjectDir::from_work_dir(&work_dir),
+        SessionListOptions::default(),
+    ))
+    .expect("session meta should list")
+    .into_iter()
+    .next()
+    .expect("session should exist");
+    let restored =
+        run_store(store.load_session(&meta.session_id, None)).expect("session should load");
+
+    assert_eq!(restored.transcript.len(), 3);
+    assert!(matches!(
+        &restored.transcript[0],
+        TranscriptReplayItem::Message {
+            role: runtime_domain::session::TranscriptReplayRole::User,
+            content,
+        } if content == "edit file"
+    ));
+    assert!(matches!(
+        &restored.transcript[1],
+        TranscriptReplayItem::ToolActivity { activity }
+            if activity.activity_id == "call-1"
+                && matches!(
+                    activity.content.as_slice(),
+                    [RuntimeToolActivityContent::Diff { path, old_text, new_text, is_truncated }]
+                        if path == "src/lib.rs"
+                            && old_text.as_deref() == Some("old")
+                            && new_text == "new"
+                            && !is_truncated
+                )
+    ));
+    assert_eq!(
+        restored.transcript[2],
+        TranscriptReplayItem::TerminalSnapshot {
+            snapshot: terminal_snapshot
+        }
+    );
+}

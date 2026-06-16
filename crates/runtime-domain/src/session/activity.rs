@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const TOOL_RESULT_RAW_VALUE_MARKER: &str = "__hunea_tool_result";
@@ -7,7 +8,8 @@ const TOOL_RESULT_RAW_VALUE_DISPLAY_CONTENT: &str = "display_content";
 const TOOL_RESULT_RAW_VALUE_DETAILS: &str = "details";
 
 /// `RuntimeToolKind` 是 runtime tool activity 的稳定工具分类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeToolKind {
     Read,
     Write,
@@ -23,7 +25,8 @@ pub enum RuntimeToolKind {
 }
 
 /// `RuntimeToolActivityStatus` 是 runtime tool activity 的生命周期状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeToolActivityStatus {
     Pending,
     InProgress,
@@ -32,14 +35,15 @@ pub enum RuntimeToolActivityStatus {
 }
 
 /// `RuntimeToolActivityLocation` 表示 tool activity 关联的文件位置。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuntimeToolActivityLocation {
     pub path: String,
     pub line: Option<u32>,
 }
 
 /// `RuntimeToolActivityContent` 表示 tool activity 的富内容片段。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeToolActivityContent {
     Text(String),
     Image {
@@ -72,7 +76,8 @@ pub enum RuntimeToolActivityContent {
 }
 
 /// `RuntimeToolActivityRawValue` 保留 runtime tool activity 原始 JSON 语义。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct RuntimeToolActivityRawValue {
     value: Value,
 }
@@ -216,7 +221,7 @@ impl From<&str> for RuntimeToolActivityRawValue {
 }
 
 /// `RuntimeToolActivity` 表示一次可渲染、可更新的 runtime tool activity。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuntimeToolActivity {
     pub activity_id: String,
     pub title: String,
@@ -229,7 +234,7 @@ pub struct RuntimeToolActivity {
 }
 
 /// `RuntimeToolActivityUpdate` 表示 tool activity 的增量更新。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuntimeToolActivityUpdate {
     pub activity_id: String,
     pub title: Option<String>,
@@ -242,14 +247,14 @@ pub struct RuntimeToolActivityUpdate {
 }
 
 /// `RuntimeTerminalExitStatus` 表示 runtime terminal 命令退出状态。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuntimeTerminalExitStatus {
     pub exit_code: Option<u32>,
     pub signal: Option<String>,
 }
 
 /// `RuntimeTerminalSnapshot` 表示 UI 渲染 terminal 嵌入块所需的当前输出快照。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuntimeTerminalSnapshot {
     pub terminal_id: String,
     pub command: Option<String>,

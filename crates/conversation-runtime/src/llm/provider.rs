@@ -150,10 +150,14 @@ fn required_api_key_from_parts(
 
 #[cfg(test)]
 mod tests {
+    use provider_protocol::{ConversationItem, Role};
     use runtime_domain::{provider::ProviderKind, session::ProviderRequest};
 
     use super::openai_client_for_request;
-    use crate::ChatMessage;
+
+    fn user_item(text: &str) -> ConversationItem {
+        ConversationItem::text(Role::User, text)
+    }
 
     #[test]
     fn openai_compatible_request_keeps_api_key_optional() {
@@ -164,7 +168,7 @@ mod tests {
             base_url: Some("http://127.0.0.1:1234/v1".to_string()),
             api_key: None,
             api_key_env: None,
-            messages: vec![ChatMessage::user("hello".to_string())],
+            items: vec![user_item("hello")],
         };
 
         assert!(openai_client_for_request(&request).is_ok());
@@ -179,7 +183,7 @@ mod tests {
             base_url: None,
             api_key: None,
             api_key_env: None,
-            messages: vec![ChatMessage::user("hello".to_string())],
+            items: vec![user_item("hello")],
         };
 
         let error = openai_client_for_request(&request)
@@ -197,7 +201,7 @@ mod tests {
             base_url: Some("not a url".to_string()),
             api_key: None,
             api_key_env: None,
-            messages: vec![ChatMessage::user("hello".to_string())],
+            items: vec![user_item("hello")],
         };
 
         let error = openai_client_for_request(&request)
@@ -219,7 +223,7 @@ mod tests {
             base_url: None,
             api_key: None,
             api_key_env: None,
-            messages: vec![ChatMessage::user("hello".to_string())],
+            items: vec![user_item("hello")],
         };
 
         let error = openai_client_for_request(&request).expect_err(

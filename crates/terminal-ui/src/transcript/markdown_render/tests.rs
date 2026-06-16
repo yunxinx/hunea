@@ -118,7 +118,21 @@ fn render_markdown_preserves_blank_line_between_list_and_following_heading() {
 
     assert_eq!(
         lines_to_plain_text(&lines),
-        "- 当前共识：仍待验证。\n\n### 💡 为什么重要？\n1. 算力策略：提示"
+        "- 当前共识：仍待验证。\n\n### 💡 为什么重要？\n\n1. 算力策略：提示"
+    );
+}
+
+#[test]
+fn render_markdown_preserves_blank_line_between_heading_and_following_list() {
+    let lines = render_markdown_lines(
+        "### 1. 构词逻辑\n*   **Q**：取自英文单词 **Question**（问题）。",
+        80,
+        default_palette(),
+    );
+
+    assert_eq!(
+        lines_to_plain_text(&lines),
+        "### 1. 构词逻辑\n\n- Q：取自英文单词 Question（问题）。"
     );
 }
 

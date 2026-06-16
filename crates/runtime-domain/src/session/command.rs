@@ -18,6 +18,24 @@ pub enum RuntimeCommand {
         request_id: String,
         option_id: Option<String>,
     },
+    ListSessions,
+    LoadSessionPreview {
+        session_id: String,
+    },
+    ResumeSession {
+        session_id: String,
+    },
+    LoadEntryTree,
+    LoadBranchTree,
+    LoadBranchPreview {
+        branch_row_id: String,
+    },
+    SwitchBranch {
+        leaf_id: String,
+    },
+    SelectEntryRewind {
+        entry_id: String,
+    },
     Reset,
 }
 
@@ -69,6 +87,14 @@ impl RuntimeCommand {
             Self::Interrupt { target: None }
             | Self::RespondPermission { target: None, .. }
             | Self::TruncateConversation { .. }
+            | Self::ListSessions
+            | Self::LoadSessionPreview { .. }
+            | Self::ResumeSession { .. }
+            | Self::LoadEntryTree
+            | Self::LoadBranchTree
+            | Self::LoadBranchPreview { .. }
+            | Self::SwitchBranch { .. }
+            | Self::SelectEntryRewind { .. }
             | Self::Reset => None,
         }
     }

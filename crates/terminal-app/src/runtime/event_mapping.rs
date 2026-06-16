@@ -29,39 +29,37 @@ pub(crate) fn runtime_event_from_conversation_event(
             target,
             is_thinking,
         },
-        ConversationEvent::AssistantDelta { content } => RuntimeEvent::AssistantDelta {
-            target: target.expect("conversation target should be available for assistant delta"),
-            content,
+        ConversationEvent::AssistantDelta { content } => match target {
+            Some(target) => RuntimeEvent::AssistantDelta { target, content },
+            None => missing_target_event("assistant delta"),
         },
-        ConversationEvent::ReasoningDelta { content } => RuntimeEvent::ReasoningDelta {
-            target: target.expect("conversation target should be available for reasoning delta"),
-            content,
+        ConversationEvent::ReasoningDelta { content } => match target {
+            Some(target) => RuntimeEvent::ReasoningDelta { target, content },
+            None => missing_target_event("reasoning delta"),
         },
-        ConversationEvent::ToolActivityStarted { activity } => RuntimeEvent::ToolActivityStarted {
-            target: target.expect("conversation target should be available for tool activity"),
-            activity,
+        ConversationEvent::ToolActivityStarted { activity } => match target {
+            Some(target) => RuntimeEvent::ToolActivityStarted { target, activity },
+            None => missing_target_event("tool activity start"),
         },
-        ConversationEvent::ToolActivityUpdated { update } => RuntimeEvent::ToolActivityUpdated {
-            target: target.expect("conversation target should be available for tool activity"),
-            update,
+        ConversationEvent::ToolActivityUpdated { update } => match target {
+            Some(target) => RuntimeEvent::ToolActivityUpdated { target, update },
+            None => missing_target_event("tool activity update"),
         },
-        ConversationEvent::TerminalUpdated { snapshot } => RuntimeEvent::TerminalUpdated {
-            target: target.expect("conversation target should be available for terminal update"),
-            snapshot,
+        ConversationEvent::TerminalUpdated { snapshot } => match target {
+            Some(target) => RuntimeEvent::TerminalUpdated { target, snapshot },
+            None => missing_target_event("terminal update"),
         },
         ConversationEvent::ManagedSearchToolAuthorization { .. } => RuntimeEvent::SystemMessage {
             target,
             message: "managed search tool authorization was not persisted".to_string(),
         },
-        ConversationEvent::PermissionRequested { request } => RuntimeEvent::PermissionRequested {
-            target: target.expect("conversation target should be available for permission request"),
-            request,
+        ConversationEvent::PermissionRequested { request } => match target {
+            Some(target) => RuntimeEvent::PermissionRequested { target, request },
+            None => missing_target_event("permission request"),
         },
         ConversationEvent::Finished { response, metrics } => RuntimeEvent::MessageFinished {
             target,
-            content: response.content,
-            reasoning_content: response.reasoning_content,
-            reasoning_duration: response.reasoning_duration,
+            response,
             finish_reason: None,
             metrics: metrics.map(|metrics| {
                 RuntimeRequestMetrics::new(metrics.latency, metrics.output_tokens, metrics.duration)
@@ -69,6 +67,13 @@ pub(crate) fn runtime_event_from_conversation_event(
         },
         ConversationEvent::Failed { message } => RuntimeEvent::Failed { target, message },
         ConversationEvent::Interrupted => RuntimeEvent::Interrupted { target },
+    }
+}
+
+fn missing_target_event(event_name: &str) -> RuntimeEvent {
+    RuntimeEvent::Failed {
+        target: None,
+        message: format!("Conversation target is missing for {event_name}"),
     }
 }
 

@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::{message::Message, tool::ToolDefinition};
+use crate::{message::ConversationItem, tool::ToolDefinition};
 
 /// `PromptOptions` contains provider-call options that are independent of session state.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -15,17 +15,17 @@ pub struct PromptOptions {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromptRequest {
     pub model: String,
-    pub messages: Vec<Message>,
+    pub items: Vec<ConversationItem>,
     pub tools: Vec<ToolDefinition>,
     pub options: PromptOptions,
 }
 
 impl PromptRequest {
     /// `new` creates a provider prompt request.
-    pub fn new(model: impl Into<String>, messages: Vec<Message>) -> Self {
+    pub fn new(model: impl Into<String>, items: Vec<ConversationItem>) -> Self {
         Self {
             model: model.into(),
-            messages,
+            items,
             tools: Vec::new(),
             options: PromptOptions::default(),
         }

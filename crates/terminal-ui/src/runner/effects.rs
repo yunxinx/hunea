@@ -42,6 +42,72 @@ pub(super) fn apply_effect_if_needed(
             );
             Ok(())
         }
+        AppEffect::OpenResumePicker => {
+            model.open_session_picker_loading();
+            run_simple_runtime_command_effect(
+                model,
+                runtime_coordinator,
+                RuntimeCommand::ListSessions,
+            );
+            Ok(())
+        }
+        AppEffect::OpenSessionPreview { session_id } => {
+            run_simple_runtime_command_effect(
+                model,
+                runtime_coordinator,
+                RuntimeCommand::LoadSessionPreview { session_id },
+            );
+            Ok(())
+        }
+        AppEffect::ResumeSession { session_id } => {
+            run_simple_runtime_command_effect(
+                model,
+                runtime_coordinator,
+                RuntimeCommand::ResumeSession { session_id },
+            );
+            Ok(())
+        }
+        AppEffect::OpenEntryRewind => {
+            model.open_entry_tree_loading();
+            run_simple_runtime_command_effect(
+                model,
+                runtime_coordinator,
+                RuntimeCommand::LoadEntryTree,
+            );
+            Ok(())
+        }
+        AppEffect::OpenBranchTree => {
+            model.open_entry_tree_branch_tree_loading();
+            run_simple_runtime_command_effect(
+                model,
+                runtime_coordinator,
+                RuntimeCommand::LoadBranchTree,
+            );
+            Ok(())
+        }
+        AppEffect::SelectEntryRewind { entry_id, prefill } => {
+            if let Some(prefill) = prefill {
+                model.composer_mut().reset_text_and_move_to_end(prefill);
+            }
+            run_simple_runtime_command_effect(
+                model,
+                runtime_coordinator,
+                RuntimeCommand::SelectEntryRewind { entry_id },
+            );
+            Ok(())
+        }
+        AppEffect::OpenBranchPreview { branch_row_id } => {
+            run_simple_runtime_command_effect(
+                model,
+                runtime_coordinator,
+                RuntimeCommand::LoadBranchPreview { branch_row_id },
+            );
+            Ok(())
+        }
+        AppEffect::SwitchBranch { leaf_id } => {
+            run_switch_branch_effect(model, runtime_coordinator, &leaf_id);
+            Ok(())
+        }
         AppEffect::TruncateConversation {
             retained_user_turns,
         } => {
@@ -64,6 +130,29 @@ pub(super) fn apply_effect_if_needed(
             run_interrupt_current_turn_effect(model, runtime_coordinator);
             Ok(())
         }
+    }
+}
+
+pub(super) fn run_switch_branch_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+    leaf_id: &str,
+) {
+    match runtime_coordinator.dispatch_runtime_command(RuntimeCommand::SwitchBranch {
+        leaf_id: leaf_id.to_string(),
+    }) {
+        Ok(_) => model.open_entry_tree_loading(),
+        Err(message) => model.show_entry_tree_branch_picker_error(&message),
+    }
+}
+
+fn run_simple_runtime_command_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+    command: RuntimeCommand,
+) {
+    if let Err(message) = runtime_coordinator.dispatch_runtime_command(command) {
+        model.show_transient_status_notice(&message);
     }
 }
 

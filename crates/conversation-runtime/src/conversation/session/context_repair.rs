@@ -1,8 +1,6 @@
-use std::sync::{Mutex, mpsc};
+use std::sync::Mutex;
 
-use provider_protocol::{Message, ToolCall, ToolResult};
-
-use super::{ConversationDelta, ConversationWorkerEvent};
+use provider_protocol::{ContentBlock, ConversationItem, ToolCall};
 
 #[derive(Debug, Default)]
 pub(super) struct ProviderContextRepairLedger {
@@ -10,11 +8,13 @@ pub(super) struct ProviderContextRepairLedger {
 }
 
 impl ProviderContextRepairLedger {
-    pub(super) fn observe(&mut self, message: &Message) {
-        self.unresolved_tool_calls.extend(message.tool_calls());
+    pub(super) fn observe(&mut self, item: &ConversationItem) {
+        for call in item.tool_calls() {
+            self.unresolved_tool_calls.push(call.clone());
+        }
 
-        if let Some(tool_result) = message.first_tool_result() {
-            self.resolve_tool_result(&tool_result.call_id);
+        if let ConversationItem::ToolResult { call_id, .. } = item {
+            self.resolve_tool_result(call_id);
         }
     }
 
@@ -30,29 +30,26 @@ impl ProviderContextRepairLedger {
         self.unresolved_tool_calls.remove(index);
     }
 
-    pub(super) fn take_repair_messages(&mut self, content: &'static str) -> Vec<Message> {
+    pub(super) fn take_repair_items(&mut self, content: &'static str) -> Vec<ConversationItem> {
         std::mem::take(&mut self.unresolved_tool_calls)
             .into_iter()
             .map(|call| {
-                Message::tool_result(ToolResult::error(call.call_id, call.name, content, None))
+                ConversationItem::tool_result(
+                    call.call_id,
+                    vec![ContentBlock::Text(content.to_string())],
+                    true,
+                )
             })
             .collect()
     }
 }
 
-pub(super) fn emit_provider_context_repair_messages(
+pub(super) fn take_provider_context_repair_items(
     ledger: &Mutex<ProviderContextRepairLedger>,
-    sender: &mpsc::Sender<ConversationWorkerEvent>,
     content: &'static str,
-) {
-    let repair_messages = ledger
+) -> Vec<ConversationItem> {
+    ledger
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take_repair_messages(content);
-
-    for message in repair_messages {
-        let _ = sender.send(ConversationWorkerEvent::Session(
-            ConversationDelta::ProviderContextMessage { message },
-        ));
-    }
+        .take_repair_items(content)
 }

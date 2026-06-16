@@ -3,10 +3,12 @@ mod item_index;
 mod items;
 mod list;
 mod markdown;
+pub(crate) mod markdown_blocks;
 pub(crate) mod markdown_highlight;
 mod markdown_links;
 mod markdown_render;
 pub(crate) mod markdown_table_source;
+mod preview_scroll;
 mod prompt_wrap;
 mod render_state;
 mod wrap;
@@ -34,12 +36,14 @@ pub(crate) use items::{
 };
 pub(crate) use list::{Transcript, TranscriptItem, materialize_transcript_item_render_block};
 pub(crate) use markdown::{
-    estimate_markdown_metrics_for_tabs, render_markdown_lines, render_markdown_metrics,
+    assistant_markdown_options, estimate_markdown_metrics_for_tabs, render_markdown_lines,
+    render_markdown_metrics,
 };
 #[cfg(test)]
 pub(crate) use markdown::{
     render_markdown_metrics_call_count, reset_render_markdown_metrics_call_count,
 };
+pub(crate) use preview_scroll::{latest_preview_offset, preview_page_offset};
 pub(crate) use prompt_wrap::{PromptVisualLine, wrap_prompt_visual_lines};
 #[cfg(test)]
 pub(crate) use render_state::RenderItemSummary;

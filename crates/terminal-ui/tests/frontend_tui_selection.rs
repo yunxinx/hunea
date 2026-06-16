@@ -305,11 +305,12 @@ fn status_line_selection_can_start_from_left_inset_without_copying_it() {
     model.update(AppEvent::StartupReadyTimeout);
 
     let rows = render_rows(&mut model, 40, 6);
+    let current_dir_marker = current_dir_marker();
     let (row, status_text) = rows
         .iter()
         .enumerate()
         .find_map(|(row, line)| {
-            line.contains("lumos_rust")
+            line.contains(&current_dir_marker)
                 .then(|| (row, line.trim().to_string()))
         })
         .expect("status line should include current directory");
@@ -369,11 +370,12 @@ fn second_status_line_selection_uses_its_own_anchor() {
     model.update(AppEvent::StartupReadyTimeout);
 
     let rows = render_rows(&mut model, 40, 7);
+    let current_dir_marker = current_dir_marker();
     let (row, status_text) = rows
         .iter()
         .enumerate()
         .find_map(|(row, line)| {
-            line.contains("lumos_rust")
+            line.contains(&current_dir_marker)
                 .then(|| (row, line.trim().to_string()))
         })
         .expect("second status line should include current directory");
@@ -426,7 +428,8 @@ fn status_line_selection_keeps_unselected_cells_dim() {
     model.update(AppEvent::StartupReadyTimeout);
 
     let before = render_buffer(&mut model, 40, 6);
-    let (row, content_column) = find_symbol_in_buffer(&before, "lumos_rust")
+    let current_dir_marker = current_dir_marker();
+    let (row, content_column) = find_symbol_in_buffer(&before, &current_dir_marker)
         .expect("status line should include current directory");
     let unselected_column = content_column + 3;
     let original_fg = before[(
@@ -583,6 +586,16 @@ fn find_cell_containing(
         "could not find {needle:?} in rendered rows: {:?}",
         render_rows(model, width, height)
     )
+}
+
+fn current_dir_marker() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "hunea".to_string())
 }
 
 fn find_symbol_in_buffer(buffer: &Buffer, needle: &str) -> Option<(usize, usize)> {

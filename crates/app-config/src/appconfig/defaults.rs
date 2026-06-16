@@ -1,6 +1,6 @@
 use super::{
-    COMPOSER_UNDO_DEFAULT_LIMIT, Config, DebugConfig, ReasoningContentDisplay, RuntimeConfig,
-    TuiConfig, UserInputStyle,
+    BRANCH_PICKER_LIST_ROWS_DEFAULT, COMPOSER_UNDO_DEFAULT_LIMIT, Config, DebugConfig,
+    ReasoningContentDisplay, RuntimeConfig, TuiConfig, UserInputStyle,
 };
 
 impl Config {
@@ -16,8 +16,10 @@ impl Config {
                 swap_enter_and_send: false,
                 ctrl_c_clears_input: true,
                 esc_interrupt_presses: 2,
+                esc_rewind_mode: super::EscRewindMode::Coarse,
                 show_esc_interrupt_hint: true,
                 file_picker_popup_height: 7,
+                branch_picker_list_rows: BRANCH_PICKER_LIST_ROWS_DEFAULT,
                 composer_undo_limit: COMPOSER_UNDO_DEFAULT_LIMIT,
                 print_transcript_on_exit: false,
                 show_reasoning_content: false,

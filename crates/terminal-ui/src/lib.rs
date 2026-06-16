@@ -12,6 +12,7 @@ mod composer;
 mod debug;
 mod display_width;
 mod document;
+mod entry_tree;
 mod exit_confirmation;
 mod external_editor;
 mod file_picker;
@@ -20,6 +21,7 @@ mod floating;
 mod history_scroll_indicator;
 mod inline_panel;
 mod markdown_display;
+mod markdown_source;
 mod message;
 mod message_revisit;
 mod model;
@@ -30,6 +32,8 @@ mod runner;
 mod runtime;
 mod selection;
 mod sender;
+mod session_picker;
+mod session_preview;
 mod shimmer;
 mod startup_banner;
 mod status_line;
@@ -39,6 +43,9 @@ mod style_mode;
 mod styled_text;
 mod terminal_grid;
 mod terminal_text;
+#[cfg(test)]
+mod test_helpers;
+mod time;
 mod tool_approval_panel;
 mod tool_result;
 mod transcript;
@@ -49,7 +56,7 @@ mod view;
 pub mod theme;
 
 pub use external_editor::ExternalEditorLaunch;
-pub use model::{Model, ModelOptions, RequestMetrics};
+pub use model::{EscRewindMode, Model, ModelOptions, RequestMetrics};
 pub use runner::{
     NoopRuntimeCoordinator, RuntimeCoordinator, run, run_with_options,
     run_with_runtime_coordinator, run_with_style_mode,

@@ -1,14 +1,14 @@
 use provider_protocol::PromptRequest;
 
-pub use runtime_domain::session::{ChatMessage, ChatRole, ProviderRequest};
+pub use runtime_domain::session::ProviderRequest;
 
-use crate::conversation::{PreparedConversationRequest, message_from_chat_message};
+use crate::conversation::PreparedConversationRequest;
 use crate::llm::ProviderRequestError;
 
 pub(crate) fn prompt_request_from_provider_request(
     request: &ProviderRequest,
 ) -> Result<PromptRequest, ProviderRequestError> {
-    if request.messages.is_empty() {
+    if request.items.is_empty() {
         return Err(ProviderRequestError::EmptyPrompt {
             provider_id: request.provider_id.clone(),
         });
@@ -16,19 +16,14 @@ pub(crate) fn prompt_request_from_provider_request(
 
     Ok(PromptRequest::new(
         request.model_id.clone(),
-        request
-            .messages
-            .iter()
-            .cloned()
-            .map(message_from_chat_message)
-            .collect(),
+        request.items.clone(),
     ))
 }
 
 pub(crate) fn prompt_request_from_prepared_request(
     request: &PreparedConversationRequest,
 ) -> Result<PromptRequest, ProviderRequestError> {
-    if request.messages().is_empty() {
+    if request.items().is_empty() {
         return Err(ProviderRequestError::EmptyPrompt {
             provider_id: request.provider_id().to_string(),
         });
@@ -36,17 +31,17 @@ pub(crate) fn prompt_request_from_prepared_request(
 
     Ok(PromptRequest::new(
         request.model_id().to_string(),
-        request.messages().to_vec(),
+        request.items().to_vec(),
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use provider_protocol::{MessageContent, MessageRole};
+    use provider_protocol::{ContentBlock, ConversationItem};
 
-    use super::{ChatMessage, ProviderRequest, prompt_request_from_provider_request};
+    use super::ProviderRequest;
     use crate::ProviderKind;
-    use runtime_domain::session::ChatMessageBlock;
+    use crate::llm::request::prompt_request_from_provider_request;
 
     #[test]
     fn prompt_request_keeps_structured_user_blocks() {
@@ -57,28 +52,31 @@ mod tests {
             base_url: Some("http://127.0.0.1:1234/v1".to_string()),
             api_key: None,
             api_key_env: None,
-            messages: vec![ChatMessage::user_with_blocks(
-                "review @assets/sample.png".to_string(),
-                Some(vec![
-                    ChatMessageBlock::Text("review ".to_string()),
-                    ChatMessageBlock::Image {
-                        data_base64: "iVBORw==".to_string(),
-                        mime_type: "image/png".to_string(),
-                        uri: None,
-                    },
-                ]),
-            )],
+            items: vec![ConversationItem::user(vec![
+                ContentBlock::Text("review ".to_string()),
+                ContentBlock::Image {
+                    data_base64: "iVBORw==".to_string(),
+                    mime_type: "image/png".to_string(),
+                    uri: None,
+                },
+            ])],
         };
 
         let request = prompt_request_from_provider_request(&request).expect("prompt should build");
-        assert_eq!(request.messages[0].role, MessageRole::User);
+        let ConversationItem::Message {
+            role: provider_protocol::Role::User,
+            content,
+        } = &request.items[0]
+        else {
+            panic!("expected user message item");
+        };
         assert!(matches!(
-            &request.messages[0].content[0],
-            MessageContent::Text(text) if text == "review "
+            &content[0],
+            ContentBlock::Text(text) if text == "review "
         ));
         assert!(matches!(
-            &request.messages[0].content[1],
-            MessageContent::Image { data_base64, mime_type, .. }
+            &content[1],
+            ContentBlock::Image { data_base64, mime_type, .. }
                 if data_base64 == "iVBORw==" && mime_type == "image/png"
         ));
     }

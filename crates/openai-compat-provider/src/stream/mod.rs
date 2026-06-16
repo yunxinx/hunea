@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use provider_protocol::{
-    FinishReason, Message, MessageContent, MessageRole, PromptResponse, ProviderError, StreamEvent,
+    ContentBlock, ConversationItem, FinishReason, PromptCompletion, ProviderError, StreamEvent,
     StreamEventSink, TokenUsage, ToolCall,
 };
 use serde::Deserialize;
@@ -125,7 +125,7 @@ impl OpenAiStreamState {
     ) -> Result<(), ProviderError> {
         if !self.has_started {
             self.has_started = true;
-            sink.emit(StreamEvent::MessageStarted);
+            sink.emit(StreamEvent::TurnStarted);
         }
 
         let chunk = serde_json::from_str::<ChatCompletionChunk>(data).map_err(|source| {
@@ -169,9 +169,9 @@ impl OpenAiStreamState {
     pub(crate) fn finish(
         mut self,
         sink: &mut (dyn StreamEventSink + Send),
-    ) -> Result<PromptResponse, ProviderError> {
+    ) -> Result<PromptCompletion, ProviderError> {
         if !self.has_started {
-            sink.emit(StreamEvent::MessageStarted);
+            sink.emit(StreamEvent::TurnStarted);
         }
 
         let tool_calls = self
@@ -193,11 +193,31 @@ impl OpenAiStreamState {
                 FinishReason::ToolCalls
             }
         });
-        let message =
-            assistant_message_from_parts(self.content, self.reasoning_content, tool_calls.clone());
-        let response = PromptResponse::new(message, finish_reason, self.usage, tool_calls);
-        sink.emit(StreamEvent::MessageCompleted(response.clone()));
-        Ok(response)
+
+        let mut items = Vec::new();
+
+        if !self.reasoning_content.is_empty() {
+            items.push(ConversationItem::Reasoning {
+                content: self.reasoning_content,
+                summary: None,
+                encrypted: None,
+            });
+        }
+
+        let mut assistant_content = Vec::new();
+        if !self.content.is_empty() {
+            assistant_content.push(ContentBlock::Text(self.content));
+        }
+        if !assistant_content.is_empty() || !tool_calls.is_empty() {
+            items.push(ConversationItem::assistant_with_parts(
+                assistant_content,
+                tool_calls,
+            ));
+        }
+
+        let completion = PromptCompletion::new(items, finish_reason, self.usage);
+        sink.emit(StreamEvent::TurnCompleted(completion.clone()));
+        Ok(completion)
     }
 
     fn apply_tool_call_delta(
@@ -235,22 +255,6 @@ impl OpenAiStreamState {
     }
 }
 
-fn assistant_message_from_parts(
-    text: String,
-    reasoning_content: String,
-    tool_calls: Vec<ToolCall>,
-) -> Message {
-    let mut content = Vec::new();
-    if !text.is_empty() {
-        content.push(MessageContent::Text(text));
-    }
-    if !reasoning_content.is_empty() {
-        content.push(MessageContent::Reasoning(reasoning_content));
-    }
-    content.extend(tool_calls.into_iter().map(MessageContent::ToolCall));
-    Message::new(MessageRole::Assistant, content)
-}
-
 #[derive(Debug, Default)]
 struct PartialToolCall {
     call_id: Option<String>,
@@ -267,13 +271,9 @@ impl PartialToolCall {
             ProviderError::Protocol(format!("tool call {index} completed without an id"))
         })?;
         let arguments = if self.arguments.trim().is_empty() {
-            serde_json::json!({})
+            "{}".to_string()
         } else {
-            serde_json::from_str(&self.arguments).map_err(|source| {
-                ProviderError::Protocol(format!(
-                    "tool call {name} arguments are not valid JSON: {source}"
-                ))
-            })?
+            self.arguments.clone()
         };
         Ok(ToolCall::new(call_id, name, arguments))
     }
@@ -333,7 +333,7 @@ struct OpenAiUsage {
 
 #[cfg(test)]
 mod tests {
-    use provider_protocol::{FinishReason, MessageContent, StreamEvent, StreamEventSink};
+    use provider_protocol::{ConversationItem, FinishReason, StreamEvent, StreamEventSink};
 
     use super::{OpenAiSseDecoder, OpenAiStreamState};
 
@@ -344,6 +344,14 @@ mod tests {
         fn emit(&mut self, event: StreamEvent) {
             self.0.push(event);
         }
+    }
+
+    fn assistant_item(completion: &provider_protocol::PromptCompletion) -> &ConversationItem {
+        completion
+            .items
+            .iter()
+            .find(|item| item.role() == Some(provider_protocol::Role::Assistant))
+            .expect("expected assistant message in completion items")
     }
 
     #[test]
@@ -405,9 +413,13 @@ mod tests {
             )
             .unwrap();
 
-        let response = state.finish(&mut events).unwrap();
-        assert_eq!(response.tool_calls[0].name, "read");
-        assert_eq!(response.tool_calls[0].arguments["path"], "Cargo.toml");
+        let completion = state.finish(&mut events).unwrap();
+        let call = assistant_item(&completion)
+            .tool_calls()
+            .next()
+            .expect("expected tool call");
+        assert_eq!(call.name, "read");
+        assert_eq!(call.arguments, r#"{"path":"Cargo.toml"}"#);
     }
 
     #[test]
@@ -473,19 +485,45 @@ mod tests {
             )
             .unwrap();
 
-        let response = state.finish(&mut events).unwrap();
+        let completion = state.finish(&mut events).unwrap();
 
-        assert_eq!(response.finish_reason, FinishReason::Stop);
+        assert_eq!(completion.finish_reason, FinishReason::Stop);
         assert_eq!(
-            response
+            completion
                 .usage
                 .expect("usage should be captured")
                 .total_tokens,
             Some(7)
         );
-        assert_eq!(response.message.text_content(), "answer");
-        assert!(response.message.content.iter().any(|content| {
-            matches!(content, MessageContent::Reasoning(reasoning) if reasoning == "think")
-        }));
+        assert_eq!(completion.items[1].text_content(), "answer");
+        assert!(
+            matches!(&completion.items[0], ConversationItem::Reasoning { content, .. } if content == "think")
+        );
+    }
+
+    #[test]
+    fn stream_state_does_not_emit_empty_assistant_item_for_reasoning_only() {
+        let mut state = OpenAiStreamState::new("qwen3".to_string());
+        let mut events = Events::default();
+        state
+            .apply_data_frame(
+                r#"{"choices":[{"delta":{"reasoning_content":"think"},"finish_reason":"stop"}]}"#,
+                &mut events,
+            )
+            .unwrap();
+
+        let completion = state.finish(&mut events).unwrap();
+
+        assert_eq!(completion.items.len(), 1);
+        assert!(matches!(
+            &completion.items[0],
+            ConversationItem::Reasoning { content, .. } if content == "think"
+        ));
+        assert!(
+            completion
+                .items
+                .iter()
+                .all(|item| item.role() != Some(provider_protocol::Role::Assistant))
+        );
     }
 }

@@ -1,9 +1,13 @@
-use std::io::{self, IsTerminal, Write};
+use std::{
+    io::{self, IsTerminal, Write},
+    sync::Arc,
+};
 
 use app_config::appconfig::{self, Config, TuiConfig};
 use color_eyre::eyre::{Result, WrapErr};
 use conversation_runtime::models as provider_models;
-use runtime_domain::phrases;
+use runtime_domain::{envinfo, phrases};
+use session_store::{LocalSessionStore, SessionHeader, SessionId, SessionStore};
 use terminal_ui::{self, StartupBannerOptions};
 
 mod options_mapping;
@@ -22,7 +26,10 @@ pub use replay::{
 use runtime::{AppRuntimeCoordinator, AppRuntimeOptions};
 
 #[cfg(test)]
-use app_config::appconfig::{DebugConfig, ReasoningContentDisplay, RuntimeConfig, UserInputStyle};
+use app_config::appconfig::{
+    BRANCH_PICKER_LIST_ROWS_DEFAULT, DebugConfig, EscRewindMode, ReasoningContentDisplay,
+    RuntimeConfig, UserInputStyle,
+};
 #[cfg(test)]
 use options_mapping::{
     model_options_from_app_config, model_options_from_config, runtime_options_from_app_config,
@@ -64,16 +71,25 @@ pub fn run_with_writer<W: Write>(
 ) -> Result<()> {
     let loaded_models = provider_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
-    let mut runtime_coordinator = AppRuntimeCoordinator::new(AppRuntimeOptions {
+    let mut runtime_options = AppRuntimeOptions {
         model_config_path: loaded_models.source_path.clone(),
         ..AppRuntimeOptions::default()
-    });
+    };
+    attach_default_session_persistence(&mut runtime_options, &loaded_models)
+        .wrap_err("failed to initialize session persistence")?;
+    let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options)
+        .map_err(color_eyre::eyre::Report::msg)
+        .wrap_err("failed to initialize app runtime coordinator")?;
     let model = terminal_ui::run_with_runtime_coordinator(
         StartupBannerOptions::default(),
         model_options_from_config_and_models(tui_config, &loaded_models, &loaded_phrases),
         &mut runtime_coordinator,
     )
     .wrap_err("failed to run tui application")?;
+    runtime_coordinator
+        .shutdown()
+        .map_err(color_eyre::eyre::Report::msg)
+        .wrap_err("failed to flush session persistence")?;
     write_terminal_replay_on_exit(writer, &model, preserve_ansi, tui_config)
 }
 
@@ -85,16 +101,59 @@ pub fn run_with_config_writer<W: Write>(
 ) -> Result<()> {
     let loaded_models = provider_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
-    let mut runtime_coordinator = AppRuntimeCoordinator::new(
-        runtime_options_from_app_config_and_models(config, &loaded_models),
-    );
+    let mut runtime_options = runtime_options_from_app_config_and_models(config, &loaded_models);
+    attach_default_session_persistence(&mut runtime_options, &loaded_models)
+        .wrap_err("failed to initialize session persistence")?;
+    let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options)
+        .map_err(color_eyre::eyre::Report::msg)
+        .wrap_err("failed to initialize app runtime coordinator")?;
     let model = terminal_ui::run_with_runtime_coordinator(
         StartupBannerOptions::default(),
         model_options_from_app_config_and_models(config, &loaded_models, &loaded_phrases),
         &mut runtime_coordinator,
     )
     .wrap_err("failed to run tui application")?;
+    runtime_coordinator
+        .shutdown()
+        .map_err(color_eyre::eyre::Report::msg)
+        .wrap_err("failed to flush session persistence")?;
     write_terminal_replay_on_exit(writer, &model, preserve_ansi, &config.tui)
+}
+
+fn attach_default_session_persistence(
+    options: &mut AppRuntimeOptions,
+    loaded_models: &provider_models::LoadedModelCatalog,
+) -> Result<()> {
+    let store = open_local_session_store()?;
+    let work_dir = std::env::current_dir().wrap_err("resolve current working directory")?;
+    let git_head = envinfo::git_head();
+    let initial_model = loaded_models
+        .selected_model
+        .as_ref()
+        .map(|selection| selection.model_id.clone())
+        .unwrap_or_default();
+
+    options.session_store = Some(store);
+    options.session_header_template = Some(SessionHeader {
+        session_id: SessionId::new(),
+        work_dir,
+        session_name: None,
+        initial_model,
+        git_head,
+        cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    });
+    Ok(())
+}
+
+fn open_local_session_store() -> Result<Arc<dyn SessionStore>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .wrap_err("start session store runtime")?;
+    let store = runtime
+        .block_on(LocalSessionStore::open())
+        .wrap_err("open local session store")?;
+    Ok(Arc::new(store))
 }
 
 #[cfg(test)]
@@ -115,10 +174,12 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: BRANCH_PICKER_LIST_ROWS_DEFAULT,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert!(options.copy_on_mouse_selection_release);
@@ -161,6 +222,16 @@ mod tests {
     }
 
     #[test]
+    fn model_options_from_config_carries_branch_picker_list_rows() {
+        let options = model_options_from_config(&TuiConfig {
+            branch_picker_list_rows: 9,
+            ..default_tui_config()
+        });
+
+        assert_eq!(options.branch_picker_list_rows, 9);
+    }
+
+    #[test]
     fn model_options_from_config_carries_composer_undo_limit() {
         let options = model_options_from_config(&TuiConfig {
             composer_undo_limit: 80,
@@ -197,10 +268,12 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert!(options.swap_enter_and_send);
@@ -220,10 +293,12 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert!(!options.ctrl_c_clears_input);
@@ -243,10 +318,12 @@ mod tests {
             esc_interrupt_presses: 3,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert_eq!(options.esc_interrupt_presses, 3);
@@ -266,10 +343,12 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: false,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert!(!options.show_esc_interrupt_hint);
@@ -289,10 +368,12 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: true,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert!(options.show_reasoning_content);
@@ -312,10 +393,12 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: true,
             reasoning_content_display: ReasoningContentDisplay::Expanded,
+            esc_rewind_mode: EscRewindMode::Coarse,
         });
 
         assert_eq!(
@@ -407,10 +490,12 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         };
 
         write_terminal_replay_on_exit(&mut FailingWriter, &model, false, &config)
@@ -432,10 +517,12 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: true,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         };
         let mut output = Vec::new();
 
@@ -458,10 +545,12 @@ mod tests {
             esc_interrupt_presses: 2,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7,
+            branch_picker_list_rows: 7,
             composer_undo_limit: 50,
             print_transcript_on_exit: false,
             show_reasoning_content: false,
             reasoning_content_display: ReasoningContentDisplay::Collapsed,
+            esc_rewind_mode: EscRewindMode::Coarse,
         }
     }
 

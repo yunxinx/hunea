@@ -23,6 +23,7 @@ use super::{
 
 #[cfg(test)]
 use super::ViewportRenderResult;
+use crate::composer::ComposerSourceMessage;
 #[cfg(test)]
 use crate::styled_text::line_to_plain_text;
 use crate::{
@@ -33,7 +34,6 @@ use crate::{
     theme::TerminalPalette,
     tool_result::{ToolActivityRenderMode, ToolResultItem, ToolResultKind},
 };
-use runtime_domain::session::ChatMessage;
 use runtime_domain::session::{
     RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
 };
@@ -164,7 +164,7 @@ impl Transcript {
         sender: Sender,
         content: impl Into<String>,
         style_mode: StyleMode,
-        source_message: Option<ChatMessage>,
+        source_message: Option<ComposerSourceMessage>,
     ) {
         self.push_item(TranscriptItem::Message(
             MessageItem::new_with_style_mode_and_source(
@@ -293,7 +293,8 @@ impl Transcript {
             call.clone(),
             self.tool_activity_render_mode,
         ) {
-            if let Some((last_index, last_item)) = self.items.iter().enumerate().next_back()
+            if exploration.is_exploration_group()
+                && let Some((last_index, last_item)) = self.items.iter().enumerate().next_back()
                 && let TranscriptItem::ToolResult(tool_result) = last_item.as_ref()
             {
                 let mut tool_result = tool_result.clone();

@@ -6,11 +6,19 @@ use runtime_domain::{
 use crate::{
     ReasoningDisplayMode,
     composer::DEFAULT_COMPOSER_UNDO_LIMIT,
+    entry_tree::BRANCH_PICKER_LIST_ROWS_DEFAULT,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT},
     status_line::StatusLineItem,
     status_phrases::default_status_phrases,
     style_mode::StyleMode,
 };
+
+/// `EscRewindMode` 表示空 composer 下 `Esc` 进入哪类回溯交互。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscRewindMode {
+    Coarse,
+    Entry,
+}
 
 /// `ModelOptions` 表示创建 TUI 模型时可配置的样式与状态行选项。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,8 +33,10 @@ pub struct ModelOptions {
     pub swap_enter_and_send: bool,
     pub ctrl_c_clears_input: bool,
     pub esc_interrupt_presses: u8,
+    pub esc_rewind_mode: EscRewindMode,
     pub show_esc_interrupt_hint: bool,
     pub file_picker_popup_height: u16,
+    pub branch_picker_list_rows: u16,
     pub composer_undo_limit: usize,
     pub show_reasoning_content: bool,
     pub reasoning_display_mode: ReasoningDisplayMode,
@@ -51,9 +61,11 @@ impl Default for ModelOptions {
             swap_enter_and_send: false,
             ctrl_c_clears_input: true,
             esc_interrupt_presses: 2,
+            esc_rewind_mode: EscRewindMode::Coarse,
             show_esc_interrupt_hint: true,
             file_picker_popup_height: 7
                 .clamp(FILE_PICKER_POPUP_MIN_HEIGHT, FILE_PICKER_POPUP_MAX_HEIGHT),
+            branch_picker_list_rows: BRANCH_PICKER_LIST_ROWS_DEFAULT,
             composer_undo_limit: DEFAULT_COMPOSER_UNDO_LIMIT,
             show_reasoning_content: false,
             reasoning_display_mode: ReasoningDisplayMode::Collapsed,

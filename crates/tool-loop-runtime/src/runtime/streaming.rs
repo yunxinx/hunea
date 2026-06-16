@@ -1,5 +1,5 @@
 use provider_protocol::{
-    Message, PromptRequest, PromptResponse, ProviderClient, ProviderError, StreamEvent,
+    ConversationItem, PromptCompletion, PromptRequest, ProviderClient, ProviderError, StreamEvent,
     StreamEventSink,
 };
 use tokio_util::sync::CancellationToken;
@@ -10,12 +10,12 @@ use super::{ToolLoopClock, ToolLoopProgress, state::RuntimeTurnState};
 
 pub(super) async fn stream_provider_turn<C, F>(
     client: &C,
-    request: PromptRequest,
+    request: &PromptRequest,
     cancellation: &CancellationToken,
     clock: &ToolLoopClock,
     state: &mut RuntimeTurnState,
     on_progress: &mut F,
-) -> Result<PromptResponse, ToolLoopError>
+) -> Result<PromptCompletion, ToolLoopError>
 where
     C: ProviderClient + ?Sized,
     F: FnMut(ToolLoopProgress) + Send,
@@ -55,17 +55,28 @@ where
     }
 }
 
-pub(super) fn append_provider_context_message<F>(
-    message: Message,
-    appended_messages: &mut Vec<Message>,
+pub(super) fn append_provider_context_items<F>(
+    items: &[ConversationItem],
+    appended_items: &mut Vec<ConversationItem>,
     on_progress: &mut F,
 ) where
     F: FnMut(ToolLoopProgress),
 {
-    on_progress(ToolLoopProgress::ProviderContextMessage {
-        message: message.clone(),
-    });
-    appended_messages.push(message);
+    for item in items {
+        on_progress(ToolLoopProgress::ProviderContextItem { item: item.clone() });
+        appended_items.push(item.clone());
+    }
+}
+
+pub(super) fn append_provider_context_item<F>(
+    item: ConversationItem,
+    appended_items: &mut Vec<ConversationItem>,
+    on_progress: &mut F,
+) where
+    F: FnMut(ToolLoopProgress),
+{
+    on_progress(ToolLoopProgress::ProviderContextItem { item: item.clone() });
+    appended_items.push(item);
 }
 
 struct RuntimeStreamSink<'a, F>
@@ -75,7 +86,7 @@ where
     state: &'a mut RuntimeTurnState,
     on_progress: &'a mut F,
     clock: &'a ToolLoopClock,
-    provider_response: &'a mut Option<PromptResponse>,
+    provider_response: &'a mut Option<PromptCompletion>,
 }
 
 impl<F> StreamEventSink for RuntimeStreamSink<'_, F>
@@ -84,7 +95,7 @@ where
 {
     fn emit(&mut self, event: StreamEvent) {
         match event {
-            StreamEvent::MessageStarted => self.state.mark_request_started(self.clock.now()),
+            StreamEvent::TurnStarted => self.state.mark_request_started(self.clock.now()),
             StreamEvent::TextDelta(content) => {
                 self.state
                     .observe_content_chunk(&content, self.clock.now(), self.on_progress)
@@ -118,8 +129,8 @@ where
                     self.on_progress,
                 );
             }
-            StreamEvent::MessageCompleted(response) => {
-                *self.provider_response = Some(response);
+            StreamEvent::TurnCompleted(completion) => {
+                *self.provider_response = Some(completion);
             }
         }
     }

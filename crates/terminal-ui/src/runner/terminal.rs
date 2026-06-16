@@ -17,23 +17,41 @@ use super::{event_pipeline::TerminalWaitPlan, terminal_surface::TerminalSurface}
 pub(super) type TuiTerminal = TerminalSurface<CrosstermBackend<io::Stdout>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalMouseModePreference {
+    Capture,
+    NativeWithAlternateScroll,
+    CaptureWithAlternateScroll,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TerminalMouseMode {
     has_mouse_capture: bool,
     has_alternate_scroll: bool,
 }
 
 impl TerminalMouseMode {
-    pub(super) const fn for_mouse_capture(has_mouse_capture: bool) -> Self {
-        if has_mouse_capture {
-            Self {
+    pub(super) const fn from_preference(preference: TerminalMouseModePreference) -> Self {
+        match preference {
+            TerminalMouseModePreference::Capture => Self {
                 has_mouse_capture: true,
                 has_alternate_scroll: false,
-            }
-        } else {
-            Self {
+            },
+            TerminalMouseModePreference::NativeWithAlternateScroll => Self {
                 has_mouse_capture: false,
                 has_alternate_scroll: true,
-            }
+            },
+            TerminalMouseModePreference::CaptureWithAlternateScroll => Self {
+                has_mouse_capture: true,
+                has_alternate_scroll: true,
+            },
+        }
+    }
+
+    pub(super) const fn for_mouse_capture(has_mouse_capture: bool) -> Self {
+        if has_mouse_capture {
+            Self::from_preference(TerminalMouseModePreference::Capture)
+        } else {
+            Self::from_preference(TerminalMouseModePreference::NativeWithAlternateScroll)
         }
     }
 }
@@ -213,6 +231,15 @@ mod tests {
             TerminalMouseMode::for_mouse_capture(false),
             TerminalMouseMode {
                 has_mouse_capture: false,
+                has_alternate_scroll: true,
+            }
+        );
+        assert_eq!(
+            TerminalMouseMode::from_preference(
+                super::TerminalMouseModePreference::CaptureWithAlternateScroll
+            ),
+            TerminalMouseMode {
+                has_mouse_capture: true,
                 has_alternate_scroll: true,
             }
         );

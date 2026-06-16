@@ -8,7 +8,6 @@ use std::{
 use std::cell::Cell;
 
 use ratatui::text::Line;
-use runtime_domain::session::ChatMessage;
 
 use super::{
     Sender, StyleMode,
@@ -18,6 +17,7 @@ use super::{
     theme::TerminalPalette,
     transcript::{ItemLineAnchor, TranscriptFastEstimate, TranscriptItemMetrics},
 };
+use crate::composer::ComposerSourceMessage;
 
 mod assistant;
 mod assistant_estimate;
@@ -64,7 +64,7 @@ pub(super) struct UserMessageRenderLayout {
 pub struct MessageItem {
     sender: Sender,
     content: Rc<str>,
-    source_message: Option<ChatMessage>,
+    source_message: Option<ComposerSourceMessage>,
     style_mode: StyleMode,
     render_cache_key: u64,
 }
@@ -96,7 +96,7 @@ impl MessageItem {
         sender: Sender,
         content: impl Into<String>,
         style_mode: StyleMode,
-        source_message: Option<ChatMessage>,
+        source_message: Option<ComposerSourceMessage>,
     ) -> Self {
         let style_mode = style_mode.normalized();
         let content = content.into();
@@ -170,7 +170,10 @@ impl MessageItem {
     }
 
     pub(crate) fn source_content(&self) -> &str {
-        self.content.as_ref()
+        self.source_message
+            .as_ref()
+            .map(ComposerSourceMessage::content)
+            .unwrap_or_else(|| self.content.as_ref())
     }
 
     pub(crate) fn render_cache_key(&self) -> u64 {

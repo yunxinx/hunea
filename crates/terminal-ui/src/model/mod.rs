@@ -18,6 +18,7 @@ use runtime_domain::{
 use super::{
     ReasoningDisplayMode, StartupBannerOptions,
     composer::{Composer, PendingComposerCursorClick},
+    entry_tree::{BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN},
     external_editor::ExternalEditorLaunch,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT, FilePickerState},
     file_search::FileSearchCache,
@@ -44,7 +45,7 @@ mod runtime_response;
 mod state;
 
 pub use metrics::RequestMetrics;
-pub use options::ModelOptions;
+pub use options::{EscRewindMode, ModelOptions};
 use runtime_response::{RuntimeResponseBuffer, StreamedRuntimeReasoning};
 pub(crate) use state::PendingReasoningToggleClick;
 use state::{DocumentRuntimeState, NoticeState, SelectionRuntimeState};
@@ -67,6 +68,9 @@ pub struct Model {
     pub(super) tool_approval_panel: ToolApprovalPanelState,
     pub(super) tool_approval_panel_revision: usize,
     pub(super) transcript_overlay: Option<crate::transcript_overlay::TranscriptOverlayState>,
+    pub(super) session_picker: Option<crate::session_picker::SessionPickerState>,
+    pub(super) session_preview: Option<crate::session_preview::SessionPreviewState>,
+    pub(super) entry_tree: Option<crate::entry_tree::EntryTreeState>,
     pub(super) message_revisit: MessageRevisitState,
     pub(super) runtime_terminal_snapshots: Vec<RuntimeTerminalSnapshot>,
     pub(super) stream_activity: Option<StreamActivityState>,
@@ -85,8 +89,10 @@ pub struct Model {
     pub(super) swap_enter_and_send: bool,
     pub(super) ctrl_c_clears_input: bool,
     pub(super) esc_interrupt_presses: u8,
+    pub(super) esc_rewind_mode: EscRewindMode,
     pub(super) show_esc_interrupt_hint: bool,
     pub(super) file_picker_popup_height: u16,
+    pub(super) branch_picker_list_rows: u16,
     pub(super) show_reasoning_content: bool,
     pub(super) reasoning_display_mode: ReasoningDisplayMode,
     pub(super) debug_commands_enabled: bool,
@@ -143,9 +149,7 @@ impl Model {
         let style_mode = options.style_mode.normalized();
         let status_line_items = options.status_line_items;
         let status_line_2_items = options.status_line_2_items;
-        let selected_model = options
-            .selected_model
-            .filter(|selection| options.model_catalog.accepts_selection(selection));
+        let selected_model = options.selected_model;
         if startup_banner_options.model_name.is_none() {
             startup_banner_options.model_name = selected_model
                 .as_ref()
@@ -176,6 +180,9 @@ impl Model {
             tool_approval_panel: ToolApprovalPanelState::default(),
             tool_approval_panel_revision: 1,
             transcript_overlay: None,
+            session_picker: None,
+            session_preview: None,
+            entry_tree: None,
             message_revisit: MessageRevisitState::default(),
             runtime_terminal_snapshots: Vec::new(),
             stream_activity: None,
@@ -200,10 +207,14 @@ impl Model {
             swap_enter_and_send: options.swap_enter_and_send,
             ctrl_c_clears_input: options.ctrl_c_clears_input,
             esc_interrupt_presses: options.esc_interrupt_presses.clamp(1, 3),
+            esc_rewind_mode: options.esc_rewind_mode,
             show_esc_interrupt_hint: options.show_esc_interrupt_hint,
             file_picker_popup_height: options
                 .file_picker_popup_height
                 .clamp(FILE_PICKER_POPUP_MIN_HEIGHT, FILE_PICKER_POPUP_MAX_HEIGHT),
+            branch_picker_list_rows: options
+                .branch_picker_list_rows
+                .clamp(BRANCH_PICKER_LIST_ROWS_MIN, BRANCH_PICKER_LIST_ROWS_MAX),
             show_reasoning_content: options.show_reasoning_content,
             reasoning_display_mode: options.reasoning_display_mode,
             debug_commands_enabled: options.debug_commands_enabled,
@@ -327,6 +338,9 @@ impl Model {
         self.height = height;
         self.has_window = true;
         self.transcript.set_width(width);
+        if let Some(preview) = self.session_preview.as_mut() {
+            preview.transcript.set_width(width);
+        }
         self.composer.set_width(width);
         if width_changed {
             self.sync_transcript_render();
@@ -350,6 +364,9 @@ impl Model {
         self.has_dark_background = has_dark_background;
         self.has_palette = true;
         self.transcript.set_palette(palette);
+        if let Some(preview) = self.session_preview.as_mut() {
+            preview.transcript.set_palette(palette);
+        }
         if palette_changed {
             self.sync_transcript_render();
         }
@@ -378,6 +395,9 @@ impl Model {
         self.transcript = transcript;
         self.composer.clear();
         self.model_panel = ModelPanelState::default();
+        self.session_picker = None;
+        self.session_preview = None;
+        self.entry_tree = None;
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.message_revisit = MessageRevisitState::default();

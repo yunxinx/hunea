@@ -1,6 +1,8 @@
 use runtime_domain::session::{
     RuntimeEvent, RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeTarget,
-    RuntimeToolActivity, RuntimeToolActivityStatus, RuntimeToolActivityUpdate, RuntimeToolKind,
+    RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityStatus,
+    RuntimeToolActivityUpdate, RuntimeToolKind, SessionResumePayload, TranscriptReplayItem,
+    TranscriptReplayRole,
 };
 
 use super::super::{
@@ -8,6 +10,7 @@ use super::super::{
     model::RequestMetrics,
     runtime::tool_activity_preview::ToolApprovalPreview,
     tool_approval_panel::{ToolApprovalDetail, ToolApprovalSource},
+    tool_result::ToolActivityRenderMode,
 };
 use serde_json::Value;
 
@@ -93,12 +96,26 @@ impl RuntimeEventApply for Model {
                 self.close_tool_approval_panel();
                 self.show_transient_status_notice("Runtime permission request cancelled");
             }
+            RuntimeEvent::SessionListLoaded { rows } => {
+                self.apply_session_picker_rows(rows);
+            }
+            RuntimeEvent::SessionPreviewLoaded { payload } => {
+                self.apply_session_preview_payload(payload);
+            }
+            RuntimeEvent::SessionTreeLoaded { payload } => {
+                self.apply_entry_tree_payload(payload);
+            }
+            RuntimeEvent::SessionBranchTreeLoaded { payload } => {
+                self.apply_entry_tree_branch_tree_payload(payload);
+            }
+            RuntimeEvent::SessionTreePreviewLoaded { payload } => {
+                self.apply_entry_tree_branch_preview_payload(payload);
+            }
+            RuntimeEvent::SessionResumed { payload } => {
+                self.apply_session_resume_payload(payload);
+            }
             RuntimeEvent::MessageFinished {
-                content,
-                reasoning_content,
-                reasoning_duration,
-                metrics,
-                ..
+                response, metrics, ..
             } => {
                 self.close_runtime_permission_approval_panel();
                 if let Some(metrics) = metrics {
@@ -110,9 +127,9 @@ impl RuntimeEventApply for Model {
                 }
                 self.set_stream_activity_thinking(false);
                 self.flush_runtime_response_buffer_with_final(
-                    content,
-                    reasoning_content,
-                    reasoning_duration,
+                    response.text_content(),
+                    response.reasoning_content(),
+                    response.reasoning_duration,
                 );
                 self.finish_stream_activity_with_work_summary();
                 self.reset_runtime_final_body_divider_state();
@@ -179,6 +196,151 @@ impl Model {
                 .unwrap_or("Working"),
         );
     }
+
+    fn apply_session_resume_payload(&mut self, payload: SessionResumePayload) {
+        self.close_runtime_permission_approval_panel();
+        self.clear_runtime_response_buffer();
+        self.accept_streamed_runtime_reasoning_from_runtime();
+        self.clear_stream_activity();
+        self.reset_runtime_final_body_divider_state();
+
+        let restored_model = payload.restored_model.clone();
+        self.rebuild_transcript_from_replay(payload.transcript);
+        self.apply_resumed_model(restored_model);
+        self.show_transient_status_notice(&format!("Resumed session {}", payload.session_id));
+    }
+
+    fn rebuild_transcript_from_replay(&mut self, items: Vec<TranscriptReplayItem>) {
+        let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
+        let (transcript, terminal_snapshots) =
+            self.transcript_from_replay_items_with_terminal_snapshots(items, None);
+        self.transcript = transcript;
+        self.runtime_terminal_snapshots = terminal_snapshots;
+        self.refresh_status_line_after_transcript_change();
+        self.sync_transcript_render();
+        self.document_runtime.follow_bottom = true;
+        self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
+    }
+
+    pub(crate) fn transcript_from_replay_items(
+        &self,
+        items: Vec<TranscriptReplayItem>,
+    ) -> crate::transcript::Transcript {
+        self.transcript_from_replay_items_with_terminal_snapshots(items, None)
+            .0
+    }
+
+    pub(crate) fn transcript_from_replay_items_with_tool_activity_render_mode(
+        &self,
+        items: Vec<TranscriptReplayItem>,
+        tool_activity_render_mode: ToolActivityRenderMode,
+    ) -> crate::transcript::Transcript {
+        self.transcript_from_replay_items_with_terminal_snapshots(
+            items,
+            Some(tool_activity_render_mode),
+        )
+        .0
+    }
+
+    fn transcript_from_replay_items_with_terminal_snapshots(
+        &self,
+        items: Vec<TranscriptReplayItem>,
+        tool_activity_render_mode: Option<ToolActivityRenderMode>,
+    ) -> (crate::transcript::Transcript, Vec<RuntimeTerminalSnapshot>) {
+        let mut transcript = crate::transcript::Transcript::new(self.palette);
+        transcript.set_gap(1);
+        if self.has_window {
+            transcript.set_width(self.width);
+        }
+        if let Some(tool_activity_render_mode) = tool_activity_render_mode {
+            transcript.set_tool_activity_render_mode(tool_activity_render_mode);
+        }
+        let mut terminal_snapshots = Vec::new();
+        for item in items {
+            if let TranscriptReplayItem::TerminalSnapshot { snapshot } = &item {
+                upsert_replay_terminal_snapshot(&mut terminal_snapshots, snapshot.clone());
+            }
+            append_transcript_replay_item(
+                &mut transcript,
+                item,
+                self.style_mode,
+                self.reasoning_display_mode,
+            );
+        }
+        for snapshot in terminal_snapshots.iter().cloned() {
+            let _ = transcript.set_runtime_terminal_snapshot(snapshot);
+        }
+        (transcript, terminal_snapshots)
+    }
+
+    fn apply_resumed_model(
+        &mut self,
+        restored_model: Option<runtime_domain::model_catalog::ModelSelection>,
+    ) {
+        let Some(selection) = restored_model else {
+            return;
+        };
+
+        self.selected_model = Some(selection);
+        self.requires_model_selection = true;
+        self.bump_status_line_revision();
+    }
+}
+
+fn append_transcript_replay_item(
+    transcript: &mut crate::transcript::Transcript,
+    item: TranscriptReplayItem,
+    style_mode: crate::style_mode::StyleMode,
+    reasoning_display_mode: crate::ReasoningDisplayMode,
+) {
+    match item {
+        TranscriptReplayItem::Message {
+            role: TranscriptReplayRole::User,
+            content,
+        } => {
+            transcript.append_message_with_style_mode(crate::Sender::User, content, style_mode);
+        }
+        TranscriptReplayItem::Message {
+            role: TranscriptReplayRole::Assistant,
+            content,
+        } => {
+            transcript.append_message_with_style_mode(
+                crate::Sender::Assistant,
+                content,
+                style_mode,
+            );
+        }
+        TranscriptReplayItem::Reasoning { content } => {
+            transcript.append_reasoning_message(content, reasoning_display_mode, None);
+        }
+        TranscriptReplayItem::ToolActivity { activity } => {
+            transcript.append_runtime_tool_activity(activity);
+        }
+        TranscriptReplayItem::TerminalSnapshot { snapshot } => {
+            let _ = transcript.set_runtime_terminal_snapshot(snapshot);
+        }
+        TranscriptReplayItem::ToolResult { content } => {
+            transcript.append_tool_result(content, crate::tool_result::ToolResultKind::Ran);
+        }
+        TranscriptReplayItem::System { content } => {
+            transcript.append_system_message(content);
+        }
+    }
+}
+
+fn upsert_replay_terminal_snapshot(
+    snapshots: &mut Vec<RuntimeTerminalSnapshot>,
+    snapshot: RuntimeTerminalSnapshot,
+) {
+    if let Some(existing) = snapshots
+        .iter_mut()
+        .find(|existing| existing.terminal_id == snapshot.terminal_id)
+    {
+        *existing = snapshot;
+        return;
+    }
+
+    snapshots.push(snapshot);
 }
 
 fn split_error_description_and_json_body(message: &str) -> (String, Option<String>) {

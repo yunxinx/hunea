@@ -1,7 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{buffer::Buffer, layout::Rect};
 
-use crate::{AppEvent, Model, Sender, StartupBannerOptions, theme::default_palette};
+use crate::{
+    AppEvent, Model, Sender, StartupBannerOptions, test_helpers::render_model_buffer,
+    theme::default_palette,
+};
 use runtime_domain::session::{
     RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityStatus, RuntimeToolKind,
 };
@@ -39,8 +41,11 @@ fn overlay_scroll_boundary() {
         max_offset
     );
 
-    // q 关闭
+    // q 不再作为关闭快捷键；只保留 Esc。
     model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Char('q')));
+    assert!(model.transcript_overlay_active());
+
+    model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Esc));
     assert!(!model.transcript_overlay_active());
 }
 
@@ -390,13 +395,6 @@ fn overlay_render_does_not_materialize_full_transcript_result() {
         0,
         "overlay render should use viewport/item materialization instead of full transcript render"
     );
-}
-
-fn render_model_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
-    let area = Rect::new(0, 0, width, height);
-    let mut buffer = Buffer::empty(area);
-    let _ = model.render_to_buffer(area, &mut buffer);
-    buffer
 }
 
 #[test]

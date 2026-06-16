@@ -82,6 +82,24 @@ pub fn render(model: &mut Model, frame: &mut RenderFrame<'_>) {
         return;
     }
 
+    if model.session_preview_active() {
+        model.complete_startup_banner_entrance();
+        model.render_session_preview(frame, area);
+        return;
+    }
+
+    if model.session_picker_active() {
+        model.complete_startup_banner_entrance();
+        model.render_session_picker(frame, area);
+        return;
+    }
+
+    if model.entry_tree_active() {
+        model.complete_startup_banner_entrance();
+        model.render_entry_tree(frame, area);
+        return;
+    }
+
     let document = model.build_document_layout();
     let viewport = model.build_document_viewport(&document);
 

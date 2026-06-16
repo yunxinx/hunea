@@ -1462,6 +1462,90 @@ fn list_dir_detailed_mode_keeps_transcript_summary_compact() {
 }
 
 #[test]
+fn list_dir_debug_detailed_mode_expands_raw_input_and_output() {
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-list".to_string(),
+            title: "List Directory src".to_string(),
+            kind: RuntimeToolKind::Search,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: vec![RuntimeToolActivityLocation {
+                path: "src".to_string(),
+                line: None,
+            }],
+            raw_input: Some(serde_json::json!({ "path": "src" }).into()),
+            raw_output: Some("lib.rs\ntool_result.rs".into()),
+        },
+        ToolActivityRenderMode::DebugDetailed,
+    );
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert!(
+        rendered_plain
+            .iter()
+            .any(|line| line.contains("● List src")),
+        "debug detailed mode should keep the tool identity visible: {rendered_plain:?}"
+    );
+    assert!(
+        rendered_plain.iter().any(|line| line.contains("Input:"))
+            && rendered_plain.iter().any(|line| line.contains("\"path\"")),
+        "debug detailed mode should expose raw tool input: {rendered_plain:?}"
+    );
+    assert!(
+        rendered_plain
+            .iter()
+            .any(|line| line.contains("tool_result.rs")),
+        "debug detailed mode should expose raw tool output: {rendered_plain:?}"
+    );
+}
+
+#[test]
+fn exploration_tool_activity_debug_detailed_mode_renders_as_runtime_item() {
+    let item = ToolResultItem::from_exploration_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-list".to_string(),
+            title: "List Directory src".to_string(),
+            kind: RuntimeToolKind::Search,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(serde_json::json!({ "path": "src" }).into()),
+            raw_output: Some("lib.rs\ntool_result.rs".into()),
+        },
+        ToolActivityRenderMode::DebugDetailed,
+    )
+    .expect("debug detailed mode should render exploration activities without grouping");
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert!(
+        rendered_plain
+            .iter()
+            .any(|line| line.contains("● List src")),
+        "debug detailed mode should keep exploration tool identity visible: {rendered_plain:?}"
+    );
+    assert!(
+        rendered_plain.iter().any(|line| line.contains("Input:"))
+            && rendered_plain.iter().any(|line| line.contains("\"path\"")),
+        "debug detailed mode should expose raw exploration tool input: {rendered_plain:?}"
+    );
+    assert!(
+        rendered_plain
+            .iter()
+            .any(|line| line.contains("tool_result.rs")),
+        "debug detailed mode should expose raw exploration tool output: {rendered_plain:?}"
+    );
+}
+
+#[test]
 fn completed_open_exploration_group_uses_main_marker_color() {
     let palette = default_palette();
     let mut item = ToolResultItem::from_exploration_tool_activity(

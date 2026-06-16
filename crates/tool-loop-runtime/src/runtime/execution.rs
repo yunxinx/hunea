@@ -1,5 +1,6 @@
 use provider_protocol::{
-    ToolCall as AiToolCall, ToolDefinition as AiToolDefinition, ToolResult as AiToolResult,
+    ToolCall as AiToolCall, ToolCallArgumentsError, ToolDefinition as AiToolDefinition,
+    ToolResult as AiToolResult,
 };
 use runtime_domain::session::{
     ManagedSearchTool, RuntimeTerminalExitStatus, RuntimeTerminalSnapshot,
@@ -39,16 +40,39 @@ pub(super) fn interrupted_tool_execution(call: &AiToolCall) -> ToolExecution {
     }
 }
 
+fn invalid_arguments_tool_execution(
+    call: &AiToolCall,
+    error: ToolCallArgumentsError,
+) -> ToolExecution {
+    let message = format!(
+        "Invalid tool call arguments from provider for '{}': {error}",
+        call.name
+    );
+    ToolExecution {
+        raw_result: ToolResult::error(call.call_id.clone(), message.clone()),
+        provider_result: AiToolResult::error(
+            call.call_id.clone(),
+            call.name.clone(),
+            message,
+            None,
+        ),
+        processed_error: None,
+    }
+}
+
 pub(super) async fn execute_tool_call(
     call: &AiToolCall,
     context: &mut ToolCallExecutionContext<'_>,
     on_progress: &mut impl FnMut(ToolLoopProgress),
 ) -> ToolExecution {
-    let runtime_call = tool_runtime::ToolCall::new(
-        call.call_id.clone(),
-        call.name.clone(),
-        call.arguments.clone(),
-    );
+    let arguments = match call.parsed_arguments_value() {
+        Ok(value) => value,
+        Err(error) => {
+            return invalid_arguments_tool_execution(call, error);
+        }
+    };
+    let runtime_call =
+        tool_runtime::ToolCall::new(call.call_id.clone(), call.name.clone(), arguments);
 
     let authorization = authorize_tool_call(&runtime_call, context).await;
     let raw_result = match authorization.denial_message {
@@ -222,9 +246,16 @@ async fn authorize_tool_call(
                 ));
             };
             let mut permission_request = ToolPermissionRequest::new(call.clone(), definition);
-            let preview =
-                permission_preview_from_executor(context.executor, call, context.cancellation)
-                    .await;
+            let preview = match permission_preview_from_executor(
+                context.executor,
+                call,
+                context.cancellation,
+            )
+            .await
+            {
+                Ok(preview) => preview,
+                Err(message) => return ToolAuthorization::deny(message),
+            };
             let permission_snapshot = preview
                 .as_ref()
                 .and_then(|preview| preview.snapshot.clone());
@@ -246,17 +277,16 @@ async fn permission_preview_from_executor(
     executor: &ToolExecutorRegistry,
     call: &tool_runtime::ToolCall,
     cancellation: &CancellationToken,
-) -> Option<ToolPermissionPreview> {
+) -> Result<Option<ToolPermissionPreview>, String> {
     if cancellation.is_cancelled() {
-        return None;
+        return Ok(None);
     }
     let executor = executor.clone();
     let call = call.clone();
     let cancellation = cancellation.clone();
     tokio::task::spawn_blocking(move || executor.permission_preview(&call, &cancellation))
         .await
-        .ok()
-        .flatten()
+        .map_err(|error| format!("Tool permission preview failed: {error}"))
 }
 
 struct ToolAuthorization {
@@ -304,4 +334,111 @@ pub(super) fn ai_tool_definitions_from_registry(registry: &ToolRegistry) -> Vec<
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{ToolCallExecutionContext, authorize_tool_call, invalid_arguments_tool_execution};
+    use provider_protocol::ToolCall as AiToolCall;
+    use tokio_util::sync::CancellationToken;
+    use tool_runtime::{
+        DefaultToolErrorFormatter, SharedToolErrorFormatter, SharedToolPermissionHandler, Tool,
+        ToolCall, ToolDefinition, ToolExecutionFuture, ToolPermissionDecision,
+        ToolPermissionFuture, ToolPermissionHandler, ToolPermissionPolicy, ToolPermissionRequest,
+        ToolResult,
+    };
+
+    use crate::runtime::{ToolLoopClock, state::RuntimeTurnState};
+
+    #[test]
+    fn invalid_arguments_produces_error_tool_execution() {
+        let call = AiToolCall::new("call-1", "bash", "not valid json");
+        let error = call
+            .parsed_arguments_value()
+            .expect_err("invalid arguments should produce parse error");
+
+        let execution = invalid_arguments_tool_execution(&call, error);
+
+        assert!(execution.raw_result.is_error);
+        assert!(execution.processed_error.is_none());
+        assert!(
+            execution
+                .raw_result
+                .content
+                .contains("Invalid tool call arguments")
+        );
+        assert!(execution.raw_result.content.contains("bash"));
+        assert!(execution.provider_result.is_error);
+        assert_eq!(execution.provider_result.call_id, "call-1");
+        assert_eq!(execution.provider_result.name, "bash");
+    }
+
+    #[tokio::test]
+    async fn preview_task_panic_denies_permission_instead_of_silently_allowing() {
+        let mut executor = tool_runtime::ToolExecutorRegistry::new();
+        executor.insert(PanicPreviewTool);
+        let definitions = executor.definitions();
+        let permission_handler: SharedToolPermissionHandler = Arc::new(AllowingPermissionHandler);
+        let cancellation = CancellationToken::new();
+        let clock = ToolLoopClock::default();
+        let error_formatter: SharedToolErrorFormatter = Arc::new(DefaultToolErrorFormatter);
+        let mut state = RuntimeTurnState::new("qwen3".to_string());
+        let mut context = ToolCallExecutionContext {
+            executor: &executor,
+            tool_definitions: &definitions,
+            cancellation: &cancellation,
+            clock: &clock,
+            permission_handler: Some(&permission_handler),
+            error_formatter: &error_formatter,
+            state: &mut state,
+        };
+        let call = ToolCall::new("call-1", "panic_preview", serde_json::json!({}));
+
+        let authorization = authorize_tool_call(&call, &mut context).await;
+
+        assert!(
+            authorization
+                .denial_message
+                .as_deref()
+                .is_some_and(|message| message.contains("permission preview"))
+        );
+    }
+
+    struct PanicPreviewTool;
+
+    impl Tool for PanicPreviewTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new("panic_preview").with_permission_policy(ToolPermissionPolicy::Ask)
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _call: ToolCall,
+            _cancellation: &'a CancellationToken,
+        ) -> ToolExecutionFuture<'a> {
+            Box::pin(async { ToolResult::success("call-1", "not reached") })
+        }
+
+        fn permission_preview(
+            &self,
+            _call: &ToolCall,
+            _cancellation: &CancellationToken,
+        ) -> Option<tool_runtime::ToolPermissionPreview> {
+            panic!("preview panicked");
+        }
+    }
+
+    struct AllowingPermissionHandler;
+
+    impl ToolPermissionHandler for AllowingPermissionHandler {
+        fn request_permission<'a>(
+            &'a self,
+            _request: ToolPermissionRequest,
+            _cancellation: &'a CancellationToken,
+        ) -> ToolPermissionFuture<'a> {
+            Box::pin(async { ToolPermissionDecision::Allow })
+        }
+    }
 }

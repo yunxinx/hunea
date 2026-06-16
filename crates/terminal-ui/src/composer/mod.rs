@@ -24,7 +24,7 @@ use self::{
 use super::{style_mode::StyleMode, theme::TerminalPalette};
 use crate::terminal_text::sanitize_terminal_text;
 
-pub(crate) use self::message::chat_message_from_composer_text;
+pub(crate) use self::message::{ComposerSourceMessage, source_message_from_composer_text};
 pub(crate) use self::mouse::{
     cursor_position_for_line_anchor_click, move_cursor_to_logical_position,
     selection_end_char_for_line_anchor, selection_start_char_for_line_anchor,

@@ -37,6 +37,10 @@ fn workspace_declares_ai_runtime_crates_and_tools_domain() {
         "terminal-app should assemble tool registries without leaking them into runtime-domain"
     );
     assert!(
+        !dependency_section(&app_manifest).contains("provider-protocol"),
+        "terminal-app should not depend on provider-protocol outside tests"
+    );
+    assert!(
         conversation_manifest.contains("tool-loop-runtime.workspace = true")
             && conversation_manifest.contains("openai-compat-provider.workspace = true"),
         "conversation-runtime should depend on the tool loop and OpenAI-compatible adapter"
@@ -59,6 +63,19 @@ fn workspace_declares_ai_runtime_crates_and_tools_domain() {
             "tool-runtime should stay independent from {forbidden}"
         );
     }
+}
+
+#[test]
+fn terminal_app_keeps_provider_protocol_test_only() {
+    let workspace = workspace_root();
+    let app_manifest = fs::read_to_string(workspace.join("crates/terminal-app/Cargo.toml"))
+        .expect("terminal-app manifest is readable");
+    let dependencies = dependency_section(&app_manifest);
+
+    assert!(
+        !dependencies.contains("provider-protocol"),
+        "terminal-app should not depend on provider-protocol at runtime when it is only used by tests"
+    );
 }
 
 #[test]

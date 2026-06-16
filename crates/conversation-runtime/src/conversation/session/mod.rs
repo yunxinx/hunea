@@ -10,30 +10,43 @@ use std::{
     time::Duration,
 };
 
-use provider_protocol::Message;
+use tokio::sync::mpsc as tokio_mpsc;
 use tokio_util::sync::CancellationToken;
 
 use runtime_domain::{
     request_policy::RuntimeRequestPolicy,
     session::{ConversationEvent, RuntimeTarget},
 };
+use session_store::SessionId;
 use tool_runtime::{SharedToolPermissionHandler, ToolExecutorRegistry};
 
 use super::{
-    ConversationPermissionBroker, ConversationTimeoutPause, TurnExecutionError,
-    turn::run_prepared_conversation_with_progress,
+    ConversationPermissionBroker, ConversationTimeoutPause, PersistedConversationItem,
+    TurnExecutionError, turn::run_prepared_conversation_with_progress,
 };
 use crate::PreparedConversationRequest;
 
 mod context_repair;
+mod event_apply;
+mod persistence;
 mod progress_mapping;
 mod timeout;
 
-use context_repair::{ProviderContextRepairLedger, emit_provider_context_repair_messages};
+use context_repair::{ProviderContextRepairLedger, take_provider_context_repair_items};
+use persistence::{
+    ConversationDelta, SessionPersistenceCommand, flush_session_persistence,
+    run_session_persistence_actor,
+};
 use progress_mapping::{
     conversation_worker_event_from_progress, progress_sender_to_permission_sender,
 };
 use timeout::{TurnAttemptOutcome, run_with_soft_timeout};
+
+#[cfg(test)]
+use persistence::{
+    SessionPersistenceState, persist_context_item, persist_terminal_snapshot,
+    persist_tool_activity_started, persist_tool_activity_update, persist_turn_start,
+};
 
 const TIMEOUT_REPAIR_GRACE: Duration = Duration::from_secs(2);
 const TOOL_EXECUTION_INTERRUPTED: &str = "Tool execution interrupted";
@@ -49,12 +62,6 @@ enum ConversationWorkerEvent {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ConversationDelta {
-    ProviderTurnStarted,
-    ProviderContextMessage { message: Message },
-}
-
 impl ConversationWorkerEvent {
     fn progress(event: ConversationEvent) -> Self {
         Self::Progress(event)
@@ -68,8 +75,9 @@ pub struct ConversationWorker {
     pub cancellation: Option<CancellationToken>,
     pub target: Option<RuntimeTarget>,
     permission_broker: Option<ConversationPermissionBroker>,
-    provider_turn_started: bool,
-    session_messages: Vec<Message>,
+    pending_session_id: Option<SessionId>,
+    pending_user_entry_id: Option<String>,
+    session_items: Vec<PersistedConversationItem>,
 }
 
 impl ConversationWorker {
@@ -113,8 +121,9 @@ impl ConversationWorker {
         self.cancellation = Some(cancellation);
         self.target = Some(target);
         self.permission_broker = Some(permission_broker);
-        self.provider_turn_started = false;
-        self.session_messages.clear();
+        self.pending_session_id = None;
+        self.pending_user_entry_id = None;
+        self.session_items.clear();
     }
 
     pub fn is_running(&self) -> bool {
@@ -130,8 +139,9 @@ impl ConversationWorker {
         }
         self.receiver = None;
         self.target = None;
-        self.provider_turn_started = false;
-        self.session_messages.clear();
+        self.pending_session_id = None;
+        self.pending_user_entry_id = None;
+        self.session_items.clear();
     }
 
     pub fn interrupt(&mut self) -> bool {
@@ -162,69 +172,16 @@ impl ConversationWorker {
         self.target.as_ref()
     }
 
-    pub fn take_provider_turn_started(&mut self) -> bool {
-        std::mem::take(&mut self.provider_turn_started)
+    pub fn take_pending_user_entry_id(&mut self) -> Option<String> {
+        self.pending_user_entry_id.take()
     }
 
-    pub fn take_session_messages(&mut self) -> Vec<Message> {
-        std::mem::take(&mut self.session_messages)
+    pub fn take_pending_session_id(&mut self) -> Option<SessionId> {
+        self.pending_session_id.take()
     }
 
-    pub fn try_recv_event(&mut self) -> Option<ConversationEvent> {
-        loop {
-            let event = match self.receiver.as_ref()?.try_recv() {
-                Ok(event) => event,
-                Err(mpsc::TryRecvError::Empty) => return None,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.receiver = None;
-                    self.cancellation = None;
-                    self.target = None;
-                    if let Some(permission_broker) = self.permission_broker.take() {
-                        permission_broker.cancel_all();
-                    }
-                    return Some(ConversationEvent::Failed {
-                        message: "conversation request stopped before completion".to_string(),
-                    });
-                }
-            };
-
-            match event {
-                ConversationWorkerEvent::Progress(event) => {
-                    if event.is_terminal() {
-                        self.receiver = None;
-                        self.cancellation = None;
-                        self.target = None;
-                        if let Some(permission_broker) = self.permission_broker.take() {
-                            permission_broker.cancel_all();
-                        }
-                    }
-                    return Some(event);
-                }
-                ConversationWorkerEvent::Session(event) => {
-                    self.apply_session_event(event);
-                }
-                ConversationWorkerEvent::Finished { response, metrics } => {
-                    self.receiver = None;
-                    self.cancellation = None;
-                    self.target = None;
-                    if let Some(permission_broker) = self.permission_broker.take() {
-                        permission_broker.cancel_all();
-                    }
-                    return Some(ConversationEvent::Finished { response, metrics });
-                }
-            }
-        }
-    }
-
-    fn apply_session_event(&mut self, event: ConversationDelta) {
-        match event {
-            ConversationDelta::ProviderTurnStarted => {
-                self.provider_turn_started = true;
-            }
-            ConversationDelta::ProviderContextMessage { message } => {
-                self.session_messages.push(message);
-            }
-        }
+    pub fn take_session_items(&mut self) -> Vec<PersistedConversationItem> {
+        std::mem::take(&mut self.session_items)
     }
 }
 
@@ -236,13 +193,21 @@ async fn run_conversation_worker(
     permission_broker: ConversationPermissionBroker,
     sender: mpsc::Sender<ConversationWorkerEvent>,
 ) {
-    let provider_context_messages_started = Arc::new(AtomicBool::new(false));
+    let provider_context_items_started = Arc::new(AtomicBool::new(false));
     let provider_context_repair_ledger =
         Arc::new(Mutex::new(ProviderContextRepairLedger::default()));
+    let (session_sender, session_receiver) = tokio_mpsc::unbounded_channel();
+    let session_actor_cancellation = cancellation.clone();
+    let session_actor = tokio::spawn(run_session_persistence_actor(
+        request.persistence_cloned(),
+        session_receiver,
+        sender.clone(),
+        session_actor_cancellation,
+    ));
     for attempt in 0..=request_policy.attempts() {
         let progress_sender = sender.clone();
-        let attempt_provider_context_messages_started =
-            Arc::clone(&provider_context_messages_started);
+        let progress_session_sender = session_sender.clone();
+        let attempt_provider_context_items_started = Arc::clone(&provider_context_items_started);
         let attempt_provider_context_repair_ledger = Arc::clone(&provider_context_repair_ledger);
         let attempt_cancellation = cancellation.child_token();
         let timeout_pause = ConversationTimeoutPause::default();
@@ -263,25 +228,65 @@ async fn run_conversation_worker(
                 &attempt_cancellation,
                 request_policy.tool_max_turns(),
                 Some(permission_handler),
-                move |progress| {
-                    let event = conversation_worker_event_from_progress(progress);
-                    if let ConversationWorkerEvent::Session(
-                        ConversationDelta::ProviderContextMessage { message },
-                    ) = &event
-                    {
-                        attempt_provider_context_messages_started.store(true, Ordering::Relaxed);
+                move |progress| match progress {
+                    crate::conversation::ConversationProgress::ProviderTurnStarted => {
+                        let _ = progress_session_sender
+                            .send(SessionPersistenceCommand::ProviderTurnStarted);
+                    }
+                    crate::conversation::ConversationProgress::ProviderContextItem { item } => {
+                        attempt_provider_context_items_started.store(true, Ordering::Relaxed);
                         attempt_provider_context_repair_ledger
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .observe(message);
+                            .observe(&item);
+                        let _ = progress_session_sender
+                            .send(SessionPersistenceCommand::ProviderContextItem(item));
                     }
-                    let _ = progress_sender.send(event);
+                    crate::conversation::ConversationProgress::ToolActivityStarted { activity } => {
+                        let _ = progress_session_sender.send(
+                            SessionPersistenceCommand::ToolActivityStarted(activity.clone()),
+                        );
+                        if let Some(event) = conversation_worker_event_from_progress(
+                            crate::conversation::ConversationProgress::ToolActivityStarted {
+                                activity,
+                            },
+                        ) {
+                            let _ = progress_sender.send(event);
+                        }
+                    }
+                    crate::conversation::ConversationProgress::ToolActivityUpdated { update } => {
+                        let _ = progress_session_sender.send(
+                            SessionPersistenceCommand::ToolActivityUpdated(update.clone()),
+                        );
+                        if let Some(event) = conversation_worker_event_from_progress(
+                            crate::conversation::ConversationProgress::ToolActivityUpdated {
+                                update,
+                            },
+                        ) {
+                            let _ = progress_sender.send(event);
+                        }
+                    }
+                    crate::conversation::ConversationProgress::TerminalUpdated { snapshot } => {
+                        let _ = progress_session_sender.send(
+                            SessionPersistenceCommand::TerminalSnapshot(snapshot.clone()),
+                        );
+                        if let Some(event) = conversation_worker_event_from_progress(
+                            crate::conversation::ConversationProgress::TerminalUpdated { snapshot },
+                        ) {
+                            let _ = progress_sender.send(event);
+                        }
+                    }
+                    other => {
+                        if let Some(event) = conversation_worker_event_from_progress(other) {
+                            let _ = progress_sender.send(event);
+                        }
+                    }
                 },
             ),
         )
         .await;
         let can_retry_from_original_request =
-            !provider_context_messages_started.load(Ordering::Relaxed);
+            !provider_context_items_started.load(Ordering::Relaxed);
 
         match attempt_result {
             TurnAttemptOutcome::TimedOut(Err(_)) | TurnAttemptOutcome::TimedOutAfterGrace
@@ -292,61 +297,91 @@ async fn run_conversation_worker(
                     attempt,
                     &request_policy,
                     &cancellation,
+                    &session_sender,
                     &sender,
                 )
                 .await
                 {
+                    drop(session_sender);
+                    let _ = session_actor.await;
                     return;
                 }
             }
             TurnAttemptOutcome::TimedOut(Err(_)) | TurnAttemptOutcome::TimedOutAfterGrace => {
                 permission_broker.cancel_all();
-                emit_provider_context_repair_messages(
+                send_repair_items(
                     provider_context_repair_ledger.as_ref(),
-                    &sender,
+                    &session_sender,
                     TOOL_EXECUTION_TIMED_OUT,
                 );
-                let _ = sender.send(ConversationWorkerEvent::progress(
+                send_terminal_after_session_persistence(
+                    &session_sender,
+                    &sender,
                     ConversationEvent::Failed {
                         message: format!(
                             "Conversation request timed out after {}s",
                             request_policy.timeout().as_secs()
                         ),
                     },
-                ));
+                )
+                .await;
+                drop(session_sender);
+                let _ = session_actor.await;
                 return;
             }
             TurnAttemptOutcome::Completed(Ok(completion))
             | TurnAttemptOutcome::TimedOut(Ok(completion)) => {
                 permission_broker.cancel_all();
+                if let Err(error) = flush_session_persistence(&session_sender).await {
+                    let _ = sender.send(ConversationWorkerEvent::progress(
+                        ConversationEvent::Failed {
+                            message: error.to_string(),
+                        },
+                    ));
+                    drop(session_sender);
+                    let _ = session_actor.await;
+                    return;
+                }
                 let _ = sender.send(ConversationWorkerEvent::Finished {
                     response: completion.response,
                     metrics: completion.metrics,
                 });
+                drop(session_sender);
+                let _ = session_actor.await;
                 return;
             }
             TurnAttemptOutcome::Completed(Err(TurnExecutionError::Cancelled)) => {
                 permission_broker.cancel_all();
-                emit_provider_context_repair_messages(
+                send_repair_items(
                     provider_context_repair_ledger.as_ref(),
-                    &sender,
+                    &session_sender,
                     TOOL_EXECUTION_INTERRUPTED,
                 );
-                let _ = sender.send(ConversationWorkerEvent::progress(
+                send_terminal_after_session_persistence(
+                    &session_sender,
+                    &sender,
                     ConversationEvent::Interrupted,
-                ));
+                )
+                .await;
+                drop(session_sender);
+                let _ = session_actor.await;
                 return;
             }
             TurnAttemptOutcome::CancelledAfterGrace => {
                 permission_broker.cancel_all();
-                emit_provider_context_repair_messages(
+                send_repair_items(
                     provider_context_repair_ledger.as_ref(),
-                    &sender,
+                    &session_sender,
                     TOOL_EXECUTION_INTERRUPTED,
                 );
-                let _ = sender.send(ConversationWorkerEvent::progress(
+                send_terminal_after_session_persistence(
+                    &session_sender,
+                    &sender,
                     ConversationEvent::Interrupted,
-                ));
+                )
+                .await;
+                drop(session_sender);
+                let _ = session_actor.await;
                 return;
             }
             TurnAttemptOutcome::Completed(Err(_error))
@@ -357,28 +392,63 @@ async fn run_conversation_worker(
                     attempt,
                     &request_policy,
                     &cancellation,
+                    &session_sender,
                     &sender,
                 )
                 .await
                 {
+                    drop(session_sender);
+                    let _ = session_actor.await;
                     return;
                 }
             }
             TurnAttemptOutcome::Completed(Err(error)) => {
                 permission_broker.cancel_all();
-                emit_provider_context_repair_messages(
+                send_repair_items(
                     provider_context_repair_ledger.as_ref(),
-                    &sender,
+                    &session_sender,
                     TOOL_EXECUTION_INTERRUPTED,
                 );
-                let _ = sender.send(ConversationWorkerEvent::progress(
+                send_terminal_after_session_persistence(
+                    &session_sender,
+                    &sender,
                     ConversationEvent::Failed {
                         message: error.to_string(),
                     },
-                ));
+                )
+                .await;
+                drop(session_sender);
+                let _ = session_actor.await;
                 return;
             }
         }
+    }
+
+    drop(session_sender);
+    let _ = session_actor.await;
+}
+
+async fn send_terminal_after_session_persistence(
+    session_sender: &tokio_mpsc::UnboundedSender<SessionPersistenceCommand>,
+    sender: &mpsc::Sender<ConversationWorkerEvent>,
+    terminal_event: ConversationEvent,
+) {
+    let event = match flush_session_persistence(session_sender).await {
+        Ok(()) => terminal_event,
+        Err(error) => ConversationEvent::Failed {
+            message: error.to_string(),
+        },
+    };
+    let _ = sender.send(ConversationWorkerEvent::progress(event));
+}
+
+fn send_repair_items(
+    ledger: &Mutex<ProviderContextRepairLedger>,
+    sender: &tokio_mpsc::UnboundedSender<SessionPersistenceCommand>,
+    content: &'static str,
+) {
+    for item in take_provider_context_repair_items(ledger, content) {
+        let _ = sender.send(SessionPersistenceCommand::ProviderContextItem(item));
     }
 }
 
@@ -386,6 +456,7 @@ async fn retry_conversation_after_attempt(
     attempt: usize,
     request_policy: &RuntimeRequestPolicy,
     cancellation: &CancellationToken,
+    session_sender: &tokio_mpsc::UnboundedSender<SessionPersistenceCommand>,
     sender: &mpsc::Sender<ConversationWorkerEvent>,
 ) -> bool {
     let retry = attempt + 1;
@@ -396,7 +467,11 @@ async fn retry_conversation_after_attempt(
     ));
     tokio::select! {
         _ = cancellation.cancelled() => {
-            let _ = sender.send(ConversationWorkerEvent::progress(ConversationEvent::Interrupted));
+            send_terminal_after_session_persistence(
+                session_sender,
+                sender,
+                ConversationEvent::Interrupted,
+            ).await;
             true
         }
         _ = tokio::time::sleep(request_policy.delay_for_retry(retry)) => false,
@@ -404,387 +479,4 @@ async fn retry_conversation_after_attempt(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-            mpsc,
-        },
-        time::Duration,
-    };
-
-    use provider_protocol::{Message, MessageRole, ToolCall, ToolResult};
-    use runtime_domain::{request_policy::RuntimeRequestPolicy, session::RuntimeTarget};
-    use tokio_util::sync::CancellationToken;
-    use tool_runtime::ToolExecutorRegistry;
-
-    use super::{
-        ConversationDelta, ConversationEvent, ConversationPermissionBroker, ConversationWorker,
-        ConversationWorkerEvent,
-    };
-    use crate::{ConversationResponse, PreparedConversationRequest, ProviderKind};
-
-    #[test]
-    fn conversation_runtime_clears_receiver_after_terminal_event() {
-        let (sender, receiver) = mpsc::channel();
-        sender
-            .send(ConversationWorkerEvent::progress(
-                ConversationEvent::Interrupted,
-            ))
-            .expect("send terminal event");
-        let mut runtime = ConversationWorker {
-            receiver: Some(receiver),
-            cancellation: Some(CancellationToken::new()),
-            target: Some(RuntimeTarget::provider("provider", "model")),
-            permission_broker: None,
-            provider_turn_started: false,
-            session_messages: Vec::new(),
-        };
-
-        assert_eq!(
-            runtime.try_recv_event(),
-            Some(ConversationEvent::Interrupted)
-        );
-        assert!(!runtime.is_running());
-        assert!(runtime.current_target().is_none());
-    }
-
-    #[test]
-    fn conversation_runtime_keeps_receiver_after_retry_event() {
-        let (sender, receiver) = mpsc::channel();
-        let mut runtime = ConversationWorker {
-            receiver: Some(receiver),
-            cancellation: Some(CancellationToken::new()),
-            target: Some(RuntimeTarget::provider("provider", "model")),
-            permission_broker: None,
-            provider_turn_started: false,
-            session_messages: Vec::new(),
-        };
-
-        sender
-            .send(ConversationWorkerEvent::progress(
-                ConversationEvent::Retrying {
-                    message: "Reconnecting... 1/3".to_string(),
-                },
-            ))
-            .expect("retry event should be queued");
-
-        assert_eq!(
-            runtime.try_recv_event(),
-            Some(ConversationEvent::Retrying {
-                message: "Reconnecting... 1/3".to_string(),
-            })
-        );
-        assert!(runtime.is_running());
-
-        sender
-            .send(ConversationWorkerEvent::Finished {
-                response: ConversationResponse {
-                    content: "完成".to_string(),
-                    reasoning_content: None,
-                    reasoning_duration: None,
-                },
-                metrics: None,
-            })
-            .expect("finish event should be queued");
-
-        assert_eq!(
-            runtime.try_recv_event(),
-            Some(ConversationEvent::Finished {
-                response: ConversationResponse {
-                    content: "完成".to_string(),
-                    reasoning_content: None,
-                    reasoning_duration: None,
-                },
-                metrics: None,
-            })
-        );
-        assert!(!runtime.is_running());
-        assert!(runtime.take_session_messages().is_empty());
-    }
-
-    #[test]
-    fn conversation_runtime_keeps_receiver_after_token_estimate_event() {
-        let (sender, receiver) = mpsc::channel();
-        let mut runtime = ConversationWorker {
-            receiver: Some(receiver),
-            cancellation: Some(CancellationToken::new()),
-            target: Some(RuntimeTarget::provider("provider", "model")),
-            permission_broker: None,
-            provider_turn_started: false,
-            session_messages: Vec::new(),
-        };
-
-        sender
-            .send(ConversationWorkerEvent::progress(
-                ConversationEvent::OutputTokenEstimate { total_tokens: 12 },
-            ))
-            .expect("token estimate event should be queued");
-
-        assert_eq!(
-            runtime.try_recv_event(),
-            Some(ConversationEvent::OutputTokenEstimate { total_tokens: 12 })
-        );
-        assert!(runtime.is_running());
-    }
-
-    #[test]
-    fn conversation_runtime_keeps_receiver_after_text_delta_event() {
-        let (sender, receiver) = mpsc::channel();
-        let mut runtime = ConversationWorker {
-            receiver: Some(receiver),
-            cancellation: Some(CancellationToken::new()),
-            target: Some(RuntimeTarget::provider("provider", "model")),
-            permission_broker: None,
-            provider_turn_started: false,
-            session_messages: Vec::new(),
-        };
-
-        sender
-            .send(ConversationWorkerEvent::progress(
-                ConversationEvent::AssistantDelta {
-                    content: "partial".to_string(),
-                },
-            ))
-            .expect("assistant delta event should be queued");
-
-        assert_eq!(
-            runtime.try_recv_event(),
-            Some(ConversationEvent::AssistantDelta {
-                content: "partial".to_string(),
-            })
-        );
-        assert!(runtime.is_running());
-    }
-
-    #[test]
-    fn conversation_runtime_buffers_session_events_without_ui_event() {
-        let (sender, receiver) = mpsc::channel();
-        let mut runtime = ConversationWorker {
-            receiver: Some(receiver),
-            cancellation: Some(CancellationToken::new()),
-            target: Some(RuntimeTarget::provider("provider", "model")),
-            permission_broker: None,
-            provider_turn_started: false,
-            session_messages: Vec::new(),
-        };
-        let message = Message::text(MessageRole::Assistant, "stored");
-
-        sender
-            .send(ConversationWorkerEvent::Session(
-                ConversationDelta::ProviderTurnStarted,
-            ))
-            .expect("provider event should be queued");
-        sender
-            .send(ConversationWorkerEvent::Session(
-                ConversationDelta::ProviderContextMessage {
-                    message: message.clone(),
-                },
-            ))
-            .expect("message event should be queued");
-
-        assert_eq!(runtime.try_recv_event(), None);
-        assert!(runtime.take_provider_turn_started());
-        assert_eq!(runtime.take_session_messages(), vec![message]);
-        assert!(runtime.is_running());
-    }
-
-    #[test]
-    fn conversation_interrupt_keeps_receiver_until_worker_terminal_event() {
-        let (_sender, receiver) = mpsc::channel();
-        let mut runtime = ConversationWorker {
-            receiver: Some(receiver),
-            cancellation: Some(CancellationToken::new()),
-            target: Some(RuntimeTarget::provider("provider", "model")),
-            permission_broker: None,
-            provider_turn_started: false,
-            session_messages: Vec::new(),
-        };
-
-        assert!(runtime.interrupt());
-        assert!(runtime.is_running());
-        assert!(runtime.current_target().is_some());
-    }
-
-    #[tokio::test]
-    async fn soft_timeout_pauses_while_permission_is_waiting() {
-        let parent_cancellation = CancellationToken::new();
-        let attempt_cancellation = parent_cancellation.child_token();
-        let timeout_pause = super::ConversationTimeoutPause::default();
-        let future_timeout_pause = timeout_pause.clone();
-
-        let outcome = super::run_with_soft_timeout(
-            &parent_cancellation,
-            &attempt_cancellation,
-            Duration::from_millis(10),
-            Duration::from_millis(5),
-            timeout_pause,
-            async move {
-                let permission_wait = future_timeout_pause.pause();
-                tokio::time::sleep(Duration::from_millis(30)).await;
-                drop(permission_wait);
-                "approved"
-            },
-        )
-        .await;
-
-        assert!(matches!(
-            outcome,
-            super::TurnAttemptOutcome::Completed("approved")
-        ));
-        assert!(
-            !attempt_cancellation.is_cancelled(),
-            "permission waits should not consume the request timeout budget"
-        );
-    }
-
-    #[tokio::test]
-    async fn soft_timeout_cancels_child_and_waits_for_repair() {
-        let parent_cancellation = CancellationToken::new();
-        let attempt_cancellation = parent_cancellation.child_token();
-        let future_cancellation = attempt_cancellation.clone();
-        let repair_observed = Arc::new(AtomicBool::new(false));
-        let future_repair_observed = Arc::clone(&repair_observed);
-
-        let outcome = super::run_with_soft_timeout(
-            &parent_cancellation,
-            &attempt_cancellation,
-            Duration::from_millis(10),
-            Duration::from_millis(10),
-            super::ConversationTimeoutPause::default(),
-            async move {
-                future_cancellation.cancelled().await;
-                future_repair_observed.store(true, Ordering::Relaxed);
-                "repaired"
-            },
-        )
-        .await;
-
-        match outcome {
-            super::TurnAttemptOutcome::TimedOut(value) => assert_eq!(value, "repaired"),
-            super::TurnAttemptOutcome::Completed(_) => {
-                panic!("timeout should mark the attempt as timed out")
-            }
-            super::TurnAttemptOutcome::TimedOutAfterGrace
-            | super::TurnAttemptOutcome::CancelledAfterGrace => {
-                panic!("future should finish inside the repair grace")
-            }
-        }
-        assert!(repair_observed.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test]
-    async fn soft_timeout_stops_waiting_after_repair_grace() {
-        let parent_cancellation = CancellationToken::new();
-        let attempt_cancellation = parent_cancellation.child_token();
-
-        let outcome = super::run_with_soft_timeout(
-            &parent_cancellation,
-            &attempt_cancellation,
-            Duration::from_millis(5),
-            Duration::from_millis(5),
-            super::ConversationTimeoutPause::default(),
-            async {
-                std::future::pending::<()>().await;
-                "never"
-            },
-        )
-        .await;
-
-        assert!(matches!(
-            outcome,
-            super::TurnAttemptOutcome::TimedOutAfterGrace
-        ));
-        assert!(attempt_cancellation.is_cancelled());
-    }
-
-    #[tokio::test]
-    async fn parent_cancellation_stops_waiting_after_repair_grace() {
-        let parent_cancellation = CancellationToken::new();
-        let attempt_cancellation = parent_cancellation.child_token();
-        parent_cancellation.cancel();
-
-        let outcome = super::run_with_soft_timeout(
-            &parent_cancellation,
-            &attempt_cancellation,
-            Duration::from_secs(1),
-            Duration::from_millis(5),
-            super::ConversationTimeoutPause::default(),
-            async {
-                std::future::pending::<()>().await;
-                "never"
-            },
-        )
-        .await;
-
-        assert!(matches!(
-            outcome,
-            super::TurnAttemptOutcome::CancelledAfterGrace
-        ));
-        assert!(attempt_cancellation.is_cancelled());
-    }
-
-    #[test]
-    fn provider_context_repair_messages_fill_unresolved_tool_calls() {
-        let mut ledger = super::ProviderContextRepairLedger::default();
-        let first_call = ToolCall::new("call-1", "read", serde_json::json!({}));
-        let second_call = ToolCall::new("call-2", "search", serde_json::json!({}));
-
-        ledger.observe(&Message::assistant_with_tool_calls(
-            String::new(),
-            vec![first_call, second_call],
-        ));
-        ledger.observe(&Message::tool_result(ToolResult::success(
-            "call-1", "read", "done", None,
-        )));
-
-        let repair_messages = ledger.take_repair_messages(super::TOOL_EXECUTION_TIMED_OUT);
-
-        assert_eq!(repair_messages.len(), 1);
-        let repair_result = repair_messages[0]
-            .first_tool_result()
-            .expect("repair message should contain a tool result");
-        assert_eq!(repair_result.call_id, "call-2");
-        assert_eq!(repair_result.name, "search");
-        assert!(repair_result.is_error);
-        assert_eq!(repair_result.content, super::TOOL_EXECUTION_TIMED_OUT);
-        assert!(
-            ledger
-                .take_repair_messages(super::TOOL_EXECUTION_TIMED_OUT)
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn conversation_worker_reports_interrupted_when_pre_cancelled() {
-        let request = PreparedConversationRequest::new(
-            "local",
-            ProviderKind::OpenAiCompatible,
-            "qwen3",
-            Some("http://127.0.0.1:1234/v1".to_string()),
-            None,
-            None,
-            vec![Message::text(MessageRole::User, "hello")],
-        );
-        let executor = ToolExecutorRegistry::new();
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
-        let (sender, receiver) = mpsc::channel();
-
-        super::run_conversation_worker(
-            request,
-            executor,
-            RuntimeRequestPolicy::default(),
-            cancellation,
-            ConversationPermissionBroker::default(),
-            sender,
-        )
-        .await;
-
-        assert_eq!(
-            receiver.recv().expect("worker should emit an event"),
-            ConversationWorkerEvent::progress(ConversationEvent::Interrupted)
-        );
-    }
-}
+mod tests;

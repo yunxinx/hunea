@@ -6,7 +6,9 @@ use std::{
 use crate::{
     theme::{TerminalPalette, quote_text_style, table_header_text_style},
     transcript::{
-        markdown_highlight::highlight_code_chunks, markdown_links::render_local_link_target,
+        markdown_blocks::{MarkdownBlockKind, should_insert_markdown_block_spacing},
+        markdown_highlight::highlight_code_chunks,
+        markdown_links::render_local_link_target,
     },
 };
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Tag, TagEnd};
@@ -88,7 +90,7 @@ pub(super) struct MarkdownRenderer {
     code_block_buffer: String,
     line_ends_with_local_link_target: bool,
     pending_local_link_soft_break: bool,
-    needs_spacing: bool,
+    pending_spacing_after: Option<MarkdownBlockKind>,
 }
 
 impl MarkdownRenderer {
@@ -145,7 +147,7 @@ impl MarkdownRenderer {
             code_block_buffer: String::new(),
             line_ends_with_local_link_target: false,
             pending_local_link_soft_break: false,
-            needs_spacing: false,
+            pending_spacing_after: None,
         }
     }
 
@@ -223,16 +225,8 @@ impl MarkdownRenderer {
                 self.blockquote_depth += 1;
             }
             Tag::CodeBlock(kind) => self.start_code_block(kind),
-            Tag::List(Some(start)) => self.list_stack.push(ListFrame {
-                kind: ListKind::Ordered(start as usize),
-                active_marker: None,
-                continuation_indent: String::new(),
-            }),
-            Tag::List(None) => self.list_stack.push(ListFrame {
-                kind: ListKind::Bullet,
-                active_marker: None,
-                continuation_indent: String::new(),
-            }),
+            Tag::List(Some(start)) => self.start_list(ListKind::Ordered(start as usize)),
+            Tag::List(None) => self.start_list(ListKind::Bullet),
             Tag::Item => self.start_list_item(),
             Tag::Emphasis => self.inline_styles.emphasis_depth += 1,
             Tag::Strong => self.inline_styles.strong_depth += 1,
@@ -288,13 +282,13 @@ impl MarkdownRenderer {
         match tag {
             TagEnd::Paragraph => {
                 self.flush_current_block();
-                self.needs_spacing = true;
+                self.pending_spacing_after = Some(MarkdownBlockKind::Paragraph);
             }
             TagEnd::CodeBlock => self.end_code_block(),
             TagEnd::Heading(_) => {
                 self.flush_current_block();
                 self.inline_styles.heading_style = None;
-                self.needs_spacing = true;
+                self.pending_spacing_after = Some(MarkdownBlockKind::Heading);
             }
             TagEnd::BlockQuote(_) => {
                 self.flush_current_block();
@@ -304,7 +298,7 @@ impl MarkdownRenderer {
                 self.flush_current_block();
                 self.list_stack.pop();
                 if self.list_stack.is_empty() {
-                    self.needs_spacing = true;
+                    self.pending_spacing_after = Some(MarkdownBlockKind::List);
                 }
             }
             TagEnd::Item => {
@@ -335,7 +329,7 @@ impl MarkdownRenderer {
             TagEnd::Table => {
                 if let Some(table) = self.table.take() {
                     self.push_table(table);
-                    self.needs_spacing = true;
+                    self.pending_spacing_after = Some(MarkdownBlockKind::Paragraph);
                 }
             }
             TagEnd::TableHead => {
@@ -370,17 +364,29 @@ impl MarkdownRenderer {
     }
 
     fn start_prose_block(&mut self) {
-        self.start_block(WrapMode::Prose, false);
+        self.start_markdown_block(WrapMode::Prose, false);
     }
 
     fn start_heading_block(&mut self, level: HeadingLevel) {
-        self.start_block(WrapMode::Prose, false);
+        self.start_markdown_block(WrapMode::Prose, false);
         self.inline_styles.heading_style = Some(heading_style(level));
         self.push_text(&format!("{} ", "#".repeat(heading_level_number(level))));
     }
 
     fn start_literal_block(&mut self, preserve_trailing_spaces: bool) {
-        self.start_block(WrapMode::Literal, preserve_trailing_spaces);
+        self.start_markdown_block(WrapMode::Literal, preserve_trailing_spaces);
+    }
+
+    fn start_list(&mut self, kind: ListKind) {
+        self.flush_current_block();
+        if self.list_stack.is_empty() {
+            self.maybe_insert_spacing();
+        }
+        self.list_stack.push(ListFrame {
+            kind,
+            active_marker: None,
+            continuation_indent: String::new(),
+        });
     }
 
     fn start_code_block(&mut self, kind: CodeBlockKind<'_>) {
@@ -437,10 +443,10 @@ impl MarkdownRenderer {
         }
 
         self.flush_current_block();
-        self.needs_spacing = true;
+        self.pending_spacing_after = Some(MarkdownBlockKind::Code);
     }
 
-    fn start_block(&mut self, wrap_mode: WrapMode, preserve_trailing_spaces: bool) {
+    fn start_markdown_block(&mut self, wrap_mode: WrapMode, preserve_trailing_spaces: bool) {
         self.flush_current_block();
         self.maybe_insert_spacing();
         let (first_prefix, continuation_prefix) = self.current_prefixes();
@@ -454,7 +460,10 @@ impl MarkdownRenderer {
     }
 
     fn maybe_insert_spacing(&mut self) {
-        if self.needs_spacing && self.list_stack.is_empty() && !self.output.is_empty() {
+        if should_insert_markdown_block_spacing(self.pending_spacing_after)
+            && self.list_stack.is_empty()
+            && !self.output.is_empty()
+        {
             self.output.push(LogicalLine {
                 first_prefix: Vec::new(),
                 continuation_prefix: Vec::new(),
@@ -463,7 +472,7 @@ impl MarkdownRenderer {
                 preserve_trailing_spaces: false,
             });
         }
-        self.needs_spacing = false;
+        self.pending_spacing_after = None;
     }
 
     fn current_prefixes(&self) -> (Vec<StyledChunk>, Vec<StyledChunk>) {
@@ -606,7 +615,7 @@ impl MarkdownRenderer {
         }
 
         self.flush_current_block();
-        self.needs_spacing = true;
+        self.pending_spacing_after = Some(MarkdownBlockKind::Code);
     }
 
     fn push_soft_break(&mut self) {
@@ -658,7 +667,7 @@ impl MarkdownRenderer {
             block.append_text(html, style);
         }
         self.flush_current_block();
-        self.needs_spacing = true;
+        self.pending_spacing_after = Some(MarkdownBlockKind::Code);
     }
 
     fn push_newline(&mut self) {
@@ -699,7 +708,7 @@ impl MarkdownRenderer {
             wrap_mode: WrapMode::Literal,
             preserve_trailing_spaces: false,
         });
-        self.needs_spacing = true;
+        self.pending_spacing_after = Some(MarkdownBlockKind::Paragraph);
     }
 
     fn finish_link(&mut self) {

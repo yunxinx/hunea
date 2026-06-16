@@ -4,7 +4,8 @@
 //! `pulldown-cmark` event 到 `ratatui` 行的转换放在 `markdown_render` 中。
 
 pub(crate) use super::markdown_render::{
-    estimate_markdown_metrics_for_tabs, render_markdown_lines, render_markdown_metrics,
+    assistant_markdown_options, estimate_markdown_metrics_for_tabs, render_markdown_lines,
+    render_markdown_metrics,
 };
 
 #[cfg(test)]

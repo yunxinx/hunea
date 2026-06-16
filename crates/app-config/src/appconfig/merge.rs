@@ -3,12 +3,12 @@ use std::{fs, io, path::Path};
 use super::{
     error::AppConfigError,
     file_config::{FileConfig, FileRuntimeConfig},
-    types::{Config, ReasoningContentDisplay, RuntimeConfig, UserInputStyle},
+    types::{Config, EscRewindMode, ReasoningContentDisplay, RuntimeConfig, UserInputStyle},
     validate::{
-        normalize_request_retry_delays, validate_composer_undo_limit, validate_external_editor,
-        validate_file_picker_popup_height, validate_request_retry_attempts,
-        validate_request_timeout_seconds, validate_status_line_items_for_path,
-        validate_tool_max_turns,
+        normalize_request_retry_delays, validate_branch_picker_list_rows,
+        validate_composer_undo_limit, validate_external_editor, validate_file_picker_popup_height,
+        validate_request_retry_attempts, validate_request_timeout_seconds,
+        validate_status_line_items_for_path, validate_tool_max_turns,
     },
 };
 
@@ -104,12 +104,29 @@ pub(super) fn merge_config_file(
         config.tui.esc_interrupt_presses = esc_interrupt_presses;
     }
 
+    if let Some(esc_rewind_mode) = file_config.tui.esc_rewind_mode {
+        config.tui.esc_rewind_mode =
+            EscRewindMode::parse(&esc_rewind_mode).map_err(|error| match error {
+                AppConfigError::InvalidEscRewindMode { value, .. } => {
+                    AppConfigError::InvalidEscRewindMode {
+                        path: Some(path.to_path_buf()),
+                        value,
+                    }
+                }
+                other => other,
+            })?;
+    }
+
     if let Some(show_esc_interrupt_hint) = file_config.tui.show_esc_interrupt_hint {
         config.tui.show_esc_interrupt_hint = show_esc_interrupt_hint;
     }
 
     if let Some(height) = file_config.tui.file_picker_popup_height {
         config.tui.file_picker_popup_height = validate_file_picker_popup_height(height, path)?;
+    }
+
+    if let Some(rows) = file_config.tui.branch_picker_list_rows {
+        config.tui.branch_picker_list_rows = validate_branch_picker_list_rows(rows, path)?;
     }
 
     if let Some(limit) = file_config.tui.composer_undo_limit {

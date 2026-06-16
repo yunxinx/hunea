@@ -3,10 +3,7 @@ use ratatui::{buffer::Buffer, layout::Rect};
 use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
-use runtime_domain::{
-    provider::{ProviderApiKey, ProviderKind},
-    session::ChatRole,
-};
+use runtime_domain::provider::{ProviderApiKey, ProviderKind};
 use terminal_ui::{
     AppEffect, AppEvent, Model, ModelOptions, StartupBannerOptions,
     theme::{palette_from_background, terminal_default_palette},
@@ -82,7 +79,7 @@ fn configured_default_model_is_kept_when_provider_models_are_not_loaded() {
 }
 
 #[test]
-fn configured_default_model_is_dropped_when_it_is_outside_allowlist() {
+fn configured_default_model_is_trusted_when_it_is_outside_allowlist() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
         ModelOptions {
@@ -101,16 +98,21 @@ fn configured_default_model_is_dropped_when_it_is_outside_allowlist() {
         has_dark_background: true,
     });
 
-    assert_eq!(model.selected_model(), None);
+    assert_eq!(
+        model.selected_model(),
+        Some(ModelSelection::new("local", "qwen4"))
+    );
 
     for character in "hello".chars() {
         model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
     }
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    assert_eq!(effect, None);
-    assert_eq!(model.composer_text(), "hello");
-    assert!(rendered_model_text(&mut model).contains("Select a model before sending"));
+    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+        panic!("expected conversation turn effect, got {effect:?}");
+    };
+    assert_eq!(request.provider_id(), "local");
+    assert_eq!(request.model_id(), "qwen4");
 }
 
 #[test]
@@ -192,8 +194,8 @@ fn enter_with_selected_provider_model_returns_conversation_turn_effect() {
     assert_eq!(request.provider_kind(), ProviderKind::OpenAiCompatible);
     assert_eq!(request.model_id(), "qwen3");
     assert_eq!(request.base_url(), Some("http://127.0.0.1:1234/v1"));
-    assert_eq!(request.message().role, ChatRole::User);
-    assert_eq!(request.message().content, "hello");
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "hello");
 }
 
 #[test]
@@ -298,8 +300,8 @@ fn clear_command_removes_previous_conversation_context() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    assert_eq!(request.message().role, ChatRole::User);
-    assert_eq!(request.message().content, "fresh question");
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "fresh question");
 }
 
 fn single_model_catalog() -> ModelCatalog {

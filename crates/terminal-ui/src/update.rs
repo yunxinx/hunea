@@ -3,14 +3,14 @@ use std::{path::PathBuf, time::Duration};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use runtime_domain::{
     model_catalog::{ModelSelection, ProviderSyncRequest},
-    session::{ChatMessage, ConversationTurnRequest, RuntimeTarget},
+    session::{ConversationTurnRequest, RuntimeTarget},
 };
 
 use super::{
     ExternalEditorLaunch, Model, Sender,
     composer::{
-        chat_message_from_composer_text, selection_end_char_for_line_anchor,
-        selection_start_char_for_line_anchor,
+        ComposerSourceMessage, selection_end_char_for_line_anchor,
+        selection_start_char_for_line_anchor, source_message_from_composer_text,
     },
     document::DocumentAnchorRegion,
     exit_confirmation::EXIT_CONFIRMATION_PROMPT,
@@ -32,6 +32,25 @@ pub enum AppEffect {
         target: RuntimeTarget,
         request_id: String,
         option_id: Option<String>,
+    },
+    OpenResumePicker,
+    OpenSessionPreview {
+        session_id: String,
+    },
+    ResumeSession {
+        session_id: String,
+    },
+    OpenEntryRewind,
+    OpenBranchTree,
+    SelectEntryRewind {
+        entry_id: String,
+        prefill: Option<String>,
+    },
+    OpenBranchPreview {
+        branch_row_id: String,
+    },
+    SwitchBranch {
+        leaf_id: String,
     },
     TruncateConversation {
         retained_user_turns: usize,
@@ -106,6 +125,14 @@ pub enum AppEvent {
 }
 
 impl Model {
+    pub(crate) fn terminal_input_coalescing(&self) -> crate::runner::TerminalInputCoalescing {
+        crate::runner::TerminalInputCoalescing {
+            has_page_scroll_burst_coalescing: self.session_preview_active()
+                || self.session_picker_active()
+                || self.entry_tree_active(),
+        }
+    }
+
     /// `update` 根据事件推进模型状态。
     pub fn update(&mut self, event: AppEvent) -> Option<AppEffect> {
         match event {
@@ -113,6 +140,9 @@ impl Model {
             AppEvent::Paste(text) => {
                 if self.transcript_overlay_active()
                     || self.tool_approval_fullscreen_preview_active()
+                    || self.session_preview_active()
+                    || self.session_picker_active()
+                    || self.entry_tree_active()
                     || self.model_panel_active()
                 {
                     self.cancel_exit_confirmation();
@@ -129,6 +159,22 @@ impl Model {
                 self.cancel_exit_confirmation();
                 if self.tool_approval_fullscreen_preview_active() {
                     self.scroll_tool_approval_fullscreen_preview_by(delta_lines);
+                    return None;
+                }
+                if self.session_preview_active() {
+                    self.move_session_preview_page(delta_lines.signum());
+                    return None;
+                }
+                if self.session_picker_active() {
+                    self.move_session_picker_selection(delta_lines.signum());
+                    return None;
+                }
+                if self.entry_tree_active() {
+                    if self.entry_tree_preview_active() {
+                        self.move_entry_tree_preview_page(delta_lines.signum());
+                    } else {
+                        self.move_entry_tree_selection(delta_lines.signum());
+                    }
                     return None;
                 }
                 if self.transcript_overlay_active() {
@@ -158,8 +204,13 @@ impl Model {
                 column,
                 row,
             } => {
+                if self.entry_tree_active() {
+                    return self.handle_entry_tree_mouse_down(button, column, row);
+                }
                 if self.transcript_overlay_active()
                     || self.tool_approval_fullscreen_preview_active()
+                    || self.session_preview_active()
+                    || self.session_picker_active()
                 {
                     return None;
                 }
@@ -172,6 +223,9 @@ impl Model {
             } => {
                 if self.transcript_overlay_active()
                     || self.tool_approval_fullscreen_preview_active()
+                    || self.session_preview_active()
+                    || self.session_picker_active()
+                    || self.entry_tree_active()
                 {
                     return None;
                 }
@@ -184,6 +238,9 @@ impl Model {
             } => {
                 if self.transcript_overlay_active()
                     || self.tool_approval_fullscreen_preview_active()
+                    || self.session_preview_active()
+                    || self.session_picker_active()
+                    || self.entry_tree_active()
                 {
                     return None;
                 }
@@ -295,6 +352,18 @@ impl Model {
         }
 
         if let Some(effect) = self.handle_tool_approval_panel_key(key) {
+            return effect;
+        }
+
+        if let Some(effect) = self.handle_session_preview_key(key) {
+            return effect;
+        }
+
+        if let Some(effect) = self.handle_session_picker_key(key) {
+            return effect;
+        }
+
+        if let Some(effect) = self.handle_entry_tree_key(key) {
             return effect;
         }
 
@@ -612,7 +681,7 @@ impl Model {
 
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let style_mode = self.style_mode;
-        let source_message = chat_message_from_composer_text(&content, self.prompt_root());
+        let source_message = source_message_from_composer_text(&content, self.prompt_root());
         self.transcript_mut()
             .append_message_with_style_mode_and_source(
                 Sender::User,
@@ -666,7 +735,7 @@ impl Model {
     fn conversation_turn_request_for_selection(
         &mut self,
         selection: &ModelSelection,
-        message: ChatMessage,
+        message: ComposerSourceMessage,
     ) -> Option<ConversationTurnRequest> {
         let Some(provider) = self
             .model_catalog
@@ -676,14 +745,14 @@ impl Model {
             return None;
         };
         let connection = provider.connection();
-        Some(ConversationTurnRequest::new(
+        Some(ConversationTurnRequest::new_user_text(
             selection.provider_id.clone(),
             connection.kind,
             selection.model_id.clone(),
             connection.base_url.clone(),
             connection.api_key.clone(),
             connection.api_key_env.clone(),
-            message,
+            message.into_content(),
         ))
     }
 

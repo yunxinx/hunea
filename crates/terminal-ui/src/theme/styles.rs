@@ -43,6 +43,11 @@ pub fn command_accent_text_style(palette: TerminalPalette) -> Style {
     apply_foreground(Style::new(), palette.command_accent)
 }
 
+/// `approval_rejected_text_style` 返回人为拒绝审批使用的黄色提示样式。
+pub fn approval_rejected_text_style(palette: TerminalPalette) -> Style {
+    apply_foreground(Style::new(), palette.approval_rejected)
+}
+
 /// `system_error_text_style` 返回运行时 system message 的错误文字样式。
 pub fn system_error_text_style(palette: TerminalPalette) -> Style {
     apply_foreground(Style::new(), palette.system_error)
@@ -91,6 +96,11 @@ pub(crate) fn surface_half_block_plain_line(width: usize) -> String {
     " ".repeat(width.max(1))
 }
 
+/// `subtle_rule_line` 返回全屏预览内部使用的弱分隔线。
+pub(crate) fn subtle_rule_line(width: usize, palette: TerminalPalette) -> Line<'static> {
+    Line::styled("╌".repeat(width.max(1)), tertiary_text_style(palette))
+}
+
 /// `panel_block` 返回用于启动欢迎块容器的统一边框样式。
 pub fn panel_block(palette: TerminalPalette) -> Block<'static> {
     let block = Block::bordered()
@@ -126,9 +136,10 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
 
     use super::{
-        accent_text_style, command_accent_text_style, muted_text_style, panel_block,
-        primary_text_style, quote_text_style, secondary_text_style, surface_emphasis_style,
-        surface_text_style, system_error_text_style, table_header_text_style, tertiary_text_style,
+        accent_text_style, approval_rejected_text_style, command_accent_text_style,
+        muted_text_style, panel_block, primary_text_style, quote_text_style, secondary_text_style,
+        surface_emphasis_style, surface_text_style, system_error_text_style,
+        table_header_text_style, tertiary_text_style,
     };
     use crate::theme::{default_palette, terminal_default_palette};
 
@@ -144,6 +155,10 @@ mod tests {
         assert_eq!(
             command_accent_text_style(palette).fg,
             Some(palette.command_accent)
+        );
+        assert_eq!(
+            approval_rejected_text_style(palette).fg,
+            Some(palette.approval_rejected)
         );
         assert_eq!(
             system_error_text_style(palette).fg,

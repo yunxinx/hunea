@@ -8,8 +8,12 @@ color-eyre.workspace = true
 app-config.workspace = true
 runtime-domain.workspace = true
 conversation-runtime.workspace = true
+session-store.workspace = true
 tool-runtime.workspace = true
 terminal-ui.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 crossterm.workspace = true
+provider-protocol.workspace = true
+serde_json.workspace = true

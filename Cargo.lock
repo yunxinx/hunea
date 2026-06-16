@@ -61,7 +61,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "app-config"
-version = "0.4.19"
+version = "0.6.1"
 dependencies = [
  "directories",
  "runtime-domain",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "conversation-runtime"
-version = "0.4.19"
+version = "0.6.1"
 dependencies = [
  "directories",
  "openai-compat-provider",
@@ -440,6 +440,7 @@ dependencies = [
  "runtime-domain",
  "serde",
  "serde_json",
+ "session-store",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -823,6 +824,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
 name = "fancy-regex"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -831,6 +844,12 @@ dependencies = [
  "bit-set",
  "regex",
 ]
+
+[[package]]
+name = "fastrand"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "fax"
@@ -1122,6 +1141,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "foldhash 0.2.0",
+]
+
+[[package]]
+name = "hashlink"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
+dependencies = [
+ "hashbrown 0.15.5",
 ]
 
 [[package]]
@@ -1564,6 +1592,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "libsqlite3-sys"
+version = "0.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "line-clipping"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1880,7 +1919,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openai-compat-provider"
-version = "0.4.19"
+version = "0.6.1"
 dependencies = [
  "futures-util",
  "provider-protocol",
@@ -2175,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "provider-protocol"
-version = "0.4.19"
+version = "0.6.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2554,15 +2593,30 @@ dependencies = [
 
 [[package]]
 name = "runtime-domain"
-version = "0.4.19"
+version = "0.6.1"
 dependencies = [
  "directories",
+ "provider-protocol",
  "serde",
  "serde_json",
  "tiktoken",
  "tokio",
  "tokio-util",
  "toml",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
+dependencies = [
+ "bitflags 2.11.1",
+ "fallible-iterator",
+ "fallible-streaming-iterator",
+ "hashlink",
+ "libsqlite3-sys",
+ "smallvec",
 ]
 
 [[package]]
@@ -2798,6 +2852,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "session-store"
+version = "0.6.1"
+dependencies = [
+ "provider-protocol",
+ "runtime-domain",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3038,21 +3108,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.2",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "terminal-app"
-version = "0.4.19"
+version = "0.6.1"
 dependencies = [
  "app-config",
  "color-eyre",
  "conversation-runtime",
  "crossterm",
+ "provider-protocol",
  "runtime-domain",
+ "serde_json",
+ "session-store",
  "terminal-ui",
+ "tokio",
  "tool-runtime",
 ]
 
 [[package]]
 name = "terminal-cli"
-version = "0.4.19"
+version = "0.6.1"
 dependencies = [
  "app-config",
  "color-eyre",
@@ -3073,7 +3160,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-ui"
-version = "0.4.19"
+version = "0.6.1"
 dependencies = [
  "arboard",
  "base64",
@@ -3396,7 +3483,7 @@ checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
 name = "tool-loop-runtime"
-version = "0.4.19"
+version = "0.6.1"
 dependencies = [
  "provider-protocol",
  "runtime-domain",
@@ -3409,7 +3496,7 @@ dependencies = [
 
 [[package]]
 name = "tool-runtime"
-version = "0.4.19"
+version = "0.6.1"
 dependencies = [
  "directories",
  "flate2",
@@ -3481,7 +3568,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
  "pin-project-lite",
+ "tracing-attributes",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-attributes"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3650,6 +3749,7 @@ dependencies = [
  "atomic",
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
@@ -3658,6 +3758,12 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"
@@ -4345,7 +4451,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.4.19"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "semver",

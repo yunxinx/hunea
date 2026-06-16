@@ -91,6 +91,10 @@ show_esc_interrupt_hint = true
 # 取值范围 3..21，默认高度 7 行。
 file_picker_popup_height = 7
 
+# `branch_picker_list_rows` 控制对话树分支选择浮窗的可见分支行数。
+# 取值范围 3..14，默认 7 行。
+branch_picker_list_rows = 7
+
 # `print_transcript_on_exit` 控制退出 TUI 后，是否把当前对话内容
 # 回放打印到终端 scrollback。
 print_transcript_on_exit = false

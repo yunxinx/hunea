@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
 
 use super::{
-    AppEffect, Model, debug,
+    AppEffect, EscRewindMode, Model, debug,
     display_width::display_width,
     selection::SelectableLineRange,
     status_line::{
@@ -25,6 +25,9 @@ const COMMAND_PANEL_DESCRIPTION_GAP: usize = 4;
 pub(super) enum CommandPanelAction {
     Clear,
     Exit,
+    OpenResumePicker,
+    OpenEntryRewind,
+    OpenCoarseRewind,
     OpenModelPanel,
     OpenToolApprovalDebug,
 }
@@ -375,6 +378,27 @@ impl Model {
                 self.mark_quitting();
                 None
             }
+            CommandPanelAction::OpenResumePicker => {
+                self.composer_mut().clear();
+                self.sync_command_panel_navigation();
+                self.sync_file_picker_state();
+                self.sync_composer_height();
+                Some(AppEffect::OpenResumePicker)
+            }
+            CommandPanelAction::OpenEntryRewind => {
+                self.composer_mut().clear();
+                self.sync_command_panel_navigation();
+                self.sync_file_picker_state();
+                self.sync_composer_height();
+                Some(AppEffect::OpenEntryRewind)
+            }
+            CommandPanelAction::OpenCoarseRewind => {
+                self.composer_mut().clear();
+                self.sync_command_panel_navigation();
+                self.sync_file_picker_state();
+                self.sync_composer_height();
+                self.open_coarse_rewind_from_command()
+            }
             CommandPanelAction::OpenModelPanel => {
                 self.open_model_panel();
                 None
@@ -387,7 +411,8 @@ impl Model {
     }
 
     fn filter_command_panel_items(&self, query: &str) -> Vec<CommandPanelItem> {
-        let items = filter_base_command_panel_items("", self.debug_commands_enabled);
+        let items =
+            filter_base_command_panel_items("", self.debug_commands_enabled, self.esc_rewind_mode);
 
         if query.is_empty() {
             return items;
@@ -407,7 +432,9 @@ fn command_panel_query(value: &str) -> Option<String> {
     }
 
     let query = raw_command_panel_query(value)?;
-    if !filter_base_command_panel_items(&query, false).is_empty() || query.chars().count() == 1 {
+    if !filter_base_command_panel_items(&query, false, EscRewindMode::Coarse).is_empty()
+        || query.chars().count() == 1
+    {
         return Some(query);
     }
 
@@ -444,6 +471,7 @@ fn raw_command_panel_query(value: &str) -> Option<String> {
 fn filter_base_command_panel_items(
     query: &str,
     debug_commands_enabled: bool,
+    esc_rewind_mode: EscRewindMode,
 ) -> Vec<CommandPanelItem> {
     let mut items = vec![CommandPanelItem {
         name: "/exit".to_string(),
@@ -451,6 +479,28 @@ fn filter_base_command_panel_items(
         description: "Exit the application".to_string(),
         action: CommandPanelAction::Exit,
     }];
+
+    items.push(CommandPanelItem {
+        name: "/resume".to_string(),
+        aliases: Vec::new(),
+        description: "Resume a previous session".to_string(),
+        action: CommandPanelAction::OpenResumePicker,
+    });
+    if matches!(esc_rewind_mode, EscRewindMode::Entry) {
+        items.push(CommandPanelItem {
+            name: "/sends-back".to_string(),
+            aliases: Vec::new(),
+            description: "Edit a previous user message".to_string(),
+            action: CommandPanelAction::OpenCoarseRewind,
+        });
+    } else {
+        items.push(CommandPanelItem {
+            name: "/tree".to_string(),
+            aliases: Vec::new(),
+            description: "Rewind to a precise session entry".to_string(),
+            action: CommandPanelAction::OpenEntryRewind,
+        });
+    }
 
     items.push(CommandPanelItem {
         name: "/models".to_string(),
@@ -480,7 +530,7 @@ fn filter_base_command_panel_items(
 
 #[cfg(test)]
 fn base_command_panel_items_for_query(query: &str) -> Vec<CommandPanelItem> {
-    filter_base_command_panel_items(query, false)
+    filter_base_command_panel_items(query, false, EscRewindMode::Coarse)
 }
 
 fn command_panel_completion_text(item: &CommandPanelItem) -> String {

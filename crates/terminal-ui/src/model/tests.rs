@@ -4,15 +4,17 @@ use std::{
 };
 
 use super::*;
-use crate::{AppEffect, AppEvent, Sender, StyleMode, document::DocumentAnchorRegion};
+use crate::{
+    AppEffect, AppEvent, Sender, StyleMode,
+    document::DocumentAnchorRegion,
+    test_helpers::{render_model_buffer, rendered_rows},
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{buffer::Buffer, layout::Rect};
 use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
 use runtime_domain::phrases::StatusPhraseOrder;
 use runtime_domain::provider::ProviderKind;
-use runtime_domain::session::ChatRole;
 use std::path::{Path, PathBuf};
 
 fn progressive_exactization_fixture() -> Model {
@@ -353,8 +355,8 @@ fn conversation_turn_request_carries_only_current_user_message() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    assert_eq!(request.message().role, ChatRole::User);
-    assert_eq!(request.message().content, "follow up");
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "follow up");
 }
 
 #[test]
@@ -390,8 +392,8 @@ fn conversation_turn_request_ignores_runtime_system_messages_in_transcript() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    assert_eq!(request.message().role, ChatRole::User);
-    assert_eq!(request.message().content, "hello");
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "hello");
     assert_eq!(
         model.transcript_plain_items(),
         vec!["■ connection refused".to_string(), "› hello".to_string()]
@@ -416,9 +418,11 @@ fn conversation_turn_request_preserves_at_file_reference_as_text() {
         panic!("expected conversation turn effect");
     };
 
-    let message = request.message();
-    assert_eq!(message.content, "review @assets/sample.png @src/code.py");
-    assert!(message.blocks.is_none());
+    assert!(request.is_user_message());
+    assert_eq!(
+        request.message_text(),
+        "review @assets/sample.png @src/code.py"
+    );
 }
 
 #[test]
@@ -447,8 +451,8 @@ fn conversation_turn_request_does_not_reuse_structured_transcript_history() {
         panic!("expected conversation turn effect");
     };
 
-    assert_eq!(request.message().content, "follow up");
-    assert!(request.message().blocks.is_none());
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "follow up");
 }
 
 #[test]
@@ -649,9 +653,8 @@ fn at_file_picker_enter_on_exact_visible_path_submits_prompt() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    let message = request.message();
-    assert_eq!(message.content, "@src/lib.rs");
-    assert!(message.blocks.is_none());
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "@src/lib.rs");
 }
 
 #[test]
@@ -722,9 +725,8 @@ fn at_file_picker_enter_on_explicit_gitignored_file_submits_prompt() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    let message = request.message();
-    assert_eq!(message.content, "@target/debug.log");
-    assert!(message.blocks.is_none());
+    assert!(request.is_user_message());
+    assert_eq!(request.message_text(), "@target/debug.log");
 }
 
 #[test]
@@ -755,9 +757,11 @@ fn at_file_picker_enter_on_explicit_absolute_file_submits_prompt() {
     let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
-    let message = request.message();
-    assert_eq!(message.content, format!("@{}", outside_path.display()));
-    assert!(message.blocks.is_none());
+    assert!(request.is_user_message());
+    assert_eq!(
+        request.message_text(),
+        format!("@{}", outside_path.display())
+    );
 }
 
 #[test]
@@ -2680,25 +2684,6 @@ fn type_text(model: &mut Model, text: &str) {
 fn rendered_rows_for_model(model: &mut Model, width: u16, height: u16) -> Vec<String> {
     let buffer = render_model_buffer(model, width, height);
     rendered_rows(&buffer)
-}
-
-fn render_model_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {
-    let area = Rect::new(0, 0, width, height);
-    let mut buffer = Buffer::empty(area);
-    let _ = model.render_to_buffer(area, &mut buffer);
-    buffer
-}
-
-fn rendered_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
-    (0..buffer.area.height)
-        .map(|row| {
-            let mut line = String::new();
-            for column in 0..buffer.area.width {
-                line.push_str(buffer[(column, row)].symbol());
-            }
-            line
-        })
-        .collect()
 }
 
 fn rendered_column(row: &str, needle: &str) -> Option<usize> {

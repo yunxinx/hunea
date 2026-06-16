@@ -1046,6 +1046,61 @@ fn projected_assistant_ordered_lists_match_eager_renderer() {
 }
 
 #[test]
+fn projected_assistant_heading_followed_by_list_matches_eager_spacing() {
+    let mut markdown = String::from("# Long Assistant Markdown\n\n");
+    for index in 0..50 {
+        markdown.push_str(&format!(
+            "### 1. 构词逻辑 {index}\n*   **Q**：取自英文单词 **Question**（问题）。\n\n",
+        ));
+    }
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(80);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(80, default_palette());
+    let expected_plain_lines = expected_lines
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        block.lines.is_empty(),
+        "long assistant Markdown should stay on the projection path"
+    );
+    assert!(
+        expected_plain_lines.windows(3).any(|lines| lines
+            == [
+                "### 1. 构词逻辑 0",
+                "",
+                "- Q：取自英文单词 Question（问题）。"
+            ]),
+        "eager renderer should preserve the heading-to-list blank line: {expected_plain_lines:?}"
+    );
+    assert_eq!(
+        (0..render.line_count)
+            .map(|index| {
+                render
+                    .line_at(index)
+                    .expect("projected assistant block should materialize every visible line")
+                    .plain_line
+            })
+            .collect::<Vec<_>>(),
+        expected_plain_lines
+    );
+}
+
+#[test]
 fn projected_assistant_list_followed_by_heading_matches_eager_spacing() {
     let mut markdown = String::from("# Long Assistant Markdown\n\n");
     for index in 0..50 {
@@ -1083,6 +1138,173 @@ fn projected_assistant_list_followed_by_heading_matches_eager_spacing() {
             .windows(3)
             .any(|lines| lines == ["- 当前共识 0：仍待验证。", "", "### 💡 为什么重要 0？"]),
         "eager renderer should preserve the list-to-heading blank line: {expected_plain_lines:?}"
+    );
+    assert_eq!(
+        (0..render.line_count)
+            .map(|index| {
+                render
+                    .line_at(index)
+                    .expect("projected assistant block should materialize every visible line")
+                    .plain_line
+            })
+            .collect::<Vec<_>>(),
+        expected_plain_lines
+    );
+}
+
+#[test]
+fn projected_assistant_paragraphs_separated_by_blank_line_match_eager_spacing() {
+    let mut markdown = String::from("# Long Assistant Markdown\n\n");
+    for index in 0..90 {
+        markdown.push_str(&format!(
+            "第一段 {index} 说明当前状态。\n\n第二段 {index} 补充后续动作。\n\n",
+        ));
+    }
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(80);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(80, default_palette());
+    let expected_plain_lines = expected_lines
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        block.lines.is_empty(),
+        "long assistant Markdown should stay on the projection path"
+    );
+    assert!(
+        expected_plain_lines.windows(3).any(|lines| {
+            lines == ["第一段 0 说明当前状态。", "", "第二段 0 补充后续动作。"]
+        }),
+        "eager renderer should preserve the paragraph separator blank line: {expected_plain_lines:?}"
+    );
+    assert_eq!(
+        (0..render.line_count)
+            .map(|index| {
+                render
+                    .line_at(index)
+                    .expect("projected assistant block should materialize every visible line")
+                    .plain_line
+            })
+            .collect::<Vec<_>>(),
+        expected_plain_lines
+    );
+}
+
+#[test]
+fn projected_assistant_blank_separated_list_items_match_eager_spacing() {
+    let mut markdown = String::from("# Long Assistant Markdown\n\n");
+    for index in 0..90 {
+        markdown.push_str(&format!(
+            "- 第一项 {index} 说明当前状态。\n\n- 第二项 {index} 补充后续动作。\n\n",
+        ));
+    }
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(80);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(80, default_palette());
+    let expected_plain_lines = expected_lines
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        block.lines.is_empty(),
+        "long assistant Markdown should stay on the projection path"
+    );
+    assert!(
+        expected_plain_lines.windows(3).any(|lines| {
+            lines
+                == [
+                    "- 第一项 0 说明当前状态。",
+                    "- 第二项 0 补充后续动作。",
+                    "- 第一项 1 说明当前状态。",
+                ]
+        }),
+        "eager renderer should keep blank-separated list items inside one list block: {expected_plain_lines:?}"
+    );
+    assert_eq!(
+        (0..render.line_count)
+            .map(|index| {
+                render
+                    .line_at(index)
+                    .expect("projected assistant block should materialize every visible line")
+                    .plain_line
+            })
+            .collect::<Vec<_>>(),
+        expected_plain_lines
+    );
+}
+
+#[test]
+fn projected_assistant_list_continuation_lines_match_parser_block_boundaries() {
+    let mut markdown = String::from("# Long Assistant Markdown\n\n");
+    for index in 0..90 {
+        markdown.push_str(&format!(
+            "- 第一项 {index} 说明当前状态。\n  第二行仍属于第一项。\n\n- 第二项 {index} 补充后续动作。\n  第二行仍属于第二项。\n\n",
+        ));
+    }
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(80);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(80, default_palette());
+    let expected_plain_lines = expected_lines
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        block.lines.is_empty(),
+        "list continuation lines should stay on the assistant projection path"
+    );
+    assert!(
+        expected_plain_lines.windows(4).any(|lines| {
+            lines
+                == [
+                    "- 第一项 0 说明当前状态。",
+                    "  第二行仍属于第一项。",
+                    "- 第二项 0 补充后续动作。",
+                    "  第二行仍属于第二项。",
+                ]
+        }),
+        "eager renderer should keep continuation lines inside the list block: {expected_plain_lines:?}"
     );
     assert_eq!(
         (0..render.line_count)
@@ -1196,6 +1418,38 @@ fn assistant_projection_falls_back_for_empty_fenced_code_blocks() {
     assert!(
         !block.lines.is_empty(),
         "empty fenced code blocks should preserve existing eager Markdown rendering"
+    );
+    assert_eq!(render.lines_for_range(0, render.line_count), expected_lines);
+}
+
+#[test]
+fn assistant_projection_falls_back_for_unclosed_fenced_code_blocks() {
+    let mut markdown = String::from("```rust\n");
+    for index in 0..160 {
+        markdown.push_str(&format!(
+            "let value_{index} = \"unclosed fenced code should keep eager rendering\";\n"
+        ));
+    }
+
+    let mut transcript = Transcript::new(default_palette());
+    transcript.set_width(72);
+    transcript.items = Rc::new(vec![Rc::new(TranscriptItem::Message(MessageItem::new(
+        Sender::Assistant,
+        markdown,
+    )))]);
+
+    let expected_lines = transcript.items[0].render_lines(72, default_palette());
+    let render = transcript.render();
+    let block = render
+        .items
+        .first()
+        .expect("assistant item should produce a render block")
+        .block
+        .as_ref();
+
+    assert!(
+        !block.lines.is_empty(),
+        "unclosed fenced code blocks should preserve existing eager Markdown rendering"
     );
     assert_eq!(render.lines_for_range(0, render.line_count), expected_lines);
 }

@@ -11,7 +11,9 @@ mod turn;
 pub use client::run_conversation_turn_with_cancellation;
 pub use error::TurnExecutionError;
 pub(crate) use permission::{ConversationPermissionBroker, ConversationTimeoutPause};
-pub(crate) use provider_conversation::message_from_chat_message;
+pub(crate) use provider_conversation::{
+    PersistedConversationItem, PreparedConversationPersistence,
+};
 pub use provider_conversation::{
     PreparedConversationRequest, ProviderConversation, ProviderConversationError,
 };

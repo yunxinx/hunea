@@ -13,7 +13,10 @@ use crate::{
     inline_panel::inline_panel_rule_line,
     render_frame::RenderFrame,
     styled_text::render_line_with_full_width_background,
-    theme::{TerminalPalette, muted_text_style, primary_text_style, tertiary_text_style},
+    theme::{
+        TerminalPalette, muted_text_style, primary_text_style, subtle_rule_line,
+        tertiary_text_style,
+    },
     tool_result::{ToolActivityRenderMode, ToolResultItem},
     transcript_overlay::build_percentage_rule,
 };
@@ -102,7 +105,7 @@ impl Model {
 }
 
 fn file_preview_separator_line(width: usize, palette: TerminalPalette) -> Line<'static> {
-    Line::styled("╌".repeat(width.max(1)), tertiary_text_style(palette))
+    subtle_rule_line(width, palette)
 }
 
 fn build_file_preview_content_cache(model: &Model, width: usize) -> FilePreviewRenderCache {

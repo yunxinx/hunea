@@ -72,6 +72,7 @@ pub(crate) enum ToolResultKind {
 pub(crate) enum ToolActivityRenderMode {
     Compact,
     Detailed,
+    DebugDetailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -137,6 +138,10 @@ impl ToolResultItem {
         render_mode: ToolActivityRenderMode,
     ) -> Option<Self> {
         let call = call.into();
+        if render_mode == ToolActivityRenderMode::DebugDetailed {
+            return Some(Self::from_runtime_tool_activity(call, render_mode));
+        }
+
         is_groupable_exploration_tool_call(&call)
             .then(|| Self::from_body(ToolResultBody::Exploration(vec![call]), render_mode))
     }
@@ -166,6 +171,10 @@ impl ToolResultItem {
             permission_waiting,
             terminal_snapshots,
         }
+    }
+
+    pub(crate) fn is_exploration_group(&self) -> bool {
+        matches!(self.body, ToolResultBody::Exploration(_))
     }
 
     /// `render_lines` 将工具审批结果渲染为带颜色的文本行。
@@ -742,7 +751,10 @@ impl ToolResultItem {
     }
 
     fn should_use_detailed_execute_transcript(&self, call: &RuntimeToolActivity) -> bool {
-        if self.render_mode != ToolActivityRenderMode::Detailed || !is_execute_like_tool_call(call)
+        if !matches!(
+            self.render_mode,
+            ToolActivityRenderMode::Detailed | ToolActivityRenderMode::DebugDetailed
+        ) || !is_execute_like_tool_call(call)
         {
             return false;
         }

@@ -6,13 +6,13 @@ use std::{
 use super::{
     error::AppConfigError,
     merge::merge_config_file,
-    paths::user_config_directory,
+    paths::config_dir,
     types::{Config, UserInputStyle},
 };
 
 /// `load` 按“用户级配置 -> 当前目录覆盖”的顺序加载配置。
 pub fn load() -> Result<Config, AppConfigError> {
-    load_with_lookups(env::current_dir, user_config_directory)
+    load_with_lookups(env::current_dir, config_dir)
 }
 
 /// `load_from_paths` 使用给定目录快照加载配置，便于测试与非标准启动入口复用。

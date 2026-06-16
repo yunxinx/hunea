@@ -1,8 +1,8 @@
 use std::{fmt, io, path::PathBuf};
 
 use super::{
-    COMPOSER_UNDO_MAX_LIMIT, COMPOSER_UNDO_MIN_LIMIT, FILE_PICKER_POPUP_MAX_HEIGHT,
-    FILE_PICKER_POPUP_MIN_HEIGHT,
+    BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN, COMPOSER_UNDO_MAX_LIMIT,
+    COMPOSER_UNDO_MIN_LIMIT, FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT,
 };
 
 /// `AppConfigError` 描述配置加载或校验失败。
@@ -43,7 +43,15 @@ pub enum AppConfigError {
         path: Option<PathBuf>,
         value: u8,
     },
+    InvalidEscRewindMode {
+        path: Option<PathBuf>,
+        value: String,
+    },
     InvalidFilePickerPopupHeight {
+        path: Option<PathBuf>,
+        value: usize,
+    },
+    InvalidBranchPickerListRows {
         path: Option<PathBuf>,
         value: usize,
     },
@@ -136,6 +144,19 @@ impl fmt::Display for AppConfigError {
                 f,
                 "tui.esc_interrupt_presses must be 1, 2, or 3, got {value}"
             ),
+            Self::InvalidEscRewindMode {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: tui.esc_rewind_mode must be \"coarse\" or \"entry\", got {:?}",
+                path.display(),
+                value
+            ),
+            Self::InvalidEscRewindMode { path: None, value } => write!(
+                f,
+                "tui.esc_rewind_mode must be \"coarse\" or \"entry\", got {value:?}"
+            ),
             Self::InvalidFilePickerPopupHeight {
                 path: Some(path),
                 value,
@@ -151,6 +172,22 @@ impl fmt::Display for AppConfigError {
                 f,
                 "tui.file_picker_popup_height must be between {} and {}, got {value}",
                 FILE_PICKER_POPUP_MIN_HEIGHT, FILE_PICKER_POPUP_MAX_HEIGHT
+            ),
+            Self::InvalidBranchPickerListRows {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: tui.branch_picker_list_rows must be between {} and {}, got {}",
+                path.display(),
+                BRANCH_PICKER_LIST_ROWS_MIN,
+                BRANCH_PICKER_LIST_ROWS_MAX,
+                value
+            ),
+            Self::InvalidBranchPickerListRows { path: None, value } => write!(
+                f,
+                "tui.branch_picker_list_rows must be between {} and {}, got {value}",
+                BRANCH_PICKER_LIST_ROWS_MIN, BRANCH_PICKER_LIST_ROWS_MAX
             ),
             Self::InvalidComposerUndoLimit {
                 path: Some(path),
@@ -208,7 +245,9 @@ impl std::error::Error for AppConfigError {
             | Self::InvalidExternalEditorCommand { .. }
             | Self::ExternalEditorMustWait { .. }
             | Self::InvalidEscInterruptPresses { .. }
+            | Self::InvalidEscRewindMode { .. }
             | Self::InvalidFilePickerPopupHeight { .. }
+            | Self::InvalidBranchPickerListRows { .. }
             | Self::InvalidComposerUndoLimit { .. }
             | Self::InvalidReasoningContentDisplay { .. }
             | Self::InvalidRuntimeRequestPolicy { .. } => None,

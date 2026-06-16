@@ -1,6 +1,8 @@
 use super::{
-    RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics, RuntimeTarget,
-    RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
+    ConversationResponse, RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics,
+    RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
+    SessionBranchTreePayload, SessionPickerRow, SessionPreviewPayload, SessionResumePayload,
+    SessionTreePayload,
 };
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
@@ -66,11 +68,27 @@ pub enum RuntimeEvent {
         target: RuntimeTarget,
         request_id: Option<String>,
     },
+    SessionListLoaded {
+        rows: Vec<SessionPickerRow>,
+    },
+    SessionPreviewLoaded {
+        payload: SessionPreviewPayload,
+    },
+    SessionResumed {
+        payload: SessionResumePayload,
+    },
+    SessionTreeLoaded {
+        payload: SessionTreePayload,
+    },
+    SessionBranchTreeLoaded {
+        payload: SessionBranchTreePayload,
+    },
+    SessionTreePreviewLoaded {
+        payload: SessionTreePayload,
+    },
     MessageFinished {
         target: Option<RuntimeTarget>,
-        content: String,
-        reasoning_content: Option<String>,
-        reasoning_duration: Option<std::time::Duration>,
+        response: ConversationResponse,
         finish_reason: Option<String>,
         metrics: Option<RuntimeRequestMetrics>,
     },
@@ -110,6 +128,12 @@ impl RuntimeEvent {
             | Self::Retrying { target, .. }
             | Self::Failed { target, .. }
             | Self::Interrupted { target, .. } => target.as_ref(),
+            Self::SessionListLoaded { .. }
+            | Self::SessionPreviewLoaded { .. }
+            | Self::SessionResumed { .. }
+            | Self::SessionTreeLoaded { .. }
+            | Self::SessionBranchTreeLoaded { .. }
+            | Self::SessionTreePreviewLoaded { .. } => None,
         }
     }
 }

@@ -10,6 +10,10 @@ fn tui_has_no_runtime_crate_dependencies() {
         !dependencies.contains("conversation-runtime"),
         "terminal-ui should consume runtime events through runtime-domain, not depend on conversation runtime implementation crates"
     );
+    assert!(
+        !dependencies.contains("provider-protocol"),
+        "terminal-ui should not depend on provider protocol types for render or composer state"
+    );
 }
 
 #[test]

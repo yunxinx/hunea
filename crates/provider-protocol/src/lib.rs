@@ -10,8 +10,10 @@ pub mod tool;
 
 pub use client::{ProviderClient, ProviderFuture, StreamEventSink};
 pub use error::ProviderError;
-pub use message::{Message, MessageContent, MessageRole};
+pub use message::{
+    ContentBlock, ConversationItem, ConversationItemValidationError, Role, visible_text_from_blocks,
+};
 pub use model::{ModelDescriptor, ProviderCapabilities};
-pub use prompt::{FinishReason, PromptOptions, PromptRequest, PromptResponse, TokenUsage};
+pub use prompt::{FinishReason, PromptCompletion, PromptOptions, PromptRequest, TokenUsage};
 pub use stream::StreamEvent;
-pub use tool::{ToolCall, ToolDefinition, ToolResult};
+pub use tool::{ToolCall, ToolCallArgumentsError, ToolDefinition, ToolResult};

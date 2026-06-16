@@ -5,5 +5,5 @@ mod usage;
 
 pub use finish_reason::FinishReason;
 pub use request::{PromptOptions, PromptRequest};
-pub use response::PromptResponse;
+pub use response::PromptCompletion;
 pub use usage::TokenUsage;

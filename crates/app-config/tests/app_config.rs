@@ -5,7 +5,7 @@ use std::{
 };
 
 use app_config::appconfig::{
-    AppConfigError, ReasoningContentDisplay, UserInputStyle, load_from_paths,
+    AppConfigError, EscRewindMode, ReasoningContentDisplay, UserInputStyle, load_from_paths,
     persist_managed_search_tool_authorization_to_path,
 };
 use runtime_domain::session::ManagedSearchTool;
@@ -22,6 +22,7 @@ fn load_defaults_to_cx_when_no_config_exists() {
     assert!(config.tui.status_line.is_empty());
     assert!(config.tui.status_line_2.is_empty());
     assert_eq!(config.tui.file_picker_popup_height, 7);
+    assert_eq!(config.tui.branch_picker_list_rows, 7);
     assert_eq!(config.tui.composer_undo_limit, 50);
     assert!(!config.debug.enabled);
 }
@@ -280,6 +281,17 @@ fn load_defaults_show_esc_interrupt_hint_to_true() {
 }
 
 #[test]
+fn load_defaults_esc_rewind_mode_to_coarse() {
+    let working_dir = temp_test_dir("load-default-esc-rewind-mode-working");
+    let user_config_dir = temp_test_dir("load-default-esc-rewind-mode-config");
+
+    let config = load_from_paths(Some(working_dir.as_path()), Some(user_config_dir.as_path()))
+        .expect("missing config files should keep esc rewind mode at coarse");
+
+    assert_eq!(config.tui.esc_rewind_mode, EscRewindMode::Coarse);
+}
+
+#[test]
 fn load_defaults_print_transcript_on_exit_to_false() {
     let working_dir = temp_test_dir("load-default-print-transcript-working");
     let user_config_dir = temp_test_dir("load-default-print-transcript-config");
@@ -488,6 +500,20 @@ fn load_accepts_configured_esc_interrupt_presses() {
 }
 
 #[test]
+fn load_accepts_configured_entry_esc_rewind_mode() {
+    let working_dir = temp_test_dir("load-entry-esc-rewind-mode-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nesc_rewind_mode = \"entry\"\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("esc_rewind_mode should accept entry");
+
+    assert_eq!(config.tui.esc_rewind_mode, EscRewindMode::Entry);
+}
+
+#[test]
 fn load_accepts_configured_file_picker_popup_height() {
     let working_dir = temp_test_dir("load-file-picker-popup-height-working");
     write_config(
@@ -499,6 +525,20 @@ fn load_accepts_configured_file_picker_popup_height() {
         .expect("file picker popup height should accept values up to 21");
 
     assert_eq!(config.tui.file_picker_popup_height, 21);
+}
+
+#[test]
+fn load_accepts_configured_branch_picker_list_rows() {
+    let working_dir = temp_test_dir("load-branch-picker-list-rows-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nbranch_picker_list_rows = 14\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("branch picker list rows should accept values up to 14");
+
+    assert_eq!(config.tui.branch_picker_list_rows, 14);
 }
 
 #[test]
@@ -568,6 +608,20 @@ fn load_accepts_minimum_file_picker_popup_height() {
 }
 
 #[test]
+fn load_accepts_minimum_branch_picker_list_rows() {
+    let working_dir = temp_test_dir("load-min-branch-picker-list-rows-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nbranch_picker_list_rows = 3\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("branch picker list rows should accept the minimum value");
+
+    assert_eq!(config.tui.branch_picker_list_rows, 3);
+}
+
+#[test]
 fn load_rejects_file_picker_popup_height_below_minimum() {
     let working_dir = temp_test_dir("load-low-file-picker-popup-height-working");
     write_config(
@@ -587,6 +641,25 @@ fn load_rejects_file_picker_popup_height_below_minimum() {
 }
 
 #[test]
+fn load_rejects_branch_picker_list_rows_below_minimum() {
+    let working_dir = temp_test_dir("load-low-branch-picker-list-rows-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nbranch_picker_list_rows = 2\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("branch picker list rows should reject values below 3");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.branch_picker_list_rows must be between 3 and 14"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn load_rejects_file_picker_popup_height_above_maximum() {
     let working_dir = temp_test_dir("load-high-file-picker-popup-height-working");
     write_config(
@@ -601,6 +674,25 @@ fn load_rejects_file_picker_popup_height_above_maximum() {
         error
             .to_string()
             .contains("tui.file_picker_popup_height must be between 3 and 21"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_rejects_branch_picker_list_rows_above_maximum() {
+    let working_dir = temp_test_dir("load-high-branch-picker-list-rows-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nbranch_picker_list_rows = 15\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("branch picker list rows should reject values above 14");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.branch_picker_list_rows must be between 3 and 14"),
         "unexpected error: {error}"
     );
 }
@@ -812,6 +904,20 @@ fn load_rejects_invalid_esc_interrupt_presses() {
         .expect_err("esc_interrupt_presses should only accept 1, 2, or 3");
 
     assert!(error.to_string().contains("tui.esc_interrupt_presses"));
+}
+
+#[test]
+fn load_rejects_invalid_esc_rewind_mode() {
+    let working_dir = temp_test_dir("load-invalid-esc-rewind-mode-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nesc_rewind_mode = \"fine\"\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("esc_rewind_mode should only accept coarse or entry");
+
+    assert!(error.to_string().contains("tui.esc_rewind_mode"));
 }
 
 #[test]

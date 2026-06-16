@@ -10,9 +10,11 @@ pub use conversation::{
 pub use conversation::{
     PreparedConversationRequest, ProviderConversation, ProviderConversationError,
 };
+pub use llm::ProviderRequestError;
 pub use llm::ProviderRequestMetrics;
-pub use llm::{ChatMessage, ChatRole, ProviderRequest, ProviderRequestError};
 pub(crate) use llm::{ProviderProgress, list_provider_models};
 pub use models::{ModelProviderRefreshEvent, ModelRefreshWorker};
+pub use provider_protocol::{ConversationItem, Role};
 pub use runtime_domain::provider::{ProviderApiKey, ProviderKind};
+pub use runtime_domain::session::ProviderRequest;
 pub use tokio_util::sync::CancellationToken;

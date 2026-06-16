@@ -64,10 +64,6 @@ impl Model {
                 overlay.scroll_offset = max_offset;
                 Some(None)
             }
-            KeyCode::Char('q') if key.modifiers.is_empty() => {
-                self.close_transcript_overlay();
-                Some(None)
-            }
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.close_transcript_overlay();
                 Some(None)

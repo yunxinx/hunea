@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use provider_protocol::{Message, PromptResponse, ToolCall as AiToolCall};
+use provider_protocol::{ConversationItem, PromptCompletion, ToolCall as AiToolCall};
 use runtime_domain::{
     session::{
         ProviderRequestMetrics, RuntimeTerminalSnapshot, RuntimeToolActivityContent,
@@ -16,8 +16,6 @@ use super::{ToolLoopCompletion, ToolLoopProgress, ToolLoopResponse};
 
 pub(super) struct RuntimeTurnState {
     model_id: String,
-    content: String,
-    final_content: Option<String>,
     reasoning_content: String,
     // 可见进度包含工具输出；statusline metrics 只能使用 LLM 输出。
     output_progress: StreamingTokenProgress,
@@ -43,8 +41,6 @@ impl RuntimeTurnState {
     pub(super) fn new(model_id: String) -> Self {
         Self {
             model_id: model_id.clone(),
-            content: String::new(),
-            final_content: None,
             reasoning_content: String::new(),
             output_progress: StreamingTokenProgress::new(model_id.clone()),
             llm_output_progress: StreamingTokenProgress::new(model_id.clone()),
@@ -88,7 +84,7 @@ impl RuntimeTurnState {
 
     pub(super) fn complete_provider_turn(
         &mut self,
-        response: &PromptResponse,
+        response: &PromptCompletion,
         finished_at: Instant,
     ) {
         let response_output_tokens = response
@@ -124,17 +120,19 @@ impl RuntimeTurnState {
 
     fn provider_turn_has_output(
         &self,
-        response: &PromptResponse,
+        response: &PromptCompletion,
         output_tokens: Option<usize>,
     ) -> bool {
         self.current_provider_generation_started_at.is_some()
             || output_tokens.is_some_and(|tokens| tokens > 0)
-            || !response.message.text_content().is_empty()
-            || !response.tool_calls.is_empty()
-    }
-
-    pub(super) fn capture_turn_response(&mut self, response: &PromptResponse) {
-        self.final_content = Some(response.message.text_content());
+            || response
+                .items
+                .iter()
+                .any(|item| !item.text_content().is_empty())
+            || response
+                .items
+                .iter()
+                .any(|item| item.tool_calls().next().is_some())
     }
 
     pub(super) fn observe_content_chunk(
@@ -147,7 +145,6 @@ impl RuntimeTurnState {
             return;
         }
         self.mark_generated_output_started(now, on_progress);
-        self.content.push_str(content);
         on_progress(ToolLoopProgress::AssistantDelta {
             content: content.to_string(),
         });
@@ -235,12 +232,16 @@ impl RuntimeTurnState {
 
     pub(super) fn observe_response_tool_calls_completed(
         &mut self,
-        response: &PromptResponse,
+        response: &PromptCompletion,
         now: Instant,
         on_progress: &mut impl FnMut(ToolLoopProgress),
     ) {
-        for (index, call) in response.tool_calls.iter().enumerate() {
-            self.observe_tool_call_completed(index, call, now, on_progress);
+        let mut index = 0usize;
+        for item in &response.items {
+            for call in item.tool_calls() {
+                self.observe_tool_call_completed(index, call, now, on_progress);
+                index = index.saturating_add(1);
+            }
         }
     }
 
@@ -385,7 +386,7 @@ impl RuntimeTurnState {
     pub(super) fn finish_at(
         mut self,
         finished_at: Instant,
-        appended_messages: Vec<Message>,
+        appended_items: Vec<ConversationItem>,
     ) -> ToolLoopCompletion {
         if self.is_thinking {
             self.is_thinking = false;
@@ -393,21 +394,10 @@ impl RuntimeTurnState {
         let _ = self.output_progress.flush(finished_at);
         let _ = self.llm_output_progress.flush(finished_at);
         let metrics = self.performance_metrics();
-        let reasoning_content = trim_outer_blank_lines(&self.reasoning_content);
         let reasoning_duration = self.reasoning_duration();
-        let content = self
-            .final_content
-            .unwrap_or(self.content)
-            .trim_end()
-            .to_string();
         ToolLoopCompletion {
-            response: ToolLoopResponse {
-                content,
-                reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
-                reasoning_duration,
-            },
+            response: ToolLoopResponse::new(appended_items, reasoning_duration),
             metrics,
-            appended_messages,
         }
     }
 
@@ -430,19 +420,6 @@ impl RuntimeTurnState {
         let finished_at = self.reasoning_finished_at.unwrap_or(started_at);
         Some(finished_at.saturating_duration_since(started_at))
     }
-}
-
-fn trim_outer_blank_lines(content: &str) -> String {
-    let lines = content.lines().collect::<Vec<_>>();
-    let Some(start) = lines.iter().position(|line| !line.trim().is_empty()) else {
-        return String::new();
-    };
-    let end = lines
-        .iter()
-        .rposition(|line| !line.trim().is_empty())
-        .expect("start exists when at least one non-blank line exists");
-
-    lines[start..=end].join("\n")
 }
 
 fn observe_complete_token_total(
@@ -565,4 +542,57 @@ fn terminal_output_delta<'a>(previous: &str, current: &'a str) -> &'a str {
     }
 
     &current[overlap_len..]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use provider_protocol::{ConversationItem, FinishReason, PromptCompletion, ToolCall};
+
+    use super::RuntimeTurnState;
+
+    #[test]
+    fn completed_response_tool_calls_use_flat_tool_call_indices() {
+        let mut state = RuntimeTurnState::new("qwen3".to_string());
+        let completion = PromptCompletion::new(
+            vec![ConversationItem::assistant_with_tool_calls(
+                String::new(),
+                vec![
+                    ToolCall::new("call-1", "read", r#"{"path":"one"}"#),
+                    ToolCall::new("call-2", "read", r#"{"path":"two"}"#),
+                ],
+            )],
+            FinishReason::ToolCalls,
+            None,
+        );
+        let mut events = Vec::new();
+
+        state.observe_response_tool_calls_completed(&completion, Instant::now(), &mut |event| {
+            events.push(event)
+        });
+
+        assert_eq!(
+            state.tool_call_ids_by_index.get(&0).map(String::as_str),
+            Some("call-1")
+        );
+        assert_eq!(
+            state.tool_call_ids_by_index.get(&1).map(String::as_str),
+            Some("call-2")
+        );
+        assert_eq!(
+            state
+                .tool_call_argument_output_by_index
+                .get(&0)
+                .map(String::as_str),
+            Some(r#"{"path":"one"}"#)
+        );
+        assert_eq!(
+            state
+                .tool_call_argument_output_by_index
+                .get(&1)
+                .map(String::as_str),
+            Some(r#"{"path":"two"}"#)
+        );
+    }
 }

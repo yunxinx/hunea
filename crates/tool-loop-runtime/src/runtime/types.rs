@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use provider_protocol::Message;
+use provider_protocol::ConversationItem;
 use runtime_domain::session::{
     ManagedSearchTool, ProviderRequestMetrics, RuntimeTerminalSnapshot, RuntimeToolActivity,
     RuntimeToolActivityUpdate,
@@ -14,7 +14,7 @@ use tool_runtime::{
 pub enum ToolLoopProgress {
     SystemMessage { message: String },
     ProviderTurnStarted,
-    ProviderContextMessage { message: Message },
+    ProviderContextItem { item: ConversationItem },
     OutputTokens { total_tokens: usize },
     InputTokens { total_tokens: usize },
     Thinking { is_thinking: bool },
@@ -26,12 +26,21 @@ pub enum ToolLoopProgress {
     ManagedSearchToolAuthorization { tool: ManagedSearchTool },
 }
 
-/// `ToolLoopResponse` is the final visible assistant output.
+/// `ToolLoopResponse` 保存本轮运行时输出的完整 provider-visible items。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolLoopResponse {
-    pub content: String,
-    pub reasoning_content: Option<String>,
+    pub items: Vec<ConversationItem>,
     pub reasoning_duration: Option<Duration>,
+}
+
+impl ToolLoopResponse {
+    /// `new` 从本轮新增的 provider-visible items 创建响应。
+    pub fn new(items: Vec<ConversationItem>, reasoning_duration: Option<Duration>) -> Self {
+        Self {
+            items,
+            reasoning_duration,
+        }
+    }
 }
 
 /// `ToolLoopCompletion` is returned when a runtime turn completes.
@@ -39,7 +48,6 @@ pub struct ToolLoopResponse {
 pub struct ToolLoopCompletion {
     pub response: ToolLoopResponse,
     pub metrics: Option<ProviderRequestMetrics>,
-    pub appended_messages: Vec<Message>,
 }
 
 /// `ToolLoopClock` 抽象 runtime 计时来源，方便测试审批等待时间剔除逻辑。

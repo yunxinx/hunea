@@ -25,7 +25,7 @@ impl Model {
         }
     }
 
-    pub(super) fn transcript_overlay_content_height(&self) -> usize {
+    pub(crate) fn transcript_overlay_content_height(&self) -> usize {
         self.height.saturating_sub(2).max(1) as usize
     }
 

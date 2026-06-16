@@ -1,12 +1,18 @@
 use std::time::Duration;
 
 use super::conversation::{apply_conversation_event, run_send_conversation_turn_effect};
-use super::effects::run_interrupt_current_turn_effect;
-use super::input::{TerminalInputAction, coalesced_input_actions};
+use super::effects::{run_interrupt_current_turn_effect, run_switch_branch_effect};
+use super::input::{
+    TerminalInputAction, TerminalInputCoalescing, coalesced_input_actions,
+    coalesced_input_actions_with_options,
+};
 use super::*;
 use crate::{
-    AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem, runtime::RuntimeEventApply,
-    theme::default_palette, transcript::TranscriptItem,
+    AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem,
+    runtime::RuntimeEventApply,
+    test_helpers::{branch_choice, render_model_buffer, rendered_rows},
+    theme::default_palette,
+    transcript::TranscriptItem,
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -16,10 +22,10 @@ use runtime_domain::model_catalog::ProviderSyncRequest;
 use runtime_domain::provider::ProviderKind;
 use runtime_domain::request_policy::RuntimeRequestPolicy;
 use runtime_domain::session::{
-    ChatMessage, ConversationEvent, ConversationResponse, ConversationTurnRequest,
-    ProviderRequestMetrics, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
-    RuntimeToolActivity, RuntimeToolActivityContent, RuntimeToolActivityStatus,
-    RuntimeToolActivityUpdate, RuntimeToolKind,
+    ConversationEvent, ConversationResponse, ConversationTurnRequest, ProviderRequestMetrics,
+    RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget, RuntimeToolActivity,
+    RuntimeToolActivityContent, RuntimeToolActivityStatus, RuntimeToolActivityUpdate,
+    RuntimeToolKind, SessionTreePayload, SessionTreeRow, SessionTreeRowKind,
 };
 
 #[derive(Default)]
@@ -28,8 +34,22 @@ struct TestRuntimeCoordinator {
     conversation_running: bool,
     conversation_interrupted: bool,
     conversation_request: Option<ConversationTurnRequest>,
+    last_command: Option<RuntimeCommand>,
+    next_runtime_error: Option<String>,
     reset_count: usize,
     conversation_retained_user_turns: Option<usize>,
+}
+
+fn assistant_response(content: impl Into<String>) -> ConversationResponse {
+    ConversationResponse::assistant_text(content)
+}
+
+fn reasoned_response(
+    content: impl Into<String>,
+    reasoning_content: impl Into<String>,
+    reasoning_duration: Duration,
+) -> ConversationResponse {
+    ConversationResponse::with_reasoning(content, reasoning_content, Some(reasoning_duration))
 }
 
 impl RuntimeCoordinator for TestRuntimeCoordinator {
@@ -41,6 +61,10 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
         &mut self,
         command: RuntimeCommand,
     ) -> Result<RuntimeCommandReceipt, String> {
+        self.last_command = Some(command.clone());
+        if let Some(message) = self.next_runtime_error.take() {
+            return Err(message);
+        }
         match command {
             RuntimeCommand::Reset => {
                 self.runtime_events.clear();
@@ -76,6 +100,14 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                 })
             }
             RuntimeCommand::RespondPermission { .. } => Ok(RuntimeCommandReceipt::Accepted),
+            RuntimeCommand::ListSessions
+            | RuntimeCommand::LoadSessionPreview { .. }
+            | RuntimeCommand::ResumeSession { .. }
+            | RuntimeCommand::LoadEntryTree
+            | RuntimeCommand::LoadBranchTree
+            | RuntimeCommand::LoadBranchPreview { .. }
+            | RuntimeCommand::SwitchBranch { .. }
+            | RuntimeCommand::SelectEntryRewind { .. } => Ok(RuntimeCommandReceipt::Accepted),
         }
     }
 
@@ -94,11 +126,7 @@ fn conversation_completion_appends_assistant_message_after_request_finishes() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "你好，我是本地模型".to_string(),
-                reasoning_content: None,
-                reasoning_duration: None,
-            },
+            response: assistant_response("你好，我是本地模型"),
             metrics: None,
         },
     );
@@ -189,9 +217,7 @@ fn runtime_expanded_reasoning_flushes_before_message_finish() {
 
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "我先看一下 src。".to_string(),
-        reasoning_content: Some("先分析目录结构".to_string()),
-        reasoning_duration: Some(Duration::from_secs(2)),
+        response: reasoned_response("我先看一下 src。", "先分析目录结构", Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
     });
@@ -232,9 +258,7 @@ fn runtime_expanded_simplified_reasoning_flushes_before_message_finish() {
 
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "我先看一下 src。".to_string(),
-        reasoning_content: Some("先分析目录结构".to_string()),
-        reasoning_duration: Some(Duration::from_secs(2)),
+        response: reasoned_response("我先看一下 src。", "先分析目录结构", Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
     });
@@ -298,11 +322,11 @@ fn runtime_final_response_keeps_streamed_reasoning_flushed_across_tool_boundarie
 
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "当前目录包含 Cargo.toml 和 crates/。".to_string(),
-        reasoning_content: Some(
-            "我已经拿到目录结果，现在只保留最终回复前需要展示的推理。".to_string(),
+        response: reasoned_response(
+            "当前目录包含 Cargo.toml 和 crates/。",
+            "我已经拿到目录结果，现在只保留最终回复前需要展示的推理。",
+            Duration::from_secs(2),
         ),
-        reasoning_duration: Some(Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
     });
@@ -363,11 +387,11 @@ fn runtime_final_response_extends_buffered_reasoning_tail_after_earlier_tool_bou
 
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "当前目录包含 Cargo.toml 和 crates/。".to_string(),
-        reasoning_content: Some(
-            "我需要先查看当前目录。我已经拿到目录结果，接下来整理回复。".to_string(),
+        response: reasoned_response(
+            "当前目录包含 Cargo.toml 和 crates/。",
+            "我需要先查看当前目录。我已经拿到目录结果，接下来整理回复。",
+            Duration::from_secs(2),
         ),
-        reasoning_duration: Some(Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
     });
@@ -441,9 +465,7 @@ fn runtime_final_response_does_not_duplicate_buffered_delta() {
     });
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终结论".to_string(),
-        reasoning_content: None,
-        reasoning_duration: None,
+        response: assistant_response("最终结论"),
         finish_reason: None,
         metrics: None,
     });
@@ -476,9 +498,7 @@ fn runtime_final_response_does_not_overwrite_flushed_streamed_reasoning() {
     });
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终结论".to_string(),
-        reasoning_content: Some("先分析完整".to_string()),
-        reasoning_duration: Some(Duration::from_secs(2)),
+        response: reasoned_response("最终结论", "先分析完整", Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
     });
@@ -510,9 +530,7 @@ fn runtime_final_response_uses_final_reasoning_when_no_boundary_arrives() {
     });
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终结论".to_string(),
-        reasoning_content: Some("先分析完整".to_string()),
-        reasoning_duration: Some(Duration::from_secs(2)),
+        response: reasoned_response("最终结论", "先分析完整", Duration::from_secs(2)),
         finish_reason: None,
         metrics: None,
     });
@@ -583,9 +601,7 @@ fn runtime_final_response_after_four_tool_calls_inserts_divider_before_body() {
     apply_runtime_tool_starts(&mut model, &target, 4);
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终正文".to_string(),
-        reasoning_content: None,
-        reasoning_duration: None,
+        response: assistant_response("最终正文"),
         finish_reason: None,
         metrics: None,
     });
@@ -615,9 +631,7 @@ fn runtime_final_response_after_three_tool_calls_does_not_insert_divider() {
     apply_runtime_tool_starts(&mut model, &target, 3);
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终正文".to_string(),
-        reasoning_content: None,
-        reasoning_duration: None,
+        response: assistant_response("最终正文"),
         finish_reason: None,
         metrics: None,
     });
@@ -651,9 +665,7 @@ fn runtime_reasoning_after_four_tool_calls_inserts_divider_before_final_body() {
     apply_runtime_tool_starts(&mut model, &target, 4);
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终正文".to_string(),
-        reasoning_content: Some("最终前的思考".to_string()),
-        reasoning_duration: Some(Duration::from_secs(1)),
+        response: reasoned_response("最终正文", "最终前的思考", Duration::from_secs(1)),
         finish_reason: None,
         metrics: None,
     });
@@ -703,9 +715,7 @@ fn runtime_intermediate_text_after_four_tool_calls_does_not_insert_divider_befor
 
     model.apply_runtime_event(RuntimeEvent::MessageFinished {
         target: Some(target),
-        content: "最终正文".to_string(),
-        reasoning_content: None,
-        reasoning_duration: None,
+        response: assistant_response("最终正文"),
         finish_reason: None,
         metrics: None,
     });
@@ -797,11 +807,7 @@ fn conversation_completion_updates_last_request_metrics() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "完成".to_string(),
-                reasoning_content: None,
-                reasoning_duration: None,
-            },
+            response: assistant_response("完成"),
             metrics: Some(ProviderRequestMetrics {
                 latency: std::time::Duration::from_millis(250),
                 output_tokens: 80,
@@ -845,11 +851,7 @@ fn conversation_completion_collapses_reasoning_by_default() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "结论".to_string(),
-                reasoning_content: Some("先分析".to_string()),
-                reasoning_duration: Some(std::time::Duration::from_secs(3)),
-            },
+            response: reasoned_response("结论", "先分析", Duration::from_secs(3)),
             metrics: None,
         },
     );
@@ -885,11 +887,7 @@ fn conversation_completion_keeps_reasoning_body_gap_to_one_line() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "结论".to_string(),
-                reasoning_content: Some("先分析".to_string()),
-                reasoning_duration: Some(std::time::Duration::from_secs(3)),
-            },
+            response: reasoned_response("结论", "先分析", Duration::from_secs(3)),
             metrics: None,
         },
     );
@@ -916,11 +914,7 @@ fn conversation_reasoning_header_click_toggles_visibility_without_changing_sourc
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "结论".to_string(),
-                reasoning_content: Some("先分析".to_string()),
-                reasoning_duration: Some(std::time::Duration::from_secs(3)),
-            },
+            response: reasoned_response("结论", "先分析", Duration::from_secs(3)),
             metrics: None,
         },
     );
@@ -982,11 +976,7 @@ fn conversation_reasoning_header_drag_does_not_toggle() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "结论".to_string(),
-                reasoning_content: Some("先分析".to_string()),
-                reasoning_duration: Some(std::time::Duration::from_secs(3)),
-            },
+            response: reasoned_response("结论", "先分析", Duration::from_secs(3)),
             metrics: None,
         },
     );
@@ -1045,11 +1035,7 @@ fn conversation_reasoning_header_click_outside_label_does_not_toggle() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "结论".to_string(),
-                reasoning_content: Some("先分析".to_string()),
-                reasoning_duration: Some(std::time::Duration::from_secs(3)),
-            },
+            response: reasoned_response("结论", "先分析", Duration::from_secs(3)),
             metrics: None,
         },
     );
@@ -1092,11 +1078,7 @@ fn conversation_completion_hides_reasoning_when_configured_off() {
         &mut model,
         None,
         ConversationEvent::Finished {
-            response: ConversationResponse {
-                content: "结论".to_string(),
-                reasoning_content: Some("先分析".to_string()),
-                reasoning_duration: Some(std::time::Duration::from_secs(3)),
-            },
+            response: reasoned_response("结论", "先分析", Duration::from_secs(3)),
             metrics: None,
         },
     );
@@ -1501,14 +1483,14 @@ fn conversation_tool_finished_updates_runtime_tool_activity() {
 fn conversation_send_effect_starts_conversation_target() {
     let mut model = Model::new(StartupBannerOptions::default());
     let mut runtime_coordinator = TestRuntimeCoordinator::default();
-    let request = ConversationTurnRequest::new(
+    let request = ConversationTurnRequest::new_user_text(
         "local",
         ProviderKind::OpenAiCompatible,
         "qwen3",
         None,
         None,
         None,
-        ChatMessage::user("hello".to_string()),
+        "hello",
     );
 
     run_send_conversation_turn_effect(&mut model, &mut runtime_coordinator, request);
@@ -1539,14 +1521,14 @@ fn truncate_conversation_command_records_retained_turns() {
 
 #[test]
 fn conversation_turn_request_keeps_runtime_target_in_core_dto() {
-    let request = ConversationTurnRequest::new(
+    let request = ConversationTurnRequest::new_user_text(
         "local",
         ProviderKind::OpenAiCompatible,
         "qwen3",
         None,
         None,
         None,
-        ChatMessage::user("hello".to_string()),
+        "hello",
     );
 
     assert_eq!(request.target(), RuntimeTarget::provider("local", "qwen3"));
@@ -1600,6 +1582,71 @@ fn interrupt_receipt_and_runtime_event_append_single_system_message() {
 }
 
 #[test]
+fn switch_branch_effect_preserves_composer_and_reopens_entry_tree_loading() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(72, 12);
+    model.composer_mut().reset_text_and_move_to_end("draft");
+    model.sync_composer_height();
+    open_branch_picker_for_switch_test(&mut model);
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+
+    run_switch_branch_effect(&mut model, &mut runtime_coordinator, "leaf-b");
+
+    assert_eq!(
+        runtime_coordinator.last_command,
+        Some(RuntimeCommand::SwitchBranch {
+            leaf_id: "leaf-b".to_string()
+        })
+    );
+    assert_eq!(
+        model.composer_text(),
+        "draft",
+        "switch branch must preserve the unsent composer draft"
+    );
+    assert!(model.entry_tree_active());
+    assert!(
+        !model.entry_tree_branch_picker_active(),
+        "accepted switch should close L2/L3/L4 while the refreshed L1 tree loads"
+    );
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 12));
+    assert!(
+        rows.iter().any(|row| row.contains("Loading session tree")),
+        "accepted switch should show the L1 loading state until runtime refresh arrives: {rows:?}"
+    );
+}
+
+#[test]
+fn switch_branch_effect_keeps_picker_open_and_shows_error_on_rejection() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(72, 12);
+    model.composer_mut().reset_text_and_move_to_end("draft");
+    model.sync_composer_height();
+    open_branch_picker_for_switch_test(&mut model);
+    let mut runtime_coordinator = TestRuntimeCoordinator {
+        next_runtime_error: Some("Cannot switch branch while a request is running".to_string()),
+        ..TestRuntimeCoordinator::default()
+    };
+
+    run_switch_branch_effect(&mut model, &mut runtime_coordinator, "leaf-b");
+
+    assert_eq!(
+        model.composer_text(),
+        "draft",
+        "failed switch must not modify the composer draft"
+    );
+    assert!(
+        model.entry_tree_branch_picker_active(),
+        "rejected switch should leave the branch picker available for correction"
+    );
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 12));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Cannot switch branch while a request is running")),
+        "rejected switch should render a visible picker error: {rows:?}"
+    );
+}
+
+#[test]
 fn ready_input_batch_coalesces_wheel_burst_before_key() {
     let events = (0..128)
         .map(|_| {
@@ -1631,6 +1678,82 @@ fn ready_input_batch_coalesces_wheel_burst_before_key() {
 }
 
 #[test]
+fn ready_input_batch_keeps_arrow_keys_uncoalesced_by_default() {
+    let events = vec![
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+    ];
+
+    let actions = coalesced_input_actions(events);
+
+    assert_eq!(
+        actions,
+        vec![
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Up))),
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Up))),
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Up))),
+        ]
+    );
+}
+
+#[test]
+fn ready_input_batch_coalesces_alternate_scroll_arrow_burst_when_enabled() {
+    let events = vec![
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+        Event::Key(KeyEvent::from(KeyCode::Up)),
+        Event::Key(KeyEvent::from(KeyCode::Char('x'))),
+        Event::Key(KeyEvent::from(KeyCode::Down)),
+        Event::Key(KeyEvent::from(KeyCode::Down)),
+    ];
+
+    let actions = coalesced_input_actions_with_options(
+        events,
+        TerminalInputCoalescing {
+            has_page_scroll_burst_coalescing: true,
+        },
+    );
+
+    assert_eq!(
+        actions,
+        vec![
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Up))),
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Char('x')))),
+            TerminalInputAction::App(AppEvent::Key(KeyEvent::from(KeyCode::Down))),
+        ]
+    );
+}
+
+#[test]
+fn ready_input_batch_coalesces_preview_wheel_burst_to_single_page_delta() {
+    let events = (0..128)
+        .map(|_| {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::empty(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let actions = coalesced_input_actions_with_options(
+        events,
+        TerminalInputCoalescing {
+            has_page_scroll_burst_coalescing: true,
+        },
+    );
+
+    assert_eq!(
+        actions,
+        vec![TerminalInputAction::App(AppEvent::MouseWheel {
+            delta_lines: Model::document_mouse_wheel_delta().signum(),
+        })]
+    );
+}
+
+#[test]
 fn startup_probe_without_background_leaves_palette_for_startup_timeout() {
     assert!(
         startup_palette_detection(terminal_probe::TerminalBackgroundProbeResult::unavailable())
@@ -1644,6 +1767,41 @@ fn startup_probe_timeout_does_not_request_event_level_late_response_cleanup() {
         terminal_probe::TerminalBackgroundProbeResult::timed_out(),
         terminal_probe::TerminalBackgroundProbeResult::unavailable()
     );
+}
+
+fn open_branch_picker_for_switch_test(model: &mut Model) {
+    model.set_palette(default_palette(), true);
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(switch_branch_tree_payload());
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+    assert!(
+        model.entry_tree_branch_picker_active(),
+        "fixture should open the branch picker"
+    );
+}
+
+fn switch_branch_tree_payload() -> SessionTreePayload {
+    SessionTreePayload {
+        rows: vec![SessionTreeRow {
+            row_id: "user-a".to_string(),
+            parent_id: None,
+            display_depth: 0,
+            kind: SessionTreeRowKind::User,
+            display_text: "root question".to_string(),
+            summary: "root question".to_string(),
+            preview_content: "root question".to_string(),
+            preview_replay_items: Vec::new(),
+            rewind_target_id: Some("user-a".to_string()),
+            rewind_prefill: None,
+            is_active_path: true,
+            is_current: true,
+            branch_choices: vec![
+                branch_choice("assistant-b", "leaf-b", "inactive answer", false),
+                branch_choice("assistant-c", "leaf-c", "current answer", true),
+            ],
+        }],
+        current_row_id: Some("user-a".to_string()),
+    }
 }
 
 fn apply_effect_if_needed_for_test(

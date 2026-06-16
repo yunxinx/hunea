@@ -1,4 +1,4 @@
-use provider_protocol::Message;
+use provider_protocol::ConversationItem;
 use tool_loop_runtime::ToolLoopCompletion;
 
 use crate::ProviderRequestMetrics;
@@ -11,8 +11,8 @@ pub(crate) enum ConversationProgress {
         message: String,
     },
     ProviderTurnStarted,
-    ProviderContextMessage {
-        message: Message,
+    ProviderContextItem {
+        item: ConversationItem,
     },
     OutputTokens {
         total_tokens: usize,
@@ -52,11 +52,10 @@ pub(crate) struct ConversationCompletion {
 impl ConversationCompletion {
     pub(crate) fn from_runtime_completion(completion: ToolLoopCompletion) -> Self {
         Self {
-            response: ConversationResponse {
-                content: completion.response.content,
-                reasoning_content: completion.response.reasoning_content,
-                reasoning_duration: completion.response.reasoning_duration,
-            },
+            response: ConversationResponse::new(
+                completion.response.items,
+                completion.response.reasoning_duration,
+            ),
             metrics: completion.metrics,
         }
     }

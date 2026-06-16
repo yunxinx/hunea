@@ -4,7 +4,7 @@ use std::{fs, time::Duration};
 mod support;
 
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
-use session_store::{InMemorySessionStore, SessionStore};
+use session_store::{InMemorySessionStore, ResolveError, SessionStore, SessionStoreError};
 use support::{TestSessionRoot, first_item_entry_id, item_entry_ids, open_store, sample_header};
 
 #[tokio::test]
@@ -207,6 +207,34 @@ async fn local_store_resolves_explicit_leaf_even_after_branch_override() {
         .expect("explicit leaf should resolve requested branch");
 
     assert_eq!(resolved, vec![item_a, item_b, item_c]);
+}
+
+#[tokio::test]
+async fn local_store_reports_missing_leaf_as_resolve_error() {
+    let root = TestSessionRoot::new("local-store-missing-leaf");
+    let work_dir = root.workspace_path("repo");
+    let store = open_store(&root).await;
+    let session_id = store
+        .create_session(sample_header(&work_dir, "gpt-4.1", Some("missing-leaf")))
+        .await
+        .expect("session should be created");
+
+    store
+        .append(&session_id, ConversationItem::text(Role::User, "hello"))
+        .await
+        .expect("item should append");
+
+    let error = store
+        .load_session_tree_for_leaf(&session_id, "missing-leaf-id")
+        .await
+        .expect_err("missing leaf should not be reported as metadata corruption");
+
+    assert!(matches!(
+        error,
+        SessionStoreError::ResolveFailed {
+            source: ResolveError::LeafNotFound(ref leaf_id)
+        } if leaf_id == "missing-leaf-id"
+    ));
 }
 
 #[tokio::test]

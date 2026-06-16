@@ -8,14 +8,12 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use provider_protocol::Role;
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use tokio::task;
 
 use crate::{
-    SESSION_MESSAGE_PREVIEW_CHAR_LIMIT, SESSION_TITLE_FALLBACK_CHAR_LIMIT, SessionEntryKind,
-    SessionMeta, SessionStoreError, SessionStoreError::IndexInconsistent, encode_project_dir,
-    jsonl::JsonlLoader,
+    SessionMeta, SessionStoreError, encode_project_dir, jsonl::JsonlLoader,
+    meta_derive::SessionMetaDeriver,
 };
 
 const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -163,7 +161,7 @@ fn initialize_database_with_retry(index_path: &Path) -> Result<(), SessionStoreE
         }
     }
 
-    Err(IndexInconsistent {
+    Err(SessionStoreError::CorruptIndex {
         message: "sqlite initialization retry loop exhausted without a result".to_string(),
     })
 }
@@ -180,7 +178,6 @@ fn with_connection<T>(
     conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
         .map_err(sqlite_error)?;
     enable_wal_mode(&conn)?;
-    initialize_database_schema(&conn)?;
 
     operation(&conn)
 }
@@ -192,7 +189,7 @@ fn enable_wal_mode(conn: &Connection) -> Result<(), SessionStoreError> {
         .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
         .map_err(sqlite_error)?;
     if !journal_mode.eq_ignore_ascii_case("wal") {
-        return Err(IndexInconsistent {
+        return Err(SessionStoreError::CorruptIndex {
             message: format!("sqlite journal_mode is `{journal_mode}`, expected `wal`"),
         });
     }
@@ -333,12 +330,11 @@ fn get_session_meta_row(
     conn: &Connection,
     session_id: &str,
 ) -> Result<SessionMeta, SessionStoreError> {
-    let requested_session_id =
-        session_id
-            .parse()
-            .map_err(|_| SessionStoreError::IndexInconsistent {
-                message: format!("session id `{session_id}` is not a valid UUIDv7"),
-            })?;
+    let requested_session_id = session_id
+        .parse()
+        .map_err(|_| SessionStoreError::CorruptIndex {
+            message: format!("session id `{session_id}` is not a valid UUIDv7"),
+        })?;
     let meta = conn
         .query_row(
             "
@@ -579,87 +575,21 @@ fn build_repair_plan(
 fn extract_session_meta(
     discovered_file: &DiscoveredSessionFile,
 ) -> Result<ExtractedSessionMeta, SessionStoreError> {
-    let mut header_entry: Option<(crate::SessionHeader, i64)> = None;
-    let mut first_user_message = None;
-    let mut latest_user_message = None;
-    let mut latest_assistant_message = None;
-    let mut latest_model = None;
-    let mut updated_at = None;
+    let mut deriver = SessionMetaDeriver::default();
 
     JsonlLoader::scan(&discovered_file.path, |entry| {
-        updated_at = Some(entry.timestamp);
-
-        match entry.kind {
-            SessionEntryKind::Header(header) if header_entry.is_none() => {
-                header_entry = Some((header, entry.timestamp));
-            }
-            SessionEntryKind::Header(_) => {}
-            SessionEntryKind::Item(item) if item.role() == Some(Role::User) => {
-                let text = item.text_content();
-                if first_user_message.is_none() {
-                    first_user_message = Some(text.clone());
-                }
-                latest_user_message = Some(text);
-            }
-            SessionEntryKind::Item(item) if item.role() == Some(Role::Assistant) => {
-                latest_assistant_message = Some(item.text_content());
-            }
-            SessionEntryKind::ConfigChange(snapshot) => {
-                latest_model = Some(snapshot.model);
-            }
-            _ => {}
-        }
-
+        deriver.observe(&entry);
         Ok(())
     })?;
 
-    let (header, created_at) = header_entry.ok_or_else(|| IndexInconsistent {
-        message: format!(
+    let meta = deriver.finish(
+        discovered_file.path.clone(),
+        Some(discovered_file.fingerprint.file_size),
+        format!(
             "session file `{}` is missing a header entry",
             discovered_file.path.display()
         ),
-    })?;
-    let title = header
-        .session_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            first_user_message
-                .as_deref()
-                .map(|text| truncate_chars(text, SESSION_TITLE_FALLBACK_CHAR_LIMIT))
-        })
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| header.session_id.to_string());
-    let preview = latest_user_message
-        .as_deref()
-        .map(|text| truncate_chars(text, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT))
-        .filter(|value| !value.is_empty());
-    let first_user_preview = first_user_message
-        .as_deref()
-        .map(|text| truncate_chars(text, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT))
-        .filter(|value| !value.is_empty());
-    let last_assistant_preview = latest_assistant_message
-        .as_deref()
-        .map(|text| truncate_chars(text, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT))
-        .filter(|value| !value.is_empty());
-    let meta = SessionMeta {
-        session_id: header.session_id.clone(),
-        project_dir: normalize_project_dir(&header.work_dir),
-        title,
-        preview,
-        first_user_preview,
-        last_assistant_preview,
-        total_tokens: 0,
-        model: latest_model.or_else(|| Some(header.initial_model.clone())),
-        created_at,
-        updated_at: updated_at.unwrap_or(created_at),
-        git_head: header.git_head.clone(),
-        work_dir: header.work_dir.clone(),
-        jsonl_path: discovered_file.path.clone(),
-        size_bytes: Some(discovered_file.fingerprint.file_size),
-    };
+    )?;
 
     Ok(ExtractedSessionMeta {
         meta,
@@ -716,28 +646,16 @@ fn modified_time_ms(metadata: &fs::Metadata) -> Result<i64, SessionStoreError> {
         .modified()
         .map_err(io_error)?
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| IndexInconsistent {
+        .map_err(|error| SessionStoreError::CorruptIndex {
             message: format!("file modified time is before unix epoch: {error}"),
         })?;
-    i64::try_from(duration.as_millis()).map_err(|_| IndexInconsistent {
+    i64::try_from(duration.as_millis()).map_err(|_| SessionStoreError::CorruptIndex {
         message: "file modified time exceeds i64 range".to_string(),
     })
 }
 
-fn normalize_project_dir(work_dir: &Path) -> String {
-    work_dir
-        .canonicalize()
-        .unwrap_or_else(|_| work_dir.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn truncate_chars(text: &str, limit: usize) -> String {
-    text.chars().take(limit).collect()
-}
-
 fn checked_i64(value: u64, label: &str) -> Result<i64, SessionStoreError> {
-    i64::try_from(value).map_err(|_| IndexInconsistent {
+    i64::try_from(value).map_err(|_| SessionStoreError::CorruptIndex {
         message: format!("{label} exceeds sqlite INTEGER range"),
     })
 }

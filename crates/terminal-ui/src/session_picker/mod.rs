@@ -11,12 +11,11 @@ use runtime_domain::session::SessionPickerRow;
 
 use crate::{
     AppEffect, Model,
-    display_width::display_width,
     render_frame::RenderFrame,
     status_line::truncate_display_width_with_ellipsis,
     styled_text::render_line_with_full_width_background,
     theme::{
-        command_accent_text_style, muted_text_style, primary_text_style, secondary_text_style,
+        build_page_rule, command_accent_text_style, primary_text_style, secondary_text_style,
         subtle_rule_line, tertiary_text_style,
     },
 };
@@ -267,7 +266,7 @@ impl Model {
         frame.render_widget(SessionPickerWidget { lines: &lines }, body_area);
 
         frame.render_widget(
-            Paragraph::new(build_session_picker_page_rule(
+            Paragraph::new(build_page_rule(
                 area.width,
                 state.page_number(page_size),
                 state.page_count(page_size),
@@ -658,36 +657,6 @@ fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
     }
 
     haystack.to_lowercase().contains(&needle.to_lowercase())
-}
-
-fn build_session_picker_page_rule(
-    width: u16,
-    page_number: usize,
-    page_count: usize,
-    palette: crate::theme::TerminalPalette,
-) -> Line<'static> {
-    let width = usize::from(width);
-    let compact_label = format!(" {page_number}/{page_count} ");
-    let full_label = format!(" Page {page_number}/{page_count} ");
-    let label = if width >= 24 {
-        full_label
-    } else {
-        compact_label
-    };
-    let label_width = display_width(&label);
-    let right_pad = 2usize;
-
-    if width <= label_width + right_pad {
-        return Line::styled(label, muted_text_style(palette));
-    }
-
-    let left_dash_count = width.saturating_sub(label_width + right_pad);
-    let mut line = String::with_capacity(width);
-    line.push_str(&"─".repeat(left_dash_count));
-    line.push_str(&label);
-    line.push_str(&"─".repeat(right_pad));
-
-    Line::styled(line, muted_text_style(palette))
 }
 
 fn session_picker_header_rule_line(

@@ -58,10 +58,9 @@ where
     let mut appended_items = Vec::new();
 
     loop {
-        let prompt = request.clone();
         let provider_completion = stream_provider_turn(
             client,
-            prompt,
+            &request,
             cancellation,
             &clock,
             &mut state,
@@ -249,7 +248,7 @@ mod tests {
     impl ProviderClient for FakeProvider {
         fn stream_prompt<'a>(
             &'a self,
-            _request: PromptRequest,
+            _request: &'a PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
         ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
@@ -286,7 +285,7 @@ mod tests {
     impl ProviderClient for UsageProvider {
         fn stream_prompt<'a>(
             &'a self,
-            _request: PromptRequest,
+            _request: &'a PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
         ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
@@ -328,7 +327,7 @@ mod tests {
     impl ProviderClient for DelayedFirstTokenProvider {
         fn stream_prompt<'a>(
             &'a self,
-            _request: PromptRequest,
+            _request: &'a PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
         ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
@@ -358,7 +357,7 @@ mod tests {
     impl ProviderClient for ToolLoopUsageProvider {
         fn stream_prompt<'a>(
             &'a self,
-            request: PromptRequest,
+            request: &'a PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
         ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
@@ -413,7 +412,7 @@ mod tests {
     impl ProviderClient for MixedUsageProvider {
         fn stream_prompt<'a>(
             &'a self,
-            request: PromptRequest,
+            request: &'a PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
         ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
@@ -490,7 +489,7 @@ mod tests {
     impl ProviderClient for TimedToolLoopProvider {
         fn stream_prompt<'a>(
             &'a self,
-            request: PromptRequest,
+            request: &'a PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
         ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
@@ -550,7 +549,7 @@ mod tests {
     impl ProviderClient for ResponseOnlyTimedTextProvider {
         fn stream_prompt<'a>(
             &'a self,
-            _request: PromptRequest,
+            _request: &'a PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
         ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
@@ -590,7 +589,7 @@ mod tests {
     impl ProviderClient for MultiToolBatchProvider {
         fn stream_prompt<'a>(
             &'a self,
-            request: PromptRequest,
+            request: &'a PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
         ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
@@ -663,7 +662,7 @@ mod tests {
     impl ProviderClient for WriteArgumentStreamingProvider {
         fn stream_prompt<'a>(
             &'a self,
-            request: PromptRequest,
+            request: &'a PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
         ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
@@ -726,7 +725,7 @@ mod tests {
     impl ProviderClient for WriteArgumentCompletedProvider {
         fn stream_prompt<'a>(
             &'a self,
-            request: PromptRequest,
+            request: &'a PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
         ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
@@ -773,7 +772,7 @@ mod tests {
     impl ProviderClient for WriteArgumentResponseOnlyProvider {
         fn stream_prompt<'a>(
             &'a self,
-            request: PromptRequest,
+            request: &'a PromptRequest,
             sink: &'a mut (dyn StreamEventSink + Send),
         ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
             Box::pin(async move {
@@ -1346,7 +1345,7 @@ mod tests {
         impl ProviderClient for RunOnceProvider {
             fn stream_prompt<'a>(
                 &'a self,
-                request: PromptRequest,
+                request: &'a PromptRequest,
                 sink: &'a mut (dyn StreamEventSink + Send),
             ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
                 Box::pin(async move {
@@ -1457,7 +1456,7 @@ mod tests {
         impl ProviderClient for FailingFollowUpProvider {
             fn stream_prompt<'a>(
                 &'a self,
-                _request: PromptRequest,
+                _request: &'a PromptRequest,
                 sink: &'a mut (dyn StreamEventSink + Send),
             ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
                 Box::pin(async move {
@@ -1537,7 +1536,7 @@ mod tests {
         impl ProviderClient for TwoToolProvider {
             fn stream_prompt<'a>(
                 &'a self,
-                _request: PromptRequest,
+                _request: &'a PromptRequest,
                 sink: &'a mut (dyn StreamEventSink + Send),
             ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
                 Box::pin(async move {
@@ -2035,7 +2034,7 @@ mod tests {
         impl ProviderClient for SplitDeltaProvider {
             fn stream_prompt<'a>(
                 &'a self,
-                _request: PromptRequest,
+                _request: &'a PromptRequest,
                 sink: &'a mut (dyn StreamEventSink + Send),
             ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
                 Box::pin(async move {

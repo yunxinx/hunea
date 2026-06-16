@@ -397,9 +397,11 @@ async fn run_conversation_worker(
             TurnAttemptOutcome::Completed(Ok(completion))
             | TurnAttemptOutcome::TimedOut(Ok(completion)) => {
                 permission_broker.cancel_all();
-                if let Err(message) = flush_session_persistence(&session_sender).await {
+                if let Err(error) = flush_session_persistence(&session_sender).await {
                     let _ = sender.send(ConversationWorkerEvent::progress(
-                        ConversationEvent::Failed { message },
+                        ConversationEvent::Failed {
+                            message: error.to_string(),
+                        },
                     ));
                     drop(session_sender);
                     let _ = session_actor.await;
@@ -498,7 +500,9 @@ async fn send_terminal_after_session_persistence(
 ) {
     let event = match flush_session_persistence(session_sender).await {
         Ok(()) => terminal_event,
-        Err(message) => ConversationEvent::Failed { message },
+        Err(error) => ConversationEvent::Failed {
+            message: error.to_string(),
+        },
     };
     let _ = sender.send(ConversationWorkerEvent::progress(event));
 }
@@ -564,6 +568,7 @@ mod tests {
     use session_store::{
         LocalSessionStore, SessionHeader, SessionId, SessionStore, SessionStoreError,
     };
+    use tokio::sync::mpsc as tokio_mpsc;
     use tokio_util::sync::CancellationToken;
     use tool_runtime::ToolExecutorRegistry;
 
@@ -883,6 +888,62 @@ mod tests {
 
         assert_eq!(resolved, vec![user, assistant]);
         assert!(jsonl.contains("\"type\":\"config_change\""));
+    }
+
+    #[test]
+    fn flush_session_persistence_preserves_store_error_source() {
+        let root = tempdir_path("worker-flush-error-source");
+        let work_dir = root.join("workspace");
+        fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+        let store =
+            Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
+        let missing_session_id = SessionId::new();
+        let store_trait: Arc<dyn SessionStore> = store;
+        let mut conversation = ProviderConversation::with_session_store(
+            store_trait,
+            sample_header(&work_dir, "qwen3"),
+        )
+        .expect("persisted conversation should initialize");
+        conversation.set_session_id(missing_session_id.clone());
+        let request = conversation
+            .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "qwen3",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                None,
+                None,
+                ConversationItem::text(Role::User, "hello"),
+            ))
+            .expect("turn should prepare");
+
+        let error = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build")
+            .block_on(async {
+                let (command_sender, command_receiver) = tokio_mpsc::unbounded_channel();
+                let (event_sender, _event_receiver) = mpsc::channel();
+                let actor = tokio::spawn(super::run_session_persistence_actor(
+                    request.persistence_cloned(),
+                    command_receiver,
+                    event_sender,
+                    CancellationToken::new(),
+                ));
+                let error = super::flush_session_persistence(&command_sender)
+                    .await
+                    .expect_err("flush failure should preserve typed source");
+                drop(command_sender);
+                actor.await.expect("persistence actor should stop cleanly");
+                error
+            });
+
+        assert!(matches!(
+            error.as_ref(),
+            SessionPersistenceError::Flush {
+                source: SessionStoreError::SessionNotFound { session_id }
+            } if session_id == &missing_session_id
+        ));
     }
 
     #[test]

@@ -11,9 +11,11 @@ use thiserror::Error;
 use uuid::{Timestamp, Uuid, Version};
 
 pub(crate) mod jsonl;
+pub(crate) mod meta_derive;
 pub(crate) mod metadata;
 pub(crate) mod recorder;
 mod store;
+pub(crate) mod util;
 
 pub use store::{InMemorySessionStore, LocalSessionStore, SessionStore};
 
@@ -229,8 +231,12 @@ pub enum SessionStoreError {
     },
     #[error("session `{session_id}` does not exist")]
     SessionNotFound { session_id: SessionId },
-    #[error("session metadata index is inconsistent: {message}")]
-    IndexInconsistent { message: String },
+    #[error("session store configuration is invalid: {message}")]
+    ConfigurationError { message: String },
+    #[error("session metadata index is corrupt: {message}")]
+    CorruptIndex { message: String },
+    #[error("session is missing a header entry: {message}")]
+    MissingHeader { message: String },
     #[error("failed to access session metadata sqlite index: {source}")]
     SqliteError {
         #[source]
@@ -269,6 +275,7 @@ pub enum ResolveError {
 }
 
 /// 生成 session 内唯一 entry id。
+#[must_use]
 pub fn generate_entry_id(existing_ids: &HashSet<String>) -> String {
     generate_entry_id_with(existing_ids, Uuid::now_v7)
 }

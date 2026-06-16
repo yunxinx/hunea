@@ -39,11 +39,11 @@ impl OpenAiChatCompletionsClient {
 impl ProviderClient for OpenAiChatCompletionsClient {
     fn stream_prompt<'a>(
         &'a self,
-        request: PromptRequest,
+        request: &'a PromptRequest,
         sink: &'a mut (dyn StreamEventSink + Send),
     ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>> {
         Box::pin(async move {
-            let body = chat_completion_request_body(&request)?;
+            let body = chat_completion_request_body(request)?;
             let response = self
                 .apply_auth(self.http.post(self.config.endpoint("/chat/completions")))
                 .json(&body)
@@ -56,7 +56,7 @@ impl ProviderClient for OpenAiChatCompletionsClient {
             }
 
             let mut decoder = OpenAiSseDecoder::default();
-            let mut stream_state = OpenAiStreamState::new(request.model);
+            let mut stream_state = OpenAiStreamState::new(request.model.clone());
             let mut bytes = response.bytes_stream();
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(|source| ProviderError::Transport(source.to_string()))?;

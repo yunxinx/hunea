@@ -30,7 +30,7 @@ pub trait ProviderClient: Send + Sync {
     /// `stream_prompt` sends one provider request and emits normalized stream events.
     fn stream_prompt<'a>(
         &'a self,
-        request: PromptRequest,
+        request: &'a PromptRequest,
         sink: &'a mut (dyn StreamEventSink + Send),
     ) -> ProviderFuture<'a, Result<PromptCompletion, ProviderError>>;
 

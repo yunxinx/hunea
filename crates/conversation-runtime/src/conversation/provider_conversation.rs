@@ -136,7 +136,6 @@ impl PreparedConversationRequest {
 #[derive(Default)]
 pub struct ProviderConversation {
     system_prompt: Option<String>,
-    history: Vec<ConversationItem>,
     persisted_history: Vec<PersistedConversationItem>,
     pending_user_message: Option<ConversationItem>,
     persistence: Option<ProviderConversationPersistence>,
@@ -188,11 +187,6 @@ impl ProviderConversation {
         session_id: Option<SessionId>,
         restored_state: &ResolvedSessionState,
     ) -> Self {
-        let history = restored_state
-            .items
-            .iter()
-            .map(|entry| entry.item.clone())
-            .collect::<Vec<_>>();
         let persisted_history = restored_state
             .items
             .iter()
@@ -208,7 +202,6 @@ impl ProviderConversation {
                 .clone()
                 .and_then(|config| config.system_prompt)
                 .and_then(normalize_system_prompt),
-            history,
             persisted_history,
             pending_user_message: None,
             persistence: Some(ProviderConversationPersistence {
@@ -221,7 +214,6 @@ impl ProviderConversation {
 
     /// `clear` 清空当前会话。
     pub fn clear(&mut self) {
-        self.history.clear();
         self.persisted_history.clear();
         self.pending_user_message = None;
         if let Some(persistence) = self.persistence.as_mut() {
@@ -236,9 +228,9 @@ impl ProviderConversation {
     ) -> Result<Option<(SessionId, String)>, ProviderConversationError> {
         self.pending_user_message = None;
         let mut user_turn_count = 0usize;
-        let mut truncate_index = self.history.len();
-        for (index, item) in self.history.iter().enumerate() {
-            if item.role() != Some(Role::User) {
+        let mut truncate_index = self.persisted_history.len();
+        for (index, item) in self.persisted_history.iter().enumerate() {
+            if item.item.role() != Some(Role::User) {
                 continue;
             }
             user_turn_count = user_turn_count.saturating_add(1);
@@ -247,7 +239,6 @@ impl ProviderConversation {
                 break;
             }
         }
-        self.history.truncate(truncate_index);
         self.persisted_history.truncate(truncate_index);
 
         let leaf_update = if let Some(persistence) = self.persistence.as_ref()
@@ -276,9 +267,24 @@ impl ProviderConversation {
         self.system_prompt.as_deref()
     }
 
-    /// `history` 返回当前 provider-visible 历史。
-    pub fn history(&self) -> &[ConversationItem] {
-        &self.history
+    /// `history` 以零拷贝方式返回当前 provider-visible 历史。
+    #[must_use]
+    pub fn history(&self) -> impl ExactSizeIterator<Item = &ConversationItem> + '_ {
+        self.persisted_history
+            .iter()
+            .map(|persisted_item| &persisted_item.item)
+    }
+
+    /// `is_history_empty` 返回当前 provider-visible 历史是否为空。
+    #[must_use]
+    pub fn is_history_empty(&self) -> bool {
+        self.persisted_history.is_empty()
+    }
+
+    /// `history_len` 返回当前 provider-visible 历史项数量。
+    #[must_use]
+    pub fn history_len(&self) -> usize {
+        self.persisted_history.len()
     }
 
     /// `session_id` 返回当前持久化 session id。
@@ -333,6 +339,7 @@ impl ProviderConversation {
     }
 
     /// `commit_pending_user` 把已开始发送给 provider 的当前用户消息写回会话历史。
+    #[must_use]
     pub fn commit_pending_user(
         &mut self,
         entry_id: Option<String>,
@@ -344,7 +351,6 @@ impl ProviderConversation {
         let Some(user_message) = self.pending_user_message.take() else {
             return false;
         };
-        self.history.push(user_message.clone());
         self.persisted_history.push(PersistedConversationItem {
             entry_id,
             item: user_message,
@@ -353,6 +359,7 @@ impl ProviderConversation {
     }
 
     /// `rollback_pending_user` 丢弃尚未开始发送给 provider 的当前用户消息。
+    #[must_use]
     pub fn rollback_pending_user(&mut self) -> bool {
         self.pending_user_message.take().is_some()
     }
@@ -363,7 +370,6 @@ impl ProviderConversation {
         items: impl IntoIterator<Item = PersistedConversationItem>,
     ) {
         for item in items {
-            self.history.push(item.item.clone());
             self.persisted_history.push(item);
         }
     }
@@ -385,12 +391,13 @@ impl ProviderConversation {
     }
 
     fn provider_items(&self) -> Vec<ConversationItem> {
-        let mut items =
-            Vec::with_capacity(self.history.len() + usize::from(self.system_prompt.is_some()));
+        let mut items = Vec::with_capacity(
+            self.persisted_history.len() + usize::from(self.system_prompt.is_some()),
+        );
         if let Some(system_prompt) = self.system_prompt.as_deref() {
             items.push(ConversationItem::text(Role::System, system_prompt));
         }
-        items.extend(self.history.iter().cloned());
+        items.extend(self.persisted_history.iter().map(|item| item.item.clone()));
         items
     }
 
@@ -455,6 +462,21 @@ mod tests {
     }
 
     #[test]
+    fn history_exposes_borrowed_items_without_collecting_owned_history() {
+        let mut session = ProviderConversation::new();
+        session.commit_turn_items([cached_item(ConversationItem::text(Role::User, "hello"))]);
+
+        let mut history = session.history();
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.next().map(ConversationItem::text_content),
+            Some("hello".to_string())
+        );
+        assert_eq!(history.len(), 0);
+    }
+
+    #[test]
     fn prepare_turn_prepends_system_prompt_without_persisting_it_in_history() {
         let mut session = ProviderConversation::new();
         session.set_system_prompt(Some("You are helpful".to_string()));
@@ -473,7 +495,7 @@ mod tests {
 
         assert_eq!(request.items()[0].role(), Some(Role::System));
         assert_eq!(request.items()[0].text_content(), "You are helpful");
-        assert!(session.history().is_empty());
+        assert!(session.is_history_empty());
     }
 
     #[test]
@@ -512,7 +534,7 @@ mod tests {
                 ConversationItem::text(Role::User, "first question"),
             ))
             .expect("first turn should prepare");
-        session.commit_pending_user(None, None);
+        assert!(session.commit_pending_user(None, None));
         session.commit_turn_items([cached_item(ConversationItem::text(
             Role::Assistant,
             "first answer",
@@ -528,7 +550,7 @@ mod tests {
                 ConversationItem::text(Role::User, "second question"),
             ))
             .expect("second turn should prepare");
-        session.commit_pending_user(None, None);
+        assert!(session.commit_pending_user(None, None));
         session.commit_turn_items([cached_item(ConversationItem::text(
             Role::Assistant,
             "second answer",
@@ -540,7 +562,6 @@ mod tests {
 
         let visible_text = session
             .history()
-            .iter()
             .map(ConversationItem::text_content)
             .collect::<Vec<_>>();
         assert_eq!(visible_text, vec!["first question", "first answer"]);
@@ -562,7 +583,7 @@ mod tests {
             .expect("turn should prepare");
 
         assert!(session.rollback_pending_user());
-        assert!(session.history().is_empty());
+        assert!(session.is_history_empty());
     }
 
     #[test]
@@ -582,7 +603,10 @@ mod tests {
 
         assert!(session.commit_pending_user(None, None));
         assert!(!session.commit_pending_user(None, None));
-        assert_eq!(session.history()[0].text_content(), "sent");
+        assert_eq!(
+            session.history().next().map(ConversationItem::text_content),
+            Some("sent".to_string())
+        );
         assert_eq!(session.history().len(), 1);
     }
 
@@ -672,7 +696,7 @@ mod tests {
             .map(ConversationItem::text_content)
             .collect::<Vec<_>>();
         assert_eq!(visible_text, vec!["hello", "hi", "follow up"]);
-        assert_eq!(session.history(), existing_items.as_slice());
+        assert!(session.history().eq(existing_items.iter()));
     }
 
     #[test]
@@ -701,7 +725,7 @@ mod tests {
             .append_items(items.clone())
             .expect("items should append to provider history");
 
-        assert_eq!(session.history(), items.as_slice());
+        assert!(session.history().eq(items.iter()));
     }
 
     #[test]
@@ -773,14 +797,11 @@ mod tests {
             Some((session_id, first_assistant_entry_id)),
             "truncate should report the leaf update for async persistence"
         );
-        assert_eq!(
-            session.history(),
-            vec![
-                ConversationItem::text(Role::User, "first"),
-                ConversationItem::text(Role::Assistant, "alpha"),
-            ]
-            .as_slice()
-        );
+        let expected_history = [
+            ConversationItem::text(Role::User, "first"),
+            ConversationItem::text(Role::Assistant, "alpha"),
+        ];
+        assert!(session.history().eq(expected_history.iter()));
     }
 
     fn sample_header(work_dir: &Path, model: &str) -> SessionHeader {

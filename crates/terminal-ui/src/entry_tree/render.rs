@@ -1,4 +1,5 @@
 use super::*;
+use crate::theme::build_page_rule;
 
 impl Model {
     pub(crate) fn render_entry_tree(&mut self, frame: &mut RenderFrame<'_>, area: Rect) {
@@ -70,7 +71,7 @@ impl Model {
         frame.render_widget(EntryTreeWidget { lines: &lines }, body_area);
 
         frame.render_widget(
-            Paragraph::new(build_entry_tree_page_rule(
+            Paragraph::new(build_page_rule(
                 area.width,
                 state.page_number(page_size),
                 state.page_count(page_size),
@@ -282,7 +283,7 @@ impl Model {
         }
 
         frame.render_widget(
-            Paragraph::new(build_entry_tree_page_rule(
+            Paragraph::new(build_page_rule(
                 area.width,
                 branch_tree.page_number(page_size),
                 branch_tree.page_count(page_size),
@@ -637,7 +638,7 @@ impl Model {
         frame.render_widget(EntryTreeWidget { lines: &lines }, body_area);
 
         frame.render_widget(
-            Paragraph::new(build_entry_tree_page_rule(
+            Paragraph::new(build_page_rule(
                 area.width,
                 state.page_number(page_size),
                 state.page_count(page_size),
@@ -976,36 +977,6 @@ fn entry_tree_kind_style(
         Some(color) => Style::new().fg(color),
         None => Style::new(),
     }
-}
-
-fn build_entry_tree_page_rule(
-    width: u16,
-    page_number: usize,
-    page_count: usize,
-    palette: crate::theme::TerminalPalette,
-) -> Line<'static> {
-    let width = usize::from(width);
-    let compact_label = format!(" {page_number}/{page_count} ");
-    let full_label = format!(" Page {page_number}/{page_count} ");
-    let label = if width >= 24 {
-        full_label
-    } else {
-        compact_label
-    };
-    let label_width = display_width(&label);
-    let right_pad = 2usize;
-
-    if width <= label_width + right_pad {
-        return Line::styled(label, muted_text_style(palette));
-    }
-
-    let left_dash_count = width.saturating_sub(label_width + right_pad);
-    let mut line = String::with_capacity(width);
-    line.push_str(&"─".repeat(left_dash_count));
-    line.push_str(&label);
-    line.push_str(&"─".repeat(right_pad));
-
-    Line::styled(line, muted_text_style(palette))
 }
 
 fn entry_tree_footer_hint(

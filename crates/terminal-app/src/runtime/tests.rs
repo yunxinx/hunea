@@ -436,7 +436,7 @@ impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
     {
         if leaf_id.is_none() && self.fail_committed_load.load(Ordering::SeqCst) {
             return Box::pin(async {
-                Err(SessionStoreError::IndexInconsistent {
+                Err(SessionStoreError::CorruptIndex {
                     message: "injected committed load failure".to_string(),
                 })
             });
@@ -934,7 +934,6 @@ fn resume_session_emits_transcript_and_restored_model() {
         coordinator
             .provider_conversation
             .history()
-            .iter()
             .map(ConversationItem::text_content)
             .collect::<Vec<_>>(),
         vec!["hello resume", "resume answer"]
@@ -1280,7 +1279,7 @@ fn load_session_preview_emits_transcript_without_resuming_runtime_session() {
         vec!["preview user", "preview answer"]
     );
     assert!(
-        coordinator.provider_conversation.history().is_empty(),
+        coordinator.provider_conversation.is_history_empty(),
         "loading preview should not replace the active provider conversation"
     );
     cleanup(&work_dir);
@@ -1730,7 +1729,6 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
         coordinator
             .provider_conversation
             .history()
-            .iter()
             .map(ConversationItem::text_content)
             .collect::<Vec<_>>(),
         vec!["hello", "branch-b"],
@@ -2160,7 +2158,6 @@ fn select_entry_rewind_rebuilds_provider_history_to_selected_entry() {
         coordinator
             .provider_conversation
             .history()
-            .iter()
             .map(ConversationItem::text_content)
             .collect::<Vec<_>>(),
         vec!["first", "answer"]
@@ -2244,16 +2241,19 @@ fn select_entry_rewind_ignores_reasoning_without_restore_target() {
         .expect("non-rewindable reasoning should be accepted as a no-op");
     wait_for_runtime_idle(&mut coordinator);
 
-    assert_eq!(
-        coordinator.provider_conversation.history(),
-        &[
-            ConversationItem::text(Role::User, "first"),
-            ConversationItem::Reasoning {
-                content: "thinking".to_string(),
-                summary: None,
-                encrypted: None,
-            },
-        ]
+    let expected_history = [
+        ConversationItem::text(Role::User, "first"),
+        ConversationItem::Reasoning {
+            content: "thinking".to_string(),
+            summary: None,
+            encrypted: None,
+        },
+    ];
+    assert!(
+        coordinator
+            .provider_conversation
+            .history()
+            .eq(expected_history.iter())
     );
     assert_no_runtime_events(
         &mut coordinator,
@@ -2305,7 +2305,7 @@ fn conversation_failure_before_provider_request_rolls_back_pending_user() {
             .any(|event| matches!(event, RuntimeEvent::Failed { .. })),
         "preflight failure should be reported"
     );
-    assert!(coordinator.provider_conversation.history().is_empty());
+    assert!(coordinator.provider_conversation.is_history_empty());
 
     let next_request = ConversationTurnRequest::new(
         "local",

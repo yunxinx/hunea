@@ -184,7 +184,7 @@ impl AppRuntimeCoordinator {
 
     fn load_entry_tree(&mut self) -> Result<RuntimeCommandReceipt, String> {
         let Some(session_id) = self.provider_conversation.session_id().cloned() else {
-            if self.provider_conversation.history().is_empty() {
+            if self.provider_conversation.is_history_empty() {
                 self.pending_runtime_events
                     .push(RuntimeEvent::SessionTreeLoaded {
                         payload: SessionTreePayload {
@@ -222,7 +222,7 @@ impl AppRuntimeCoordinator {
 
     fn load_branch_tree(&mut self) -> Result<RuntimeCommandReceipt, String> {
         let Some(session_id) = self.provider_conversation.session_id().cloned() else {
-            if self.provider_conversation.history().is_empty() {
+            if self.provider_conversation.is_history_empty() {
                 self.pending_runtime_events
                     .push(RuntimeEvent::SessionBranchTreeLoaded {
                         payload: SessionBranchTreePayload {
@@ -541,7 +541,7 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
                 continue;
             }
             if event.is_terminal() {
-                self.provider_conversation.rollback_pending_user();
+                let _ = self.provider_conversation.rollback_pending_user();
             }
             let runtime_event = runtime_event_from_conversation_event(target, event);
             if should_defer_runtime_event_for_render_barrier(&events, &runtime_event) {
@@ -631,7 +631,8 @@ impl AppRuntimeCoordinator {
     fn reconcile_conversation_updates(&mut self) {
         let session_id = self.conversation_worker.take_pending_session_id();
         if let Some(entry_id) = self.conversation_worker.take_pending_user_entry_id() {
-            self.provider_conversation
+            let _ = self
+                .provider_conversation
                 .commit_pending_user(Some(entry_id), session_id);
         } else if let Some(session_id) = session_id {
             self.provider_conversation.set_session_id(session_id);

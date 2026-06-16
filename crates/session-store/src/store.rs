@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs as std_fs,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -8,7 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use provider_protocol::{ConversationItem, Role};
+use provider_protocol::ConversationItem;
 use runtime_domain::session::TranscriptReplayItem;
 use tokio::{
     fs,
@@ -17,13 +16,12 @@ use tokio::{
 };
 
 use crate::{
-    ConfigSnapshot, ResolveError, ResolvedSessionState, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT,
-    SESSION_TITLE_FALLBACK_CHAR_LIMIT, SessionBranchTreeSnapshot, SessionEntry, SessionEntryKind,
-    SessionHeader, SessionId, SessionMeta, SessionStoreError, SessionTreeSnapshot,
-    encode_project_dir, generate_entry_id, hunea_dir, jsonl::JsonlLoader, metadata::MetadataIndex,
-    recorder::SessionRecorder, resolve as resolve_entries, resolve_state,
-    session_branch_preview_snapshot, session_branch_tree_snapshot, session_filename,
-    session_tree_snapshot, session_tree_snapshot_for_leaf,
+    ConfigSnapshot, ResolveError, ResolvedSessionState, SessionBranchTreeSnapshot, SessionEntry,
+    SessionEntryKind, SessionHeader, SessionId, SessionMeta, SessionStoreError,
+    SessionTreeSnapshot, encode_project_dir, generate_entry_id, hunea_dir, jsonl::JsonlLoader,
+    meta_derive, metadata::MetadataIndex, recorder::SessionRecorder, resolve as resolve_entries,
+    resolve_state, session_branch_preview_snapshot, session_branch_tree_snapshot, session_filename,
+    session_tree_snapshot, session_tree_snapshot_for_leaf, util::normalize_project_dir,
 };
 
 const MAX_OPEN_SESSION_HANDLES: usize = 64;
@@ -145,7 +143,7 @@ struct LocalSessionState {
 impl LocalSessionStore {
     /// 使用默认 hunea 配置目录打开本地 session store。
     pub async fn open() -> Result<Self, SessionStoreError> {
-        let hunea_dir = hunea_dir().ok_or_else(|| SessionStoreError::IndexInconsistent {
+        let hunea_dir = hunea_dir().ok_or_else(|| SessionStoreError::ConfigurationError {
             message: "failed to resolve hunea config directory".to_string(),
         })?;
         Self::open_in(hunea_dir).await
@@ -194,7 +192,7 @@ impl LocalSessionStore {
         let meta = self.index.get_session_meta(&session_id.to_string()).await?;
         let entries = load_entries(&meta.jsonl_path).await?;
         if entries.is_empty() {
-            return Err(SessionStoreError::IndexInconsistent {
+            return Err(SessionStoreError::MissingHeader {
                 message: format!("session `{session_id}` is missing persisted entries"),
             });
         }
@@ -220,7 +218,7 @@ impl LocalSessionStore {
         let mut entry_ids = self.append_entries(session_id, vec![kind]).await?;
         entry_ids
             .pop()
-            .ok_or_else(|| SessionStoreError::IndexInconsistent {
+            .ok_or_else(|| SessionStoreError::CorruptIndex {
                 message: "session append did not produce an entry id".to_string(),
             })
     }
@@ -639,7 +637,7 @@ impl SessionStore for LocalSessionStore {
 
 impl LocalSessionHandle {
     fn new(jsonl_path: PathBuf, entries: Vec<SessionEntry>) -> Result<Self, SessionStoreError> {
-        let session_meta = derive_session_meta(&entries, jsonl_path.clone())?;
+        let session_meta = derive_store_session_meta(&entries, jsonl_path.clone())?;
         Ok(Self {
             recorder: Arc::new(SessionRecorder::new(jsonl_path.clone())?),
             jsonl_path,
@@ -684,7 +682,7 @@ impl LocalSessionState {
         }
 
         self.entries.push(entry);
-        self.session_meta = derive_session_meta(&self.entries, jsonl_path.to_path_buf())?;
+        self.session_meta = derive_store_session_meta(&self.entries, jsonl_path.to_path_buf())?;
         Ok(())
     }
 
@@ -718,8 +716,8 @@ impl LocalSessionState {
         if self.entry_ids.contains(leaf_id) {
             Ok(())
         } else {
-            Err(SessionStoreError::IndexInconsistent {
-                message: format!("leaf target `{leaf_id}` does not exist"),
+            Err(SessionStoreError::ResolveFailed {
+                source: ResolveError::LeafNotFound(leaf_id.to_string()),
             })
         }
     }
@@ -751,7 +749,7 @@ impl InMemorySessionStore {
         let mut entry_ids = self.append_entries(session_id, vec![kind]).await?;
         entry_ids
             .pop()
-            .ok_or_else(|| SessionStoreError::IndexInconsistent {
+            .ok_or_else(|| SessionStoreError::CorruptIndex {
                 message: "session append did not produce an entry id".to_string(),
             })
     }
@@ -891,8 +889,8 @@ impl SessionStore for InMemorySessionStore {
             if let Some(leaf_id) = requested_leaf_id.as_deref()
                 && !session.entries.iter().any(|entry| entry.id == leaf_id)
             {
-                return Err(SessionStoreError::IndexInconsistent {
-                    message: format!("leaf target `{leaf_id}` does not exist"),
+                return Err(SessionStoreError::ResolveFailed {
+                    source: ResolveError::LeafNotFound(leaf_id.to_string()),
                 });
             }
 
@@ -1039,7 +1037,9 @@ impl SessionStore for InMemorySessionStore {
             let sessions = self.sessions.read().await;
             let mut metas = sessions
                 .values()
-                .map(|session| derive_session_meta(&session.entries, session.jsonl_path.clone()))
+                .map(|session| {
+                    derive_store_session_meta(&session.entries, session.jsonl_path.clone())
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             metas.retain(|meta| meta.project_dir == project_dir);
             metas.sort_by(|left, right| {
@@ -1066,7 +1066,7 @@ impl SessionStore for InMemorySessionStore {
                     .ok_or_else(|| SessionStoreError::SessionNotFound {
                         session_id: session_id.clone(),
                     })?;
-            derive_session_meta(&session.entries, session.jsonl_path.clone())
+            derive_store_session_meta(&session.entries, session.jsonl_path.clone())
         })
     }
 
@@ -1110,7 +1110,7 @@ fn requested_leaf_id<'a>(
     entries
         .last()
         .map(|entry| entry.id.as_str())
-        .ok_or_else(|| SessionStoreError::IndexInconsistent {
+        .ok_or_else(|| SessionStoreError::MissingHeader {
             message: "session is missing persisted entries".to_string(),
         })
 }
@@ -1169,111 +1169,28 @@ fn entry_ids(entries: &[SessionEntry]) -> HashSet<String> {
     entries.iter().map(|entry| entry.id.clone()).collect()
 }
 
-fn derive_session_meta(
+fn derive_store_session_meta(
     entries: &[SessionEntry],
     jsonl_path: PathBuf,
 ) -> Result<SessionMeta, SessionStoreError> {
-    let mut header_entry = None;
-    let mut first_user_message = None;
-    let mut latest_user_message = None;
-    let mut latest_assistant_message = None;
-    let mut latest_model = None;
-
-    for entry in entries {
-        match &entry.kind {
-            SessionEntryKind::Header(header) if header_entry.is_none() => {
-                header_entry = Some((header.clone(), entry.timestamp));
-            }
-            SessionEntryKind::Item(item) if item.role() == Some(Role::User) => {
-                let text = item.text_content();
-                if first_user_message.is_none() {
-                    first_user_message = Some(text.clone());
-                }
-                latest_user_message = Some(text);
-            }
-            SessionEntryKind::Item(item) if item.role() == Some(Role::Assistant) => {
-                latest_assistant_message = Some(item.text_content());
-            }
-            SessionEntryKind::ConfigChange(snapshot) => {
-                latest_model = Some(snapshot.model.clone());
-            }
-            _ => {}
-        }
-    }
-
-    let (header, created_at) =
-        header_entry.ok_or_else(|| SessionStoreError::IndexInconsistent {
-            message: "session is missing header entry".to_string(),
-        })?;
-    let updated_at = entries
-        .last()
-        .map(|entry| entry.timestamp)
-        .unwrap_or(created_at);
-    let title = header
-        .session_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            first_user_message
-                .as_deref()
-                .map(|text| truncate_chars(text, SESSION_TITLE_FALLBACK_CHAR_LIMIT))
-        })
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| header.session_id.to_string());
-    let preview = latest_user_message
-        .as_deref()
-        .map(|text| truncate_chars(text, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT))
-        .filter(|value| !value.is_empty());
-    let first_user_preview = first_user_message
-        .as_deref()
-        .map(|text| truncate_chars(text, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT))
-        .filter(|value| !value.is_empty());
-    let last_assistant_preview = latest_assistant_message
-        .as_deref()
-        .map(|text| truncate_chars(text, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT))
-        .filter(|value| !value.is_empty());
-
-    Ok(SessionMeta {
-        session_id: header.session_id.clone(),
-        project_dir: normalize_project_dir(&header.work_dir),
-        title,
-        preview,
-        first_user_preview,
-        last_assistant_preview,
-        total_tokens: 0,
-        model: latest_model.or_else(|| Some(header.initial_model.clone())),
-        created_at,
-        updated_at,
-        git_head: header.git_head.clone(),
-        work_dir: header.work_dir.clone(),
-        size_bytes: std_fs::metadata(&jsonl_path)
-            .ok()
-            .map(|metadata| metadata.len()),
+    let size_bytes = std::fs::metadata(&jsonl_path)
+        .ok()
+        .map(|metadata| metadata.len());
+    meta_derive::derive_session_meta(
+        entries,
         jsonl_path,
-    })
-}
-
-fn normalize_project_dir(work_dir: &Path) -> String {
-    work_dir
-        .canonicalize()
-        .unwrap_or_else(|_| work_dir.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn truncate_chars(text: &str, limit: usize) -> String {
-    text.chars().take(limit).collect()
+        size_bytes,
+        "session is missing header entry".to_string(),
+    )
 }
 
 fn current_timestamp_ms() -> Result<i64, SessionStoreError> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| SessionStoreError::IndexInconsistent {
+        .map_err(|error| SessionStoreError::CorruptIndex {
             message: format!("system time is before unix epoch: {error}"),
         })?;
-    i64::try_from(duration.as_millis()).map_err(|_| SessionStoreError::IndexInconsistent {
+    i64::try_from(duration.as_millis()).map_err(|_| SessionStoreError::CorruptIndex {
         message: "system time exceeds i64 millisecond range".to_string(),
     })
 }
@@ -1282,18 +1199,7 @@ fn resolve_error(error: ResolveError) -> SessionStoreError {
     match error {
         ResolveError::DuplicateId(id) => SessionStoreError::DuplicateId { id },
         ResolveError::DanglingParent(parent_id) => SessionStoreError::DanglingParent { parent_id },
-        ResolveError::LeafNotFound(leaf_id) => SessionStoreError::IndexInconsistent {
-            message: format!("resolve failed because leaf `{leaf_id}` was not found"),
-        },
-        ResolveError::CycleDetected => SessionStoreError::IndexInconsistent {
-            message: "resolve failed because the entry graph contains a cycle".to_string(),
-        },
-        ResolveError::InvalidCompactionTarget(target_id) => SessionStoreError::IndexInconsistent {
-            message: format!("resolve failed because compaction target `{target_id}` is invalid"),
-        },
-        ResolveError::InvalidTreeRow(entry_id) => SessionStoreError::IndexInconsistent {
-            message: format!("resolve failed because entry `{entry_id}` is not a tree row"),
-        },
+        source => SessionStoreError::ResolveFailed { source },
     }
 }
 

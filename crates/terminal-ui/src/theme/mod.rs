@@ -1,6 +1,8 @@
+mod page_rule;
 mod palette;
 mod styles;
 
+pub(crate) use page_rule::{build_labeled_rule, build_page_rule};
 pub use palette::{
     PaletteDetection, TerminalPalette, default_palette, detect_palette, palette_from_background,
     terminal_default_palette, try_detect_palette,

@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::mpsc,
+    sync::{Arc, mpsc},
 };
 
 use provider_protocol::{ConversationItem, Role};
@@ -34,7 +34,7 @@ pub(super) enum SessionPersistenceCommand {
     ToolActivityUpdated(RuntimeToolActivityUpdate),
     TerminalSnapshot(RuntimeTerminalSnapshot),
     Flush {
-        ack: oneshot::Sender<Result<(), String>>,
+        ack: oneshot::Sender<Result<(), Arc<SessionPersistenceError>>>,
     },
 }
 
@@ -81,8 +81,10 @@ pub(super) enum SessionPersistenceError {
     },
     #[error("conversation session has not started persistence")]
     MissingSession,
-    #[error("{message}")]
-    FlushActorFailed { message: String },
+    #[error("conversation session persistence worker stopped unexpectedly")]
+    WorkerStopped,
+    #[error("conversation session persistence worker dropped flush ack")]
+    FlushAckDropped,
 }
 
 pub(super) async fn run_session_persistence_actor(
@@ -95,26 +97,33 @@ pub(super) async fn run_session_persistence_actor(
     while let Some(command) = receiver.recv().await {
         let result = match command {
             SessionPersistenceCommand::ProviderTurnStarted => {
-                persist_turn_start(persistence.as_ref(), &sender, &cancellation, &mut state).await
+                persist_turn_start(persistence.as_ref(), &sender, &cancellation, &mut state)
+                    .await
+                    .map_err(Arc::new)
             }
-            SessionPersistenceCommand::ProviderContextItem(item) => {
-                persist_context_item(
-                    persistence.as_ref(),
-                    &sender,
-                    &cancellation,
-                    item,
-                    &mut state,
-                )
-                .await
-            }
+            SessionPersistenceCommand::ProviderContextItem(item) => persist_context_item(
+                persistence.as_ref(),
+                &sender,
+                &cancellation,
+                item,
+                &mut state,
+            )
+            .await
+            .map_err(Arc::new),
             SessionPersistenceCommand::ToolActivityStarted(activity) => {
-                persist_tool_activity_started(persistence.as_ref(), activity, &mut state).await
+                persist_tool_activity_started(persistence.as_ref(), activity, &mut state)
+                    .await
+                    .map_err(Arc::new)
             }
             SessionPersistenceCommand::ToolActivityUpdated(update) => {
-                persist_tool_activity_update(persistence.as_ref(), update, &mut state).await
+                persist_tool_activity_update(persistence.as_ref(), update, &mut state)
+                    .await
+                    .map_err(Arc::new)
             }
             SessionPersistenceCommand::TerminalSnapshot(snapshot) => {
-                persist_terminal_snapshot(persistence.as_ref(), snapshot, &state).await
+                persist_terminal_snapshot(persistence.as_ref(), snapshot, &state)
+                    .await
+                    .map_err(Arc::new)
             }
             SessionPersistenceCommand::Flush { ack } => {
                 let result = flush_persistence(persistence.as_ref(), &state).await;
@@ -124,9 +133,9 @@ pub(super) async fn run_session_persistence_actor(
                         Ok(())
                     }
                     Err(error) => {
-                        let message = error.to_string();
-                        let _ = ack.send(Err(message.clone()));
-                        Err(SessionPersistenceError::FlushActorFailed { message })
+                        let error = Arc::new(error);
+                        let _ = ack.send(Err(error.clone()));
+                        Err(error)
                     }
                 }
             }
@@ -471,12 +480,12 @@ async fn flush_persistence(
 
 pub(super) async fn flush_session_persistence(
     sender: &tokio_mpsc::UnboundedSender<SessionPersistenceCommand>,
-) -> Result<(), String> {
+) -> Result<(), Arc<SessionPersistenceError>> {
     let (ack_tx, ack_rx) = oneshot::channel();
     sender
         .send(SessionPersistenceCommand::Flush { ack: ack_tx })
-        .map_err(|_| "conversation session persistence worker stopped unexpectedly".to_string())?;
+        .map_err(|_| Arc::new(SessionPersistenceError::WorkerStopped))?;
     ack_rx
         .await
-        .map_err(|_| "conversation session persistence worker dropped flush ack".to_string())?
+        .map_err(|_| Arc::new(SessionPersistenceError::FlushAckDropped))?
 }

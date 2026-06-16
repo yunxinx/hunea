@@ -10,7 +10,9 @@ use crate::{
     message::assistant_message_visual_inset,
     render_frame::RenderFrame,
     styled_text::{line_to_plain_text, render_line_with_full_width_background},
-    theme::{TerminalPalette, muted_text_style, tertiary_text_style},
+    theme::{
+        TerminalPalette, build_labeled_rule, build_page_rule, muted_text_style, tertiary_text_style,
+    },
     transcript::{Transcript, TranscriptItem, TranscriptItemMetricsIndex},
 };
 
@@ -39,53 +41,8 @@ pub(crate) fn build_percentage_rule(
     percentage: usize,
     palette: TerminalPalette,
 ) -> Line<'static> {
-    let width = width as usize;
     let label = format!(" {percentage}% ");
-    let label_len = label.chars().count();
-    let right_pad = 2; // 百分比右侧固定两个 ─
-
-    if width <= label_len + right_pad {
-        return Line::styled(label, muted_text_style(palette));
-    }
-
-    let left_dash_count = width.saturating_sub(label_len + right_pad);
-    let mut line = String::with_capacity(width);
-    line.push_str(&"─".repeat(left_dash_count));
-    line.push_str(&label);
-    line.push_str(&"─".repeat(right_pad));
-
-    Line::styled(line, muted_text_style(palette))
-}
-
-/// 右对齐页码的分隔线，保持和百分比分隔线相同的位置与视觉重量。
-pub(crate) fn build_page_rule(
-    width: u16,
-    page_number: usize,
-    page_count: usize,
-    palette: TerminalPalette,
-) -> Line<'static> {
-    let width = width as usize;
-    let compact_label = format!(" {page_number}/{page_count} ");
-    let full_label = format!(" Page {page_number}/{page_count} ");
-    let label = if width >= 24 {
-        full_label
-    } else {
-        compact_label
-    };
-    let label_len = label.chars().count();
-    let right_pad = 2;
-
-    if width <= label_len + right_pad {
-        return Line::styled(label, muted_text_style(palette));
-    }
-
-    let left_dash_count = width.saturating_sub(label_len + right_pad);
-    let mut line = String::with_capacity(width);
-    line.push_str(&"─".repeat(left_dash_count));
-    line.push_str(&label);
-    line.push_str(&"─".repeat(right_pad));
-
-    Line::styled(line, muted_text_style(palette))
+    build_labeled_rule(width, label, palette)
 }
 
 pub(crate) fn render_transcript_overlay_view(

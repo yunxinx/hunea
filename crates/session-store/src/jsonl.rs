@@ -71,7 +71,7 @@ impl JsonlWriter {
 
         self.file
             .as_mut()
-            .ok_or_else(|| SessionStoreError::IndexInconsistent {
+            .ok_or_else(|| SessionStoreError::CorruptIndex {
                 message: "session JSONL writer did not initialize its file".to_string(),
             })
     }

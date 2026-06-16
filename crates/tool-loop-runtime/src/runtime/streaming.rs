@@ -10,7 +10,7 @@ use super::{ToolLoopClock, ToolLoopProgress, state::RuntimeTurnState};
 
 pub(super) async fn stream_provider_turn<C, F>(
     client: &C,
-    request: PromptRequest,
+    request: &PromptRequest,
     cancellation: &CancellationToken,
     clock: &ToolLoopClock,
     state: &mut RuntimeTurnState,

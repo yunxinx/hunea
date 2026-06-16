@@ -5,7 +5,7 @@ use runtime_domain::session::{
     RuntimeToolActivity, RuntimeToolActivityContent, TranscriptReplayItem,
 };
 
-use crate::{ResolveError, SessionEntry, SessionEntryKind, util::truncate_chars_with_ellipsis};
+use crate::{ResolveError, SessionEntry, SessionEntryKind};
 
 use super::{replay::push_transcript_replay_snapshot, types::SessionTreeSnapshotRowKind};
 
@@ -309,10 +309,6 @@ fn session_tree_fallback_preview_content(
             SessionTreeSnapshotRowKind::Reasoning => "reasoning".to_string(),
         },
     }
-}
-
-pub(super) fn truncate_chars(text: &str, limit: usize) -> String {
-    truncate_chars_with_ellipsis(text, limit)
 }
 
 fn assistant_tool_call_summary(item: &ConversationItem) -> String {

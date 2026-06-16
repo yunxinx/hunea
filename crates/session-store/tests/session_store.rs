@@ -4,7 +4,10 @@ use std::{fs, time::Duration};
 mod support;
 
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
-use session_store::{InMemorySessionStore, ResolveError, SessionStore, SessionStoreError};
+use session_store::{
+    InMemorySessionStore, ProjectDir, ResolveError, SessionListOptions, SessionStore,
+    SessionStoreError,
+};
 use support::{TestSessionRoot, first_item_entry_id, item_entry_ids, open_store, sample_header};
 
 #[tokio::test]
@@ -315,7 +318,10 @@ async fn local_store_lists_sessions_by_project_and_updated_order() {
         .expect("other project append should succeed");
 
     let listed = store
-        .list_sessions(repo_a.to_string_lossy().as_ref())
+        .list_sessions(
+            &ProjectDir::from_work_dir(&repo_a),
+            SessionListOptions::default(),
+        )
         .await
         .expect("repo A sessions should list");
 

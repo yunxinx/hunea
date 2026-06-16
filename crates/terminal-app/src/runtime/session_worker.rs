@@ -11,7 +11,7 @@ use conversation_runtime::ProviderConversation;
 use runtime_domain::session::{
     RuntimeEvent, SessionPickerRow, SessionResumePayload, SessionTreePayload,
 };
-use session_store::{SessionHeader, SessionId, SessionStore};
+use session_store::{ProjectDir, SessionHeader, SessionId, SessionListOptions, SessionStore};
 
 use super::{
     session_branch_tree_payload, session_picker_row_from_meta, session_preview_payload,
@@ -29,7 +29,10 @@ pub(super) struct SessionStoreWorker {
 }
 
 pub(super) enum SessionStoreWorkerEvent {
-    Runtime(RuntimeEvent),
+    Runtime {
+        event: RuntimeEvent,
+        completes_command: bool,
+    },
     Restored {
         conversation: ProviderConversation,
         payload: SessionResumePayload,
@@ -49,7 +52,7 @@ pub(super) enum SessionStoreWorkerEvent {
 enum SessionStoreCommand {
     ListSessions {
         store: Arc<dyn SessionStore>,
-        project_dir: String,
+        project_dir: ProjectDir,
         active_session_id: Option<SessionId>,
     },
     LoadSessionPreview {
@@ -149,7 +152,7 @@ impl SessionStoreWorker {
     pub(super) fn list_sessions(
         &mut self,
         store: Arc<dyn SessionStore>,
-        project_dir: String,
+        project_dir: ProjectDir,
         active_session_id: Option<SessionId>,
     ) -> Result<(), String> {
         self.send_command(
@@ -305,14 +308,42 @@ impl SessionStoreWorker {
     }
 
     fn mark_event_drained(&mut self, event: &SessionStoreWorkerEvent) {
-        self.pending_commands = self.pending_commands.saturating_sub(1);
-        if event.is_mutation_result() {
-            self.pending_mutations = self.pending_mutations.saturating_sub(1);
+        if event.completes_command() {
+            self.pending_commands = self.pending_commands.saturating_sub(1);
+            if event.is_mutation_result() {
+                self.pending_mutations = self.pending_mutations.saturating_sub(1);
+            }
         }
     }
 }
 
 impl SessionStoreWorkerEvent {
+    fn runtime(event: RuntimeEvent) -> Self {
+        Self::Runtime {
+            event,
+            completes_command: true,
+        }
+    }
+
+    fn runtime_progress(event: RuntimeEvent) -> Self {
+        Self::Runtime {
+            event,
+            completes_command: false,
+        }
+    }
+
+    fn completes_command(&self) -> bool {
+        match self {
+            Self::Runtime {
+                completes_command, ..
+            } => *completes_command,
+            Self::Restored { .. }
+            | Self::RestoredWithTree { .. }
+            | Self::Noop
+            | Self::Failed { .. } => true,
+        }
+    }
+
     fn is_mutation_result(&self) -> bool {
         matches!(
             self,
@@ -354,37 +385,86 @@ fn run_session_worker(
             continue;
         }
 
+        if let SessionStoreCommand::ListSessions {
+            store,
+            project_dir,
+            active_session_id,
+        } = command
+        {
+            runtime.block_on(handle_list_sessions_command(
+                store,
+                project_dir,
+                active_session_id,
+                &event_sender,
+            ));
+            continue;
+        }
+
         let event = runtime.block_on(handle_session_command(command));
         let _ = event_sender.send(event);
     }
 }
 
+async fn handle_list_sessions_command(
+    store: Arc<dyn SessionStore>,
+    project_dir: ProjectDir,
+    active_session_id: Option<SessionId>,
+    event_sender: &Sender<SessionStoreWorkerEvent>,
+) {
+    // session picker 先显示 SQLite 缓存结果，再用 repair 后的结果刷新，避免扫盘阻塞入口。
+    let initial_rows = match list_session_rows(
+        store.as_ref(),
+        &project_dir,
+        active_session_id.as_ref(),
+        SessionListOptions::default(),
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            let _ = event_sender.send(failed(error.to_string(), false));
+            return;
+        }
+    };
+    let _ = event_sender.send(SessionStoreWorkerEvent::runtime_progress(
+        RuntimeEvent::SessionListLoaded {
+            rows: initial_rows.clone(),
+        },
+    ));
+
+    match list_session_rows(
+        store.as_ref(),
+        &project_dir,
+        active_session_id.as_ref(),
+        SessionListOptions { repair: true },
+    )
+    .await
+    {
+        Ok(repaired_rows) if repaired_rows != initial_rows => {
+            let _ = event_sender.send(SessionStoreWorkerEvent::runtime(
+                RuntimeEvent::SessionListLoaded {
+                    rows: repaired_rows,
+                },
+            ));
+        }
+        Ok(_) => {
+            let _ = event_sender.send(SessionStoreWorkerEvent::Noop);
+        }
+        Err(error) => {
+            let _ = event_sender.send(failed(error.to_string(), false));
+        }
+    }
+}
+
 async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWorkerEvent {
     match command {
-        SessionStoreCommand::ListSessions {
-            store,
-            project_dir,
-            active_session_id,
-        } => match store.list_sessions(&project_dir).await {
-            Ok(metas) => {
-                let rows = metas
-                    .into_iter()
-                    .filter(|meta| {
-                        active_session_id
-                            .as_ref()
-                            .map(|session_id| meta.session_id != *session_id)
-                            .unwrap_or(true)
-                    })
-                    .map(session_picker_row_from_meta)
-                    .collect::<Vec<SessionPickerRow>>();
-                SessionStoreWorkerEvent::Runtime(RuntimeEvent::SessionListLoaded { rows })
-            }
-            Err(error) => failed(error.to_string(), false),
-        },
+        SessionStoreCommand::ListSessions { .. } => {
+            unreachable!("list sessions is handled by the worker loop")
+        }
         SessionStoreCommand::LoadSessionPreview { store, session_id } => {
             match store.load_session(&session_id, None).await {
                 Ok(restored_state) => {
-                    SessionStoreWorkerEvent::Runtime(RuntimeEvent::SessionPreviewLoaded {
+                    SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionPreviewLoaded {
                         payload: session_preview_payload(session_id, restored_state),
                     })
                 }
@@ -404,7 +484,7 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
         },
         SessionStoreCommand::LoadEntryTree { store, session_id } => {
             match store.load_session_tree(&session_id).await {
-                Ok(snapshot) => SessionStoreWorkerEvent::Runtime(RuntimeEvent::SessionTreeLoaded {
+                Ok(snapshot) => SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionTreeLoaded {
                     payload: session_tree_payload(snapshot),
                 }),
                 Err(error) => failed(error.to_string(), false),
@@ -413,7 +493,7 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
         SessionStoreCommand::LoadBranchTree { store, session_id } => {
             match store.load_session_branch_tree(&session_id).await {
                 Ok(snapshot) => {
-                    SessionStoreWorkerEvent::Runtime(RuntimeEvent::SessionBranchTreeLoaded {
+                    SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchTreeLoaded {
                         payload: session_branch_tree_payload(snapshot),
                     })
                 }
@@ -429,7 +509,7 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
             .await
         {
             Ok(snapshot) => {
-                SessionStoreWorkerEvent::Runtime(RuntimeEvent::SessionTreePreviewLoaded {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionTreePreviewLoaded {
                     payload: session_tree_payload(snapshot),
                 })
             }
@@ -473,6 +553,24 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
         },
         SessionStoreCommand::FlushAll { .. } => unreachable!("flush is handled by worker loop"),
     }
+}
+
+async fn list_session_rows(
+    store: &dyn SessionStore,
+    project_dir: &ProjectDir,
+    active_session_id: Option<&SessionId>,
+    options: SessionListOptions,
+) -> Result<Vec<SessionPickerRow>, session_store::SessionStoreError> {
+    let metas = store.list_sessions(project_dir, options).await?;
+    Ok(metas
+        .into_iter()
+        .filter(|meta| {
+            active_session_id
+                .map(|session_id| meta.session_id != *session_id)
+                .unwrap_or(true)
+        })
+        .map(session_picker_row_from_meta)
+        .collect())
 }
 
 async fn restore_conversation(

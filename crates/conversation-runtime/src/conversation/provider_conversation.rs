@@ -149,11 +149,13 @@ struct ProviderConversationPersistence {
 
 impl ProviderConversation {
     /// `new` 创建空的 provider-visible 对话。
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// `with_session_store` 创建带持久化能力的 provider-visible 对话。
+    #[must_use = "creating a persisted provider conversation can fail and must be handled"]
     pub fn with_session_store(
         store: Arc<dyn SessionStore>,
         header_template: SessionHeader,
@@ -167,6 +169,7 @@ impl ProviderConversation {
     }
 
     /// `with_resolved_session_store` 使用调用方已显式解析的 session state 构造对话。
+    #[must_use = "restoring a persisted provider conversation can fail and must be handled"]
     pub fn with_resolved_session_store(
         store: Arc<dyn SessionStore>,
         header_template: SessionHeader,
@@ -222,6 +225,7 @@ impl ProviderConversation {
     }
 
     /// `truncate_after_user_turns` 保留指定数量的已提交 user turns。
+    #[must_use = "truncating provider history may require a persisted leaf update"]
     pub fn truncate_after_user_turns(
         &mut self,
         retained_user_turns: usize,
@@ -263,6 +267,7 @@ impl ProviderConversation {
     }
 
     /// `system_prompt` 返回当前生效的 system prompt。
+    #[must_use]
     pub fn system_prompt(&self) -> Option<&str> {
         self.system_prompt.as_deref()
     }
@@ -288,6 +293,7 @@ impl ProviderConversation {
     }
 
     /// `session_id` 返回当前持久化 session id。
+    #[must_use]
     pub fn session_id(&self) -> Option<&SessionId> {
         self.persistence
             .as_ref()
@@ -302,6 +308,7 @@ impl ProviderConversation {
     }
 
     /// `prepare_turn` 接受一个用户 turn，并构造完整执行请求。
+    #[must_use = "prepared turn requests must be submitted or explicitly discarded"]
     pub fn prepare_turn(
         &mut self,
         turn: &ConversationTurnRequest,
@@ -375,6 +382,7 @@ impl ProviderConversation {
     }
 
     /// `append_items` 追加 provider-visible 对话项。
+    #[must_use = "appending provider history can fail and must be handled"]
     pub fn append_items(
         &mut self,
         items: Vec<ConversationItem>,

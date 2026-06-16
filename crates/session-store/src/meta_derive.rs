@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use provider_protocol::Role;
 
 use crate::{
-    SESSION_MESSAGE_PREVIEW_CHAR_LIMIT, SESSION_TITLE_FALLBACK_CHAR_LIMIT, SessionEntry,
-    SessionEntryKind, SessionHeader, SessionMeta, SessionStoreError,
-    util::{normalize_project_dir, truncate_chars},
+    ProjectDir, SESSION_MESSAGE_PREVIEW_CHAR_LIMIT, SESSION_TITLE_FALLBACK_CHAR_LIMIT,
+    SessionEntry, SessionEntryKind, SessionHeader, SessionMeta, SessionStoreError,
+    util::truncate_chars,
 };
 
 #[derive(Default)]
@@ -86,7 +86,7 @@ impl SessionMetaDeriver {
 
         Ok(SessionMeta {
             session_id: header.session_id.clone(),
-            project_dir: normalize_project_dir(&header.work_dir),
+            project_dir: ProjectDir::from_work_dir(&header.work_dir),
             title,
             preview,
             first_user_preview,
@@ -98,7 +98,6 @@ impl SessionMetaDeriver {
             created_at,
             updated_at: self.updated_at.unwrap_or(created_at),
             git_head: header.git_head.clone(),
-            work_dir: header.work_dir.clone(),
             jsonl_path,
             size_bytes,
         })

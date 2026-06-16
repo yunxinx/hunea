@@ -2,12 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 use runtime_domain::session::SessionBranchSummary as DomainSessionBranchSummary;
 
-use crate::{ResolveError, SessionEntry};
+use crate::{ResolveError, SessionEntry, util::truncate_chars_with_ellipsis};
 
 use super::{
     preview::{
         SESSION_TREE_SUMMARY_CHAR_LIMIT, session_tree_row_kind, session_tree_row_preview_content,
-        single_line_display_text, truncate_chars, visible_descendant_row_kind,
+        single_line_display_text, visible_descendant_row_kind,
     },
     topology::{
         build_children_by_parent, build_entry_index, entry_is_in_subtree,
@@ -183,7 +183,10 @@ fn session_branch_summary(
         subtree_leaf_id: subtree_leaf.id.clone(),
         latest_row_id: latest_visible.id.clone(),
         kind,
-        display_summary: truncate_chars(&display_text, SESSION_TREE_SUMMARY_CHAR_LIMIT),
+        display_summary: truncate_chars_with_ellipsis(
+            &display_text,
+            SESSION_TREE_SUMMARY_CHAR_LIMIT,
+        ),
         preview_content,
         is_current,
         message_count,

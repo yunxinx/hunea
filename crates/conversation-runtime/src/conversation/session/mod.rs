@@ -566,7 +566,8 @@ mod tests {
         },
     };
     use session_store::{
-        LocalSessionStore, SessionHeader, SessionId, SessionStore, SessionStoreError,
+        LocalSessionStore, ProjectDir, SessionHeader, SessionId, SessionListOptions, SessionStore,
+        SessionStoreError,
     };
     use tokio::sync::mpsc as tokio_mpsc;
     use tokio_util::sync::CancellationToken;
@@ -879,8 +880,11 @@ mod tests {
             Some(ConversationEvent::Finished { .. })
         ));
 
-        let metas = run_store(store.list_sessions(work_dir.to_string_lossy().as_ref()))
-            .expect("session meta should list");
+        let metas = run_store(store.list_sessions(
+            &ProjectDir::from_work_dir(&work_dir),
+            SessionListOptions::default(),
+        ))
+        .expect("session meta should list");
         assert_eq!(metas.len(), 1);
         let resolved = run_store(store.resolve(&metas[0].session_id, None))
             .expect("resolved items should be readable");
@@ -1054,11 +1058,14 @@ mod tests {
         ))
         .expect("tool result item should persist");
 
-        let meta = run_store(store.list_sessions(work_dir.to_string_lossy().as_ref()))
-            .expect("session meta should list")
-            .into_iter()
-            .next()
-            .expect("session should exist");
+        let meta = run_store(store.list_sessions(
+            &ProjectDir::from_work_dir(&work_dir),
+            SessionListOptions::default(),
+        ))
+        .expect("session meta should list")
+        .into_iter()
+        .next()
+        .expect("session should exist");
         let restored =
             run_store(store.load_session(&meta.session_id, None)).expect("session should load");
 

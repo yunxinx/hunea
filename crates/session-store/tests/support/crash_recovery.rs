@@ -7,7 +7,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-use session_store::{SessionEntry, SessionId, encode_project_dir, session_filename};
+use session_store::{ProjectDir, SessionEntry, SessionId, session_filename};
 
 use super::common::TestSessionRoot;
 
@@ -47,7 +47,7 @@ pub fn write_session_fixture(
     let session_path = root
         .path()
         .join("sessions")
-        .join(encode_project_dir(work_dir))
+        .join(ProjectDir::from_work_dir(work_dir).encoded_session_dir())
         .join(session_filename(session_id));
     let parent_dir = session_path
         .parent()

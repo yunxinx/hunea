@@ -27,8 +27,9 @@ use runtime_domain::{
     },
 };
 use session_store::{
-    ConfigSnapshot, InMemorySessionStore, ResolvedSessionState, SessionHeader, SessionId,
-    SessionMeta, SessionStore, SessionStoreError, SessionTreeSnapshot,
+    ConfigSnapshot, InMemorySessionStore, LocalSessionStore, ProjectDir, ResolvedSessionState,
+    SessionEntry, SessionEntryKind, SessionHeader, SessionId, SessionListOptions, SessionMeta,
+    SessionStore, SessionStoreError, SessionTreeSnapshot, session_filename,
 };
 use terminal_ui::RuntimeCoordinator;
 
@@ -44,7 +45,7 @@ struct LoadCountingSessionStore {
 struct DelayedListSessionStore {
     inner: Arc<InMemorySessionStore>,
     list_started: Mutex<Option<mpsc::Sender<()>>>,
-    list_release: Mutex<mpsc::Receiver<()>>,
+    list_release: Mutex<Option<mpsc::Receiver<()>>>,
 }
 
 impl DelayedListSessionStore {
@@ -56,7 +57,7 @@ impl DelayedListSessionStore {
         Self {
             inner,
             list_started: Mutex::new(Some(list_started)),
-            list_release: Mutex::new(list_release),
+            list_release: Mutex::new(Some(list_release)),
         }
     }
 }
@@ -169,7 +170,8 @@ impl SessionStore for DelayedListSessionStore {
 
     fn list_sessions<'a>(
         &'a self,
-        project_dir: &'a str,
+        project_dir: &'a ProjectDir,
+        options: SessionListOptions,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<SessionMeta>, SessionStoreError>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -180,13 +182,15 @@ impl SessionStore for DelayedListSessionStore {
                 .take()
             {
                 let _ = sender.send(());
+                let receiver = self
+                    .list_release
+                    .lock()
+                    .expect("list_release mutex should not be poisoned")
+                    .take()
+                    .expect("test should provide a first-list release signal");
+                receiver.recv().expect("test should release delayed list");
             }
-            self.list_release
-                .lock()
-                .expect("list_release mutex should not be poisoned")
-                .recv()
-                .expect("test should release delayed list");
-            self.inner.list_sessions(project_dir).await
+            self.inner.list_sessions(project_dir, options).await
         })
     }
 
@@ -326,10 +330,11 @@ impl SessionStore for LoadCountingSessionStore {
 
     fn list_sessions<'a>(
         &'a self,
-        project_dir: &'a str,
+        project_dir: &'a ProjectDir,
+        options: SessionListOptions,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<SessionMeta>, SessionStoreError>> + Send + 'a>>
     {
-        self.inner.list_sessions(project_dir)
+        self.inner.list_sessions(project_dir, options)
     }
 
     fn get_session_meta<'a>(
@@ -486,10 +491,11 @@ impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
 
     fn list_sessions<'a>(
         &'a self,
-        project_dir: &'a str,
+        project_dir: &'a ProjectDir,
+        options: SessionListOptions,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<SessionMeta>, SessionStoreError>> + Send + 'a>>
     {
-        self.inner.list_sessions(project_dir)
+        self.inner.list_sessions(project_dir, options)
     }
 
     fn get_session_meta<'a>(
@@ -786,6 +792,101 @@ fn list_sessions_builds_rows_from_metadata_without_loading_full_sessions() {
     assert_eq!(rows[0].first_user_message, "metadata first user");
     assert_eq!(rows[0].last_assistant_message, "metadata assistant answer");
     cleanup(&work_dir);
+}
+
+#[test]
+fn list_sessions_auto_repairs_external_jsonl_after_fast_sqlite_rows() {
+    let root = temp_test_dir("list-sessions-auto-repair-root");
+    let work_dir = root.join("workspace");
+    fs::create_dir_all(&work_dir).expect("workspace should be creatable");
+    let store_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("session store runtime should start");
+    let store = Arc::new(
+        store_runtime
+            .block_on(LocalSessionStore::open_in(root.clone()))
+            .expect("local store should open"),
+    );
+    let cached_header = SessionHeader {
+        session_id: SessionId::new(),
+        work_dir: work_dir.clone(),
+        session_name: Some("cached session".to_string()),
+        initial_model: "qwen3".to_string(),
+        git_head: None,
+        cli_version: None,
+    };
+    store_runtime
+        .block_on(async {
+            let session_id = store.create_session(cached_header.clone()).await?;
+            store
+                .append(
+                    &session_id,
+                    ConversationItem::text(Role::User, "cached user"),
+                )
+                .await?;
+            store.flush_all().await?;
+            Ok::<(), SessionStoreError>(())
+        })
+        .expect("cached session should persist");
+    let external_session_id = SessionId::new();
+    write_external_session_jsonl(
+        &root,
+        &work_dir,
+        &external_session_id,
+        "external user from jsonl",
+    );
+    let external_session_key = external_session_id.to_string();
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::ListSessions)
+        .expect("list sessions should start");
+
+    let mut loaded_rows = wait_for_runtime_events(&mut coordinator, "initial session list rows")
+        .into_iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::SessionListLoaded { rows } => Some(rows),
+            _ => None,
+        });
+    let initial_rows = loaded_rows
+        .next()
+        .expect("first event should include session rows");
+    assert!(
+        initial_rows
+            .iter()
+            .any(|row| row.first_user_message == "cached user"),
+        "first event should show fast SQLite rows"
+    );
+    assert!(
+        !initial_rows
+            .iter()
+            .any(|row| row.session_id == external_session_key),
+        "external JSONL should not be visible before background repair"
+    );
+
+    let repaired_rows = loaded_rows
+        .next()
+        .unwrap_or_else(|| wait_for_session_list_rows(&mut coordinator));
+    assert!(
+        repaired_rows
+            .iter()
+            .any(|row| row.session_id == external_session_key
+                && row.first_user_message == "external user from jsonl"),
+        "background repair should refresh the picker rows with external JSONL sessions"
+    );
+    cleanup(&root);
 }
 
 #[test]
@@ -2334,6 +2435,46 @@ fn temp_test_dir(prefix: &str) -> PathBuf {
 
 fn cleanup(path: &Path) {
     let _ = fs::remove_dir_all(path);
+}
+
+fn write_external_session_jsonl(
+    hunea_dir: &Path,
+    work_dir: &Path,
+    session_id: &SessionId,
+    user_text: &str,
+) {
+    let project_dir = hunea_dir
+        .join("sessions")
+        .join(ProjectDir::from_work_dir(work_dir).encoded_session_dir());
+    fs::create_dir_all(&project_dir).expect("external project session dir should be creatable");
+    let path = project_dir.join(session_filename(session_id));
+    let entries = [
+        SessionEntry {
+            id: "header".to_string(),
+            parent_id: None,
+            timestamp: 1_717_514_800_000,
+            kind: SessionEntryKind::Header(SessionHeader {
+                session_id: session_id.clone(),
+                work_dir: work_dir.to_path_buf(),
+                session_name: Some("external session".to_string()),
+                initial_model: "qwen3".to_string(),
+                git_head: None,
+                cli_version: None,
+            }),
+        },
+        SessionEntry {
+            id: "user-1".to_string(),
+            parent_id: Some("header".to_string()),
+            timestamp: 1_717_514_800_100,
+            kind: SessionEntryKind::Item(ConversationItem::text(Role::User, user_text)),
+        },
+    ];
+    let mut contents = String::new();
+    for entry in entries {
+        contents.push_str(&serde_json::to_string(&entry).expect("entry should serialize"));
+        contents.push('\n');
+    }
+    fs::write(path, contents).expect("external session jsonl should be writable");
 }
 
 fn wait_for_session_list_rows(coordinator: &mut AppRuntimeCoordinator) -> Vec<SessionPickerRow> {

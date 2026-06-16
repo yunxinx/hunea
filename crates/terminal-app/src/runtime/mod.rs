@@ -1,5 +1,7 @@
+mod conversation_commands;
 mod event_mapping;
 mod managed_search_authorization;
+mod session_commands;
 mod session_worker;
 
 use std::{path::PathBuf, sync::Arc};
@@ -11,9 +13,9 @@ use runtime_domain::{
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     request_policy::RuntimeRequestPolicy,
     session::{
-        ConversationEvent, ConversationTurnRequest, RuntimeCommand, RuntimeCommandReceipt,
-        RuntimeEvent, RuntimeTarget, SessionBranchTreePayload, SessionPickerRow,
-        SessionPreviewPayload, SessionResumePayload, SessionTreePayload, SessionTreeRow,
+        ConversationEvent, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
+        SessionBranchTreePayload, SessionPickerRow, SessionPreviewPayload, SessionResumePayload,
+        SessionTreePayload, SessionTreeRow,
     },
 };
 use session_store::{
@@ -89,25 +91,7 @@ impl AppRuntimeCoordinator {
             }
             RuntimeCommand::TruncateConversation {
                 retained_user_turns,
-            } => {
-                if self.conversation_worker.is_running() {
-                    return Err(
-                        "Cannot truncate provider conversation while a request is running"
-                            .to_string(),
-                    );
-                }
-                self.ensure_session_mutation_available("truncate conversation")?;
-                if let Some((session_id, leaf_id)) = self
-                    .provider_conversation
-                    .truncate_after_user_turns(retained_user_turns)
-                    .map_err(|error| error.to_string())?
-                {
-                    let store = self.session_store()?;
-                    self.session_store_worker
-                        .set_leaf(store, session_id, leaf_id)?;
-                }
-                Ok(RuntimeCommandReceipt::Accepted)
-            }
+            } => self.truncate_conversation(retained_user_turns),
             RuntimeCommand::Interrupt { target } => self.interrupt_runtime(target),
             RuntimeCommand::RespondPermission {
                 target,
@@ -142,143 +126,6 @@ impl AppRuntimeCoordinator {
         }
     }
 
-    fn list_sessions(&mut self) -> Result<RuntimeCommandReceipt, String> {
-        let store = self.session_store()?;
-        let header = self.session_header()?;
-        let project_dir = header.work_dir.to_string_lossy().to_string();
-        let active_session_id = self
-            .provider_conversation
-            .session_id()
-            .cloned()
-            .or(Some(header.session_id));
-        self.session_store_worker
-            .list_sessions(store, project_dir, active_session_id)?;
-        Ok(RuntimeCommandReceipt::Accepted)
-    }
-
-    fn resume_session(&mut self, session_id: &str) -> Result<RuntimeCommandReceipt, String> {
-        if self.conversation_worker.is_running() {
-            return Err("Cannot resume session while a request is running".to_string());
-        }
-        self.ensure_session_mutation_available("resume session")?;
-
-        let session_id = session_id
-            .parse::<SessionId>()
-            .map_err(|error| format!("Invalid session id: {error}"))?;
-        let store = self.session_store()?;
-        let header = self.session_header()?;
-        self.session_store_worker
-            .resume_session(store, header, session_id)?;
-        Ok(RuntimeCommandReceipt::Accepted)
-    }
-
-    fn load_session_preview(&mut self, session_id: &str) -> Result<RuntimeCommandReceipt, String> {
-        let session_id = session_id
-            .parse::<SessionId>()
-            .map_err(|error| format!("Invalid session id: {error}"))?;
-        let store = self.session_store()?;
-        self.session_store_worker
-            .load_session_preview(store, session_id)?;
-        Ok(RuntimeCommandReceipt::Accepted)
-    }
-
-    fn load_entry_tree(&mut self) -> Result<RuntimeCommandReceipt, String> {
-        let Some(session_id) = self.provider_conversation.session_id().cloned() else {
-            if self.provider_conversation.is_history_empty() {
-                self.pending_runtime_events
-                    .push(RuntimeEvent::SessionTreeLoaded {
-                        payload: SessionTreePayload {
-                            rows: Vec::new(),
-                            current_row_id: None,
-                        },
-                    });
-                return Ok(RuntimeCommandReceipt::Accepted);
-            }
-            return Err("No active persisted session to show tree".to_string());
-        };
-        let store = self.session_store()?;
-        self.session_store_worker
-            .load_entry_tree(store, session_id)?;
-        Ok(RuntimeCommandReceipt::Accepted)
-    }
-
-    fn load_branch_preview(
-        &mut self,
-        branch_row_id: &str,
-    ) -> Result<RuntimeCommandReceipt, String> {
-        let session_id = self
-            .provider_conversation
-            .session_id()
-            .cloned()
-            .ok_or_else(|| "No active persisted session to preview".to_string())?;
-        let store = self.session_store()?;
-        self.session_store_worker.load_branch_preview(
-            store,
-            session_id,
-            branch_row_id.to_string(),
-        )?;
-        Ok(RuntimeCommandReceipt::Accepted)
-    }
-
-    fn load_branch_tree(&mut self) -> Result<RuntimeCommandReceipt, String> {
-        let Some(session_id) = self.provider_conversation.session_id().cloned() else {
-            if self.provider_conversation.is_history_empty() {
-                self.pending_runtime_events
-                    .push(RuntimeEvent::SessionBranchTreeLoaded {
-                        payload: SessionBranchTreePayload {
-                            nodes: Vec::new(),
-                            current_branch_row_id: None,
-                            total_message_count: 0,
-                        },
-                    });
-                return Ok(RuntimeCommandReceipt::Accepted);
-            }
-            return Err("No active persisted session to show branch tree".to_string());
-        };
-        let store = self.session_store()?;
-        self.session_store_worker
-            .load_branch_tree(store, session_id)?;
-        Ok(RuntimeCommandReceipt::Accepted)
-    }
-
-    fn switch_branch(&mut self, leaf_id: &str) -> Result<RuntimeCommandReceipt, String> {
-        if self.conversation_worker.is_running() {
-            return Err("Cannot switch branch while a request is running".to_string());
-        }
-        self.ensure_session_mutation_available("switch branch")?;
-        let session_id = self
-            .provider_conversation
-            .session_id()
-            .cloned()
-            .ok_or_else(|| "No active persisted session to switch branch".to_string())?;
-        let store = self.session_store()?;
-        let header = self.session_header()?;
-        self.session_store_worker
-            .switch_branch(store, header, session_id, leaf_id.to_string())?;
-        Ok(RuntimeCommandReceipt::Accepted)
-    }
-
-    fn select_entry_rewind(&mut self, entry_id: &str) -> Result<RuntimeCommandReceipt, String> {
-        if self.conversation_worker.is_running() {
-            return Err("Cannot rewind session while a request is running".to_string());
-        }
-        self.ensure_session_mutation_available("rewind session")?;
-        let session_id = self
-            .provider_conversation
-            .session_id()
-            .cloned()
-            .ok_or_else(|| "No active persisted session to rewind".to_string())?;
-        let store = self.session_store()?;
-        let header = self.session_header()?;
-        self.session_store_worker.select_entry_rewind(
-            store,
-            header,
-            session_id,
-            entry_id.to_string(),
-        )?;
-        Ok(RuntimeCommandReceipt::Accepted)
-    }
-
     fn session_store(&self) -> Result<Arc<dyn SessionStore>, String> {
         self.options
             .session_store
@@ -304,101 +151,12 @@ impl AppRuntimeCoordinator {
         Ok(())
     }
 
-    fn respond_conversation_permission(
-        &mut self,
-        target: Option<&RuntimeTarget>,
-        request_id: &str,
-        option_id: Option<String>,
-    ) -> Result<(), String> {
-        ensure_conversation_target(self.conversation_worker.current_target(), target)?;
-        self.conversation_worker
-            .respond_permission(request_id, option_id)
-    }
-
-    fn respond_permission(
-        &mut self,
-        target: Option<&RuntimeTarget>,
-        request_id: &str,
-        option_id: Option<String>,
-    ) -> Result<(), String> {
-        match target {
-            Some(RuntimeTarget::Provider(_)) => {
-                self.respond_conversation_permission(target, request_id, option_id)
-            }
-            None if self.conversation_worker.is_running() => {
-                self.respond_conversation_permission(None, request_id, option_id)
-            }
-            None => Err("Conversation worker is not running".to_string()),
-        }
-    }
-
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
         self.conversation_worker.reset_after_clear();
         if let Some(store) = self.options.session_store.as_ref() {
             self.session_store_worker.flush_all(store.clone())?;
         }
         Ok(())
-    }
-
-    fn start_conversation_turn(
-        &mut self,
-        target: RuntimeTarget,
-        request: ConversationTurnRequest,
-    ) -> Result<RuntimeCommandReceipt, String> {
-        let request_target = request.target();
-        if target != request_target {
-            return Err(format!(
-                "Conversation target does not match request: {}",
-                target.display_label()
-            ));
-        }
-        if self.conversation_worker.is_running() {
-            return Err("Conversation request is already running".to_string());
-        }
-
-        let activity_label = request.model_id().to_string();
-        let prepared_request = self
-            .provider_conversation
-            .prepare_turn(&request)
-            .map_err(|error| error.to_string())?;
-        self.conversation_worker.start(
-            prepared_request,
-            self.workspace_tools.clone(),
-            self.options.runtime_request_policy.clone(),
-        );
-        Ok(RuntimeCommandReceipt::ConversationStarted { activity_label })
-    }
-
-    fn interrupt_runtime(
-        &mut self,
-        target: Option<RuntimeTarget>,
-    ) -> Result<RuntimeCommandReceipt, String> {
-        match target {
-            Some(target @ RuntimeTarget::Provider(_)) => {
-                self.interrupt_conversation_worker(Some(&target))
-            }
-            None => {
-                if self.conversation_worker.is_running() {
-                    return self.interrupt_conversation_worker(None);
-                }
-                Ok(RuntimeCommandReceipt::Accepted)
-            }
-        }
-    }
-
-    fn interrupt_conversation_worker(
-        &mut self,
-        command_target: Option<&RuntimeTarget>,
-    ) -> Result<RuntimeCommandReceipt, String> {
-        let active_target = self.conversation_worker.current_target().cloned();
-        ensure_conversation_target(active_target.as_ref(), command_target)?;
-        if self.conversation_worker.interrupt() {
-            Ok(RuntimeCommandReceipt::Interrupted {
-                target: active_target,
-            })
-        } else {
-            Ok(RuntimeCommandReceipt::Accepted)
-        }
     }
 }
 
@@ -419,7 +177,7 @@ fn session_picker_row_from_meta(meta: SessionMeta) -> SessionPickerRow {
         first_user_message,
         last_assistant_message,
         updated_at_ms: meta.updated_at,
-        work_dir: meta.work_dir.display().to_string(),
+        work_dir: meta.project_dir.display().to_string(),
         size_bytes: meta.size_bytes,
         model: meta.model,
     }
@@ -594,7 +352,7 @@ impl AppRuntimeCoordinator {
     fn drain_session_store_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
         for event in self.session_store_worker.drain_events() {
             match event {
-                SessionStoreWorkerEvent::Runtime(event) => events.push(event),
+                SessionStoreWorkerEvent::Runtime { event, .. } => events.push(event),
                 SessionStoreWorkerEvent::Restored {
                     conversation,
                     payload,

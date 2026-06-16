@@ -3130,6 +3130,7 @@ dependencies = [
  "crossterm",
  "provider-protocol",
  "runtime-domain",
+ "serde_json",
  "session-store",
  "terminal-ui",
  "tokio",

@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{ResolveError, SessionEntry, SessionEntryKind};
+use crate::{ResolveError, SessionEntry, SessionEntryKind, util::truncate_chars_with_ellipsis};
 
 use super::{
     branch::session_tree_branch_choices_by_parent,
     preview::{
         SESSION_TREE_SUMMARY_CHAR_LIMIT, session_tree_row_kind, session_tree_row_preview_content,
-        session_tree_row_preview_replay_items, single_line_display_text, truncate_chars,
+        session_tree_row_preview_replay_items, single_line_display_text,
     },
     rewind::{
         restore_target_for_visible_row, rewind_target_for_tree_row,
@@ -206,7 +206,7 @@ fn session_tree_snapshot_row(
     let preview_replay_items =
         session_tree_row_preview_replay_items(entry, kind, children_by_parent);
     let display_text = single_line_display_text(&preview_content);
-    let summary = truncate_chars(&display_text, SESSION_TREE_SUMMARY_CHAR_LIMIT);
+    let summary = truncate_chars_with_ellipsis(&display_text, SESSION_TREE_SUMMARY_CHAR_LIMIT);
     let parent_id = match nearest_visible_parent_id(entry, by_id, visible_entry_ids) {
         Ok(parent_id) => parent_id,
         Err(error) => return Some(Err(error)),

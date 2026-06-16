@@ -16,8 +16,8 @@ use crash_recovery_support::{
 };
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
 use session_store::{
-    ConfigSnapshot, SessionEntry, SessionEntryKind, SessionHeader, SessionId, SessionMeta,
-    SessionStore,
+    ConfigSnapshot, ProjectDir, SessionEntry, SessionEntryKind, SessionHeader, SessionId,
+    SessionListOptions, SessionMeta, SessionStore,
 };
 
 #[tokio::test]
@@ -174,7 +174,10 @@ async fn local_store_rebuilds_sqlite_index_from_jsonl_after_index_deletion() {
 
         session_meta_map(
             store
-                .list_sessions(work_dir.to_string_lossy().as_ref())
+                .list_sessions(
+                    &ProjectDir::from_work_dir(&work_dir),
+                    SessionListOptions::default(),
+                )
                 .await
                 .expect("sessions should list before index deletion"),
         )
@@ -185,7 +188,10 @@ async fn local_store_rebuilds_sqlite_index_from_jsonl_after_index_deletion() {
     let reopened_store = open_store(&root).await;
     let after_restart = session_meta_map(
         reopened_store
-            .list_sessions(work_dir.to_string_lossy().as_ref())
+            .list_sessions(
+                &ProjectDir::from_work_dir(&work_dir),
+                SessionListOptions::default(),
+            )
             .await
             .expect("sessions should list after backfill"),
     );
@@ -516,7 +522,10 @@ async fn local_store_meets_phase2_recovery_performance_targets() {
     for _ in 0..7 {
         let list_started = Instant::now();
         listed = list_store
-            .list_sessions(list_work_dir.to_string_lossy().as_ref())
+            .list_sessions(
+                &ProjectDir::from_work_dir(&list_work_dir),
+                SessionListOptions::default(),
+            )
             .await
             .expect("benchmark sessions should list");
         list_samples.push(list_started.elapsed());
@@ -546,7 +555,7 @@ fn session_meta_map(metas: Vec<SessionMeta>) -> BTreeMap<String, SessionMetaSumm
                     model: meta.model,
                     created_at: meta.created_at,
                     updated_at: meta.updated_at,
-                    work_dir: meta.work_dir,
+                    work_dir: meta.project_dir.as_path().to_path_buf(),
                     jsonl_path: meta.jsonl_path,
                 },
             )

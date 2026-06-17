@@ -21,12 +21,6 @@ impl Model {
         };
         let current_row_id = payload.current_row_id;
         let previous_rows = std::mem::take(&mut state.rows);
-        let previous_selected_ids = state
-            .selected_row_indices
-            .iter()
-            .filter_map(|row_index| previous_rows.get(*row_index))
-            .map(|row| row.row_id.as_str())
-            .collect::<Vec<_>>();
         state.rows = payload
             .rows
             .into_iter()
@@ -35,7 +29,7 @@ impl Model {
         state.is_loading = false;
         state.error = None;
         state.preview = None;
-        state.remap_selected_rows_by_id(previous_selected_ids);
+        state.remap_selected_rows_from_previous_rows(&previous_rows);
         if !state.select_row_by_id(current_row_id.as_deref()) {
             state.select_latest_row();
         }

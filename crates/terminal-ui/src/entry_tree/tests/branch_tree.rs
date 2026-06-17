@@ -228,6 +228,25 @@ fn entry_tree_branch_tree_enter_switches_non_current_branch() {
 }
 
 #[test]
+fn late_branch_tree_payload_after_exit_does_not_reopen_branch_tree() {
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![numbered_tree_row(0)],
+        current_row_id: Some("row-0".to_string()),
+    });
+    model.open_entry_tree_branch_tree_loading();
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert!(!model.entry_tree_branch_tree_active());
+
+    model.apply_entry_tree_branch_tree_payload(branch_tree_payload());
+
+    assert!(model.entry_tree_active());
+    assert!(!model.entry_tree_branch_tree_active());
+}
+
+#[test]
 fn entry_tree_branch_tree_left_click_selects_visible_branch_node() {
     let mut model = ready_model();
     model.set_window(112, 14);

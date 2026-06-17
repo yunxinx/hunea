@@ -389,7 +389,12 @@ impl Model {
         let Some(state) = self.entry_tree.as_mut() else {
             return;
         };
-        let mut preview = state.branch_preview.take().unwrap_or_default();
+        let Some(preview) = state.branch_preview.as_mut() else {
+            return;
+        };
+        if !preview.is_loading {
+            return;
+        }
         let current_row_id = payload.current_row_id;
         preview.rows = payload.rows;
         preview.is_loading = false;
@@ -398,7 +403,6 @@ impl Model {
         if !preview.select_row_by_id(current_row_id.as_deref()) {
             preview.select_latest_row();
         }
-        state.branch_preview = Some(preview);
     }
 
     pub(crate) fn entry_tree_branch_preview_active(&self) -> bool {
@@ -496,19 +500,25 @@ impl Model {
         let Some(state) = self.entry_tree.as_mut() else {
             return;
         };
-        let mut branch_tree = state.branch_tree.take().unwrap_or_default();
-        branch_tree.nodes = branch_tree_display_order_nodes(payload.nodes);
-        branch_tree.selected = 0;
-        branch_tree.is_loading = false;
-        branch_tree.metadata_now_ms = current_unix_timestamp_ms();
-        branch_tree.current_branch_row_id = payload.current_branch_row_id;
-        branch_tree.total_message_count = payload.total_message_count;
-        branch_tree.error = None;
-        branch_tree.select_current_or_first();
+        {
+            let Some(branch_tree) = state.branch_tree.as_mut() else {
+                return;
+            };
+            if !branch_tree.is_loading {
+                return;
+            }
+            branch_tree.nodes = branch_tree_display_order_nodes(payload.nodes);
+            branch_tree.selected = 0;
+            branch_tree.is_loading = false;
+            branch_tree.metadata_now_ms = current_unix_timestamp_ms();
+            branch_tree.current_branch_row_id = payload.current_branch_row_id;
+            branch_tree.total_message_count = payload.total_message_count;
+            branch_tree.error = None;
+            branch_tree.select_current_or_first();
+        }
         state.preview = None;
         state.branch_picker = None;
         state.branch_preview = None;
-        state.branch_tree = Some(branch_tree);
     }
 
     pub(crate) fn entry_tree_branch_tree_active(&self) -> bool {

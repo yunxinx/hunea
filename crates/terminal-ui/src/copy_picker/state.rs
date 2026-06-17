@@ -117,19 +117,23 @@ impl CopyPickerState {
         self.selected_row_indices.contains(&row_index)
     }
 
-    pub(super) fn remap_selected_rows_by_id<'a>(
+    pub(super) fn remap_selected_rows_from_previous_rows(
         &mut self,
-        previous_selected_ids: impl IntoIterator<Item = &'a str>,
+        previous_rows: &[CopyPickerRow],
     ) {
-        let previous_selected_ids = previous_selected_ids.into_iter().collect::<Vec<_>>();
+        let previous_selected_ids = self
+            .selected_row_indices
+            .iter()
+            .filter_map(|row_index| previous_rows.get(*row_index))
+            .map(|row| row.row_id.as_str())
+            .collect::<BTreeSet<_>>();
         self.selected_row_indices = self
             .rows
             .iter()
             .enumerate()
             .filter_map(|(index, row)| {
                 previous_selected_ids
-                    .iter()
-                    .any(|row_id| *row_id == row.row_id)
+                    .contains(row.row_id.as_str())
                     .then_some(index)
             })
             .collect();

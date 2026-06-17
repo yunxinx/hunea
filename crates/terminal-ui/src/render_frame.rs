@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use ratatui::{
     buffer::Buffer,
     layout::{Position, Rect},
@@ -8,14 +10,16 @@ use ratatui::{
 pub(crate) struct RenderFrame<'a> {
     area: Rect,
     buffer: &'a mut Buffer,
+    now: Instant,
     cursor_position: Option<Position>,
 }
 
 impl<'a> RenderFrame<'a> {
-    pub(crate) fn new(area: Rect, buffer: &'a mut Buffer) -> Self {
+    pub(crate) fn new_at(now: Instant, area: Rect, buffer: &'a mut Buffer) -> Self {
         Self {
             area,
             buffer,
+            now,
             cursor_position: None,
         }
     }
@@ -30,6 +34,10 @@ impl<'a> RenderFrame<'a> {
 
     pub(crate) fn buffer_mut(&mut self) -> &mut Buffer {
         self.buffer
+    }
+
+    pub(crate) const fn now(&self) -> Instant {
+        self.now
     }
 
     pub(crate) fn set_cursor_position<P: Into<Position>>(&mut self, position: P) {

@@ -4,6 +4,7 @@ use runtime_domain::session::SessionPreviewPayload;
 
 use crate::{
     AppEffect, Model,
+    overlay_key_result::OverlayKeyResult,
     render_frame::RenderFrame,
     transcript::{
         Transcript, latest_preview_offset as latest_session_preview_offset,
@@ -65,37 +66,37 @@ impl Model {
         self.session_preview = None;
     }
 
-    pub(crate) fn handle_session_preview_key(
-        &mut self,
-        key: KeyEvent,
-    ) -> Option<Option<AppEffect>> {
+    pub(crate) fn handle_session_preview_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
         if !self.session_preview_active() {
-            return None;
+            return OverlayKeyResult::Ignored;
         }
 
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
-                let session_id = self
+                let Some(session_id) = self
                     .session_preview
                     .as_ref()
-                    .map(|preview| preview.session_id.clone())?;
+                    .map(|preview| preview.session_id.clone())
+                else {
+                    return OverlayKeyResult::Ignored;
+                };
                 self.close_session_preview();
                 self.session_picker = None;
-                Some(Some(AppEffect::ResumeSession { session_id }))
+                OverlayKeyResult::Effect(AppEffect::ResumeSession { session_id })
             }
             KeyCode::Esc | KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 self.close_session_preview();
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Left | KeyCode::Up | KeyCode::Char('h') if key.modifiers.is_empty() => {
                 self.move_session_preview_page(-1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Right | KeyCode::Down | KeyCode::Char('l') if key.modifiers.is_empty() => {
                 self.move_session_preview_page(1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
-            _ => Some(None),
+            _ => OverlayKeyResult::Handled,
         }
     }
 

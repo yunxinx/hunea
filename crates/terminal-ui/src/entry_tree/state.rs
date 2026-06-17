@@ -1,6 +1,9 @@
 use runtime_domain::session::{SessionBranchTreeNode, SessionTreeBranchChoice, SessionTreeRow};
 
-use crate::{transcript::Transcript, transcript_overlay::TranscriptOverlayState};
+use crate::{
+    list_selection::{ListNavigationDirection, PagedSelection, VisibleWindowSelection},
+    transcript_preview::TranscriptPreviewState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct EntryTreeState {
@@ -87,24 +90,13 @@ impl Default for EntryTreeBranchPreviewState {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct EntryTreePreviewState {
-    pub(super) transcript: Transcript,
-    pub(super) overlay: TranscriptOverlayState,
-    pub(super) is_following_bottom: bool,
-}
-
-impl PartialEq for EntryTreePreviewState {
-    fn eq(&self, other: &Self) -> bool {
-        self.transcript == other.transcript
-            && self.overlay == other.overlay
-            && self.is_following_bottom == other.is_following_bottom
-    }
-}
-
-impl Eq for EntryTreePreviewState {}
+pub(super) type EntryTreePreviewState = TranscriptPreviewState;
 
 impl EntryTreeState {
+    fn selection(&self) -> PagedSelection {
+        PagedSelection::new(self.selected, self.rows.len())
+    }
+
     pub(super) fn select_latest_row(&mut self) {
         self.selected = self.rows.len().saturating_sub(1);
     }
@@ -120,35 +112,12 @@ impl EntryTreeState {
         true
     }
 
-    pub(super) fn move_selection(&mut self, direction: isize) {
-        if self.rows.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let last = self.rows.len().saturating_sub(1);
-        self.selected = if direction.is_negative() {
-            self.selected.saturating_sub(direction.unsigned_abs())
-        } else {
-            self.selected.saturating_add(direction as usize).min(last)
-        };
+    pub(super) fn move_selection(&mut self, direction: ListNavigationDirection) {
+        self.selected = self.selection().move_selection(direction);
     }
 
-    pub(super) fn move_page(&mut self, direction: isize, page_size: usize) {
-        if self.rows.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let page_size = page_size.max(1);
-        let current_page = self.selected / page_size;
-        let last_page = self.rows.len().saturating_sub(1) / page_size;
-        let next_page = if direction.is_negative() {
-            current_page.saturating_sub(direction.unsigned_abs())
-        } else {
-            current_page
-                .saturating_add(direction as usize)
-                .min(last_page)
-        };
-        self.selected = (next_page * page_size).min(self.rows.len().saturating_sub(1));
+    pub(super) fn move_page(&mut self, direction: ListNavigationDirection, page_size: usize) {
+        self.selected = self.selection().move_page(direction, page_size);
     }
 
     pub(super) fn selected_row(&self) -> Option<&SessionTreeRow> {
@@ -156,8 +125,10 @@ impl EntryTreeState {
     }
 
     pub(super) fn select_visible_row(&mut self, page_size: usize, visible_offset: usize) -> bool {
-        let row_index = self.page_start(page_size).saturating_add(visible_offset);
-        if row_index < self.rows.len() {
+        if let Some(row_index) = self
+            .selection()
+            .select_visible_index(page_size, visible_offset)
+        {
             self.selected = row_index;
             true
         } else {
@@ -166,61 +137,78 @@ impl EntryTreeState {
     }
 
     pub(super) fn page_start(&self, page_size: usize) -> usize {
-        let page_size = page_size.max(1);
-        self.selected / page_size * page_size
+        self.selection().page_start(page_size)
     }
 
-    pub(super) fn page_indices(&self, page_size: usize) -> impl Iterator<Item = usize> + '_ {
-        let page_size = page_size.max(1);
-        (self.page_start(page_size)..self.rows.len()).take(page_size)
+    pub(super) fn page_indices(&self, page_size: usize) -> impl Iterator<Item = usize> {
+        self.selection().page_indices(page_size)
     }
 
     pub(super) fn page_number(&self, page_size: usize) -> usize {
-        if self.rows.is_empty() {
-            return 1;
-        }
-        self.selected / page_size.max(1) + 1
+        self.selection().page_number(page_size)
     }
 
     pub(super) fn page_count(&self, page_size: usize) -> usize {
-        if self.rows.is_empty() {
-            return 1;
-        }
-        self.rows.len().saturating_sub(1) / page_size.max(1) + 1
+        self.selection().page_count(page_size)
     }
 
     pub(super) fn selected_position_label(&self) -> usize {
-        if self.rows.is_empty() {
-            0
-        } else {
-            self.selected + 1
-        }
+        self.selection().selected_position_label()
     }
 }
 
 impl EntryTreeBranchPickerState {
+    fn selection(&self) -> VisibleWindowSelection {
+        VisibleWindowSelection::new(self.selected, self.items.len())
+    }
+
     pub(super) fn selected_item(&self) -> Option<&SessionTreeBranchChoice> {
         self.items.get(self.selected)
     }
 
-    pub(super) fn move_selection(&mut self, direction: isize, visible_rows: usize) {
+    pub(super) fn move_selection(
+        &mut self,
+        direction: ListNavigationDirection,
+        visible_rows: usize,
+    ) {
+        self.selected = self.selection().move_selection(direction);
         if self.items.is_empty() {
-            self.selected = 0;
             self.scroll = 0;
             return;
         }
-        let last = self.items.len() - 1;
-        self.selected = if direction.is_negative() {
-            self.selected.saturating_sub(direction.unsigned_abs())
-        } else {
-            self.selected.saturating_add(direction as usize).min(last)
+        self.scroll = self
+            .selection()
+            .scroll_start_for_selection(self.scroll, visible_rows);
+    }
+
+    pub(super) fn scroll_to_selection(&mut self, visible_rows: usize) {
+        self.scroll = self
+            .selection()
+            .scroll_start_for_selection(self.scroll, visible_rows);
+    }
+
+    pub(super) fn select_visible_item(
+        &mut self,
+        visible_offset: usize,
+        visible_rows: usize,
+    ) -> bool {
+        let Some(selected) = self
+            .selection()
+            .select_visible_index(self.scroll, visible_offset)
+        else {
+            return false;
         };
-        self.scroll =
-            clamp_branch_picker_scroll(self.scroll, self.selected, self.items.len(), visible_rows);
+        self.selected = selected;
+        self.scroll_to_selection(visible_rows);
+        true
     }
 }
 
 impl EntryTreeBranchTreeState {
+    fn selection(&self) -> PagedSelection {
+        PagedSelection::new(self.selected, self.nodes.len())
+    }
+
     pub(super) fn selected_node(&self) -> Option<&SessionBranchTreeNode> {
         self.nodes.get(self.selected)
     }
@@ -246,46 +234,19 @@ impl EntryTreeBranchTreeState {
         self.selected = 0;
     }
 
-    pub(super) fn move_selection(&mut self, direction: isize, visible_rows: usize) {
-        if self.nodes.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let last = self.nodes.len() - 1;
-        self.selected = if direction.is_negative() {
-            self.selected.saturating_sub(direction.unsigned_abs())
-        } else {
-            self.selected.saturating_add(direction as usize).min(last)
-        };
-        let page_size = visible_rows.max(1);
-        let page_start = self.page_start(page_size);
-        if self.selected < page_start || self.selected >= page_start.saturating_add(page_size) {
-            let next_page_start = self.selected / page_size * page_size;
-            self.selected = self.selected.max(next_page_start);
-        }
+    pub(super) fn move_selection(&mut self, direction: ListNavigationDirection) {
+        self.selected = self.selection().move_selection(direction);
     }
 
-    pub(super) fn move_page(&mut self, direction: isize, page_size: usize) {
-        if self.nodes.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let page_size = page_size.max(1);
-        let current_page = self.selected / page_size;
-        let last_page = self.nodes.len().saturating_sub(1) / page_size;
-        let next_page = if direction.is_negative() {
-            current_page.saturating_sub(direction.unsigned_abs())
-        } else {
-            current_page
-                .saturating_add(direction as usize)
-                .min(last_page)
-        };
-        self.selected = (next_page * page_size).min(self.nodes.len().saturating_sub(1));
+    pub(super) fn move_page(&mut self, direction: ListNavigationDirection, page_size: usize) {
+        self.selected = self.selection().move_page(direction, page_size);
     }
 
     pub(super) fn select_visible_node(&mut self, page_size: usize, visible_offset: usize) -> bool {
-        let node_index = self.page_start(page_size).saturating_add(visible_offset);
-        if node_index < self.nodes.len() {
+        if let Some(node_index) = self
+            .selection()
+            .select_visible_index(page_size, visible_offset)
+        {
             self.selected = node_index;
             true
         } else {
@@ -301,39 +262,31 @@ impl EntryTreeBranchTreeState {
     }
 
     pub(super) fn page_start(&self, page_size: usize) -> usize {
-        let page_size = page_size.max(1);
-        self.selected / page_size * page_size
+        self.selection().page_start(page_size)
     }
 
-    pub(super) fn page_indices(&self, page_size: usize) -> impl Iterator<Item = usize> + '_ {
-        let page_size = page_size.max(1);
-        (self.page_start(page_size)..self.nodes.len()).take(page_size)
+    pub(super) fn page_indices(&self, page_size: usize) -> impl Iterator<Item = usize> {
+        self.selection().page_indices(page_size)
     }
 
     pub(super) fn page_number(&self, page_size: usize) -> usize {
-        if self.nodes.is_empty() {
-            return 1;
-        }
-        self.selected / page_size.max(1) + 1
+        self.selection().page_number(page_size)
     }
 
     pub(super) fn page_count(&self, page_size: usize) -> usize {
-        if self.nodes.is_empty() {
-            return 1;
-        }
-        self.nodes.len().saturating_sub(1) / page_size.max(1) + 1
+        self.selection().page_count(page_size)
     }
 
     pub(super) fn selected_position_label(&self) -> usize {
-        if self.nodes.is_empty() {
-            0
-        } else {
-            self.selected + 1
-        }
+        self.selection().selected_position_label()
     }
 }
 
 impl EntryTreeBranchPreviewState {
+    fn selection(&self) -> PagedSelection {
+        PagedSelection::new(self.selected, self.rows.len())
+    }
+
     pub(super) fn select_latest_row(&mut self) {
         self.selected = self.rows.len().saturating_sub(1);
     }
@@ -349,42 +302,19 @@ impl EntryTreeBranchPreviewState {
         true
     }
 
-    pub(super) fn move_selection(&mut self, direction: isize) {
-        if self.rows.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let last = self.rows.len().saturating_sub(1);
-        self.selected = if direction.is_negative() {
-            self.selected.saturating_sub(direction.unsigned_abs())
-        } else {
-            self.selected.saturating_add(direction as usize).min(last)
-        };
+    pub(super) fn move_selection(&mut self, direction: ListNavigationDirection) {
+        self.selected = self.selection().move_selection(direction);
     }
 
-    pub(super) fn move_page(&mut self, direction: isize, page_size: usize) {
-        if self.rows.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let page_size = page_size.max(1);
-        let current_page = self.selected / page_size;
-        let last_page = self.rows.len().saturating_sub(1) / page_size;
-        let next_page = if direction.is_negative() {
-            current_page.saturating_sub(direction.unsigned_abs())
-        } else {
-            current_page
-                .saturating_add(direction as usize)
-                .min(last_page)
-        };
-        self.selected = (next_page * page_size).min(self.rows.len().saturating_sub(1));
+    pub(super) fn move_page(&mut self, direction: ListNavigationDirection, page_size: usize) {
+        self.selected = self.selection().move_page(direction, page_size);
     }
 
     pub(super) fn select_visible_row(&mut self, page_size: usize, visible_offset: usize) -> bool {
-        let page_size = page_size.max(1);
-        let page_start = self.selected / page_size * page_size;
-        let row_index = page_start.saturating_add(visible_offset);
-        if row_index < self.rows.len() {
+        if let Some(row_index) = self
+            .selection()
+            .select_visible_index(page_size, visible_offset)
+        {
             self.selected = row_index;
             true
         } else {
@@ -397,11 +327,7 @@ impl EntryTreeBranchPreviewState {
     }
 
     pub(super) fn selected_position_label(&self) -> usize {
-        if self.rows.is_empty() {
-            0
-        } else {
-            self.selected + 1
-        }
+        self.selection().selected_position_label()
     }
 }
 
@@ -426,40 +352,21 @@ impl EntryTreeBranchPreviewMetadata {
     }
 }
 
-pub(super) fn clamp_branch_picker_scroll(
-    scroll: usize,
-    selected: usize,
-    item_count: usize,
-    visible_rows: usize,
-) -> usize {
-    if item_count == 0 {
-        return 0;
-    }
-    let visible_rows = visible_rows.max(1);
-    let max_scroll = item_count.saturating_sub(visible_rows);
-    let mut scroll = scroll.min(max_scroll);
-    if selected < scroll {
-        scroll = selected;
-    }
-    if selected >= scroll.saturating_add(visible_rows) {
-        scroll = selected + 1 - visible_rows;
-    }
-    scroll.min(max_scroll)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::theme::default_palette;
+    use crate::transcript::Transcript;
+    use crate::transcript_overlay::TranscriptOverlayState;
+    use crate::transcript_preview::TranscriptPreviewState;
 
     #[test]
-    fn entry_tree_preview_equality_includes_bottom_follow_state() {
-        let following = EntryTreePreviewState {
+    fn transcript_preview_equality_includes_bottom_follow_state() {
+        let following = TranscriptPreviewState {
             transcript: Transcript::new(default_palette()),
             overlay: TranscriptOverlayState::new(),
             is_following_bottom: true,
         };
-        let manually_scrolled = EntryTreePreviewState {
+        let manually_scrolled = TranscriptPreviewState {
             is_following_bottom: false,
             ..following.clone()
         };

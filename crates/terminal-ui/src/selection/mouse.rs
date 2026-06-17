@@ -19,8 +19,10 @@ impl Model {
         column: u16,
         row: u16,
     ) -> Option<AppEffect> {
-        if let Some(effect) = self.handle_history_scroll_indicator_mouse_down(button, column, row) {
-            return effect;
+        let history_scroll_result =
+            self.handle_history_scroll_indicator_mouse_down(button, column, row);
+        if !history_scroll_result.is_ignored() {
+            return history_scroll_result.into_effect();
         }
 
         self.clear_history_scroll_indicator();

@@ -123,8 +123,6 @@ pub(crate) fn render_transcript_overlay_view(
         fill_empty_transcript_overlay_rows(frame, area, palette, area.y, content_bottom);
     }
 
-    overlay.scroll_offset = scroll_offset;
-
     if area.height >= 2 {
         let rule_y = area.y + area.height - 2;
         let rule_line = match options.progress_style {

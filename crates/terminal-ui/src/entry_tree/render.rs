@@ -22,53 +22,26 @@ impl Model {
             return;
         };
         frame.render_widget(Clear, area);
-        if area.is_empty() || area.height < ENTRY_TREE_CHROME_HEIGHT {
+        let Some(chrome) = fullscreen_list_chrome_rects(area) else {
             return;
-        }
-
-        let body_height = area.height.saturating_sub(ENTRY_TREE_CHROME_HEIGHT);
+        };
         let page_size = entry_tree_page_size_for_height(area.height);
-        let header_area = Rect::new(area.x, area.y, area.width, ENTRY_TREE_HEADER_HEIGHT);
-        let header_rule_area = Rect::new(
-            area.x,
-            area.y + ENTRY_TREE_HEADER_HEIGHT,
-            area.width,
-            ENTRY_TREE_HEADER_RULE_HEIGHT,
-        );
-        let body_area = Rect::new(
-            area.x,
-            area.y + ENTRY_TREE_HEADER_HEIGHT + ENTRY_TREE_HEADER_RULE_HEIGHT,
-            area.width,
-            body_height,
-        );
-        let page_rule_area = Rect::new(
-            area.x,
-            area.y
-                + area
-                    .height
-                    .saturating_sub(ENTRY_TREE_PAGE_RULE_HEIGHT + ENTRY_TREE_FOOTER_HEIGHT),
-            area.width,
-            ENTRY_TREE_PAGE_RULE_HEIGHT,
-        );
-        let footer_area = Rect::new(
-            area.x,
-            area.y + area.height.saturating_sub(ENTRY_TREE_FOOTER_HEIGHT),
-            area.width,
-            ENTRY_TREE_FOOTER_HEIGHT,
-        );
 
         frame.render_widget(
             Paragraph::new(self.entry_tree_header_line(state, usize::from(area.width))),
-            header_area,
+            chrome.header,
         );
         frame.render_widget(
             Paragraph::new(subtle_rule_line(usize::from(area.width), self.palette)),
-            header_rule_area,
+            chrome.header_rule,
         );
 
-        let lines =
-            self.entry_tree_body_lines(state, usize::from(area.width), usize::from(body_height));
-        frame.render_widget(EntryTreeWidget { lines: &lines }, body_area);
+        let lines = self.entry_tree_body_lines(
+            state,
+            usize::from(area.width),
+            usize::from(chrome.body.height),
+        );
+        frame.render_widget(EntryTreeWidget { lines: &lines }, chrome.body);
 
         frame.render_widget(
             Paragraph::new(build_page_rule(
@@ -77,7 +50,7 @@ impl Model {
                 state.page_count(page_size),
                 self.palette,
             )),
-            page_rule_area,
+            chrome.page_rule,
         );
         frame.render_widget(
             Paragraph::new(Line::styled(
@@ -92,7 +65,7 @@ impl Model {
                 ),
                 tertiary_text_style(self.palette).add_modifier(Modifier::ITALIC),
             )),
-            footer_area,
+            chrome.footer,
         );
 
         if state.branch_picker.is_some() {
@@ -175,7 +148,8 @@ impl Model {
         graph_line: EntryTreeGraphLine,
         is_selected: bool,
     ) -> Line<'static> {
-        let kind_prefix = entry_tree_kind_prefix(row.kind);
+        let kind_prefix =
+            session_tree_row_kind_prefix(row.kind, TreeRowKindPrefixAlignment::CenterTool);
         let left_padding = " ".repeat(ENTRY_TREE_BODY_HORIZONTAL_PADDING);
         let prefix_width =
             display_width(&left_padding) + graph_line.display_width() + display_width(&kind_prefix);
@@ -216,67 +190,38 @@ impl Model {
             return;
         };
         frame.render_widget(Clear, area);
-        if area.is_empty() || area.height < ENTRY_TREE_CHROME_HEIGHT {
+        let Some(chrome) = fullscreen_list_chrome_rects(area) else {
             return;
-        }
-
-        let body_height = area.height.saturating_sub(ENTRY_TREE_CHROME_HEIGHT);
+        };
         let page_size = entry_tree_branch_tree_page_size_for_height(area.height);
-        let header_area = Rect::new(area.x, area.y, area.width, ENTRY_TREE_HEADER_HEIGHT);
-        let header_rule_area = Rect::new(
-            area.x,
-            area.y + ENTRY_TREE_HEADER_HEIGHT,
-            area.width,
-            ENTRY_TREE_HEADER_RULE_HEIGHT,
-        );
-        let body_area = Rect::new(
-            area.x,
-            area.y + ENTRY_TREE_HEADER_HEIGHT + ENTRY_TREE_HEADER_RULE_HEIGHT,
-            area.width,
-            body_height,
-        );
-        let page_rule_area = Rect::new(
-            area.x,
-            area.y
-                + area
-                    .height
-                    .saturating_sub(ENTRY_TREE_PAGE_RULE_HEIGHT + ENTRY_TREE_FOOTER_HEIGHT),
-            area.width,
-            ENTRY_TREE_PAGE_RULE_HEIGHT,
-        );
-        let footer_area = Rect::new(
-            area.x,
-            area.y + area.height.saturating_sub(ENTRY_TREE_FOOTER_HEIGHT),
-            area.width,
-            ENTRY_TREE_FOOTER_HEIGHT,
-        );
 
         frame.render_widget(
             Paragraph::new(
                 self.entry_tree_branch_tree_header_line(branch_tree, usize::from(area.width)),
             ),
-            header_area,
+            chrome.header,
         );
         frame.render_widget(
             Paragraph::new(subtle_rule_line(usize::from(area.width), self.palette)),
-            header_rule_area,
+            chrome.header_rule,
         );
 
         let lines = self.entry_tree_branch_tree_body_lines(
             branch_tree,
             usize::from(area.width),
-            usize::from(body_height),
+            usize::from(chrome.body.height),
             page_size,
         );
-        frame.render_widget(EntryTreeWidget { lines: &lines }, body_area);
+        frame.render_widget(EntryTreeWidget { lines: &lines }, chrome.body);
         if let Some(selected_visible_row) = branch_tree.selected_visible_row(page_size) {
-            let selected_y = body_area
+            let selected_y = chrome
+                .body
                 .y
                 .saturating_add(1)
                 .saturating_add(u16::try_from(selected_visible_row).unwrap_or(u16::MAX));
-            if selected_y < body_area.bottom() {
+            if selected_y < chrome.body.bottom() {
                 frame.buffer_mut().set_style(
-                    Rect::new(body_area.x, selected_y, body_area.width, 1),
+                    Rect::new(chrome.body.x, selected_y, chrome.body.width, 1),
                     self.entry_tree_branch_picker_selected_style(),
                 );
             }
@@ -289,7 +234,7 @@ impl Model {
                 branch_tree.page_count(page_size),
                 self.palette,
             )),
-            page_rule_area,
+            chrome.page_rule,
         );
         frame.render_widget(
             Paragraph::new(Line::styled(
@@ -301,7 +246,7 @@ impl Model {
                 ),
                 tertiary_text_style(self.palette).add_modifier(Modifier::ITALIC),
             )),
-            footer_area,
+            chrome.footer,
         );
     }
 
@@ -567,40 +512,10 @@ impl Model {
             return;
         };
         frame.render_widget(Clear, area);
-        if area.is_empty() || area.height < ENTRY_TREE_CHROME_HEIGHT {
+        let Some(chrome) = fullscreen_list_chrome_rects(area) else {
             return;
-        }
-
-        let body_height = area.height.saturating_sub(ENTRY_TREE_CHROME_HEIGHT);
+        };
         let page_size = entry_tree_page_size_for_height(area.height);
-        let header_area = Rect::new(area.x, area.y, area.width, ENTRY_TREE_HEADER_HEIGHT);
-        let header_rule_area = Rect::new(
-            area.x,
-            area.y + ENTRY_TREE_HEADER_HEIGHT,
-            area.width,
-            ENTRY_TREE_HEADER_RULE_HEIGHT,
-        );
-        let body_area = Rect::new(
-            area.x,
-            area.y + ENTRY_TREE_HEADER_HEIGHT + ENTRY_TREE_HEADER_RULE_HEIGHT,
-            area.width,
-            body_height,
-        );
-        let page_rule_area = Rect::new(
-            area.x,
-            area.y
-                + area
-                    .height
-                    .saturating_sub(ENTRY_TREE_PAGE_RULE_HEIGHT + ENTRY_TREE_FOOTER_HEIGHT),
-            area.width,
-            ENTRY_TREE_PAGE_RULE_HEIGHT,
-        );
-        let footer_area = Rect::new(
-            area.x,
-            area.y + area.height.saturating_sub(ENTRY_TREE_FOOTER_HEIGHT),
-            area.width,
-            ENTRY_TREE_FOOTER_HEIGHT,
-        );
 
         let should_show_branch_metadata =
             matches!(preview.source, EntryTreeBranchPreviewSource::BranchTree);
@@ -616,11 +531,11 @@ impl Model {
                     approval_rejected_text_style(self.palette).bold(),
                 ),
             ])),
-            header_area,
+            chrome.header,
         );
         frame.render_widget(
             Paragraph::new(subtle_rule_line(usize::from(area.width), self.palette)),
-            header_rule_area,
+            chrome.header_rule,
         );
 
         let state = EntryTreeState {
@@ -633,9 +548,12 @@ impl Model {
             branch_tree: None,
             branch_preview: None,
         };
-        let lines =
-            self.entry_tree_body_lines(&state, usize::from(area.width), usize::from(body_height));
-        frame.render_widget(EntryTreeWidget { lines: &lines }, body_area);
+        let lines = self.entry_tree_body_lines(
+            &state,
+            usize::from(area.width),
+            usize::from(chrome.body.height),
+        );
+        frame.render_widget(EntryTreeWidget { lines: &lines }, chrome.body);
 
         frame.render_widget(
             Paragraph::new(build_page_rule(
@@ -644,14 +562,14 @@ impl Model {
                 state.page_count(page_size),
                 self.palette,
             )),
-            page_rule_area,
+            chrome.page_rule,
         );
         frame.render_widget(
             Paragraph::new(Line::styled(
                 self.entry_tree_branch_preview_footer_hint(),
                 tertiary_text_style(self.palette).add_modifier(Modifier::ITALIC),
             )),
-            footer_area,
+            chrome.footer,
         );
     }
 
@@ -676,10 +594,6 @@ impl Model {
         let Some(preview) = self.entry_tree_message_preview_mut() else {
             return;
         };
-        if preview.is_following_bottom {
-            preview.overlay.scroll_offset =
-                latest_entry_tree_preview_offset(&mut preview.transcript, content_height);
-        }
         render_transcript_overlay_view(
             frame,
             area,
@@ -931,39 +845,16 @@ impl Widget for EntryTreeWidget<'_> {
     }
 }
 
-fn entry_tree_kind_label(kind: SessionTreeRowKind) -> &'static str {
-    match kind {
-        SessionTreeRowKind::User => "user",
-        SessionTreeRowKind::Assistant => "assistant",
-        SessionTreeRowKind::Tool => "tool",
-        SessionTreeRowKind::Reasoning => "reasoning",
-    }
-}
-
-fn entry_tree_kind_prefix(kind: SessionTreeRowKind) -> String {
-    let label = entry_tree_kind_label(kind);
-    match kind {
-        SessionTreeRowKind::Tool => format!("{label:^ENTRY_TREE_KIND_WIDTH$} "),
-        SessionTreeRowKind::User
-        | SessionTreeRowKind::Assistant
-        | SessionTreeRowKind::Reasoning => {
-            format!("{label:<ENTRY_TREE_KIND_WIDTH$} ")
-        }
-    }
-}
-
 fn entry_tree_content_style(
     row: &SessionTreeRow,
     palette: crate::theme::TerminalPalette,
     is_selected: bool,
 ) -> Style {
     match row.kind {
-        SessionTreeRowKind::User => command_accent_text_style(palette),
-        SessionTreeRowKind::Reasoning => tertiary_text_style(palette).italic(),
-        SessionTreeRowKind::Tool => muted_text_style(palette),
         SessionTreeRowKind::Assistant if is_selected => primary_text_style(palette).bold(),
         SessionTreeRowKind::Assistant if row.is_active_path => primary_text_style(palette),
         SessionTreeRowKind::Assistant => secondary_text_style(palette),
+        kind => session_tree_row_kind_label_style(kind, palette),
     }
 }
 

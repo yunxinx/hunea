@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use super::conversation::{apply_conversation_event, run_send_conversation_turn_effect};
-use super::effects::{run_interrupt_current_turn_effect, run_switch_branch_effect};
+use super::effects::{
+    run_interrupt_current_turn_effect, run_open_copy_picker_effect, run_switch_branch_effect,
+};
 use super::input::{
     TerminalInputAction, TerminalInputCoalescing, coalesced_input_actions,
     coalesced_input_actions_with_options,
@@ -104,6 +106,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             | RuntimeCommand::LoadSessionPreview { .. }
             | RuntimeCommand::ResumeSession { .. }
             | RuntimeCommand::LoadEntryTree
+            | RuntimeCommand::LoadCopyPickerTree
             | RuntimeCommand::LoadBranchTree
             | RuntimeCommand::LoadBranchPreview { .. }
             | RuntimeCommand::SwitchBranch { .. }
@@ -136,6 +139,20 @@ fn conversation_completion_appends_assistant_message_after_request_finishes() {
         vec!["你好，我是本地模型".to_string()]
     );
     assert!(!model.current_stream_activity_render_result().has_content);
+}
+
+#[test]
+fn open_copy_picker_effect_dispatches_copy_picker_tree_load() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+
+    run_open_copy_picker_effect(&mut model, &mut runtime_coordinator);
+
+    assert!(model.copy_picker_active());
+    assert_eq!(
+        runtime_coordinator.last_command,
+        Some(RuntimeCommand::LoadCopyPickerTree)
+    );
 }
 
 #[test]

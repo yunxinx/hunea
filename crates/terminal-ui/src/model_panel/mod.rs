@@ -16,6 +16,7 @@ use super::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, inline_panel_visible_rows, wrap_inline_text,
     },
+    overlay_key_result::OverlayKeyResult,
     theme::{
         command_accent_text_style, primary_text_style, secondary_text_style, surface_text_style,
         tertiary_text_style,
@@ -74,65 +75,62 @@ impl Model {
         self.sync_document_viewport_for_composer_cursor();
     }
 
-    pub(crate) fn handle_model_panel_key(
-        &mut self,
-        key: KeyEvent,
-    ) -> Option<Option<super::AppEffect>> {
+    pub(crate) fn handle_model_panel_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
         if !self.model_panel_active() {
-            return None;
+            return OverlayKeyResult::Ignored;
         }
 
         match key.code {
             KeyCode::Esc => {
                 if self.clear_model_panel_search() {
-                    return Some(None);
+                    return OverlayKeyResult::Handled;
                 }
                 self.close_model_panel();
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Left if key.modifiers.is_empty() => {
                 self.move_model_panel_provider(-1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Right if key.modifiers.is_empty() => {
                 self.move_model_panel_provider(1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
                 self.move_model_panel_provider(1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::BackTab => {
                 self.move_model_panel_provider(-1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Up if key.modifiers.is_empty() => {
                 self.move_model_panel_model(-1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Down if key.modifiers.is_empty() => {
                 self.move_model_panel_model(1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Char('u' | 'U') if is_model_refresh_key(key) => {
-                Some(self.refresh_current_model_panel_provider())
+                OverlayKeyResult::from_effect(self.refresh_current_model_panel_provider())
             }
             _ if is_model_search_clear_key(key) => {
                 self.clear_model_panel_search();
-                Some(None)
+                OverlayKeyResult::Handled
             }
             _ if is_model_search_backspace_key(key) => {
                 self.backspace_model_panel_search();
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
-                Some(self.select_current_model_panel_model())
+                OverlayKeyResult::from_effect(self.select_current_model_panel_model())
             }
             KeyCode::Char(character) if is_model_plain_search_key(key) => {
                 self.push_model_panel_search_character(character);
-                Some(None)
+                OverlayKeyResult::Handled
             }
-            _ => Some(None),
+            _ => OverlayKeyResult::Handled,
         }
     }
 

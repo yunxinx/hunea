@@ -1,5 +1,7 @@
 use runtime_domain::session::SessionPickerRow;
 
+use crate::list_selection::{ListNavigationDirection, PagedSelection};
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct SessionPickerState {
     pub(super) rows: Vec<SessionPickerRow>,
@@ -14,6 +16,10 @@ pub(crate) struct SessionPickerState {
 }
 
 impl SessionPickerState {
+    fn selection(&self) -> PagedSelection {
+        PagedSelection::new(self.selected, self.filtered_indices.len())
+    }
+
     pub(super) fn apply_filter(&mut self) {
         let query = self.search_query.trim();
         self.filtered_indices = self
@@ -27,38 +33,23 @@ impl SessionPickerState {
         self.restore_selected_session_or_clamp();
     }
 
-    pub(super) fn move_selection(&mut self, direction: isize) {
+    pub(super) fn move_selection(&mut self, direction: ListNavigationDirection) {
         if self.filtered_indices.is_empty() {
             self.selected = 0;
             self.selected_session_id = None;
             return;
         }
-        let last = self.filtered_indices.len().saturating_sub(1);
-        self.selected = if direction.is_negative() {
-            self.selected.saturating_sub(direction.unsigned_abs())
-        } else {
-            self.selected.saturating_add(direction as usize).min(last)
-        };
+        self.selected = self.selection().move_selection(direction);
         self.sync_selected_session_id();
     }
 
-    pub(super) fn move_page(&mut self, direction: isize, page_size: usize) {
+    pub(super) fn move_page(&mut self, direction: ListNavigationDirection, page_size: usize) {
         if self.filtered_indices.is_empty() {
             self.selected = 0;
             self.selected_session_id = None;
             return;
         }
-        let page_size = page_size.max(1);
-        let current_page = self.selected / page_size;
-        let last_page = self.filtered_indices.len().saturating_sub(1) / page_size;
-        let next_page = if direction.is_negative() {
-            current_page.saturating_sub(direction.unsigned_abs())
-        } else {
-            current_page
-                .saturating_add(direction as usize)
-                .min(last_page)
-        };
-        self.selected = (next_page * page_size).min(self.filtered_indices.len().saturating_sub(1));
+        self.selected = self.selection().move_page(direction, page_size);
         self.sync_selected_session_id();
     }
 
@@ -146,37 +137,27 @@ impl SessionPickerState {
     }
 
     pub(super) fn page_start(&self, page_size: usize) -> usize {
-        let page_size = page_size.max(1);
-        self.selected / page_size * page_size
+        self.selection().page_start(page_size)
     }
 
     pub(super) fn page_indices(&self, page_size: usize) -> impl Iterator<Item = usize> + '_ {
-        let page_size = page_size.max(1);
         self.filtered_indices
-            .iter()
-            .skip(self.page_start(page_size))
-            .take(page_size)
+            .get(self.selection().page_indices(page_size))
+            .into_iter()
+            .flatten()
             .copied()
     }
 
     pub(super) fn page_number(&self, page_size: usize) -> usize {
-        if self.filtered_indices.is_empty() {
-            return 1;
-        }
-        self.selected / page_size.max(1) + 1
+        self.selection().page_number(page_size)
     }
 
     pub(super) fn page_count(&self, page_size: usize) -> usize {
-        let page_size = page_size.max(1);
-        self.filtered_indices.len().saturating_sub(1) / page_size + 1
+        self.selection().page_count(page_size)
     }
 
     pub(super) fn selected_position_label(&self) -> usize {
-        if self.filtered_indices.is_empty() {
-            0
-        } else {
-            self.selected + 1
-        }
+        self.selection().selected_position_label()
     }
 }
 

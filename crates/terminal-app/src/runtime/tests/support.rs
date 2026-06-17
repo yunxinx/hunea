@@ -34,7 +34,8 @@ pub(super) fn runtime_coordinator(options: AppRuntimeOptions) -> AppRuntimeCoord
 }
 
 pub(super) use super::store_fixtures::{
-    CommittedLoadFailsAfterSetLeafStore, DelayedListSessionStore, LoadCountingSessionStore,
+    CommittedLoadFailsAfterSetLeafStore, DelayedListSessionStore, FailingSessionTreeStore,
+    LoadCountingSessionStore,
 };
 
 pub(super) fn temp_test_dir(prefix: &str) -> PathBuf {
@@ -138,6 +139,19 @@ pub(super) fn wait_for_session_tree(coordinator: &mut AppRuntimeCoordinator) -> 
             _ => None,
         },
         "session tree payload",
+    )
+}
+
+pub(super) fn wait_for_copy_picker_tree(
+    coordinator: &mut AppRuntimeCoordinator,
+) -> SessionTreePayload {
+    wait_for_runtime_event(
+        coordinator,
+        |event| match event {
+            RuntimeEvent::CopyPickerTreeLoaded { payload } => Some(payload),
+            _ => None,
+        },
+        "copy picker tree payload",
     )
 }
 

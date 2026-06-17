@@ -136,7 +136,9 @@ pub fn run_with_runtime_coordinator(
         render_needed |= drain_runtime_coordinator_events(&mut model, runtime_coordinator);
 
         if render_needed {
-            terminal.draw(|area, buffer| model.render_to_buffer(area, buffer))?;
+            let frame_time = Instant::now();
+            model.advance_toast_at(frame_time);
+            terminal.draw(|area, buffer| model.render_to_buffer_at(frame_time, area, buffer))?;
             // 不同全屏界面对鼠标的需求不同：transcript 需要滚轮转方向键，
             // resume picker 则完全交还给终端以保留原生选区和滚动。
             let desired_mouse_mode =

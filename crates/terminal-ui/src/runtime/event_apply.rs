@@ -103,7 +103,24 @@ impl RuntimeEventApply for Model {
                 self.apply_session_preview_payload(payload);
             }
             RuntimeEvent::SessionTreeLoaded { payload } => {
-                self.apply_entry_tree_payload(payload);
+                if self.entry_tree_active() {
+                    self.apply_entry_tree_payload(payload);
+                }
+            }
+            RuntimeEvent::SessionTreeLoadFailed { message } => {
+                if self.entry_tree_active() {
+                    self.show_entry_tree_error(&message);
+                }
+            }
+            RuntimeEvent::CopyPickerTreeLoaded { payload } => {
+                if self.copy_picker_active() {
+                    self.apply_copy_picker_payload(payload);
+                }
+            }
+            RuntimeEvent::CopyPickerTreeLoadFailed { message } => {
+                if self.copy_picker_active() {
+                    self.show_copy_picker_error(&message);
+                }
             }
             RuntimeEvent::SessionBranchTreeLoaded { payload } => {
                 self.apply_entry_tree_branch_tree_payload(payload);

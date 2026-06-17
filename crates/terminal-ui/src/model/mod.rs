@@ -18,6 +18,7 @@ use runtime_domain::{
 use super::{
     ReasoningDisplayMode, StartupBannerOptions,
     composer::{Composer, PendingComposerCursorClick},
+    copy_picker::CopyPickerState,
     entry_tree::{BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN},
     external_editor::ExternalEditorLaunch,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT, FilePickerState},
@@ -32,6 +33,7 @@ use super::{
     stream_activity::StreamActivityState,
     style_mode::StyleMode,
     theme::{TerminalPalette, default_palette},
+    toast::ToastState,
     tool_approval_panel::ToolApprovalPanelState,
     transcript::{RenderResult, Transcript, index_only_render_result},
     view,
@@ -71,6 +73,7 @@ pub struct Model {
     pub(super) session_picker: Option<crate::session_picker::SessionPickerState>,
     pub(super) session_preview: Option<crate::session_preview::SessionPreviewState>,
     pub(super) entry_tree: Option<crate::entry_tree::EntryTreeState>,
+    pub(super) copy_picker: Option<CopyPickerState>,
     pub(super) message_revisit: MessageRevisitState,
     pub(super) runtime_terminal_snapshots: Vec<RuntimeTerminalSnapshot>,
     pub(super) stream_activity: Option<StreamActivityState>,
@@ -116,6 +119,7 @@ pub struct Model {
     pub(super) has_window: bool,
     pub(super) has_dark_background: bool,
     pub(super) notice_state: NoticeState,
+    pub(super) toast_state: ToastState,
     pub(super) status_line_revision: usize,
     quitting: bool,
 }
@@ -183,6 +187,7 @@ impl Model {
             session_picker: None,
             session_preview: None,
             entry_tree: None,
+            copy_picker: None,
             message_revisit: MessageRevisitState::default(),
             runtime_terminal_snapshots: Vec::new(),
             stream_activity: None,
@@ -241,6 +246,7 @@ impl Model {
             has_window: false,
             has_dark_background: true,
             notice_state: NoticeState::default(),
+            toast_state: ToastState::default(),
             status_line_revision: 1,
             quitting: false,
         }
@@ -249,7 +255,16 @@ impl Model {
     /// `render_to_buffer` 将当前模型渲染到指定屏幕缓冲区。
     #[must_use = "`render_to_buffer` 返回渲染后的 cursor 位置，调用方必须传递或显式丢弃"]
     pub fn render_to_buffer(&mut self, area: Rect, buffer: &mut Buffer) -> Option<Position> {
-        let mut frame = RenderFrame::new(area, buffer);
+        self.render_to_buffer_at(Instant::now(), area, buffer)
+    }
+
+    pub(crate) fn render_to_buffer_at(
+        &mut self,
+        now: Instant,
+        area: Rect,
+        buffer: &mut Buffer,
+    ) -> Option<Position> {
+        let mut frame = RenderFrame::new_at(now, area, buffer);
         view::render(self, &mut frame);
         project_wide_selection_styles(frame.buffer_mut());
         frame.cursor_position()
@@ -309,6 +324,7 @@ impl Model {
             self.notice_state.external_editor_helper_deadline,
             self.notice_state.history_scroll_indicator_deadline,
             self.selection_runtime.auto_scroll_deadline,
+            self.toast_timeout_deadline(),
         ]
         .into_iter()
         .flatten()
@@ -398,6 +414,7 @@ impl Model {
         self.session_picker = None;
         self.session_preview = None;
         self.entry_tree = None;
+        self.copy_picker = None;
         self.tool_approval_panel = ToolApprovalPanelState::default();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
         self.message_revisit = MessageRevisitState::default();
@@ -417,6 +434,7 @@ impl Model {
             ..DocumentRuntimeState::default()
         };
         self.notice_state = NoticeState::default();
+        self.toast_state = ToastState::default();
         self.bump_status_line_revision();
         self.sync_transcript_render();
         self.sync_composer_height();
@@ -510,6 +528,14 @@ impl Model {
         {
             return Some(super::AppEvent::SelectionAutoScrollTick {
                 token: self.selection_runtime.auto_scroll_token,
+            });
+        }
+
+        if let Some(deadline) = self.toast_timeout_deadline()
+            && now >= deadline
+        {
+            return Some(super::AppEvent::ToastNoticeTimeout {
+                token: self.toast_timeout_token(),
             });
         }
 

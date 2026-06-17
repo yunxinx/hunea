@@ -71,7 +71,13 @@ impl Model {
         if self.entry_tree_preview_active() {
             return TerminalMouseModePreference::NativeWithAlternateScroll;
         }
+        if self.copy_picker_preview_active() {
+            return TerminalMouseModePreference::NativeWithAlternateScroll;
+        }
         if self.entry_tree_active() {
+            return TerminalMouseModePreference::CaptureWithAlternateScroll;
+        }
+        if self.copy_picker_active() {
             return TerminalMouseModePreference::CaptureWithAlternateScroll;
         }
         if self.transcript_overlay_active()

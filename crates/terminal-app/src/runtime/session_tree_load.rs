@@ -1,0 +1,39 @@
+use runtime_domain::session::{RuntimeEvent, SessionTreePayload};
+
+/// Session tree 的数据源相同，但不同覆盖层必须收到不同事件，避免迟到 payload 错投。
+#[derive(Debug, Clone, Copy)]
+pub(super) enum SessionTreeLoadConsumer {
+    EntryTree,
+    CopyPicker,
+}
+
+impl SessionTreeLoadConsumer {
+    pub(super) fn loaded_event(self, payload: SessionTreePayload) -> RuntimeEvent {
+        match self {
+            Self::EntryTree => RuntimeEvent::SessionTreeLoaded { payload },
+            Self::CopyPicker => RuntimeEvent::CopyPickerTreeLoaded { payload },
+        }
+    }
+
+    pub(super) fn failed_event(self, message: String) -> RuntimeEvent {
+        match self {
+            Self::EntryTree => RuntimeEvent::SessionTreeLoadFailed { message },
+            Self::CopyPicker => RuntimeEvent::CopyPickerTreeLoadFailed { message },
+        }
+    }
+
+    pub(super) fn empty_tree_event(self) -> RuntimeEvent {
+        let payload = SessionTreePayload {
+            rows: Vec::new(),
+            current_row_id: None,
+        };
+        self.loaded_event(payload)
+    }
+
+    pub(super) const fn no_session_error(self) -> &'static str {
+        match self {
+            Self::EntryTree => "No active persisted session to show tree",
+            Self::CopyPicker => "No active persisted session to copy from",
+        }
+    }
+}

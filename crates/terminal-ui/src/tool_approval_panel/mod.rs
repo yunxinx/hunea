@@ -14,6 +14,7 @@ use super::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, wrap_inline_text,
     },
+    overlay_key_result::OverlayKeyResult,
     runtime::tool_activity_preview::ToolApprovalPreview,
     theme::{primary_text_style, secondary_text_style, tertiary_text_style},
     tool_result::ToolResultKind,
@@ -152,19 +153,16 @@ impl Model {
         }
     }
 
-    pub(crate) fn handle_tool_approval_panel_key(
-        &mut self,
-        key: KeyEvent,
-    ) -> Option<Option<AppEffect>> {
+    pub(crate) fn handle_tool_approval_panel_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
         if !self.tool_approval_panel_active() {
-            return None;
+            return OverlayKeyResult::Ignored;
         }
 
         if self.tool_approval_fullscreen_preview_active() {
-            return Some(self.handle_tool_approval_fullscreen_preview_key(key));
+            return self.handle_tool_approval_fullscreen_preview_key(key);
         }
         if self.tool_approval_panel.preview.is_some() {
-            return Some(self.handle_tool_approval_inline_file_preview_key(key));
+            return self.handle_tool_approval_inline_file_preview_key(key);
         }
 
         match key.code {
@@ -179,7 +177,7 @@ impl Model {
                 );
                 self.tool_approval_panel_revision =
                     self.tool_approval_panel_revision.saturating_add(1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Left | KeyCode::Right if key.modifiers.is_empty() => {
                 move_tool_approval_selection(
@@ -192,7 +190,7 @@ impl Model {
                 );
                 self.tool_approval_panel_revision =
                     self.tool_approval_panel_revision.saturating_add(1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let choices = tool_approval_choices(&self.tool_approval_panel);
@@ -200,9 +198,9 @@ impl Model {
                     .get(self.tool_approval_panel.selected)
                     .copied()
                     .unwrap_or(ToolApprovalChoice::Deny);
-                Some(self.resolve_tool_approval_choice(choice))
+                OverlayKeyResult::from_effect(self.resolve_tool_approval_choice(choice))
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => Some(
+            KeyCode::Char('y') | KeyCode::Char('Y') => OverlayKeyResult::from_effect(
                 self.resolve_tool_approval_choice(
                     preferred_tool_approval_choice(
                         &self.tool_approval_panel,
@@ -214,7 +212,7 @@ impl Model {
                     .unwrap_or(ToolApprovalChoice::Allow),
                 ),
             ),
-            KeyCode::Char('n') | KeyCode::Char('N') => Some(
+            KeyCode::Char('n') | KeyCode::Char('N') => OverlayKeyResult::from_effect(
                 self.resolve_tool_approval_choice(
                     preferred_tool_approval_choice(
                         &self.tool_approval_panel,
@@ -223,8 +221,10 @@ impl Model {
                     .unwrap_or(ToolApprovalChoice::Deny),
                 ),
             ),
-            KeyCode::Esc if key.modifiers.is_empty() => Some(self.cancel_tool_approval_panel()),
-            _ => Some(None),
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                OverlayKeyResult::from_effect(self.cancel_tool_approval_panel())
+            }
+            _ => OverlayKeyResult::Handled,
         }
     }
 
@@ -284,112 +284,128 @@ impl Model {
         self.tool_approval_panel.preview_scroll_offset = next;
     }
 
-    fn handle_tool_approval_fullscreen_preview_key(&mut self, key: KeyEvent) -> Option<AppEffect> {
+    fn handle_tool_approval_fullscreen_preview_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
                 self.scroll_tool_approval_fullscreen_preview_by(-1);
-                None
+                OverlayKeyResult::Handled
             }
             KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
                 self.scroll_tool_approval_fullscreen_preview_by(1);
-                None
+                OverlayKeyResult::Handled
             }
             KeyCode::PageUp => {
                 let page = file_preview_fullscreen_content_height(self)
                     .saturating_sub(1)
                     .max(1);
                 self.scroll_tool_approval_fullscreen_preview_by(-(page as isize));
-                None
+                OverlayKeyResult::Handled
             }
             KeyCode::PageDown => {
                 let page = file_preview_fullscreen_content_height(self)
                     .saturating_sub(1)
                     .max(1);
                 self.scroll_tool_approval_fullscreen_preview_by(page as isize);
-                None
+                OverlayKeyResult::Handled
             }
             KeyCode::Char('u') if key.modifiers == crossterm::event::KeyModifiers::CONTROL => {
                 let half_page = file_preview_fullscreen_content_height(self) / 2;
                 self.scroll_tool_approval_fullscreen_preview_by(-(half_page.max(1) as isize));
-                None
+                OverlayKeyResult::Handled
             }
             KeyCode::Char('d') if key.modifiers == crossterm::event::KeyModifiers::CONTROL => {
                 let half_page = file_preview_fullscreen_content_height(self) / 2;
                 self.scroll_tool_approval_fullscreen_preview_by(half_page.max(1) as isize);
-                None
+                OverlayKeyResult::Handled
             }
             KeyCode::Home => {
                 self.tool_approval_panel.preview_scroll_offset = 0;
-                None
+                OverlayKeyResult::Handled
             }
             KeyCode::End => {
                 self.tool_approval_panel.preview_scroll_offset =
                     file_preview_fullscreen_max_offset(self);
-                None
+                OverlayKeyResult::Handled
             }
-            KeyCode::Enter if key.modifiers.is_empty() => self.resolve_tool_approval_choice(
-                preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                )
-                .unwrap_or(ToolApprovalChoice::Deny),
+            KeyCode::Enter if key.modifiers.is_empty() => OverlayKeyResult::from_effect(
+                self.resolve_tool_approval_choice(
+                    preferred_tool_approval_choice(
+                        &self.tool_approval_panel,
+                        &[
+                            ToolApprovalChoice::Allow,
+                            ToolApprovalChoice::AllowInSession,
+                        ],
+                    )
+                    .unwrap_or(ToolApprovalChoice::Deny),
+                ),
             ),
-            KeyCode::Char('y') | KeyCode::Char('Y') => self.resolve_tool_approval_choice(
-                preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                )
-                .unwrap_or(ToolApprovalChoice::Allow),
+            KeyCode::Char('y') | KeyCode::Char('Y') => OverlayKeyResult::from_effect(
+                self.resolve_tool_approval_choice(
+                    preferred_tool_approval_choice(
+                        &self.tool_approval_panel,
+                        &[
+                            ToolApprovalChoice::Allow,
+                            ToolApprovalChoice::AllowInSession,
+                        ],
+                    )
+                    .unwrap_or(ToolApprovalChoice::Allow),
+                ),
             ),
-            KeyCode::Char('n') | KeyCode::Char('N') => self.resolve_tool_approval_choice(
-                preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
-                )
-                .unwrap_or(ToolApprovalChoice::Deny),
+            KeyCode::Char('n') | KeyCode::Char('N') => OverlayKeyResult::from_effect(
+                self.resolve_tool_approval_choice(
+                    preferred_tool_approval_choice(
+                        &self.tool_approval_panel,
+                        &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
+                    )
+                    .unwrap_or(ToolApprovalChoice::Deny),
+                ),
             ),
-            KeyCode::Esc if key.modifiers.is_empty() => self.cancel_tool_approval_panel(),
-            _ => None,
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                OverlayKeyResult::from_effect(self.cancel_tool_approval_panel())
+            }
+            _ => OverlayKeyResult::Handled,
         }
     }
 
-    fn handle_tool_approval_inline_file_preview_key(&mut self, key: KeyEvent) -> Option<AppEffect> {
+    fn handle_tool_approval_inline_file_preview_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
         match key.code {
-            KeyCode::Enter if key.modifiers.is_empty() => self.resolve_tool_approval_choice(
-                preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                )
-                .unwrap_or(ToolApprovalChoice::Deny),
+            KeyCode::Enter if key.modifiers.is_empty() => OverlayKeyResult::from_effect(
+                self.resolve_tool_approval_choice(
+                    preferred_tool_approval_choice(
+                        &self.tool_approval_panel,
+                        &[
+                            ToolApprovalChoice::Allow,
+                            ToolApprovalChoice::AllowInSession,
+                        ],
+                    )
+                    .unwrap_or(ToolApprovalChoice::Deny),
+                ),
             ),
-            KeyCode::Char('y') | KeyCode::Char('Y') => self.resolve_tool_approval_choice(
-                preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                )
-                .unwrap_or(ToolApprovalChoice::Allow),
+            KeyCode::Char('y') | KeyCode::Char('Y') => OverlayKeyResult::from_effect(
+                self.resolve_tool_approval_choice(
+                    preferred_tool_approval_choice(
+                        &self.tool_approval_panel,
+                        &[
+                            ToolApprovalChoice::Allow,
+                            ToolApprovalChoice::AllowInSession,
+                        ],
+                    )
+                    .unwrap_or(ToolApprovalChoice::Allow),
+                ),
             ),
-            KeyCode::Char('n') | KeyCode::Char('N') => self.resolve_tool_approval_choice(
-                preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
-                )
-                .unwrap_or(ToolApprovalChoice::Deny),
+            KeyCode::Char('n') | KeyCode::Char('N') => OverlayKeyResult::from_effect(
+                self.resolve_tool_approval_choice(
+                    preferred_tool_approval_choice(
+                        &self.tool_approval_panel,
+                        &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
+                    )
+                    .unwrap_or(ToolApprovalChoice::Deny),
+                ),
             ),
-            KeyCode::Esc if key.modifiers.is_empty() => self.cancel_tool_approval_panel(),
-            _ => None,
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                OverlayKeyResult::from_effect(self.cancel_tool_approval_panel())
+            }
+            _ => OverlayKeyResult::Handled,
         }
     }
 

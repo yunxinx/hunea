@@ -80,6 +80,15 @@ pub enum RuntimeEvent {
     SessionTreeLoaded {
         payload: SessionTreePayload,
     },
+    SessionTreeLoadFailed {
+        message: String,
+    },
+    CopyPickerTreeLoaded {
+        payload: SessionTreePayload,
+    },
+    CopyPickerTreeLoadFailed {
+        message: String,
+    },
     SessionBranchTreeLoaded {
         payload: SessionBranchTreePayload,
     },
@@ -132,6 +141,9 @@ impl RuntimeEvent {
             | Self::SessionPreviewLoaded { .. }
             | Self::SessionResumed { .. }
             | Self::SessionTreeLoaded { .. }
+            | Self::SessionTreeLoadFailed { .. }
+            | Self::CopyPickerTreeLoaded { .. }
+            | Self::CopyPickerTreeLoadFailed { .. }
             | Self::SessionBranchTreeLoaded { .. }
             | Self::SessionTreePreviewLoaded { .. } => None,
         }

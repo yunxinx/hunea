@@ -68,35 +68,8 @@ pub fn render(model: &mut Model, frame: &mut RenderFrame<'_>) {
         return;
     }
 
-    // 文件审批预览需要完整审查 diff，超出当前屏幕时进入独立全屏界面。
-    if model.tool_approval_fullscreen_preview_active() {
-        model.complete_startup_banner_entrance();
-        model.render_tool_approval_fullscreen_preview(frame, area);
-        return;
-    }
-
-    // Transcript 覆盖层模式：全屏渲染对话历史，隐藏 composer 和各面板
-    if model.transcript_overlay_active() {
-        model.complete_startup_banner_entrance();
-        model.render_transcript_overlay(frame, area);
-        return;
-    }
-
-    if model.session_preview_active() {
-        model.complete_startup_banner_entrance();
-        model.render_session_preview(frame, area);
-        return;
-    }
-
-    if model.session_picker_active() {
-        model.complete_startup_banner_entrance();
-        model.render_session_picker(frame, area);
-        return;
-    }
-
-    if model.entry_tree_active() {
-        model.complete_startup_banner_entrance();
-        model.render_entry_tree(frame, area);
+    if render_active_overlay(model, frame, area) {
+        model.render_toast(frame, area);
         return;
     }
 
@@ -139,6 +112,50 @@ pub fn render(model: &mut Model, frame: &mut RenderFrame<'_>) {
             area.y + u16::try_from(cursor_y).unwrap_or(u16::MAX),
         ));
     }
+
+    model.render_toast(frame, area);
+}
+
+fn render_active_overlay(model: &mut Model, frame: &mut RenderFrame<'_>, area: Rect) -> bool {
+    // 文件审批预览需要完整审查 diff，超出当前屏幕时进入独立全屏界面。
+    if model.tool_approval_fullscreen_preview_active() {
+        model.complete_startup_banner_entrance();
+        model.render_tool_approval_fullscreen_preview(frame, area);
+        return true;
+    }
+
+    // Transcript 覆盖层模式：全屏渲染对话历史，隐藏 composer 和各面板。
+    if model.transcript_overlay_active() {
+        model.complete_startup_banner_entrance();
+        model.render_transcript_overlay(frame, area);
+        return true;
+    }
+
+    if model.session_preview_active() {
+        model.complete_startup_banner_entrance();
+        model.render_session_preview(frame, area);
+        return true;
+    }
+
+    if model.session_picker_active() {
+        model.complete_startup_banner_entrance();
+        model.render_session_picker(frame, area);
+        return true;
+    }
+
+    if model.copy_picker_active() {
+        model.complete_startup_banner_entrance();
+        model.render_copy_picker(frame, area);
+        return true;
+    }
+
+    if model.entry_tree_active() {
+        model.complete_startup_banner_entrance();
+        model.render_entry_tree(frame, area);
+        return true;
+    }
+
+    false
 }
 
 fn startup_banner_entrance_rect(

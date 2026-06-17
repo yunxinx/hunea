@@ -1,6 +1,14 @@
 use super::*;
-use crate::{AppEvent, Sender, StartupBannerOptions, theme::default_palette};
+use crate::{
+    AppEvent, Sender, StartupBannerOptions, overlay_key_result::OverlayKeyResult,
+    theme::default_palette,
+};
 use ratatui::{buffer::Buffer, layout::Rect};
+
+fn handled_effect(result: OverlayKeyResult, context: &str) -> Option<AppEffect> {
+    assert!(!result.is_ignored(), "{context}");
+    result.into_effect()
+}
 
 #[test]
 fn preview_layout_omits_labels_and_uses_vertical_numbered_choices() {
@@ -264,9 +272,10 @@ fn preview_choice_closes_without_status_notice_and_appends_result() {
     model.palette = default_palette();
     open_preview_panel(&mut model);
 
-    let effect = model
-        .handle_tool_approval_panel_key(KeyCode::Enter.into())
-        .expect("tool approval panel should handle Enter");
+    let effect = handled_effect(
+        model.handle_tool_approval_panel_key(KeyCode::Enter.into()),
+        "tool approval panel should handle Enter",
+    );
 
     assert!(effect.is_none());
     assert!(!model.tool_approval_panel_active());
@@ -302,9 +311,10 @@ fn runtime_allow_choice_does_not_append_redundant_ran_result() {
     );
     let before = model.transcript_mut().plain_items();
 
-    let effect = model
-        .handle_tool_approval_panel_key(KeyCode::Enter.into())
-        .expect("tool approval panel should handle Enter");
+    let effect = handled_effect(
+        model.handle_tool_approval_panel_key(KeyCode::Enter.into()),
+        "tool approval panel should handle Enter",
+    );
 
     assert_eq!(
         effect,
@@ -343,9 +353,10 @@ fn esc_cancels_runtime_permission_without_rejecting() {
     );
     let before = model.transcript_mut().plain_items();
 
-    let effect = model
-        .handle_tool_approval_panel_key(KeyCode::Esc.into())
-        .expect("tool approval panel should handle Esc");
+    let effect = handled_effect(
+        model.handle_tool_approval_panel_key(KeyCode::Esc.into()),
+        "tool approval panel should handle Esc",
+    );
 
     assert_eq!(
         effect,
@@ -646,10 +657,11 @@ fn fullscreen_file_preview_uses_direct_approval_keys_without_choice_navigation()
         "fullscreen mode should not use left/right choice navigation"
     );
 
-    let effect = model
-        .handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Enter))
-        .expect("fullscreen key should be handled")
-        .expect("Enter should approve the preview");
+    let effect = handled_effect(
+        model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Enter)),
+        "fullscreen key should be handled",
+    )
+    .expect("Enter should approve the preview");
 
     assert_eq!(
         effect,
@@ -917,10 +929,11 @@ fn inline_file_preview_uses_direct_approval_keys_without_choice_navigation() {
         "inline file preview should ignore left/right choice navigation"
     );
 
-    let effect = model
-        .handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Enter))
-        .expect("inline file preview key should be handled")
-        .expect("Enter should approve the preview");
+    let effect = handled_effect(
+        model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Enter)),
+        "inline file preview key should be handled",
+    )
+    .expect("Enter should approve the preview");
 
     assert_eq!(
         effect,

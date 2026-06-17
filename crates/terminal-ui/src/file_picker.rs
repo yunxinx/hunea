@@ -4,10 +4,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
 
 use super::{
-    AppEffect, Model,
+    Model,
     display_width::display_width,
     file_search::{FileSearchMatch, common_path_completion_prefix},
     inline_panel::InlinePanelRenderResult,
+    overlay_key_result::OverlayKeyResult,
     path_resolve::{resolve_configured_current_dir, resolve_path_token},
     selection::{SelectableLineRange, selectable_range_for_plain_line},
     status_line::truncate_display_width_with_ellipsis,
@@ -84,49 +85,49 @@ impl Model {
         });
     }
 
-    pub(crate) fn handle_file_picker_key(&mut self, key: KeyEvent) -> Option<Option<AppEffect>> {
+    pub(crate) fn handle_file_picker_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
         if !self.file_picker_active() {
-            return None;
+            return OverlayKeyResult::Ignored;
         }
 
         match key.code {
             KeyCode::Up if key.modifiers.is_empty() => {
                 self.move_file_picker_selection(-1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Down if key.modifiers.is_empty() => {
                 self.move_file_picker_selection(1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
                 self.move_file_picker_selection(-1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
                 self.move_file_picker_selection(1);
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.dismiss_current_file_picker_token();
                 self.close_file_picker();
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
                 self.complete_file_picker_common_prefix();
-                Some(None)
+                OverlayKeyResult::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 if self.current_file_picker_query_resolves_to_file() {
                     self.close_file_picker();
                     self.dismissed_file_picker_token = None;
-                    return None;
+                    return OverlayKeyResult::Ignored;
                 }
                 if self.insert_selected_file_picker_path() {
-                    return Some(None);
+                    return OverlayKeyResult::Handled;
                 }
-                Some(None)
+                OverlayKeyResult::Handled
             }
-            _ => None,
+            _ => OverlayKeyResult::Ignored,
         }
     }
 

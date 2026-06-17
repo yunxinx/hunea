@@ -134,6 +134,10 @@ fn command_panel_shows_resume_and_tree_by_default() {
         "default slash menu should expose /resume: {rows:?}"
     );
     assert!(
+        rows.iter().any(|row| row.contains("/copy")),
+        "default slash menu should expose /copy: {rows:?}"
+    );
+    assert!(
         rows.iter().any(|row| row.contains("/tree")),
         "default slash menu should expose /tree for entry rewind: {rows:?}"
     );

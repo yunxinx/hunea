@@ -26,6 +26,7 @@ pub enum RuntimeCommand {
         session_id: String,
     },
     LoadEntryTree,
+    LoadCopyPickerTree,
     LoadBranchTree,
     LoadBranchPreview {
         branch_row_id: String,
@@ -91,6 +92,7 @@ impl RuntimeCommand {
             | Self::LoadSessionPreview { .. }
             | Self::ResumeSession { .. }
             | Self::LoadEntryTree
+            | Self::LoadCopyPickerTree
             | Self::LoadBranchTree
             | Self::LoadBranchPreview { .. }
             | Self::SwitchBranch { .. }

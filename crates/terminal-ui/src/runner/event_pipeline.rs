@@ -76,6 +76,14 @@ fn next_pipeline_deadline(
         });
     }
 
+    if let Some(toast_interval) = model.toast_frame_interval() {
+        let toast_deadline = now + toast_interval;
+        next_deadline = Some(match next_deadline {
+            Some(deadline) => deadline.min(toast_deadline),
+            None => toast_deadline,
+        });
+    }
+
     if let Some(activity_deadline) = model.tool_activity_next_frame_deadline_at(now) {
         next_deadline = Some(match next_deadline {
             Some(deadline) => deadline.min(activity_deadline),
@@ -117,6 +125,9 @@ fn render_on_timeout(
         || model
             .startup_banner_entrance_frame_interval_at(now)
             .is_some_and(|entrance_interval| deadline <= now + entrance_interval)
+        || model
+            .toast_frame_interval()
+            .is_some_and(|toast_interval| deadline <= now + toast_interval)
         || model
             .tool_activity_next_frame_deadline_at(now)
             .is_some_and(|activity_deadline| deadline <= activity_deadline)
@@ -172,6 +183,22 @@ mod tests {
             terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
             TerminalWaitPlan::Poll {
                 duration: Duration::from_millis(16),
+                render_on_timeout: true,
+            }
+        );
+    }
+
+    #[test]
+    fn toast_animation_deadline_requests_render_on_timeout() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.update(crate::AppEvent::StartupReadyTimeout);
+        model.show_toast(crate::toast::ToastSeverity::Info, "Saved");
+        let now = Instant::now();
+
+        assert_eq!(
+            terminal_wait_plan(&model, now + Duration::from_secs(10), now, false),
+            TerminalWaitPlan::Poll {
+                duration: crate::toast::TOAST_FRAME_INTERVAL,
                 render_on_timeout: true,
             }
         );

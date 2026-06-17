@@ -15,7 +15,7 @@ use session_store::{ProjectDir, SessionHeader, SessionId, SessionListOptions, Se
 
 use super::{
     session_branch_tree_payload, session_picker_row_from_meta, session_preview_payload,
-    session_resume_payload, session_tree_payload,
+    session_resume_payload, session_tree_load::SessionTreeLoadConsumer, session_tree_payload,
 };
 
 const SESSION_EVENT_DRAIN_WAIT: Duration = Duration::from_millis(2);
@@ -64,9 +64,10 @@ enum SessionStoreCommand {
         header: SessionHeader,
         session_id: SessionId,
     },
-    LoadEntryTree {
+    LoadSessionTree {
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        consumer: SessionTreeLoadConsumer,
     },
     LoadBranchTree {
         store: Arc<dyn SessionStore>,
@@ -110,6 +111,8 @@ impl SessionStoreWorker {
     pub(super) fn new() -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
+        // session store 可能包含阻塞文件系统路径；这里固定为专用 OS 线程，
+        // 线程内用 current-thread runtime 驱动 store 的 async trait，避免阻塞 TUI 主循环。
         thread::spawn(move || run_session_worker(command_receiver, event_sender));
         Self {
             command_sender,
@@ -192,13 +195,18 @@ impl SessionStoreWorker {
         )
     }
 
-    pub(super) fn load_entry_tree(
+    pub(super) fn load_session_tree(
         &mut self,
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        consumer: SessionTreeLoadConsumer,
     ) -> Result<(), String> {
         self.send_command(
-            SessionStoreCommand::LoadEntryTree { store, session_id },
+            SessionStoreCommand::LoadSessionTree {
+                store,
+                session_id,
+                consumer,
+            },
             false,
         )
     }
@@ -482,14 +490,18 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
             },
             Err(message) => failed(message, true),
         },
-        SessionStoreCommand::LoadEntryTree { store, session_id } => {
-            match store.load_session_tree(&session_id).await {
-                Ok(snapshot) => SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionTreeLoaded {
-                    payload: session_tree_payload(snapshot),
-                }),
-                Err(error) => failed(error.to_string(), false),
+        SessionStoreCommand::LoadSessionTree {
+            store,
+            session_id,
+            consumer,
+        } => match store.load_session_tree(&session_id).await {
+            Ok(snapshot) => SessionStoreWorkerEvent::runtime(
+                consumer.loaded_event(session_tree_payload(snapshot)),
+            ),
+            Err(error) => {
+                SessionStoreWorkerEvent::runtime(consumer.failed_event(error.to_string()))
             }
-        }
+        },
         SessionStoreCommand::LoadBranchTree { store, session_id } => {
             match store.load_session_branch_tree(&session_id).await {
                 Ok(snapshot) => {
@@ -564,11 +576,7 @@ async fn list_session_rows(
     let metas = store.list_sessions(project_dir, options).await?;
     Ok(metas
         .into_iter()
-        .filter(|meta| {
-            active_session_id
-                .map(|session_id| meta.session_id != *session_id)
-                .unwrap_or(true)
-        })
+        .filter(|meta| active_session_id.is_none_or(|session_id| meta.session_id != *session_id))
         .map(session_picker_row_from_meta)
         .collect())
 }

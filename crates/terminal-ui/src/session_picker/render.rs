@@ -8,6 +8,7 @@ use runtime_domain::session::SessionPickerRow;
 
 use crate::{
     Model,
+    fullscreen_list_chrome::fullscreen_list_chrome_rects,
     render_frame::RenderFrame,
     status_line::truncate_display_width_with_ellipsis,
     styled_text::render_line_with_full_width_background,
@@ -18,8 +19,6 @@ use crate::{
 };
 
 use super::{
-    SESSION_PICKER_CHROME_HEIGHT, SESSION_PICKER_FOOTER_HEIGHT, SESSION_PICKER_HEADER_HEIGHT,
-    SESSION_PICKER_HEADER_RULE_HEIGHT, SESSION_PICKER_PAGE_RULE_HEIGHT,
     SESSION_PICKER_PROMPT_MARKER_WIDTH, SessionPickerState, session_picker_page_size_for_height,
 };
 
@@ -29,44 +28,15 @@ impl Model {
             return;
         };
         frame.render_widget(Clear, area);
-        if area.is_empty() || area.height < SESSION_PICKER_CHROME_HEIGHT {
+        let Some(chrome) = fullscreen_list_chrome_rects(area) else {
             return;
-        }
+        };
 
-        let body_height = area.height.saturating_sub(SESSION_PICKER_CHROME_HEIGHT);
         let page_size = session_picker_page_size_for_height(area.height);
-        let header_area = Rect::new(area.x, area.y, area.width, SESSION_PICKER_HEADER_HEIGHT);
-        let header_rule_area = Rect::new(
-            area.x,
-            area.y + SESSION_PICKER_HEADER_HEIGHT,
-            area.width,
-            SESSION_PICKER_HEADER_RULE_HEIGHT,
-        );
-        let body_area = Rect::new(
-            area.x,
-            area.y + SESSION_PICKER_HEADER_HEIGHT + SESSION_PICKER_HEADER_RULE_HEIGHT,
-            area.width,
-            body_height,
-        );
-        let page_rule_area = Rect::new(
-            area.x,
-            area.y
-                + area
-                    .height
-                    .saturating_sub(SESSION_PICKER_PAGE_RULE_HEIGHT + SESSION_PICKER_FOOTER_HEIGHT),
-            area.width,
-            SESSION_PICKER_PAGE_RULE_HEIGHT,
-        );
-        let footer_area = Rect::new(
-            area.x,
-            area.y + area.height.saturating_sub(SESSION_PICKER_FOOTER_HEIGHT),
-            area.width,
-            SESSION_PICKER_FOOTER_HEIGHT,
-        );
 
         frame.render_widget(
             Paragraph::new(self.session_picker_header_line(state, usize::from(area.width))),
-            header_area,
+            chrome.header,
         );
 
         frame.render_widget(
@@ -74,15 +44,16 @@ impl Model {
                 usize::from(area.width),
                 self.palette,
             )),
-            header_rule_area,
+            chrome.header_rule,
         );
 
         let lines = self.session_picker_body_lines(
             state,
             usize::from(area.width),
-            usize::from(body_area.height),
+            usize::from(chrome.body.height),
+            page_size,
         );
-        frame.render_widget(SessionPickerWidget { lines: &lines }, body_area);
+        frame.render_widget(SessionPickerWidget { lines: &lines }, chrome.body);
 
         frame.render_widget(
             Paragraph::new(build_page_rule(
@@ -91,7 +62,7 @@ impl Model {
                 state.page_count(page_size),
                 self.palette,
             )),
-            page_rule_area,
+            chrome.page_rule,
         );
 
         frame.render_widget(
@@ -99,7 +70,7 @@ impl Model {
                 session_picker_footer_hint(area.width),
                 tertiary_text_style(self.palette).add_modifier(Modifier::ITALIC),
             )),
-            footer_area,
+            chrome.footer,
         );
     }
 
@@ -143,13 +114,9 @@ impl Model {
         state: &SessionPickerState,
         width: usize,
         body_height: usize,
+        page_size: usize,
     ) -> Vec<Line<'static>> {
         let width = width.max(1);
-        let page_size = session_picker_page_size_for_height(
-            u16::try_from(body_height)
-                .unwrap_or(u16::MAX)
-                .saturating_add(SESSION_PICKER_CHROME_HEIGHT),
-        );
         let mut lines = Vec::new();
 
         if state.is_loading {

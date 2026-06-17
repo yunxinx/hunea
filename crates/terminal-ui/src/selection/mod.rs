@@ -7,7 +7,9 @@ mod state;
 mod viewport;
 use std::time::Instant;
 
-use crate::{AppEffect, Model, display_width::display_width, document::DocumentLayout};
+use crate::{
+    AppEffect, Model, display_width::display_width, document::DocumentLayout, toast::ToastSeverity,
+};
 
 pub(super) use self::copy::selection_text;
 pub(super) use self::range::{
@@ -28,9 +30,9 @@ const SELECTION_COPY_FAILED_NOTICE_TEXT: &str = "Copy selection failed";
 impl Model {
     pub(crate) fn handle_selection_copy_completed(&mut self, success: bool) {
         if success {
-            self.show_transient_status_notice(SELECTION_COPIED_NOTICE_TEXT);
+            self.show_toast(ToastSeverity::Info, SELECTION_COPIED_NOTICE_TEXT);
         } else {
-            self.show_transient_status_notice(SELECTION_COPY_FAILED_NOTICE_TEXT);
+            self.show_toast(ToastSeverity::Error, SELECTION_COPY_FAILED_NOTICE_TEXT);
         }
     }
 

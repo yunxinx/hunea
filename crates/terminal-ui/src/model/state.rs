@@ -55,7 +55,10 @@ pub(crate) struct DocumentRuntimeState {
     pub(crate) restore: RestoreState,
 }
 
-/// `NoticeState` 收口短暂提示、滚动提示、外部编辑器提示与退出确认。
+/// `NoticeState` 收口底部状态行上的短暂提示、滚动提示、外部编辑器提示与退出确认。
+///
+/// 状态行提示用于不会打断阅读节奏的导航与确认类反馈，例如退出确认与 Esc 中断提示。
+/// 需要醒目确认的结果性事件应使用上层 `ToastState`，避免占用底部状态槽并移动文档内容。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NoticeState {
     pub(crate) status_text: String,

@@ -2,6 +2,7 @@ mod conversation_commands;
 mod event_mapping;
 mod managed_search_authorization;
 mod session_commands;
+mod session_tree_load;
 mod session_worker;
 
 use std::{path::PathBuf, sync::Arc};
@@ -108,6 +109,7 @@ impl AppRuntimeCoordinator {
             }
             RuntimeCommand::ResumeSession { session_id } => self.resume_session(&session_id),
             RuntimeCommand::LoadEntryTree => self.load_entry_tree(),
+            RuntimeCommand::LoadCopyPickerTree => self.load_copy_picker_tree(),
             RuntimeCommand::LoadBranchTree => self.load_branch_tree(),
             RuntimeCommand::LoadBranchPreview { branch_row_id } => {
                 self.load_branch_preview(&branch_row_id)

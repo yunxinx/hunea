@@ -126,6 +126,51 @@ fn entry_tree_space_preview_renders_assistant_tool_call_json_with_highlighting()
 }
 
 #[test]
+fn entry_tree_preview_render_does_not_change_scroll_offset() {
+    let mut model = ready_model();
+    model.set_window(60, 8);
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_preview_replay_items(
+            "assistant-long",
+            SessionTreeRowKind::Assistant,
+            "assistant preview",
+            vec![TranscriptReplayItem::Message {
+                role: TranscriptReplayRole::Assistant,
+                content: (0..20)
+                    .map(|index| format!("preview line {index}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }],
+        )],
+        current_row_id: Some("assistant-long".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert!(model.entry_tree_preview_active());
+
+    let preview = model
+        .entry_tree
+        .as_mut()
+        .and_then(|state| state.preview.as_mut())
+        .expect("entry tree preview should be open");
+    preview.is_following_bottom = true;
+    preview.overlay.scroll_offset = 0;
+
+    let _ = render_model_buffer(&mut model, 60, 8);
+
+    let scroll_offset = model
+        .entry_tree
+        .as_ref()
+        .and_then(|state| state.preview.as_ref())
+        .map(|preview| preview.overlay.scroll_offset);
+    assert_eq!(
+        scroll_offset,
+        Some(0),
+        "rendering must not repair or advance preview scroll state"
+    );
+}
+
+#[test]
 fn entry_tree_space_preview_renders_tool_activity_in_detailed_mode() {
     let mut model = ready_model();
     model.open_entry_tree_loading();

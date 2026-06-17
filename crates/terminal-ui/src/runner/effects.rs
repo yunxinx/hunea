@@ -51,6 +51,10 @@ pub(super) fn apply_effect_if_needed(
             );
             Ok(())
         }
+        AppEffect::OpenCopyPicker => {
+            run_open_copy_picker_effect(model, runtime_coordinator);
+            Ok(())
+        }
         AppEffect::OpenSessionPreview { session_id } => {
             run_simple_runtime_command_effect(
                 model,
@@ -143,6 +147,18 @@ pub(super) fn run_switch_branch_effect(
     }) {
         Ok(_) => model.open_entry_tree_loading(),
         Err(message) => model.show_entry_tree_branch_picker_error(&message),
+    }
+}
+
+pub(super) fn run_open_copy_picker_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) {
+    model.open_copy_picker_loading();
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadCopyPickerTree)
+    {
+        model.show_copy_picker_error(&message);
     }
 }
 

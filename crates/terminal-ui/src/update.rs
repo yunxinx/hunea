@@ -27,6 +27,7 @@ pub const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 pub enum AppEffect {
     LaunchExternalEditor(ExternalEditorLaunch),
     CopySelection(String),
+    OpenCopyPicker,
     ResetRuntimeSession,
     RespondRuntimePermission {
         target: RuntimeTarget,
@@ -121,6 +122,9 @@ pub enum AppEvent {
     SelectionCopyCompleted {
         success: bool,
     },
+    ToastNoticeTimeout {
+        token: usize,
+    },
     StartupReadyTimeout,
 }
 
@@ -129,6 +133,7 @@ impl Model {
         crate::runner::TerminalInputCoalescing {
             has_page_scroll_burst_coalescing: self.session_preview_active()
                 || self.session_picker_active()
+                || self.copy_picker_active()
                 || self.entry_tree_active(),
         }
     }
@@ -142,6 +147,7 @@ impl Model {
                     || self.tool_approval_fullscreen_preview_active()
                     || self.session_preview_active()
                     || self.session_picker_active()
+                    || self.copy_picker_active()
                     || self.entry_tree_active()
                     || self.model_panel_active()
                 {
@@ -166,14 +172,22 @@ impl Model {
                     return None;
                 }
                 if self.session_picker_active() {
-                    self.move_session_picker_selection(delta_lines.signum());
+                    self.move_session_picker_selection_by_delta(delta_lines.signum());
+                    return None;
+                }
+                if self.copy_picker_active() {
+                    if self.copy_picker_preview_active() {
+                        self.move_copy_picker_preview_page(delta_lines.signum());
+                    } else {
+                        self.move_copy_picker_selection_by_delta(delta_lines.signum());
+                    }
                     return None;
                 }
                 if self.entry_tree_active() {
                     if self.entry_tree_preview_active() {
                         self.move_entry_tree_preview_page(delta_lines.signum());
                     } else {
-                        self.move_entry_tree_selection(delta_lines.signum());
+                        self.move_entry_tree_selection_by_delta(delta_lines.signum());
                     }
                     return None;
                 }
@@ -204,6 +218,9 @@ impl Model {
                 column,
                 row,
             } => {
+                if self.copy_picker_active() {
+                    return self.handle_copy_picker_mouse_down(button, column, row);
+                }
                 if self.entry_tree_active() {
                     return self.handle_entry_tree_mouse_down(button, column, row);
                 }
@@ -225,6 +242,7 @@ impl Model {
                     || self.tool_approval_fullscreen_preview_active()
                     || self.session_preview_active()
                     || self.session_picker_active()
+                    || self.copy_picker_active()
                     || self.entry_tree_active()
                 {
                     return None;
@@ -240,6 +258,7 @@ impl Model {
                     || self.tool_approval_fullscreen_preview_active()
                     || self.session_preview_active()
                     || self.session_picker_active()
+                    || self.copy_picker_active()
                     || self.entry_tree_active()
                 {
                     return None;
@@ -289,6 +308,10 @@ impl Model {
                 self.handle_selection_copy_completed(success);
                 None
             }
+            AppEvent::ToastNoticeTimeout { token } => {
+                self.handle_toast_timeout(token);
+                None
+            }
             AppEvent::StartupReadyTimeout => {
                 if !self.has_palette() {
                     self.set_palette(terminal_default_palette(), false);
@@ -317,11 +340,13 @@ impl Model {
         self.clear_history_scroll_indicator();
         if self.transcript_overlay_active() {
             self.cancel_exit_confirmation();
-            if let Some(effect) = self.handle_message_revisit_overlay_key(key) {
-                return effect;
+            let result = self.handle_message_revisit_overlay_key(key);
+            if !result.is_ignored() {
+                return result.into_effect();
             }
-            if let Some(effect) = self.handle_transcript_overlay_key(key) {
-                return effect;
+            let result = self.handle_transcript_overlay_key(key);
+            if !result.is_ignored() {
+                return result.into_effect();
             }
         }
 
@@ -351,24 +376,34 @@ impl Model {
             return None;
         }
 
-        if let Some(effect) = self.handle_tool_approval_panel_key(key) {
-            return effect;
+        let result = self.handle_tool_approval_panel_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
-        if let Some(effect) = self.handle_session_preview_key(key) {
-            return effect;
+        let result = self.handle_session_preview_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
-        if let Some(effect) = self.handle_session_picker_key(key) {
-            return effect;
+        let result = self.handle_session_picker_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
-        if let Some(effect) = self.handle_entry_tree_key(key) {
-            return effect;
+        let result = self.handle_copy_picker_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
-        if let Some(effect) = self.handle_transcript_overlay_key(key) {
-            return effect;
+        let result = self.handle_entry_tree_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
+        }
+
+        let result = self.handle_transcript_overlay_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
         if is_plain_esc && let Some(effect) = self.handle_chat_interrupt_key() {
@@ -377,8 +412,9 @@ impl Model {
             self.reset_chat_interrupt_esc_count();
         }
 
-        if let Some(effect) = self.handle_model_panel_key(key) {
-            return effect;
+        let result = self.handle_model_panel_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
         if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -387,16 +423,21 @@ impl Model {
                 .map(AppEffect::LaunchExternalEditor);
         }
 
-        if let Some(effect) = self.handle_command_panel_key(key) {
-            return effect;
+        let result = self.handle_command_panel_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
-        if let Some(effect) = self.handle_file_picker_key(key) {
-            return effect;
+        let result = self.handle_file_picker_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
-        if is_plain_esc && let Some(effect) = self.handle_message_revisit_main_esc_key() {
-            return effect;
+        if is_plain_esc {
+            let result = self.handle_message_revisit_main_esc_key();
+            if !result.is_ignored() {
+                return result.into_effect();
+            }
         }
 
         if key.code == KeyCode::Enter {
@@ -728,6 +769,8 @@ impl Model {
         self.sync_composer_height();
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         self.restore_transcript_overlay_scroll_anchor(transcript_overlay_anchor);
+        self.sync_copy_picker_preview_follow_bottom();
+        self.sync_entry_tree_preview_follow_bottom();
     }
 }
 

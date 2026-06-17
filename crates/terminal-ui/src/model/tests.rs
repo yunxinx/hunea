@@ -8,6 +8,7 @@ use crate::{
     AppEffect, AppEvent, Sender, StyleMode,
     document::DocumentAnchorRegion,
     test_helpers::{render_model_buffer, rendered_rows},
+    toast::ToastSeverity,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use runtime_domain::model_catalog::{
@@ -77,6 +78,33 @@ fn startup_banner_entrance_runs_only_once_across_banner_rebuilds() {
     assert_eq!(
         model.startup_banner_entrance_frame_interval_at(started_at),
         None
+    );
+}
+
+#[test]
+fn selection_copy_completion_uses_toast_not_status_notice() {
+    let mut model = Model::new(StartupBannerOptions::default());
+
+    model.handle_selection_copy_completed(true);
+
+    assert_eq!(model.current_status_notice_text(), "");
+    assert_eq!(model.active_toast_text_for_test(), Some("Selection copied"));
+}
+
+#[test]
+fn exit_confirmation_stays_on_status_line_when_toast_exists() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.show_toast(ToastSeverity::Info, "Background notice");
+
+    model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+
+    assert!(model.current_status_notice_text().contains("exit"));
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("Background notice")
     );
 }
 

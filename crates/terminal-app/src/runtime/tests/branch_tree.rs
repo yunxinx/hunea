@@ -1,6 +1,38 @@
 use super::support::*;
 
 #[test]
+fn load_branch_tree_emits_empty_tree_for_new_unpersisted_session() {
+    let work_dir = temp_test_dir("load-branch-tree-empty-work");
+    let store = Arc::new(InMemorySessionStore::new());
+    let header = SessionHeader {
+        session_id: SessionId::new(),
+        work_dir: work_dir.clone(),
+        session_name: None,
+        initial_model: "qwen3".to_string(),
+        git_head: None,
+        cli_version: None,
+    };
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(header),
+        ..AppRuntimeOptions::default()
+    });
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::LoadBranchTree)
+        .expect("empty new session branch tree should load as an empty payload");
+
+    let payload = wait_for_session_branch_tree(&mut coordinator);
+    assert!(
+        payload.nodes.is_empty(),
+        "new sessions without messages should render an empty branch tree"
+    );
+    assert_eq!(payload.current_branch_row_id, None);
+    assert_eq!(payload.total_message_count, 0);
+    cleanup(&work_dir);
+}
+
+#[test]
 fn load_branch_tree_emits_branch_roots_for_active_session() {
     let work_dir = temp_test_dir("load-branch-tree-work");
     let store = Arc::new(InMemorySessionStore::new());

@@ -1,12 +1,13 @@
 use crate::{
     AppEffect, AppEvent, Model, StartupBannerOptions,
+    overlay_input_result::OverlayInputResult,
     runtime::RuntimeEventApply,
     test_helpers::{
         render_model_buffer, rendered_rows, tree_row, tree_row_with_preview_replay_items,
     },
     theme::default_palette,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use runtime_domain::session::{
     RuntimeEvent, SessionTreePayload, SessionTreeRowKind, TranscriptReplayItem,
     TranscriptReplayRole,

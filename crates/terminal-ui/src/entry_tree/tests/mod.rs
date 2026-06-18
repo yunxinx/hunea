@@ -21,6 +21,7 @@ use crate::test_helpers::{
 use crate::time::current_unix_timestamp_ms;
 use crate::{
     AppEffect, AppEvent, Model, ModelOptions, StartupBannerOptions,
+    overlay_input_result::OverlayInputResult,
     runtime::RuntimeEventApply,
     theme::{
         accent_text_style, approval_rejected_text_style, command_accent_text_style,

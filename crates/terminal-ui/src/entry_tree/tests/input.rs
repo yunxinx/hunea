@@ -79,3 +79,45 @@ fn entry_tree_left_click_selects_visible_body_row() {
         "clicking tree chrome should not move selection: {after_header_click_rows:?}"
     );
 }
+
+#[test]
+fn entry_tree_mouse_down_reports_modal_input_contract() {
+    let mut inactive_model = ready_model();
+    assert_eq!(
+        inactive_model.handle_entry_tree_mouse_down(MouseButton::Left, 12, 2),
+        OverlayInputResult::Ignored
+    );
+
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: (0..4).map(numbered_tree_row).collect(),
+        current_row_id: None,
+    });
+
+    assert_eq!(
+        model.handle_entry_tree_mouse_down(MouseButton::Left, 12, ENTRY_TREE_HEADER_HEIGHT),
+        OverlayInputResult::Handled,
+        "active entry tree should consume clicks on its chrome"
+    );
+    assert_eq!(
+        model.handle_entry_tree_mouse_down(
+            MouseButton::Right,
+            12,
+            ENTRY_TREE_HEADER_HEIGHT + ENTRY_TREE_HEADER_RULE_HEIGHT + 1,
+        ),
+        OverlayInputResult::Handled,
+        "active entry tree should consume non-left clicks instead of passing them to transcript selection"
+    );
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert_eq!(
+        model.handle_entry_tree_mouse_down(
+            MouseButton::Left,
+            12,
+            ENTRY_TREE_HEADER_HEIGHT + ENTRY_TREE_HEADER_RULE_HEIGHT + 1,
+        ),
+        OverlayInputResult::Handled,
+        "entry tree preview keeps pointer input modal even though native selection remains available at the terminal layer"
+    );
+}

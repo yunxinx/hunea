@@ -14,6 +14,7 @@ use super::{
     },
     document::DocumentAnchorRegion,
     exit_confirmation::EXIT_CONFIRMATION_PROMPT,
+    overlay_input_result::OverlayInputResult,
     path_resolve::resolve_configured_current_dir,
     terminal_text::sanitize_terminal_text,
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},
@@ -163,36 +164,9 @@ impl Model {
             }
             AppEvent::MouseWheel { delta_lines } => {
                 self.cancel_exit_confirmation();
-                if self.tool_approval_fullscreen_preview_active() {
-                    self.scroll_tool_approval_fullscreen_preview_by(delta_lines);
-                    return None;
-                }
-                if self.session_preview_active() {
-                    self.move_session_preview_page(delta_lines.signum());
-                    return None;
-                }
-                if self.session_picker_active() {
-                    self.move_session_picker_selection_by_delta(delta_lines.signum());
-                    return None;
-                }
-                if self.copy_picker_active() {
-                    if self.copy_picker_preview_active() {
-                        self.move_copy_picker_preview_page(delta_lines.signum());
-                    } else {
-                        self.move_copy_picker_selection_by_delta(delta_lines.signum());
-                    }
-                    return None;
-                }
-                if self.entry_tree_active() {
-                    if self.entry_tree_preview_active() {
-                        self.move_entry_tree_preview_page(delta_lines.signum());
-                    } else {
-                        self.move_entry_tree_selection_by_delta(delta_lines.signum());
-                    }
-                    return None;
-                }
-                if self.transcript_overlay_active() {
-                    return None;
+                let result = self.handle_overlay_mouse_wheel(delta_lines);
+                if !result.is_ignored() {
+                    return result.into_effect();
                 }
                 let before_document_viewport_y = self.document_runtime.viewport_y;
                 let before_composer_viewport_y = self.composer.viewport_offset();
@@ -218,18 +192,9 @@ impl Model {
                 column,
                 row,
             } => {
-                if self.copy_picker_active() {
-                    return self.handle_copy_picker_mouse_down(button, column, row);
-                }
-                if self.entry_tree_active() {
-                    return self.handle_entry_tree_mouse_down(button, column, row);
-                }
-                if self.transcript_overlay_active()
-                    || self.tool_approval_fullscreen_preview_active()
-                    || self.session_preview_active()
-                    || self.session_picker_active()
-                {
-                    return None;
+                let result = self.handle_overlay_mouse_down(button, column, row);
+                if !result.is_ignored() {
+                    return result.into_effect();
                 }
                 self.handle_mouse_down(button, column, row)
             }
@@ -238,14 +203,9 @@ impl Model {
                 column,
                 row,
             } => {
-                if self.transcript_overlay_active()
-                    || self.tool_approval_fullscreen_preview_active()
-                    || self.session_preview_active()
-                    || self.session_picker_active()
-                    || self.copy_picker_active()
-                    || self.entry_tree_active()
-                {
-                    return None;
+                let result = self.handle_overlay_pointer_passthrough_blocker();
+                if !result.is_ignored() {
+                    return result.into_effect();
                 }
                 self.handle_mouse_up(button, column, row)
             }
@@ -254,14 +214,9 @@ impl Model {
                 column,
                 row,
             } => {
-                if self.transcript_overlay_active()
-                    || self.tool_approval_fullscreen_preview_active()
-                    || self.session_preview_active()
-                    || self.session_picker_active()
-                    || self.copy_picker_active()
-                    || self.entry_tree_active()
-                {
-                    return None;
+                let result = self.handle_overlay_pointer_passthrough_blocker();
+                if !result.is_ignored() {
+                    return result.into_effect();
                 }
                 self.handle_mouse_drag(button, column, row)
             }
@@ -319,6 +274,76 @@ impl Model {
                 None
             }
         }
+    }
+
+    fn handle_overlay_mouse_wheel(&mut self, delta_lines: isize) -> OverlayInputResult {
+        if self.tool_approval_fullscreen_preview_active() {
+            self.scroll_tool_approval_fullscreen_preview_by(delta_lines);
+            return OverlayInputResult::Handled;
+        }
+        if self.session_preview_active() {
+            self.move_session_preview_page(delta_lines.signum());
+            return OverlayInputResult::Handled;
+        }
+        if self.session_picker_active() {
+            self.move_session_picker_selection_by_delta(delta_lines.signum());
+            return OverlayInputResult::Handled;
+        }
+        if self.copy_picker_active() {
+            if self.copy_picker_preview_active() {
+                self.move_copy_picker_preview_page(delta_lines.signum());
+            } else {
+                self.move_copy_picker_selection_by_delta(delta_lines.signum());
+            }
+            return OverlayInputResult::Handled;
+        }
+        if self.entry_tree_active() {
+            if self.entry_tree_preview_active() {
+                self.move_entry_tree_preview_page(delta_lines.signum());
+            } else {
+                self.move_entry_tree_selection_by_delta(delta_lines.signum());
+            }
+            return OverlayInputResult::Handled;
+        }
+        if self.transcript_overlay_active() {
+            return OverlayInputResult::Handled;
+        }
+        OverlayInputResult::Ignored
+    }
+
+    fn handle_overlay_mouse_down(
+        &mut self,
+        button: MouseButton,
+        column: u16,
+        row: u16,
+    ) -> OverlayInputResult {
+        if self.copy_picker_active() {
+            return self.handle_copy_picker_mouse_down(button, column, row);
+        }
+        if self.entry_tree_active() {
+            return self.handle_entry_tree_mouse_down(button, column, row);
+        }
+        if self.overlay_blocks_pointer_passthrough() {
+            return OverlayInputResult::Handled;
+        }
+        OverlayInputResult::Ignored
+    }
+
+    fn handle_overlay_pointer_passthrough_blocker(&self) -> OverlayInputResult {
+        if self.overlay_blocks_pointer_passthrough() {
+            OverlayInputResult::Handled
+        } else {
+            OverlayInputResult::Ignored
+        }
+    }
+
+    fn overlay_blocks_pointer_passthrough(&self) -> bool {
+        self.transcript_overlay_active()
+            || self.tool_approval_fullscreen_preview_active()
+            || self.session_preview_active()
+            || self.session_picker_active()
+            || self.copy_picker_active()
+            || self.entry_tree_active()
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppEffect> {

@@ -9,7 +9,10 @@ use std::{
     io,
     panic::{AssertUnwindSafe, catch_unwind},
     process::Command,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc, mpsc,
+        mpsc::{SyncSender, TrySendError},
+    },
     thread::{self, JoinHandle},
 };
 
@@ -25,6 +28,8 @@ use super::{
 };
 
 type SystemClipboardResult = std::result::Result<(), String>;
+
+const CLIPBOARD_JOB_QUEUE_CAPACITY: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ExternalIoEvent {
@@ -44,12 +49,19 @@ struct SystemClipboardWriter {
 }
 
 struct ClipboardWorker {
-    jobs_sender: Option<mpsc::Sender<ClipboardJob>>,
+    jobs_sender: Option<SyncSender<ClipboardJob>>,
     worker_thread: Option<JoinHandle<()>>,
 }
 
 struct ClipboardJob {
     text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CopySelectionStartResult {
+    Queued,
+    QueueFull,
+    WorkerStopped,
 }
 
 impl ExternalIoRuntime {
@@ -84,18 +96,23 @@ impl ExternalIoRuntime {
         }
     }
 
-    pub(super) fn start_copy_selection(&mut self, text: String) {
+    pub(super) fn start_copy_selection(&mut self, text: String) -> CopySelectionStartResult {
         match self.clipboard_worker.submit(text) {
             Ok(()) => {
                 self.pending_clipboard_writes = self.pending_clipboard_writes.saturating_add(1);
+                CopySelectionStartResult::Queued
             }
-            Err(text) => {
+            Err(ClipboardSubmitError::QueueFull) => CopySelectionStartResult::QueueFull,
+            Err(ClipboardSubmitError::WorkerStopped { text }) => {
                 if self
                     .clipboard_events_sender
                     .send(ExternalIoEvent::SelectionSystemClipboardFailed { text })
                     .is_ok()
                 {
                     self.pending_clipboard_writes = self.pending_clipboard_writes.saturating_add(1);
+                    CopySelectionStartResult::Queued
+                } else {
+                    CopySelectionStartResult::WorkerStopped
                 }
             }
         }
@@ -120,6 +137,11 @@ impl ExternalIoRuntime {
     }
 }
 
+enum ClipboardSubmitError {
+    QueueFull,
+    WorkerStopped { text: String },
+}
+
 impl Default for ExternalIoRuntime {
     fn default() -> Self {
         Self::new()
@@ -140,7 +162,8 @@ impl SystemClipboardWriter {
 
 impl ClipboardWorker {
     fn start(events_sender: mpsc::Sender<ExternalIoEvent>, writer: SystemClipboardWriter) -> Self {
-        let (jobs_sender, jobs_receiver) = mpsc::channel::<ClipboardJob>();
+        let (jobs_sender, jobs_receiver) =
+            mpsc::sync_channel::<ClipboardJob>(CLIPBOARD_JOB_QUEUE_CAPACITY);
         let worker_thread = thread::spawn(move || {
             for job in jobs_receiver {
                 let write_result = catch_unwind(AssertUnwindSafe(|| writer.write(&job.text)));
@@ -161,13 +184,18 @@ impl ClipboardWorker {
         }
     }
 
-    fn submit(&self, text: String) -> std::result::Result<(), String> {
+    fn submit(&self, text: String) -> std::result::Result<(), ClipboardSubmitError> {
         let Some(jobs_sender) = self.jobs_sender.as_ref() else {
-            return Err(text);
+            return Err(ClipboardSubmitError::WorkerStopped { text });
         };
         jobs_sender
-            .send(ClipboardJob { text })
-            .map_err(|error| error.0.text)
+            .try_send(ClipboardJob { text })
+            .map_err(|error| match error {
+                TrySendError::Full(_job) => ClipboardSubmitError::QueueFull,
+                TrySendError::Disconnected(job) => {
+                    ClipboardSubmitError::WorkerStopped { text: job.text }
+                }
+            })
     }
 
     fn shutdown(&mut self) {
@@ -215,10 +243,20 @@ pub(super) fn run_external_editor_effect(
 }
 
 pub(super) fn run_copy_selection_effect(
+    model: &mut Model,
     external_io: &mut ExternalIoRuntime,
     text: String,
 ) -> Result<()> {
-    external_io.start_copy_selection(text);
+    match external_io.start_copy_selection(text) {
+        CopySelectionStartResult::Queued => {}
+        CopySelectionStartResult::QueueFull | CopySelectionStartResult::WorkerStopped => {
+            apply_model_event_without_effect(
+                model,
+                AppEvent::SelectionCopyCompleted { success: false },
+                "selection copy queue rejected",
+            );
+        }
+    }
     Ok(())
 }
 
@@ -404,6 +442,65 @@ mod tests {
             events,
             vec![ExternalIoEvent::SelectionSystemClipboardCopied]
         );
+    }
+
+    #[test]
+    fn copy_selection_rejects_when_clipboard_job_queue_is_full() {
+        let (writer_started_sender, writer_started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let release_receiver = Arc::new(Mutex::new(release_receiver));
+        let writer_release_receiver = Arc::clone(&release_receiver);
+        let mut external_io = ExternalIoRuntime::with_system_clipboard_writer(move |_text| {
+            writer_started_sender
+                .send(())
+                .expect("test should observe each clipboard write start");
+            writer_release_receiver
+                .lock()
+                .expect("test release receiver should not be poisoned")
+                .recv()
+                .expect("test should release every queued clipboard write");
+            Ok(())
+        });
+
+        assert_eq!(
+            external_io.start_copy_selection("in-flight".to_string()),
+            CopySelectionStartResult::Queued
+        );
+        writer_started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first clipboard write should start and block");
+
+        for index in 0..CLIPBOARD_JOB_QUEUE_CAPACITY {
+            assert_eq!(
+                external_io.start_copy_selection(format!("queued-{index}")),
+                CopySelectionStartResult::Queued
+            );
+        }
+        assert_eq!(
+            external_io.pending_clipboard_writes,
+            CLIPBOARD_JOB_QUEUE_CAPACITY + 1
+        );
+
+        assert_eq!(
+            external_io.start_copy_selection("overflow".to_string()),
+            CopySelectionStartResult::QueueFull
+        );
+        assert_eq!(
+            external_io.pending_clipboard_writes,
+            CLIPBOARD_JOB_QUEUE_CAPACITY + 1,
+            "rejected copy requests must not keep the runner polling forever"
+        );
+
+        for _ in 0..=CLIPBOARD_JOB_QUEUE_CAPACITY {
+            release_sender
+                .send(())
+                .expect("test should release the accepted clipboard writes");
+        }
+        assert_eq!(
+            drain_external_io_events_until(&mut external_io, CLIPBOARD_JOB_QUEUE_CAPACITY + 1),
+            vec![ExternalIoEvent::SelectionSystemClipboardCopied; CLIPBOARD_JOB_QUEUE_CAPACITY + 1]
+        );
+        assert!(!external_io.has_pending_work());
     }
 
     #[test]

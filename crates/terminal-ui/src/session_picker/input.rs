@@ -4,7 +4,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use runtime_domain::session::SessionPickerRow;
 
 use crate::{
-    AppEffect, Model, list_selection::ListNavigationDirection, overlay_key_result::OverlayKeyResult,
+    AppEffect, Model, list_selection::ListNavigationDirection,
+    overlay_input_result::OverlayInputResult,
 };
 
 use super::{SessionPickerState, session_picker_page_size_for_height};
@@ -44,9 +45,9 @@ impl Model {
         self.session_picker = Some(state);
     }
 
-    pub(crate) fn handle_session_picker_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
+    pub(crate) fn handle_session_picker_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if !self.session_picker_active() {
-            return OverlayKeyResult::Ignored;
+            return OverlayInputResult::Ignored;
         }
 
         let is_searching = self
@@ -59,74 +60,74 @@ impl Model {
                 if let Some(state) = self.session_picker.as_mut()
                     && state.exit_search()
                 {
-                    return OverlayKeyResult::Handled;
+                    return OverlayInputResult::Handled;
                 }
                 self.session_picker = None;
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char(character) if is_searching && is_session_picker_search_text_key(&key) => {
                 if let Some(state) = self.session_picker.as_mut() {
                     state.push_search_character(character);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Up => {
                 if let Some(state) = self.session_picker.as_mut() {
                     state.move_selection(ListNavigationDirection::Previous);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Down => {
                 if let Some(state) = self.session_picker.as_mut() {
                     state.move_selection(ListNavigationDirection::Next);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Left => {
                 let page_size = session_picker_page_size_for_height(self.height);
                 if let Some(state) = self.session_picker.as_mut() {
                     state.move_page(ListNavigationDirection::Previous, page_size);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Right => {
                 let page_size = session_picker_page_size_for_height(self.height);
                 if let Some(state) = self.session_picker.as_mut() {
                     state.move_page(ListNavigationDirection::Next, page_size);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char('k') if key.modifiers.is_empty() => {
                 if let Some(state) = self.session_picker.as_mut() {
                     state.move_selection(ListNavigationDirection::Previous);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char('j') if key.modifiers.is_empty() => {
                 if let Some(state) = self.session_picker.as_mut() {
                     state.move_selection(ListNavigationDirection::Next);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char('h') if key.modifiers.is_empty() => {
                 let page_size = session_picker_page_size_for_height(self.height);
                 if let Some(state) = self.session_picker.as_mut() {
                     state.move_page(ListNavigationDirection::Previous, page_size);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char('l') if key.modifiers.is_empty() => {
                 let page_size = session_picker_page_size_for_height(self.height);
                 if let Some(state) = self.session_picker.as_mut() {
                     state.move_page(ListNavigationDirection::Next, page_size);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Backspace => {
                 if let Some(state) = self.session_picker.as_mut() {
                     state.backspace_search();
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char('u')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -135,7 +136,7 @@ impl Model {
                 if let Some(state) = self.session_picker.as_mut() {
                     state.clear_search();
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Enter => {
                 let selected_session_id = self
@@ -145,15 +146,15 @@ impl Model {
                     .map(|row| row.session_id.clone());
                 if let Some(session_id) = selected_session_id {
                     self.session_picker = None;
-                    return OverlayKeyResult::Effect(AppEffect::ResumeSession { session_id });
+                    return OverlayInputResult::Effect(AppEffect::ResumeSession { session_id });
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char('/') if key.modifiers.is_empty() => {
                 if let Some(state) = self.session_picker.as_mut() {
                     state.is_searching = true;
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 let selected_session_id = self
@@ -163,11 +164,11 @@ impl Model {
                     .map(|row| row.session_id.clone());
                 selected_session_id
                     .map(|session_id| {
-                        OverlayKeyResult::Effect(AppEffect::OpenSessionPreview { session_id })
+                        OverlayInputResult::Effect(AppEffect::OpenSessionPreview { session_id })
                     })
-                    .unwrap_or(OverlayKeyResult::Handled)
+                    .unwrap_or(OverlayInputResult::Handled)
             }
-            _ => OverlayKeyResult::Handled,
+            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 }

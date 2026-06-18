@@ -4,7 +4,7 @@ use runtime_domain::session::SessionPreviewPayload;
 
 use crate::{
     AppEffect, Model,
-    overlay_key_result::OverlayKeyResult,
+    overlay_input_result::OverlayInputResult,
     render_frame::RenderFrame,
     transcript::{
         Transcript, latest_preview_offset as latest_session_preview_offset,
@@ -66,9 +66,9 @@ impl Model {
         self.session_preview = None;
     }
 
-    pub(crate) fn handle_session_preview_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
+    pub(crate) fn handle_session_preview_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if !self.session_preview_active() {
-            return OverlayKeyResult::Ignored;
+            return OverlayInputResult::Ignored;
         }
 
         match key.code {
@@ -78,25 +78,25 @@ impl Model {
                     .as_ref()
                     .map(|preview| preview.session_id.clone())
                 else {
-                    return OverlayKeyResult::Ignored;
+                    return OverlayInputResult::Ignored;
                 };
                 self.close_session_preview();
                 self.session_picker = None;
-                OverlayKeyResult::Effect(AppEffect::ResumeSession { session_id })
+                OverlayInputResult::Effect(AppEffect::ResumeSession { session_id })
             }
             KeyCode::Esc | KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 self.close_session_preview();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Left | KeyCode::Up | KeyCode::Char('h') if key.modifiers.is_empty() => {
                 self.move_session_preview_page(-1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Right | KeyCode::Down | KeyCode::Char('l') if key.modifiers.is_empty() => {
                 self.move_session_preview_page(1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
-            _ => OverlayKeyResult::Handled,
+            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 

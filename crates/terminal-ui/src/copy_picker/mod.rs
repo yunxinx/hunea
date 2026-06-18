@@ -19,7 +19,7 @@ use crate::{
         fullscreen_list_page_size_for_height,
     },
     list_selection::{ListNavigationDirection, PagedSelection, row_index_by_id},
-    overlay_key_result::OverlayKeyResult,
+    overlay_input_result::OverlayInputResult,
     render_frame::RenderFrame,
     session_tree_preview_replay::SessionTreePreviewReplay,
     session_tree_row_kind_view::{

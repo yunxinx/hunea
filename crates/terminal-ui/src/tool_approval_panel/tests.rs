@@ -1,11 +1,11 @@
 use super::*;
 use crate::{
-    AppEvent, Sender, StartupBannerOptions, overlay_key_result::OverlayKeyResult,
+    AppEvent, Sender, StartupBannerOptions, overlay_input_result::OverlayInputResult,
     theme::default_palette,
 };
 use ratatui::{buffer::Buffer, layout::Rect};
 
-fn handled_effect(result: OverlayKeyResult, context: &str) -> Option<AppEffect> {
+fn handled_effect(result: OverlayInputResult, context: &str) -> Option<AppEffect> {
     assert!(!result.is_ignored(), "{context}");
     result.into_effect()
 }

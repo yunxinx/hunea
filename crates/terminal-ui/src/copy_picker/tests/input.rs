@@ -64,7 +64,7 @@ fn copy_picker_mouse_click_moves_cursor_without_copying() {
     let mut model = ready_copy_picker_model();
 
     let effect = model.update(AppEvent::MouseDown {
-        button: crossterm::event::MouseButton::Left,
+        button: MouseButton::Left,
         column: 4,
         row: 2,
     });
@@ -74,5 +74,33 @@ fn copy_picker_mouse_click_moves_cursor_without_copying() {
     assert_eq!(
         copied,
         Some(AppEffect::CopySelection("first user".to_string()))
+    );
+}
+
+#[test]
+fn copy_picker_mouse_down_reports_modal_input_contract() {
+    let mut inactive_model = Model::new(StartupBannerOptions::default());
+    assert_eq!(
+        inactive_model.handle_copy_picker_mouse_down(MouseButton::Left, 4, 2),
+        OverlayInputResult::Ignored
+    );
+
+    let mut model = ready_copy_picker_model();
+    assert_eq!(
+        model.handle_copy_picker_mouse_down(MouseButton::Left, 4, 0),
+        OverlayInputResult::Handled,
+        "active copy picker should consume clicks outside the list body"
+    );
+    assert_eq!(
+        model.handle_copy_picker_mouse_down(MouseButton::Right, 4, 2),
+        OverlayInputResult::Handled,
+        "active copy picker should consume non-left clicks instead of passing them to transcript selection"
+    );
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert_eq!(
+        model.handle_copy_picker_mouse_down(MouseButton::Left, 4, 2),
+        OverlayInputResult::Handled,
+        "copy picker preview keeps pointer input modal even though native selection remains available at the terminal layer"
     );
 }

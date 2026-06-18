@@ -1,15 +1,15 @@
 use crate::AppEffect;
 
-/// `OverlayKeyResult` 明确表达覆盖层按键是否接管，以及是否产生副作用。
-#[must_use = "overlay key results decide whether input was consumed"]
+/// `OverlayInputResult` 明确表达覆盖层输入是否接管，以及是否产生副作用。
+#[must_use = "overlay input results decide whether input was consumed"]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OverlayKeyResult {
+pub(crate) enum OverlayInputResult {
     Ignored,
     Handled,
     Effect(AppEffect),
 }
 
-impl OverlayKeyResult {
+impl OverlayInputResult {
     pub(crate) fn from_effect(effect: Option<AppEffect>) -> Self {
         match effect {
             Some(effect) => Self::Effect(effect),
@@ -37,26 +37,26 @@ mod tests {
     use crate::AppEffect;
 
     #[test]
-    fn overlay_key_result_names_key_dispatch_states() {
+    fn overlay_input_result_names_key_dispatch_states() {
         let effect = AppEffect::OpenCopyPicker;
 
         assert_eq!(
-            OverlayKeyResult::from_effect(None),
-            OverlayKeyResult::Handled
+            OverlayInputResult::from_effect(None),
+            OverlayInputResult::Handled
         );
         assert_eq!(
-            OverlayKeyResult::from_effect(Some(effect.clone())),
-            OverlayKeyResult::Effect(effect.clone())
+            OverlayInputResult::from_effect(Some(effect.clone())),
+            OverlayInputResult::Effect(effect.clone())
         );
 
-        assert!(OverlayKeyResult::Ignored.is_ignored());
-        assert!(!OverlayKeyResult::Handled.is_ignored());
-        assert!(!OverlayKeyResult::Effect(effect.clone()).is_ignored());
+        assert!(OverlayInputResult::Ignored.is_ignored());
+        assert!(!OverlayInputResult::Handled.is_ignored());
+        assert!(!OverlayInputResult::Effect(effect.clone()).is_ignored());
 
-        assert_eq!(OverlayKeyResult::Ignored.into_effect(), None);
-        assert_eq!(OverlayKeyResult::Handled.into_effect(), None);
+        assert_eq!(OverlayInputResult::Ignored.into_effect(), None);
+        assert_eq!(OverlayInputResult::Handled.into_effect(), None);
         assert_eq!(
-            OverlayKeyResult::Effect(effect.clone()).into_effect(),
+            OverlayInputResult::Effect(effect.clone()).into_effect(),
             Some(effect)
         );
     }

@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    AppEffect, Model, Sender, overlay_key_result::OverlayKeyResult, transcript::TranscriptItem,
+    AppEffect, Model, Sender, overlay_input_result::OverlayInputResult, transcript::TranscriptItem,
 };
 
 #[cfg(test)]
@@ -41,7 +41,7 @@ impl Model {
         None
     }
 
-    pub(crate) fn handle_message_revisit_main_esc_key(&mut self) -> OverlayKeyResult {
+    pub(crate) fn handle_message_revisit_main_esc_key(&mut self) -> OverlayInputResult {
         if self.message_revisit.is_armed
             && self.current_status_notice_text() != MESSAGE_REVISIT_HINT
         {
@@ -50,69 +50,72 @@ impl Model {
 
         if self.stream_activity.is_some() || !self.composer_text().is_empty() {
             self.reset_message_revisit_state();
-            return OverlayKeyResult::Ignored;
+            return OverlayInputResult::Ignored;
         }
 
         if !self.has_message_revisit_target() {
             self.reset_message_revisit_state();
-            return OverlayKeyResult::Ignored;
+            return OverlayInputResult::Ignored;
         }
 
         if !self.message_revisit.is_armed {
             self.message_revisit.is_armed = true;
             self.message_revisit.selected_message_index = None;
             self.show_transient_status_notice(MESSAGE_REVISIT_HINT);
-            return OverlayKeyResult::Handled;
+            return OverlayInputResult::Handled;
         }
 
         if matches!(self.esc_rewind_mode, crate::EscRewindMode::Entry) {
             self.clear_message_revisit_notice();
             self.reset_message_revisit_state();
-            return OverlayKeyResult::Effect(AppEffect::OpenEntryRewind);
+            return OverlayInputResult::Effect(AppEffect::OpenEntryRewind);
         }
 
         self.clear_message_revisit_notice();
         self.open_transcript_overlay();
         self.message_revisit.is_overlay_active = true;
         self.select_latest_message_revisit_target();
-        OverlayKeyResult::Handled
+        OverlayInputResult::Handled
     }
 
-    pub(crate) fn handle_message_revisit_overlay_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
+    pub(crate) fn handle_message_revisit_overlay_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> OverlayInputResult {
         if !self.message_revisit.is_overlay_active {
-            return OverlayKeyResult::Ignored;
+            return OverlayInputResult::Ignored;
         }
 
         match key.code {
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.close_transcript_overlay();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.close_transcript_overlay();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.close_transcript_overlay();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Left if key.modifiers.is_empty() => {
                 self.step_message_revisit_selection(-1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Right if key.modifiers.is_empty() => {
                 self.step_message_revisit_selection(1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let selection = self.current_message_revisit_selection();
                 self.close_transcript_overlay();
                 if let Some(selection) = selection {
-                    return OverlayKeyResult::from_effect(
+                    return OverlayInputResult::from_effect(
                         self.apply_message_revisit_selection(selection),
                     );
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             _ => self.handle_transcript_overlay_key(key),
         }

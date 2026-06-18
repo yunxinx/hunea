@@ -7,7 +7,7 @@ use super::{
     Model,
     display_width::display_width,
     document::{DocumentLayout, DocumentViewport},
-    overlay_key_result::OverlayKeyResult,
+    overlay_input_result::OverlayInputResult,
     render_frame::RenderFrame,
     status_line::truncate_display_width,
     theme::tertiary_text_style,
@@ -79,9 +79,9 @@ impl Model {
         button: MouseButton,
         column: u16,
         row: u16,
-    ) -> OverlayKeyResult {
+    ) -> OverlayInputResult {
         if !self.history_scroll_indicator_hit(column, row) {
-            return OverlayKeyResult::Ignored;
+            return OverlayInputResult::Ignored;
         }
 
         self.cancel_exit_confirmation();
@@ -90,15 +90,15 @@ impl Model {
             MouseButton::Middle => {
                 self.clear_pending_composer_cursor_click();
                 self.reset_selection_click();
-                OverlayKeyResult::from_effect(self.request_copy_selection())
+                OverlayInputResult::from_effect(self.request_copy_selection())
             }
             MouseButton::Left => {
                 self.stop_selection_auto_scroll();
                 self.clear_pending_composer_cursor_click();
                 self.clear_selection();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
-            _ => OverlayKeyResult::Handled,
+            _ => OverlayInputResult::Handled,
         }
     }
 

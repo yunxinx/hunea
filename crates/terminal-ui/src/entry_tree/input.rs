@@ -103,9 +103,9 @@ impl Model {
         }
     }
 
-    pub(crate) fn handle_entry_tree_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
+    pub(crate) fn handle_entry_tree_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if !self.entry_tree_active() {
-            return OverlayKeyResult::Ignored;
+            return OverlayInputResult::Ignored;
         }
 
         if self.entry_tree_preview_active() {
@@ -127,40 +127,40 @@ impl Model {
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.entry_tree = None;
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
                 self.move_entry_tree_selection(ListNavigationDirection::Previous);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
                 self.move_entry_tree_selection(ListNavigationDirection::Next);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Left | KeyCode::Char('h') if key.modifiers.is_empty() => {
                 let page_size = self.entry_tree_page_size();
                 if let Some(state) = self.entry_tree.as_mut() {
                     state.move_page(ListNavigationDirection::Previous, page_size);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Right | KeyCode::Char('l') if key.modifiers.is_empty() => {
                 let page_size = self.entry_tree_page_size();
                 if let Some(state) = self.entry_tree.as_mut() {
                     state.move_page(ListNavigationDirection::Next, page_size);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 self.open_entry_tree_preview();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
                 self.open_entry_tree_branch_picker();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char('A') if is_entry_tree_branch_tree_shortcut(key) => {
-                OverlayKeyResult::Effect(AppEffect::OpenBranchTree)
+                OverlayInputResult::Effect(AppEffect::OpenBranchTree)
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let selected = self
@@ -173,14 +173,14 @@ impl Model {
                     let entry_id = row.row_id.clone();
                     let prefill = row.rewind_prefill.clone();
                     self.entry_tree = None;
-                    return OverlayKeyResult::Effect(AppEffect::SelectEntryRewind {
+                    return OverlayInputResult::Effect(AppEffect::SelectEntryRewind {
                         entry_id,
                         prefill,
                     });
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
-            _ => OverlayKeyResult::Handled,
+            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 
@@ -189,34 +189,38 @@ impl Model {
         button: MouseButton,
         column: u16,
         row: u16,
-    ) -> Option<AppEffect> {
-        if button != MouseButton::Left
-            || !self.entry_tree_active()
-            || self.entry_tree_preview_active()
-        {
-            return None;
+    ) -> OverlayInputResult {
+        if !self.entry_tree_active() {
+            return OverlayInputResult::Ignored;
+        }
+
+        if button != MouseButton::Left || self.entry_tree_preview_active() {
+            return OverlayInputResult::Handled;
         }
         if self.handle_entry_tree_branch_picker_mouse_down(column, row) {
-            return None;
+            return OverlayInputResult::Handled;
         }
         if self.handle_entry_tree_branch_preview_mouse_down(row) {
-            return None;
+            return OverlayInputResult::Handled;
         }
         if self.handle_entry_tree_branch_tree_mouse_down(row) {
-            return None;
+            return OverlayInputResult::Handled;
         }
 
         let should_close_branch_picker_after_tree_selection =
             self.entry_tree_branch_picker_active() && !self.entry_tree_branch_preview_active();
         let page_size = self.entry_tree_page_size();
-        let visible_offset = fullscreen_list_body_visible_offset_for_row(self.height, row)?;
+        let Some(visible_offset) = fullscreen_list_body_visible_offset_for_row(self.height, row)
+        else {
+            return OverlayInputResult::Handled;
+        };
         if let Some(state) = self.entry_tree.as_mut() {
             let selected_visible_row = state.select_visible_row(page_size, visible_offset);
             if selected_visible_row && should_close_branch_picker_after_tree_selection {
                 state.branch_picker = None;
             }
         }
-        None
+        OverlayInputResult::Handled
     }
 
     fn handle_entry_tree_branch_picker_mouse_down(&mut self, column: u16, row: u16) -> bool {
@@ -328,21 +332,21 @@ impl Model {
         picker.move_selection(direction, visible_rows);
     }
 
-    fn handle_entry_tree_branch_picker_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
+    fn handle_entry_tree_branch_picker_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 if let Some(state) = self.entry_tree.as_mut() {
                     state.branch_picker = None;
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
                 self.move_entry_tree_branch_picker_selection(ListNavigationDirection::Previous);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
                 self.move_entry_tree_branch_picker_selection(ListNavigationDirection::Next);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 let Some((branch_row_id, preview_metadata, is_current)) = self
@@ -362,10 +366,10 @@ impl Model {
                         ))
                     })
                 else {
-                    return OverlayKeyResult::Handled;
+                    return OverlayInputResult::Handled;
                 };
                 if is_current {
-                    return OverlayKeyResult::Handled;
+                    return OverlayInputResult::Handled;
                 }
                 if let Some(state) = self.entry_tree.as_mut() {
                     state.branch_preview = Some(EntryTreeBranchPreviewState {
@@ -377,7 +381,7 @@ impl Model {
                         picker.error = None;
                     }
                 }
-                OverlayKeyResult::Effect(AppEffect::OpenBranchPreview { branch_row_id })
+                OverlayInputResult::Effect(AppEffect::OpenBranchPreview { branch_row_id })
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let Some(leaf_id) = self
@@ -387,11 +391,11 @@ impl Model {
                     .and_then(EntryTreeBranchPickerState::selected_item)
                     .map(|branch| branch.branch.subtree_leaf_id.clone())
                 else {
-                    return OverlayKeyResult::Handled;
+                    return OverlayInputResult::Handled;
                 };
-                OverlayKeyResult::Effect(AppEffect::SwitchBranch { leaf_id })
+                OverlayInputResult::Effect(AppEffect::SwitchBranch { leaf_id })
             }
-            _ => OverlayKeyResult::Handled,
+            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 
@@ -450,21 +454,21 @@ impl Model {
         }
     }
 
-    fn handle_entry_tree_branch_preview_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
+    fn handle_entry_tree_branch_preview_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 if let Some(state) = self.entry_tree.as_mut() {
                     state.branch_preview = None;
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
                 self.move_entry_tree_branch_preview_selection(ListNavigationDirection::Previous);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
                 self.move_entry_tree_branch_preview_selection(ListNavigationDirection::Next);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Left | KeyCode::Char('h') if key.modifiers.is_empty() => {
                 let page_size = self.entry_tree_page_size();
@@ -475,7 +479,7 @@ impl Model {
                 {
                     preview.move_page(ListNavigationDirection::Previous, page_size);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Right | KeyCode::Char('l') if key.modifiers.is_empty() => {
                 let page_size = self.entry_tree_page_size();
@@ -486,14 +490,14 @@ impl Model {
                 {
                     preview.move_page(ListNavigationDirection::Next, page_size);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 self.open_entry_tree_preview();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
-            KeyCode::Enter if key.modifiers.is_empty() => OverlayKeyResult::Handled,
-            _ => OverlayKeyResult::Handled,
+            KeyCode::Enter if key.modifiers.is_empty() => OverlayInputResult::Handled,
+            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 
@@ -561,22 +565,22 @@ impl Model {
         }
     }
 
-    fn handle_entry_tree_branch_tree_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
+    fn handle_entry_tree_branch_tree_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 if let Some(state) = self.entry_tree.as_mut() {
                     state.branch_tree = None;
                     state.branch_preview = None;
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
                 self.move_entry_tree_branch_tree_selection(ListNavigationDirection::Previous);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
                 self.move_entry_tree_branch_tree_selection(ListNavigationDirection::Next);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Left | KeyCode::Char('h') if key.modifiers.is_empty() => {
                 let page_size = entry_tree_branch_tree_page_size_for_height(self.height);
@@ -587,7 +591,7 @@ impl Model {
                 {
                     branch_tree.move_page(ListNavigationDirection::Previous, page_size);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Right | KeyCode::Char('l') if key.modifiers.is_empty() => {
                 let page_size = entry_tree_branch_tree_page_size_for_height(self.height);
@@ -598,7 +602,7 @@ impl Model {
                 {
                     branch_tree.move_page(ListNavigationDirection::Next, page_size);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 let Some((branch_row_id, preview_metadata, is_current)) = self
@@ -619,10 +623,10 @@ impl Model {
                         ))
                     })
                 else {
-                    return OverlayKeyResult::Handled;
+                    return OverlayInputResult::Handled;
                 };
                 if is_current {
-                    return OverlayKeyResult::Handled;
+                    return OverlayInputResult::Handled;
                 }
                 if let Some(state) = self.entry_tree.as_mut() {
                     state.branch_preview = Some(EntryTreeBranchPreviewState {
@@ -631,7 +635,7 @@ impl Model {
                         ..EntryTreeBranchPreviewState::default()
                     });
                 }
-                OverlayKeyResult::Effect(AppEffect::OpenBranchPreview { branch_row_id })
+                OverlayInputResult::Effect(AppEffect::OpenBranchPreview { branch_row_id })
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let Some(selected_node) = self
@@ -640,16 +644,16 @@ impl Model {
                     .and_then(|state| state.branch_tree.as_ref())
                     .and_then(EntryTreeBranchTreeState::selected_node)
                 else {
-                    return OverlayKeyResult::Handled;
+                    return OverlayInputResult::Handled;
                 };
                 if selected_node.branch.is_current {
-                    return OverlayKeyResult::Handled;
+                    return OverlayInputResult::Handled;
                 }
-                OverlayKeyResult::Effect(AppEffect::SwitchBranch {
+                OverlayInputResult::Effect(AppEffect::SwitchBranch {
                     leaf_id: selected_node.branch.subtree_leaf_id.clone(),
                 })
             }
-            _ => OverlayKeyResult::Handled,
+            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 
@@ -771,21 +775,21 @@ impl Model {
         }
     }
 
-    fn handle_entry_tree_preview_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
+    fn handle_entry_tree_preview_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         match key.code {
             KeyCode::Esc | KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 self.close_entry_tree_preview();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Left | KeyCode::Up | KeyCode::Char('h') if key.modifiers.is_empty() => {
                 self.move_entry_tree_preview_page(-1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Right | KeyCode::Down | KeyCode::Char('l') if key.modifiers.is_empty() => {
                 self.move_entry_tree_preview_page(1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
-            _ => OverlayKeyResult::Handled,
+            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 

@@ -51,9 +51,9 @@ impl Model {
         self.copy_picker = Some(state);
     }
 
-    pub(crate) fn handle_copy_picker_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
+    pub(crate) fn handle_copy_picker_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if self.copy_picker.is_none() {
-            return OverlayKeyResult::Ignored;
+            return OverlayInputResult::Ignored;
         }
 
         if self.copy_picker_preview_active() {
@@ -61,54 +61,54 @@ impl Model {
         }
 
         if let Some(format) = copy_picker_format_for_key(key) {
-            return OverlayKeyResult::from_effect(self.copy_picker_copy_effect(format));
+            return OverlayInputResult::from_effect(self.copy_picker_copy_effect(format));
         }
 
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.copy_picker = None;
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
                 self.move_copy_picker_selection(ListNavigationDirection::Previous);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
                 self.move_copy_picker_selection(ListNavigationDirection::Next);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Left | KeyCode::Char('h') if key.modifiers.is_empty() => {
                 let page_size = fullscreen_list_page_size_for_height(self.height);
                 if let Some(state) = self.copy_picker.as_mut() {
                     state.move_page(ListNavigationDirection::Previous, page_size);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Right | KeyCode::Char('l') if key.modifiers.is_empty() => {
                 let page_size = fullscreen_list_page_size_for_height(self.height);
                 if let Some(state) = self.copy_picker.as_mut() {
                     state.move_page(ListNavigationDirection::Next, page_size);
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
                 if let Some(state) = self.copy_picker.as_mut() {
                     state.toggle_selected_row();
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             _ if is_copy_picker_select_all_shortcut(key) => {
                 if let Some(state) = self.copy_picker.as_mut() {
                     state.select_all_or_invert();
                 }
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 self.open_copy_picker_preview();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
-            KeyCode::Enter if key.modifiers.is_empty() => OverlayKeyResult::Handled,
-            _ => OverlayKeyResult::Handled,
+            KeyCode::Enter if key.modifiers.is_empty() => OverlayInputResult::Handled,
+            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 
@@ -117,20 +117,24 @@ impl Model {
         button: MouseButton,
         _column: u16,
         row: u16,
-    ) -> Option<AppEffect> {
-        if button != MouseButton::Left
-            || !self.copy_picker_active()
-            || self.copy_picker_preview_active()
-        {
-            return None;
+    ) -> OverlayInputResult {
+        if !self.copy_picker_active() {
+            return OverlayInputResult::Ignored;
         }
 
-        let visible_offset = fullscreen_list_body_visible_offset_for_row(self.height, row)?;
+        if button != MouseButton::Left || self.copy_picker_preview_active() {
+            return OverlayInputResult::Handled;
+        }
+
+        let Some(visible_offset) = fullscreen_list_body_visible_offset_for_row(self.height, row)
+        else {
+            return OverlayInputResult::Handled;
+        };
         let page_size = fullscreen_list_page_size_for_height(self.height);
         if let Some(state) = self.copy_picker.as_mut() {
             state.select_visible_row(page_size, visible_offset);
         }
-        None
+        OverlayInputResult::Handled
     }
 
     fn move_copy_picker_selection(&mut self, direction: ListNavigationDirection) {
@@ -231,26 +235,26 @@ impl Model {
         }
     }
 
-    fn handle_copy_picker_preview_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
+    fn handle_copy_picker_preview_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if let Some(format) = copy_picker_format_for_key(key) {
-            return OverlayKeyResult::from_effect(self.copy_picker_copy_effect(format));
+            return OverlayInputResult::from_effect(self.copy_picker_copy_effect(format));
         }
 
         match key.code {
             KeyCode::Esc | KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 self.close_copy_picker_preview();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Left | KeyCode::Up | KeyCode::Char('h') if key.modifiers.is_empty() => {
                 self.move_copy_picker_preview_page(-1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Right | KeyCode::Down | KeyCode::Char('l') if key.modifiers.is_empty() => {
                 self.move_copy_picker_preview_page(1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
-            KeyCode::Enter if key.modifiers.is_empty() => OverlayKeyResult::Handled,
-            _ => OverlayKeyResult::Handled,
+            KeyCode::Enter if key.modifiers.is_empty() => OverlayInputResult::Handled,
+            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 

@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use super::{
     AppEffect, EscRewindMode, Model, debug,
     display_width::display_width,
-    overlay_key_result::OverlayKeyResult,
+    overlay_input_result::OverlayInputResult,
     selection::SelectableLineRange,
     status_line::{
         status_line_gap_before, status_line_pair_height, truncate_display_width_with_ellipsis,
@@ -105,46 +105,46 @@ impl Model {
         }
     }
 
-    pub(crate) fn handle_command_panel_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
+    pub(crate) fn handle_command_panel_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         let Some(state) = self.current_command_panel_state() else {
-            return OverlayKeyResult::Ignored;
+            return OverlayInputResult::Ignored;
         };
 
         match key.code {
             KeyCode::Up if key.modifiers.is_empty() => {
                 if state.items.len() <= 1 {
-                    return OverlayKeyResult::Ignored;
+                    return OverlayInputResult::Ignored;
                 }
                 self.move_command_panel_selection(-1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Down if key.modifiers.is_empty() => {
                 if state.items.len() <= 1 {
-                    return OverlayKeyResult::Ignored;
+                    return OverlayInputResult::Ignored;
                 }
                 self.move_command_panel_selection(1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
                 let Some(item) = state.items.get(state.selected) else {
-                    return OverlayKeyResult::Ignored;
+                    return OverlayInputResult::Ignored;
                 };
                 let completion_text = command_panel_completion_text(item);
                 self.complete_command_panel_selection(&completion_text);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 // 命令面板的输入是筛选条件，Enter 执行当前选中项；
                 // 子序列匹配出的命令只要已被选中，就和前缀匹配一样可执行。
                 let Some(item) = state.items.get(state.selected).cloned() else {
-                    return OverlayKeyResult::Ignored;
+                    return OverlayInputResult::Ignored;
                 };
-                OverlayKeyResult::from_effect(self.execute_command_panel_item(item))
+                OverlayInputResult::from_effect(self.execute_command_panel_item(item))
             }
             KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
-                OverlayKeyResult::Ignored
+                OverlayInputResult::Ignored
             }
-            _ => OverlayKeyResult::Ignored,
+            _ => OverlayInputResult::Ignored,
         }
     }
 

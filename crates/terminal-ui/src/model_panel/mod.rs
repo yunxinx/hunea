@@ -16,7 +16,7 @@ use super::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, inline_panel_visible_rows, wrap_inline_text,
     },
-    overlay_key_result::OverlayKeyResult,
+    overlay_input_result::OverlayInputResult,
     theme::{
         command_accent_text_style, primary_text_style, secondary_text_style, surface_text_style,
         tertiary_text_style,
@@ -75,62 +75,62 @@ impl Model {
         self.sync_document_viewport_for_composer_cursor();
     }
 
-    pub(crate) fn handle_model_panel_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
+    pub(crate) fn handle_model_panel_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if !self.model_panel_active() {
-            return OverlayKeyResult::Ignored;
+            return OverlayInputResult::Ignored;
         }
 
         match key.code {
             KeyCode::Esc => {
                 if self.clear_model_panel_search() {
-                    return OverlayKeyResult::Handled;
+                    return OverlayInputResult::Handled;
                 }
                 self.close_model_panel();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Left if key.modifiers.is_empty() => {
                 self.move_model_panel_provider(-1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Right if key.modifiers.is_empty() => {
                 self.move_model_panel_provider(1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
                 self.move_model_panel_provider(1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::BackTab => {
                 self.move_model_panel_provider(-1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Up if key.modifiers.is_empty() => {
                 self.move_model_panel_model(-1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Down if key.modifiers.is_empty() => {
                 self.move_model_panel_model(1);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Char('u' | 'U') if is_model_refresh_key(key) => {
-                OverlayKeyResult::from_effect(self.refresh_current_model_panel_provider())
+                OverlayInputResult::from_effect(self.refresh_current_model_panel_provider())
             }
             _ if is_model_search_clear_key(key) => {
                 self.clear_model_panel_search();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             _ if is_model_search_backspace_key(key) => {
                 self.backspace_model_panel_search();
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
-                OverlayKeyResult::from_effect(self.select_current_model_panel_model())
+                OverlayInputResult::from_effect(self.select_current_model_panel_model())
             }
             KeyCode::Char(character) if is_model_plain_search_key(key) => {
                 self.push_model_panel_search_character(character);
-                OverlayKeyResult::Handled
+                OverlayInputResult::Handled
             }
-            _ => OverlayKeyResult::Handled,
+            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 

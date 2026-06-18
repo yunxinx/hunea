@@ -26,7 +26,7 @@ pub(super) fn apply_effect_if_needed(
         AppEffect::LaunchExternalEditor(launch) => {
             run_external_editor_effect(terminal, model, launch)
         }
-        AppEffect::CopySelection(text) => run_copy_selection_effect(external_io, text),
+        AppEffect::CopySelection(text) => run_copy_selection_effect(model, external_io, text),
         AppEffect::ResetRuntimeSession => {
             reset_runtime_session_after_clear(runtime_coordinator);
             Ok(())

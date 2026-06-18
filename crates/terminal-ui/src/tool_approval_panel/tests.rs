@@ -546,7 +546,7 @@ fn overflowing_file_preview_uses_fullscreen_instead_of_inline_panel() {
         "fullscreen preview still starts on the default approval choice"
     );
 
-    model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Down));
+    let _ = model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Down));
     assert_eq!(
         model.tool_approval_panel.selected, 0,
         "Down should scroll fullscreen diff, not move the approval choice"
@@ -604,7 +604,7 @@ fn fullscreen_file_preview_renders_scrollable_diff_with_approval_footer() {
         "fullscreen preview should not render the vertical choice picker: {initial:?}"
     );
 
-    model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::End));
+    let _ = model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::End));
     let bottom = rendered_model_rows(&mut model, 120, 12).join("\n");
 
     assert!(
@@ -651,7 +651,7 @@ fn fullscreen_file_preview_uses_direct_approval_keys_without_choice_navigation()
         )),
     );
 
-    model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Right));
+    let _ = model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Right));
     assert_eq!(
         model.tool_approval_panel.selected, 0,
         "fullscreen mode should not use left/right choice navigation"
@@ -918,12 +918,12 @@ fn inline_file_preview_uses_direct_approval_keys_without_choice_navigation() {
     );
 
     assert_eq!(model.tool_approval_panel.selected, 0);
-    model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Down));
+    let _ = model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Down));
     assert_eq!(
         model.tool_approval_panel.selected, 0,
         "inline file preview should not keep hidden vertical choice navigation"
     );
-    model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Right));
+    let _ = model.handle_tool_approval_panel_key(KeyEvent::from(KeyCode::Right));
     assert_eq!(
         model.tool_approval_panel.selected, 0,
         "inline file preview should ignore left/right choice navigation"
@@ -962,25 +962,25 @@ fn arrow_keys_move_linearly_between_vertical_choices() {
         Vec::new(),
     );
 
-    model.handle_tool_approval_panel_key(KeyCode::Down.into());
+    let _ = model.handle_tool_approval_panel_key(KeyCode::Down.into());
     assert_eq!(
         selected_tool_approval_choice(&model),
         Some(ToolApprovalChoice::AllowInSession)
     );
 
-    model.handle_tool_approval_panel_key(KeyCode::Down.into());
+    let _ = model.handle_tool_approval_panel_key(KeyCode::Down.into());
     assert_eq!(
         selected_tool_approval_choice(&model),
         Some(ToolApprovalChoice::Deny)
     );
 
-    model.handle_tool_approval_panel_key(KeyCode::Right.into());
+    let _ = model.handle_tool_approval_panel_key(KeyCode::Right.into());
     assert_eq!(
         selected_tool_approval_choice(&model),
         Some(ToolApprovalChoice::DenyInSession)
     );
 
-    model.handle_tool_approval_panel_key(KeyCode::Up.into());
+    let _ = model.handle_tool_approval_panel_key(KeyCode::Up.into());
     assert_eq!(
         selected_tool_approval_choice(&model),
         Some(ToolApprovalChoice::Deny)

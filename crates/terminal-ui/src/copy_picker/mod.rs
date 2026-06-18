@@ -9,9 +9,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, Paragraph, Widget},
 };
-use runtime_domain::session::{
-    SessionTreePayload, SessionTreeRow, TranscriptReplayItem, TranscriptReplayRole,
-};
+use runtime_domain::session::{SessionTreePayload, SessionTreeRow, TranscriptReplayItem};
 
 use crate::{
     AppEffect, Model,
@@ -23,6 +21,7 @@ use crate::{
     list_selection::{ListNavigationDirection, PagedSelection, row_index_by_id},
     overlay_key_result::OverlayKeyResult,
     render_frame::RenderFrame,
+    session_tree_preview_replay::SessionTreePreviewReplay,
     session_tree_row_kind_view::{
         CopyableSessionTreeRowKind, TreeRowKindPrefixAlignment, session_tree_row_kind_is_copyable,
         session_tree_row_kind_label_style, session_tree_row_kind_prefix,

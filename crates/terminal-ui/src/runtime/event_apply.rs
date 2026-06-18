@@ -9,6 +9,7 @@ use super::super::{
     Model,
     model::RequestMetrics,
     runtime::tool_activity_preview::ToolApprovalPreview,
+    session_tree_preview_replay::SessionTreePreviewReplay,
     tool_approval_panel::{ToolApprovalDetail, ToolApprovalSource},
     tool_result::ToolActivityRenderMode,
 };
@@ -245,7 +246,7 @@ impl Model {
 
     pub(crate) fn transcript_from_replay_items(
         &self,
-        items: Vec<TranscriptReplayItem>,
+        items: impl IntoIterator<Item = TranscriptReplayItem>,
     ) -> crate::transcript::Transcript {
         self.transcript_from_replay_items_with_terminal_snapshots(items, None)
             .0
@@ -253,7 +254,7 @@ impl Model {
 
     pub(crate) fn transcript_from_replay_items_with_tool_activity_render_mode(
         &self,
-        items: Vec<TranscriptReplayItem>,
+        items: impl IntoIterator<Item = TranscriptReplayItem>,
         tool_activity_render_mode: ToolActivityRenderMode,
     ) -> crate::transcript::Transcript {
         self.transcript_from_replay_items_with_terminal_snapshots(
@@ -263,11 +264,46 @@ impl Model {
         .0
     }
 
-    fn transcript_from_replay_items_with_terminal_snapshots(
+    pub(crate) fn transcript_from_session_tree_preview_replay_with_tool_activity_render_mode(
         &self,
-        items: Vec<TranscriptReplayItem>,
+        replay: SessionTreePreviewReplay<'_>,
+        tool_activity_render_mode: ToolActivityRenderMode,
+    ) -> crate::transcript::Transcript {
+        match replay {
+            SessionTreePreviewReplay::Borrowed(items) => self
+                .transcript_from_replay_item_refs_with_tool_activity_render_mode(
+                    items,
+                    tool_activity_render_mode,
+                ),
+            SessionTreePreviewReplay::Fallback(item) => self
+                .transcript_from_replay_items_with_tool_activity_render_mode(
+                    std::iter::once(item),
+                    tool_activity_render_mode,
+                ),
+        }
+    }
+
+    fn transcript_from_replay_item_refs_with_tool_activity_render_mode(
+        &self,
+        items: &[TranscriptReplayItem],
+        tool_activity_render_mode: ToolActivityRenderMode,
+    ) -> crate::transcript::Transcript {
+        self.transcript_from_replay_items_with_terminal_snapshots(
+            items.iter(),
+            Some(tool_activity_render_mode),
+        )
+        .0
+    }
+
+    fn transcript_from_replay_items_with_terminal_snapshots<I, T>(
+        &self,
+        items: I,
         tool_activity_render_mode: Option<ToolActivityRenderMode>,
-    ) -> (crate::transcript::Transcript, Vec<RuntimeTerminalSnapshot>) {
+    ) -> (crate::transcript::Transcript, Vec<RuntimeTerminalSnapshot>)
+    where
+        I: IntoIterator<Item = T>,
+        T: TranscriptReplayItemSource,
+    {
         let mut transcript = crate::transcript::Transcript::new(self.palette);
         transcript.set_gap(1);
         if self.has_window {
@@ -278,12 +314,11 @@ impl Model {
         }
         let mut terminal_snapshots = Vec::new();
         for item in items {
-            if let TranscriptReplayItem::TerminalSnapshot { snapshot } = &item {
+            if let Some(snapshot) = item.terminal_snapshot() {
                 upsert_replay_terminal_snapshot(&mut terminal_snapshots, snapshot.clone());
             }
-            append_transcript_replay_item(
+            item.append_to_transcript(
                 &mut transcript,
-                item,
                 self.style_mode,
                 self.reasoning_display_mode,
             );
@@ -305,6 +340,66 @@ impl Model {
         self.selected_model = Some(selection);
         self.requires_model_selection = true;
         self.bump_status_line_revision();
+    }
+}
+
+trait TranscriptReplayItemSource {
+    fn terminal_snapshot(&self) -> Option<&RuntimeTerminalSnapshot>;
+
+    fn append_to_transcript(
+        self,
+        transcript: &mut crate::transcript::Transcript,
+        style_mode: crate::style_mode::StyleMode,
+        reasoning_display_mode: crate::ReasoningDisplayMode,
+    );
+}
+
+impl TranscriptReplayItemSource for TranscriptReplayItem {
+    fn terminal_snapshot(&self) -> Option<&RuntimeTerminalSnapshot> {
+        match self {
+            Self::TerminalSnapshot { snapshot } => Some(snapshot),
+            Self::Message { .. }
+            | Self::Reasoning { .. }
+            | Self::ToolActivity { .. }
+            | Self::ToolResult { .. }
+            | Self::System { .. } => None,
+        }
+    }
+
+    fn append_to_transcript(
+        self,
+        transcript: &mut crate::transcript::Transcript,
+        style_mode: crate::style_mode::StyleMode,
+        reasoning_display_mode: crate::ReasoningDisplayMode,
+    ) {
+        append_transcript_replay_item(transcript, self, style_mode, reasoning_display_mode);
+    }
+}
+
+impl TranscriptReplayItemSource for &TranscriptReplayItem {
+    fn terminal_snapshot(&self) -> Option<&RuntimeTerminalSnapshot> {
+        match *self {
+            TranscriptReplayItem::TerminalSnapshot { snapshot } => Some(snapshot),
+            TranscriptReplayItem::Message { .. }
+            | TranscriptReplayItem::Reasoning { .. }
+            | TranscriptReplayItem::ToolActivity { .. }
+            | TranscriptReplayItem::ToolResult { .. }
+            | TranscriptReplayItem::System { .. } => None,
+        }
+    }
+
+    fn append_to_transcript(
+        self,
+        transcript: &mut crate::transcript::Transcript,
+        style_mode: crate::style_mode::StyleMode,
+        reasoning_display_mode: crate::ReasoningDisplayMode,
+    ) {
+        append_borrowed_transcript_replay_item(
+            transcript,
+            self,
+            style_mode,
+            reasoning_display_mode,
+        );
     }
 }
 
@@ -345,6 +440,51 @@ fn append_transcript_replay_item(
         }
         TranscriptReplayItem::System { content } => {
             transcript.append_system_message(content);
+        }
+    }
+}
+
+fn append_borrowed_transcript_replay_item(
+    transcript: &mut crate::transcript::Transcript,
+    item: &TranscriptReplayItem,
+    style_mode: crate::style_mode::StyleMode,
+    reasoning_display_mode: crate::ReasoningDisplayMode,
+) {
+    match item {
+        TranscriptReplayItem::Message {
+            role: TranscriptReplayRole::User,
+            content,
+        } => {
+            transcript.append_message_with_style_mode(
+                crate::Sender::User,
+                content.clone(),
+                style_mode,
+            );
+        }
+        TranscriptReplayItem::Message {
+            role: TranscriptReplayRole::Assistant,
+            content,
+        } => {
+            transcript.append_message_with_style_mode(
+                crate::Sender::Assistant,
+                content.clone(),
+                style_mode,
+            );
+        }
+        TranscriptReplayItem::Reasoning { content } => {
+            transcript.append_reasoning_message(content.clone(), reasoning_display_mode, None);
+        }
+        TranscriptReplayItem::ToolActivity { activity } => {
+            transcript.append_runtime_tool_activity(activity.clone());
+        }
+        TranscriptReplayItem::TerminalSnapshot { snapshot } => {
+            let _ = transcript.set_runtime_terminal_snapshot(snapshot.clone());
+        }
+        TranscriptReplayItem::ToolResult { content } => {
+            transcript.append_tool_result(content.clone(), crate::tool_result::ToolResultKind::Ran);
+        }
+        TranscriptReplayItem::System { content } => {
+            transcript.append_system_message(content.clone());
         }
     }
 }

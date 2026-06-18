@@ -1,6 +1,7 @@
 use crate::AppEffect;
 
 /// `OverlayKeyResult` 明确表达覆盖层按键是否接管，以及是否产生副作用。
+#[must_use = "overlay key results decide whether input was consumed"]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OverlayKeyResult {
     Ignored,
@@ -16,10 +17,12 @@ impl OverlayKeyResult {
         }
     }
 
+    #[must_use]
     pub(crate) fn is_ignored(&self) -> bool {
         matches!(self, Self::Ignored)
     }
 
+    #[must_use = "the extracted effect must be applied or deliberately ignored"]
     pub(crate) fn into_effect(self) -> Option<AppEffect> {
         match self {
             Self::Ignored | Self::Handled => None,

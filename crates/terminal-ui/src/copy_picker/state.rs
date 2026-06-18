@@ -223,14 +223,12 @@ impl CopyPickerRow {
         text
     }
 
-    pub(super) fn preview_replay_items(&self) -> Vec<TranscriptReplayItem> {
-        if !self.replay_items.is_empty() {
-            return self.replay_items.clone();
-        }
-        vec![TranscriptReplayItem::Message {
-            role: copyable_row_kind_replay_role(self.kind),
-            content: self.copy_text_for_format(CopyPickerTextFormat::Display),
-        }]
+    pub(super) fn preview_replay(&self) -> SessionTreePreviewReplay<'_> {
+        SessionTreePreviewReplay::from_copyable_parts(
+            self.kind.session_tree_kind(),
+            &self.replay_items,
+            &self.raw_text,
+        )
     }
 
     fn append_text_for_format(&self, format: CopyPickerTextFormat, text: &mut String) {
@@ -259,12 +257,5 @@ impl CopyPickerRow {
         if !has_replay_text {
             text.push_str(&self.raw_text);
         }
-    }
-}
-
-fn copyable_row_kind_replay_role(kind: CopyableSessionTreeRowKind) -> TranscriptReplayRole {
-    match kind {
-        CopyableSessionTreeRowKind::User => TranscriptReplayRole::User,
-        CopyableSessionTreeRowKind::Assistant => TranscriptReplayRole::Assistant,
     }
 }

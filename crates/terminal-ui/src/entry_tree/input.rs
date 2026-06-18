@@ -697,26 +697,26 @@ impl Model {
 
     fn open_entry_tree_preview(&mut self) {
         let from_branch_preview = self.entry_tree_branch_preview_active();
-        let selected_row = if from_branch_preview {
-            self.entry_tree
-                .as_ref()
-                .and_then(|state| state.branch_preview.as_ref())
-                .and_then(EntryTreeBranchPreviewState::selected_row)
-                .cloned()
-        } else {
-            self.entry_tree
-                .as_ref()
-                .and_then(EntryTreeState::selected_row)
-                .cloned()
-        };
-        let Some(row) = selected_row else {
-            return;
+        let mut transcript = {
+            let selected_row = if from_branch_preview {
+                self.entry_tree
+                    .as_ref()
+                    .and_then(|state| state.branch_preview.as_ref())
+                    .and_then(EntryTreeBranchPreviewState::selected_row)
+            } else {
+                self.entry_tree
+                    .as_ref()
+                    .and_then(EntryTreeState::selected_row)
+            };
+            let Some(row) = selected_row else {
+                return;
+            };
+            self.transcript_from_session_tree_preview_replay_with_tool_activity_render_mode(
+                SessionTreePreviewReplay::from_session_tree_row(row),
+                ToolActivityRenderMode::DebugDetailed,
+            )
         };
 
-        let mut transcript = self.transcript_from_replay_items_with_tool_activity_render_mode(
-            entry_tree_preview_replay_items(&row),
-            ToolActivityRenderMode::DebugDetailed,
-        );
         transcript.set_reasoning_render_mode(ReasoningRenderMode::Detailed);
         let content_height = self.transcript_overlay_content_height();
         let mut preview = EntryTreePreviewState::following_bottom(transcript);

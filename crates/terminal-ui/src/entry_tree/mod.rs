@@ -9,7 +9,7 @@ use ratatui::{
 };
 use runtime_domain::session::{
     SessionBranchTreeNode, SessionBranchTreePayload, SessionTreeBranchChoice, SessionTreePayload,
-    SessionTreeRow, SessionTreeRowKind, TranscriptReplayItem,
+    SessionTreeRow, SessionTreeRowKind,
 };
 
 use crate::{
@@ -25,6 +25,7 @@ use crate::{
     list_selection::ListNavigationDirection,
     overlay_key_result::OverlayKeyResult,
     render_frame::RenderFrame,
+    session_tree_preview_replay::SessionTreePreviewReplay,
     session_tree_row_kind_view::{
         SESSION_TREE_ROW_KIND_PREFIX_WIDTH, SESSION_TREE_ROW_KIND_WIDTH,
         TreeRowKindPrefixAlignment, session_tree_row_kind_label_style,
@@ -137,10 +138,6 @@ fn entry_tree_branch_picker_popup_area(area: Rect, anchor_y: u16, popup_height: 
 
 const fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
-}
-
-fn entry_tree_preview_replay_items(row: &SessionTreeRow) -> Vec<TranscriptReplayItem> {
-    row.preview_replay_items.clone()
 }
 
 pub(crate) fn entry_tree_page_size_for_height(height: u16) -> usize {

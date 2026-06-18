@@ -38,6 +38,7 @@ mod selection;
 mod sender;
 mod session_picker;
 mod session_preview;
+mod session_tree_preview_replay;
 mod session_tree_row_kind_view;
 mod shimmer;
 mod startup_banner;

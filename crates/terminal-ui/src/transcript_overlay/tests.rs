@@ -29,11 +29,11 @@ fn overlay_scroll_boundary() {
     assert_eq!(overlay.scroll_offset, 0);
 
     // Home 应该保持在 0
-    model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Home));
+    let _ = model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Home));
     assert_eq!(model.transcript_overlay.as_ref().unwrap().scroll_offset, 0);
 
     // End 应该滚动到底部
-    model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::End));
+    let _ = model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::End));
     let total_lines = model.transcript.item_metrics_index().line_count;
     let max_offset = total_lines.saturating_sub(8);
     assert_eq!(
@@ -42,10 +42,10 @@ fn overlay_scroll_boundary() {
     );
 
     // q 不再作为关闭快捷键；只保留 Esc。
-    model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Char('q')));
+    let _ = model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Char('q')));
     assert!(model.transcript_overlay_active());
 
-    model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Esc));
+    let _ = model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Esc));
     assert!(!model.transcript_overlay_active());
 }
 
@@ -65,11 +65,11 @@ fn overlay_vim_jk_navigation() {
     assert_eq!(model.transcript_overlay.as_ref().unwrap().scroll_offset, 0);
 
     // j 向下滚动一行
-    model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Char('j')));
+    let _ = model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Char('j')));
     assert_eq!(model.transcript_overlay.as_ref().unwrap().scroll_offset, 1);
 
     // k 向上滚动一行
-    model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Char('k')));
+    let _ = model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::Char('k')));
     assert_eq!(model.transcript_overlay.as_ref().unwrap().scroll_offset, 0);
 }
 
@@ -89,11 +89,13 @@ fn overlay_vim_ctrl_ud_half_page() {
     model.open_transcript_overlay();
     // 半页 = 8 / 2 = 4
     // Ctrl+D 向下滚动 4 行
-    model.handle_transcript_overlay_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    let _ = model
+        .handle_transcript_overlay_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
     assert_eq!(model.transcript_overlay.as_ref().unwrap().scroll_offset, 4);
 
     // Ctrl+U 向上滚动 4 行
-    model.handle_transcript_overlay_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    let _ = model
+        .handle_transcript_overlay_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     assert_eq!(model.transcript_overlay.as_ref().unwrap().scroll_offset, 0);
 }
 
@@ -105,10 +107,12 @@ fn toggle_with_ctrl_t() {
 
     assert!(!model.transcript_overlay_active());
 
-    model.handle_transcript_overlay_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let _ = model
+        .handle_transcript_overlay_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     assert!(model.transcript_overlay_active());
 
-    model.handle_transcript_overlay_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    let _ = model
+        .handle_transcript_overlay_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     assert!(!model.transcript_overlay_active());
 }
 
@@ -410,7 +414,7 @@ fn overlay_bottom_follow_tracks_committed_append_when_at_bottom() {
     model.sync_transcript_render();
     model.open_transcript_overlay();
 
-    model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::End));
+    let _ = model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::End));
     let old_offset = model.transcript_overlay.as_ref().unwrap().scroll_offset;
     let old_max_offset = overlay_max_offset(&mut model);
     assert_eq!(old_offset, old_max_offset);
@@ -441,8 +445,8 @@ fn overlay_bottom_follow_preserves_manual_scroll_on_committed_append() {
     );
     model.sync_transcript_render();
     model.open_transcript_overlay();
-    model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::End));
-    model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::PageUp));
+    let _ = model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::End));
+    let _ = model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::PageUp));
 
     let manual_offset = model.transcript_overlay.as_ref().unwrap().scroll_offset;
     assert!(
@@ -513,7 +517,7 @@ fn overlay_resize_keeps_bottom_pinned_after_height_decreases() {
     );
     model.sync_transcript_render();
     model.open_transcript_overlay();
-    model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::End));
+    let _ = model.handle_transcript_overlay_key(KeyEvent::from(KeyCode::End));
     let old_max_offset = overlay_max_offset(&mut model);
     assert_eq!(
         model.transcript_overlay.as_ref().unwrap().scroll_offset,

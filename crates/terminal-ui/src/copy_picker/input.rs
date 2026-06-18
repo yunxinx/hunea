@@ -178,19 +178,22 @@ impl Model {
     }
 
     fn open_copy_picker_preview(&mut self) {
-        let preview_target = self.copy_picker.as_ref().and_then(|state| {
-            state
-                .selected_row()
-                .map(|row| (state.selected, row.preview_replay_items()))
-        });
-        let Some((row_index, replay_items)) = preview_target else {
-            return;
+        let preview_target = {
+            let Some(state) = self.copy_picker.as_ref() else {
+                return;
+            };
+            let Some(row) = state.selected_row() else {
+                return;
+            };
+            let transcript = self
+                .transcript_from_session_tree_preview_replay_with_tool_activity_render_mode(
+                    row.preview_replay(),
+                    ToolActivityRenderMode::DebugDetailed,
+                );
+            (state.selected, transcript)
         };
 
-        let mut transcript = self.transcript_from_replay_items_with_tool_activity_render_mode(
-            replay_items,
-            ToolActivityRenderMode::DebugDetailed,
-        );
+        let (row_index, mut transcript) = preview_target;
         transcript.set_reasoning_render_mode(ReasoningRenderMode::Detailed);
         let content_height = self.transcript_overlay_content_height();
         let mut transcript_preview = TranscriptPreviewState::following_bottom(transcript);

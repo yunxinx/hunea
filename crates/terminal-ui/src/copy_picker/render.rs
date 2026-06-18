@@ -149,7 +149,7 @@ impl Model {
             TreeRowKindPrefixAlignment::Left,
         );
         let prefix_width =
-            display_width(&left_padding) + COPY_PICKER_MARKER_WIDTH + display_width(&kind_prefix);
+            display_width(&left_padding) + COPY_PICKER_MARKER_WIDTH + display_width(kind_prefix);
         let text_width = width
             .saturating_sub(prefix_width)
             .saturating_sub(COPY_PICKER_BODY_HORIZONTAL_PADDING);

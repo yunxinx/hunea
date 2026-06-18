@@ -123,10 +123,14 @@ impl RuntimeEventApply for Model {
                 }
             }
             RuntimeEvent::SessionBranchTreeLoaded { payload } => {
-                self.apply_entry_tree_branch_tree_payload(payload);
+                if self.entry_tree_branch_tree_loading() {
+                    self.apply_entry_tree_branch_tree_payload(payload);
+                }
             }
             RuntimeEvent::SessionTreePreviewLoaded { payload } => {
-                self.apply_entry_tree_branch_preview_payload(payload);
+                if self.entry_tree_branch_preview_loading() {
+                    self.apply_entry_tree_branch_preview_payload(payload);
+                }
             }
             RuntimeEvent::SessionResumed { payload } => {
                 self.apply_session_resume_payload(payload);

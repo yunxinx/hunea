@@ -247,6 +247,20 @@ fn late_branch_tree_payload_after_exit_does_not_reopen_branch_tree() {
 }
 
 #[test]
+fn branch_tree_loading_state_tracks_only_pending_branch_tree_payload() {
+    let mut model = ready_model();
+
+    assert!(!model.entry_tree_branch_tree_loading());
+
+    model.open_entry_tree_branch_tree_loading();
+    assert!(model.entry_tree_branch_tree_loading());
+
+    model.apply_entry_tree_branch_tree_payload(branch_tree_payload());
+    assert!(!model.entry_tree_branch_tree_loading());
+    assert!(model.entry_tree_branch_tree_active());
+}
+
+#[test]
 fn entry_tree_branch_tree_left_click_selects_visible_branch_node() {
     let mut model = ready_model();
     model.set_window(112, 14);

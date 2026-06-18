@@ -296,6 +296,46 @@ fn late_branch_preview_payload_after_exit_does_not_reopen_branch_preview() {
 }
 
 #[test]
+fn branch_preview_loading_state_tracks_only_pending_branch_preview_payload() {
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_branch_choices(
+            "user-a",
+            SessionTreeRowKind::User,
+            "root question",
+            vec![
+                branch_choice("assistant-b", "assistant-b", "inactive answer", false),
+                branch_choice("assistant-c", "user-d", "current follow up", true),
+            ],
+        )],
+        current_row_id: Some("user-a".to_string()),
+    });
+
+    assert!(!model.entry_tree_branch_preview_loading());
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert!(model.entry_tree_branch_preview_loading());
+
+    model.apply_entry_tree_branch_preview_payload(SessionTreePayload {
+        rows: vec![tree_row_with_parent_at_depth(
+            "assistant-b",
+            None,
+            SessionTreeRowKind::Assistant,
+            "inactive answer",
+            0,
+            true,
+            true,
+        )],
+        current_row_id: Some("assistant-b".to_string()),
+    });
+
+    assert!(!model.entry_tree_branch_preview_loading());
+    assert!(model.entry_tree_branch_preview_active());
+}
+
+#[test]
 fn entry_tree_esc_pops_l4_l3_l2_l1_in_order() {
     let mut model = ready_model();
     model.open_entry_tree_loading();

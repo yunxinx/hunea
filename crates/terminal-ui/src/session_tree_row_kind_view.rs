@@ -21,6 +21,12 @@ pub(crate) enum CopyableSessionTreeRowKind {
     Assistant,
 }
 
+const USER_KIND_PREFIX: &str = "user      ";
+const ASSISTANT_KIND_PREFIX: &str = "assistant ";
+const TOOL_KIND_PREFIX: &str = "tool      ";
+const CENTERED_TOOL_KIND_PREFIX: &str = "  tool    ";
+const REASONING_KIND_PREFIX: &str = "reasoning ";
+
 impl CopyableSessionTreeRowKind {
     pub(crate) fn from_session_tree_kind(kind: SessionTreeRowKind) -> Option<Self> {
         match kind {
@@ -42,25 +48,18 @@ pub(crate) fn session_tree_row_kind_is_copyable(kind: SessionTreeRowKind) -> boo
     CopyableSessionTreeRowKind::from_session_tree_kind(kind).is_some()
 }
 
-pub(crate) fn session_tree_row_kind_label(kind: SessionTreeRowKind) -> &'static str {
-    match kind {
-        SessionTreeRowKind::User => "user",
-        SessionTreeRowKind::Assistant => "assistant",
-        SessionTreeRowKind::Tool => "tool",
-        SessionTreeRowKind::Reasoning => "reasoning",
-    }
-}
-
 pub(crate) fn session_tree_row_kind_prefix(
     kind: SessionTreeRowKind,
     alignment: TreeRowKindPrefixAlignment,
-) -> String {
-    let label = session_tree_row_kind_label(kind);
+) -> &'static str {
     match (kind, alignment) {
         (SessionTreeRowKind::Tool, TreeRowKindPrefixAlignment::CenterTool) => {
-            format!("{label:^SESSION_TREE_ROW_KIND_WIDTH$} ")
+            CENTERED_TOOL_KIND_PREFIX
         }
-        _ => format!("{label:<SESSION_TREE_ROW_KIND_WIDTH$} "),
+        (SessionTreeRowKind::User, _) => USER_KIND_PREFIX,
+        (SessionTreeRowKind::Assistant, _) => ASSISTANT_KIND_PREFIX,
+        (SessionTreeRowKind::Tool, _) => TOOL_KIND_PREFIX,
+        (SessionTreeRowKind::Reasoning, _) => REASONING_KIND_PREFIX,
     }
 }
 
@@ -86,6 +85,17 @@ mod tests {
 
     #[test]
     fn row_kind_prefix_uses_shared_width_and_alignment() {
+        let user_prefix: &'static str = session_tree_row_kind_prefix(
+            SessionTreeRowKind::User,
+            TreeRowKindPrefixAlignment::Left,
+        );
+        let tool_prefix: &'static str = session_tree_row_kind_prefix(
+            SessionTreeRowKind::Tool,
+            TreeRowKindPrefixAlignment::CenterTool,
+        );
+
+        assert_eq!(user_prefix, "user      ");
+        assert_eq!(tool_prefix, "  tool    ");
         assert_eq!(
             session_tree_row_kind_prefix(
                 SessionTreeRowKind::User,

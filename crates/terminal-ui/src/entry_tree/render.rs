@@ -152,7 +152,7 @@ impl Model {
             session_tree_row_kind_prefix(row.kind, TreeRowKindPrefixAlignment::CenterTool);
         let left_padding = " ".repeat(ENTRY_TREE_BODY_HORIZONTAL_PADDING);
         let prefix_width =
-            display_width(&left_padding) + graph_line.display_width() + display_width(&kind_prefix);
+            display_width(&left_padding) + graph_line.display_width() + display_width(kind_prefix);
         let text_width = width
             .saturating_sub(prefix_width)
             .saturating_sub(ENTRY_TREE_BODY_HORIZONTAL_PADDING);

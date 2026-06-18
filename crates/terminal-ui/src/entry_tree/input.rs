@@ -411,6 +411,13 @@ impl Model {
             .is_some_and(|state| state.branch_preview.is_some())
     }
 
+    pub(crate) fn entry_tree_branch_preview_loading(&self) -> bool {
+        self.entry_tree
+            .as_ref()
+            .and_then(|state| state.branch_preview.as_ref())
+            .is_some_and(|preview| preview.is_loading)
+    }
+
     pub(crate) fn show_entry_tree_branch_picker_error(&mut self, message: &str) {
         let Some(picker) = self
             .entry_tree
@@ -525,6 +532,13 @@ impl Model {
         self.entry_tree
             .as_ref()
             .is_some_and(|state| state.branch_tree.is_some())
+    }
+
+    pub(crate) fn entry_tree_branch_tree_loading(&self) -> bool {
+        self.entry_tree
+            .as_ref()
+            .and_then(|state| state.branch_tree.as_ref())
+            .is_some_and(|branch_tree| branch_tree.is_loading)
     }
 
     fn move_entry_tree_branch_tree_selection(&mut self, direction: ListNavigationDirection) {

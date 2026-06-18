@@ -10,7 +10,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     process::Command,
     sync::{Arc, mpsc},
-    thread,
+    thread::{self, JoinHandle},
 };
 
 use arboard::Clipboard;
@@ -44,7 +44,8 @@ struct SystemClipboardWriter {
 }
 
 struct ClipboardWorker {
-    jobs_sender: mpsc::Sender<ClipboardJob>,
+    jobs_sender: Option<mpsc::Sender<ClipboardJob>>,
+    worker_thread: Option<JoinHandle<()>>,
 }
 
 struct ClipboardJob {
@@ -112,6 +113,11 @@ impl ExternalIoRuntime {
         self.pending_clipboard_writes = self.pending_clipboard_writes.saturating_sub(events.len());
         events
     }
+
+    pub(super) fn shutdown_and_drain_events(&mut self) -> Vec<ExternalIoEvent> {
+        self.clipboard_worker.shutdown();
+        self.drain_events()
+    }
 }
 
 impl Default for ExternalIoRuntime {
@@ -135,7 +141,7 @@ impl SystemClipboardWriter {
 impl ClipboardWorker {
     fn start(events_sender: mpsc::Sender<ExternalIoEvent>, writer: SystemClipboardWriter) -> Self {
         let (jobs_sender, jobs_receiver) = mpsc::channel::<ClipboardJob>();
-        thread::spawn(move || {
+        let worker_thread = thread::spawn(move || {
             for job in jobs_receiver {
                 let write_result = catch_unwind(AssertUnwindSafe(|| writer.write(&job.text)));
                 let event = match write_result {
@@ -149,13 +155,32 @@ impl ClipboardWorker {
                 }
             }
         });
-        Self { jobs_sender }
+        Self {
+            jobs_sender: Some(jobs_sender),
+            worker_thread: Some(worker_thread),
+        }
     }
 
     fn submit(&self, text: String) -> std::result::Result<(), String> {
-        self.jobs_sender
+        let Some(jobs_sender) = self.jobs_sender.as_ref() else {
+            return Err(text);
+        };
+        jobs_sender
             .send(ClipboardJob { text })
             .map_err(|error| error.0.text)
+    }
+
+    fn shutdown(&mut self) {
+        self.jobs_sender.take();
+        if let Some(worker_thread) = self.worker_thread.take() {
+            let _ = worker_thread.join();
+        }
+    }
+}
+
+impl Drop for ClipboardWorker {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -435,6 +460,33 @@ mod tests {
                 },
                 ExternalIoEvent::SelectionSystemClipboardCopied,
             ]
+        );
+        assert!(!external_io.has_pending_work());
+    }
+
+    #[test]
+    fn shutdown_waits_for_queued_clipboard_writes_and_drains_completion_events() {
+        let (release_sender, release_receiver) = mpsc::channel();
+        let release_receiver = Arc::new(Mutex::new(release_receiver));
+        let writer_release_receiver = Arc::clone(&release_receiver);
+        let mut external_io = ExternalIoRuntime::with_system_clipboard_writer(move |_text| {
+            writer_release_receiver
+                .lock()
+                .expect("test release receiver should not be poisoned")
+                .recv()
+                .expect("test should release the queued clipboard write");
+            Ok(())
+        });
+
+        external_io.start_copy_selection("alpha".to_string());
+        assert!(external_io.has_pending_work());
+        release_sender
+            .send(())
+            .expect("test should release the background writer");
+
+        assert_eq!(
+            external_io.shutdown_and_drain_events(),
+            vec![ExternalIoEvent::SelectionSystemClipboardCopied]
         );
         assert!(!external_io.has_pending_work());
     }

@@ -521,7 +521,7 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
             .await
         {
             Ok(snapshot) => {
-                SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionTreePreviewLoaded {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchPreviewLoaded {
                     payload: session_tree_payload(snapshot),
                 })
             }

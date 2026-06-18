@@ -219,6 +219,8 @@ pub fn run_with_runtime_coordinator(
         }
     }
 
+    apply_external_io_shutdown_events(&mut terminal, &mut model, &mut external_io)?;
+
     Ok(model)
 }
 
@@ -282,6 +284,17 @@ fn drain_external_io_events(
     }
 
     Ok(true)
+}
+
+fn apply_external_io_shutdown_events(
+    terminal: &mut terminal::TuiTerminal,
+    model: &mut Model,
+    external_io: &mut ExternalIoRuntime,
+) -> Result<()> {
+    for event in external_io.shutdown_and_drain_events() {
+        apply_external_io_event(terminal, model, event)?;
+    }
+    Ok(())
 }
 
 fn drain_runtime_coordinator_events(

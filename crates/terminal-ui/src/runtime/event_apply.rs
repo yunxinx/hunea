@@ -127,7 +127,7 @@ impl RuntimeEventApply for Model {
                     self.apply_entry_tree_branch_tree_payload(payload);
                 }
             }
-            RuntimeEvent::SessionTreePreviewLoaded { payload } => {
+            RuntimeEvent::SessionBranchPreviewLoaded { payload } => {
                 if self.entry_tree_branch_preview_loading() {
                     self.apply_entry_tree_branch_preview_payload(payload);
                 }

@@ -174,7 +174,7 @@ pub(super) fn wait_for_session_tree_preview(
     wait_for_runtime_event(
         coordinator,
         |event| match event {
-            RuntimeEvent::SessionTreePreviewLoaded { payload } => Some(payload),
+            RuntimeEvent::SessionBranchPreviewLoaded { payload } => Some(payload),
             _ => None,
         },
         "session tree preview payload",

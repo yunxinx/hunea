@@ -1,5 +1,13 @@
+//! 外部阻塞 I/O 的同步 runner 边界。
+//!
+//! TUI runner 本身是同步循环，没有可复用的 tokio executor handle；这里用专用
+//! OS worker 承载系统剪贴板等阻塞 I/O。不要把这个模式复制到已经处于 tokio
+//! async 上下文的代码里；async 侧应优先使用项目既有 runtime 边界或
+//! `spawn_blocking`。
+
 use std::{
     io,
+    panic::{AssertUnwindSafe, catch_unwind},
     process::Command,
     sync::{Arc, mpsc},
     thread,
@@ -25,22 +33,33 @@ pub(super) struct ExternalIoRuntime {
     clipboard_events_sender: mpsc::Sender<ExternalIoEvent>,
     clipboard_events_receiver: mpsc::Receiver<ExternalIoEvent>,
     pending_clipboard_writes: usize,
-    system_clipboard_writer: SystemClipboardWriter,
+    clipboard_worker: ClipboardWorker,
 }
 
-#[derive(Clone)]
 struct SystemClipboardWriter {
     write: Arc<dyn Fn(&str) -> SystemClipboardResult + Send + Sync + 'static>,
+}
+
+struct ClipboardWorker {
+    jobs_sender: mpsc::Sender<ClipboardJob>,
+}
+
+struct ClipboardJob {
+    text: String,
 }
 
 impl ExternalIoRuntime {
     pub(super) fn new() -> Self {
         let (clipboard_events_sender, clipboard_events_receiver) = mpsc::channel();
+        let clipboard_worker = ClipboardWorker::start(
+            clipboard_events_sender.clone(),
+            SystemClipboardWriter::new(copy_selection_to_system_clipboard),
+        );
         Self {
             clipboard_events_sender,
             clipboard_events_receiver,
             pending_clipboard_writes: 0,
-            system_clipboard_writer: SystemClipboardWriter::new(copy_selection_to_system_clipboard),
+            clipboard_worker,
         }
     }
 
@@ -48,22 +67,34 @@ impl ExternalIoRuntime {
     fn with_system_clipboard_writer(
         writer: impl Fn(&str) -> SystemClipboardResult + Send + Sync + 'static,
     ) -> Self {
-        let mut runtime = Self::new();
-        runtime.system_clipboard_writer = SystemClipboardWriter::new(writer);
-        runtime
+        let (clipboard_events_sender, clipboard_events_receiver) = mpsc::channel();
+        let clipboard_worker = ClipboardWorker::start(
+            clipboard_events_sender.clone(),
+            SystemClipboardWriter::new(writer),
+        );
+        Self {
+            clipboard_events_sender,
+            clipboard_events_receiver,
+            pending_clipboard_writes: 0,
+            clipboard_worker,
+        }
     }
 
     pub(super) fn start_copy_selection(&mut self, text: String) {
-        self.pending_clipboard_writes = self.pending_clipboard_writes.saturating_add(1);
-        let sender = self.clipboard_events_sender.clone();
-        let writer = self.system_clipboard_writer.clone();
-        thread::spawn(move || {
-            let event = match writer.write(&text) {
-                Ok(()) => ExternalIoEvent::SelectionSystemClipboardCopied,
-                Err(_) => ExternalIoEvent::SelectionSystemClipboardFailed { text },
-            };
-            let _ = sender.send(event);
-        });
+        match self.clipboard_worker.submit(text) {
+            Ok(()) => {
+                self.pending_clipboard_writes = self.pending_clipboard_writes.saturating_add(1);
+            }
+            Err(text) => {
+                if self
+                    .clipboard_events_sender
+                    .send(ExternalIoEvent::SelectionSystemClipboardFailed { text })
+                    .is_ok()
+                {
+                    self.pending_clipboard_writes = self.pending_clipboard_writes.saturating_add(1);
+                }
+            }
+        }
     }
 
     pub(super) const fn has_pending_work(&self) -> bool {
@@ -95,6 +126,33 @@ impl SystemClipboardWriter {
 
     fn write(&self, text: &str) -> SystemClipboardResult {
         (self.write)(text)
+    }
+}
+
+impl ClipboardWorker {
+    fn start(events_sender: mpsc::Sender<ExternalIoEvent>, writer: SystemClipboardWriter) -> Self {
+        let (jobs_sender, jobs_receiver) = mpsc::channel::<ClipboardJob>();
+        thread::spawn(move || {
+            for job in jobs_receiver {
+                let write_result = catch_unwind(AssertUnwindSafe(|| writer.write(&job.text)));
+                let event = match write_result {
+                    Ok(Ok(())) => ExternalIoEvent::SelectionSystemClipboardCopied,
+                    Ok(Err(_)) | Err(_) => {
+                        ExternalIoEvent::SelectionSystemClipboardFailed { text: job.text }
+                    }
+                };
+                if events_sender.send(event).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { jobs_sender }
+    }
+
+    fn submit(&self, text: String) -> std::result::Result<(), String> {
+        self.jobs_sender
+            .send(ClipboardJob { text })
+            .map_err(|error| error.0.text)
     }
 }
 
@@ -183,7 +241,11 @@ fn copy_selection_to_terminal_clipboard_writer(
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{Arc, Mutex, mpsc},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
         thread,
         time::{Duration, Instant},
     };
@@ -212,8 +274,44 @@ mod tests {
         );
         assert!(external_io.has_pending_work());
         assert_eq!(
-            external_io.drain_events(),
+            drain_external_io_events_until(&mut external_io, 1),
             vec![ExternalIoEvent::SelectionSystemClipboardCopied]
+        );
+        assert!(!external_io.has_pending_work());
+    }
+
+    #[test]
+    fn copy_selection_reuses_one_background_worker_for_multiple_writes() {
+        let (thread_id_sender, thread_id_receiver) = mpsc::channel();
+        let mut external_io = ExternalIoRuntime::with_system_clipboard_writer(move |_text| {
+            thread_id_sender
+                .send(thread::current().id())
+                .expect("test should receive every writer thread id");
+            Ok(())
+        });
+
+        external_io.start_copy_selection("alpha".to_string());
+        external_io.start_copy_selection("beta".to_string());
+
+        let events = drain_external_io_events_until(&mut external_io, 2);
+        let worker_threads = (0..2)
+            .map(|_| {
+                thread_id_receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("worker should report each clipboard write")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            events,
+            vec![
+                ExternalIoEvent::SelectionSystemClipboardCopied,
+                ExternalIoEvent::SelectionSystemClipboardCopied,
+            ]
+        );
+        assert_eq!(
+            worker_threads[0], worker_threads[1],
+            "clipboard writes should use one long-lived worker instead of spawning one OS thread per copy"
         );
         assert!(!external_io.has_pending_work());
     }
@@ -294,6 +392,36 @@ mod tests {
                 text: "alpha".to_string()
             }]
         );
+        assert!(
+            !external_io.has_pending_work(),
+            "failed clipboard writes should not leave the runner in a permanent background-poll state"
+        );
+    }
+
+    #[test]
+    fn panicking_system_clipboard_write_reports_failure_and_keeps_worker_alive() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let writer_attempts = Arc::clone(&attempts);
+        let mut external_io = ExternalIoRuntime::with_system_clipboard_writer(move |_text| {
+            if writer_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("clipboard backend panicked");
+            }
+            Ok(())
+        });
+
+        external_io.start_copy_selection("alpha".to_string());
+        external_io.start_copy_selection("beta".to_string());
+
+        assert_eq!(
+            drain_external_io_events_until(&mut external_io, 2),
+            vec![
+                ExternalIoEvent::SelectionSystemClipboardFailed {
+                    text: "alpha".to_string()
+                },
+                ExternalIoEvent::SelectionSystemClipboardCopied,
+            ]
+        );
+        assert!(!external_io.has_pending_work());
     }
 
     #[test]
@@ -304,5 +432,24 @@ mod tests {
             .expect("OSC52 write should succeed");
 
         assert_eq!(output, b"\x1b]52;c;YWxwaGE=\x07");
+    }
+
+    fn drain_external_io_events_until(
+        external_io: &mut ExternalIoRuntime,
+        expected_count: usize,
+    ) -> Vec<ExternalIoEvent> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut events = Vec::new();
+        while events.len() < expected_count {
+            events.extend(external_io.drain_events());
+            assert!(
+                Instant::now() < deadline,
+                "background clipboard worker should report all requested events"
+            );
+            if events.len() < expected_count {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        events
     }
 }

@@ -1,10 +1,13 @@
 use super::*;
+use std::rc::Rc;
+
 use crate::{
     AppEffect, Sender, StartupBannerOptions,
-    document::{DocumentAnchorRegion, DocumentLineAnchor},
+    document::{DocumentAnchorRegion, DocumentLayout, DocumentLineAnchor, DocumentTailLayout},
     theme::default_palette,
     transcript::{LineAnchor, index_only_render_result, materialize_transcript_item_render_block},
 };
+use ratatui::text::Line;
 
 #[test]
 fn transcript_selection_survives_append_and_copies_using_anchor_bound_range() {
@@ -71,6 +74,40 @@ fn assistant_selection_uses_visual_inset_as_display_only_offset() {
     assert_eq!(
         model.request_copy_selection(),
         Some(AppEffect::CopySelection("alpha".to_string()))
+    );
+}
+
+#[test]
+fn line_selection_falls_back_to_current_line_end_when_next_anchor_is_missing() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let first_anchor = DocumentLineAnchor {
+        region: DocumentAnchorRegion::Composer,
+        gap_index: 0,
+        ..DocumentLineAnchor::default()
+    };
+    let mut layout = DocumentLayout::with_test_plain_lines(0, &["alpha", "beta"]);
+    layout.tail = Rc::new(DocumentTailLayout {
+        lines: vec![Line::raw("alpha"), Line::raw("beta")],
+        text_lines: vec!["alpha".to_string(), "beta".to_string()],
+        anchors: vec![first_anchor],
+        selectable: vec![
+            SelectableLineRange::new(0, 5),
+            SelectableLineRange::new(0, 4),
+        ],
+        ..layout.tail.as_ref().clone()
+    });
+
+    model.select_line_at_point(SelectionPoint::new(first_anchor, 2), &layout);
+
+    assert!(model.selection_runtime.selection.is_active());
+    assert_eq!(
+        model.selection_runtime.selection.anchor(),
+        SelectionPoint::new(first_anchor, 0)
+    );
+    assert_eq!(
+        model.selection_runtime.selection.focus(),
+        SelectionPoint::new(first_anchor, 5),
+        "line selection should degrade to the current line end when the following line has no anchor"
     );
 }
 

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use crate::Model;
 
-/// 后台 runtime 仍使用非唤醒式 receiver 时，主循环需要低频醒来 drain 一次。
+/// 后台工作仍使用非唤醒式 receiver 时，主循环需要低频醒来 drain 一次。
 pub(super) const BACKGROUND_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,9 +18,9 @@ pub(super) fn terminal_wait_plan(
     model: &Model,
     startup_deadline: Instant,
     now: Instant,
-    has_background_runtime: bool,
+    has_background_work: bool,
 ) -> TerminalWaitPlan {
-    let deadline = next_pipeline_deadline(model, startup_deadline, now, has_background_runtime);
+    let deadline = next_pipeline_deadline(model, startup_deadline, now, has_background_work);
     match deadline {
         Some(deadline) => TerminalWaitPlan::Poll {
             duration: deadline.saturating_duration_since(now),
@@ -45,7 +45,7 @@ fn next_pipeline_deadline(
     model: &Model,
     startup_deadline: Instant,
     now: Instant,
-    has_background_runtime: bool,
+    has_background_work: bool,
 ) -> Option<Instant> {
     let mut next_deadline = if model.has_palette() {
         None
@@ -91,7 +91,7 @@ fn next_pipeline_deadline(
         });
     }
 
-    if has_background_runtime {
+    if has_background_work {
         let background_deadline = now + BACKGROUND_EVENT_POLL_INTERVAL;
         next_deadline = Some(match next_deadline {
             Some(deadline) => deadline.min(background_deadline),

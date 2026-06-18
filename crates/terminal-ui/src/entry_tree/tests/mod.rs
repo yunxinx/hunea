@@ -4,8 +4,9 @@ use ratatui::{
     style::{Color, Modifier},
 };
 use runtime_domain::session::{
-    RuntimeToolActivity, RuntimeToolActivityStatus, RuntimeToolKind, SessionTreePayload,
-    SessionTreeRow, SessionTreeRowKind, TranscriptReplayItem, TranscriptReplayRole,
+    RuntimeEvent, RuntimeToolActivity, RuntimeToolActivityStatus, RuntimeToolKind,
+    SessionTreePayload, SessionTreeRow, SessionTreeRowKind, TranscriptReplayItem,
+    TranscriptReplayRole,
 };
 
 use super::{
@@ -20,6 +21,7 @@ use crate::test_helpers::{
 use crate::time::current_unix_timestamp_ms;
 use crate::{
     AppEffect, AppEvent, Model, ModelOptions, StartupBannerOptions,
+    runtime::RuntimeEventApply,
     theme::{
         accent_text_style, approval_rejected_text_style, command_accent_text_style,
         default_palette, muted_text_style, primary_text_style, table_header_text_style,
@@ -101,6 +103,41 @@ fn entry_tree_empty_payload_renders_empty_state_not_loading() {
     assert!(
         rows.iter().all(|row| !row.contains("Loading session tree")),
         "empty tree payload must not keep the loading copy: {rows:?}"
+    );
+}
+
+#[test]
+fn late_loaded_entry_tree_payload_is_ignored_after_initial_load_finishes() {
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row(
+            "current-user",
+            SessionTreeRowKind::User,
+            "current user",
+            Some("current user".to_string()),
+            Some("current-user"),
+        )],
+        current_row_id: Some("current-user".to_string()),
+    });
+
+    model.apply_runtime_event(RuntimeEvent::SessionTreeLoaded {
+        payload: SessionTreePayload {
+            rows: vec![tree_row(
+                "late-user",
+                SessionTreeRowKind::User,
+                "late user",
+                Some("late user".to_string()),
+                Some("late-user"),
+            )],
+            current_row_id: Some("late-user".to_string()),
+        },
+    });
+
+    assert_eq!(
+        model.entry_tree_row_ids_for_test(),
+        vec!["current-user"],
+        "a duplicate or late main-tree payload must not replace the already interactive tree"
     );
 }
 

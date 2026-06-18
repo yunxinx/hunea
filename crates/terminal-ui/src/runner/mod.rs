@@ -24,6 +24,7 @@ pub(crate) mod terminal_surface;
 
 use super::{runtime::RuntimeEventApply, theme::palette_detection_from_background};
 use effects::apply_effect_if_needed;
+use external_io::{ExternalIoRuntime, apply_external_io_event};
 pub(crate) use input::TerminalInputCoalescing;
 use input::{
     TerminalInputAction, coalesced_input_actions_with_options, read_ready_terminal_events,
@@ -131,9 +132,11 @@ pub fn run_with_runtime_coordinator(
     let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;
     let mut render_needed = true;
     let mut mouse_mode = TerminalMouseMode::for_mouse_capture(true);
+    let mut external_io = ExternalIoRuntime::new();
 
     loop {
         render_needed |= drain_runtime_coordinator_events(&mut model, runtime_coordinator);
+        render_needed |= drain_external_io_events(&mut terminal, &mut model, &mut external_io)?;
 
         if render_needed {
             let frame_time = Instant::now();
@@ -157,24 +160,34 @@ pub fn run_with_runtime_coordinator(
         let now = Instant::now();
         if !model.has_palette() && now >= startup_deadline {
             let effect = model.update(AppEvent::StartupReadyTimeout);
-            apply_effect_if_needed(&mut terminal, &mut model, runtime_coordinator, effect)?;
+            apply_effect_if_needed(
+                &mut terminal,
+                &mut model,
+                runtime_coordinator,
+                &mut external_io,
+                effect,
+            )?;
             render_needed = true;
             continue;
         }
 
         if let Some(timeout_event) = model.timeout_event(now) {
             let effect = model.update(timeout_event);
-            apply_effect_if_needed(&mut terminal, &mut model, runtime_coordinator, effect)?;
+            apply_effect_if_needed(
+                &mut terminal,
+                &mut model,
+                runtime_coordinator,
+                &mut external_io,
+                effect,
+            )?;
             render_needed = true;
             continue;
         }
 
-        let wait_plan = event_pipeline::terminal_wait_plan(
-            &model,
-            startup_deadline,
-            now,
-            runtime_coordinator.has_background_runtime(),
-        );
+        let has_background_work =
+            runtime_coordinator.has_background_runtime() || external_io.has_pending_work();
+        let wait_plan =
+            event_pipeline::terminal_wait_plan(&model, startup_deadline, now, has_background_work);
         let first_event = match wait_for_terminal_event(wait_plan)? {
             Some(event) => event,
             None => {
@@ -192,6 +205,7 @@ pub fn run_with_runtime_coordinator(
             &mut terminal,
             &mut model,
             runtime_coordinator,
+            &mut external_io,
         )? {
             render_needed = true;
         }
@@ -213,13 +227,14 @@ fn apply_terminal_input_actions(
     terminal: &mut terminal::TuiTerminal,
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
+    external_io: &mut ExternalIoRuntime,
 ) -> Result<bool> {
     let mut changed = false;
     for action in actions {
         match action {
             TerminalInputAction::App(app_event) => {
                 let effect = model.update(app_event);
-                apply_effect_if_needed(terminal, model, runtime_coordinator, effect)?;
+                apply_effect_if_needed(terminal, model, runtime_coordinator, external_io, effect)?;
                 changed = true;
             }
             TerminalInputAction::CancelExitConfirmation => {
@@ -234,6 +249,23 @@ fn apply_terminal_input_actions(
     }
 
     Ok(changed)
+}
+
+fn drain_external_io_events(
+    terminal: &mut terminal::TuiTerminal,
+    model: &mut Model,
+    external_io: &mut ExternalIoRuntime,
+) -> Result<bool> {
+    let events = external_io.drain_events();
+    if events.is_empty() {
+        return Ok(false);
+    }
+
+    for event in events {
+        apply_external_io_event(terminal, model, event)?;
+    }
+
+    Ok(true)
 }
 
 fn drain_runtime_coordinator_events(

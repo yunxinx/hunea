@@ -5,7 +5,9 @@ use crate::{AppEffect, Model};
 
 use super::RuntimeCoordinator;
 use super::conversation::run_send_conversation_turn_effect;
-use super::external_io::{run_copy_selection_effect, run_external_editor_effect};
+use super::external_io::{
+    ExternalIoRuntime, run_copy_selection_effect, run_external_editor_effect,
+};
 use super::model_refresh::{persist_selected_model, run_refresh_model_provider_effect};
 use super::terminal::TuiTerminal;
 
@@ -13,6 +15,7 @@ pub(super) fn apply_effect_if_needed(
     terminal: &mut TuiTerminal,
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
+    external_io: &mut ExternalIoRuntime,
     effect: Option<AppEffect>,
 ) -> Result<()> {
     let Some(effect) = effect else {
@@ -23,7 +26,7 @@ pub(super) fn apply_effect_if_needed(
         AppEffect::LaunchExternalEditor(launch) => {
             run_external_editor_effect(terminal, model, launch)
         }
-        AppEffect::CopySelection(text) => run_copy_selection_effect(terminal, model, &text),
+        AppEffect::CopySelection(text) => run_copy_selection_effect(external_io, text),
         AppEffect::ResetRuntimeSession => {
             reset_runtime_session_after_clear(runtime_coordinator);
             Ok(())

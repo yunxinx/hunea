@@ -57,6 +57,30 @@ fn late_copy_picker_payload_is_ignored_after_copy_picker_closes() {
 }
 
 #[test]
+fn late_loaded_copy_picker_payload_is_ignored_after_initial_load_finishes() {
+    let mut model = ready_copy_picker_model();
+
+    model.apply_runtime_event(RuntimeEvent::CopyPickerTreeLoaded {
+        payload: SessionTreePayload {
+            rows: vec![tree_row(
+                "late-user",
+                SessionTreeRowKind::User,
+                "late user",
+                Some("late user".to_string()),
+                Some("late-user"),
+            )],
+            current_row_id: Some("late-user".to_string()),
+        },
+    });
+
+    assert_eq!(
+        model.copy_picker_row_ids_for_test(),
+        vec!["user-1", "assistant-1", "user-2"],
+        "a duplicate or late copy-picker payload must not replace the already interactive picker"
+    );
+}
+
+#[test]
 fn direct_copy_picker_payload_is_ignored_without_active_picker() {
     let mut model = Model::new(StartupBannerOptions::default());
 

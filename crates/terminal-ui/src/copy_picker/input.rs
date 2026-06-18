@@ -5,6 +5,12 @@ impl Model {
         self.copy_picker.is_some()
     }
 
+    pub(crate) fn copy_picker_loading(&self) -> bool {
+        self.copy_picker
+            .as_ref()
+            .is_some_and(|state| state.is_loading)
+    }
+
     pub(crate) fn copy_picker_preview_active(&self) -> bool {
         self.copy_picker
             .as_ref()

@@ -5,6 +5,12 @@ impl Model {
         self.entry_tree.is_some()
     }
 
+    pub(crate) fn entry_tree_loading(&self) -> bool {
+        self.entry_tree
+            .as_ref()
+            .is_some_and(|state| state.is_loading)
+    }
+
     pub(crate) fn open_entry_tree_loading(&mut self) {
         self.entry_tree = Some(EntryTreeState {
             is_loading: true,
@@ -13,7 +19,9 @@ impl Model {
     }
 
     pub(crate) fn apply_entry_tree_payload(&mut self, payload: SessionTreePayload) {
-        let mut state = self.entry_tree.take().unwrap_or_default();
+        let Some(mut state) = self.entry_tree.take() else {
+            return;
+        };
         let current_row_id = payload.current_row_id;
         state.rows = payload.rows;
         state.is_loading = false;
@@ -29,7 +37,9 @@ impl Model {
     }
 
     pub(crate) fn show_entry_tree_error(&mut self, message: &str) {
-        let mut state = self.entry_tree.take().unwrap_or_default();
+        let Some(mut state) = self.entry_tree.take() else {
+            return;
+        };
         state.is_loading = false;
         state.error = Some(message.to_string());
         self.entry_tree = Some(state);
@@ -777,5 +787,19 @@ impl Model {
             }
             _ => OverlayKeyResult::Handled,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_tree_row_ids_for_test(&self) -> Vec<&str> {
+        self.entry_tree
+            .as_ref()
+            .map(|state| {
+                state
+                    .rows
+                    .iter()
+                    .map(|row| row.row_id.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     }
 }

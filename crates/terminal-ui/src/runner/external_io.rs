@@ -68,7 +68,7 @@ fn copy_selection_to_system_or_terminal_clipboard(terminal: &mut TuiTerminal, te
 
 fn copy_selection_to_system_clipboard(text: &str) -> Result<(), arboard::Error> {
     let mut clipboard = Clipboard::new()?;
-    clipboard.set_text(text.to_string())
+    clipboard.set_text(text)
 }
 
 fn copy_selection_to_terminal_clipboard(terminal: &mut TuiTerminal, text: &str) -> io::Result<()> {

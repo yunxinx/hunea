@@ -37,7 +37,7 @@ pub(super) struct EntryTreeBranchTreeState {
     pub(super) error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct EntryTreeBranchPreviewState {
     pub(super) rows: Vec<SessionTreeRow>,
     pub(super) selected: usize,
@@ -61,20 +61,6 @@ pub(super) enum EntryTreeBranchPreviewSource {
     BranchPicker,
     BranchTree,
 }
-
-impl PartialEq for EntryTreeBranchPreviewState {
-    fn eq(&self, other: &Self) -> bool {
-        self.rows == other.rows
-            && self.selected == other.selected
-            && self.is_loading == other.is_loading
-            && self.error == other.error
-            && self.message_preview == other.message_preview
-            && self.metadata == other.metadata
-            && self.source == other.source
-    }
-}
-
-impl Eq for EntryTreeBranchPreviewState {}
 
 impl Default for EntryTreeBranchPreviewState {
     fn default() -> Self {
@@ -134,10 +120,6 @@ impl EntryTreeState {
         } else {
             false
         }
-    }
-
-    pub(super) fn page_start(&self, page_size: usize) -> usize {
-        self.selection().page_start(page_size)
     }
 
     pub(super) fn page_indices(&self, page_size: usize) -> impl Iterator<Item = usize> {

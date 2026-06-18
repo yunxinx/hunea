@@ -181,7 +181,7 @@ impl Model {
         let preview_target = self.copy_picker.as_ref().and_then(|state| {
             state
                 .selected_row()
-                .map(|row| (state.selected, copy_picker_preview_replay_items(row)))
+                .map(|row| (state.selected, row.preview_replay_items()))
         });
         let Some((row_index, replay_items)) = preview_target else {
             return;

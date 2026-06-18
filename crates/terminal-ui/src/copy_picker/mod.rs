@@ -20,7 +20,7 @@ use crate::{
         fullscreen_list_body_visible_offset_for_row, fullscreen_list_chrome_rects,
         fullscreen_list_page_size_for_height,
     },
-    list_selection::{ListNavigationDirection, PagedSelection},
+    list_selection::{ListNavigationDirection, PagedSelection, row_index_by_id},
     overlay_key_result::OverlayKeyResult,
     render_frame::RenderFrame,
     session_tree_row_kind_view::{
@@ -60,6 +60,4 @@ mod state;
 mod tests;
 
 pub(crate) use state::CopyPickerState;
-use state::{
-    CopyPickerPreviewState, CopyPickerRow, CopyPickerTextFormat, copy_picker_preview_replay_items,
-};
+use state::{CopyPickerPreviewState, CopyPickerRow, CopyPickerTextFormat};

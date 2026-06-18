@@ -1,7 +1,7 @@
 use crate::{transcript::Transcript, transcript_overlay::TranscriptOverlayState};
 
 /// Transcript 覆盖层预览的共享状态。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TranscriptPreviewState {
     pub(crate) transcript: Transcript,
     pub(crate) overlay: TranscriptOverlayState,
@@ -17,13 +17,3 @@ impl TranscriptPreviewState {
         }
     }
 }
-
-impl PartialEq for TranscriptPreviewState {
-    fn eq(&self, other: &Self) -> bool {
-        self.transcript == other.transcript
-            && self.overlay == other.overlay
-            && self.is_following_bottom == other.is_following_bottom
-    }
-}
-
-impl Eq for TranscriptPreviewState {}

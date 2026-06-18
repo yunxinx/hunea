@@ -16,8 +16,7 @@ pub(super) struct CopyPickerRow {
     pub(super) kind: CopyableSessionTreeRowKind,
     pub(super) summary: String,
     pub(super) raw_text: String,
-    pub(super) display_text: String,
-    pub(super) preview_replay_items: Vec<TranscriptReplayItem>,
+    pub(super) replay_items: Vec<TranscriptReplayItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,10 +54,7 @@ impl CopyPickerState {
     }
 
     pub(super) fn select_row_by_id(&mut self, row_id: Option<&str>) -> bool {
-        let Some(row_id) = row_id else {
-            return false;
-        };
-        let Some(index) = self.rows.iter().position(|row| row.row_id == row_id) else {
+        let Some(index) = row_index_by_id(&self.rows, row_id, CopyPickerRow::row_id) else {
             return false;
         };
         self.selected = index;
@@ -167,23 +163,19 @@ impl CopyPickerState {
             return self
                 .rows
                 .get(preview.row_index)
-                .map(|row| row.text_for_format(format).to_string());
+                .map(|row| row.copy_text_for_format(format));
         }
 
         let mut payload = String::new();
         let mut has_rows = false;
         if self.selected_row_indices.is_empty() {
             if let Some(row) = self.selected_row() {
-                append_copy_payload_part(&mut payload, &mut has_rows, row.text_for_format(format));
+                append_copy_payload_row(&mut payload, &mut has_rows, row, format);
             }
         } else {
             for row_index in &self.selected_row_indices {
                 if let Some(row) = self.rows.get(*row_index) {
-                    append_copy_payload_part(
-                        &mut payload,
-                        &mut has_rows,
-                        row.text_for_format(format),
-                    );
+                    append_copy_payload_row(&mut payload, &mut has_rows, row, format);
                 }
             }
         }
@@ -192,63 +184,82 @@ impl CopyPickerState {
     }
 }
 
-fn append_copy_payload_part(payload: &mut String, has_rows: &mut bool, text: &str) {
+fn append_copy_payload_row(
+    payload: &mut String,
+    has_rows: &mut bool,
+    row: &CopyPickerRow,
+    format: CopyPickerTextFormat,
+) {
     if *has_rows {
         payload.push_str(COPY_PICKER_JOIN_SEPARATOR);
     } else {
         *has_rows = true;
     }
-    payload.push_str(text);
+    row.append_text_for_format(format, payload);
 }
 
 impl CopyPickerRow {
+    pub(super) fn row_id(&self) -> &str {
+        &self.row_id
+    }
+
     pub(super) fn from_session_tree_row(row: SessionTreeRow) -> Option<Self> {
         if !session_tree_row_kind_is_copyable(row.kind) {
             return None;
         }
         let kind = CopyableSessionTreeRowKind::from_session_tree_kind(row.kind)?;
-        let display_text = copy_picker_display_text(&row);
         Some(Self {
             row_id: row.row_id,
             kind,
             summary: row.summary,
             raw_text: row.preview_content,
-            display_text,
-            preview_replay_items: row.preview_replay_items,
+            replay_items: row.preview_replay_items,
         })
     }
 
-    pub(super) fn text_for_format(&self, format: CopyPickerTextFormat) -> &str {
+    pub(super) fn copy_text_for_format(&self, format: CopyPickerTextFormat) -> String {
+        let mut text = String::new();
+        self.append_text_for_format(format, &mut text);
+        text
+    }
+
+    pub(super) fn preview_replay_items(&self) -> Vec<TranscriptReplayItem> {
+        if !self.replay_items.is_empty() {
+            return self.replay_items.clone();
+        }
+        vec![TranscriptReplayItem::Message {
+            role: copyable_row_kind_replay_role(self.kind),
+            content: self.copy_text_for_format(CopyPickerTextFormat::Display),
+        }]
+    }
+
+    fn append_text_for_format(&self, format: CopyPickerTextFormat, text: &mut String) {
         match format {
-            CopyPickerTextFormat::Raw => &self.raw_text,
-            CopyPickerTextFormat::Display => &self.display_text,
+            CopyPickerTextFormat::Raw => text.push_str(&self.raw_text),
+            CopyPickerTextFormat::Display => self.append_display_text(text),
         }
     }
-}
 
-fn copy_picker_display_text(row: &SessionTreeRow) -> String {
-    let replay_text = row
-        .preview_replay_items
-        .iter()
-        .map(TranscriptReplayItem::content_text)
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    if replay_text.trim().is_empty() {
-        row.preview_content.clone()
-    } else {
-        replay_text
-    }
-}
+    fn append_display_text(&self, text: &mut String) {
+        let mut has_replay_text = false;
+        for replay_text in self
+            .replay_items
+            .iter()
+            .map(TranscriptReplayItem::content_text)
+            .filter(|text| !text.trim().is_empty())
+        {
+            if has_replay_text {
+                text.push_str("\n\n");
+            } else {
+                has_replay_text = true;
+            }
+            text.push_str(replay_text);
+        }
 
-pub(super) fn copy_picker_preview_replay_items(row: &CopyPickerRow) -> Vec<TranscriptReplayItem> {
-    if !row.preview_replay_items.is_empty() {
-        return row.preview_replay_items.clone();
+        if !has_replay_text {
+            text.push_str(&self.raw_text);
+        }
     }
-    vec![TranscriptReplayItem::Message {
-        role: copyable_row_kind_replay_role(row.kind),
-        content: row.display_text.clone(),
-    }]
 }
 
 fn copyable_row_kind_replay_role(kind: CopyableSessionTreeRowKind) -> TranscriptReplayRole {

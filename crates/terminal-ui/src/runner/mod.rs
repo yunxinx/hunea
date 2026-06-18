@@ -118,16 +118,24 @@ pub fn run_with_runtime_coordinator(
 
     let background_probe = terminal_probe::query_background(STARTUP_PROBE_TIMEOUT);
     if let Some(detection) = startup_palette_detection(background_probe) {
-        let _ = model.update(AppEvent::DetectedPalette {
-            palette: detection.palette,
-            has_dark_background: detection.has_dark_background,
-        });
+        apply_model_event_without_effect(
+            &mut model,
+            AppEvent::DetectedPalette {
+                palette: detection.palette,
+                has_dark_background: detection.has_dark_background,
+            },
+            "startup palette detection",
+        );
     }
     let area = terminal.size()?;
-    let _ = model.update(AppEvent::Resized {
-        width: area.width,
-        height: area.height,
-    });
+    apply_model_event_without_effect(
+        &mut model,
+        AppEvent::Resized {
+            width: area.width,
+            height: area.height,
+        },
+        "initial terminal resize",
+    );
 
     let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;
     let mut render_needed = true;
@@ -220,6 +228,14 @@ fn startup_palette_detection(
     background_probe
         .background
         .map(palette_detection_from_background)
+}
+
+fn apply_model_event_without_effect(model: &mut Model, event: AppEvent, context: &str) {
+    let effect = model.update(event);
+    debug_assert!(
+        effect.is_none(),
+        "runner event `{context}` unexpectedly produced an AppEffect: {effect:?}"
+    );
 }
 
 fn apply_terminal_input_actions(

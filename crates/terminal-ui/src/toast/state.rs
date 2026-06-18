@@ -96,23 +96,14 @@ impl Default for ToastState {
 impl ToastState {
     pub(super) fn show(&mut self, severity: ToastSeverity, text: impl Into<String>) {
         let notice = ToastNotice::new(severity, text);
-        match mem::replace(&mut self.phase, ToastPhase::Idle) {
-            ToastPhase::Idle => self.start_entering(notice),
-            ToastPhase::Entering(animation) => {
-                self.pending = Some(notice);
-                self.start_exiting(animation.notice);
-            }
-            ToastPhase::Visible {
-                notice: exiting_notice,
-                ..
-            } => {
-                self.pending = Some(notice);
-                self.start_exiting(exiting_notice);
-            }
-            ToastPhase::Exiting(animation) => {
-                self.phase = ToastPhase::Exiting(animation);
-                self.pending = Some(notice);
-            }
+        if matches!(self.phase, ToastPhase::Idle) {
+            self.start_entering(notice);
+            return;
+        }
+
+        self.pending = Some(notice);
+        if !matches!(self.phase, ToastPhase::Exiting(_)) {
+            self.start_exiting_active_notice();
         }
     }
 
@@ -223,6 +214,16 @@ impl ToastState {
 
     fn start_exiting(&mut self, notice: ToastNotice) {
         self.phase = ToastPhase::Exiting(ToastAnimation::exit(notice));
+    }
+
+    fn start_exiting_active_notice(&mut self) {
+        match mem::replace(&mut self.phase, ToastPhase::Idle) {
+            ToastPhase::Entering(animation) => self.start_exiting(animation.notice),
+            ToastPhase::Visible { notice, .. } => self.start_exiting(notice),
+            phase @ (ToastPhase::Idle | ToastPhase::Exiting(_)) => {
+                self.phase = phase;
+            }
+        }
     }
 
     fn finish_enter(&mut self, now: Instant) {

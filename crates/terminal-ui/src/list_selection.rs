@@ -156,6 +156,16 @@ impl VisibleWindowSelection {
     }
 }
 
+/// 在带稳定 `row_id` 的列表中查找目标行索引。
+pub(crate) fn row_index_by_id<T>(
+    rows: &[T],
+    row_id: Option<&str>,
+    row_id_for: impl Fn(&T) -> &str,
+) -> Option<usize> {
+    let row_id = row_id?;
+    rows.iter().position(|row| row_id_for(row) == row_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +226,24 @@ mod tests {
         assert_eq!(selection.select_visible_index(3, 0), Some(3));
         assert_eq!(selection.select_visible_index(3, 2), Some(5));
         assert_eq!(selection.select_visible_index(3, 5), None);
+    }
+
+    #[test]
+    fn row_index_by_id_resolves_optional_identity() {
+        struct Row {
+            row_id: &'static str,
+        }
+        let rows = [Row { row_id: "first" }, Row { row_id: "second" }];
+
+        assert_eq!(
+            row_index_by_id(&rows, Some("second"), |row| row.row_id),
+            Some(1)
+        );
+        assert_eq!(
+            row_index_by_id(&rows, Some("missing"), |row| row.row_id),
+            None
+        );
+        assert_eq!(row_index_by_id(&rows, None, |row| row.row_id), None);
     }
 
     #[test]

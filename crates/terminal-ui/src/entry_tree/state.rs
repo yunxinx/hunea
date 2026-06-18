@@ -1,7 +1,9 @@
 use runtime_domain::session::{SessionBranchTreeNode, SessionTreeBranchChoice, SessionTreeRow};
 
 use crate::{
-    list_selection::{ListNavigationDirection, PagedSelection, VisibleWindowSelection},
+    list_selection::{
+        ListNavigationDirection, PagedSelection, VisibleWindowSelection, row_index_by_id,
+    },
     transcript_preview::TranscriptPreviewState,
 };
 
@@ -88,10 +90,7 @@ impl EntryTreeState {
     }
 
     pub(super) fn select_row_by_id(&mut self, row_id: Option<&str>) -> bool {
-        let Some(row_id) = row_id else {
-            return false;
-        };
-        let Some(index) = self.rows.iter().position(|row| row.row_id == row_id) else {
+        let Some(index) = row_index_by_id(&self.rows, row_id, |row| row.row_id.as_str()) else {
             return false;
         };
         self.selected = index;
@@ -274,10 +273,7 @@ impl EntryTreeBranchPreviewState {
     }
 
     pub(super) fn select_row_by_id(&mut self, row_id: Option<&str>) -> bool {
-        let Some(row_id) = row_id else {
-            return false;
-        };
-        let Some(index) = self.rows.iter().position(|row| row.row_id == row_id) else {
+        let Some(index) = row_index_by_id(&self.rows, row_id, |row| row.row_id.as_str()) else {
             return false;
         };
         self.selected = index;

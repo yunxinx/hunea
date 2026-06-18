@@ -19,7 +19,10 @@ use color_eyre::eyre::Result;
 
 use crate::{AppEvent, ExternalEditorLaunch, Model};
 
-use super::terminal::{TerminalSession, TuiTerminal};
+use super::{
+    apply_model_event_without_effect,
+    terminal::{TerminalSession, TuiTerminal},
+};
 
 type SystemClipboardResult = std::result::Result<(), String>;
 
@@ -166,15 +169,23 @@ pub(super) fn run_external_editor_effect(
     TerminalSession::resume(terminal)?;
 
     let area = terminal.size()?;
-    let _ = model.update(AppEvent::Resized {
-        width: area.width,
-        height: area.height,
-    });
-    let _ = model.update(AppEvent::ExternalEditorFinished {
-        draft_path: launch.draft_path,
-        original_draft: launch.original_draft,
-        failed,
-    });
+    apply_model_event_without_effect(
+        model,
+        AppEvent::Resized {
+            width: area.width,
+            height: area.height,
+        },
+        "external editor terminal resize",
+    );
+    apply_model_event_without_effect(
+        model,
+        AppEvent::ExternalEditorFinished {
+            draft_path: launch.draft_path,
+            original_draft: launch.original_draft,
+            failed,
+        },
+        "external editor finished",
+    );
     Ok(())
 }
 
@@ -197,7 +208,11 @@ pub(super) fn apply_external_io_event(
             copy_selection_to_terminal_clipboard(terminal, &text).is_ok()
         }
     };
-    let _ = model.update(AppEvent::SelectionCopyCompleted { success });
+    apply_model_event_without_effect(
+        model,
+        AppEvent::SelectionCopyCompleted { success },
+        "selection copy completed",
+    );
     Ok(())
 }
 

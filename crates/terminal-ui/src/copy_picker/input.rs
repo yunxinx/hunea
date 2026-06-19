@@ -19,6 +19,7 @@ impl Model {
 
     pub(crate) fn open_copy_picker_loading(&mut self) {
         self.copy_picker = Some(CopyPickerState::default());
+        self.close_composer_attached_ui();
     }
 
     pub(crate) fn apply_copy_picker_payload(&mut self, payload: SessionTreePayload) {

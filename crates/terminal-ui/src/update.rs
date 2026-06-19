@@ -311,8 +311,8 @@ impl Model {
         match self.top_modal_layer() {
             Some(ModalLayer::CopyPicker) => self.handle_copy_picker_mouse_down(button, column, row),
             Some(ModalLayer::EntryTree) => self.handle_entry_tree_mouse_down(button, column, row),
-            Some(layer) if layer.blocks_pointer_passthrough() => OverlayInputResult::Handled,
-            Some(_) | None => OverlayInputResult::Ignored,
+            Some(_) => OverlayInputResult::Handled,
+            None => OverlayInputResult::Ignored,
         }
     }
 
@@ -342,6 +342,26 @@ impl Model {
         self.handle_modal_layer_key(layer, key)
     }
 
+    fn handle_modal_layer_key_before_global_shortcuts(
+        &mut self,
+        key: KeyEvent,
+    ) -> OverlayInputResult {
+        let Some(layer) = self
+            .top_modal_layer()
+            .filter(|layer| layer.handles_key_before_global_shortcuts())
+        else {
+            return OverlayInputResult::Ignored;
+        };
+        self.handle_modal_layer_key(layer, key)
+    }
+
+    fn handle_current_modal_or_panel_key(&mut self, key: KeyEvent) -> OverlayInputResult {
+        if self.tool_approval_panel_active() {
+            return self.handle_tool_approval_panel_key(key);
+        }
+        self.handle_top_modal_layer_key(key)
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppEffect> {
         if !(key.kind.is_press() || key.kind.is_repeat()) {
             return None;
@@ -359,12 +379,10 @@ impl Model {
         let is_ctrl_c =
             key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
         self.clear_history_scroll_indicator();
-        if let Some(ModalLayer::TranscriptOverlay) = self.top_modal_layer() {
+        let result = self.handle_modal_layer_key_before_global_shortcuts(key);
+        if !result.is_ignored() {
             self.cancel_exit_confirmation();
-            let result = self.handle_modal_layer_key(ModalLayer::TranscriptOverlay, key);
-            if !result.is_ignored() {
-                return result.into_effect();
-            }
+            return result.into_effect();
         }
 
         if !is_plain_esc {
@@ -393,22 +411,12 @@ impl Model {
             return None;
         }
 
-        if !matches!(
-            self.top_modal_layer(),
-            Some(ModalLayer::ToolApprovalFullscreenPreview)
-        ) {
-            let result = self.handle_tool_approval_panel_key(key);
-            if !result.is_ignored() {
-                return result.into_effect();
-            }
-        }
-
-        let result = self.handle_top_modal_layer_key(key);
+        let result = self.handle_current_modal_or_panel_key(key);
         if !result.is_ignored() {
             return result.into_effect();
         }
 
-        let result = self.handle_transcript_overlay_key(key);
+        let result = self.handle_transcript_overlay_global_key(key);
         if !result.is_ignored() {
             return result.into_effect();
         }

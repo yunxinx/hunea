@@ -15,12 +15,23 @@ impl Model {
         self.handle_transcript_overlay_key(key)
     }
 
-    /// `handle_transcript_overlay_key` 处理覆盖层激活时的键盘事件。
-    pub(crate) fn handle_transcript_overlay_key(&mut self, key: KeyEvent) -> OverlayInputResult {
-        // Ctrl+T 始终切换覆盖层（无论当前是否激活）
-        if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    /// `handle_transcript_overlay_global_key` 处理无需覆盖层已激活的全局 transcript 快捷键。
+    pub(crate) fn handle_transcript_overlay_global_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> OverlayInputResult {
+        if is_transcript_overlay_toggle_key(key) {
             self.toggle_transcript_overlay();
             return OverlayInputResult::Handled;
+        }
+        OverlayInputResult::Ignored
+    }
+
+    /// `handle_transcript_overlay_key` 处理覆盖层激活时的键盘事件。
+    pub(crate) fn handle_transcript_overlay_key(&mut self, key: KeyEvent) -> OverlayInputResult {
+        let global_result = self.handle_transcript_overlay_global_key(key);
+        if !global_result.is_ignored() {
+            return global_result;
         }
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -81,4 +92,8 @@ impl Model {
             _ => OverlayInputResult::Handled, // 覆盖层激活时，消费所有其它按键，防止落入 composer
         }
     }
+}
+
+fn is_transcript_overlay_toggle_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL)
 }

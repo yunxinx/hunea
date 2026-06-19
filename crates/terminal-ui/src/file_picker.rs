@@ -34,10 +34,7 @@ impl Model {
     }
 
     pub(crate) fn sync_file_picker_state(&mut self) {
-        if self.tool_approval_panel_active()
-            || self.model_panel_active()
-            || self.command_panel_active()
-        {
+        if self.blocks_composer_attached_ui() || self.command_panel_active() {
             self.close_file_picker();
             return;
         }
@@ -295,6 +292,12 @@ impl Model {
 
     fn close_file_picker(&mut self) {
         self.file_picker = None;
+    }
+
+    pub(crate) fn close_composer_attached_ui(&mut self) {
+        self.close_file_picker();
+        self.command_panel_selected = 0;
+        self.command_panel_scroll = 0;
     }
 
     fn dismiss_current_file_picker_token(&mut self) {

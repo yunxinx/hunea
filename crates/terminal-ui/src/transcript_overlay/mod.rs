@@ -82,8 +82,7 @@ impl Model {
         // 关闭其它 immersive panel，遵循互斥策略
         self.close_model_panel();
         self.close_tool_approval_panel();
-        self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.close_composer_attached_ui();
         self.sync_composer_height();
 
         let compact_index = self.transcript.progressive_item_metrics_index();

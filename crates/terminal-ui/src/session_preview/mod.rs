@@ -55,6 +55,7 @@ impl Model {
         preview.overlay.scroll_offset =
             latest_session_preview_offset(&mut preview.transcript, content_height);
         self.session_preview = Some(preview);
+        self.close_composer_attached_ui();
     }
 
     pub(crate) fn apply_session_preview_payload(&mut self, payload: SessionPreviewPayload) {

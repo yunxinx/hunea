@@ -20,9 +20,9 @@ impl ModalLayer {
         )
     }
 
-    /// 全屏模态层激活时，指针事件不能穿透到底层 transcript/composer。
-    pub(crate) const fn blocks_pointer_passthrough(self) -> bool {
-        true
+    /// Transcript 覆盖层保留 `Ctrl-C` 关闭自身的语义，需先于全局退出确认处理。
+    pub(crate) const fn handles_key_before_global_shortcuts(self) -> bool {
+        matches!(self, Self::TranscriptOverlay)
     }
 }
 
@@ -52,12 +52,18 @@ impl Model {
 
     /// 粘贴会修改 composer；全屏模态层或 model panel 激活时应吞掉粘贴。
     pub(crate) fn blocks_main_paste(&self) -> bool {
-        self.top_modal_layer().is_some() || self.model_panel_active()
+        self.blocks_composer_attached_ui()
+    }
+
+    /// 全屏模态层与 modal panel 激活时，composer 的候选浮层不应保留或接管输入。
+    pub(crate) fn blocks_composer_attached_ui(&self) -> bool {
+        self.top_modal_layer().is_some()
+            || self.model_panel_active()
+            || self.tool_approval_panel_active()
     }
 
     pub(crate) fn modal_blocks_pointer_passthrough(&self) -> bool {
-        self.top_modal_layer()
-            .is_some_and(ModalLayer::blocks_pointer_passthrough)
+        self.top_modal_layer().is_some()
     }
 
     pub(crate) fn modal_has_page_scroll_burst_coalescing(&self) -> bool {
@@ -88,6 +94,14 @@ impl Model {
                 Some(TerminalMouseModePreference::NativeWithAlternateScroll)
             }
         }
+    }
+
+    pub(crate) fn close_fullscreen_modal_layers(&mut self) {
+        self.close_transcript_overlay();
+        self.session_preview = None;
+        self.session_picker = None;
+        self.copy_picker = None;
+        self.entry_tree = None;
     }
 }
 
@@ -176,7 +190,39 @@ mod tests {
                 option_id: Some("allow-once".to_string()),
             })
         );
-        assert_eq!(model.top_modal_layer(), Some(ModalLayer::SessionPreview));
+        assert_eq!(model.top_modal_layer(), None);
+    }
+
+    #[test]
+    fn inline_tool_approval_replaces_hidden_fullscreen_modal_input() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.set_window(80, 12);
+        model.open_session_picker_loading();
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::SessionPicker));
+
+        open_inline_tool_approval(&mut model);
+
+        assert!(model.tool_approval_panel_active());
+        assert_eq!(model.top_modal_layer(), None);
+        assert_eq!(
+            press_key(&mut model, KeyCode::Enter),
+            Some(AppEffect::RespondRuntimePermission {
+                target: RuntimeTarget::provider("local", "qwen3"),
+                request_id: "permission-write".to_string(),
+                option_id: Some("allow-once".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn fullscreen_modal_blocks_composer_command_panel() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        press_key(&mut model, KeyCode::Char('/'));
+        assert!(model.command_panel_active());
+
+        model.open_session_picker_loading();
+
+        assert!(!model.command_panel_active());
     }
 
     #[test]
@@ -277,6 +323,24 @@ mod tests {
             )),
         );
         assert!(model.tool_approval_fullscreen_preview_active());
+    }
+
+    fn open_inline_tool_approval(model: &mut Model) {
+        model.open_tool_approval_panel_with_preview(
+            ToolApprovalSource::RuntimePermission {
+                target: RuntimeTarget::provider("local", "qwen3"),
+                request_id: "permission-write".to_string(),
+                allow_option_id: Some("allow-once".to_string()),
+                allow_always_option_id: None,
+                reject_option_id: Some("reject-once".to_string()),
+                reject_always_option_id: None,
+            },
+            "WriteFile: temp.md".to_string(),
+            Vec::new(),
+            None,
+        );
+        assert!(model.tool_approval_panel_active());
+        assert!(!model.tool_approval_fullscreen_preview_active());
     }
 
     fn press_key(model: &mut Model, code: KeyCode) -> Option<AppEffect> {

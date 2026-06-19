@@ -510,6 +510,20 @@ fn at_file_picker_opens_and_tab_completes_common_prefix() {
 }
 
 #[test]
+fn fullscreen_modal_closes_composer_file_picker_state() {
+    let root = TempFileTree::new("fullscreen-closes-file-picker");
+    root.write_file("src/lib.rs");
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@s");
+    assert!(model.file_picker_active());
+
+    model.open_session_picker_loading();
+
+    assert!(!model.file_picker_active());
+}
+
+#[test]
 fn at_file_picker_tab_completes_prefix_candidates_not_fuzzy_matches() {
     let root = TempFileTree::new("tab-complete-prefix-only");
     root.write_file("src/dir1/docs.md");

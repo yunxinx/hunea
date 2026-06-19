@@ -60,7 +60,7 @@ pub(crate) struct CommandPanelRenderResult {
 
 impl Model {
     pub(crate) fn command_panel_active(&self) -> bool {
-        if self.tool_approval_panel_active() {
+        if self.blocks_composer_attached_ui() {
             return false;
         }
 
@@ -172,7 +172,7 @@ impl Model {
     }
 
     fn current_command_panel_state(&self) -> Option<CommandPanelState> {
-        if self.tool_approval_panel_active() {
+        if self.blocks_composer_attached_ui() {
             return None;
         }
 

@@ -21,6 +21,7 @@ impl Model {
             is_loading: true,
             ..EntryTreeState::default()
         });
+        self.close_composer_attached_ui();
     }
 
     pub(crate) fn apply_entry_tree_payload(&mut self, payload: SessionTreePayload) {

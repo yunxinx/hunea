@@ -34,6 +34,7 @@ impl Model {
             opened_at_ms,
             ..SessionPickerState::default()
         });
+        self.close_composer_attached_ui();
     }
 
     pub(crate) fn apply_session_picker_rows(&mut self, rows: Vec<SessionPickerRow>) {

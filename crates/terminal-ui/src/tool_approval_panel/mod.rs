@@ -106,7 +106,7 @@ impl Model {
         details: Vec<ToolApprovalDetail>,
         preview: Option<ToolApprovalPreview>,
     ) {
-        self.close_transcript_overlay();
+        self.close_fullscreen_modal_layers();
         self.pause_stream_activity();
         self.close_model_panel();
         self.tool_approval_panel = ToolApprovalPanelState {
@@ -122,8 +122,7 @@ impl Model {
         };
         self.sync_tool_approval_preview_mode();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
-        self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.close_composer_attached_ui();
         self.sync_composer_height();
         self.sync_document_viewport_for_composer_cursor();
     }

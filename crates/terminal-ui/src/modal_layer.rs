@@ -93,11 +93,13 @@ impl Model {
 
 #[cfg(test)]
 mod tests {
-    use runtime_domain::session::SessionTreeRowKind;
+    use crossterm::event::{KeyCode, KeyEvent};
+    use runtime_domain::session::{RuntimeTarget, SessionTreeRowKind};
 
     use crate::{
-        Model, StartupBannerOptions, runner::TerminalMouseModePreference, test_helpers::tree_row,
-        theme::default_palette, transcript::Transcript,
+        AppEffect, AppEvent, Model, StartupBannerOptions, runner::TerminalMouseModePreference,
+        runtime::tool_activity_preview::ToolApprovalPreview, test_helpers::tree_row,
+        theme::default_palette, tool_approval_panel::ToolApprovalSource, transcript::Transcript,
     };
 
     use super::ModalLayer;
@@ -105,6 +107,13 @@ mod tests {
     #[test]
     fn top_modal_layer_uses_single_priority_order() {
         let mut model = Model::new(StartupBannerOptions::default());
+        model.set_window(80, 12);
+
+        model.open_entry_tree_loading();
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::EntryTree));
+
+        model.open_copy_picker_loading();
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::CopyPicker));
 
         model.open_session_picker_loading();
         assert_eq!(model.top_modal_layer(), Some(ModalLayer::SessionPicker));
@@ -114,6 +123,60 @@ mod tests {
 
         model.open_transcript_overlay();
         assert_eq!(model.top_modal_layer(), Some(ModalLayer::TranscriptOverlay));
+
+        open_fullscreen_tool_approval(&mut model);
+        assert_eq!(
+            model.top_modal_layer(),
+            Some(ModalLayer::ToolApprovalFullscreenPreview)
+        );
+    }
+
+    #[test]
+    fn key_dispatch_closes_only_the_top_fullscreen_modal_layer() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.set_window(80, 12);
+        model.open_entry_tree_loading();
+        model.open_copy_picker_loading();
+        model.open_session_picker_loading();
+        model.open_session_preview(
+            "session-under-approval".to_string(),
+            Transcript::new(default_palette()),
+        );
+        model.open_transcript_overlay();
+
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::TranscriptOverlay));
+        assert_eq!(press_key(&mut model, KeyCode::Esc), None);
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::SessionPreview));
+        assert_eq!(press_key(&mut model, KeyCode::Esc), None);
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::SessionPicker));
+        assert_eq!(press_key(&mut model, KeyCode::Esc), None);
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::CopyPicker));
+        assert_eq!(press_key(&mut model, KeyCode::Esc), None);
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::EntryTree));
+        assert_eq!(press_key(&mut model, KeyCode::Esc), None);
+        assert_eq!(model.top_modal_layer(), None);
+    }
+
+    #[test]
+    fn key_dispatch_routes_top_fullscreen_tool_approval_effect() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.set_window(80, 12);
+        model.open_session_preview(
+            "session-under-approval".to_string(),
+            Transcript::new(default_palette()),
+        );
+        open_fullscreen_tool_approval(&mut model);
+
+        let effect = press_key(&mut model, KeyCode::Enter);
+        assert_eq!(
+            effect,
+            Some(AppEffect::RespondRuntimePermission {
+                target: RuntimeTarget::provider("local", "qwen3"),
+                request_id: "permission-write".to_string(),
+                option_id: Some("allow-once".to_string()),
+            })
+        );
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::SessionPreview));
     }
 
     #[test]
@@ -190,5 +253,33 @@ mod tests {
             Some(TerminalMouseModePreference::CaptureWithAlternateScroll)
         );
         assert!(model.modal_has_page_scroll_burst_coalescing());
+    }
+
+    fn open_fullscreen_tool_approval(model: &mut Model) {
+        let content = (1..=30)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        model.open_tool_approval_panel_with_preview(
+            ToolApprovalSource::RuntimePermission {
+                target: RuntimeTarget::provider("local", "qwen3"),
+                request_id: "permission-write".to_string(),
+                allow_option_id: Some("allow-once".to_string()),
+                allow_always_option_id: None,
+                reject_option_id: Some("reject-once".to_string()),
+                reject_always_option_id: None,
+            },
+            "WriteFile: temp.md".to_string(),
+            Vec::new(),
+            Some(ToolApprovalPreview::create_file(
+                "temp.md".to_string(),
+                content,
+            )),
+        );
+        assert!(model.tool_approval_fullscreen_preview_active());
+    }
+
+    fn press_key(model: &mut Model, code: KeyCode) -> Option<AppEffect> {
+        model.update(AppEvent::Key(KeyEvent::from(code)))
     }
 }

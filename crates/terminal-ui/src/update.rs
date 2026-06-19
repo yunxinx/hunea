@@ -324,6 +324,24 @@ impl Model {
         }
     }
 
+    fn handle_modal_layer_key(&mut self, layer: ModalLayer, key: KeyEvent) -> OverlayInputResult {
+        match layer {
+            ModalLayer::ToolApprovalFullscreenPreview => self.handle_tool_approval_panel_key(key),
+            ModalLayer::TranscriptOverlay => self.handle_active_transcript_overlay_key(key),
+            ModalLayer::SessionPreview => self.handle_session_preview_key(key),
+            ModalLayer::SessionPicker => self.handle_session_picker_key(key),
+            ModalLayer::CopyPicker => self.handle_copy_picker_key(key),
+            ModalLayer::EntryTree => self.handle_entry_tree_key(key),
+        }
+    }
+
+    fn handle_top_modal_layer_key(&mut self, key: KeyEvent) -> OverlayInputResult {
+        let Some(layer) = self.top_modal_layer() else {
+            return OverlayInputResult::Ignored;
+        };
+        self.handle_modal_layer_key(layer, key)
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppEffect> {
         if !(key.kind.is_press() || key.kind.is_repeat()) {
             return None;
@@ -341,9 +359,9 @@ impl Model {
         let is_ctrl_c =
             key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
         self.clear_history_scroll_indicator();
-        if matches!(self.top_modal_layer(), Some(ModalLayer::TranscriptOverlay)) {
+        if let Some(ModalLayer::TranscriptOverlay) = self.top_modal_layer() {
             self.cancel_exit_confirmation();
-            let result = self.handle_active_transcript_overlay_key(key);
+            let result = self.handle_modal_layer_key(ModalLayer::TranscriptOverlay, key);
             if !result.is_ignored() {
                 return result.into_effect();
             }
@@ -375,27 +393,17 @@ impl Model {
             return None;
         }
 
-        let result = self.handle_tool_approval_panel_key(key);
-        if !result.is_ignored() {
-            return result.into_effect();
+        if !matches!(
+            self.top_modal_layer(),
+            Some(ModalLayer::ToolApprovalFullscreenPreview)
+        ) {
+            let result = self.handle_tool_approval_panel_key(key);
+            if !result.is_ignored() {
+                return result.into_effect();
+            }
         }
 
-        let result = self.handle_session_preview_key(key);
-        if !result.is_ignored() {
-            return result.into_effect();
-        }
-
-        let result = self.handle_session_picker_key(key);
-        if !result.is_ignored() {
-            return result.into_effect();
-        }
-
-        let result = self.handle_copy_picker_key(key);
-        if !result.is_ignored() {
-            return result.into_effect();
-        }
-
-        let result = self.handle_entry_tree_key(key);
+        let result = self.handle_top_modal_layer_key(key);
         if !result.is_ignored() {
             return result.into_effect();
         }

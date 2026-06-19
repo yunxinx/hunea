@@ -471,8 +471,7 @@ impl Model {
 
     pub(crate) fn startup_banner_entrance_target_renderable(&self) -> bool {
         self.startup_banner_entrance_target_available()
-            && !self.transcript_overlay_active()
-            && !self.tool_approval_fullscreen_preview_active()
+            && !self.modal_obscures_startup_banner_entrance_target()
     }
 
     pub(crate) fn complete_startup_banner_entrance(&mut self) {

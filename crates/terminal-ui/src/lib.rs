@@ -27,6 +27,7 @@ mod markdown_display;
 mod markdown_source;
 mod message;
 mod message_revisit;
+mod modal_layer;
 mod model;
 mod model_panel;
 mod overlay_input_result;

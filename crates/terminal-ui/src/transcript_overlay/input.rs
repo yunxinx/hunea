@@ -3,6 +3,18 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::{Model, overlay_input_result::OverlayInputResult};
 
 impl Model {
+    /// `handle_active_transcript_overlay_key` 统一 transcript 覆盖层及 message revisit 子模式的输入优先级。
+    pub(crate) fn handle_active_transcript_overlay_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> OverlayInputResult {
+        let result = self.handle_message_revisit_overlay_key(key);
+        if !result.is_ignored() {
+            return result;
+        }
+        self.handle_transcript_overlay_key(key)
+    }
+
     /// `handle_transcript_overlay_key` 处理覆盖层激活时的键盘事件。
     pub(crate) fn handle_transcript_overlay_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         // Ctrl+T 始终切换覆盖层（无论当前是否激活）

@@ -14,6 +14,7 @@ use super::{
     },
     document::DocumentAnchorRegion,
     exit_confirmation::EXIT_CONFIRMATION_PROMPT,
+    modal_layer::ModalLayer,
     overlay_input_result::OverlayInputResult,
     path_resolve::resolve_configured_current_dir,
     terminal_text::sanitize_terminal_text,
@@ -132,10 +133,7 @@ pub enum AppEvent {
 impl Model {
     pub(crate) fn terminal_input_coalescing(&self) -> crate::runner::TerminalInputCoalescing {
         crate::runner::TerminalInputCoalescing {
-            has_page_scroll_burst_coalescing: self.session_preview_active()
-                || self.session_picker_active()
-                || self.copy_picker_active()
-                || self.entry_tree_active(),
+            has_page_scroll_burst_coalescing: self.modal_has_page_scroll_burst_coalescing(),
         }
     }
 
@@ -144,14 +142,7 @@ impl Model {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
             AppEvent::Paste(text) => {
-                if self.transcript_overlay_active()
-                    || self.tool_approval_fullscreen_preview_active()
-                    || self.session_preview_active()
-                    || self.session_picker_active()
-                    || self.copy_picker_active()
-                    || self.entry_tree_active()
-                    || self.model_panel_active()
-                {
+                if self.blocks_main_paste() {
                     self.cancel_exit_confirmation();
                     None
                 } else {
@@ -277,38 +268,38 @@ impl Model {
     }
 
     fn handle_overlay_mouse_wheel(&mut self, delta_lines: isize) -> OverlayInputResult {
-        if self.tool_approval_fullscreen_preview_active() {
-            self.scroll_tool_approval_fullscreen_preview_by(delta_lines);
-            return OverlayInputResult::Handled;
-        }
-        if self.session_preview_active() {
-            self.move_session_preview_page(delta_lines.signum());
-            return OverlayInputResult::Handled;
-        }
-        if self.session_picker_active() {
-            self.move_session_picker_selection_by_delta(delta_lines.signum());
-            return OverlayInputResult::Handled;
-        }
-        if self.copy_picker_active() {
-            if self.copy_picker_preview_active() {
-                self.move_copy_picker_preview_page(delta_lines.signum());
-            } else {
-                self.move_copy_picker_selection_by_delta(delta_lines.signum());
+        match self.top_modal_layer() {
+            Some(ModalLayer::ToolApprovalFullscreenPreview) => {
+                self.scroll_tool_approval_fullscreen_preview_by(delta_lines);
+                OverlayInputResult::Handled
             }
-            return OverlayInputResult::Handled;
-        }
-        if self.entry_tree_active() {
-            if self.entry_tree_preview_active() {
-                self.move_entry_tree_preview_page(delta_lines.signum());
-            } else {
-                self.move_entry_tree_selection_by_delta(delta_lines.signum());
+            Some(ModalLayer::SessionPreview) => {
+                self.move_session_preview_page(delta_lines.signum());
+                OverlayInputResult::Handled
             }
-            return OverlayInputResult::Handled;
+            Some(ModalLayer::SessionPicker) => {
+                self.move_session_picker_selection_by_delta(delta_lines.signum());
+                OverlayInputResult::Handled
+            }
+            Some(ModalLayer::CopyPicker) => {
+                if self.copy_picker_preview_active() {
+                    self.move_copy_picker_preview_page(delta_lines.signum());
+                } else {
+                    self.move_copy_picker_selection_by_delta(delta_lines.signum());
+                }
+                OverlayInputResult::Handled
+            }
+            Some(ModalLayer::EntryTree) => {
+                if self.entry_tree_preview_active() {
+                    self.move_entry_tree_preview_page(delta_lines.signum());
+                } else {
+                    self.move_entry_tree_selection_by_delta(delta_lines.signum());
+                }
+                OverlayInputResult::Handled
+            }
+            Some(ModalLayer::TranscriptOverlay) => OverlayInputResult::Handled,
+            None => OverlayInputResult::Ignored,
         }
-        if self.transcript_overlay_active() {
-            return OverlayInputResult::Handled;
-        }
-        OverlayInputResult::Ignored
     }
 
     fn handle_overlay_mouse_down(
@@ -317,33 +308,20 @@ impl Model {
         column: u16,
         row: u16,
     ) -> OverlayInputResult {
-        if self.copy_picker_active() {
-            return self.handle_copy_picker_mouse_down(button, column, row);
+        match self.top_modal_layer() {
+            Some(ModalLayer::CopyPicker) => self.handle_copy_picker_mouse_down(button, column, row),
+            Some(ModalLayer::EntryTree) => self.handle_entry_tree_mouse_down(button, column, row),
+            Some(layer) if layer.blocks_pointer_passthrough() => OverlayInputResult::Handled,
+            Some(_) | None => OverlayInputResult::Ignored,
         }
-        if self.entry_tree_active() {
-            return self.handle_entry_tree_mouse_down(button, column, row);
-        }
-        if self.overlay_blocks_pointer_passthrough() {
-            return OverlayInputResult::Handled;
-        }
-        OverlayInputResult::Ignored
     }
 
     fn handle_overlay_pointer_passthrough_blocker(&self) -> OverlayInputResult {
-        if self.overlay_blocks_pointer_passthrough() {
+        if self.modal_blocks_pointer_passthrough() {
             OverlayInputResult::Handled
         } else {
             OverlayInputResult::Ignored
         }
-    }
-
-    fn overlay_blocks_pointer_passthrough(&self) -> bool {
-        self.transcript_overlay_active()
-            || self.tool_approval_fullscreen_preview_active()
-            || self.session_preview_active()
-            || self.session_picker_active()
-            || self.copy_picker_active()
-            || self.entry_tree_active()
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppEffect> {
@@ -363,13 +341,9 @@ impl Model {
         let is_ctrl_c =
             key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
         self.clear_history_scroll_indicator();
-        if self.transcript_overlay_active() {
+        if matches!(self.top_modal_layer(), Some(ModalLayer::TranscriptOverlay)) {
             self.cancel_exit_confirmation();
-            let result = self.handle_message_revisit_overlay_key(key);
-            if !result.is_ignored() {
-                return result.into_effect();
-            }
-            let result = self.handle_transcript_overlay_key(key);
+            let result = self.handle_active_transcript_overlay_key(key);
             if !result.is_ignored() {
                 return result.into_effect();
             }

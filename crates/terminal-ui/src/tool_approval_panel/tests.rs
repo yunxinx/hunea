@@ -1,8 +1,9 @@
 use super::*;
 use crate::{
-    AppEvent, Sender, StartupBannerOptions, overlay_input_result::OverlayInputResult,
+    AppEffect, AppEvent, Sender, StartupBannerOptions, overlay_input_result::OverlayInputResult,
     theme::default_palette,
 };
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{buffer::Buffer, layout::Rect};
 
 fn handled_effect(result: OverlayInputResult, context: &str) -> Option<AppEffect> {
@@ -371,6 +372,65 @@ fn esc_cancels_runtime_permission_without_rejecting() {
         model.transcript_mut().plain_items(),
         before,
         "Esc is cancellation, so it must not append a reject result"
+    );
+}
+
+#[test]
+fn unavailable_runtime_approval_choice_is_handled_without_response() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.palette = default_palette();
+    model.open_tool_approval_panel(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-missing-choice".to_string(),
+            allow_option_id: None,
+            allow_always_option_id: None,
+            reject_option_id: Some("reject-once".to_string()),
+            reject_always_option_id: None,
+        },
+        "cargo check".to_string(),
+        Vec::new(),
+    );
+
+    let effect = handled_effect(
+        model.handle_tool_approval_panel_key(KeyCode::Char('y').into()),
+        "missing allow shortcut should still be consumed by the modal panel",
+    );
+
+    assert_eq!(effect, None);
+    assert!(
+        model.tool_approval_panel_active(),
+        "missing runtime option must not close the approval panel or respond with an empty option id"
+    );
+}
+
+#[test]
+fn stale_runtime_selection_is_handled_without_defaulting_to_deny() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.palette = default_palette();
+    model.open_tool_approval_panel(
+        ToolApprovalSource::RuntimePermission {
+            target: runtime_domain::session::RuntimeTarget::provider("local", "qwen3"),
+            request_id: "permission-stale-selection".to_string(),
+            allow_option_id: Some("allow-once".to_string()),
+            allow_always_option_id: None,
+            reject_option_id: None,
+            reject_always_option_id: None,
+        },
+        "cargo check".to_string(),
+        Vec::new(),
+    );
+    model.tool_approval_panel.selected = 99;
+
+    let effect = handled_effect(
+        model.handle_tool_approval_panel_key(KeyCode::Enter.into()),
+        "stale selection should still be consumed by the modal panel",
+    );
+
+    assert_eq!(effect, None);
+    assert!(
+        model.tool_approval_panel_active(),
+        "stale selection must not fall back to a different runtime approval choice"
     );
 }
 

@@ -68,26 +68,8 @@ impl Model {
     }
 
     pub(crate) fn mouse_mode_preference(&self) -> TerminalMouseModePreference {
-        if self.entry_tree_preview_active() {
-            return TerminalMouseModePreference::NativeWithAlternateScroll;
-        }
-        if self.copy_picker_preview_active() {
-            return TerminalMouseModePreference::NativeWithAlternateScroll;
-        }
-        if self.entry_tree_active() {
-            return TerminalMouseModePreference::CaptureWithAlternateScroll;
-        }
-        if self.copy_picker_active() {
-            return TerminalMouseModePreference::CaptureWithAlternateScroll;
-        }
-        if self.transcript_overlay_active()
-            || self.session_preview_active()
-            || self.session_picker_active()
-            || self.tool_approval_fullscreen_preview_active()
-        {
-            return TerminalMouseModePreference::NativeWithAlternateScroll;
-        }
-        TerminalMouseModePreference::Capture
+        self.modal_mouse_mode_preference()
+            .unwrap_or(TerminalMouseModePreference::Capture)
     }
 
     pub(crate) fn open_transcript_overlay(&mut self) {

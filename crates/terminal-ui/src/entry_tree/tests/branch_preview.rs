@@ -354,8 +354,12 @@ fn branch_preview_load_failure_renders_overlay_error() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
     assert!(model.entry_tree_branch_preview_loading());
+    let request_id = model
+        .entry_tree_branch_preview_pending_request_id_for_test()
+        .unwrap();
 
     model.apply_runtime_event(RuntimeEvent::SessionBranchPreviewLoadFailed {
+        request_id,
         message: "branch preview index is corrupt".to_string(),
     });
 
@@ -366,6 +370,93 @@ fn branch_preview_load_failure_renders_overlay_error() {
         rows.iter()
             .any(|row| row.contains("branch preview index is corrupt")),
         "branch preview load failure should render inside the active overlay: {rows:?}"
+    );
+}
+
+#[test]
+fn stale_branch_preview_payload_is_ignored_after_preview_switches_branch() {
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_branch_choices(
+            "user-a",
+            SessionTreeRowKind::User,
+            "root question",
+            vec![
+                branch_choice("assistant-a", "assistant-a", "inactive answer A", false),
+                branch_choice("assistant-b", "assistant-b", "inactive answer B", false),
+                branch_choice("assistant-c", "assistant-c", "current answer", true),
+            ],
+        )],
+        current_row_id: Some("user-a".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+
+    let stale_effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    let (stale_request_id, stale_branch_row_id) = match stale_effect {
+        Some(AppEffect::OpenBranchPreview {
+            request_id,
+            branch_row_id,
+        }) => (request_id, branch_row_id),
+        effect => panic!("expected branch preview effect, got {effect:?}"),
+    };
+    assert_eq!(stale_branch_row_id, "assistant-a");
+    assert!(model.entry_tree_branch_preview_loading());
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    let current_effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    let (current_request_id, current_branch_row_id) = match current_effect {
+        Some(AppEffect::OpenBranchPreview {
+            request_id,
+            branch_row_id,
+        }) => (request_id, branch_row_id),
+        effect => panic!("expected branch preview effect, got {effect:?}"),
+    };
+    assert_eq!(current_branch_row_id, "assistant-b");
+
+    model.apply_runtime_event(RuntimeEvent::SessionBranchPreviewLoaded {
+        request_id: stale_request_id,
+        payload: SessionTreePayload {
+            rows: vec![tree_row_with_parent_at_depth(
+                "assistant-a",
+                None,
+                SessionTreeRowKind::Assistant,
+                "inactive answer A",
+                0,
+                true,
+                true,
+            )],
+            current_row_id: Some("assistant-a".to_string()),
+        },
+    });
+
+    assert!(model.entry_tree_branch_preview_loading());
+    assert_eq!(
+        model.entry_tree_branch_preview_row_ids_for_test(),
+        Vec::<&str>::new()
+    );
+
+    model.apply_runtime_event(RuntimeEvent::SessionBranchPreviewLoaded {
+        request_id: current_request_id,
+        payload: SessionTreePayload {
+            rows: vec![tree_row_with_parent_at_depth(
+                "assistant-b",
+                None,
+                SessionTreeRowKind::Assistant,
+                "inactive answer B",
+                0,
+                true,
+                true,
+            )],
+            current_row_id: Some("assistant-b".to_string()),
+        },
+    });
+
+    assert!(!model.entry_tree_branch_preview_loading());
+    assert_eq!(
+        model.entry_tree_branch_preview_row_ids_for_test(),
+        vec!["assistant-b"]
     );
 }
 

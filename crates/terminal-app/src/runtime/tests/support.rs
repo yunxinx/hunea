@@ -18,9 +18,9 @@ pub(super) use runtime_domain::{
         ConversationTurnRequest, ManagedSearchTool, RuntimeCommand, RuntimeCommandReceipt,
         RuntimeEvent, RuntimePermissionRequest, RuntimeTarget, RuntimeToolActivity,
         RuntimeToolActivityContent, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
-        RuntimeToolKind, SessionBranchTreePayload, SessionPickerRow, SessionPreviewPayload,
-        SessionResumePayload, SessionTreePayload, SessionTreeRowKind, TranscriptReplayItem,
-        TranscriptReplayRole,
+        RuntimeToolKind, SessionBranchTreePayload, SessionLoadRequestId, SessionPickerRow,
+        SessionPreviewPayload, SessionResumePayload, SessionTreePayload, SessionTreeRowKind,
+        TranscriptReplayItem, TranscriptReplayRole,
     },
 };
 pub(super) use session_store::{
@@ -31,6 +31,10 @@ pub(super) use terminal_ui::RuntimeCoordinator;
 
 pub(super) fn runtime_coordinator(options: AppRuntimeOptions) -> AppRuntimeCoordinator {
     AppRuntimeCoordinator::new(options).expect("runtime coordinator should initialize")
+}
+
+pub(super) const fn request_id(value: u64) -> SessionLoadRequestId {
+    SessionLoadRequestId::new(value)
 }
 
 pub(super) use super::store_fixtures::{
@@ -135,7 +139,7 @@ pub(super) fn wait_for_session_tree(coordinator: &mut AppRuntimeCoordinator) -> 
     wait_for_runtime_event(
         coordinator,
         |event| match event {
-            RuntimeEvent::SessionTreeLoaded { payload } => Some(payload),
+            RuntimeEvent::SessionTreeLoaded { payload, .. } => Some(payload),
             _ => None,
         },
         "session tree payload",
@@ -148,7 +152,7 @@ pub(super) fn wait_for_copy_picker_tree(
     wait_for_runtime_event(
         coordinator,
         |event| match event {
-            RuntimeEvent::CopyPickerTreeLoaded { payload } => Some(payload),
+            RuntimeEvent::CopyPickerTreeLoaded { payload, .. } => Some(payload),
             _ => None,
         },
         "copy picker tree payload",
@@ -161,7 +165,7 @@ pub(super) fn wait_for_session_branch_tree(
     wait_for_runtime_event(
         coordinator,
         |event| match event {
-            RuntimeEvent::SessionBranchTreeLoaded { payload } => Some(payload),
+            RuntimeEvent::SessionBranchTreeLoaded { payload, .. } => Some(payload),
             _ => None,
         },
         "session branch tree payload",
@@ -174,7 +178,7 @@ pub(super) fn wait_for_session_tree_preview(
     wait_for_runtime_event(
         coordinator,
         |event| match event {
-            RuntimeEvent::SessionBranchPreviewLoaded { payload } => Some(payload),
+            RuntimeEvent::SessionBranchPreviewLoaded { payload, .. } => Some(payload),
             _ => None,
         },
         "session tree preview payload",

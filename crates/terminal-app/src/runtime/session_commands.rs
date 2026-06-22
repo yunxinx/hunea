@@ -1,4 +1,6 @@
-use runtime_domain::session::{RuntimeCommandReceipt, RuntimeEvent, SessionBranchTreePayload};
+use runtime_domain::session::{
+    RuntimeCommandReceipt, RuntimeEvent, SessionBranchTreePayload, SessionLoadRequestId,
+};
 use session_store::{ProjectDir, SessionId};
 
 use super::{AppRuntimeCoordinator, session_tree_load::SessionTreeLoadConsumer};
@@ -50,34 +52,44 @@ impl AppRuntimeCoordinator {
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
-    pub(super) fn load_entry_tree(&mut self) -> Result<RuntimeCommandReceipt, String> {
-        self.load_session_tree_for_target(SessionTreeLoadTarget::SessionTree(
-            SessionTreeLoadConsumer::EntryTree,
-        ))
+    pub(super) fn load_entry_tree(
+        &mut self,
+        request_id: SessionLoadRequestId,
+    ) -> Result<RuntimeCommandReceipt, String> {
+        self.load_session_tree_for_target(
+            SessionTreeLoadTarget::SessionTree(SessionTreeLoadConsumer::EntryTree),
+            request_id,
+        )
     }
 
-    pub(super) fn load_copy_picker_tree(&mut self) -> Result<RuntimeCommandReceipt, String> {
-        self.load_session_tree_for_target(SessionTreeLoadTarget::SessionTree(
-            SessionTreeLoadConsumer::CopyPicker,
-        ))
+    pub(super) fn load_copy_picker_tree(
+        &mut self,
+        request_id: SessionLoadRequestId,
+    ) -> Result<RuntimeCommandReceipt, String> {
+        self.load_session_tree_for_target(
+            SessionTreeLoadTarget::SessionTree(SessionTreeLoadConsumer::CopyPicker),
+            request_id,
+        )
     }
 
     fn load_session_tree_for_target(
         &mut self,
         target: SessionTreeLoadTarget,
+        request_id: SessionLoadRequestId,
     ) -> Result<RuntimeCommandReceipt, String> {
-        let Some(session_id) = self.active_session_id_or_empty_tree_event(target)? else {
+        let Some(session_id) = self.active_session_id_or_empty_tree_event(target, request_id)?
+        else {
             return Ok(RuntimeCommandReceipt::Accepted);
         };
         let store = self.session_store()?;
         match target {
             SessionTreeLoadTarget::SessionTree(consumer) => {
                 self.session_store_worker
-                    .load_session_tree(store, session_id, consumer)?;
+                    .load_session_tree(store, session_id, consumer, request_id)?;
             }
             SessionTreeLoadTarget::BranchTree => {
                 self.session_store_worker
-                    .load_branch_tree(store, session_id)?;
+                    .load_branch_tree(store, session_id, request_id)?;
             }
         }
         Ok(RuntimeCommandReceipt::Accepted)
@@ -85,6 +97,7 @@ impl AppRuntimeCoordinator {
 
     pub(super) fn load_branch_preview(
         &mut self,
+        request_id: SessionLoadRequestId,
         branch_row_id: &str,
     ) -> Result<RuntimeCommandReceipt, String> {
         let session_id = self
@@ -96,16 +109,24 @@ impl AppRuntimeCoordinator {
         self.session_store_worker.load_branch_preview(
             store,
             session_id,
+            request_id,
             branch_row_id.to_string(),
         )?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
-    pub(super) fn load_branch_tree(&mut self) -> Result<RuntimeCommandReceipt, String> {
-        self.load_session_tree_for_target(SessionTreeLoadTarget::BranchTree)
+    pub(super) fn load_branch_tree(
+        &mut self,
+        request_id: SessionLoadRequestId,
+    ) -> Result<RuntimeCommandReceipt, String> {
+        self.load_session_tree_for_target(SessionTreeLoadTarget::BranchTree, request_id)
     }
 
-    pub(super) fn switch_branch(&mut self, leaf_id: &str) -> Result<RuntimeCommandReceipt, String> {
+    pub(super) fn switch_branch(
+        &mut self,
+        request_id: SessionLoadRequestId,
+        leaf_id: &str,
+    ) -> Result<RuntimeCommandReceipt, String> {
         if self.conversation_worker.is_running() {
             return Err("Cannot switch branch while a request is running".to_string());
         }
@@ -117,8 +138,13 @@ impl AppRuntimeCoordinator {
             .ok_or_else(|| "No active persisted session to switch branch".to_string())?;
         let store = self.session_store()?;
         let header = self.session_header()?;
-        self.session_store_worker
-            .switch_branch(store, header, session_id, leaf_id.to_string())?;
+        self.session_store_worker.switch_branch(
+            store,
+            header,
+            session_id,
+            request_id,
+            leaf_id.to_string(),
+        )?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 
@@ -149,10 +175,12 @@ impl AppRuntimeCoordinator {
     fn active_session_id_or_empty_tree_event(
         &mut self,
         target: SessionTreeLoadTarget,
+        request_id: SessionLoadRequestId,
     ) -> Result<Option<SessionId>, String> {
         let Some(session_id) = self.provider_conversation.session_id().cloned() else {
             if self.provider_conversation.is_history_empty() {
-                self.pending_runtime_events.push(target.empty_tree_event());
+                self.pending_runtime_events
+                    .push(target.empty_tree_event(request_id));
                 return Ok(None);
             }
             return Err(target.no_session_error().to_string());
@@ -168,10 +196,11 @@ enum SessionTreeLoadTarget {
 }
 
 impl SessionTreeLoadTarget {
-    fn empty_tree_event(self) -> RuntimeEvent {
+    fn empty_tree_event(self, request_id: SessionLoadRequestId) -> RuntimeEvent {
         match self {
-            Self::SessionTree(consumer) => consumer.empty_tree_event(),
+            Self::SessionTree(consumer) => consumer.empty_tree_event(request_id),
             Self::BranchTree => RuntimeEvent::SessionBranchTreeLoaded {
+                request_id,
                 payload: SessionBranchTreePayload {
                     nodes: Vec::new(),
                     current_branch_row_id: None,

@@ -8,8 +8,8 @@ use ratatui::{
     },
 };
 use runtime_domain::session::{
-    SessionBranchTreeNode, SessionBranchTreePayload, SessionTreeBranchChoice, SessionTreePayload,
-    SessionTreeRow, SessionTreeRowKind,
+    SessionBranchTreeNode, SessionBranchTreePayload, SessionLoadRequestId, SessionTreeBranchChoice,
+    SessionTreePayload, SessionTreeRow, SessionTreeRowKind,
 };
 
 use crate::{

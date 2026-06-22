@@ -75,11 +75,11 @@ pub(super) fn apply_effect_if_needed(
             Ok(())
         }
         AppEffect::OpenEntryRewind => {
-            model.open_entry_tree_loading();
+            let request_id = model.open_entry_tree_loading();
             run_simple_runtime_command_effect(
                 model,
                 runtime_coordinator,
-                RuntimeCommand::LoadEntryTree,
+                RuntimeCommand::LoadEntryTree { request_id },
             );
             Ok(())
         }
@@ -98,8 +98,11 @@ pub(super) fn apply_effect_if_needed(
             );
             Ok(())
         }
-        AppEffect::OpenBranchPreview { branch_row_id } => {
-            run_open_branch_preview_effect(model, runtime_coordinator, branch_row_id);
+        AppEffect::OpenBranchPreview {
+            request_id,
+            branch_row_id,
+        } => {
+            run_open_branch_preview_effect(model, runtime_coordinator, request_id, branch_row_id);
             Ok(())
         }
         AppEffect::SwitchBranch { leaf_id } => {
@@ -136,10 +139,12 @@ pub(super) fn run_switch_branch_effect(
     runtime_coordinator: &mut impl RuntimeCoordinator,
     leaf_id: &str,
 ) {
+    let request_id = model.next_session_load_request_id();
     match runtime_coordinator.dispatch_runtime_command(RuntimeCommand::SwitchBranch {
+        request_id,
         leaf_id: leaf_id.to_string(),
     }) {
-        Ok(_) => model.open_entry_tree_loading(),
+        Ok(_) => model.open_entry_tree_loading_for_request(request_id),
         Err(message) => model.show_entry_tree_branch_picker_error(&message),
     }
 }
@@ -148,9 +153,9 @@ pub(super) fn run_open_copy_picker_effect(
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
 ) {
-    model.open_copy_picker_loading();
-    if let Err(message) =
-        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadCopyPickerTree)
+    let request_id = model.open_copy_picker_loading();
+    if let Err(message) = runtime_coordinator
+        .dispatch_runtime_command(RuntimeCommand::LoadCopyPickerTree { request_id })
     {
         model.show_copy_picker_error(&message);
     }
@@ -160,9 +165,9 @@ pub(super) fn run_open_branch_tree_effect(
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
 ) {
-    model.open_entry_tree_branch_tree_loading();
+    let request_id = model.open_entry_tree_branch_tree_loading();
     if let Err(message) =
-        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadBranchTree)
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadBranchTree { request_id })
     {
         model.show_entry_tree_branch_tree_error(&message);
     }
@@ -171,10 +176,14 @@ pub(super) fn run_open_branch_tree_effect(
 pub(super) fn run_open_branch_preview_effect(
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
+    request_id: runtime_domain::session::SessionLoadRequestId,
     branch_row_id: String,
 ) {
-    if let Err(message) = runtime_coordinator
-        .dispatch_runtime_command(RuntimeCommand::LoadBranchPreview { branch_row_id })
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadBranchPreview {
+            request_id,
+            branch_row_id,
+        })
     {
         model.show_entry_tree_branch_preview_error(&message);
     }

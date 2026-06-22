@@ -3,7 +3,7 @@ use std::{path::PathBuf, time::Duration};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use runtime_domain::{
     model_catalog::{ModelSelection, ProviderSyncRequest},
-    session::{ConversationTurnRequest, RuntimeTarget},
+    session::{ConversationTurnRequest, RuntimeTarget, SessionLoadRequestId},
 };
 
 use super::{
@@ -50,6 +50,7 @@ pub enum AppEffect {
         prefill: Option<String>,
     },
     OpenBranchPreview {
+        request_id: SessionLoadRequestId,
         branch_row_id: String,
     },
     SwitchBranch {

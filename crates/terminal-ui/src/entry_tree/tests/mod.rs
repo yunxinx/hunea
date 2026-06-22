@@ -5,8 +5,8 @@ use ratatui::{
 };
 use runtime_domain::session::{
     RuntimeEvent, RuntimeToolActivity, RuntimeToolActivityStatus, RuntimeToolKind,
-    SessionTreePayload, SessionTreeRow, SessionTreeRowKind, TranscriptReplayItem,
-    TranscriptReplayRole,
+    SessionLoadRequestId, SessionTreePayload, SessionTreeRow, SessionTreeRowKind,
+    TranscriptReplayItem, TranscriptReplayRole,
 };
 
 use super::{
@@ -123,6 +123,7 @@ fn late_loaded_entry_tree_payload_is_ignored_after_initial_load_finishes() {
     });
 
     model.apply_runtime_event(RuntimeEvent::SessionTreeLoaded {
+        request_id: SessionLoadRequestId::new(1),
         payload: SessionTreePayload {
             rows: vec![tree_row(
                 "late-user",
@@ -140,6 +141,49 @@ fn late_loaded_entry_tree_payload_is_ignored_after_initial_load_finishes() {
         vec!["current-user"],
         "a duplicate or late main-tree payload must not replace the already interactive tree"
     );
+}
+
+#[test]
+fn stale_entry_tree_payload_is_ignored_after_tree_reopens_loading() {
+    let mut model = ready_model();
+
+    let stale_request_id = model.open_entry_tree_loading();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    let current_request_id = model.open_entry_tree_loading();
+
+    model.apply_runtime_event(RuntimeEvent::SessionTreeLoaded {
+        request_id: stale_request_id,
+        payload: SessionTreePayload {
+            rows: vec![tree_row(
+                "stale-user",
+                SessionTreeRowKind::User,
+                "stale user",
+                Some("stale user".to_string()),
+                Some("stale-user"),
+            )],
+            current_row_id: Some("stale-user".to_string()),
+        },
+    });
+
+    assert!(model.entry_tree_loading());
+    assert_eq!(model.entry_tree_row_ids_for_test(), Vec::<&str>::new());
+
+    model.apply_runtime_event(RuntimeEvent::SessionTreeLoaded {
+        request_id: current_request_id,
+        payload: SessionTreePayload {
+            rows: vec![tree_row(
+                "current-user",
+                SessionTreeRowKind::User,
+                "current user",
+                Some("current user".to_string()),
+                Some("current-user"),
+            )],
+            current_row_id: Some("current-user".to_string()),
+        },
+    });
+
+    assert!(!model.entry_tree_loading());
+    assert_eq!(model.entry_tree_row_ids_for_test(), vec!["current-user"]);
 }
 
 #[test]
@@ -879,6 +923,27 @@ fn rendered_prefix_before(buffer: &Buffer, row: u16, expected_text: &str) -> Str
 
 fn ready_model() -> Model {
     ready_model_with_options(ModelOptions::default())
+}
+
+fn assert_open_branch_preview_effect(
+    model: &Model,
+    effect: Option<AppEffect>,
+    expected_branch_row_id: &str,
+    message: &str,
+) {
+    let Some(AppEffect::OpenBranchPreview {
+        request_id,
+        branch_row_id,
+    }) = effect
+    else {
+        panic!("{message}: expected branch preview effect");
+    };
+    assert_eq!(branch_row_id, expected_branch_row_id, "{message}");
+    assert_eq!(
+        model.entry_tree_branch_preview_pending_request_id_for_test(),
+        Some(request_id),
+        "{message}: effect request id must match active preview state"
+    );
 }
 
 fn ready_model_with_options(options: ModelOptions) -> Model {

@@ -12,7 +12,7 @@ pub(super) use runtime_domain::session::{RuntimeToolActivity, RuntimeToolActivit
 use runtime_domain::{
     envinfo,
     model_catalog::{ModelCatalog, ModelSelection},
-    session::RuntimeTerminalSnapshot,
+    session::{RuntimeTerminalSnapshot, SessionLoadRequestId},
 };
 
 use super::{
@@ -74,6 +74,7 @@ pub struct Model {
     pub(super) session_preview: Option<crate::session_preview::SessionPreviewState>,
     pub(super) entry_tree: Option<crate::entry_tree::EntryTreeState>,
     pub(super) copy_picker: Option<CopyPickerState>,
+    pub(super) next_session_load_request_id: u64,
     pub(super) message_revisit: MessageRevisitState,
     pub(super) runtime_terminal_snapshots: Vec<RuntimeTerminalSnapshot>,
     pub(super) stream_activity: Option<StreamActivityState>,
@@ -188,6 +189,7 @@ impl Model {
             session_preview: None,
             entry_tree: None,
             copy_picker: None,
+            next_session_load_request_id: 1,
             message_revisit: MessageRevisitState::default(),
             runtime_terminal_snapshots: Vec::new(),
             stream_activity: None,
@@ -547,6 +549,15 @@ impl Model {
 
     pub(crate) fn maybe_prepare_external_editor_launch(&mut self) -> Option<ExternalEditorLaunch> {
         self.prepare_external_editor_launch()
+    }
+
+    pub(crate) fn next_session_load_request_id(&mut self) -> SessionLoadRequestId {
+        let request_id = SessionLoadRequestId::new(self.next_session_load_request_id);
+        self.next_session_load_request_id = self.next_session_load_request_id.wrapping_add(1);
+        if self.next_session_load_request_id == 0 {
+            self.next_session_load_request_id = 1;
+        }
+        request_id
     }
 }
 

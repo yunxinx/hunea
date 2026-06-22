@@ -6,6 +6,7 @@ pub(crate) struct CopyPickerState {
     pub(super) selected: usize,
     pub(super) selected_row_indices: BTreeSet<usize>,
     pub(super) is_loading: bool,
+    pub(super) pending_request_id: Option<SessionLoadRequestId>,
     pub(super) error: Option<String>,
     pub(super) preview: Option<CopyPickerPreviewState>,
 }
@@ -38,6 +39,7 @@ impl Default for CopyPickerState {
             selected: 0,
             selected_row_indices: BTreeSet::new(),
             is_loading: true,
+            pending_request_id: None,
             error: None,
             preview: None,
         }

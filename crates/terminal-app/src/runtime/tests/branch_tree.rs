@@ -19,7 +19,9 @@ fn load_branch_tree_emits_empty_tree_for_new_unpersisted_session() {
     });
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadBranchTree)
+        .handle_runtime_command(RuntimeCommand::LoadBranchTree {
+            request_id: request_id(10),
+        })
         .expect("empty new session branch tree should load as an empty payload");
 
     let payload = wait_for_session_branch_tree(&mut coordinator);
@@ -104,7 +106,9 @@ fn load_branch_tree_emits_branch_roots_for_active_session() {
     wait_for_session_resumed(&mut coordinator);
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadBranchTree)
+        .handle_runtime_command(RuntimeCommand::LoadBranchTree {
+            request_id: request_id(11),
+        })
         .expect("load branch tree should succeed");
 
     let payload = wait_for_session_branch_tree(&mut coordinator);
@@ -164,13 +168,15 @@ fn load_branch_tree_failure_emits_branch_tree_error_event() {
     wait_for_session_resumed(&mut coordinator);
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadBranchTree)
+        .handle_runtime_command(RuntimeCommand::LoadBranchTree {
+            request_id: request_id(12),
+        })
         .expect("branch tree command should be accepted before async load fails");
 
     let message = wait_for_runtime_event(
         &mut coordinator,
         |event| match event {
-            RuntimeEvent::SessionBranchTreeLoadFailed { message } => Some(message),
+            RuntimeEvent::SessionBranchTreeLoadFailed { message, .. } => Some(message),
             RuntimeEvent::Failed { message, .. } => {
                 panic!("branch tree load failure must not become global failure: {message}")
             }
@@ -252,6 +258,7 @@ fn load_branch_preview_emits_delta_for_requested_branch_without_switching() {
 
     coordinator
         .handle_runtime_command(RuntimeCommand::LoadBranchPreview {
+            request_id: request_id(13),
             branch_row_id: inactive_branch_row_id.clone(),
         })
         .expect("load branch preview should succeed");
@@ -272,7 +279,9 @@ fn load_branch_preview_emits_delta_for_requested_branch_without_switching() {
     );
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadEntryTree)
+        .handle_runtime_command(RuntimeCommand::LoadEntryTree {
+            request_id: request_id(14),
+        })
         .expect("load committed tree should still succeed");
     let committed_payload = wait_for_session_tree(&mut coordinator);
     assert_eq!(
@@ -335,13 +344,16 @@ fn load_branch_preview_failure_emits_branch_preview_error_event() {
     wait_for_session_resumed(&mut coordinator);
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadBranchPreview { branch_row_id })
+        .handle_runtime_command(RuntimeCommand::LoadBranchPreview {
+            request_id: request_id(15),
+            branch_row_id,
+        })
         .expect("branch preview command should be accepted before async load fails");
 
     let message = wait_for_runtime_event(
         &mut coordinator,
         |event| match event {
-            RuntimeEvent::SessionBranchPreviewLoadFailed { message } => Some(message),
+            RuntimeEvent::SessionBranchPreviewLoadFailed { message, .. } => Some(message),
             RuntimeEvent::Failed { message, .. } => {
                 panic!("branch preview load failure must not become global failure: {message}")
             }

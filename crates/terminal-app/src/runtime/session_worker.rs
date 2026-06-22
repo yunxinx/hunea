@@ -9,7 +9,7 @@ use std::{
 
 use conversation_runtime::ProviderConversation;
 use runtime_domain::session::{
-    RuntimeEvent, SessionPickerRow, SessionResumePayload, SessionTreePayload,
+    RuntimeEvent, SessionLoadRequestId, SessionPickerRow, SessionResumePayload, SessionTreePayload,
 };
 use session_store::{ProjectDir, SessionHeader, SessionId, SessionListOptions, SessionStore};
 
@@ -40,6 +40,7 @@ pub(super) enum SessionStoreWorkerEvent {
     RestoredWithTree {
         conversation: ProviderConversation,
         resume_payload: SessionResumePayload,
+        tree_request_id: SessionLoadRequestId,
         tree_payload: SessionTreePayload,
     },
     Noop,
@@ -67,21 +68,25 @@ enum SessionStoreCommand {
     LoadSessionTree {
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
         consumer: SessionTreeLoadConsumer,
     },
     LoadBranchTree {
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
     },
     LoadBranchPreview {
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
         branch_row_id: String,
     },
     SwitchBranch {
         store: Arc<dyn SessionStore>,
         header: SessionHeader,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
         leaf_id: String,
     },
     SelectEntryRewind {
@@ -200,11 +205,13 @@ impl SessionStoreWorker {
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
         consumer: SessionTreeLoadConsumer,
+        request_id: SessionLoadRequestId,
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::LoadSessionTree {
                 store,
                 session_id,
+                request_id,
                 consumer,
             },
             false,
@@ -215,9 +222,14 @@ impl SessionStoreWorker {
         &mut self,
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
     ) -> Result<(), String> {
         self.send_command(
-            SessionStoreCommand::LoadBranchTree { store, session_id },
+            SessionStoreCommand::LoadBranchTree {
+                store,
+                session_id,
+                request_id,
+            },
             false,
         )
     }
@@ -226,12 +238,14 @@ impl SessionStoreWorker {
         &mut self,
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
         branch_row_id: String,
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::LoadBranchPreview {
                 store,
                 session_id,
+                request_id,
                 branch_row_id,
             },
             false,
@@ -243,6 +257,7 @@ impl SessionStoreWorker {
         store: Arc<dyn SessionStore>,
         header: SessionHeader,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
         leaf_id: String,
     ) -> Result<(), String> {
         self.send_command(
@@ -250,6 +265,7 @@ impl SessionStoreWorker {
                 store,
                 header,
                 session_id,
+                request_id,
                 leaf_id,
             },
             true,
@@ -493,32 +509,38 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
         SessionStoreCommand::LoadSessionTree {
             store,
             session_id,
+            request_id,
             consumer,
         } => match store.load_session_tree(&session_id).await {
             Ok(snapshot) => SessionStoreWorkerEvent::runtime(
-                consumer.loaded_event(session_tree_payload(snapshot)),
+                consumer.loaded_event(request_id, session_tree_payload(snapshot)),
             ),
+            Err(error) => SessionStoreWorkerEvent::runtime(
+                consumer.failed_event(request_id, error.to_string()),
+            ),
+        },
+        SessionStoreCommand::LoadBranchTree {
+            store,
+            session_id,
+            request_id,
+        } => match store.load_session_branch_tree(&session_id).await {
+            Ok(snapshot) => {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchTreeLoaded {
+                    request_id,
+                    payload: session_branch_tree_payload(snapshot),
+                })
+            }
             Err(error) => {
-                SessionStoreWorkerEvent::runtime(consumer.failed_event(error.to_string()))
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchTreeLoadFailed {
+                    request_id,
+                    message: error.to_string(),
+                })
             }
         },
-        SessionStoreCommand::LoadBranchTree { store, session_id } => {
-            match store.load_session_branch_tree(&session_id).await {
-                Ok(snapshot) => {
-                    SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchTreeLoaded {
-                        payload: session_branch_tree_payload(snapshot),
-                    })
-                }
-                Err(error) => {
-                    SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchTreeLoadFailed {
-                        message: error.to_string(),
-                    })
-                }
-            }
-        }
         SessionStoreCommand::LoadBranchPreview {
             store,
             session_id,
+            request_id,
             branch_row_id,
         } => match store
             .load_session_branch_preview(&session_id, &branch_row_id)
@@ -526,11 +548,13 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
         {
             Ok(snapshot) => {
                 SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchPreviewLoaded {
+                    request_id,
                     payload: session_tree_payload(snapshot),
                 })
             }
             Err(error) => {
                 SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchPreviewLoadFailed {
+                    request_id,
                     message: error.to_string(),
                 })
             }
@@ -539,12 +563,14 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
             store,
             header,
             session_id,
+            request_id,
             leaf_id,
         } => match switch_branch(store, header, session_id, leaf_id).await {
             Ok((conversation, resume_payload, tree_payload)) => {
                 SessionStoreWorkerEvent::RestoredWithTree {
                     conversation,
                     resume_payload,
+                    tree_request_id: request_id,
                     tree_payload,
                 }
             }

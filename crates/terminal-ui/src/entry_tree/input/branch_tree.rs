@@ -1,13 +1,23 @@
 use super::*;
 
 impl Model {
-    pub(crate) fn open_entry_tree_branch_tree_loading(&mut self) {
+    pub(crate) fn open_entry_tree_branch_tree_loading(&mut self) -> SessionLoadRequestId {
+        let request_id = self.next_session_load_request_id();
+        self.open_entry_tree_branch_tree_loading_for_request(request_id);
+        request_id
+    }
+
+    pub(crate) fn open_entry_tree_branch_tree_loading_for_request(
+        &mut self,
+        request_id: SessionLoadRequestId,
+    ) {
         let mut state = self.entry_tree.take().unwrap_or_default();
         state.preview = None;
         state.branch_picker = None;
         state.branch_preview = None;
         state.branch_tree = Some(EntryTreeBranchTreeState {
             is_loading: true,
+            pending_request_id: Some(request_id),
             metadata_now_ms: current_unix_timestamp_ms(),
             ..EntryTreeBranchTreeState::default()
         });
@@ -31,6 +41,7 @@ impl Model {
             branch_tree.nodes = branch_tree_display_order_nodes(payload.nodes);
             branch_tree.selected = 0;
             branch_tree.is_loading = false;
+            branch_tree.pending_request_id = None;
             branch_tree.metadata_now_ms = current_unix_timestamp_ms();
             branch_tree.current_branch_row_id = payload.current_branch_row_id;
             branch_tree.total_message_count = payload.total_message_count;
@@ -53,6 +64,7 @@ impl Model {
         branch_tree.nodes.clear();
         branch_tree.selected = 0;
         branch_tree.is_loading = false;
+        branch_tree.pending_request_id = None;
         branch_tree.error = Some(message.to_string());
     }
 
@@ -62,11 +74,49 @@ impl Model {
             .is_some_and(|state| state.branch_tree.is_some())
     }
 
+    #[cfg(test)]
     pub(crate) fn entry_tree_branch_tree_loading(&self) -> bool {
         self.entry_tree
             .as_ref()
             .and_then(|state| state.branch_tree.as_ref())
             .is_some_and(|branch_tree| branch_tree.is_loading)
+    }
+
+    pub(crate) fn entry_tree_branch_tree_load_request_matches(
+        &self,
+        request_id: SessionLoadRequestId,
+    ) -> bool {
+        self.entry_tree
+            .as_ref()
+            .and_then(|state| state.branch_tree.as_ref())
+            .is_some_and(|branch_tree| {
+                branch_tree.is_loading && branch_tree.pending_request_id == Some(request_id)
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_tree_branch_tree_pending_request_id_for_test(
+        &self,
+    ) -> Option<SessionLoadRequestId> {
+        self.entry_tree
+            .as_ref()
+            .and_then(|state| state.branch_tree.as_ref())
+            .and_then(|branch_tree| branch_tree.pending_request_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_tree_branch_tree_row_ids_for_test(&self) -> Vec<&str> {
+        self.entry_tree
+            .as_ref()
+            .and_then(|state| state.branch_tree.as_ref())
+            .map(|branch_tree| {
+                branch_tree
+                    .nodes
+                    .iter()
+                    .map(|node| node.branch.branch_row_id.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     }
 
     pub(super) fn move_entry_tree_branch_tree_selection(
@@ -148,14 +198,19 @@ impl Model {
                 if is_current {
                     return OverlayInputResult::Handled;
                 }
+                let request_id = self.next_session_load_request_id();
                 if let Some(state) = self.entry_tree.as_mut() {
                     state.branch_preview = Some(EntryTreeBranchPreviewState {
+                        pending_request_id: Some(request_id),
                         metadata: Some(preview_metadata),
                         source: EntryTreeBranchPreviewSource::BranchTree,
                         ..EntryTreeBranchPreviewState::default()
                     });
                 }
-                OverlayInputResult::Effect(AppEffect::OpenBranchPreview { branch_row_id })
+                OverlayInputResult::Effect(AppEffect::OpenBranchPreview {
+                    request_id,
+                    branch_row_id,
+                })
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let Some(selected_node) = self

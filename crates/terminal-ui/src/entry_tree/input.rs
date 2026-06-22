@@ -10,15 +10,28 @@ impl Model {
         self.entry_tree.is_some()
     }
 
+    #[cfg(test)]
     pub(crate) fn entry_tree_loading(&self) -> bool {
         self.entry_tree
             .as_ref()
             .is_some_and(|state| state.is_loading)
     }
 
-    pub(crate) fn open_entry_tree_loading(&mut self) {
+    pub(crate) fn open_entry_tree_loading(&mut self) -> SessionLoadRequestId {
+        let request_id = self.next_session_load_request_id();
         self.entry_tree = Some(EntryTreeState {
             is_loading: true,
+            pending_request_id: Some(request_id),
+            ..EntryTreeState::default()
+        });
+        self.close_composer_attached_ui();
+        request_id
+    }
+
+    pub(crate) fn open_entry_tree_loading_for_request(&mut self, request_id: SessionLoadRequestId) {
+        self.entry_tree = Some(EntryTreeState {
+            is_loading: true,
+            pending_request_id: Some(request_id),
             ..EntryTreeState::default()
         });
         self.close_composer_attached_ui();
@@ -31,6 +44,7 @@ impl Model {
         let current_row_id = payload.current_row_id;
         state.rows = payload.rows;
         state.is_loading = false;
+        state.pending_request_id = None;
         state.error = None;
         state.preview = None;
         state.branch_picker = None;
@@ -47,8 +61,22 @@ impl Model {
             return;
         };
         state.is_loading = false;
+        state.pending_request_id = None;
         state.error = Some(message.to_string());
         self.entry_tree = Some(state);
+    }
+
+    pub(crate) fn entry_tree_load_request_matches(&self, request_id: SessionLoadRequestId) -> bool {
+        self.entry_tree
+            .as_ref()
+            .is_some_and(|state| state.is_loading && state.pending_request_id == Some(request_id))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_tree_pending_request_id_for_test(&self) -> Option<SessionLoadRequestId> {
+        self.entry_tree
+            .as_ref()
+            .and_then(|state| state.pending_request_id)
     }
 
     pub(crate) fn move_entry_tree_selection_by_delta(&mut self, delta: isize) {

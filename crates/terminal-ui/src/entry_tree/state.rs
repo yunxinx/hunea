@@ -1,4 +1,6 @@
-use runtime_domain::session::{SessionBranchTreeNode, SessionTreeBranchChoice, SessionTreeRow};
+use runtime_domain::session::{
+    SessionBranchTreeNode, SessionLoadRequestId, SessionTreeBranchChoice, SessionTreeRow,
+};
 
 use crate::{
     list_selection::{
@@ -12,6 +14,7 @@ pub(crate) struct EntryTreeState {
     pub(super) rows: Vec<SessionTreeRow>,
     pub(super) selected: usize,
     pub(super) is_loading: bool,
+    pub(super) pending_request_id: Option<SessionLoadRequestId>,
     pub(super) error: Option<String>,
     pub(super) preview: Option<EntryTreePreviewState>,
     pub(super) branch_picker: Option<EntryTreeBranchPickerState>,
@@ -33,6 +36,7 @@ pub(super) struct EntryTreeBranchTreeState {
     pub(super) nodes: Vec<SessionBranchTreeNode>,
     pub(super) selected: usize,
     pub(super) is_loading: bool,
+    pub(super) pending_request_id: Option<SessionLoadRequestId>,
     pub(super) metadata_now_ms: i64,
     pub(super) current_branch_row_id: Option<String>,
     pub(super) total_message_count: usize,
@@ -44,6 +48,7 @@ pub(super) struct EntryTreeBranchPreviewState {
     pub(super) rows: Vec<SessionTreeRow>,
     pub(super) selected: usize,
     pub(super) is_loading: bool,
+    pub(super) pending_request_id: Option<SessionLoadRequestId>,
     pub(super) error: Option<String>,
     pub(super) message_preview: Option<EntryTreePreviewState>,
     pub(super) metadata: Option<EntryTreeBranchPreviewMetadata>,
@@ -70,6 +75,7 @@ impl Default for EntryTreeBranchPreviewState {
             rows: Vec::new(),
             selected: 0,
             is_loading: true,
+            pending_request_id: None,
             error: None,
             message_preview: None,
             metadata: None,

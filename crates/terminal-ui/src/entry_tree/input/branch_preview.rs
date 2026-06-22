@@ -33,6 +33,7 @@ impl Model {
         let current_row_id = payload.current_row_id;
         preview.rows = payload.rows;
         preview.is_loading = false;
+        preview.pending_request_id = None;
         preview.error = None;
         preview.message_preview = None;
         if !preview.select_row_by_id(current_row_id.as_deref()) {
@@ -51,6 +52,7 @@ impl Model {
         preview.rows.clear();
         preview.selected = 0;
         preview.is_loading = false;
+        preview.pending_request_id = None;
         preview.error = Some(message.to_string());
         preview.message_preview = None;
     }
@@ -61,11 +63,49 @@ impl Model {
             .is_some_and(|state| state.branch_preview.is_some())
     }
 
+    #[cfg(test)]
     pub(crate) fn entry_tree_branch_preview_loading(&self) -> bool {
         self.entry_tree
             .as_ref()
             .and_then(|state| state.branch_preview.as_ref())
             .is_some_and(|preview| preview.is_loading)
+    }
+
+    pub(crate) fn entry_tree_branch_preview_load_request_matches(
+        &self,
+        request_id: SessionLoadRequestId,
+    ) -> bool {
+        self.entry_tree
+            .as_ref()
+            .and_then(|state| state.branch_preview.as_ref())
+            .is_some_and(|preview| {
+                preview.is_loading && preview.pending_request_id == Some(request_id)
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_tree_branch_preview_pending_request_id_for_test(
+        &self,
+    ) -> Option<SessionLoadRequestId> {
+        self.entry_tree
+            .as_ref()
+            .and_then(|state| state.branch_preview.as_ref())
+            .and_then(|preview| preview.pending_request_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_tree_branch_preview_row_ids_for_test(&self) -> Vec<&str> {
+        self.entry_tree
+            .as_ref()
+            .and_then(|state| state.branch_preview.as_ref())
+            .map(|preview| {
+                preview
+                    .rows
+                    .iter()
+                    .map(|row| row.row_id.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     }
 
     pub(super) fn move_entry_tree_branch_preview_selection(

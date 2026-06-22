@@ -113,9 +113,9 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             RuntimeCommand::ListSessions
             | RuntimeCommand::LoadSessionPreview { .. }
             | RuntimeCommand::ResumeSession { .. }
-            | RuntimeCommand::LoadEntryTree
-            | RuntimeCommand::LoadCopyPickerTree
-            | RuntimeCommand::LoadBranchTree
+            | RuntimeCommand::LoadEntryTree { .. }
+            | RuntimeCommand::LoadCopyPickerTree { .. }
+            | RuntimeCommand::LoadBranchTree { .. }
             | RuntimeCommand::LoadBranchPreview { .. }
             | RuntimeCommand::SwitchBranch { .. }
             | RuntimeCommand::SelectEntryRewind { .. } => Ok(RuntimeCommandReceipt::Accepted),
@@ -157,9 +157,10 @@ fn open_copy_picker_effect_dispatches_copy_picker_tree_load() {
     run_open_copy_picker_effect(&mut model, &mut runtime_coordinator);
 
     assert!(model.copy_picker_active());
+    let request_id = model.copy_picker_pending_request_id_for_test().unwrap();
     assert_eq!(
         runtime_coordinator.last_command,
-        Some(RuntimeCommand::LoadCopyPickerTree)
+        Some(RuntimeCommand::LoadCopyPickerTree { request_id })
     );
 }
 
@@ -211,6 +212,9 @@ fn open_branch_preview_effect_keeps_immediate_failure_inside_branch_preview_over
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
     assert!(model.entry_tree_branch_preview_loading());
+    let request_id = model
+        .entry_tree_branch_preview_pending_request_id_for_test()
+        .unwrap();
     let mut runtime_coordinator = TestRuntimeCoordinator {
         next_runtime_error: Some("branch preview unavailable".to_string()),
         ..TestRuntimeCoordinator::default()
@@ -219,6 +223,7 @@ fn open_branch_preview_effect_keeps_immediate_failure_inside_branch_preview_over
     run_open_branch_preview_effect(
         &mut model,
         &mut runtime_coordinator,
+        request_id,
         "assistant-b".to_string(),
     );
 
@@ -1685,10 +1690,12 @@ fn switch_branch_effect_preserves_composer_and_reopens_entry_tree_loading() {
     let mut runtime_coordinator = TestRuntimeCoordinator::default();
 
     run_switch_branch_effect(&mut model, &mut runtime_coordinator, "leaf-b");
+    let request_id = model.entry_tree_pending_request_id_for_test().unwrap();
 
     assert_eq!(
         runtime_coordinator.last_command,
         Some(RuntimeCommand::SwitchBranch {
+            request_id,
             leaf_id: "leaf-b".to_string()
         })
     );

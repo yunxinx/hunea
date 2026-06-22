@@ -140,8 +140,10 @@ impl Model {
                 if is_current {
                     return OverlayInputResult::Handled;
                 }
+                let request_id = self.next_session_load_request_id();
                 if let Some(state) = self.entry_tree.as_mut() {
                     state.branch_preview = Some(EntryTreeBranchPreviewState {
+                        pending_request_id: Some(request_id),
                         metadata: Some(preview_metadata),
                         source: EntryTreeBranchPreviewSource::BranchPicker,
                         ..EntryTreeBranchPreviewState::default()
@@ -150,7 +152,10 @@ impl Model {
                         picker.error = None;
                     }
                 }
-                OverlayInputResult::Effect(AppEffect::OpenBranchPreview { branch_row_id })
+                OverlayInputResult::Effect(AppEffect::OpenBranchPreview {
+                    request_id,
+                    branch_row_id,
+                })
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let Some(leaf_id) = self

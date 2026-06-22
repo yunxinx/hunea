@@ -99,12 +99,14 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
         "session resume event",
     );
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadEntryTree)
+        .handle_runtime_command(RuntimeCommand::LoadEntryTree {
+            request_id: request_id(20),
+        })
         .expect("load entry tree should succeed");
     let current_tree = wait_for_runtime_event(
         &mut coordinator,
         |event| match event {
-            RuntimeEvent::SessionTreeLoaded { payload } => Some(payload),
+            RuntimeEvent::SessionTreeLoaded { payload, .. } => Some(payload),
             _ => None,
         },
         "session tree payload",
@@ -123,7 +125,10 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
     let branch_row_id = branch_choice.branch.branch_row_id;
     let branch_leaf_id = branch_choice.branch.subtree_leaf_id;
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadBranchPreview { branch_row_id })
+        .handle_runtime_command(RuntimeCommand::LoadBranchPreview {
+            request_id: request_id(21),
+            branch_row_id,
+        })
         .expect("branch preview should load");
     let preview_rows = wait_for_session_tree_preview(&mut coordinator)
         .rows
@@ -133,6 +138,7 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
 
     coordinator
         .handle_runtime_command(RuntimeCommand::SwitchBranch {
+            request_id: request_id(22),
             leaf_id: branch_leaf_id,
         })
         .expect("switch branch should succeed");
@@ -165,7 +171,7 @@ fn switch_branch_moves_leaf_and_rebuilds_transcript_and_tree() {
     let tree_payload = events
         .into_iter()
         .find_map(|event| match event {
-            RuntimeEvent::SessionTreeLoaded { payload } => Some(payload),
+            RuntimeEvent::SessionTreeLoaded { payload, .. } => Some(payload),
             _ => None,
         })
         .expect("switch should refresh the committed path tree");
@@ -267,6 +273,7 @@ fn switch_branch_is_blocked_while_provider_turn_is_running() {
 
     let error = coordinator
         .handle_runtime_command(RuntimeCommand::SwitchBranch {
+            request_id: request_id(23),
             leaf_id: inactive_branch_leaf_id,
         })
         .expect_err("switch branch should be rejected while provider is running");
@@ -334,7 +341,9 @@ fn switch_branch_failure_keeps_committed_leaf_unchanged() {
         .expect("resume session should succeed");
     wait_for_session_resumed(&mut coordinator);
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadEntryTree)
+        .handle_runtime_command(RuntimeCommand::LoadEntryTree {
+            request_id: request_id(24),
+        })
         .expect("load entry tree should succeed");
     let before_rows = wait_for_session_tree(&mut coordinator)
         .rows
@@ -344,6 +353,7 @@ fn switch_branch_failure_keeps_committed_leaf_unchanged() {
 
     let receipt = coordinator
         .handle_runtime_command(RuntimeCommand::SwitchBranch {
+            request_id: request_id(25),
             leaf_id: "missing-leaf".to_string(),
         })
         .expect("invalid leaf switch should be accepted for async execution");
@@ -362,7 +372,9 @@ fn switch_branch_failure_keeps_committed_leaf_unchanged() {
         "failure should include the missing leaf id: {error}"
     );
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadEntryTree)
+        .handle_runtime_command(RuntimeCommand::LoadEntryTree {
+            request_id: request_id(26),
+        })
         .expect("load entry tree should still succeed");
     let after_rows = wait_for_session_tree(&mut coordinator)
         .rows
@@ -438,7 +450,9 @@ fn switch_branch_uses_prepared_leaf_restore_instead_of_committed_reload() {
         .expect("resume session should succeed");
     wait_for_session_resumed(&mut coordinator);
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadEntryTree)
+        .handle_runtime_command(RuntimeCommand::LoadEntryTree {
+            request_id: request_id(27),
+        })
         .expect("load entry tree should succeed");
     let before_rows = wait_for_session_tree(&mut coordinator)
         .rows
@@ -447,13 +461,14 @@ fn switch_branch_uses_prepared_leaf_restore_instead_of_committed_reload() {
         .collect::<Vec<_>>();
     coordinator
         .handle_runtime_command(RuntimeCommand::SwitchBranch {
+            request_id: request_id(28),
             leaf_id: inactive_branch_leaf_id,
         })
         .expect("switch should not reload from the committed leaf after set_leaf");
     let after_rows = wait_for_runtime_event(
         &mut coordinator,
         |event| match event {
-            RuntimeEvent::SessionTreeLoaded { payload } => Some(
+            RuntimeEvent::SessionTreeLoaded { payload, .. } => Some(
                 payload
                     .rows
                     .into_iter()

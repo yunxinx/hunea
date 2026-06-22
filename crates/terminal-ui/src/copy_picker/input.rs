@@ -5,6 +5,7 @@ impl Model {
         self.copy_picker.is_some()
     }
 
+    #[cfg(test)]
     pub(crate) fn copy_picker_loading(&self) -> bool {
         self.copy_picker
             .as_ref()
@@ -17,9 +18,14 @@ impl Model {
             .is_some_and(|state| state.preview.is_some())
     }
 
-    pub(crate) fn open_copy_picker_loading(&mut self) {
-        self.copy_picker = Some(CopyPickerState::default());
+    pub(crate) fn open_copy_picker_loading(&mut self) -> SessionLoadRequestId {
+        let request_id = self.next_session_load_request_id();
+        self.copy_picker = Some(CopyPickerState {
+            pending_request_id: Some(request_id),
+            ..CopyPickerState::default()
+        });
         self.close_composer_attached_ui();
+        request_id
     }
 
     pub(crate) fn apply_copy_picker_payload(&mut self, payload: SessionTreePayload) {
@@ -34,6 +40,7 @@ impl Model {
             .filter_map(CopyPickerRow::from_session_tree_row)
             .collect();
         state.is_loading = false;
+        state.pending_request_id = None;
         state.error = None;
         state.preview = None;
         state.remap_selected_rows_from_previous_rows(&previous_rows);
@@ -48,8 +55,25 @@ impl Model {
             return;
         };
         state.is_loading = false;
+        state.pending_request_id = None;
         state.error = Some(message.to_string());
         self.copy_picker = Some(state);
+    }
+
+    pub(crate) fn copy_picker_load_request_matches(
+        &self,
+        request_id: SessionLoadRequestId,
+    ) -> bool {
+        self.copy_picker
+            .as_ref()
+            .is_some_and(|state| state.is_loading && state.pending_request_id == Some(request_id))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn copy_picker_pending_request_id_for_test(&self) -> Option<SessionLoadRequestId> {
+        self.copy_picker
+            .as_ref()
+            .and_then(|state| state.pending_request_id)
     }
 
     pub(crate) fn handle_copy_picker_key(&mut self, key: KeyEvent) -> OverlayInputResult {

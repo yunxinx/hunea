@@ -8,6 +8,7 @@ fn late_entry_tree_payload_is_ignored_without_entry_tree_intent() {
     assert!(!model.entry_tree_active());
 
     model.apply_runtime_event(RuntimeEvent::SessionTreeLoaded {
+        request_id: SessionLoadRequestId::new(1),
         payload: SessionTreePayload {
             rows: vec![tree_row(
                 "late-user",
@@ -34,6 +35,7 @@ fn late_copy_picker_payload_is_ignored_after_copy_picker_closes() {
     assert!(!model.entry_tree_active());
 
     model.apply_runtime_event(RuntimeEvent::CopyPickerTreeLoaded {
+        request_id: SessionLoadRequestId::new(1),
         payload: SessionTreePayload {
             rows: vec![tree_row(
                 "late-user",
@@ -61,6 +63,7 @@ fn late_loaded_copy_picker_payload_is_ignored_after_initial_load_finishes() {
     let mut model = ready_copy_picker_model();
 
     model.apply_runtime_event(RuntimeEvent::CopyPickerTreeLoaded {
+        request_id: SessionLoadRequestId::new(1),
         payload: SessionTreePayload {
             rows: vec![tree_row(
                 "late-user",
@@ -78,6 +81,51 @@ fn late_loaded_copy_picker_payload_is_ignored_after_initial_load_finishes() {
         vec!["user-1", "assistant-1", "user-2"],
         "a duplicate or late copy-picker payload must not replace the already interactive picker"
     );
+}
+
+#[test]
+fn stale_copy_picker_payload_is_ignored_after_picker_reopens_loading() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(80, 12);
+    model.set_palette(default_palette(), true);
+
+    let stale_request_id = model.open_copy_picker_loading();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    let current_request_id = model.open_copy_picker_loading();
+
+    model.apply_runtime_event(RuntimeEvent::CopyPickerTreeLoaded {
+        request_id: stale_request_id,
+        payload: SessionTreePayload {
+            rows: vec![tree_row(
+                "stale-user",
+                SessionTreeRowKind::User,
+                "stale user",
+                Some("stale user".to_string()),
+                Some("stale-user"),
+            )],
+            current_row_id: Some("stale-user".to_string()),
+        },
+    });
+
+    assert!(model.copy_picker_loading());
+    assert_eq!(model.copy_picker_row_ids_for_test(), Vec::<&str>::new());
+
+    model.apply_runtime_event(RuntimeEvent::CopyPickerTreeLoaded {
+        request_id: current_request_id,
+        payload: SessionTreePayload {
+            rows: vec![tree_row(
+                "current-user",
+                SessionTreeRowKind::User,
+                "current user",
+                Some("current user".to_string()),
+                Some("current-user"),
+            )],
+            current_row_id: Some("current-user".to_string()),
+        },
+    });
+
+    assert!(!model.copy_picker_loading());
+    assert_eq!(model.copy_picker_row_ids_for_test(), vec!["current-user"]);
 }
 
 #[test]
@@ -119,8 +167,10 @@ fn copy_picker_load_failed_event_renders_overlay_error_without_toast() {
     model.set_window(60, 8);
     model.set_palette(default_palette(), true);
     model.open_copy_picker_loading();
+    let request_id = model.copy_picker_pending_request_id_for_test().unwrap();
 
     model.apply_runtime_event(RuntimeEvent::CopyPickerTreeLoadFailed {
+        request_id,
         message: "session tree index is corrupt".to_string(),
     });
 

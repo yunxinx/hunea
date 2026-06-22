@@ -47,7 +47,9 @@ fn load_entry_tree_emits_rewind_targets_for_active_session() {
     wait_for_session_resumed(&mut coordinator);
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadEntryTree)
+        .handle_runtime_command(RuntimeCommand::LoadEntryTree {
+            request_id: request_id(1),
+        })
         .expect("load entry tree should succeed");
 
     let payload = wait_for_session_tree(&mut coordinator);
@@ -95,7 +97,9 @@ fn load_entry_tree_emits_empty_tree_for_new_unpersisted_session() {
     });
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadEntryTree)
+        .handle_runtime_command(RuntimeCommand::LoadEntryTree {
+            request_id: request_id(2),
+        })
         .expect("empty new session tree should load as an empty payload");
 
     let payload = wait_for_session_tree(&mut coordinator);
@@ -126,7 +130,9 @@ fn load_copy_picker_tree_emits_empty_tree_for_new_unpersisted_session() {
     });
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadCopyPickerTree)
+        .handle_runtime_command(RuntimeCommand::LoadCopyPickerTree {
+            request_id: request_id(3),
+        })
         .expect("empty new session copy picker should load as an empty payload");
 
     let payload = wait_for_copy_picker_tree(&mut coordinator);
@@ -180,13 +186,15 @@ fn load_copy_picker_tree_failure_emits_copy_picker_error_event() {
     wait_for_session_resumed(&mut coordinator);
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadCopyPickerTree)
+        .handle_runtime_command(RuntimeCommand::LoadCopyPickerTree {
+            request_id: request_id(4),
+        })
         .expect("copy picker tree command should be accepted before async load fails");
 
     let message = wait_for_runtime_event(
         &mut coordinator,
         |event| match event {
-            RuntimeEvent::CopyPickerTreeLoadFailed { message } => Some(message),
+            RuntimeEvent::CopyPickerTreeLoadFailed { message, .. } => Some(message),
             RuntimeEvent::Failed { message, .. } => {
                 panic!("copy picker tree load failure must not become global failure: {message}")
             }

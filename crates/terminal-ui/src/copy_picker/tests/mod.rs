@@ -9,8 +9,8 @@ use crate::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use runtime_domain::session::{
-    RuntimeEvent, SessionTreePayload, SessionTreeRowKind, TranscriptReplayItem,
-    TranscriptReplayRole,
+    RuntimeEvent, SessionLoadRequestId, SessionTreePayload, SessionTreeRowKind,
+    TranscriptReplayItem, TranscriptReplayRole,
 };
 
 mod input;

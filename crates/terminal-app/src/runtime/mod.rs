@@ -108,13 +108,19 @@ impl AppRuntimeCoordinator {
                 self.load_session_preview(&session_id)
             }
             RuntimeCommand::ResumeSession { session_id } => self.resume_session(&session_id),
-            RuntimeCommand::LoadEntryTree => self.load_entry_tree(),
-            RuntimeCommand::LoadCopyPickerTree => self.load_copy_picker_tree(),
-            RuntimeCommand::LoadBranchTree => self.load_branch_tree(),
-            RuntimeCommand::LoadBranchPreview { branch_row_id } => {
-                self.load_branch_preview(&branch_row_id)
+            RuntimeCommand::LoadEntryTree { request_id } => self.load_entry_tree(request_id),
+            RuntimeCommand::LoadCopyPickerTree { request_id } => {
+                self.load_copy_picker_tree(request_id)
             }
-            RuntimeCommand::SwitchBranch { leaf_id } => self.switch_branch(&leaf_id),
+            RuntimeCommand::LoadBranchTree { request_id } => self.load_branch_tree(request_id),
+            RuntimeCommand::LoadBranchPreview {
+                request_id,
+                branch_row_id,
+            } => self.load_branch_preview(request_id, &branch_row_id),
+            RuntimeCommand::SwitchBranch {
+                request_id,
+                leaf_id,
+            } => self.switch_branch(request_id, &leaf_id),
             RuntimeCommand::SelectEntryRewind { entry_id } => self.select_entry_rewind(&entry_id),
             RuntimeCommand::Reset => {
                 self.conversation_worker.reset_after_clear();
@@ -366,6 +372,7 @@ impl AppRuntimeCoordinator {
                 SessionStoreWorkerEvent::RestoredWithTree {
                     conversation,
                     resume_payload,
+                    tree_request_id,
                     tree_payload,
                 } => {
                     self.provider_conversation = conversation;
@@ -374,6 +381,7 @@ impl AppRuntimeCoordinator {
                         payload: resume_payload,
                     });
                     events.push(RuntimeEvent::SessionTreeLoaded {
+                        request_id: tree_request_id,
                         payload: tree_payload,
                     });
                 }

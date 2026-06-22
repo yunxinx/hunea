@@ -103,43 +103,67 @@ impl RuntimeEventApply for Model {
             RuntimeEvent::SessionPreviewLoaded { payload } => {
                 self.apply_session_preview_payload(payload);
             }
-            RuntimeEvent::SessionTreeLoaded { payload } => {
-                if self.entry_tree_loading() {
+            RuntimeEvent::SessionTreeLoaded {
+                request_id,
+                payload,
+            } => {
+                if self.entry_tree_load_request_matches(request_id) {
                     self.apply_entry_tree_payload(payload);
                 }
             }
-            RuntimeEvent::SessionTreeLoadFailed { message } => {
-                if self.entry_tree_loading() {
+            RuntimeEvent::SessionTreeLoadFailed {
+                request_id,
+                message,
+            } => {
+                if self.entry_tree_load_request_matches(request_id) {
                     self.show_entry_tree_error(&message);
                 }
             }
-            RuntimeEvent::CopyPickerTreeLoaded { payload } => {
-                if self.copy_picker_loading() {
+            RuntimeEvent::CopyPickerTreeLoaded {
+                request_id,
+                payload,
+            } => {
+                if self.copy_picker_load_request_matches(request_id) {
                     self.apply_copy_picker_payload(payload);
                 }
             }
-            RuntimeEvent::CopyPickerTreeLoadFailed { message } => {
-                if self.copy_picker_loading() {
+            RuntimeEvent::CopyPickerTreeLoadFailed {
+                request_id,
+                message,
+            } => {
+                if self.copy_picker_load_request_matches(request_id) {
                     self.show_copy_picker_error(&message);
                 }
             }
-            RuntimeEvent::SessionBranchTreeLoaded { payload } => {
-                if self.entry_tree_branch_tree_loading() {
+            RuntimeEvent::SessionBranchTreeLoaded {
+                request_id,
+                payload,
+            } => {
+                if self.entry_tree_branch_tree_load_request_matches(request_id) {
                     self.apply_entry_tree_branch_tree_payload(payload);
                 }
             }
-            RuntimeEvent::SessionBranchTreeLoadFailed { message } => {
-                if self.entry_tree_branch_tree_loading() {
+            RuntimeEvent::SessionBranchTreeLoadFailed {
+                request_id,
+                message,
+            } => {
+                if self.entry_tree_branch_tree_load_request_matches(request_id) {
                     self.show_entry_tree_branch_tree_error(&message);
                 }
             }
-            RuntimeEvent::SessionBranchPreviewLoaded { payload } => {
-                if self.entry_tree_branch_preview_loading() {
+            RuntimeEvent::SessionBranchPreviewLoaded {
+                request_id,
+                payload,
+            } => {
+                if self.entry_tree_branch_preview_load_request_matches(request_id) {
                     self.apply_entry_tree_branch_preview_payload(payload);
                 }
             }
-            RuntimeEvent::SessionBranchPreviewLoadFailed { message } => {
-                if self.entry_tree_branch_preview_loading() {
+            RuntimeEvent::SessionBranchPreviewLoadFailed {
+                request_id,
+                message,
+            } => {
+                if self.entry_tree_branch_preview_load_request_matches(request_id) {
                     self.show_entry_tree_branch_preview_error(&message);
                 }
             }

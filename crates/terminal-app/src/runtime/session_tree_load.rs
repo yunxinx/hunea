@@ -1,4 +1,4 @@
-use runtime_domain::session::{RuntimeEvent, SessionTreePayload};
+use runtime_domain::session::{RuntimeEvent, SessionLoadRequestId, SessionTreePayload};
 
 /// Session tree 的数据源相同，但不同覆盖层必须收到不同事件，避免迟到 payload 错投。
 #[derive(Debug, Clone, Copy)]
@@ -8,26 +8,46 @@ pub(super) enum SessionTreeLoadConsumer {
 }
 
 impl SessionTreeLoadConsumer {
-    pub(super) fn loaded_event(self, payload: SessionTreePayload) -> RuntimeEvent {
+    pub(super) fn loaded_event(
+        self,
+        request_id: SessionLoadRequestId,
+        payload: SessionTreePayload,
+    ) -> RuntimeEvent {
         match self {
-            Self::EntryTree => RuntimeEvent::SessionTreeLoaded { payload },
-            Self::CopyPicker => RuntimeEvent::CopyPickerTreeLoaded { payload },
+            Self::EntryTree => RuntimeEvent::SessionTreeLoaded {
+                request_id,
+                payload,
+            },
+            Self::CopyPicker => RuntimeEvent::CopyPickerTreeLoaded {
+                request_id,
+                payload,
+            },
         }
     }
 
-    pub(super) fn failed_event(self, message: String) -> RuntimeEvent {
+    pub(super) fn failed_event(
+        self,
+        request_id: SessionLoadRequestId,
+        message: String,
+    ) -> RuntimeEvent {
         match self {
-            Self::EntryTree => RuntimeEvent::SessionTreeLoadFailed { message },
-            Self::CopyPicker => RuntimeEvent::CopyPickerTreeLoadFailed { message },
+            Self::EntryTree => RuntimeEvent::SessionTreeLoadFailed {
+                request_id,
+                message,
+            },
+            Self::CopyPicker => RuntimeEvent::CopyPickerTreeLoadFailed {
+                request_id,
+                message,
+            },
         }
     }
 
-    pub(super) fn empty_tree_event(self) -> RuntimeEvent {
+    pub(super) fn empty_tree_event(self, request_id: SessionLoadRequestId) -> RuntimeEvent {
         let payload = SessionTreePayload {
             rows: Vec::new(),
             current_row_id: None,
         };
-        self.loaded_event(payload)
+        self.loaded_event(request_id, payload)
     }
 
     pub(super) const fn no_session_error(self) -> &'static str {

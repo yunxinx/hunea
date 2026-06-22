@@ -9,7 +9,9 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, Paragraph, Widget},
 };
-use runtime_domain::session::{SessionTreePayload, SessionTreeRow, TranscriptReplayItem};
+use runtime_domain::session::{
+    SessionLoadRequestId, SessionTreePayload, SessionTreeRow, TranscriptReplayItem,
+};
 
 use crate::{
     AppEffect, Model,

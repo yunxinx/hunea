@@ -163,7 +163,10 @@ fn load_copy_picker_tree_failure_emits_copy_picker_error_event() {
             Ok::<SessionId, session_store::SessionStoreError>(session_id)
         })
         .expect("session fixture should persist");
-    let store = Arc::new(FailingSessionTreeStore::new(inner_store));
+    let store = Arc::new(FailingSessionStore::new(
+        inner_store,
+        FailingSessionStoreLoad::SessionTree,
+    ));
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         session_store: Some(store),
         session_header_template: Some(header),

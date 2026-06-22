@@ -27,13 +27,24 @@ pub(super) struct DelayedListSessionStore {
     list_release: Mutex<Option<mpsc::Receiver<()>>>,
 }
 
-pub(super) struct FailingSessionTreeStore {
+pub(super) struct FailingSessionStore {
     inner: Arc<InMemorySessionStore>,
+    failed_load: FailingSessionStoreLoad,
 }
 
-impl FailingSessionTreeStore {
-    pub(super) fn new(inner: Arc<InMemorySessionStore>) -> Self {
-        Self { inner }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FailingSessionStoreLoad {
+    SessionTree,
+    BranchTree,
+    BranchPreview,
+}
+
+impl FailingSessionStore {
+    pub(super) fn new(
+        inner: Arc<InMemorySessionStore>,
+        failed_load: FailingSessionStoreLoad,
+    ) -> Self {
+        Self { inner, failed_load }
     }
 }
 
@@ -51,7 +62,7 @@ impl DelayedListSessionStore {
     }
 }
 
-impl SessionStore for FailingSessionTreeStore {
+impl SessionStore for FailingSessionStore {
     fn create_session<'a>(
         &'a self,
         header: SessionHeader,
@@ -119,14 +130,17 @@ impl SessionStore for FailingSessionTreeStore {
 
     fn load_session_tree<'a>(
         &'a self,
-        _session_id: &'a SessionId,
+        session_id: &'a SessionId,
     ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>
     {
-        Box::pin(async {
-            Err(SessionStoreError::CorruptIndex {
-                message: "injected session tree load failure".to_string(),
-            })
-        })
+        if self.failed_load == FailingSessionStoreLoad::SessionTree {
+            return Box::pin(async {
+                Err(SessionStoreError::CorruptIndex {
+                    message: "injected session tree load failure".to_string(),
+                })
+            });
+        }
+        self.inner.load_session_tree(session_id)
     }
 
     fn load_session_tree_for_leaf<'a>(
@@ -144,6 +158,13 @@ impl SessionStore for FailingSessionTreeStore {
         branch_row_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<SessionTreeSnapshot, SessionStoreError>> + Send + 'a>>
     {
+        if self.failed_load == FailingSessionStoreLoad::BranchPreview {
+            return Box::pin(async {
+                Err(SessionStoreError::CorruptIndex {
+                    message: "injected branch preview load failure".to_string(),
+                })
+            });
+        }
         self.inner
             .load_session_branch_preview(session_id, branch_row_id)
     }
@@ -158,6 +179,13 @@ impl SessionStore for FailingSessionTreeStore {
                 + 'a,
         >,
     > {
+        if self.failed_load == FailingSessionStoreLoad::BranchTree {
+            return Box::pin(async {
+                Err(SessionStoreError::CorruptIndex {
+                    message: "injected branch tree load failure".to_string(),
+                })
+            });
+        }
         self.inner.load_session_branch_tree(session_id)
     }
 

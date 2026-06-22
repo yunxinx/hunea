@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use super::conversation::{apply_conversation_event, run_send_conversation_turn_effect};
 use super::effects::{
-    run_interrupt_current_turn_effect, run_open_copy_picker_effect, run_switch_branch_effect,
+    run_interrupt_current_turn_effect, run_open_branch_preview_effect, run_open_branch_tree_effect,
+    run_open_copy_picker_effect, run_switch_branch_effect,
 };
 use super::input::{
     TerminalInputAction, TerminalInputCoalescing, coalesced_input_actions,
@@ -52,6 +53,13 @@ fn reasoned_response(
     reasoning_duration: Duration,
 ) -> ConversationResponse {
     ConversationResponse::with_reasoning(content, reasoning_content, Some(reasoning_duration))
+}
+
+fn ready_model() -> Model {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(72, 10);
+    model.set_palette(default_palette(), true);
+    model
 }
 
 impl RuntimeCoordinator for TestRuntimeCoordinator {
@@ -152,6 +160,75 @@ fn open_copy_picker_effect_dispatches_copy_picker_tree_load() {
     assert_eq!(
         runtime_coordinator.last_command,
         Some(RuntimeCommand::LoadCopyPickerTree)
+    );
+}
+
+#[test]
+fn open_branch_tree_effect_keeps_immediate_failure_inside_branch_tree_overlay() {
+    let mut model = ready_model();
+    let mut runtime_coordinator = TestRuntimeCoordinator {
+        next_runtime_error: Some("branch tree unavailable".to_string()),
+        ..TestRuntimeCoordinator::default()
+    };
+
+    run_open_branch_tree_effect(&mut model, &mut runtime_coordinator);
+
+    assert!(model.entry_tree_branch_tree_active());
+    assert!(!model.entry_tree_branch_tree_loading());
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 10));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("branch tree unavailable")),
+        "immediate branch tree load failure should render in the branch tree overlay: {rows:?}"
+    );
+}
+
+#[test]
+fn open_branch_preview_effect_keeps_immediate_failure_inside_branch_preview_overlay() {
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![SessionTreeRow {
+            row_id: "user-a".to_string(),
+            parent_id: None,
+            display_depth: 0,
+            kind: SessionTreeRowKind::User,
+            display_text: "root question".to_string(),
+            summary: "root question".to_string(),
+            preview_content: "root question".to_string(),
+            preview_replay_items: Vec::new(),
+            rewind_target_id: None,
+            rewind_prefill: None,
+            is_active_path: true,
+            is_current: true,
+            branch_choices: vec![
+                branch_choice("assistant-b", "assistant-b", "inactive answer", false),
+                branch_choice("assistant-c", "assistant-c", "current answer", true),
+            ],
+        }],
+        current_row_id: Some("user-a".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert!(model.entry_tree_branch_preview_loading());
+    let mut runtime_coordinator = TestRuntimeCoordinator {
+        next_runtime_error: Some("branch preview unavailable".to_string()),
+        ..TestRuntimeCoordinator::default()
+    };
+
+    run_open_branch_preview_effect(
+        &mut model,
+        &mut runtime_coordinator,
+        "assistant-b".to_string(),
+    );
+
+    assert!(model.entry_tree_branch_preview_active());
+    assert!(!model.entry_tree_branch_preview_loading());
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 10));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("branch preview unavailable")),
+        "immediate branch preview load failure should render in the branch preview overlay: {rows:?}"
     );
 }
 

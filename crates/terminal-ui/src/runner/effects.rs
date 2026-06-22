@@ -84,12 +84,7 @@ pub(super) fn apply_effect_if_needed(
             Ok(())
         }
         AppEffect::OpenBranchTree => {
-            model.open_entry_tree_branch_tree_loading();
-            run_simple_runtime_command_effect(
-                model,
-                runtime_coordinator,
-                RuntimeCommand::LoadBranchTree,
-            );
+            run_open_branch_tree_effect(model, runtime_coordinator);
             Ok(())
         }
         AppEffect::SelectEntryRewind { entry_id, prefill } => {
@@ -104,11 +99,7 @@ pub(super) fn apply_effect_if_needed(
             Ok(())
         }
         AppEffect::OpenBranchPreview { branch_row_id } => {
-            run_simple_runtime_command_effect(
-                model,
-                runtime_coordinator,
-                RuntimeCommand::LoadBranchPreview { branch_row_id },
-            );
+            run_open_branch_preview_effect(model, runtime_coordinator, branch_row_id);
             Ok(())
         }
         AppEffect::SwitchBranch { leaf_id } => {
@@ -162,6 +153,30 @@ pub(super) fn run_open_copy_picker_effect(
         runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadCopyPickerTree)
     {
         model.show_copy_picker_error(&message);
+    }
+}
+
+pub(super) fn run_open_branch_tree_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) {
+    model.open_entry_tree_branch_tree_loading();
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadBranchTree)
+    {
+        model.show_entry_tree_branch_tree_error(&message);
+    }
+}
+
+pub(super) fn run_open_branch_preview_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+    branch_row_id: String,
+) {
+    if let Err(message) = runtime_coordinator
+        .dispatch_runtime_command(RuntimeCommand::LoadBranchPreview { branch_row_id })
+    {
+        model.show_entry_tree_branch_preview_error(&message);
     }
 }
 

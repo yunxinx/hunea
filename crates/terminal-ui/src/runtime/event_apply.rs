@@ -128,9 +128,19 @@ impl RuntimeEventApply for Model {
                     self.apply_entry_tree_branch_tree_payload(payload);
                 }
             }
+            RuntimeEvent::SessionBranchTreeLoadFailed { message } => {
+                if self.entry_tree_branch_tree_loading() {
+                    self.show_entry_tree_branch_tree_error(&message);
+                }
+            }
             RuntimeEvent::SessionBranchPreviewLoaded { payload } => {
                 if self.entry_tree_branch_preview_loading() {
                     self.apply_entry_tree_branch_preview_payload(payload);
+                }
+            }
+            RuntimeEvent::SessionBranchPreviewLoadFailed { message } => {
+                if self.entry_tree_branch_preview_loading() {
+                    self.show_entry_tree_branch_preview_error(&message);
                 }
             }
             RuntimeEvent::SessionResumed { payload } => {

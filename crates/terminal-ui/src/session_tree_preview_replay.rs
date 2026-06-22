@@ -1,6 +1,6 @@
-use runtime_domain::session::{
-    SessionTreeRow, SessionTreeRowKind, TranscriptReplayItem, TranscriptReplayRole,
-};
+use runtime_domain::session::{SessionTreeRow, TranscriptReplayItem, TranscriptReplayRole};
+
+use crate::session_tree_row_kind_view::CopyableSessionTreeRowKind;
 
 /// `SessionTreePreviewReplay` 描述树行预览 replay 的来源。
 pub(crate) enum SessionTreePreviewReplay<'a> {
@@ -19,7 +19,7 @@ impl<'a> SessionTreePreviewReplay<'a> {
 
     /// `from_copyable_parts` 为 copy picker 的 copyable 行提供文本 fallback。
     pub(crate) fn from_copyable_parts(
-        kind: SessionTreeRowKind,
+        kind: CopyableSessionTreeRowKind,
         replay_items: &'a [TranscriptReplayItem],
         fallback_content: &str,
     ) -> Self {
@@ -31,20 +31,14 @@ impl<'a> SessionTreePreviewReplay<'a> {
     }
 }
 
-fn fallback_replay_item(kind: SessionTreeRowKind, content: &str) -> TranscriptReplayItem {
+fn fallback_replay_item(kind: CopyableSessionTreeRowKind, content: &str) -> TranscriptReplayItem {
     match kind {
-        SessionTreeRowKind::User => TranscriptReplayItem::Message {
+        CopyableSessionTreeRowKind::User => TranscriptReplayItem::Message {
             role: TranscriptReplayRole::User,
             content: content.to_string(),
         },
-        SessionTreeRowKind::Assistant => TranscriptReplayItem::Message {
+        CopyableSessionTreeRowKind::Assistant => TranscriptReplayItem::Message {
             role: TranscriptReplayRole::Assistant,
-            content: content.to_string(),
-        },
-        SessionTreeRowKind::Tool => TranscriptReplayItem::ToolResult {
-            content: content.to_string(),
-        },
-        SessionTreeRowKind::Reasoning => TranscriptReplayItem::Reasoning {
             content: content.to_string(),
         },
     }
@@ -53,6 +47,8 @@ fn fallback_replay_item(kind: SessionTreeRowKind, content: &str) -> TranscriptRe
 #[cfg(test)]
 mod tests {
     use runtime_domain::session::{SessionTreeRowKind, TranscriptReplayItem};
+
+    use crate::session_tree_row_kind_view::CopyableSessionTreeRowKind;
 
     use super::*;
 
@@ -63,7 +59,7 @@ mod tests {
         }];
 
         match SessionTreePreviewReplay::from_copyable_parts(
-            SessionTreeRowKind::Tool,
+            CopyableSessionTreeRowKind::Assistant,
             &items,
             "fallback",
         ) {
@@ -77,7 +73,7 @@ mod tests {
     #[test]
     fn preview_replay_fallback_matches_row_kind() {
         let replay = SessionTreePreviewReplay::from_copyable_parts(
-            SessionTreeRowKind::Assistant,
+            CopyableSessionTreeRowKind::Assistant,
             &[],
             "assistant fallback",
         );

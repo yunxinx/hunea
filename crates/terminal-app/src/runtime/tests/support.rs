@@ -34,8 +34,8 @@ pub(super) fn runtime_coordinator(options: AppRuntimeOptions) -> AppRuntimeCoord
 }
 
 pub(super) use super::store_fixtures::{
-    CommittedLoadFailsAfterSetLeafStore, DelayedListSessionStore, FailingSessionTreeStore,
-    LoadCountingSessionStore,
+    CommittedLoadFailsAfterSetLeafStore, DelayedListSessionStore, FailingSessionStore,
+    FailingSessionStoreLoad, LoadCountingSessionStore,
 };
 
 pub(super) fn temp_test_dir(prefix: &str) -> PathBuf {

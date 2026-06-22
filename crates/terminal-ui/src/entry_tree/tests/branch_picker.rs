@@ -390,6 +390,13 @@ fn entry_tree_branch_picker_relative_age_label_uses_two_highest_units() {
     assert_eq!(
         crate::entry_tree::render::branch_picker_relative_age_label(
             now_ms,
+            now_ms - (3 * 86_400_000 + 2 * 3_600_000 + 125_000),
+        ),
+        "3d·2h"
+    );
+    assert_eq!(
+        crate::entry_tree::render::branch_picker_relative_age_label(
+            now_ms,
             now_ms - 90 * 86_400_000
         ),
         "3mo·0d"

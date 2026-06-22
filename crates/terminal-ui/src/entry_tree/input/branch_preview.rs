@@ -40,6 +40,21 @@ impl Model {
         }
     }
 
+    pub(crate) fn show_entry_tree_branch_preview_error(&mut self, message: &str) {
+        let Some(preview) = self
+            .entry_tree
+            .as_mut()
+            .and_then(|state| state.branch_preview.as_mut())
+        else {
+            return;
+        };
+        preview.rows.clear();
+        preview.selected = 0;
+        preview.is_loading = false;
+        preview.error = Some(message.to_string());
+        preview.message_preview = None;
+    }
+
     pub(crate) fn entry_tree_branch_preview_active(&self) -> bool {
         self.entry_tree
             .as_ref()

@@ -509,7 +509,11 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                         payload: session_branch_tree_payload(snapshot),
                     })
                 }
-                Err(error) => failed(error.to_string(), false),
+                Err(error) => {
+                    SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchTreeLoadFailed {
+                        message: error.to_string(),
+                    })
+                }
             }
         }
         SessionStoreCommand::LoadBranchPreview {
@@ -525,7 +529,11 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                     payload: session_tree_payload(snapshot),
                 })
             }
-            Err(error) => failed(error.to_string(), false),
+            Err(error) => {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchPreviewLoadFailed {
+                    message: error.to_string(),
+                })
+            }
         },
         SessionStoreCommand::SwitchBranch {
             store,

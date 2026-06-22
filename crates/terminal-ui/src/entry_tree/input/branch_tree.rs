@@ -42,6 +42,20 @@ impl Model {
         state.branch_preview = None;
     }
 
+    pub(crate) fn show_entry_tree_branch_tree_error(&mut self, message: &str) {
+        let Some(branch_tree) = self
+            .entry_tree
+            .as_mut()
+            .and_then(|state| state.branch_tree.as_mut())
+        else {
+            return;
+        };
+        branch_tree.nodes.clear();
+        branch_tree.selected = 0;
+        branch_tree.is_loading = false;
+        branch_tree.error = Some(message.to_string());
+    }
+
     pub(crate) fn entry_tree_branch_tree_active(&self) -> bool {
         self.entry_tree
             .as_ref()

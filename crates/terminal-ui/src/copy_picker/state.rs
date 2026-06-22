@@ -224,11 +224,7 @@ impl CopyPickerRow {
     }
 
     pub(super) fn preview_replay(&self) -> SessionTreePreviewReplay<'_> {
-        SessionTreePreviewReplay::from_copyable_parts(
-            self.kind.session_tree_kind(),
-            &self.replay_items,
-            &self.raw_text,
-        )
+        SessionTreePreviewReplay::from_copyable_parts(self.kind, &self.replay_items, &self.raw_text)
     }
 
     fn append_text_for_format(&self, format: CopyPickerTextFormat, text: &mut String) {

@@ -336,6 +336,40 @@ fn branch_preview_loading_state_tracks_only_pending_branch_preview_payload() {
 }
 
 #[test]
+fn branch_preview_load_failure_renders_overlay_error() {
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_branch_choices(
+            "user-a",
+            SessionTreeRowKind::User,
+            "root question",
+            vec![
+                branch_choice("assistant-b", "assistant-b", "inactive answer", false),
+                branch_choice("assistant-c", "user-d", "current follow up", true),
+            ],
+        )],
+        current_row_id: Some("user-a".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert!(model.entry_tree_branch_preview_loading());
+
+    model.apply_runtime_event(RuntimeEvent::SessionBranchPreviewLoadFailed {
+        message: "branch preview index is corrupt".to_string(),
+    });
+
+    assert!(!model.entry_tree_branch_preview_loading());
+    assert!(model.entry_tree_branch_preview_active());
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 10));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("branch preview index is corrupt")),
+        "branch preview load failure should render inside the active overlay: {rows:?}"
+    );
+}
+
+#[test]
 fn entry_tree_branch_message_preview_transcript_tracks_resize_after_opening() {
     let mut model = ready_model();
     model.set_window(80, 12);

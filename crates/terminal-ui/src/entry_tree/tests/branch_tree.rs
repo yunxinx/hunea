@@ -261,6 +261,25 @@ fn branch_tree_loading_state_tracks_only_pending_branch_tree_payload() {
 }
 
 #[test]
+fn branch_tree_load_failure_renders_overlay_error() {
+    let mut model = ready_model();
+    model.open_entry_tree_branch_tree_loading();
+
+    model.apply_runtime_event(RuntimeEvent::SessionBranchTreeLoadFailed {
+        message: "branch tree index is corrupt".to_string(),
+    });
+
+    assert!(!model.entry_tree_branch_tree_loading());
+    assert!(model.entry_tree_branch_tree_active());
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 10));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("branch tree index is corrupt")),
+        "branch tree load failure should render inside the active overlay: {rows:?}"
+    );
+}
+
+#[test]
 fn entry_tree_branch_tree_left_click_selects_visible_branch_node() {
     let mut model = ready_model();
     model.set_window(112, 14);

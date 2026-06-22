@@ -5,7 +5,7 @@ use crate::{
     test_helpers::{
         render_model_buffer, rendered_rows, tree_row, tree_row_with_preview_replay_items,
     },
-    theme::default_palette,
+    theme::{default_palette, terminal_default_palette},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use runtime_domain::session::{

@@ -29,16 +29,13 @@ use crate::{
     status_line::truncate_display_width_with_ellipsis,
     styled_text::render_line_with_full_width_background,
     theme::{
-        approval_rejected_text_style, build_page_rule, command_accent_text_style,
+        TerminalPalette, approval_rejected_text_style, build_page_rule, command_accent_text_style,
         primary_text_style, secondary_text_style, subtle_rule_line, surface_text_style,
         tertiary_text_style,
     },
     toast::ToastSeverity,
     tool_result::ToolActivityRenderMode,
-    transcript::{
-        ReasoningRenderMode, latest_preview_offset as latest_copy_picker_preview_offset,
-        preview_page_offset as copy_picker_preview_page_offset,
-    },
+    transcript::{ReasoningRenderMode, preview_page_offset as copy_picker_preview_page_offset},
     transcript_overlay::{
         TranscriptOverlayProgressStyle, TranscriptOverlayRenderOptions,
         render_transcript_overlay_view,

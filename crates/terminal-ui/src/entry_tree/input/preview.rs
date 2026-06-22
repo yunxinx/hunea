@@ -69,8 +69,7 @@ impl Model {
         transcript.set_reasoning_render_mode(ReasoningRenderMode::Detailed);
         let content_height = self.transcript_overlay_content_height();
         let mut preview = EntryTreePreviewState::following_bottom(transcript);
-        preview.overlay.scroll_offset =
-            latest_entry_tree_preview_offset(&mut preview.transcript, content_height);
+        preview.sync_follow_bottom(content_height);
 
         if let Some(preview_state) = self
             .entry_tree
@@ -94,8 +93,7 @@ impl Model {
             .as_mut()
             .filter(|preview| preview.is_following_bottom)
         {
-            preview.overlay.scroll_offset =
-                latest_entry_tree_preview_offset(&mut preview.transcript, content_height);
+            preview.sync_follow_bottom(content_height);
         }
         if let Some(preview) = state
             .branch_preview
@@ -103,8 +101,41 @@ impl Model {
             .and_then(|preview| preview.message_preview.as_mut())
             .filter(|preview| preview.is_following_bottom)
         {
-            preview.overlay.scroll_offset =
-                latest_entry_tree_preview_offset(&mut preview.transcript, content_height);
+            preview.sync_follow_bottom(content_height);
+        }
+    }
+
+    pub(crate) fn sync_entry_tree_preview_width(&mut self, width: u16) {
+        let content_height = self.transcript_overlay_content_height();
+        let Some(state) = self.entry_tree.as_mut() else {
+            return;
+        };
+        if let Some(preview) = state.preview.as_mut() {
+            preview.set_width(width, content_height);
+        }
+        if let Some(preview) = state
+            .branch_preview
+            .as_mut()
+            .and_then(|preview| preview.message_preview.as_mut())
+        {
+            preview.set_width(width, content_height);
+        }
+    }
+
+    pub(crate) fn sync_entry_tree_preview_palette(&mut self, palette: TerminalPalette) {
+        let content_height = self.transcript_overlay_content_height();
+        let Some(state) = self.entry_tree.as_mut() else {
+            return;
+        };
+        if let Some(preview) = state.preview.as_mut() {
+            preview.set_palette(palette, content_height);
+        }
+        if let Some(preview) = state
+            .branch_preview
+            .as_mut()
+            .and_then(|preview| preview.message_preview.as_mut())
+        {
+            preview.set_palette(palette, content_height);
         }
     }
 

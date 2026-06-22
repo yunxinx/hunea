@@ -11,7 +11,7 @@ use std::{
     panic::{self, AssertUnwindSafe, catch_unwind},
     process::Command,
     sync::{
-        Arc, Once, mpsc,
+        Once, mpsc,
         mpsc::{SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
@@ -28,7 +28,7 @@ use super::{
     terminal::{TerminalSession, TuiTerminal},
 };
 
-type SystemClipboardResult = std::result::Result<(), String>;
+type SystemClipboardResult<T = ()> = std::result::Result<T, String>;
 
 const CLIPBOARD_JOB_QUEUE_CAPACITY: usize = 8;
 
@@ -48,7 +48,17 @@ pub(super) struct ExternalIoRuntime {
 }
 
 struct SystemClipboardWriter {
-    write: Arc<dyn Fn(&str) -> SystemClipboardResult + Send + Sync + 'static>,
+    connection: Option<Box<dyn SystemClipboardConnection + Send>>,
+    connection_factory:
+        Box<dyn FnMut() -> SystemClipboardResult<Box<dyn SystemClipboardConnection + Send>> + Send>,
+}
+
+trait SystemClipboardConnection {
+    fn set_text(&mut self, text: &str) -> SystemClipboardResult;
+}
+
+struct ArboardClipboardConnection {
+    clipboard: Clipboard,
 }
 
 struct ClipboardWorker {
@@ -72,7 +82,7 @@ impl ExternalIoRuntime {
         let (clipboard_events_sender, clipboard_events_receiver) = mpsc::channel();
         let clipboard_worker = ClipboardWorker::start(
             clipboard_events_sender.clone(),
-            SystemClipboardWriter::new(copy_selection_to_system_clipboard),
+            SystemClipboardWriter::system(),
         );
         Self {
             clipboard_events_sender,
@@ -89,7 +99,7 @@ impl ExternalIoRuntime {
         let (clipboard_events_sender, clipboard_events_receiver) = mpsc::channel();
         let clipboard_worker = ClipboardWorker::start(
             clipboard_events_sender.clone(),
-            SystemClipboardWriter::new(writer),
+            SystemClipboardWriter::from_write_fn_for_test(writer),
         );
         Self {
             clipboard_events_sender,
@@ -154,19 +164,91 @@ impl Default for ExternalIoRuntime {
 }
 
 impl SystemClipboardWriter {
-    fn new(writer: impl Fn(&str) -> SystemClipboardResult + Send + Sync + 'static) -> Self {
+    fn system() -> Self {
+        Self::with_connection_factory(|| {
+            let clipboard = Clipboard::new().map_err(|error| error.to_string())?;
+            Ok(Box::new(ArboardClipboardConnection { clipboard }))
+        })
+    }
+
+    fn with_connection_factory(
+        connection_factory: impl FnMut() -> SystemClipboardResult<
+            Box<dyn SystemClipboardConnection + Send>,
+        > + Send
+        + 'static,
+    ) -> Self {
         Self {
-            write: Arc::new(writer),
+            connection: None,
+            connection_factory: Box::new(connection_factory),
         }
     }
 
-    fn write(&self, text: &str) -> SystemClipboardResult {
+    #[cfg(test)]
+    fn from_write_fn_for_test(
+        writer: impl Fn(&str) -> SystemClipboardResult + Send + Sync + 'static,
+    ) -> Self {
+        let writer: std::sync::Arc<dyn Fn(&str) -> SystemClipboardResult + Send + Sync + 'static> =
+            std::sync::Arc::new(writer);
+        Self::with_connection_factory(move || {
+            Ok(Box::new(FunctionClipboardConnection {
+                write: std::sync::Arc::clone(&writer),
+            }))
+        })
+    }
+
+    #[cfg(test)]
+    fn with_connection_factory_for_test(
+        connection_factory: impl FnMut() -> SystemClipboardResult<
+            Box<dyn SystemClipboardConnection + Send>,
+        > + Send
+        + 'static,
+    ) -> Self {
+        Self::with_connection_factory(connection_factory)
+    }
+
+    fn write(&mut self, text: &str) -> SystemClipboardResult {
+        if self.connection.is_none() {
+            self.connection = Some((self.connection_factory)()?);
+        }
+
+        let Some(connection) = self.connection.as_mut() else {
+            return Err("system clipboard connection is unavailable".to_string());
+        };
+        match connection.set_text(text) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.connection.take();
+                Err(error)
+            }
+        }
+    }
+}
+
+impl SystemClipboardConnection for ArboardClipboardConnection {
+    fn set_text(&mut self, text: &str) -> SystemClipboardResult {
+        self.clipboard
+            .set_text(text)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+struct FunctionClipboardConnection {
+    write: std::sync::Arc<dyn Fn(&str) -> SystemClipboardResult + Send + Sync + 'static>,
+}
+
+#[cfg(test)]
+impl SystemClipboardConnection for FunctionClipboardConnection {
+    fn set_text(&mut self, text: &str) -> SystemClipboardResult {
         (self.write)(text)
     }
 }
 
 impl ClipboardWorker {
-    fn start(events_sender: mpsc::Sender<ExternalIoEvent>, writer: SystemClipboardWriter) -> Self {
+    fn start(
+        events_sender: mpsc::Sender<ExternalIoEvent>,
+        mut writer: SystemClipboardWriter,
+    ) -> Self {
         let (jobs_sender, jobs_receiver) =
             mpsc::sync_channel::<ClipboardJob>(CLIPBOARD_JOB_QUEUE_CAPACITY);
         let worker_thread = thread::spawn(move || {
@@ -225,11 +307,9 @@ impl ClipboardWorker {
             return;
         };
         if worker_thread.is_finished() {
-            let worker_thread = self
-                .worker_thread
-                .take()
-                .expect("checked worker thread presence");
-            let _ = worker_thread.join();
+            if let Some(worker_thread) = self.worker_thread.take() {
+                let _ = worker_thread.join();
+            }
             self.jobs_sender.take();
         }
     }
@@ -389,11 +469,6 @@ fn run_external_editor_command(command: &[String]) -> io::Result<()> {
     }
 }
 
-fn copy_selection_to_system_clipboard(text: &str) -> SystemClipboardResult {
-    let mut clipboard = Clipboard::new().map_err(|error| error.to_string())?;
-    clipboard.set_text(text).map_err(|error| error.to_string())
-}
-
 fn copy_selection_to_terminal_clipboard(terminal: &mut TuiTerminal, text: &str) -> io::Result<()> {
     copy_selection_to_terminal_clipboard_writer(terminal.backend_mut(), text)
 }
@@ -484,6 +559,71 @@ mod tests {
             "clipboard writes should use one long-lived worker instead of spawning one OS thread per copy"
         );
         assert!(!external_io.has_pending_work());
+    }
+
+    #[test]
+    fn system_clipboard_writer_reuses_one_connection_for_multiple_writes() {
+        let connection_count = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let factory_connection_count = Arc::clone(&connection_count);
+        let factory_writes = Arc::clone(&writes);
+        let mut writer = SystemClipboardWriter::with_connection_factory_for_test(move || {
+            factory_connection_count.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(RecordingClipboardConnection {
+                writes: Arc::clone(&factory_writes),
+                fail_first_write: false,
+            }))
+        });
+
+        assert_eq!(writer.write("alpha"), Ok(()));
+        assert_eq!(writer.write("beta"), Ok(()));
+
+        assert_eq!(
+            connection_count.load(Ordering::SeqCst),
+            1,
+            "system clipboard writer should keep one clipboard connection across writes"
+        );
+        assert_eq!(
+            writes
+                .lock()
+                .expect("writes lock should not poison")
+                .as_slice(),
+            ["alpha".to_string(), "beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn system_clipboard_writer_recreates_connection_after_write_failure() {
+        let connection_count = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let factory_connection_count = Arc::clone(&connection_count);
+        let factory_writes = Arc::clone(&writes);
+        let mut writer = SystemClipboardWriter::with_connection_factory_for_test(move || {
+            let connection_index = factory_connection_count.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(RecordingClipboardConnection {
+                writes: Arc::clone(&factory_writes),
+                fail_first_write: connection_index == 0,
+            }))
+        });
+
+        assert_eq!(
+            writer.write("alpha"),
+            Err("injected clipboard failure".to_string())
+        );
+        assert_eq!(writer.write("beta"), Ok(()));
+
+        assert_eq!(
+            connection_count.load(Ordering::SeqCst),
+            2,
+            "failed clipboard connection should be discarded before the next write"
+        );
+        assert_eq!(
+            writes
+                .lock()
+                .expect("writes lock should not poison")
+                .as_slice(),
+            ["beta".to_string()]
+        );
     }
 
     #[test]
@@ -730,5 +870,24 @@ mod tests {
             }
         }
         events
+    }
+
+    struct RecordingClipboardConnection {
+        writes: Arc<Mutex<Vec<String>>>,
+        fail_first_write: bool,
+    }
+
+    impl SystemClipboardConnection for RecordingClipboardConnection {
+        fn set_text(&mut self, text: &str) -> SystemClipboardResult {
+            if self.fail_first_write {
+                self.fail_first_write = false;
+                return Err("injected clipboard failure".to_string());
+            }
+            self.writes
+                .lock()
+                .expect("writes lock should not poison")
+                .push(text.to_string());
+            Ok(())
+        }
     }
 }

@@ -33,16 +33,13 @@ use crate::{
     },
     status_line::truncate_display_width_with_ellipsis,
     theme::{
-        accent_text_style, approval_rejected_text_style, command_accent_text_style,
-        primary_text_style, secondary_text_style, subtle_rule_line, system_error_text_style,
-        table_header_text_style, tertiary_text_style,
+        TerminalPalette, accent_text_style, approval_rejected_text_style,
+        command_accent_text_style, primary_text_style, secondary_text_style, subtle_rule_line,
+        system_error_text_style, table_header_text_style, tertiary_text_style,
     },
     time::current_unix_timestamp_ms,
     tool_result::ToolActivityRenderMode,
-    transcript::{
-        ReasoningRenderMode, latest_preview_offset as latest_entry_tree_preview_offset,
-        preview_page_offset as entry_tree_preview_page_offset,
-    },
+    transcript::{ReasoningRenderMode, preview_page_offset as entry_tree_preview_page_offset},
     transcript_overlay::{
         TranscriptOverlayProgressStyle, TranscriptOverlayRenderOptions,
         render_transcript_overlay_view,

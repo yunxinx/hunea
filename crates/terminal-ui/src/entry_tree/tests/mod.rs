@@ -26,7 +26,7 @@ use crate::{
     theme::{
         accent_text_style, approval_rejected_text_style, command_accent_text_style,
         default_palette, muted_text_style, primary_text_style, table_header_text_style,
-        tertiary_text_style,
+        terminal_default_palette, tertiary_text_style,
     },
 };
 mod branch_picker;

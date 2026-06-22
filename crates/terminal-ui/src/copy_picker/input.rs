@@ -201,8 +201,7 @@ impl Model {
         transcript.set_reasoning_render_mode(ReasoningRenderMode::Detailed);
         let content_height = self.transcript_overlay_content_height();
         let mut transcript_preview = TranscriptPreviewState::following_bottom(transcript);
-        transcript_preview.overlay.scroll_offset =
-            latest_copy_picker_preview_offset(&mut transcript_preview.transcript, content_height);
+        transcript_preview.sync_follow_bottom(content_height);
         let preview = CopyPickerPreviewState {
             row_index,
             transcript_preview,
@@ -223,10 +222,33 @@ impl Model {
         else {
             return;
         };
-        preview.transcript_preview.overlay.scroll_offset = latest_copy_picker_preview_offset(
-            &mut preview.transcript_preview.transcript,
-            content_height,
-        );
+        preview
+            .transcript_preview
+            .sync_follow_bottom(content_height);
+    }
+
+    pub(crate) fn sync_copy_picker_preview_width(&mut self, width: u16) {
+        let content_height = self.transcript_overlay_content_height();
+        if let Some(preview) = self
+            .copy_picker
+            .as_mut()
+            .and_then(|state| state.preview.as_mut())
+        {
+            preview.transcript_preview.set_width(width, content_height);
+        }
+    }
+
+    pub(crate) fn sync_copy_picker_preview_palette(&mut self, palette: TerminalPalette) {
+        let content_height = self.transcript_overlay_content_height();
+        if let Some(preview) = self
+            .copy_picker
+            .as_mut()
+            .and_then(|state| state.preview.as_mut())
+        {
+            preview
+                .transcript_preview
+                .set_palette(palette, content_height);
+        }
     }
 
     fn close_copy_picker_preview(&mut self) {

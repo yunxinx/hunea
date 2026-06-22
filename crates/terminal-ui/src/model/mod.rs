@@ -357,6 +357,8 @@ impl Model {
         if let Some(preview) = self.session_preview.as_mut() {
             preview.transcript.set_width(width);
         }
+        self.sync_copy_picker_preview_width(width);
+        self.sync_entry_tree_preview_width(width);
         self.composer.set_width(width);
         if width_changed {
             self.sync_transcript_render();
@@ -383,6 +385,8 @@ impl Model {
         if let Some(preview) = self.session_preview.as_mut() {
             preview.transcript.set_palette(palette);
         }
+        self.sync_copy_picker_preview_palette(palette);
+        self.sync_entry_tree_preview_palette(palette);
         if palette_changed {
             self.sync_transcript_render();
         }

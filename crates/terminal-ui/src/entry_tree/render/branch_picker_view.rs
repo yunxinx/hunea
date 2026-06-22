@@ -214,8 +214,8 @@ fn entry_tree_branch_picker_footer_rule_line(
         .saturating_sub(1);
 
     Line::from(vec![
-        Span::styled("─".to_string(), rule_style),
-        Span::styled(" ".to_string(), footer_style),
+        Span::styled("─", rule_style),
+        Span::styled(" ", footer_style),
         Span::styled(footer, footer_style),
         Span::raw(" "),
         Span::styled("─".repeat(trailing_rule_width), rule_style),

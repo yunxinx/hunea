@@ -108,7 +108,6 @@ impl Model {
                 self.open_copy_picker_preview();
                 OverlayInputResult::Handled
             }
-            KeyCode::Enter if key.modifiers.is_empty() => OverlayInputResult::Handled,
             _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
@@ -254,7 +253,6 @@ impl Model {
                 self.move_copy_picker_preview_page(1);
                 OverlayInputResult::Handled
             }
-            KeyCode::Enter if key.modifiers.is_empty() => OverlayInputResult::Handled,
             _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }

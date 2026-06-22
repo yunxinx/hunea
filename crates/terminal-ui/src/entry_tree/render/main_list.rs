@@ -44,16 +44,13 @@ impl Model {
             )),
             chrome.page_rule,
         );
+        let selected_row = state.selected_row();
         frame.render_widget(
             Paragraph::new(Line::styled(
                 entry_tree_footer_hint(
                     area.width,
-                    state
-                        .selected_row()
-                        .is_some_and(|row| row.rewind_target_id.is_some()),
-                    state
-                        .selected_row()
-                        .is_some_and(|row| row.branch_choices.len() >= 2),
+                    selected_row.is_some_and(|row| row.rewind_target_id.is_some()),
+                    selected_row.is_some_and(|row| row.branch_choices.len() >= 2),
                 ),
                 tertiary_text_style(self.palette).add_modifier(Modifier::ITALIC),
             )),

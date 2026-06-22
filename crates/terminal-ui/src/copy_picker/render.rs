@@ -163,10 +163,7 @@ impl Model {
 
         Line::from(vec![
             Span::raw(left_padding),
-            Span::styled(
-                marker.to_string(),
-                approval_rejected_text_style(self.palette),
-            ),
+            Span::styled(marker, approval_rejected_text_style(self.palette)),
             Span::styled(
                 kind_prefix,
                 session_tree_row_kind_label_style(row.kind.session_tree_kind(), self.palette),

@@ -10,6 +10,12 @@ use super::{
     tool_approval_choices,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolApprovalEnterChoice {
+    Selected,
+    PreferredAllow,
+}
+
 impl Model {
     pub(crate) fn handle_tool_approval_panel_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if !self.tool_approval_panel_active() {
@@ -21,6 +27,12 @@ impl Model {
         }
         if self.tool_approval_panel.preview.is_some() {
             return self.handle_tool_approval_inline_file_preview_key(key);
+        }
+
+        if let Some(result) =
+            self.apply_tool_approval_choice_key(key, ToolApprovalEnterChoice::Selected)
+        {
+            return result;
         }
 
         match key.code {
@@ -50,34 +62,17 @@ impl Model {
                     self.tool_approval_panel_revision.saturating_add(1);
                 OverlayInputResult::Handled
             }
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                let choices = tool_approval_choices(&self.tool_approval_panel);
-                let choice = choices.get(self.tool_approval_panel.selected).copied();
-                self.apply_tool_approval_choice(choice)
-            }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.apply_tool_approval_choice(preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                ))
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.apply_tool_approval_choice(preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
-                ))
-            }
-            KeyCode::Esc if key.modifiers.is_empty() => {
-                OverlayInputResult::from_effect(self.cancel_tool_approval_panel())
-            }
             _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 
     fn handle_tool_approval_fullscreen_preview_key(&mut self, key: KeyEvent) -> OverlayInputResult {
+        if let Some(result) =
+            self.apply_tool_approval_choice_key(key, ToolApprovalEnterChoice::PreferredAllow)
+        {
+            return result;
+        }
+
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
                 self.scroll_tool_approval_fullscreen_preview_by(-1);
@@ -120,33 +115,6 @@ impl Model {
                     file_preview_fullscreen_max_offset(self);
                 OverlayInputResult::Handled
             }
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                self.apply_tool_approval_choice(preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                ))
-            }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.apply_tool_approval_choice(preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                ))
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.apply_tool_approval_choice(preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
-                ))
-            }
-            KeyCode::Esc if key.modifiers.is_empty() => {
-                OverlayInputResult::from_effect(self.cancel_tool_approval_panel())
-            }
             _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
@@ -155,35 +123,33 @@ impl Model {
         &mut self,
         key: KeyEvent,
     ) -> OverlayInputResult {
+        self.apply_tool_approval_choice_key(key, ToolApprovalEnterChoice::PreferredAllow)
+            .unwrap_or(OverlayInputResult::Handled)
+    }
+
+    fn apply_tool_approval_choice_key(
+        &mut self,
+        key: KeyEvent,
+        enter_choice: ToolApprovalEnterChoice,
+    ) -> Option<OverlayInputResult> {
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
-                self.apply_tool_approval_choice(preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                ))
+                let choice =
+                    resolve_tool_approval_enter_choice(&self.tool_approval_panel, enter_choice);
+                Some(self.apply_tool_approval_choice(choice))
             }
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.apply_tool_approval_choice(preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                ))
+                let choice = preferred_tool_approval_allow_choice(&self.tool_approval_panel);
+                Some(self.apply_tool_approval_choice(choice))
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.apply_tool_approval_choice(preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
-                ))
+                let choice = preferred_tool_approval_deny_choice(&self.tool_approval_panel);
+                Some(self.apply_tool_approval_choice(choice))
             }
-            KeyCode::Esc if key.modifiers.is_empty() => {
-                OverlayInputResult::from_effect(self.cancel_tool_approval_panel())
-            }
-            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
+            KeyCode::Esc if key.modifiers.is_empty() => Some(OverlayInputResult::from_effect(
+                self.cancel_tool_approval_panel(),
+            )),
+            _ => None,
         }
     }
 
@@ -272,6 +238,42 @@ fn approval_result_content(choice: ToolApprovalChoice, title: &str) -> String {
     } else {
         format!("{verb} {title}")
     }
+}
+
+fn resolve_tool_approval_enter_choice(
+    state: &ToolApprovalPanelState,
+    enter_choice: ToolApprovalEnterChoice,
+) -> Option<ToolApprovalChoice> {
+    match enter_choice {
+        ToolApprovalEnterChoice::Selected => selected_tool_approval_choice(state),
+        ToolApprovalEnterChoice::PreferredAllow => preferred_tool_approval_allow_choice(state),
+    }
+}
+
+fn selected_tool_approval_choice(state: &ToolApprovalPanelState) -> Option<ToolApprovalChoice> {
+    let choices = tool_approval_choices(state);
+    choices.get(state.selected).copied()
+}
+
+fn preferred_tool_approval_allow_choice(
+    state: &ToolApprovalPanelState,
+) -> Option<ToolApprovalChoice> {
+    preferred_tool_approval_choice(
+        state,
+        &[
+            ToolApprovalChoice::Allow,
+            ToolApprovalChoice::AllowInSession,
+        ],
+    )
+}
+
+fn preferred_tool_approval_deny_choice(
+    state: &ToolApprovalPanelState,
+) -> Option<ToolApprovalChoice> {
+    preferred_tool_approval_choice(
+        state,
+        &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

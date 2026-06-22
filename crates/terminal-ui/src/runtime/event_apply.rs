@@ -356,14 +356,7 @@ trait TranscriptReplayItemSource {
 
 impl TranscriptReplayItemSource for TranscriptReplayItem {
     fn terminal_snapshot(&self) -> Option<&RuntimeTerminalSnapshot> {
-        match self {
-            Self::TerminalSnapshot { snapshot } => Some(snapshot),
-            Self::Message { .. }
-            | Self::Reasoning { .. }
-            | Self::ToolActivity { .. }
-            | Self::ToolResult { .. }
-            | Self::System { .. } => None,
-        }
+        transcript_replay_item_terminal_snapshot(self)
     }
 
     fn append_to_transcript(
@@ -378,14 +371,7 @@ impl TranscriptReplayItemSource for TranscriptReplayItem {
 
 impl TranscriptReplayItemSource for &TranscriptReplayItem {
     fn terminal_snapshot(&self) -> Option<&RuntimeTerminalSnapshot> {
-        match *self {
-            TranscriptReplayItem::TerminalSnapshot { snapshot } => Some(snapshot),
-            TranscriptReplayItem::Message { .. }
-            | TranscriptReplayItem::Reasoning { .. }
-            | TranscriptReplayItem::ToolActivity { .. }
-            | TranscriptReplayItem::ToolResult { .. }
-            | TranscriptReplayItem::System { .. } => None,
-        }
+        transcript_replay_item_terminal_snapshot(self)
     }
 
     fn append_to_transcript(
@@ -394,12 +380,25 @@ impl TranscriptReplayItemSource for &TranscriptReplayItem {
         style_mode: crate::style_mode::StyleMode,
         reasoning_display_mode: crate::ReasoningDisplayMode,
     ) {
-        append_borrowed_transcript_replay_item(
+        append_transcript_replay_item(
             transcript,
-            self,
+            (*self).clone(),
             style_mode,
             reasoning_display_mode,
         );
+    }
+}
+
+fn transcript_replay_item_terminal_snapshot(
+    item: &TranscriptReplayItem,
+) -> Option<&RuntimeTerminalSnapshot> {
+    match item {
+        TranscriptReplayItem::TerminalSnapshot { snapshot } => Some(snapshot),
+        TranscriptReplayItem::Message { .. }
+        | TranscriptReplayItem::Reasoning { .. }
+        | TranscriptReplayItem::ToolActivity { .. }
+        | TranscriptReplayItem::ToolResult { .. }
+        | TranscriptReplayItem::System { .. } => None,
     }
 }
 
@@ -440,51 +439,6 @@ fn append_transcript_replay_item(
         }
         TranscriptReplayItem::System { content } => {
             transcript.append_system_message(content);
-        }
-    }
-}
-
-fn append_borrowed_transcript_replay_item(
-    transcript: &mut crate::transcript::Transcript,
-    item: &TranscriptReplayItem,
-    style_mode: crate::style_mode::StyleMode,
-    reasoning_display_mode: crate::ReasoningDisplayMode,
-) {
-    match item {
-        TranscriptReplayItem::Message {
-            role: TranscriptReplayRole::User,
-            content,
-        } => {
-            transcript.append_message_with_style_mode(
-                crate::Sender::User,
-                content.clone(),
-                style_mode,
-            );
-        }
-        TranscriptReplayItem::Message {
-            role: TranscriptReplayRole::Assistant,
-            content,
-        } => {
-            transcript.append_message_with_style_mode(
-                crate::Sender::Assistant,
-                content.clone(),
-                style_mode,
-            );
-        }
-        TranscriptReplayItem::Reasoning { content } => {
-            transcript.append_reasoning_message(content.clone(), reasoning_display_mode, None);
-        }
-        TranscriptReplayItem::ToolActivity { activity } => {
-            transcript.append_runtime_tool_activity(activity.clone());
-        }
-        TranscriptReplayItem::TerminalSnapshot { snapshot } => {
-            let _ = transcript.set_runtime_terminal_snapshot(snapshot.clone());
-        }
-        TranscriptReplayItem::ToolResult { content } => {
-            transcript.append_tool_result(content.clone(), crate::tool_result::ToolResultKind::Ran);
-        }
-        TranscriptReplayItem::System { content } => {
-            transcript.append_system_message(content.clone());
         }
     }
 }

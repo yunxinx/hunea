@@ -34,7 +34,7 @@ impl Model {
     }
 
     pub(crate) fn sync_file_picker_state(&mut self) {
-        if self.blocks_composer_attached_ui() || self.command_panel_active() {
+        if self.blocks_composer_input() || self.command_panel_active() {
             self.close_file_picker();
             return;
         }

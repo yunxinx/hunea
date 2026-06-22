@@ -6,11 +6,12 @@
 //! `spawn_blocking`。
 
 use std::{
+    cell::Cell,
     io,
-    panic::{AssertUnwindSafe, catch_unwind},
+    panic::{self, AssertUnwindSafe, catch_unwind},
     process::Command,
     sync::{
-        Arc, mpsc,
+        Arc, Once, mpsc,
         mpsc::{SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
@@ -33,8 +34,10 @@ const CLIPBOARD_JOB_QUEUE_CAPACITY: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ExternalIoEvent {
-    SelectionSystemClipboardCopied,
+    SelectionCopiedToSystemClipboard,
     SelectionSystemClipboardFailed { text: String },
+    ClipboardWorkerPanicked { text: String },
+    ClipboardWorkerStopped { text: String },
 }
 
 pub(super) struct ExternalIoRuntime {
@@ -106,7 +109,7 @@ impl ExternalIoRuntime {
             Err(ClipboardSubmitError::WorkerStopped { text }) => {
                 if self
                     .clipboard_events_sender
-                    .send(ExternalIoEvent::SelectionSystemClipboardFailed { text })
+                    .send(ExternalIoEvent::ClipboardWorkerStopped { text })
                     .is_ok()
                 {
                     self.pending_clipboard_writes = self.pending_clipboard_writes.saturating_add(1);
@@ -133,7 +136,9 @@ impl ExternalIoRuntime {
 
     pub(super) fn shutdown_and_drain_events(&mut self) -> Vec<ExternalIoEvent> {
         self.clipboard_worker.shutdown();
-        self.drain_events()
+        let events = self.drain_events();
+        self.pending_clipboard_writes = 0;
+        events
     }
 }
 
@@ -165,13 +170,21 @@ impl ClipboardWorker {
         let (jobs_sender, jobs_receiver) =
             mpsc::sync_channel::<ClipboardJob>(CLIPBOARD_JOB_QUEUE_CAPACITY);
         let worker_thread = thread::spawn(move || {
-            for job in jobs_receiver {
-                let write_result = catch_unwind(AssertUnwindSafe(|| writer.write(&job.text)));
-                let event = match write_result {
-                    Ok(Ok(())) => ExternalIoEvent::SelectionSystemClipboardCopied,
-                    Ok(Err(_)) | Err(_) => {
-                        ExternalIoEvent::SelectionSystemClipboardFailed { text: job.text }
+            let mut can_write_system_clipboard = true;
+            while let Ok(job) = jobs_receiver.recv() {
+                let event = if can_write_system_clipboard {
+                    match catch_clipboard_worker_panic(|| writer.write(&job.text)) {
+                        Ok(Ok(())) => ExternalIoEvent::SelectionCopiedToSystemClipboard,
+                        Ok(Err(_)) => {
+                            ExternalIoEvent::SelectionSystemClipboardFailed { text: job.text }
+                        }
+                        Err(ClipboardWorkerPanic) => {
+                            can_write_system_clipboard = false;
+                            ExternalIoEvent::ClipboardWorkerPanicked { text: job.text }
+                        }
                     }
+                } else {
+                    ExternalIoEvent::ClipboardWorkerStopped { text: job.text }
                 };
                 if events_sender.send(event).is_err() {
                     break;
@@ -184,7 +197,8 @@ impl ClipboardWorker {
         }
     }
 
-    fn submit(&self, text: String) -> std::result::Result<(), ClipboardSubmitError> {
+    fn submit(&mut self, text: String) -> std::result::Result<(), ClipboardSubmitError> {
+        self.reap_finished_thread();
         let Some(jobs_sender) = self.jobs_sender.as_ref() else {
             return Err(ClipboardSubmitError::WorkerStopped { text });
         };
@@ -200,8 +214,23 @@ impl ClipboardWorker {
 
     fn shutdown(&mut self) {
         self.jobs_sender.take();
-        if let Some(worker_thread) = self.worker_thread.take() {
+        self.reap_finished_thread();
+        if self.worker_thread.is_some() {
+            self.worker_thread.take();
+        }
+    }
+
+    fn reap_finished_thread(&mut self) {
+        let Some(worker_thread) = self.worker_thread.as_ref() else {
+            return;
+        };
+        if worker_thread.is_finished() {
+            let worker_thread = self
+                .worker_thread
+                .take()
+                .expect("checked worker thread presence");
             let _ = worker_thread.join();
+            self.jobs_sender.take();
         }
     }
 }
@@ -209,6 +238,67 @@ impl ClipboardWorker {
 impl Drop for ClipboardWorker {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+struct ClipboardWorkerPanic;
+
+thread_local! {
+    static SUPPRESS_CLIPBOARD_WORKER_PANIC_HOOK: Cell<bool> = const { Cell::new(false) };
+}
+
+static INSTALL_CLIPBOARD_WORKER_PANIC_HOOK: Once = Once::new();
+
+struct ClipboardWorkerPanicHookGuard {
+    previous_suppression_state: bool,
+}
+
+impl ClipboardWorkerPanicHookGuard {
+    fn enter() -> Self {
+        install_clipboard_worker_panic_hook();
+        let previous_suppression_state = SUPPRESS_CLIPBOARD_WORKER_PANIC_HOOK.with(|flag| {
+            let previous_suppression_state = flag.get();
+            flag.set(true);
+            previous_suppression_state
+        });
+        Self {
+            previous_suppression_state,
+        }
+    }
+}
+
+impl Drop for ClipboardWorkerPanicHookGuard {
+    fn drop(&mut self) {
+        SUPPRESS_CLIPBOARD_WORKER_PANIC_HOOK.with(|flag| flag.set(self.previous_suppression_state));
+    }
+}
+
+fn install_clipboard_worker_panic_hook() {
+    INSTALL_CLIPBOARD_WORKER_PANIC_HOOK.call_once(|| {
+        let previous_hook = panic::take_hook();
+        panic::set_hook(Box::new(move |panic_info| {
+            // `catch_unwind` 之前会先运行 panic hook；只静默 clipboard worker
+            // 已标记的异常边界，避免默认 hook 把 panic 文本写进 TUI 终端。
+            let suppress_hook = SUPPRESS_CLIPBOARD_WORKER_PANIC_HOOK.with(|flag| flag.get());
+            if !suppress_hook {
+                previous_hook(panic_info);
+            }
+        }));
+    });
+}
+
+fn catch_clipboard_worker_panic(
+    write: impl FnOnce() -> SystemClipboardResult,
+) -> std::result::Result<SystemClipboardResult, ClipboardWorkerPanic> {
+    let _panic_hook_guard = ClipboardWorkerPanicHookGuard::enter();
+    match catch_unwind(AssertUnwindSafe(write)) {
+        Ok(result) => Ok(result),
+        Err(panic_payload) => {
+            // panic payload 的 Drop 也允许 panic；这里不需要读取 payload，避免在
+            // 已经处理的异常边界上触发第二次 unwinding。
+            std::mem::forget(panic_payload);
+            Err(ClipboardWorkerPanic)
+        }
     }
 }
 
@@ -266,8 +356,10 @@ pub(super) fn apply_external_io_event(
     event: ExternalIoEvent,
 ) -> Result<()> {
     let success = match event {
-        ExternalIoEvent::SelectionSystemClipboardCopied => true,
-        ExternalIoEvent::SelectionSystemClipboardFailed { text } => {
+        ExternalIoEvent::SelectionCopiedToSystemClipboard => true,
+        ExternalIoEvent::SelectionSystemClipboardFailed { text }
+        | ExternalIoEvent::ClipboardWorkerPanicked { text }
+        | ExternalIoEvent::ClipboardWorkerStopped { text } => {
             copy_selection_to_terminal_clipboard(terminal, &text).is_ok()
         }
     };
@@ -353,7 +445,7 @@ mod tests {
         assert!(external_io.has_pending_work());
         assert_eq!(
             drain_external_io_events_until(&mut external_io, 1),
-            vec![ExternalIoEvent::SelectionSystemClipboardCopied]
+            vec![ExternalIoEvent::SelectionCopiedToSystemClipboard]
         );
         assert!(!external_io.has_pending_work());
     }
@@ -383,8 +475,8 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                ExternalIoEvent::SelectionSystemClipboardCopied,
-                ExternalIoEvent::SelectionSystemClipboardCopied,
+                ExternalIoEvent::SelectionCopiedToSystemClipboard,
+                ExternalIoEvent::SelectionCopiedToSystemClipboard,
             ]
         );
         assert_eq!(
@@ -440,7 +532,7 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![ExternalIoEvent::SelectionSystemClipboardCopied]
+            vec![ExternalIoEvent::SelectionCopiedToSystemClipboard]
         );
     }
 
@@ -498,7 +590,10 @@ mod tests {
         }
         assert_eq!(
             drain_external_io_events_until(&mut external_io, CLIPBOARD_JOB_QUEUE_CAPACITY + 1),
-            vec![ExternalIoEvent::SelectionSystemClipboardCopied; CLIPBOARD_JOB_QUEUE_CAPACITY + 1]
+            vec![
+                ExternalIoEvent::SelectionCopiedToSystemClipboard;
+                CLIPBOARD_JOB_QUEUE_CAPACITY + 1
+            ]
         );
         assert!(!external_io.has_pending_work());
     }
@@ -536,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn panicking_system_clipboard_write_reports_failure_and_keeps_worker_alive() {
+    fn panicking_system_clipboard_write_stops_worker_and_fails_queued_writes() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let writer_attempts = Arc::clone(&attempts);
         let mut external_io = ExternalIoRuntime::with_system_clipboard_writer(move |_text| {
@@ -552,18 +647,31 @@ mod tests {
         assert_eq!(
             drain_external_io_events_until(&mut external_io, 2),
             vec![
-                ExternalIoEvent::SelectionSystemClipboardFailed {
+                ExternalIoEvent::ClipboardWorkerPanicked {
                     text: "alpha".to_string()
                 },
-                ExternalIoEvent::SelectionSystemClipboardCopied,
+                ExternalIoEvent::ClipboardWorkerStopped {
+                    text: "beta".to_string()
+                },
             ]
         );
         assert!(!external_io.has_pending_work());
+
+        assert_eq!(
+            external_io.start_copy_selection("gamma".to_string()),
+            CopySelectionStartResult::Queued
+        );
+        assert_eq!(
+            drain_external_io_events_until(&mut external_io, 1),
+            vec![ExternalIoEvent::ClipboardWorkerStopped {
+                text: "gamma".to_string()
+            }]
+        );
     }
 
     #[test]
-    fn shutdown_waits_for_queued_clipboard_writes_and_drains_completion_events() {
-        let (release_sender, release_receiver) = mpsc::channel();
+    fn shutdown_detaches_blocked_clipboard_writer_and_drains_ready_events() {
+        let (release_sender, release_receiver) = mpsc::channel::<()>();
         let release_receiver = Arc::new(Mutex::new(release_receiver));
         let writer_release_receiver = Arc::clone(&release_receiver);
         let mut external_io = ExternalIoRuntime::with_system_clipboard_writer(move |_text| {
@@ -571,21 +679,28 @@ mod tests {
                 .lock()
                 .expect("test release receiver should not be poisoned")
                 .recv()
-                .expect("test should release the queued clipboard write");
+                .ok();
             Ok(())
         });
 
         external_io.start_copy_selection("alpha".to_string());
         assert!(external_io.has_pending_work());
-        release_sender
-            .send(())
-            .expect("test should release the background writer");
+
+        let started_at = Instant::now();
+        let shutdown_events = external_io.shutdown_and_drain_events();
 
         assert_eq!(
-            external_io.shutdown_and_drain_events(),
-            vec![ExternalIoEvent::SelectionSystemClipboardCopied]
+            shutdown_events,
+            Vec::new(),
+            "shutdown should only drain events that were ready before shutdown"
         );
         assert!(!external_io.has_pending_work());
+        assert!(
+            started_at.elapsed() < Duration::from_millis(500),
+            "TUI shutdown must not wait for a blocked system clipboard backend"
+        );
+
+        drop(release_sender);
     }
 
     #[test]

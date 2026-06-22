@@ -142,7 +142,7 @@ impl Model {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
             AppEvent::Paste(text) => {
-                if self.blocks_main_paste() {
+                if self.blocks_composer_input() {
                     self.cancel_exit_confirmation();
                     None
                 } else {

@@ -50,13 +50,8 @@ impl Model {
         None
     }
 
-    /// 粘贴会修改 composer；全屏模态层或 model panel 激活时应吞掉粘贴。
-    pub(crate) fn blocks_main_paste(&self) -> bool {
-        self.blocks_composer_attached_ui()
-    }
-
-    /// 全屏模态层与 modal panel 激活时，composer 的候选浮层不应保留或接管输入。
-    pub(crate) fn blocks_composer_attached_ui(&self) -> bool {
+    /// 全屏模态层与 modal panel 激活时，composer 输入及其附属浮层均不应接管事件。
+    pub(crate) fn blocks_composer_input(&self) -> bool {
         self.top_modal_layer().is_some()
             || self.model_panel_active()
             || self.tool_approval_panel_active()
@@ -226,23 +221,23 @@ mod tests {
     }
 
     #[test]
-    fn model_panel_blocks_paste_without_becoming_fullscreen_modal() {
+    fn model_panel_blocks_composer_input_without_becoming_fullscreen_modal() {
         let mut model = Model::new(StartupBannerOptions::default());
 
         model.open_model_panel();
 
         assert_eq!(model.top_modal_layer(), None);
-        assert!(model.blocks_main_paste());
+        assert!(model.blocks_composer_input());
         assert!(!model.modal_blocks_pointer_passthrough());
     }
 
     #[test]
-    fn fullscreen_modal_blocks_main_paste_and_pointer_passthrough() {
+    fn fullscreen_modal_blocks_composer_input_and_pointer_passthrough() {
         let mut model = Model::new(StartupBannerOptions::default());
 
         model.open_session_picker_loading();
 
-        assert!(model.blocks_main_paste());
+        assert!(model.blocks_composer_input());
         assert!(model.modal_blocks_pointer_passthrough());
         assert!(model.modal_obscures_startup_banner_entrance_target());
     }

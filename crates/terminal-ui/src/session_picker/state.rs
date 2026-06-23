@@ -1,6 +1,9 @@
 use runtime_domain::session::SessionPickerRow;
 
-use crate::list_selection::{ListNavigationDirection, PagedSelection};
+use crate::{
+    list_selection::{ListNavigationDirection, PagedSelection},
+    text_search::contains_case_insensitive,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct SessionPickerState {
@@ -172,17 +175,3 @@ fn session_picker_row_matches(row: &SessionPickerRow, query: &str) -> bool {
             .is_some_and(|model| contains_case_insensitive(model, query))
 }
 
-fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    if needle.is_ascii() {
-        let needle_bytes = needle.as_bytes();
-        return haystack
-            .as_bytes()
-            .windows(needle_bytes.len())
-            .any(|window| window.eq_ignore_ascii_case(needle_bytes));
-    }
-
-    haystack.to_lowercase().contains(&needle.to_lowercase())
-}

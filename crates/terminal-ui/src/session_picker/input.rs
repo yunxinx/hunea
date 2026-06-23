@@ -5,7 +5,7 @@ use runtime_domain::session::SessionPickerRow;
 
 use crate::{
     AppEffect, Model, list_selection::ListNavigationDirection,
-    overlay_input_result::OverlayInputResult,
+    overlay_input_result::OverlayInputResult, text_search::is_picker_search_text_key,
 };
 
 use super::{SessionPickerState, session_picker_page_size_for_height};
@@ -66,7 +66,7 @@ impl Model {
                 self.session_picker = None;
                 OverlayInputResult::Handled
             }
-            KeyCode::Char(character) if is_searching && is_session_picker_search_text_key(&key) => {
+            KeyCode::Char(character) if is_searching && is_picker_search_text_key(&key) => {
                 if let Some(state) = self.session_picker.as_mut() {
                     state.push_search_character(character);
                 }
@@ -172,15 +172,6 @@ impl Model {
             _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
-}
-
-fn is_session_picker_search_text_key(key: &KeyEvent) -> bool {
-    let KeyCode::Char(character) = key.code else {
-        return false;
-    };
-    !character.is_ascii_control()
-        && !key.modifiers.contains(KeyModifiers::CONTROL)
-        && !key.modifiers.contains(KeyModifiers::ALT)
 }
 
 fn current_unix_time_ms() -> i64 {

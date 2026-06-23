@@ -48,6 +48,7 @@ mod startup_banner;
 mod status_line;
 mod status_phrases;
 mod stream_activity;
+mod text_search;
 mod style_mode;
 mod styled_text;
 mod terminal_grid;

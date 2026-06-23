@@ -1,11 +1,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use session_store::MessageHistoryRow;
 
 use crate::{
     AppEffect, Model, fullscreen_list_chrome::fullscreen_list_page_size_for_height,
     list_selection::ListNavigationDirection, overlay_input_result::OverlayInputResult,
+    text_search::is_picker_search_text_key,
 };
 
 use super::MessageHistoryPickerState;
@@ -33,6 +34,7 @@ impl Model {
         state.rows = rows;
         state.is_loading = false;
         state.error = None;
+        state.apply_filter();
         state.select_latest_row();
         self.message_history_picker = Some(state);
     }
@@ -67,13 +69,52 @@ impl Model {
             return self.handle_message_history_picker_preview_key(key);
         }
 
+        let is_searching = self
+            .message_history_picker
+            .as_ref()
+            .is_some_and(|state| state.is_searching);
+
         if key.code == KeyCode::Char('c') && key.modifiers.is_empty() {
             return OverlayInputResult::from_effect(self.message_history_picker_copy_effect());
         }
 
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
+                if let Some(state) = self.message_history_picker.as_mut()
+                    && state.exit_search()
+                {
+                    return OverlayInputResult::Handled;
+                }
                 self.message_history_picker = None;
+                OverlayInputResult::Handled
+            }
+            KeyCode::Char(character)
+                if is_searching && is_picker_search_text_key(&key) =>
+            {
+                if let Some(state) = self.message_history_picker.as_mut() {
+                    state.push_search_character(character);
+                }
+                OverlayInputResult::Handled
+            }
+            KeyCode::Backspace if key.modifiers.is_empty() => {
+                if let Some(state) = self.message_history_picker.as_mut() {
+                    state.backspace_search();
+                }
+                OverlayInputResult::Handled
+            }
+            KeyCode::Char('u')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if let Some(state) = self.message_history_picker.as_mut() {
+                    state.clear_search();
+                }
+                OverlayInputResult::Handled
+            }
+            KeyCode::Char('/') if key.modifiers.is_empty() => {
+                if let Some(state) = self.message_history_picker.as_mut() {
+                    state.is_searching = true;
+                }
                 OverlayInputResult::Handled
             }
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {

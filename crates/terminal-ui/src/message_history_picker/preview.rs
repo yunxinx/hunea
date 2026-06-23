@@ -85,7 +85,10 @@ impl Model {
             if state.is_loading || state.error.is_some() {
                 return;
             }
-            let Some(row) = state.selected_row() else {
+            let Some(row_index) = state.selected_row_index() else {
+                return;
+            };
+            let Some(row) = state.rows.get(row_index) else {
                 return;
             };
             let transcript = self.transcript_from_replay_items_with_tool_activity_render_mode(
@@ -95,7 +98,7 @@ impl Model {
                 }],
                 ToolActivityRenderMode::DebugDetailed,
             );
-            (state.selected, transcript)
+            (row_index, transcript)
         };
 
         let (row_index, mut transcript) = preview_target;

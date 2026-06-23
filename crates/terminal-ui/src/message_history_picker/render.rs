@@ -78,7 +78,7 @@ impl Model {
                 message_history_picker_footer_hint(
                     area.width,
                     state.selected_position_label(),
-                    state.rows.len(),
+                    state.filtered_indices.len(),
                 ),
                 tertiary_text_style(self.palette).add_modifier(Modifier::ITALIC),
             )),
@@ -88,13 +88,30 @@ impl Model {
 
     fn message_history_picker_header_line(
         &self,
-        _state: &MessageHistoryPickerState,
-        _width: usize,
+        state: &MessageHistoryPickerState,
+        width: usize,
     ) -> Line<'static> {
-        Line::styled(
-            "Message history".to_string(),
-            primary_text_style(self.palette),
-        )
+        let title = "Message history";
+        let title_width = width.saturating_sub(2).max(1);
+        let mut spans = vec![
+            Span::raw("  "),
+            Span::styled(
+                truncate_display_width_with_ellipsis(title, title_width),
+                primary_text_style(self.palette).bold(),
+            ),
+        ];
+        if state.is_searching || !state.search_query.is_empty() {
+            spans.push(Span::styled(" · ", primary_text_style(self.palette).bold()));
+            spans.push(Span::styled(
+                "Search:",
+                command_accent_text_style(self.palette).bold(),
+            ));
+            spans.push(Span::styled(
+                format!(" {}", state.search_query),
+                primary_text_style(self.palette).bold(),
+            ));
+        }
+        Line::from(spans)
     }
 
     fn message_history_picker_body_lines(
@@ -121,6 +138,19 @@ impl Model {
         if state.rows.is_empty() {
             lines.push(Line::styled(
                 "No sent messages yet.".to_string(),
+                secondary_text_style(self.palette),
+            ));
+            lines.truncate(body_height);
+            return lines;
+        }
+        if state.filtered_indices.is_empty() {
+            let empty_message = if state.search_query.is_empty() {
+                "No sent messages yet."
+            } else {
+                "No messages match search"
+            };
+            lines.push(Line::styled(
+                truncate_display_width_with_ellipsis(empty_message, width),
                 secondary_text_style(self.palette),
             ));
             lines.truncate(body_height);

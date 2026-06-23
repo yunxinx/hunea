@@ -12,6 +12,7 @@ use runtime_domain::model_catalog::{
 
 use super::{
     AppEffect, Model,
+    text_search::contains_case_insensitive,
     inline_panel::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, inline_panel_visible_rows, wrap_inline_text,
@@ -717,21 +718,6 @@ fn model_entry_matches_search(entry: &ModelEntry, query: &str) -> bool {
             .description
             .as_ref()
             .is_some_and(|description| contains_case_insensitive(description, query))
-}
-
-fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    if needle.is_ascii() {
-        let needle_bytes = needle.as_bytes();
-        return haystack
-            .as_bytes()
-            .windows(needle_bytes.len())
-            .any(|window| window.eq_ignore_ascii_case(needle_bytes));
-    }
-
-    haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
 fn append_model_entry_lines(

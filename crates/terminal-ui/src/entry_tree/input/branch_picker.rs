@@ -179,7 +179,7 @@ impl Model {
             .as_mut()
             .and_then(|state| state.branch_picker.as_mut())
         else {
-            self.show_transient_status_notice(message);
+            self.show_toast(ToastSeverity::Error, message);
             return;
         };
         picker.error = Some(message.to_string());

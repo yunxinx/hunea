@@ -1,7 +1,10 @@
 use runtime_domain::{
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
     provider::ProviderKind,
-    session::{RuntimeEvent, SessionResumePayload, TranscriptReplayItem, TranscriptReplayRole},
+    session::{
+        RuntimeEvent, RuntimeIdentity, RuntimeTarget, SessionResumePayload, TranscriptReplayItem,
+        TranscriptReplayRole,
+    },
     session::{
         RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
         RuntimeToolActivityStatus, RuntimeToolKind,
@@ -47,6 +50,39 @@ fn session_resumed_rebuilds_visible_transcript_and_restores_model() {
     assert_eq!(
         model.selected_model(),
         Some(ModelSelection::new("local", "qwen3"))
+    );
+    assert_eq!(model.current_status_notice_text(), "");
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("Resumed session session-1")
+    );
+}
+
+#[test]
+fn runtime_start_events_use_toasts_not_status_notice() {
+    let mut model = Model::new(StartupBannerOptions::default());
+
+    model.apply_runtime_event(RuntimeEvent::Started {
+        target: RuntimeTarget::provider("local", "qwen3"),
+        identity: RuntimeIdentity::new("Qwen Runtime"),
+    });
+
+    assert_eq!(model.current_status_notice_text(), "");
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("Runtime ready: Qwen Runtime")
+    );
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.apply_runtime_event(RuntimeEvent::StartFailed {
+        target: Some(RuntimeTarget::provider("local", "qwen3")),
+        message: "connection refused".to_string(),
+    });
+
+    assert_eq!(model.current_status_notice_text(), "");
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("Runtime start failed: connection refused")
     );
 }
 

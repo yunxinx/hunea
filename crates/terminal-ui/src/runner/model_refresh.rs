@@ -1,4 +1,4 @@
-use crate::Model;
+use crate::{Model, toast::ToastSeverity};
 use runtime_domain::model_catalog::{
     ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest,
 };
@@ -27,7 +27,7 @@ pub(super) fn run_refresh_model_provider_effect(
     request: ProviderSyncRequest,
 ) {
     if let Err(message) = runtime_coordinator.refresh_model_provider(request) {
-        model.show_transient_status_notice(&message);
+        model.show_toast(ToastSeverity::Error, message);
     }
 }
 
@@ -37,6 +37,6 @@ pub(super) fn persist_selected_model(
     selection: &ModelSelection,
 ) {
     if let Err(message) = runtime_coordinator.persist_selected_model(selection) {
-        model.show_transient_status_notice(&message);
+        model.show_toast(ToastSeverity::Error, message);
     }
 }

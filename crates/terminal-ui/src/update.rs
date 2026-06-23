@@ -19,6 +19,7 @@ use super::{
     path_resolve::resolve_configured_current_dir,
     terminal_text::sanitize_terminal_text,
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},
+    toast::ToastSeverity,
 };
 
 /// `STARTUP_PROBE_TIMEOUT` 是启动阶段等待主题探测结果的最长时长。
@@ -723,11 +724,11 @@ impl Model {
             return None;
         }
         if self.requires_model_selection && self.selected_model.is_none() {
-            self.show_transient_status_notice("Select a model before sending");
+            self.show_toast(ToastSeverity::Error, "Select a model before sending");
             return None;
         }
         if self.stream_activity.is_some() {
-            self.show_transient_status_notice("Chat request is already running");
+            self.show_toast(ToastSeverity::Error, "Chat request is already running");
             return None;
         }
         if let Some(selection) = self.selected_model.clone()
@@ -800,7 +801,7 @@ impl Model {
             .model_catalog
             .enabled_provider_by_id(&selection.provider_id)
         else {
-            self.show_transient_status_notice("Selected provider is not available");
+            self.show_toast(ToastSeverity::Error, "Selected provider is not available");
             return None;
         };
         let connection = provider.connection();
@@ -820,7 +821,7 @@ impl Model {
             .model_catalog
             .enabled_provider_by_id(&selection.provider_id)
         else {
-            self.show_transient_status_notice("Selected provider is not available");
+            self.show_toast(ToastSeverity::Error, "Selected provider is not available");
             return false;
         };
 
@@ -832,7 +833,7 @@ impl Model {
                 .as_ref()
                 .is_none_or(|value| value.trim().is_empty())
         {
-            self.show_transient_status_notice("Selected provider has no base_url");
+            self.show_toast(ToastSeverity::Error, "Selected provider has no base_url");
             return false;
         }
 

@@ -948,7 +948,7 @@ fn file_preview_panel_hides_status_notice() {
             "body".to_string(),
         )),
     );
-    model.show_transient_status_notice("Selection copied");
+    model.show_transient_status_notice("Press Esc again to interrupt");
 
     assert!(
         !model.current_status_line_render_result().has_content,

@@ -92,6 +92,42 @@ fn selection_copy_completion_uses_toast_not_status_notice() {
 }
 
 #[test]
+fn send_validation_error_uses_toast_not_status_notice() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            )]),
+            requires_model_selection: true,
+            ..ModelOptions::default()
+        },
+    );
+    model.composer_mut().insert_text("hello");
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.current_status_notice_text(), "");
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("Select a model before sending")
+    );
+    assert_eq!(model.composer_text(), "hello");
+    assert!(
+        model
+            .transcript_plain_items()
+            .iter()
+            .all(|item| !item.contains("hello"))
+    );
+}
+
+#[test]
 fn exit_confirmation_stays_on_status_line_when_toast_exists() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.show_toast(ToastSeverity::Info, "Background notice");
@@ -2612,10 +2648,10 @@ fn enter_during_conversation_activity_does_not_append_unsent_message() {
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
     assert_eq!(effect, None);
-    assert!(
-        model
-            .current_status_notice_text()
-            .contains("already running")
+    assert_eq!(model.current_status_notice_text(), "");
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("Chat request is already running")
     );
     assert_eq!(model.composer_text(), "second message");
     assert!(model.transcript_plain_items().is_empty());

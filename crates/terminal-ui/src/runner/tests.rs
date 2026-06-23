@@ -1605,6 +1605,33 @@ fn conversation_send_effect_starts_conversation_target() {
 }
 
 #[test]
+fn conversation_send_effect_failure_uses_toast_not_status_notice() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let mut runtime_coordinator = TestRuntimeCoordinator {
+        next_runtime_error: Some("runtime unavailable".to_string()),
+        ..TestRuntimeCoordinator::default()
+    };
+    let request = ConversationTurnRequest::new_user_text(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "qwen3",
+        None,
+        None,
+        None,
+        "hello",
+    );
+
+    run_send_conversation_turn_effect(&mut model, &mut runtime_coordinator, request);
+
+    assert_eq!(model.current_status_notice_text(), "");
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("runtime unavailable")
+    );
+    assert!(!model.current_stream_activity_render_result().has_content);
+}
+
+#[test]
 fn truncate_conversation_command_records_retained_turns() {
     let mut runtime_coordinator = TestRuntimeCoordinator::default();
 

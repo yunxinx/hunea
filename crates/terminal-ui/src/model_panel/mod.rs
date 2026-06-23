@@ -21,6 +21,7 @@ use super::{
         command_accent_text_style, primary_text_style, secondary_text_style, surface_text_style,
         tertiary_text_style,
     },
+    toast::ToastSeverity,
 };
 
 const MODEL_LIST_MAX_VISIBLE_ROWS: usize = 7;
@@ -352,34 +353,33 @@ impl Model {
         let selection = ModelSelection::new(provider_id.clone(), model_id.clone());
         self.selected_model = Some(selection.clone());
         self.bump_status_line_revision();
-        self.show_transient_status_notice(&format!(
-            "Model selected: {}",
-            self.model_selection_display_name(
-                selection.provider_id.as_str(),
-                selection.model_id.as_str()
-            )
-        ));
+        self.show_toast(
+            ToastSeverity::Info,
+            format!(
+                "Model selected: {}",
+                self.model_selection_display_name(
+                    selection.provider_id.as_str(),
+                    selection.model_id.as_str()
+                )
+            ),
+        );
         self.close_model_panel();
         Some(AppEffect::PersistSelectedModel { selection })
     }
 
     fn refresh_current_model_panel_provider(&mut self) -> Option<AppEffect> {
-        let (request, display_name) = {
+        let request = {
             let provider = self.active_model_panel_provider()?;
             let connection = provider.connection();
-            (
-                ProviderSyncRequest {
-                    provider_id: provider.id.clone(),
-                    kind: connection.kind,
-                    display_name: provider.display_name.clone(),
-                    base_url: connection.base_url.clone(),
-                    api_key: connection.api_key.clone(),
-                    api_key_env: connection.api_key_env.clone(),
-                },
-                provider.display_name.clone(),
-            )
+            ProviderSyncRequest {
+                provider_id: provider.id.clone(),
+                kind: connection.kind,
+                display_name: provider.display_name.clone(),
+                base_url: connection.base_url.clone(),
+                api_key: connection.api_key.clone(),
+                api_key_env: connection.api_key_env.clone(),
+            }
         };
-        self.show_transient_status_notice(&format!("Refreshing models: {display_name}"));
         Some(AppEffect::RefreshModelProvider { request })
     }
 
@@ -389,7 +389,10 @@ impl Model {
         model_ids: Vec<String>,
     ) {
         let Some(provider) = self.model_catalog.provider_by_id_mut(provider_id) else {
-            self.show_transient_status_notice("Refreshed provider is no longer available");
+            self.show_toast(
+                ToastSeverity::Error,
+                "Refreshed provider is no longer available",
+            );
             return;
         };
         let display_name = provider.display_name.clone();
@@ -410,7 +413,10 @@ impl Model {
         }
         self.sync_model_panel_to_selection();
         self.sync_composer_height();
-        self.show_transient_status_notice(&format!("Models refreshed: {display_name}"));
+        self.show_toast(
+            ToastSeverity::Info,
+            format!("Models refreshed: {display_name}"),
+        );
     }
 
     pub(crate) fn apply_model_provider_refresh_failure(
@@ -428,11 +434,15 @@ impl Model {
             });
 
         match display_name {
-            Some(display_name) => self.show_transient_status_notice(&format!(
-                "Failed to refresh models for {display_name}: {message}"
-            )),
+            Some(display_name) => self.show_toast(
+                ToastSeverity::Error,
+                format!("Failed to refresh models for {display_name}: {message}"),
+            ),
             None => {
-                self.show_transient_status_notice(&format!("Failed to refresh models: {message}"))
+                self.show_toast(
+                    ToastSeverity::Error,
+                    format!("Failed to refresh models: {message}"),
+                );
             }
         }
         self.refresh_model_panel_view(true);

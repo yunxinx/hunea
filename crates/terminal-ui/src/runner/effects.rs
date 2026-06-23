@@ -1,7 +1,7 @@
 use color_eyre::eyre::Result;
 use runtime_domain::session::{RuntimeCommand, RuntimeCommandReceipt, RuntimeTarget};
 
-use crate::{AppEffect, Model};
+use crate::{AppEffect, Model, toast::ToastSeverity};
 
 use super::RuntimeCoordinator;
 use super::conversation::run_send_conversation_turn_effect;
@@ -195,7 +195,7 @@ fn run_simple_runtime_command_effect(
     command: RuntimeCommand,
 ) {
     if let Err(message) = runtime_coordinator.dispatch_runtime_command(command) {
-        model.show_transient_status_notice(&message);
+        model.show_toast(ToastSeverity::Error, message);
     }
 }
 
@@ -207,7 +207,7 @@ fn run_truncate_conversation_effect(
     if let Err(message) = runtime_coordinator
         .dispatch_runtime_command(RuntimeCommand::truncate_conversation(retained_user_turns))
     {
-        model.show_transient_status_notice(&message);
+        model.show_toast(ToastSeverity::Error, message);
     }
 }
 
@@ -225,7 +225,7 @@ fn run_respond_runtime_permission_effect(
             option_id,
         })
     {
-        model.show_transient_status_notice(&message);
+        model.show_toast(ToastSeverity::Error, message);
     }
 }
 
@@ -245,6 +245,6 @@ pub(super) fn run_interrupt_current_turn_effect(
         }
         Ok(RuntimeCommandReceipt::Interrupted { .. }) => {}
         Ok(_) => {}
-        Err(message) => model.show_transient_status_notice(&message),
+        Err(message) => model.show_toast(ToastSeverity::Error, message),
     }
 }

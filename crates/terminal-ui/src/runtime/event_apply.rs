@@ -10,6 +10,7 @@ use super::super::{
     model::RequestMetrics,
     runtime::tool_activity_preview::ToolApprovalPreview,
     session_tree_preview_replay::SessionTreePreviewReplay,
+    toast::ToastSeverity,
     tool_approval_panel::{ToolApprovalDetail, ToolApprovalSource},
     tool_result::ToolActivityRenderMode,
 };
@@ -29,10 +30,16 @@ impl RuntimeEventApply for Model {
 
         match event {
             RuntimeEvent::Started { identity, .. } => {
-                self.show_transient_status_notice(&format!("Runtime ready: {}", identity.label));
+                self.show_toast(
+                    ToastSeverity::Info,
+                    format!("Runtime ready: {}", identity.label),
+                );
             }
             RuntimeEvent::StartFailed { message, .. } => {
-                self.show_transient_status_notice(&format!("Runtime start failed: {message}"));
+                self.show_toast(
+                    ToastSeverity::Error,
+                    format!("Runtime start failed: {message}"),
+                );
             }
             RuntimeEvent::SystemMessage { message, .. } => {
                 self.flush_runtime_response_buffer();
@@ -95,7 +102,7 @@ impl RuntimeEventApply for Model {
             }
             RuntimeEvent::PermissionCancelled { .. } => {
                 self.close_tool_approval_panel();
-                self.show_transient_status_notice("Runtime permission request cancelled");
+                self.show_toast(ToastSeverity::Info, "Runtime permission request cancelled");
             }
             RuntimeEvent::SessionListLoaded { rows } => {
                 self.apply_session_picker_rows(rows);
@@ -221,7 +228,7 @@ impl RuntimeEventApply for Model {
                 self.finish_stream_activity_with_work_summary();
                 self.reset_runtime_final_body_divider_state();
                 if let Some(message) = message {
-                    self.show_transient_status_notice(&format!("Runtime stopped: {message}"));
+                    self.show_toast(ToastSeverity::Error, format!("Runtime stopped: {message}"));
                 }
             }
         }
@@ -271,7 +278,10 @@ impl Model {
         let restored_model = payload.restored_model.clone();
         self.rebuild_transcript_from_replay(payload.transcript);
         self.apply_resumed_model(restored_model);
-        self.show_transient_status_notice(&format!("Resumed session {}", payload.session_id));
+        self.show_toast(
+            ToastSeverity::Info,
+            format!("Resumed session {}", payload.session_id),
+        );
     }
 
     fn rebuild_transcript_from_replay(&mut self, items: Vec<TranscriptReplayItem>) {

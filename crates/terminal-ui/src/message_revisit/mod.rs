@@ -1,7 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    AppEffect, Model, Sender, overlay_input_result::OverlayInputResult, transcript::TranscriptItem,
+    AppEffect, Model, Sender, overlay_input_result::OverlayInputResult, toast::ToastSeverity,
+    transcript::TranscriptItem,
 };
 
 #[cfg(test)]
@@ -30,7 +31,7 @@ impl Model {
             return None;
         }
         if !self.has_message_revisit_target() {
-            self.show_transient_status_notice("No previous user message");
+            self.show_toast(ToastSeverity::Info, "No previous user message");
             return None;
         }
 

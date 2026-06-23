@@ -30,6 +30,11 @@ fn provider_refresh_success_replaces_models_and_drops_stale_selection() {
     assert_eq!(model.selected_model, None);
     assert_eq!(model.model_panel.model_index, 0);
     assert_eq!(model.model_panel.scroll, 0);
+    assert_eq!(model.current_status_notice_text(), "");
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("Models refreshed: Local")
+    );
 }
 
 #[test]
@@ -106,6 +111,32 @@ fn provider_refresh_failure_keeps_existing_models_and_records_error() {
     assert_eq!(
         model.selected_model,
         Some(ModelSelection::new("local", "qwen3"))
+    );
+    assert_eq!(model.current_status_notice_text(), "");
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("Failed to refresh models for Local: connection refused")
+    );
+}
+
+#[test]
+fn model_panel_selection_uses_toast_not_status_notice() {
+    let mut model = model_with_single_provider();
+    model.selected_model = None;
+    model.open_model_panel();
+
+    let effect = model.handle_model_panel_key(KeyEvent::from(KeyCode::Enter));
+
+    assert_eq!(
+        effect.into_effect(),
+        Some(AppEffect::PersistSelectedModel {
+            selection: ModelSelection::new("local", "qwen3")
+        })
+    );
+    assert_eq!(model.current_status_notice_text(), "");
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("Model selected: [Local] qwen3")
     );
 }
 

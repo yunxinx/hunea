@@ -38,6 +38,7 @@ use crate::{
         system_error_text_style, table_header_text_style, tertiary_text_style,
     },
     time::current_unix_timestamp_ms,
+    toast::ToastSeverity,
     tool_result::ToolActivityRenderMode,
     transcript::{ReasoningRenderMode, preview_page_offset as entry_tree_preview_page_offset},
     transcript_overlay::{

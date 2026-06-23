@@ -87,6 +87,9 @@ impl Model {
             ModalLayer::CopyPicker if self.copy_picker_preview_active() => {
                 Some(TerminalMouseModePreference::NativeWithAlternateScroll)
             }
+            ModalLayer::MessageHistory if self.message_history_picker_preview_active() => {
+                Some(TerminalMouseModePreference::NativeWithAlternateScroll)
+            }
             ModalLayer::EntryTree | ModalLayer::CopyPicker | ModalLayer::MessageHistory => {
                 Some(TerminalMouseModePreference::CaptureWithAlternateScroll)
             }

@@ -19,11 +19,24 @@ use crate::{
         build_page_rule, command_accent_text_style, primary_text_style, secondary_text_style,
         subtle_rule_line, tertiary_text_style,
     },
+    transcript_overlay::{
+        TranscriptOverlayProgressStyle, TranscriptOverlayRenderOptions,
+        render_transcript_overlay_view,
+    },
 };
 
 const MESSAGE_HISTORY_MARKER_WIDTH: usize = 2;
 impl Model {
-    pub(crate) fn render_message_history_picker(&self, frame: &mut RenderFrame<'_>, area: Rect) {
+    pub(crate) fn render_message_history_picker(
+        &mut self,
+        frame: &mut RenderFrame<'_>,
+        area: Rect,
+    ) {
+        if self.message_history_picker_preview_active() {
+            self.render_message_history_picker_preview(frame, area);
+            return;
+        }
+
         let Some(state) = self.message_history_picker.as_ref() else {
             return;
         };
@@ -157,6 +170,38 @@ impl Model {
             Span::raw(" "),
             Span::styled(timestamp, tertiary_text_style(self.palette)),
         ])
+    }
+
+    fn render_message_history_picker_preview(&mut self, frame: &mut RenderFrame<'_>, area: Rect) {
+        let palette = self.palette;
+        let content_height = usize::from(area.height.saturating_sub(2).max(1));
+        let Some(preview) = self
+            .message_history_picker
+            .as_mut()
+            .and_then(|state| state.preview.as_mut())
+        else {
+            return;
+        };
+        render_transcript_overlay_view(
+            frame,
+            area,
+            &mut preview.transcript_preview.transcript,
+            &mut preview.transcript_preview.overlay,
+            TranscriptOverlayRenderOptions {
+                palette,
+                content_height,
+                footer_hint: message_history_picker_preview_footer_hint(area.width),
+                progress_style: TranscriptOverlayProgressStyle::Page,
+            },
+        );
+    }
+}
+
+fn message_history_picker_preview_footer_hint(width: u16) -> &'static str {
+    if usize::from(width) >= 48 {
+        "Esc/Space: back  c: copy  ↑↓/hl: scroll"
+    } else {
+        "Esc: back"
     }
 }
 

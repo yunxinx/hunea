@@ -369,6 +369,7 @@ impl Model {
         }
         self.sync_copy_picker_preview_width(width);
         self.sync_entry_tree_preview_width(width);
+        self.sync_message_history_picker_preview_width(width);
         self.composer.set_width(width);
         if width_changed {
             self.sync_transcript_render();
@@ -397,6 +398,7 @@ impl Model {
         }
         self.sync_copy_picker_preview_palette(palette);
         self.sync_entry_tree_preview_palette(palette);
+        self.sync_message_history_picker_preview_palette(palette);
         if palette_changed {
             self.sync_transcript_render();
         }

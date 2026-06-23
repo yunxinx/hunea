@@ -317,7 +317,11 @@ impl Model {
                 OverlayInputResult::Handled
             }
             Some(ModalLayer::MessageHistory) => {
-                self.move_message_history_picker_selection_by_delta(delta_lines.signum());
+                if self.message_history_picker_preview_active() {
+                    self.move_message_history_picker_preview_page(delta_lines.signum());
+                } else {
+                    self.move_message_history_picker_selection_by_delta(delta_lines.signum());
+                }
                 OverlayInputResult::Handled
             }
             Some(ModalLayer::TranscriptOverlay) => OverlayInputResult::Handled,
@@ -885,6 +889,7 @@ impl Model {
         self.restore_transcript_overlay_scroll_anchor(transcript_overlay_anchor);
         self.sync_copy_picker_preview_follow_bottom();
         self.sync_entry_tree_preview_follow_bottom();
+        self.sync_message_history_picker_preview_follow_bottom();
     }
 }
 

@@ -9,6 +9,13 @@ pub(crate) struct MessageHistoryPickerState {
     pub(super) opened_at_ms: i64,
     pub(super) is_loading: bool,
     pub(super) error: Option<String>,
+    pub(super) preview: Option<MessageHistoryPickerPreviewState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MessageHistoryPickerPreviewState {
+    pub(super) row_index: usize,
+    pub(super) transcript_preview: crate::transcript_preview::TranscriptPreviewState,
 }
 
 impl Default for MessageHistoryPickerState {
@@ -19,6 +26,7 @@ impl Default for MessageHistoryPickerState {
             opened_at_ms: 0,
             is_loading: true,
             error: None,
+            preview: None,
         }
     }
 }
@@ -62,5 +70,13 @@ impl MessageHistoryPickerState {
 
     pub(super) fn selected_row(&self) -> Option<&MessageHistoryRow> {
         self.rows.get(self.selected)
+    }
+
+    /// 复制完整消息正文（列表截断宽度不影响 payload）。
+    pub(super) fn copy_payload_full_text(&self) -> Option<String> {
+        if let Some(preview) = self.preview.as_ref() {
+            return self.rows.get(preview.row_index).map(|row| row.text.clone());
+        }
+        self.selected_row().map(|row| row.text.clone())
     }
 }

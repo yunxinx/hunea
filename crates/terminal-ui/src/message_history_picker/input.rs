@@ -63,6 +63,14 @@ impl Model {
             return OverlayInputResult::Ignored;
         }
 
+        if self.message_history_picker_preview_active() {
+            return self.handle_message_history_picker_preview_key(key);
+        }
+
+        if key.code == KeyCode::Char('c') && key.modifiers.is_empty() {
+            return OverlayInputResult::from_effect(self.message_history_picker_copy_effect());
+        }
+
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.message_history_picker = None;
@@ -94,9 +102,21 @@ impl Model {
                 }
                 OverlayInputResult::Handled
             }
+            KeyCode::Char(' ') if key.modifiers.is_empty() => {
+                self.open_message_history_picker_preview();
+                OverlayInputResult::Handled
+            }
             KeyCode::Enter => self.handle_message_history_picker_enter(),
             _ => OverlayInputResult::Handled,
         }
+    }
+
+    pub(crate) fn message_history_picker_copy_effect(&mut self) -> Option<AppEffect> {
+        let payload = self
+            .message_history_picker
+            .as_ref()
+            .and_then(MessageHistoryPickerState::copy_payload_full_text);
+        payload.map(AppEffect::CopySelection)
     }
 
     fn handle_message_history_picker_enter(&mut self) -> OverlayInputResult {

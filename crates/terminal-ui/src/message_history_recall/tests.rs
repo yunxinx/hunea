@@ -116,3 +116,13 @@ fn push_local_resets_navigation() {
     assert_eq!(state.history_cursor(), None);
     assert_eq!(state.last_history_text(), None);
 }
+
+#[test]
+fn apply_recalled_text_sets_last_history_and_cursor_when_in_cache() {
+    let mut state = BlindRecallState::default();
+    state.replace_cache(vec![entry("a"), entry("b")]);
+    state.apply_recalled_text("b");
+    assert_eq!(state.last_history_text(), Some("b"));
+    assert_eq!(state.history_cursor(), Some(1));
+    assert!(state.should_handle_navigation("b", 1));
+}

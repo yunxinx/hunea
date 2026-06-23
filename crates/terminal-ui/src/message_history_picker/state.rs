@@ -60,7 +60,6 @@ impl MessageHistoryPickerState {
         self.selection().selected_position_label()
     }
 
-    #[allow(dead_code)] // issue 014 Enter restore
     pub(super) fn selected_row(&self) -> Option<&MessageHistoryRow> {
         self.rows.get(self.selected)
     }

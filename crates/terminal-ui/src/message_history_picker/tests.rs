@@ -104,10 +104,56 @@ fn empty_history_shows_empty_state_and_esc_closes() {
 }
 
 #[test]
-fn enter_is_swallowed_without_closing_picker() {
+fn enter_with_empty_composer_restores_selected_and_closes_picker() {
     let mut model = ready_picker_model();
-    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
-    assert!(model.message_history_picker_active());
+    assert!(model.composer_text().is_empty());
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert!(!model.message_history_picker_active());
+    assert_eq!(model.composer_text(), "newest prompt");
+    assert_eq!(
+        model.blind_recall().last_history_text(),
+        Some("newest prompt")
+    );
+}
+
+#[test]
+fn enter_with_nonempty_composer_records_draft_then_restores() {
+    let mut model = ready_picker_model();
+    model
+        .composer_mut()
+        .replace_text_and_move_to_end_for_edit("draft kept".to_string());
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert_eq!(model.message_history_picker.as_ref().unwrap().selected, 0);
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::RecordMessageHistory {
+            text: "draft kept".to_string(),
+        })
+    );
+    assert!(!model.message_history_picker_active());
+    assert_eq!(model.composer_text(), "older prompt");
+    assert_eq!(
+        model.blind_recall().last_history_text(),
+        Some("older prompt")
+    );
+}
+
+#[test]
+fn enter_does_not_emit_rewind_or_session_effects() {
+    let mut model = ready_picker_model();
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    assert!(!matches!(
+        effect,
+        Some(AppEffect::SelectEntryRewind { .. })
+            | Some(AppEffect::OpenEntryRewind)
+            | Some(AppEffect::SwitchBranch { .. })
+    ));
 }
 
 #[test]

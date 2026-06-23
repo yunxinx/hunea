@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use session_store::MessageHistoryRow;
 
 use crate::{
-    Model, fullscreen_list_chrome::fullscreen_list_page_size_for_height,
+    AppEffect, Model, fullscreen_list_chrome::fullscreen_list_page_size_for_height,
     list_selection::ListNavigationDirection, overlay_input_result::OverlayInputResult,
 };
 
@@ -94,9 +94,58 @@ impl Model {
                 }
                 OverlayInputResult::Handled
             }
-            KeyCode::Enter => OverlayInputResult::Handled,
+            KeyCode::Enter => self.handle_message_history_picker_enter(),
             _ => OverlayInputResult::Handled,
         }
+    }
+
+    fn handle_message_history_picker_enter(&mut self) -> OverlayInputResult {
+        let Some(state) = self.message_history_picker.as_ref() else {
+            return OverlayInputResult::Handled;
+        };
+        if state.is_loading || state.error.is_some() {
+            return OverlayInputResult::Handled;
+        }
+        let Some(row) = state.selected_row().cloned() else {
+            self.message_history_picker = None;
+            return OverlayInputResult::Handled;
+        };
+
+        let draft = self.composer_text().to_string();
+        let recalled = row.text;
+
+        self.message_history_picker = None;
+
+        let record_effect = if !draft.is_empty() {
+            self.blind_recall.push_local_entry(draft.clone());
+            Some(AppEffect::RecordMessageHistory { text: draft })
+        } else {
+            None
+        };
+
+        self.apply_message_history_picker_recall(&recalled);
+
+        OverlayInputResult::from_effect(record_effect)
+    }
+
+    fn apply_message_history_picker_recall(&mut self, text: &str) {
+        let old_value = self.composer_text().to_string();
+        let old_line = self.composer.line();
+        let old_column = self.composer.column();
+
+        if text.is_empty() {
+            self.composer_mut().clear_for_edit();
+        } else {
+            self.composer_mut()
+                .reset_text_and_move_to_end(text.to_string());
+        }
+        self.blind_recall.apply_recalled_text(text);
+
+        self.sync_command_panel_navigation();
+        self.sync_file_picker_state();
+        self.sync_external_editor_helper_after_draft_change(&old_value);
+        self.sync_composer_height();
+        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
     }
 
     pub(crate) fn can_open_message_history_picker_via_ctrl_r(&self) -> bool {

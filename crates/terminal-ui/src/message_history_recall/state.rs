@@ -120,6 +120,12 @@ impl BlindRecallState {
         self.history_cursor = None;
         self.last_history_text = None;
     }
+
+    /// Picker Enter 恢复全文后，与盲回溯 Up 填入条目一致的门控状态。
+    pub(crate) fn apply_recalled_text(&mut self, text: &str) {
+        self.history_cursor = self.cache.iter().rposition(|entry| entry.text == text);
+        self.last_history_text = Some(text.to_string());
+    }
 }
 
 fn current_ts_millis() -> i64 {

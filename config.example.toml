@@ -77,6 +77,10 @@ ctrl_c_clears_input = true
 # 取值范围 1..200，默认 50。
 composer_undo_limit = 50
 
+# `message_history_limit` 控制全局 message history 最大保留条数（跨项目）。
+# 取值范围 100..1000，默认 100。
+message_history_limit = 100
+
 # `esc_interrupt_presses` 控制当前对话 turn 运行中，
 # 需要连续按多少次 Esc 才会中断当前 native 请求。
 # 可选值为 1、2、3；默认 2。

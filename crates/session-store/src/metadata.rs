@@ -93,6 +93,37 @@ impl MetadataIndex {
         .await
     }
 
+    pub(crate) async fn record_message_history(
+        &self,
+        text: String,
+        limit: usize,
+    ) -> Result<(), SessionStoreError> {
+        let index_path = (*self.index_path).clone();
+        spawn_index_task(move || {
+            crate::message_history::record_message_history(&index_path, &text, limit)
+        })
+        .await
+    }
+
+    pub(crate) async fn load_message_history_recent(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<crate::MessageHistoryEntry>, SessionStoreError> {
+        let index_path = (*self.index_path).clone();
+        spawn_index_task(move || {
+            crate::message_history::load_message_history_recent(&index_path, limit)
+        })
+        .await
+    }
+
+    pub(crate) async fn load_message_history_all(
+        &self,
+    ) -> Result<Vec<crate::MessageHistoryRow>, SessionStoreError> {
+        let index_path = (*self.index_path).clone();
+        spawn_index_task(move || crate::message_history::load_message_history_all(&index_path))
+            .await
+    }
+
     async fn run_blocking<T>(
         &self,
         operation: impl FnOnce(PathBuf, PathBuf) -> Result<T, SessionStoreError> + Send + 'static,
@@ -139,7 +170,7 @@ fn initialize_database_with_retry(index_path: &Path) -> Result<(), SessionStoreE
     })
 }
 
-fn with_connection<T>(
+pub(crate) fn with_connection<T>(
     index_path: &Path,
     operation: impl FnOnce(&Connection) -> Result<T, SessionStoreError>,
 ) -> Result<T, SessionStoreError> {
@@ -204,6 +235,12 @@ fn initialize_database_schema(conn: &Connection) -> Result<(), SessionStoreError
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_session_repair_state_jsonl_path
         ON session_repair_state(jsonl_path);
+
+        CREATE TABLE IF NOT EXISTS message_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            text TEXT NOT NULL
+        );
         ",
     )
     .map_err(sqlite_error)

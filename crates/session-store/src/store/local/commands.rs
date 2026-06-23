@@ -307,4 +307,37 @@ impl SessionStore for LocalSessionStore {
             Ok(())
         })
     }
+
+    fn record_message_history<'a>(
+        &'a self,
+        text: String,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move { self.index.record_message_history(text, limit).await })
+    }
+
+    fn load_message_history_recent<'a>(
+        &'a self,
+        limit: usize,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<crate::MessageHistoryEntry>, SessionStoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move { self.index.load_message_history_recent(limit).await })
+    }
+
+    fn load_message_history_all<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<crate::MessageHistoryRow>, SessionStoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move { self.index.load_message_history_all().await })
+    }
 }

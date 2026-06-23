@@ -3,7 +3,8 @@ use std::path::Path;
 use runtime_domain::envinfo;
 
 use super::{
-    COMPOSER_UNDO_MAX_LIMIT, COMPOSER_UNDO_MIN_LIMIT,
+    COMPOSER_UNDO_MAX_LIMIT, COMPOSER_UNDO_MIN_LIMIT, MESSAGE_HISTORY_LIMIT_MAX,
+    MESSAGE_HISTORY_LIMIT_MIN,
     error::AppConfigError,
     types::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT},
 };
@@ -76,6 +77,20 @@ pub(super) fn validate_composer_undo_limit(
 ) -> Result<usize, AppConfigError> {
     if !(COMPOSER_UNDO_MIN_LIMIT..=COMPOSER_UNDO_MAX_LIMIT).contains(&value) {
         return Err(AppConfigError::InvalidComposerUndoLimit {
+            path: Some(path.to_path_buf()),
+            value,
+        });
+    }
+
+    Ok(value)
+}
+
+pub(super) fn validate_message_history_limit(
+    value: usize,
+    path: &Path,
+) -> Result<usize, AppConfigError> {
+    if !(MESSAGE_HISTORY_LIMIT_MIN..=MESSAGE_HISTORY_LIMIT_MAX).contains(&value) {
+        return Err(AppConfigError::InvalidMessageHistoryLimit {
             path: Some(path.to_path_buf()),
             value,
         });

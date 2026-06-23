@@ -70,6 +70,14 @@ pub trait RuntimeCoordinator {
     ) -> std::result::Result<(), String> {
         Err("Model refresh runtime is not available".to_string())
     }
+
+    fn record_message_history(
+        &mut self,
+        _text: String,
+        _limit: usize,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
 }
 
 /// `NoopRuntimeCoordinator` 让纯 TUI 构建可以独立运行到模型更新层。

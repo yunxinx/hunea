@@ -123,7 +123,22 @@ pub(super) fn apply_effect_if_needed(
             run_refresh_model_provider_effect(model, runtime_coordinator, request);
             Ok(())
         }
+        AppEffect::RecordMessageHistory { text } => {
+            if let Err(message) =
+                runtime_coordinator.record_message_history(text, model.message_history_limit)
+            {
+                model.show_toast(ToastSeverity::Error, message);
+            }
+            Ok(())
+        }
         AppEffect::SendConversationTurn { request } => {
+            let text = request.message_text();
+            if !text.is_empty()
+                && let Err(message) =
+                    runtime_coordinator.record_message_history(text, model.message_history_limit)
+            {
+                model.show_toast(ToastSeverity::Error, message);
+            }
             run_send_conversation_turn_effect(model, runtime_coordinator, request);
             Ok(())
         }

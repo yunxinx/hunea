@@ -385,4 +385,37 @@ impl SessionStore for InMemorySessionStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }
+
+    fn record_message_history<'a>(
+        &'a self,
+        _text: String,
+        _limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn load_message_history_recent<'a>(
+        &'a self,
+        _limit: usize,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<crate::MessageHistoryEntry>, SessionStoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn load_message_history_all<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<crate::MessageHistoryRow>, SessionStoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(Vec::new()) })
+    }
 }

@@ -11,9 +11,9 @@ use std::{
 use provider_protocol::ConversationItem;
 use runtime_domain::session::TranscriptReplayItem;
 use session_store::{
-    ConfigSnapshot, InMemorySessionStore, ProjectDir, ResolvedSessionState, SessionHeader,
-    SessionId, SessionListOptions, SessionMeta, SessionStore, SessionStoreError,
-    SessionTreeSnapshot,
+    ConfigSnapshot, InMemorySessionStore, MessageHistoryEntry, MessageHistoryRow, ProjectDir,
+    ResolvedSessionState, SessionHeader, SessionId, SessionListOptions, SessionMeta, SessionStore,
+    SessionStoreError, SessionTreeSnapshot,
 };
 
 pub(super) struct LoadCountingSessionStore {
@@ -217,6 +217,30 @@ impl SessionStore for FailingSessionStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.flush_all()
     }
+
+    fn record_message_history<'a>(
+        &'a self,
+        text: String,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.record_message_history(text, limit)
+    }
+
+    fn load_message_history_recent<'a>(
+        &'a self,
+        limit: usize,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Vec<MessageHistoryEntry>, SessionStoreError>> + Send + 'a>,
+    > {
+        self.inner.load_message_history_recent(limit)
+    }
+
+    fn load_message_history_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MessageHistoryRow>, SessionStoreError>> + Send + 'a>>
+    {
+        self.inner.load_message_history_all()
+    }
 }
 
 impl SessionStore for DelayedListSessionStore {
@@ -370,6 +394,30 @@ impl SessionStore for DelayedListSessionStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.flush_all()
     }
+
+    fn record_message_history<'a>(
+        &'a self,
+        text: String,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.record_message_history(text, limit)
+    }
+
+    fn load_message_history_recent<'a>(
+        &'a self,
+        limit: usize,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Vec<MessageHistoryEntry>, SessionStoreError>> + Send + 'a>,
+    > {
+        self.inner.load_message_history_recent(limit)
+    }
+
+    fn load_message_history_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MessageHistoryRow>, SessionStoreError>> + Send + 'a>>
+    {
+        self.inner.load_message_history_all()
+    }
 }
 
 impl LoadCountingSessionStore {
@@ -519,6 +567,30 @@ impl SessionStore for LoadCountingSessionStore {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.flush_all()
+    }
+
+    fn record_message_history<'a>(
+        &'a self,
+        text: String,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.record_message_history(text, limit)
+    }
+
+    fn load_message_history_recent<'a>(
+        &'a self,
+        limit: usize,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Vec<MessageHistoryEntry>, SessionStoreError>> + Send + 'a>,
+    > {
+        self.inner.load_message_history_recent(limit)
+    }
+
+    fn load_message_history_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MessageHistoryRow>, SessionStoreError>> + Send + 'a>>
+    {
+        self.inner.load_message_history_all()
     }
 }
 
@@ -680,5 +752,29 @@ impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.flush_all()
+    }
+
+    fn record_message_history<'a>(
+        &'a self,
+        text: String,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.record_message_history(text, limit)
+    }
+
+    fn load_message_history_recent<'a>(
+        &'a self,
+        limit: usize,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Vec<MessageHistoryEntry>, SessionStoreError>> + Send + 'a>,
+    > {
+        self.inner.load_message_history_recent(limit)
+    }
+
+    fn load_message_history_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MessageHistoryRow>, SessionStoreError>> + Send + 'a>>
+    {
+        self.inner.load_message_history_all()
     }
 }

@@ -55,7 +55,10 @@ fn conversation_message_revisit_prefills_composer_and_truncates_history() {
     );
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
-    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+    let Some(AppEffect::SendConversationTurn {
+        request,
+    }) = effect
+    else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert_eq!(request.message_text(), "second question");

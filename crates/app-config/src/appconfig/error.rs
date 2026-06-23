@@ -3,6 +3,7 @@ use std::{fmt, io, path::PathBuf};
 use super::{
     BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN, COMPOSER_UNDO_MAX_LIMIT,
     COMPOSER_UNDO_MIN_LIMIT, FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT,
+    MESSAGE_HISTORY_LIMIT_MAX, MESSAGE_HISTORY_LIMIT_MIN,
 };
 
 /// `AppConfigError` 描述配置加载或校验失败。
@@ -56,6 +57,10 @@ pub enum AppConfigError {
         value: usize,
     },
     InvalidComposerUndoLimit {
+        path: Option<PathBuf>,
+        value: usize,
+    },
+    InvalidMessageHistoryLimit {
         path: Option<PathBuf>,
         value: usize,
     },
@@ -205,6 +210,22 @@ impl fmt::Display for AppConfigError {
                 "tui.composer_undo_limit must be between {} and {}, got {value}",
                 COMPOSER_UNDO_MIN_LIMIT, COMPOSER_UNDO_MAX_LIMIT
             ),
+            Self::InvalidMessageHistoryLimit {
+                path: Some(path),
+                value,
+            } => write!(
+                f,
+                "validate config file {}: tui.message_history_limit must be between {} and {}, got {}",
+                path.display(),
+                MESSAGE_HISTORY_LIMIT_MIN,
+                MESSAGE_HISTORY_LIMIT_MAX,
+                value
+            ),
+            Self::InvalidMessageHistoryLimit { path: None, value } => write!(
+                f,
+                "tui.message_history_limit must be between {} and {}, got {value}",
+                MESSAGE_HISTORY_LIMIT_MIN, MESSAGE_HISTORY_LIMIT_MAX
+            ),
             Self::InvalidReasoningContentDisplay {
                 path: Some(path),
                 value,
@@ -249,6 +270,7 @@ impl std::error::Error for AppConfigError {
             | Self::InvalidFilePickerPopupHeight { .. }
             | Self::InvalidBranchPickerListRows { .. }
             | Self::InvalidComposerUndoLimit { .. }
+            | Self::InvalidMessageHistoryLimit { .. }
             | Self::InvalidReasoningContentDisplay { .. }
             | Self::InvalidRuntimeRequestPolicy { .. } => None,
         }

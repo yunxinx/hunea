@@ -70,6 +70,9 @@ pub enum AppEffect {
     RefreshModelProvider {
         request: ProviderSyncRequest,
     },
+    RecordMessageHistory {
+        text: String,
+    },
 }
 
 /// `AppEvent` 描述 TUI 模型可处理的外部事件。
@@ -707,6 +710,13 @@ impl Model {
 
     fn handle_composer_clear_input(&mut self) -> Option<AppEffect> {
         let old_value = self.composer_text().to_string();
+        let record_effect = if !old_value.is_empty() {
+            Some(AppEffect::RecordMessageHistory {
+                text: old_value.clone(),
+            })
+        } else {
+            None
+        };
         let old_line = self.composer.line();
         let old_column = self.composer.column();
         self.composer_mut().clear_for_edit();
@@ -715,7 +725,7 @@ impl Model {
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
-        None
+        record_effect
     }
 
     fn handle_composer_send(&mut self) -> Option<AppEffect> {

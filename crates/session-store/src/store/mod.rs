@@ -11,9 +11,10 @@ use runtime_domain::session::TranscriptReplayItem;
 use tokio::task;
 
 use crate::{
-    ConfigSnapshot, ProjectDir, ResolveError, ResolvedSessionState, SessionBranchTreeSnapshot,
-    SessionEntry, SessionEntryKind, SessionHeader, SessionId, SessionListOptions, SessionMeta,
-    SessionStoreError, SessionTreeSnapshot, jsonl::JsonlLoader, meta_derive,
+    ConfigSnapshot, MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN, MessageHistoryEntry, MessageHistoryRow,
+    ProjectDir, ResolveError, ResolvedSessionState, SessionBranchTreeSnapshot, SessionEntry,
+    SessionEntryKind, SessionHeader, SessionId, SessionListOptions, SessionMeta, SessionStoreError,
+    SessionTreeSnapshot, jsonl::JsonlLoader, meta_derive,
 };
 
 mod local;
@@ -133,6 +134,35 @@ pub trait SessionStore: Send + Sync {
     fn flush_all<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
+
+    #[must_use]
+    fn record_message_history<'a>(
+        &'a self,
+        text: String,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
+
+    #[must_use]
+    fn load_message_history_recent<'a>(
+        &'a self,
+        limit: usize,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Vec<MessageHistoryEntry>, SessionStoreError>> + Send + 'a>,
+    >;
+
+    #[must_use]
+    fn load_message_history_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MessageHistoryRow>, SessionStoreError>> + Send + 'a>>;
+
+    /// 启动盲回溯缓存（固定 25 条，oldest-first）。
+    fn load_message_history_startup_cache<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Vec<MessageHistoryEntry>, SessionStoreError>> + Send + 'a>,
+    > {
+        self.load_message_history_recent(MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN)
+    }
 }
 
 pub(super) fn requested_leaf_id<'a>(

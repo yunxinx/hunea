@@ -346,6 +346,16 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
             .map_err(|error| format!("Failed to save default model: {error}"))
     }
 
+    fn record_message_history(&mut self, text: String, limit: usize) -> Result<(), String> {
+        let store = self.session_store()?;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?
+            .block_on(store.record_message_history(text, limit))
+            .map_err(|error| error.to_string())
+    }
+
     fn refresh_model_provider(&mut self, request: ProviderSyncRequest) -> Result<(), String> {
         if self.model_refresh.is_running() {
             return Err("Model refresh is already running".to_string());

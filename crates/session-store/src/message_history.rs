@@ -1,6 +1,8 @@
 //! 全局 message history 持久化（`index.sqlite` 的 `message_history` 表）。
 
-use runtime_domain::session::{MessageHistoryEntry, MessageHistoryRow};
+use runtime_domain::session::{
+    MessageHistoryEntry, MessageHistoryRow, should_record_message_history_text,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::SessionStoreError;
@@ -13,7 +15,7 @@ pub(crate) fn record_message_history(
     text: &str,
     limit: usize,
 ) -> Result<(), SessionStoreError> {
-    if text.is_empty() {
+    if !should_record_message_history_text(text) {
         return Ok(());
     }
 

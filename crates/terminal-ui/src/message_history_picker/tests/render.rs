@@ -1,4 +1,5 @@
 use ratatui::style::Color;
+use runtime_domain::session::MessageHistoryRow;
 
 use crate::{
     Model, StartupBannerOptions,
@@ -73,6 +74,47 @@ fn message_history_picker_render_zebra_stripes_and_timestamp_before_text() {
     }
     assert_eq!(buffer[(0, 2)].bg, default_palette().surface.unwrap());
     assert_eq!(buffer[(0, 3)].bg, Color::Reset);
+}
+
+#[test]
+fn message_history_picker_preview_renders_plain_text_without_user_surface() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_palette(default_palette(), true);
+    model.set_window(80, 12);
+    model.open_message_history_picker_loading_at(10_000);
+    model.apply_message_history_picker_rows(vec![MessageHistoryRow {
+        id: 1,
+        ts: 1_000,
+        text: "preview body".to_string(),
+    }]);
+    model.update(crate::AppEvent::Key(crossterm::event::KeyEvent::from(
+        crossterm::event::KeyCode::Char(' '),
+    )));
+    assert!(model.message_history_picker_preview_active());
+
+    let buffer = render_model_buffer(&mut model, 80, 12);
+    let rows = rendered_rows(&buffer);
+    assert!(
+        rows.iter().any(|row| row.contains("preview body")),
+        "preview should show message text: {rows:?}"
+    );
+    let body_y = rows
+        .iter()
+        .position(|row| row.contains("preview body"))
+        .expect("preview text row");
+    assert_ne!(
+        buffer[(0, body_y as u16)].bg,
+        default_palette().surface.unwrap(),
+        "plain preview must not use composer/user surface background"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("Message preview")),
+        "preview should not add a list-style title header: {rows:?}"
+    );
+    assert!(
+        rows.last().unwrap().contains("Esc back"),
+        "preview keeps overlay-style footer hint: {rows:?}"
+    );
 }
 
 #[test]

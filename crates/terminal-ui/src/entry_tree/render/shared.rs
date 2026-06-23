@@ -213,79 +213,10 @@ pub(in crate::entry_tree::render) fn branch_message_count_label(message_count: u
     }
 }
 
+/// Branch preview 标题等行内文案（无表格列宽 padding）。
 pub(in crate::entry_tree) fn branch_picker_relative_age_label(
     now_ms: i64,
     timestamp_ms: i64,
 ) -> String {
-    const SECONDS_PER_MINUTE: i64 = 60;
-    const MINUTES_PER_HOUR: i64 = 60;
-    const HOURS_PER_DAY: i64 = 24;
-    const DAYS_PER_MONTH: i64 = 30;
-    const DAYS_PER_YEAR: i64 = 365;
-
-    let elapsed_seconds = now_ms.saturating_sub(timestamp_ms).max(0) / 1_000;
-    let elapsed_minutes = elapsed_seconds / SECONDS_PER_MINUTE;
-    let elapsed_hours = elapsed_minutes / MINUTES_PER_HOUR;
-    let elapsed_days = elapsed_hours / HOURS_PER_DAY;
-
-    let years = elapsed_days / DAYS_PER_YEAR;
-    let remaining_days_after_years = elapsed_days % DAYS_PER_YEAR;
-    let months = remaining_days_after_years / DAYS_PER_MONTH;
-    let days = remaining_days_after_years % DAYS_PER_MONTH;
-    let hours = elapsed_hours % HOURS_PER_DAY;
-    let minutes = elapsed_minutes % MINUTES_PER_HOUR;
-    let seconds = elapsed_seconds % SECONDS_PER_MINUTE;
-    two_highest_relative_age_units([
-        RelativeAgeUnit {
-            value: years,
-            suffix: "y",
-        },
-        RelativeAgeUnit {
-            value: months,
-            suffix: "mo",
-        },
-        RelativeAgeUnit {
-            value: days,
-            suffix: "d",
-        },
-        RelativeAgeUnit {
-            value: hours,
-            suffix: "h",
-        },
-        RelativeAgeUnit {
-            value: minutes,
-            suffix: "m",
-        },
-        RelativeAgeUnit {
-            value: seconds,
-            suffix: "s",
-        },
-    ])
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RelativeAgeUnit {
-    value: i64,
-    suffix: &'static str,
-}
-
-fn two_highest_relative_age_units(units: [RelativeAgeUnit; 6]) -> String {
-    let Some(first_index) = units.iter().position(|unit| unit.value > 0) else {
-        return "0s".to_string();
-    };
-    let first = units[first_index];
-    if first.suffix == "s" {
-        return format!("{}{}", first.value, first.suffix);
-    }
-
-    let second = units
-        .iter()
-        .skip(first_index + 1)
-        .find(|unit| unit.value > 0)
-        .copied()
-        .unwrap_or_else(|| units[(first_index + 1).min(units.len() - 1)]);
-    format!(
-        "{}{}·{}{}",
-        first.value, first.suffix, second.value, second.suffix
-    )
+    crate::relative_age::relative_age_label(now_ms, timestamp_ms)
 }

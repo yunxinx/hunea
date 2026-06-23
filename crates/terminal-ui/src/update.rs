@@ -18,7 +18,10 @@ use super::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use runtime_domain::{
     model_catalog::{ModelSelection, ProviderSyncRequest},
-    session::{ConversationTurnRequest, RuntimeTarget, SessionLoadRequestId},
+    session::{
+        ConversationTurnRequest, RuntimeTarget, SessionLoadRequestId,
+        should_record_message_history_text,
+    },
 };
 
 /// `STARTUP_PROBE_TIMEOUT` 是启动阶段等待主题探测结果的最长时长。
@@ -784,13 +787,13 @@ impl Model {
 
     fn handle_composer_clear_input(&mut self) -> Option<AppEffect> {
         let old_value = self.composer_text().to_string();
-        let record_effect = if old_value.is_empty() {
-            None
-        } else {
+        let record_effect = if should_record_message_history_text(&old_value) {
             self.blind_recall.push_local_entry(old_value.clone());
             Some(AppEffect::RecordMessageHistory {
                 text: old_value.clone(),
             })
+        } else {
+            None
         };
         let old_line = self.composer.line();
         let old_column = self.composer.column();

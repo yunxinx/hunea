@@ -1,5 +1,5 @@
 use super::{
-    shared::{EntryTreeWidget, branch_message_count_label, branch_picker_relative_age_label},
+    shared::{EntryTreeWidget, branch_message_count_label},
     *,
 };
 
@@ -178,16 +178,11 @@ fn entry_tree_branch_picker_header_line(
     width: usize,
     palette: crate::theme::TerminalPalette,
 ) -> Line<'static> {
-    let text = format!(
-        "{:padding$}{:<msgs_width$} {:<time_width$} {:<time_width$}",
-        "",
-        "Msgs",
-        "Created",
-        "Updated",
-        padding = BRANCH_PICKER_METADATA_LEFT_PADDING,
-        msgs_width = BRANCH_PICKER_MSGS_WIDTH,
-        time_width = BRANCH_PICKER_TIME_WIDTH,
-    );
+    let left_pad = " ".repeat(BRANCH_PICKER_METADATA_LEFT_PADDING);
+    let msgs = crate::relative_age::pad_display_width_left("Msgs", BRANCH_PICKER_MSGS_WIDTH);
+    let created = crate::relative_age::pad_display_width_left("Created", BRANCH_PICKER_TIME_WIDTH);
+    let updated = crate::relative_age::pad_display_width_left("Updated", BRANCH_PICKER_TIME_WIDTH);
+    let text = format!("{left_pad}{msgs} {created} {updated}");
 
     Line::styled(
         truncate_display_width_with_ellipsis(&text, width.max(1)),
@@ -225,16 +220,16 @@ fn entry_tree_branch_picker_footer_rule_line(
 fn branch_picker_item_text(item: &SessionTreeBranchChoice, now_ms: i64, width: usize) -> String {
     let width = width.max(1);
     let branch = &item.branch;
-    let message_count = branch_message_count_label(branch.message_count);
-    let created = branch_picker_relative_age_label(now_ms, branch.branch_created_at_ms);
-    let updated = branch_picker_relative_age_label(now_ms, branch.latest_updated_at_ms);
-    let metadata_prefix = format!(
-        "{:padding$}{message_count:<msgs_width$} {created:<time_width$} {updated:<time_width$} ",
-        "",
-        padding = BRANCH_PICKER_METADATA_LEFT_PADDING,
-        msgs_width = BRANCH_PICKER_MSGS_WIDTH,
-        time_width = BRANCH_PICKER_TIME_WIDTH,
+    let left_pad = " ".repeat(BRANCH_PICKER_METADATA_LEFT_PADDING);
+    let message_count = crate::relative_age::pad_display_width_left(
+        &branch_message_count_label(branch.message_count),
+        BRANCH_PICKER_MSGS_WIDTH,
     );
+    let created =
+        crate::relative_age::relative_age_label_table_field(now_ms, branch.branch_created_at_ms);
+    let updated =
+        crate::relative_age::relative_age_label_table_field(now_ms, branch.latest_updated_at_ms);
+    let metadata_prefix = format!("{left_pad}{message_count} {created} {updated} ");
     let branch_content = if branch.is_current {
         format!(
             "{metadata_prefix}{:<ENTRY_TREE_KIND_WIDTH$} {}",

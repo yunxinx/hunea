@@ -25,7 +25,9 @@ pub use conversation::{
 pub use event::RuntimeEvent;
 pub use identity::{RuntimeAgentCapabilities, RuntimeIdentity, RuntimePromptCapabilities};
 pub use load_request::SessionLoadRequestId;
-pub use message_history::{MessageHistoryEntry, MessageHistoryRow};
+pub use message_history::{
+    MessageHistoryEntry, MessageHistoryRow, should_record_message_history_text,
+};
 pub use metrics::RuntimeRequestMetrics;
 pub use permission::{
     RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,

@@ -94,7 +94,7 @@ impl BlindRecallState {
 
     /// 本地写入（发送 / Ctrl-C 清输入）：相邻去重、trim 至 25、重置导航。
     pub(crate) fn push_local_entry(&mut self, text: String) {
-        if text.is_empty() {
+        if !runtime_domain::session::should_record_message_history_text(&text) {
             return;
         }
         self.history_cursor = None;

@@ -2764,6 +2764,24 @@ fn type_text(model: &mut Model, text: &str) {
 }
 
 #[test]
+fn ctrl_c_clear_does_not_record_whitespace_only_draft() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            ctrl_c_clears_input: true,
+            ..ModelOptions::default()
+        },
+    );
+    type_text(&mut model, "   ");
+    let effect = model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+    assert_eq!(effect, None);
+    assert!(model.composer_text().is_empty());
+}
+
+#[test]
 fn ctrl_c_clear_records_message_history_when_enabled() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),

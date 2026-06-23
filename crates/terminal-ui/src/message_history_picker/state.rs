@@ -21,7 +21,8 @@ pub(crate) struct MessageHistoryPickerState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MessageHistoryPickerPreviewState {
     pub(super) row_index: usize,
-    pub(super) transcript_preview: crate::transcript_preview::TranscriptPreviewState,
+    pub(super) wrapped_lines: Vec<String>,
+    pub(super) scroll_offset: usize,
 }
 
 impl Default for MessageHistoryPickerState {

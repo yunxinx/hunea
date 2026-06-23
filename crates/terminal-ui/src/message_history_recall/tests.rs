@@ -73,6 +73,15 @@ fn navigate_down_when_not_browsing_is_none() {
 }
 
 #[test]
+fn push_local_skips_whitespace_only() {
+    let mut state = BlindRecallState::default();
+    state.push_local_entry("   ".to_string());
+    assert!(state.cache().is_empty());
+    state.push_local_entry("ok".to_string());
+    assert_eq!(state.cache().len(), 1);
+}
+
+#[test]
 fn push_local_adjacent_dedup_and_trim() {
     let mut state = BlindRecallState::default();
     state.push_local_entry("one".to_string());

@@ -146,6 +146,20 @@ fn enter_with_empty_composer_restores_selected_and_closes_picker() {
 }
 
 #[test]
+fn enter_with_whitespace_only_composer_does_not_record_history() {
+    let mut model = ready_picker_model();
+    model
+        .composer_mut()
+        .replace_text_and_move_to_end_for_edit("   \t  ".to_string());
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert!(!model.message_history_picker_active());
+    assert_eq!(model.composer_text(), "newest prompt");
+}
+
+#[test]
 fn enter_with_nonempty_composer_records_draft_then_restores() {
     let mut model = ready_picker_model();
     model

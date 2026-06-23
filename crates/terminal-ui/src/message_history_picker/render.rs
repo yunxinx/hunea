@@ -20,12 +20,8 @@ use crate::{
     status_line::truncate_display_width_with_ellipsis,
     styled_text::render_line_with_full_width_background,
     theme::{
-        TerminalPalette, build_page_rule, command_accent_text_style, primary_text_style,
-        secondary_text_style, subtle_rule_line, surface_text_style, tertiary_text_style,
-    },
-    transcript_overlay::{
-        TranscriptOverlayProgressStyle, TranscriptOverlayRenderOptions,
-        render_transcript_overlay_view,
+        TerminalPalette, build_page_rule, command_accent_text_style, muted_text_style,
+        primary_text_style, subtle_rule_line, surface_text_style, tertiary_text_style,
     },
 };
 
@@ -216,26 +212,82 @@ impl Model {
     }
 
     fn render_message_history_picker_preview(&mut self, frame: &mut RenderFrame<'_>, area: Rect) {
-        let palette = self.palette;
-        let content_height = usize::from(area.height.saturating_sub(2).max(1));
-        let Some(preview) = self
-            .message_history_picker
-            .as_mut()
-            .and_then(|state| state.preview.as_mut())
-        else {
+        let Some(state) = self.message_history_picker.as_ref() else {
             return;
         };
-        render_transcript_overlay_view(
-            frame,
-            area,
-            &mut preview.transcript_preview.transcript,
-            &mut preview.transcript_preview.overlay,
-            TranscriptOverlayRenderOptions {
-                palette,
+        let Some(preview) = state.preview.as_ref() else {
+            return;
+        };
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        frame.render_widget(Clear, area);
+        let palette = self.palette;
+        let content_height = usize::from(area.height.saturating_sub(2).max(1));
+        let text_style = primary_text_style(palette);
+        let page_size = content_height.max(1);
+        let max_offset = preview.wrapped_lines.len().saturating_sub(page_size);
+        let scroll_offset = preview.scroll_offset.min(max_offset);
+        let (page_number, page_count) =
+            crate::transcript_overlay::render::transcript_overlay_page_progress(
+                preview.wrapped_lines.len(),
                 content_height,
-                footer_hint: message_history_picker_preview_footer_hint(area.width),
-                progress_style: TranscriptOverlayProgressStyle::Page,
-            },
+                scroll_offset,
+            );
+
+        let left_pad = " ".repeat(MESSAGE_HISTORY_BODY_HORIZONTAL_PADDING);
+        let content_bottom = area
+            .y
+            .saturating_add(u16::try_from(content_height).unwrap_or(u16::MAX));
+        let mut row = area.y;
+        for line in preview
+            .wrapped_lines
+            .iter()
+            .skip(scroll_offset)
+            .take(content_height)
+        {
+            if row >= content_bottom {
+                break;
+            }
+            render_line_with_full_width_background(
+                &Line::from(vec![
+                    Span::raw(left_pad.clone()),
+                    Span::styled(line.as_str(), text_style),
+                ]),
+                Rect::new(area.x, row, area.width, 1),
+                frame.buffer_mut(),
+            );
+            row = row.saturating_add(1);
+        }
+
+        let fill_style = muted_text_style(palette);
+        while row < content_bottom {
+            frame.render_widget(
+                Paragraph::new(Line::styled("~", fill_style)),
+                Rect::new(area.x, row, area.width, 1),
+            );
+            row = row.saturating_add(1);
+        }
+
+        if area.height >= 2 {
+            let rule_y = area.y + area.height - 2;
+            frame.render_widget(
+                Paragraph::new(build_page_rule(
+                    area.width,
+                    page_number,
+                    page_count,
+                    palette,
+                )),
+                Rect::new(area.x, rule_y, area.width, 1),
+            );
+        }
+        let footer_y = area.y + area.height - 1;
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                message_history_picker_preview_footer_hint(area.width).to_string(),
+                tertiary_text_style(palette).add_modifier(Modifier::ITALIC),
+            )),
+            Rect::new(area.x, footer_y, area.width, 1),
         );
     }
 }
@@ -257,7 +309,7 @@ fn message_history_picker_content_style(palette: TerminalPalette, is_cursor: boo
     if is_cursor {
         primary_text_style(palette).bold()
     } else {
-        secondary_text_style(palette)
+        primary_text_style(palette)
     }
 }
 

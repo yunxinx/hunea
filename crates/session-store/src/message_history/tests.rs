@@ -59,6 +59,27 @@ async fn record_dedup_adjacent_and_trim() {
 }
 
 #[tokio::test]
+async fn record_skips_whitespace_only_text() {
+    let path = temp_index_path("whitespace");
+    let index = MetadataIndex::open(&path).await.expect("index should open");
+
+    index
+        .record_message_history("   \t\n  ".to_string(), 25)
+        .await
+        .expect("record");
+    index
+        .record_message_history("real".to_string(), 25)
+        .await
+        .expect("record");
+
+    let all = index.load_message_history_all().await.expect("load");
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].text, "real");
+
+    let _ = fs::remove_dir_all(path.parent().expect("parent"));
+}
+
+#[tokio::test]
 async fn lowered_limit_trims_on_next_insert() {
     let path = temp_index_path("lower-limit");
     let index = MetadataIndex::open(&path).await.expect("index should open");

@@ -180,11 +180,11 @@ impl Model {
 
         self.message_history_picker = None;
 
-        let record_effect = if draft.is_empty() {
-            None
-        } else {
+        let record_effect = if runtime_domain::session::should_record_message_history_text(&draft) {
             self.blind_recall.push_local_entry(draft.clone());
             Some(AppEffect::RecordMessageHistory { text: draft })
+        } else {
+            None
         };
 
         self.apply_message_history_picker_recall(&recalled);

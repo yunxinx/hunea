@@ -1,12 +1,5 @@
 use std::{path::PathBuf, time::Duration};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
-use runtime_domain::{
-    model_catalog::{ModelSelection, ProviderSyncRequest},
-    session::{ConversationTurnRequest, RuntimeTarget, SessionLoadRequestId},
-};
-use session_store::MessageHistoryEntry;
-
 use super::{
     ExternalEditorLaunch, Model, Sender,
     composer::{
@@ -15,13 +8,18 @@ use super::{
     },
     document::DocumentAnchorRegion,
     exit_confirmation::EXIT_CONFIRMATION_PROMPT,
-    message_history_recall::{BlindRecallNavigateResult, startup_cache_from_recent},
+    message_history_recall::BlindRecallNavigateResult,
     modal_layer::ModalLayer,
     overlay_input_result::OverlayInputResult,
     path_resolve::resolve_configured_current_dir,
     terminal_text::sanitize_terminal_text,
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},
     toast::ToastSeverity,
+};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
+use runtime_domain::{
+    model_catalog::{ModelSelection, ProviderSyncRequest},
+    session::{ConversationTurnRequest, RuntimeTarget, SessionLoadRequestId},
 };
 
 /// `STARTUP_PROBE_TIMEOUT` 是启动阶段等待主题探测结果的最长时长。
@@ -136,8 +134,6 @@ pub enum AppEvent {
         token: usize,
     },
     StartupReadyTimeout,
-    MessageHistoryStartupCache(Vec<MessageHistoryEntry>),
-    MessageHistoryPickerRows(Vec<session_store::MessageHistoryRow>),
 }
 
 impl Model {
@@ -272,15 +268,6 @@ impl Model {
                 if !self.has_palette() {
                     self.set_palette(terminal_default_palette(), false);
                 }
-                None
-            }
-            AppEvent::MessageHistoryStartupCache(entries) => {
-                self.blind_recall
-                    .replace_cache(startup_cache_from_recent(entries));
-                None
-            }
-            AppEvent::MessageHistoryPickerRows(rows) => {
-                self.apply_message_history_picker_rows(rows);
                 None
             }
         }
@@ -796,15 +783,13 @@ impl Model {
 
     fn handle_composer_clear_input(&mut self) -> Option<AppEffect> {
         let old_value = self.composer_text().to_string();
-        if !old_value.is_empty() {
+        let record_effect = if old_value.is_empty() {
+            None
+        } else {
             self.blind_recall.push_local_entry(old_value.clone());
-        }
-        let record_effect = if !old_value.is_empty() {
             Some(AppEffect::RecordMessageHistory {
                 text: old_value.clone(),
             })
-        } else {
-            None
         };
         let old_line = self.composer.line();
         let old_column = self.composer.column();

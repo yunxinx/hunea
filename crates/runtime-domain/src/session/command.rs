@@ -45,6 +45,12 @@ pub enum RuntimeCommand {
     SelectEntryRewind {
         entry_id: String,
     },
+    LoadMessageHistoryStartupCache,
+    LoadMessageHistoryPickerRows,
+    RecordMessageHistory {
+        text: String,
+        limit: usize,
+    },
     Reset,
 }
 
@@ -105,6 +111,9 @@ impl RuntimeCommand {
             | Self::LoadBranchPreview { .. }
             | Self::SwitchBranch { .. }
             | Self::SelectEntryRewind { .. }
+            | Self::LoadMessageHistoryStartupCache
+            | Self::LoadMessageHistoryPickerRows
+            | Self::RecordMessageHistory { .. }
             | Self::Reset => None,
         }
     }

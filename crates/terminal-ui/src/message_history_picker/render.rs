@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Clear, Paragraph, Widget},
 };
 
-use session_store::MessageHistoryRow;
+use runtime_domain::session::MessageHistoryRow;
 
 use crate::{
     Model,

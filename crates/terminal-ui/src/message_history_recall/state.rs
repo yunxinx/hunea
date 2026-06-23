@@ -1,4 +1,5 @@
-use session_store::{MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN, MessageHistoryEntry};
+use runtime_domain::session::MessageHistoryEntry;
+use session_store::MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN;
 
 /// 盲回溯导航结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,12 +114,6 @@ impl BlindRecallState {
             self.cache.drain(0..overflow);
             self.history_cursor = None;
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn reset_navigation(&mut self) {
-        self.history_cursor = None;
-        self.last_history_text = None;
     }
 
     /// Picker Enter 恢复全文后，与盲回溯 Up 填入条目一致的门控状态。

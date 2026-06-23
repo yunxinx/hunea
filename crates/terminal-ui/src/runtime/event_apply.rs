@@ -182,6 +182,18 @@ impl RuntimeEventApply for Model {
                     self.show_entry_tree_error(&message);
                 }
             }
+            RuntimeEvent::MessageHistoryStartupCacheLoaded { entries } => {
+                self.blind_recall.replace_cache(entries);
+            }
+            RuntimeEvent::MessageHistoryStartupCacheLoadFailed { message } => {
+                self.show_toast(ToastSeverity::Error, message);
+            }
+            RuntimeEvent::MessageHistoryPickerRowsLoaded { rows } => {
+                self.apply_message_history_picker_rows(rows);
+            }
+            RuntimeEvent::MessageHistoryPickerRowsLoadFailed { message } => {
+                self.show_message_history_picker_error(&message);
+            }
             RuntimeEvent::SessionResumed { payload } => {
                 self.apply_session_resume_payload(payload);
             }

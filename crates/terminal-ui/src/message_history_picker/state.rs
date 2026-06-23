@@ -1,4 +1,4 @@
-use session_store::MessageHistoryRow;
+use runtime_domain::session::MessageHistoryRow;
 
 use crate::{
     list_selection::{ListNavigationDirection, PagedSelection},

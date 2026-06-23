@@ -72,33 +72,28 @@ pub trait RuntimeCoordinator {
     ) -> std::result::Result<(), String> {
         Err("Model refresh runtime is not available".to_string())
     }
-
-    fn record_message_history(
-        &mut self,
-        _text: String,
-        _limit: usize,
-    ) -> std::result::Result<(), String> {
-        Ok(())
-    }
-
-    fn load_message_history_startup_cache(
-        &mut self,
-    ) -> std::result::Result<Vec<session_store::MessageHistoryEntry>, String> {
-        Ok(Vec::new())
-    }
-
-    fn load_message_history_picker_rows(
-        &mut self,
-    ) -> std::result::Result<Vec<session_store::MessageHistoryRow>, String> {
-        Ok(Vec::new())
-    }
 }
 
 /// `NoopRuntimeCoordinator` 让纯 TUI 构建可以独立运行到模型更新层。
 #[derive(Debug, Default)]
 pub struct NoopRuntimeCoordinator;
 
-impl RuntimeCoordinator for NoopRuntimeCoordinator {}
+impl RuntimeCoordinator for NoopRuntimeCoordinator {
+    fn dispatch_runtime_command(
+        &mut self,
+        command: RuntimeCommand,
+    ) -> std::result::Result<RuntimeCommandReceipt, String> {
+        match command {
+            RuntimeCommand::LoadMessageHistoryStartupCache
+            | RuntimeCommand::LoadMessageHistoryPickerRows
+            | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
+            _ => Err(match command.target() {
+                Some(target) => format!("Runtime is not available: {}", target.display_label()),
+                None => "Runtime is not available".to_string(),
+            }),
+        }
+    }
+}
 
 /// `run` 启动交互式 TUI，并在退出后返回最终模型。
 pub fn run(startup_banner_options: StartupBannerOptions) -> Result<Model> {
@@ -159,17 +154,10 @@ pub fn run_with_runtime_coordinator(
         "initial terminal resize",
     );
 
-    match runtime_coordinator.load_message_history_startup_cache() {
-        Ok(entries) => {
-            apply_model_event_without_effect(
-                &mut model,
-                AppEvent::MessageHistoryStartupCache(entries),
-                "message history startup cache",
-            );
-        }
-        Err(message) => {
-            model.show_toast(crate::toast::ToastSeverity::Error, message);
-        }
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadMessageHistoryStartupCache)
+    {
+        model.show_toast(crate::toast::ToastSeverity::Error, message);
     }
 
     let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;

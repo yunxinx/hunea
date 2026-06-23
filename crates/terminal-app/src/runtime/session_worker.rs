@@ -105,6 +105,17 @@ enum SessionStoreCommand {
         store: Arc<dyn SessionStore>,
         ack: Sender<Result<(), String>>,
     },
+    LoadMessageHistoryStartupCache {
+        store: Arc<dyn SessionStore>,
+    },
+    LoadMessageHistoryPickerRows {
+        store: Arc<dyn SessionStore>,
+    },
+    RecordMessageHistory {
+        store: Arc<dyn SessionStore>,
+        text: String,
+        limit: usize,
+    },
 }
 
 impl Default for SessionStoreWorker {
@@ -315,6 +326,38 @@ impl SessionStoreWorker {
         receiver
             .recv_timeout(SESSION_SHUTDOWN_WAIT)
             .map_err(|_| "session store flush timed out".to_string())?
+    }
+
+    pub(super) fn load_message_history_startup_cache(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::LoadMessageHistoryStartupCache { store },
+            false,
+        )
+    }
+
+    pub(super) fn load_message_history_picker_rows(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::LoadMessageHistoryPickerRows { store },
+            false,
+        )
+    }
+
+    pub(super) fn record_message_history(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        text: String,
+        limit: usize,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::RecordMessageHistory { store, text, limit },
+            false,
+        )
     }
 
     fn send_command(
@@ -618,6 +661,38 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
             Err(error) => failed(error.to_string(), true),
         },
         SessionStoreCommand::FlushAll { .. } => unreachable!("flush is handled by worker loop"),
+        SessionStoreCommand::LoadMessageHistoryStartupCache { store } => {
+            match store.load_message_history_startup_cache().await {
+                Ok(entries) => SessionStoreWorkerEvent::runtime(
+                    RuntimeEvent::MessageHistoryStartupCacheLoaded { entries },
+                ),
+                Err(error) => SessionStoreWorkerEvent::runtime(
+                    RuntimeEvent::MessageHistoryStartupCacheLoadFailed {
+                        message: error.to_string(),
+                    },
+                ),
+            }
+        }
+        SessionStoreCommand::LoadMessageHistoryPickerRows { store } => {
+            match store.load_message_history_all().await {
+                Ok(rows) => {
+                    SessionStoreWorkerEvent::runtime(RuntimeEvent::MessageHistoryPickerRowsLoaded {
+                        rows,
+                    })
+                }
+                Err(error) => SessionStoreWorkerEvent::runtime(
+                    RuntimeEvent::MessageHistoryPickerRowsLoadFailed {
+                        message: error.to_string(),
+                    },
+                ),
+            }
+        }
+        SessionStoreCommand::RecordMessageHistory { store, text, limit } => {
+            match store.record_message_history(text, limit).await {
+                Ok(()) => SessionStoreWorkerEvent::Noop,
+                Err(error) => failed(error.to_string(), false),
+            }
+        }
     }
 }
 

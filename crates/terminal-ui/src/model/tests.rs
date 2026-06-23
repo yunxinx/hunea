@@ -4,11 +4,12 @@ use std::{
 };
 
 use super::*;
-use session_store::MessageHistoryEntry;
+use runtime_domain::session::MessageHistoryEntry;
 
 use crate::{
     AppEffect, AppEvent, Sender, StyleMode,
     document::DocumentAnchorRegion,
+    runtime::RuntimeEventApply,
     test_helpers::{render_model_buffer, rendered_rows},
     toast::ToastSeverity,
 };
@@ -18,6 +19,7 @@ use runtime_domain::model_catalog::{
 };
 use runtime_domain::phrases::StatusPhraseOrder;
 use runtime_domain::provider::ProviderKind;
+use runtime_domain::session::RuntimeEvent;
 use std::path::{Path, PathBuf};
 
 fn progressive_exactization_fixture() -> Model {
@@ -2814,17 +2816,16 @@ fn slash_command_enter_does_not_emit_message_history_effects() {
     ));
 }
 
-/// `texts` 为 oldest-first；与 SQLite `ORDER BY id DESC` 查询结果一致地反转后写入缓存。
+/// `texts` 为 oldest-first，与 `load_message_history_recent` / 启动缓存语义一致。
 fn seed_blind_recall_cache(model: &mut Model, texts_oldest_first: &[&str]) {
-    let recent_newest_first: Vec<MessageHistoryEntry> = texts_oldest_first
+    let entries: Vec<MessageHistoryEntry> = texts_oldest_first
         .iter()
-        .rev()
         .map(|text| MessageHistoryEntry {
             ts: 1,
             text: (*text).to_string(),
         })
         .collect();
-    let _ = model.update(AppEvent::MessageHistoryStartupCache(recent_newest_first));
+    model.apply_runtime_event(RuntimeEvent::MessageHistoryStartupCacheLoaded { entries });
 }
 
 #[test]

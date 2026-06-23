@@ -1,23 +1,9 @@
 //! 全局 message history 持久化（`index.sqlite` 的 `message_history` 表）。
 
+use runtime_domain::session::{MessageHistoryEntry, MessageHistoryRow};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::SessionStoreError;
-
-/// 单条 message history 记录（盲回溯缓存）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MessageHistoryEntry {
-    pub ts: i64,
-    pub text: String,
-}
-
-/// 带稳定 `id` 的记录，供 history picker 使用。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MessageHistoryRow {
-    pub id: i64,
-    pub ts: i64,
-    pub text: String,
-}
 
 /// 盲回溯启动缓存固定条数（与 PRD 一致）。
 pub const MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN: usize = 25;
@@ -65,20 +51,19 @@ pub(crate) fn load_message_history_recent(
         let mut statement = conn
             .prepare("SELECT ts, text FROM message_history ORDER BY id DESC LIMIT ?1")
             .map_err(sqlite_err)?;
-        let limit_param = i64::try_from(limit).unwrap_or(i64::MAX);
-        let rows = statement
+        let limit_param = i64::try_from(limit).map_err(|_| SessionStoreError::CorruptIndex {
+            message: "message_history recent limit exceeds sqlite INTEGER range".to_string(),
+        })?;
+        let mut entries = statement
             .query_map(params![limit_param], |row| {
                 Ok(MessageHistoryEntry {
                     ts: row.get(0)?,
                     text: row.get(1)?,
                 })
             })
+            .map_err(sqlite_err)?
+            .collect::<Result<Vec<_>, _>>()
             .map_err(sqlite_err)?;
-
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row.map_err(sqlite_err)?);
-        }
         entries.reverse();
         Ok(entries)
     })
@@ -91,7 +76,7 @@ pub(crate) fn load_message_history_all(
         let mut statement = conn
             .prepare("SELECT id, ts, text FROM message_history ORDER BY id ASC")
             .map_err(sqlite_err)?;
-        let rows = statement
+        statement
             .query_map([], |row| {
                 Ok(MessageHistoryRow {
                     id: row.get(0)?,
@@ -99,13 +84,9 @@ pub(crate) fn load_message_history_all(
                     text: row.get(2)?,
                 })
             })
-            .map_err(sqlite_err)?;
-
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row.map_err(sqlite_err)?);
-        }
-        Ok(entries)
+            .map_err(sqlite_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_err)
     })
 }
 

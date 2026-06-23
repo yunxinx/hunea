@@ -174,4 +174,3 @@ fn session_picker_row_matches(row: &SessionPickerRow, query: &str) -> bool {
             .as_deref()
             .is_some_and(|model| contains_case_insensitive(model, query))
 }
-

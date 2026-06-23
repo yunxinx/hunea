@@ -12,12 +12,12 @@ use runtime_domain::model_catalog::{
 
 use super::{
     AppEffect, Model,
-    text_search::contains_case_insensitive,
     inline_panel::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, inline_panel_visible_rows, wrap_inline_text,
     },
     overlay_input_result::OverlayInputResult,
+    text_search::contains_case_insensitive,
     theme::{
         command_accent_text_style, primary_text_style, secondary_text_style, surface_text_style,
         tertiary_text_style,

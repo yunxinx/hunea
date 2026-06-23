@@ -118,7 +118,10 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             | RuntimeCommand::LoadBranchTree { .. }
             | RuntimeCommand::LoadBranchPreview { .. }
             | RuntimeCommand::SwitchBranch { .. }
-            | RuntimeCommand::SelectEntryRewind { .. } => Ok(RuntimeCommandReceipt::Accepted),
+            | RuntimeCommand::SelectEntryRewind { .. }
+            | RuntimeCommand::LoadMessageHistoryStartupCache
+            | RuntimeCommand::LoadMessageHistoryPickerRows
+            | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
         }
     }
 

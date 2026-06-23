@@ -72,6 +72,35 @@ impl AppRuntimeCoordinator {
         )
     }
 
+    pub(super) fn load_message_history_startup_cache(
+        &mut self,
+    ) -> Result<RuntimeCommandReceipt, String> {
+        let store = self.session_store()?;
+        self.session_store_worker
+            .load_message_history_startup_cache(store)?;
+        Ok(RuntimeCommandReceipt::Accepted)
+    }
+
+    pub(super) fn load_message_history_picker_rows(
+        &mut self,
+    ) -> Result<RuntimeCommandReceipt, String> {
+        let store = self.session_store()?;
+        self.session_store_worker
+            .load_message_history_picker_rows(store)?;
+        Ok(RuntimeCommandReceipt::Accepted)
+    }
+
+    pub(super) fn record_message_history(
+        &mut self,
+        text: String,
+        limit: usize,
+    ) -> Result<RuntimeCommandReceipt, String> {
+        let store = self.session_store()?;
+        self.session_store_worker
+            .record_message_history(store, text, limit)?;
+        Ok(RuntimeCommandReceipt::Accepted)
+    }
+
     fn load_session_tree_for_target(
         &mut self,
         target: SessionTreeLoadTarget,

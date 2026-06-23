@@ -122,6 +122,13 @@ impl AppRuntimeCoordinator {
                 leaf_id,
             } => self.switch_branch(request_id, &leaf_id),
             RuntimeCommand::SelectEntryRewind { entry_id } => self.select_entry_rewind(&entry_id),
+            RuntimeCommand::LoadMessageHistoryStartupCache => {
+                self.load_message_history_startup_cache()
+            }
+            RuntimeCommand::LoadMessageHistoryPickerRows => self.load_message_history_picker_rows(),
+            RuntimeCommand::RecordMessageHistory { text, limit } => {
+                self.record_message_history(text, limit)
+            }
             RuntimeCommand::Reset => {
                 self.conversation_worker.reset_after_clear();
                 self.provider_conversation.clear();
@@ -344,40 +351,6 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
         provider_models::write_default_model(self.options.model_config_path.as_deref(), selection)
             .map(|_| ())
             .map_err(|error| format!("Failed to save default model: {error}"))
-    }
-
-    fn record_message_history(&mut self, text: String, limit: usize) -> Result<(), String> {
-        let store = self.session_store()?;
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| error.to_string())?
-            .block_on(store.record_message_history(text, limit))
-            .map_err(|error| error.to_string())
-    }
-
-    fn load_message_history_startup_cache(
-        &mut self,
-    ) -> Result<Vec<session_store::MessageHistoryEntry>, String> {
-        let store = self.session_store()?;
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| error.to_string())?
-            .block_on(store.load_message_history_startup_cache())
-            .map_err(|error| error.to_string())
-    }
-
-    fn load_message_history_picker_rows(
-        &mut self,
-    ) -> Result<Vec<session_store::MessageHistoryRow>, String> {
-        let store = self.session_store()?;
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| error.to_string())?
-            .block_on(store.load_message_history_all())
-            .map_err(|error| error.to_string())
     }
 
     fn refresh_model_provider(&mut self, request: ProviderSyncRequest) -> Result<(), String> {

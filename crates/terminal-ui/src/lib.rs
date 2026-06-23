@@ -48,13 +48,13 @@ mod startup_banner;
 mod status_line;
 mod status_phrases;
 mod stream_activity;
-mod text_search;
 mod style_mode;
 mod styled_text;
 mod terminal_grid;
 mod terminal_text;
 #[cfg(test)]
 mod test_helpers;
+mod text_search;
 mod time;
 mod toast;
 mod tool_approval_panel;

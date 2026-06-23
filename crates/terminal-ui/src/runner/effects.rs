@@ -129,7 +129,10 @@ pub(super) fn apply_effect_if_needed(
         }
         AppEffect::RecordMessageHistory { text } => {
             if let Err(message) =
-                runtime_coordinator.record_message_history(text, model.message_history_limit)
+                runtime_coordinator.dispatch_runtime_command(RuntimeCommand::RecordMessageHistory {
+                    text,
+                    limit: model.message_history_limit,
+                })
             {
                 model.show_toast(ToastSeverity::Error, message);
             }
@@ -138,8 +141,12 @@ pub(super) fn apply_effect_if_needed(
         AppEffect::SendConversationTurn { request } => {
             let text = request.message_text();
             if !text.is_empty()
-                && let Err(message) =
-                    runtime_coordinator.record_message_history(text, model.message_history_limit)
+                && let Err(message) = runtime_coordinator.dispatch_runtime_command(
+                    RuntimeCommand::RecordMessageHistory {
+                        text,
+                        limit: model.message_history_limit,
+                    },
+                )
             {
                 model.show_toast(ToastSeverity::Error, message);
             }
@@ -185,9 +192,10 @@ pub(crate) fn run_open_message_history_picker_effect(
     runtime_coordinator: &mut impl RuntimeCoordinator,
 ) {
     model.open_message_history_picker_loading();
-    match runtime_coordinator.load_message_history_picker_rows() {
-        Ok(rows) => model.apply_message_history_picker_rows(rows),
-        Err(message) => model.show_message_history_picker_error(&message),
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadMessageHistoryPickerRows)
+    {
+        model.show_message_history_picker_error(&message);
     }
 }
 

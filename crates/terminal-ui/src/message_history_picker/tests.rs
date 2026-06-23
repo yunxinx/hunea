@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use session_store::MessageHistoryRow;
+use runtime_domain::session::MessageHistoryRow;
 
 use crate::{AppEffect, AppEvent, Model, StartupBannerOptions, modal_layer::ModalLayer};
 
@@ -302,7 +302,10 @@ fn search_filters_case_insensitive_on_full_text() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('t'))));
     let state = model.message_history_picker.as_ref().unwrap();
     assert_eq!(state.filtered_indices.len(), 2);
-    assert_eq!(state.selected_row().map(|r| r.text.as_str()), Some("GIT diff"));
+    assert_eq!(
+        state.selected_row().map(|r| r.text.as_str()),
+        Some("GIT diff")
+    );
 }
 
 #[test]
@@ -375,7 +378,11 @@ fn filter_preserves_selected_row_when_still_visible() {
     model.apply_message_history_picker_rows(diverse_rows());
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
     assert_eq!(
-        model.message_history_picker.as_ref().unwrap().selected_row_index(),
+        model
+            .message_history_picker
+            .as_ref()
+            .unwrap()
+            .selected_row_index(),
         Some(1)
     );
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('/'))));
@@ -383,11 +390,14 @@ fn filter_preserves_selected_row_when_still_visible() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('a'))));
     let state = model.message_history_picker.as_ref().unwrap();
     assert_eq!(state.selected_row_index(), Some(1));
-    assert_eq!(state.selected_row().map(|r| r.text.as_str()), Some("cargo test"));
+    assert_eq!(
+        state.selected_row().map(|r| r.text.as_str()),
+        Some("cargo test")
+    );
 }
 
 #[test]
-fn noop_coordinator_loads_empty_rows_on_open_effect() {
+fn noop_coordinator_keeps_picker_loading_until_runtime_rows_event() {
     use crate::runner::{NoopRuntimeCoordinator, run_open_message_history_picker_effect};
 
     let mut coordinator = NoopRuntimeCoordinator;
@@ -395,6 +405,7 @@ fn noop_coordinator_loads_empty_rows_on_open_effect() {
     model.set_window(80, 24);
     run_open_message_history_picker_effect(&mut model, &mut coordinator);
     assert!(model.message_history_picker_active());
+    assert!(model.message_history_picker.as_ref().unwrap().is_loading);
     assert!(
         model
             .message_history_picker
@@ -403,5 +414,4 @@ fn noop_coordinator_loads_empty_rows_on_open_effect() {
             .rows
             .is_empty()
     );
-    assert!(!model.message_history_picker.as_ref().unwrap().is_loading);
 }

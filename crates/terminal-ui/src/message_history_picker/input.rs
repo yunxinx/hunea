@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use session_store::MessageHistoryRow;
+use runtime_domain::session::MessageHistoryRow;
 
 use crate::{
     AppEffect, Model, fullscreen_list_chrome::fullscreen_list_page_size_for_height,
@@ -88,9 +88,7 @@ impl Model {
                 self.message_history_picker = None;
                 OverlayInputResult::Handled
             }
-            KeyCode::Char(character)
-                if is_searching && is_picker_search_text_key(&key) =>
-            {
+            KeyCode::Char(character) if is_searching && is_picker_search_text_key(&key) => {
                 if let Some(state) = self.message_history_picker.as_mut() {
                     state.push_search_character(character);
                 }
@@ -167,21 +165,23 @@ impl Model {
         if state.is_loading || state.error.is_some() {
             return OverlayInputResult::Handled;
         }
-        let Some(row) = state.selected_row().cloned() else {
-            self.message_history_picker = None;
-            return OverlayInputResult::Handled;
+        let recalled = match state.selected_row() {
+            Some(row) => row.text.clone(),
+            None => {
+                self.message_history_picker = None;
+                return OverlayInputResult::Handled;
+            }
         };
 
         let draft = self.composer_text().to_string();
-        let recalled = row.text;
 
         self.message_history_picker = None;
 
-        let record_effect = if !draft.is_empty() {
+        let record_effect = if draft.is_empty() {
+            None
+        } else {
             self.blind_recall.push_local_entry(draft.clone());
             Some(AppEffect::RecordMessageHistory { text: draft })
-        } else {
-            None
         };
 
         self.apply_message_history_picker_recall(&recalled);

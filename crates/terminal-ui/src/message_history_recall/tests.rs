@@ -1,6 +1,5 @@
-use session_store::MessageHistoryEntry;
+use runtime_domain::session::MessageHistoryEntry;
 
-use super::startup_cache_from_recent;
 use super::state::{BlindRecallNavigateResult, BlindRecallState};
 
 fn entry(text: &str) -> MessageHistoryEntry {
@@ -8,16 +7,6 @@ fn entry(text: &str) -> MessageHistoryEntry {
         ts: 1,
         text: text.to_string(),
     }
-}
-
-#[test]
-fn startup_cache_reverses_recent_to_oldest_first() {
-    let recent = vec![entry("newest"), entry("middle"), entry("oldest")];
-    let cache = startup_cache_from_recent(recent);
-    assert_eq!(
-        cache.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(),
-        vec!["oldest", "middle", "newest"]
-    );
 }
 
 #[test]

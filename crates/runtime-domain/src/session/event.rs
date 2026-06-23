@@ -1,8 +1,8 @@
 use super::{
-    ConversationResponse, RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics,
-    RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
-    SessionBranchTreePayload, SessionLoadRequestId, SessionPickerRow, SessionPreviewPayload,
-    SessionResumePayload, SessionTreePayload,
+    ConversationResponse, MessageHistoryEntry, MessageHistoryRow, RuntimeIdentity,
+    RuntimePermissionRequest, RuntimeRequestMetrics, RuntimeTarget, RuntimeTerminalSnapshot,
+    RuntimeToolActivity, RuntimeToolActivityUpdate, SessionBranchTreePayload, SessionLoadRequestId,
+    SessionPickerRow, SessionPreviewPayload, SessionResumePayload, SessionTreePayload,
 };
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
@@ -113,6 +113,18 @@ pub enum RuntimeEvent {
         request_id: SessionLoadRequestId,
         message: String,
     },
+    MessageHistoryStartupCacheLoaded {
+        entries: Vec<MessageHistoryEntry>,
+    },
+    MessageHistoryStartupCacheLoadFailed {
+        message: String,
+    },
+    MessageHistoryPickerRowsLoaded {
+        rows: Vec<MessageHistoryRow>,
+    },
+    MessageHistoryPickerRowsLoadFailed {
+        message: String,
+    },
     MessageFinished {
         target: Option<RuntimeTarget>,
         response: ConversationResponse,
@@ -166,7 +178,11 @@ impl RuntimeEvent {
             | Self::SessionBranchTreeLoadFailed { .. }
             | Self::SessionBranchPreviewLoaded { .. }
             | Self::SessionBranchPreviewLoadFailed { .. }
-            | Self::SessionBranchSwitchFailed { .. } => None,
+            | Self::SessionBranchSwitchFailed { .. }
+            | Self::MessageHistoryStartupCacheLoaded { .. }
+            | Self::MessageHistoryStartupCacheLoadFailed { .. }
+            | Self::MessageHistoryPickerRowsLoaded { .. }
+            | Self::MessageHistoryPickerRowsLoadFailed { .. } => None,
         }
     }
 }

@@ -26,6 +26,7 @@ mod list_selection;
 mod markdown_display;
 mod markdown_source;
 mod message;
+mod message_history_picker;
 mod message_history_recall;
 mod message_revisit;
 mod modal_layer;

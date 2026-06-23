@@ -14,6 +14,8 @@ use super::{
 
 mod conversation;
 mod effects;
+#[cfg(test)]
+pub(crate) use effects::run_open_message_history_picker_effect;
 mod event_pipeline;
 mod external_io;
 mod input;
@@ -82,6 +84,12 @@ pub trait RuntimeCoordinator {
     fn load_message_history_startup_cache(
         &mut self,
     ) -> std::result::Result<Vec<session_store::MessageHistoryEntry>, String> {
+        Ok(Vec::new())
+    }
+
+    fn load_message_history_picker_rows(
+        &mut self,
+    ) -> std::result::Result<Vec<session_store::MessageHistoryRow>, String> {
         Ok(Vec::new())
     }
 }

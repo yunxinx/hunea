@@ -33,6 +33,7 @@ pub enum AppEffect {
     LaunchExternalEditor(ExternalEditorLaunch),
     CopySelection(String),
     OpenCopyPicker,
+    OpenMessageHistory,
     ResetRuntimeSession,
     RespondRuntimePermission {
         target: RuntimeTarget,
@@ -136,6 +137,7 @@ pub enum AppEvent {
     },
     StartupReadyTimeout,
     MessageHistoryStartupCache(Vec<MessageHistoryEntry>),
+    MessageHistoryPickerRows(Vec<session_store::MessageHistoryRow>),
 }
 
 impl Model {
@@ -277,6 +279,10 @@ impl Model {
                     .replace_cache(startup_cache_from_recent(entries));
                 None
             }
+            AppEvent::MessageHistoryPickerRows(rows) => {
+                self.apply_message_history_picker_rows(rows);
+                None
+            }
         }
     }
 
@@ -308,6 +314,10 @@ impl Model {
                 } else {
                     self.move_entry_tree_selection_by_delta(delta_lines.signum());
                 }
+                OverlayInputResult::Handled
+            }
+            Some(ModalLayer::MessageHistory) => {
+                self.move_message_history_picker_selection_by_delta(delta_lines.signum());
                 OverlayInputResult::Handled
             }
             Some(ModalLayer::TranscriptOverlay) => OverlayInputResult::Handled,
@@ -345,6 +355,7 @@ impl Model {
             ModalLayer::SessionPicker => self.handle_session_picker_key(key),
             ModalLayer::CopyPicker => self.handle_copy_picker_key(key),
             ModalLayer::EntryTree => self.handle_entry_tree_key(key),
+            ModalLayer::MessageHistory => self.handle_message_history_picker_key(key),
         }
     }
 
@@ -459,6 +470,13 @@ impl Model {
         let result = self.handle_file_picker_key(key);
         if !result.is_ignored() {
             return result.into_effect();
+        }
+
+        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.can_open_message_history_picker_via_ctrl_r() {
+                return Some(AppEffect::OpenMessageHistory);
+            }
+            return None;
         }
 
         if is_plain_esc {

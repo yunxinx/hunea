@@ -75,6 +75,8 @@ pub struct Model {
     pub(super) session_preview: Option<crate::session_preview::SessionPreviewState>,
     pub(super) entry_tree: Option<crate::entry_tree::EntryTreeState>,
     pub(super) copy_picker: Option<CopyPickerState>,
+    pub(super) message_history_picker:
+        Option<crate::message_history_picker::MessageHistoryPickerState>,
     pub(super) next_session_load_request_id: u64,
     pub(super) message_revisit: MessageRevisitState,
     pub(super) runtime_terminal_snapshots: Vec<RuntimeTerminalSnapshot>,
@@ -192,6 +194,7 @@ impl Model {
             session_preview: None,
             entry_tree: None,
             copy_picker: None,
+            message_history_picker: None,
             next_session_load_request_id: 1,
             message_revisit: MessageRevisitState::default(),
             runtime_terminal_snapshots: Vec::new(),

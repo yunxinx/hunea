@@ -58,6 +58,10 @@ pub(super) fn apply_effect_if_needed(
             run_open_copy_picker_effect(model, runtime_coordinator);
             Ok(())
         }
+        AppEffect::OpenMessageHistory => {
+            run_open_message_history_picker_effect(model, runtime_coordinator);
+            Ok(())
+        }
         AppEffect::OpenSessionPreview { session_id } => {
             run_simple_runtime_command_effect(
                 model,
@@ -173,6 +177,17 @@ pub(super) fn run_open_copy_picker_effect(
         .dispatch_runtime_command(RuntimeCommand::LoadCopyPickerTree { request_id })
     {
         model.show_copy_picker_error(&message);
+    }
+}
+
+pub(crate) fn run_open_message_history_picker_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) {
+    model.open_message_history_picker_loading();
+    match runtime_coordinator.load_message_history_picker_rows() {
+        Ok(rows) => model.apply_message_history_picker_rows(rows),
+        Err(message) => model.show_message_history_picker_error(&message),
     }
 }
 

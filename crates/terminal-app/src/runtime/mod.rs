@@ -368,6 +368,18 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
             .map_err(|error| error.to_string())
     }
 
+    fn load_message_history_picker_rows(
+        &mut self,
+    ) -> Result<Vec<session_store::MessageHistoryRow>, String> {
+        let store = self.session_store()?;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?
+            .block_on(store.load_message_history_all())
+            .map_err(|error| error.to_string())
+    }
+
     fn refresh_model_provider(&mut self, request: ProviderSyncRequest) -> Result<(), String> {
         if self.model_refresh.is_running() {
             return Err("Model refresh is already running".to_string());

@@ -83,10 +83,11 @@ impl AppRuntimeCoordinator {
 
     pub(super) fn load_message_history_picker_rows(
         &mut self,
+        request_id: SessionLoadRequestId,
     ) -> Result<RuntimeCommandReceipt, String> {
         let store = self.session_store()?;
         self.session_store_worker
-            .load_message_history_picker_rows(store)?;
+            .load_message_history_picker_rows(store, request_id)?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 

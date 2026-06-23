@@ -1,7 +1,7 @@
 use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin};
 
 use provider_protocol::ConversationItem;
-use runtime_domain::session::TranscriptReplayItem;
+use runtime_domain::session::{TranscriptReplayItem, should_record_message_history_text};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -47,7 +47,7 @@ impl InMemorySessionStore {
         text: String,
         limit: usize,
     ) -> Result<(), SessionStoreError> {
-        if text.is_empty() {
+        if !should_record_message_history_text(&text) {
             return Ok(());
         }
         let mut history = self.message_history.write().await;

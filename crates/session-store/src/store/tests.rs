@@ -18,7 +18,29 @@ use crate::{SessionEntry, SessionEntryKind, SessionHeader, SessionId, metadata::
 use super::{
     SessionStore,
     local::{LocalSessionHandle, LocalSessionStore, MAX_OPEN_SESSION_HANDLES, session_jsonl_path},
+    memory::InMemorySessionStore,
 };
+
+#[tokio::test]
+async fn in_memory_store_skips_whitespace_only_message_history() {
+    let store = InMemorySessionStore::new();
+
+    store
+        .record_message_history("   \t\n  ".to_string(), 25)
+        .await
+        .expect("whitespace record should be accepted as a no-op");
+    store
+        .record_message_history("real".to_string(), 25)
+        .await
+        .expect("real history should be recorded");
+
+    let rows = store
+        .load_message_history_all()
+        .await
+        .expect("history should load");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text, "real");
+}
 
 #[tokio::test]
 async fn local_session_read_paths_do_not_wait_for_write_operation_lock() {

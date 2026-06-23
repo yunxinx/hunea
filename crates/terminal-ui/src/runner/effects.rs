@@ -191,11 +191,11 @@ pub(crate) fn run_open_message_history_picker_effect(
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
 ) {
-    model.open_message_history_picker_loading();
-    if let Err(message) =
-        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadMessageHistoryPickerRows)
+    let request_id = model.open_message_history_picker_loading();
+    if let Err(message) = runtime_coordinator
+        .dispatch_runtime_command(RuntimeCommand::LoadMessageHistoryPickerRows { request_id })
     {
-        model.show_message_history_picker_error(&message);
+        model.show_message_history_picker_error(request_id, &message);
     }
 }
 

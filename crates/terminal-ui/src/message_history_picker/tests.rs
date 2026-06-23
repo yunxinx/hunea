@@ -57,8 +57,8 @@ fn diverse_rows() -> Vec<MessageHistoryRow> {
 fn ready_picker_model() -> Model {
     let mut model = Model::new(StartupBannerOptions::default());
     model.set_window(80, 24);
-    model.open_message_history_picker_loading_at(10_000);
-    model.apply_message_history_picker_rows(sample_rows());
+    let request_id = model.open_message_history_picker_loading_at(10_000);
+    model.apply_message_history_picker_rows(request_id, sample_rows());
     model
 }
 
@@ -120,8 +120,8 @@ fn empty_history_shows_empty_state_and_esc_closes() {
     model
         .composer_mut()
         .replace_text_and_move_to_end_for_edit("composer unchanged".to_string());
-    model.open_message_history_picker_loading_at(5_000);
-    model.apply_message_history_picker_rows(vec![]);
+    let request_id = model.open_message_history_picker_loading_at(5_000);
+    model.apply_message_history_picker_rows(request_id, vec![]);
 
     assert!(model.message_history_picker_active());
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
@@ -212,6 +212,50 @@ fn closing_picker_clears_transient_state() {
 }
 
 #[test]
+fn late_rows_after_close_do_not_reopen_picker() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let request_id = model.open_message_history_picker_loading_at(10_000);
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    model.apply_message_history_picker_rows(request_id, sample_rows());
+
+    assert!(!model.message_history_picker_active());
+}
+
+#[test]
+fn stale_rows_from_previous_open_do_not_replace_current_picker() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let stale_request_id = model.open_message_history_picker_loading_at(10_000);
+    let current_request_id = model.open_message_history_picker_loading_at(11_000);
+
+    model.apply_message_history_picker_rows(stale_request_id, sample_rows());
+
+    let state = model.message_history_picker.as_ref().unwrap();
+    assert!(state.is_loading);
+    assert_eq!(
+        model.message_history_picker_pending_request_id_for_test(),
+        Some(current_request_id)
+    );
+
+    model.apply_message_history_picker_rows(current_request_id, sample_rows());
+
+    let state = model.message_history_picker.as_ref().unwrap();
+    assert!(!state.is_loading);
+    assert_eq!(state.rows.len(), 2);
+}
+
+#[test]
+fn late_error_after_close_does_not_reopen_picker() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let request_id = model.open_message_history_picker_loading_at(10_000);
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    model.show_message_history_picker_error(request_id, "load failed");
+
+    assert!(!model.message_history_picker_active());
+}
+
+#[test]
 fn modal_layer_message_history_is_lowest_priority() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.set_window(80, 12);
@@ -268,8 +312,8 @@ fn c_on_list_copies_full_selected_text() {
 fn c_in_preview_copies_full_text_not_truncated() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.set_window(40, 24);
-    model.open_message_history_picker_loading_at(10_000);
-    model.apply_message_history_picker_rows(long_message_for_copy());
+    let request_id = model.open_message_history_picker_loading_at(10_000);
+    model.apply_message_history_picker_rows(request_id, long_message_for_copy());
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('c'))));
     assert_eq!(
@@ -314,8 +358,8 @@ fn slash_enters_search_without_typing_in_composer() {
 fn search_filters_case_insensitive_on_full_text() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.set_window(80, 24);
-    model.open_message_history_picker_loading_at(10_000);
-    model.apply_message_history_picker_rows(diverse_rows());
+    let request_id = model.open_message_history_picker_loading_at(10_000);
+    model.apply_message_history_picker_rows(request_id, diverse_rows());
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('/'))));
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('g'))));
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('i'))));
@@ -394,8 +438,8 @@ fn search_hjkl_are_query_text_not_navigation() {
 fn filter_preserves_selected_row_when_still_visible() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.set_window(80, 24);
-    model.open_message_history_picker_loading_at(10_000);
-    model.apply_message_history_picker_rows(diverse_rows());
+    let request_id = model.open_message_history_picker_loading_at(10_000);
+    model.apply_message_history_picker_rows(request_id, diverse_rows());
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
     assert_eq!(
         model

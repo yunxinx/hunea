@@ -1,5 +1,8 @@
 //! Message history 在 runtime 事件与命令边界上的载荷类型（持久化由 session-store 负责）。
 
+/// 盲回溯启动缓存固定条数。
+pub const MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN: usize = 25;
+
 /// 盲回溯启动缓存单条记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageHistoryEntry {

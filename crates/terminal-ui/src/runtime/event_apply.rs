@@ -188,11 +188,18 @@ impl RuntimeEventApply for Model {
             RuntimeEvent::MessageHistoryStartupCacheLoadFailed { message } => {
                 self.show_toast(ToastSeverity::Error, message);
             }
-            RuntimeEvent::MessageHistoryPickerRowsLoaded { rows } => {
-                self.apply_message_history_picker_rows(rows);
+            RuntimeEvent::MessageHistoryPickerRowsLoaded { request_id, rows } => {
+                if self.message_history_picker_load_request_matches(request_id) {
+                    self.apply_message_history_picker_rows(request_id, rows);
+                }
             }
-            RuntimeEvent::MessageHistoryPickerRowsLoadFailed { message } => {
-                self.show_message_history_picker_error(&message);
+            RuntimeEvent::MessageHistoryPickerRowsLoadFailed {
+                request_id,
+                message,
+            } => {
+                if self.message_history_picker_load_request_matches(request_id) {
+                    self.show_message_history_picker_error(request_id, &message);
+                }
             }
             RuntimeEvent::MessageHistoryRecordFailed { message } => {
                 self.show_toast(ToastSeverity::Error, message);

@@ -46,7 +46,9 @@ pub enum RuntimeCommand {
         entry_id: String,
     },
     LoadMessageHistoryStartupCache,
-    LoadMessageHistoryPickerRows,
+    LoadMessageHistoryPickerRows {
+        request_id: SessionLoadRequestId,
+    },
     RecordMessageHistory {
         text: String,
         limit: usize,
@@ -112,7 +114,7 @@ impl RuntimeCommand {
             | Self::SwitchBranch { .. }
             | Self::SelectEntryRewind { .. }
             | Self::LoadMessageHistoryStartupCache
-            | Self::LoadMessageHistoryPickerRows
+            | Self::LoadMessageHistoryPickerRows { .. }
             | Self::RecordMessageHistory { .. }
             | Self::Reset => None,
         }

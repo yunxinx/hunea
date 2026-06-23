@@ -125,7 +125,9 @@ impl AppRuntimeCoordinator {
             RuntimeCommand::LoadMessageHistoryStartupCache => {
                 self.load_message_history_startup_cache()
             }
-            RuntimeCommand::LoadMessageHistoryPickerRows => self.load_message_history_picker_rows(),
+            RuntimeCommand::LoadMessageHistoryPickerRows { request_id } => {
+                self.load_message_history_picker_rows(request_id)
+            }
             RuntimeCommand::RecordMessageHistory { text, limit } => {
                 self.record_message_history(text, limit)
             }

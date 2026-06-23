@@ -85,7 +85,7 @@ impl RuntimeCoordinator for NoopRuntimeCoordinator {
     ) -> std::result::Result<RuntimeCommandReceipt, String> {
         match command {
             RuntimeCommand::LoadMessageHistoryStartupCache
-            | RuntimeCommand::LoadMessageHistoryPickerRows
+            | RuntimeCommand::LoadMessageHistoryPickerRows { .. }
             | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
             _ => Err(match command.target() {
                 Some(target) => format!("Runtime is not available: {}", target.display_label()),

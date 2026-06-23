@@ -48,8 +48,8 @@ fn message_history_picker_render_zebra_stripes_and_timestamp_before_text() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.set_palette(default_palette(), true);
     model.set_window(80, 12);
-    model.open_message_history_picker_loading_at(10_000);
-    model.apply_message_history_picker_rows(sample_rows());
+    let request_id = model.open_message_history_picker_loading_at(10_000);
+    model.apply_message_history_picker_rows(request_id, sample_rows());
 
     let buffer = render_model_buffer(&mut model, 80, 12);
     let rows = rendered_rows(&buffer);
@@ -81,12 +81,15 @@ fn message_history_picker_preview_renders_plain_text_without_user_surface() {
     let mut model = Model::new(StartupBannerOptions::default());
     model.set_palette(default_palette(), true);
     model.set_window(80, 12);
-    model.open_message_history_picker_loading_at(10_000);
-    model.apply_message_history_picker_rows(vec![MessageHistoryRow {
-        id: 1,
-        ts: 1_000,
-        text: "preview body".to_string(),
-    }]);
+    let request_id = model.open_message_history_picker_loading_at(10_000);
+    model.apply_message_history_picker_rows(
+        request_id,
+        vec![MessageHistoryRow {
+            id: 1,
+            ts: 1_000,
+            text: "preview body".to_string(),
+        }],
+    );
     model.update(crate::AppEvent::Key(crossterm::event::KeyEvent::from(
         crossterm::event::KeyCode::Char(' '),
     )));

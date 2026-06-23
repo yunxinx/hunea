@@ -1,5 +1,5 @@
+use runtime_domain::session::MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN;
 use runtime_domain::session::MessageHistoryEntry;
-use session_store::MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN;
 
 use crate::time::current_unix_timestamp_ms;
 

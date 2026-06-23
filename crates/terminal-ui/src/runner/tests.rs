@@ -3,7 +3,7 @@ use std::time::Duration;
 use super::conversation::{apply_conversation_event, run_send_conversation_turn_effect};
 use super::effects::{
     run_interrupt_current_turn_effect, run_open_branch_preview_effect, run_open_branch_tree_effect,
-    run_open_copy_picker_effect, run_switch_branch_effect,
+    run_open_copy_picker_effect, run_open_message_history_picker_effect, run_switch_branch_effect,
 };
 use super::input::{
     TerminalInputAction, TerminalInputCoalescing, coalesced_input_actions,
@@ -120,7 +120,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             | RuntimeCommand::SwitchBranch { .. }
             | RuntimeCommand::SelectEntryRewind { .. }
             | RuntimeCommand::LoadMessageHistoryStartupCache
-            | RuntimeCommand::LoadMessageHistoryPickerRows
+            | RuntimeCommand::LoadMessageHistoryPickerRows { .. }
             | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
         }
     }
@@ -164,6 +164,23 @@ fn open_copy_picker_effect_dispatches_copy_picker_tree_load() {
     assert_eq!(
         runtime_coordinator.last_command,
         Some(RuntimeCommand::LoadCopyPickerTree { request_id })
+    );
+}
+
+#[test]
+fn open_message_history_effect_dispatches_picker_rows_load_with_request_id() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+
+    run_open_message_history_picker_effect(&mut model, &mut runtime_coordinator);
+
+    assert!(model.message_history_picker_active());
+    let request_id = model
+        .message_history_picker_pending_request_id_for_test()
+        .unwrap();
+    assert_eq!(
+        runtime_coordinator.last_command,
+        Some(RuntimeCommand::LoadMessageHistoryPickerRows { request_id })
     );
 }
 

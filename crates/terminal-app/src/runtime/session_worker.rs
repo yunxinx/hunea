@@ -110,6 +110,7 @@ enum SessionStoreCommand {
     },
     LoadMessageHistoryPickerRows {
         store: Arc<dyn SessionStore>,
+        request_id: SessionLoadRequestId,
     },
     RecordMessageHistory {
         store: Arc<dyn SessionStore>,
@@ -341,9 +342,10 @@ impl SessionStoreWorker {
     pub(super) fn load_message_history_picker_rows(
         &mut self,
         store: Arc<dyn SessionStore>,
+        request_id: SessionLoadRequestId,
     ) -> Result<(), String> {
         self.send_command(
-            SessionStoreCommand::LoadMessageHistoryPickerRows { store },
+            SessionStoreCommand::LoadMessageHistoryPickerRows { store, request_id },
             false,
         )
     }
@@ -673,15 +675,17 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                 ),
             }
         }
-        SessionStoreCommand::LoadMessageHistoryPickerRows { store } => {
+        SessionStoreCommand::LoadMessageHistoryPickerRows { store, request_id } => {
             match store.load_message_history_all().await {
                 Ok(rows) => {
                     SessionStoreWorkerEvent::runtime(RuntimeEvent::MessageHistoryPickerRowsLoaded {
+                        request_id,
                         rows,
                     })
                 }
                 Err(error) => SessionStoreWorkerEvent::runtime(
                     RuntimeEvent::MessageHistoryPickerRowsLoadFailed {
+                        request_id,
                         message: error.to_string(),
                     },
                 ),

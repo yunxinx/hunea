@@ -18,7 +18,6 @@ pub(crate) mod recorder;
 mod store;
 pub(crate) mod util;
 
-pub use message_history::MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN;
 pub use runtime_domain::session::{MessageHistoryEntry, MessageHistoryRow};
 pub use store::{InMemorySessionStore, LocalSessionStore, SessionStore};
 

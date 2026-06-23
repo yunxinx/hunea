@@ -1,4 +1,4 @@
-use runtime_domain::session::MessageHistoryRow;
+use runtime_domain::session::{MessageHistoryRow, SessionLoadRequestId};
 
 use crate::{
     list_selection::{ListNavigationDirection, PagedSelection},
@@ -11,6 +11,7 @@ pub(crate) struct MessageHistoryPickerState {
     pub(super) filtered_indices: Vec<usize>,
     pub(super) selected: usize,
     pub(super) opened_at_ms: i64,
+    pub(super) pending_request_id: Option<SessionLoadRequestId>,
     pub(super) search_query: String,
     pub(super) is_searching: bool,
     pub(super) is_loading: bool,
@@ -32,6 +33,7 @@ impl Default for MessageHistoryPickerState {
             filtered_indices: Vec::new(),
             selected: 0,
             opened_at_ms: 0,
+            pending_request_id: None,
             search_query: String::new(),
             is_searching: false,
             is_loading: true,

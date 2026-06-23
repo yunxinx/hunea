@@ -7,9 +7,6 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::SessionStoreError;
 
-/// 盲回溯启动缓存固定条数（与 PRD 一致）。
-pub const MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN: usize = 25;
-
 pub(crate) fn record_message_history(
     index_path: &std::path::Path,
     text: &str,

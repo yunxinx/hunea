@@ -120,9 +120,11 @@ pub enum RuntimeEvent {
         message: String,
     },
     MessageHistoryPickerRowsLoaded {
+        request_id: SessionLoadRequestId,
         rows: Vec<MessageHistoryRow>,
     },
     MessageHistoryPickerRowsLoadFailed {
+        request_id: SessionLoadRequestId,
         message: String,
     },
     MessageHistoryRecordFailed {

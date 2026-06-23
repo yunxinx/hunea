@@ -16,10 +16,12 @@ use super::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, inline_panel_visible_rows, wrap_inline_text,
     },
+    overlay_input_result::OverlayInputResult,
     theme::{
         command_accent_text_style, primary_text_style, secondary_text_style, surface_text_style,
         tertiary_text_style,
     },
+    toast::ToastSeverity,
 };
 
 const MODEL_LIST_MAX_VISIBLE_ROWS: usize = 7;
@@ -74,65 +76,62 @@ impl Model {
         self.sync_document_viewport_for_composer_cursor();
     }
 
-    pub(crate) fn handle_model_panel_key(
-        &mut self,
-        key: KeyEvent,
-    ) -> Option<Option<super::AppEffect>> {
+    pub(crate) fn handle_model_panel_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if !self.model_panel_active() {
-            return None;
+            return OverlayInputResult::Ignored;
         }
 
         match key.code {
             KeyCode::Esc => {
                 if self.clear_model_panel_search() {
-                    return Some(None);
+                    return OverlayInputResult::Handled;
                 }
                 self.close_model_panel();
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Left if key.modifiers.is_empty() => {
                 self.move_model_panel_provider(-1);
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Right if key.modifiers.is_empty() => {
                 self.move_model_panel_provider(1);
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
                 self.move_model_panel_provider(1);
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::BackTab => {
                 self.move_model_panel_provider(-1);
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Up if key.modifiers.is_empty() => {
                 self.move_model_panel_model(-1);
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Down if key.modifiers.is_empty() => {
                 self.move_model_panel_model(1);
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Char('u' | 'U') if is_model_refresh_key(key) => {
-                Some(self.refresh_current_model_panel_provider())
+                OverlayInputResult::from_effect(self.refresh_current_model_panel_provider())
             }
             _ if is_model_search_clear_key(key) => {
                 self.clear_model_panel_search();
-                Some(None)
+                OverlayInputResult::Handled
             }
             _ if is_model_search_backspace_key(key) => {
                 self.backspace_model_panel_search();
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
-                Some(self.select_current_model_panel_model())
+                OverlayInputResult::from_effect(self.select_current_model_panel_model())
             }
             KeyCode::Char(character) if is_model_plain_search_key(key) => {
                 self.push_model_panel_search_character(character);
-                Some(None)
+                OverlayInputResult::Handled
             }
-            _ => Some(None),
+            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 
@@ -354,34 +353,33 @@ impl Model {
         let selection = ModelSelection::new(provider_id.clone(), model_id.clone());
         self.selected_model = Some(selection.clone());
         self.bump_status_line_revision();
-        self.show_transient_status_notice(&format!(
-            "Model selected: {}",
-            self.model_selection_display_name(
-                selection.provider_id.as_str(),
-                selection.model_id.as_str()
-            )
-        ));
+        self.show_toast(
+            ToastSeverity::Info,
+            format!(
+                "Model selected: {}",
+                self.model_selection_display_name(
+                    selection.provider_id.as_str(),
+                    selection.model_id.as_str()
+                )
+            ),
+        );
         self.close_model_panel();
         Some(AppEffect::PersistSelectedModel { selection })
     }
 
     fn refresh_current_model_panel_provider(&mut self) -> Option<AppEffect> {
-        let (request, display_name) = {
+        let request = {
             let provider = self.active_model_panel_provider()?;
             let connection = provider.connection();
-            (
-                ProviderSyncRequest {
-                    provider_id: provider.id.clone(),
-                    kind: connection.kind,
-                    display_name: provider.display_name.clone(),
-                    base_url: connection.base_url.clone(),
-                    api_key: connection.api_key.clone(),
-                    api_key_env: connection.api_key_env.clone(),
-                },
-                provider.display_name.clone(),
-            )
+            ProviderSyncRequest {
+                provider_id: provider.id.clone(),
+                kind: connection.kind,
+                display_name: provider.display_name.clone(),
+                base_url: connection.base_url.clone(),
+                api_key: connection.api_key.clone(),
+                api_key_env: connection.api_key_env.clone(),
+            }
         };
-        self.show_transient_status_notice(&format!("Refreshing models: {display_name}"));
         Some(AppEffect::RefreshModelProvider { request })
     }
 
@@ -391,7 +389,10 @@ impl Model {
         model_ids: Vec<String>,
     ) {
         let Some(provider) = self.model_catalog.provider_by_id_mut(provider_id) else {
-            self.show_transient_status_notice("Refreshed provider is no longer available");
+            self.show_toast(
+                ToastSeverity::Error,
+                "Refreshed provider is no longer available",
+            );
             return;
         };
         let display_name = provider.display_name.clone();
@@ -412,7 +413,10 @@ impl Model {
         }
         self.sync_model_panel_to_selection();
         self.sync_composer_height();
-        self.show_transient_status_notice(&format!("Models refreshed: {display_name}"));
+        self.show_toast(
+            ToastSeverity::Info,
+            format!("Models refreshed: {display_name}"),
+        );
     }
 
     pub(crate) fn apply_model_provider_refresh_failure(
@@ -430,11 +434,15 @@ impl Model {
             });
 
         match display_name {
-            Some(display_name) => self.show_transient_status_notice(&format!(
-                "Failed to refresh models for {display_name}: {message}"
-            )),
+            Some(display_name) => self.show_toast(
+                ToastSeverity::Error,
+                format!("Failed to refresh models for {display_name}: {message}"),
+            ),
             None => {
-                self.show_transient_status_notice(&format!("Failed to refresh models: {message}"))
+                self.show_toast(
+                    ToastSeverity::Error,
+                    format!("Failed to refresh models: {message}"),
+                );
             }
         }
         self.refresh_model_panel_view(true);

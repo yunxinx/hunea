@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use super::{
     AppEffect, EscRewindMode, Model, debug,
     display_width::display_width,
+    overlay_input_result::OverlayInputResult,
     selection::SelectableLineRange,
     status_line::{
         status_line_gap_before, status_line_pair_height, truncate_display_width_with_ellipsis,
@@ -26,6 +27,7 @@ pub(super) enum CommandPanelAction {
     Clear,
     Exit,
     OpenResumePicker,
+    OpenCopyPicker,
     OpenEntryRewind,
     OpenCoarseRewind,
     OpenModelPanel,
@@ -58,7 +60,7 @@ pub(crate) struct CommandPanelRenderResult {
 
 impl Model {
     pub(crate) fn command_panel_active(&self) -> bool {
-        if self.tool_approval_panel_active() {
+        if self.blocks_composer_input() {
             return false;
         }
 
@@ -103,38 +105,46 @@ impl Model {
         }
     }
 
-    pub(crate) fn handle_command_panel_key(&mut self, key: KeyEvent) -> Option<Option<AppEffect>> {
-        let state = self.current_command_panel_state()?;
+    pub(crate) fn handle_command_panel_key(&mut self, key: KeyEvent) -> OverlayInputResult {
+        let Some(state) = self.current_command_panel_state() else {
+            return OverlayInputResult::Ignored;
+        };
 
         match key.code {
             KeyCode::Up if key.modifiers.is_empty() => {
                 if state.items.len() <= 1 {
-                    return None;
+                    return OverlayInputResult::Ignored;
                 }
                 self.move_command_panel_selection(-1);
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Down if key.modifiers.is_empty() => {
                 if state.items.len() <= 1 {
-                    return None;
+                    return OverlayInputResult::Ignored;
                 }
                 self.move_command_panel_selection(1);
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
-                let item = state.items.get(state.selected)?;
+                let Some(item) = state.items.get(state.selected) else {
+                    return OverlayInputResult::Ignored;
+                };
                 let completion_text = command_panel_completion_text(item);
                 self.complete_command_panel_selection(&completion_text);
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 // 命令面板的输入是筛选条件，Enter 执行当前选中项；
                 // 子序列匹配出的命令只要已被选中，就和前缀匹配一样可执行。
-                let item = state.items.get(state.selected).cloned()?;
-                Some(self.execute_command_panel_item(item))
+                let Some(item) = state.items.get(state.selected).cloned() else {
+                    return OverlayInputResult::Ignored;
+                };
+                OverlayInputResult::from_effect(self.execute_command_panel_item(item))
             }
-            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => None,
-            _ => None,
+            KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                OverlayInputResult::Ignored
+            }
+            _ => OverlayInputResult::Ignored,
         }
     }
 
@@ -162,7 +172,7 @@ impl Model {
     }
 
     fn current_command_panel_state(&self) -> Option<CommandPanelState> {
-        if self.tool_approval_panel_active() {
+        if self.blocks_composer_input() {
             return None;
         }
 
@@ -385,6 +395,13 @@ impl Model {
                 self.sync_composer_height();
                 Some(AppEffect::OpenResumePicker)
             }
+            CommandPanelAction::OpenCopyPicker => {
+                self.composer_mut().clear();
+                self.sync_command_panel_navigation();
+                self.sync_file_picker_state();
+                self.sync_composer_height();
+                Some(AppEffect::OpenCopyPicker)
+            }
             CommandPanelAction::OpenEntryRewind => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
@@ -485,6 +502,12 @@ fn filter_base_command_panel_items(
         aliases: Vec::new(),
         description: "Resume a previous session".to_string(),
         action: CommandPanelAction::OpenResumePicker,
+    });
+    items.push(CommandPanelItem {
+        name: "/copy".to_string(),
+        aliases: Vec::new(),
+        description: "Pick messages to copy".to_string(),
+        action: CommandPanelAction::OpenCopyPicker,
     });
     if matches!(esc_rewind_mode, EscRewindMode::Entry) {
         items.push(CommandPanelItem {

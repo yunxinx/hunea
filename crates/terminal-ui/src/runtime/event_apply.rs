@@ -9,6 +9,8 @@ use super::super::{
     Model,
     model::RequestMetrics,
     runtime::tool_activity_preview::ToolApprovalPreview,
+    session_tree_preview_replay::SessionTreePreviewReplay,
+    toast::ToastSeverity,
     tool_approval_panel::{ToolApprovalDetail, ToolApprovalSource},
     tool_result::ToolActivityRenderMode,
 };
@@ -28,10 +30,16 @@ impl RuntimeEventApply for Model {
 
         match event {
             RuntimeEvent::Started { identity, .. } => {
-                self.show_transient_status_notice(&format!("Runtime ready: {}", identity.label));
+                self.show_toast(
+                    ToastSeverity::Info,
+                    format!("Runtime ready: {}", identity.label),
+                );
             }
             RuntimeEvent::StartFailed { message, .. } => {
-                self.show_transient_status_notice(&format!("Runtime start failed: {message}"));
+                self.show_toast(
+                    ToastSeverity::Error,
+                    format!("Runtime start failed: {message}"),
+                );
             }
             RuntimeEvent::SystemMessage { message, .. } => {
                 self.flush_runtime_response_buffer();
@@ -94,7 +102,7 @@ impl RuntimeEventApply for Model {
             }
             RuntimeEvent::PermissionCancelled { .. } => {
                 self.close_tool_approval_panel();
-                self.show_transient_status_notice("Runtime permission request cancelled");
+                self.show_toast(ToastSeverity::Info, "Runtime permission request cancelled");
             }
             RuntimeEvent::SessionListLoaded { rows } => {
                 self.apply_session_picker_rows(rows);
@@ -102,14 +110,77 @@ impl RuntimeEventApply for Model {
             RuntimeEvent::SessionPreviewLoaded { payload } => {
                 self.apply_session_preview_payload(payload);
             }
-            RuntimeEvent::SessionTreeLoaded { payload } => {
-                self.apply_entry_tree_payload(payload);
+            RuntimeEvent::SessionTreeLoaded {
+                request_id,
+                payload,
+            } => {
+                if self.entry_tree_load_request_matches(request_id) {
+                    self.apply_entry_tree_payload(payload);
+                }
             }
-            RuntimeEvent::SessionBranchTreeLoaded { payload } => {
-                self.apply_entry_tree_branch_tree_payload(payload);
+            RuntimeEvent::SessionTreeLoadFailed {
+                request_id,
+                message,
+            } => {
+                if self.entry_tree_load_request_matches(request_id) {
+                    self.show_entry_tree_error(&message);
+                }
             }
-            RuntimeEvent::SessionTreePreviewLoaded { payload } => {
-                self.apply_entry_tree_branch_preview_payload(payload);
+            RuntimeEvent::CopyPickerTreeLoaded {
+                request_id,
+                payload,
+            } => {
+                if self.copy_picker_load_request_matches(request_id) {
+                    self.apply_copy_picker_payload(payload);
+                }
+            }
+            RuntimeEvent::CopyPickerTreeLoadFailed {
+                request_id,
+                message,
+            } => {
+                if self.copy_picker_load_request_matches(request_id) {
+                    self.show_copy_picker_error(&message);
+                }
+            }
+            RuntimeEvent::SessionBranchTreeLoaded {
+                request_id,
+                payload,
+            } => {
+                if self.entry_tree_branch_tree_load_request_matches(request_id) {
+                    self.apply_entry_tree_branch_tree_payload(payload);
+                }
+            }
+            RuntimeEvent::SessionBranchTreeLoadFailed {
+                request_id,
+                message,
+            } => {
+                if self.entry_tree_branch_tree_load_request_matches(request_id) {
+                    self.show_entry_tree_branch_tree_error(&message);
+                }
+            }
+            RuntimeEvent::SessionBranchPreviewLoaded {
+                request_id,
+                payload,
+            } => {
+                if self.entry_tree_branch_preview_load_request_matches(request_id) {
+                    self.apply_entry_tree_branch_preview_payload(payload);
+                }
+            }
+            RuntimeEvent::SessionBranchPreviewLoadFailed {
+                request_id,
+                message,
+            } => {
+                if self.entry_tree_branch_preview_load_request_matches(request_id) {
+                    self.show_entry_tree_branch_preview_error(&message);
+                }
+            }
+            RuntimeEvent::SessionBranchSwitchFailed {
+                request_id,
+                message,
+            } => {
+                if self.entry_tree_load_request_matches(request_id) {
+                    self.show_entry_tree_error(&message);
+                }
             }
             RuntimeEvent::SessionResumed { payload } => {
                 self.apply_session_resume_payload(payload);
@@ -157,7 +228,7 @@ impl RuntimeEventApply for Model {
                 self.finish_stream_activity_with_work_summary();
                 self.reset_runtime_final_body_divider_state();
                 if let Some(message) = message {
-                    self.show_transient_status_notice(&format!("Runtime stopped: {message}"));
+                    self.show_toast(ToastSeverity::Error, format!("Runtime stopped: {message}"));
                 }
             }
         }
@@ -207,7 +278,10 @@ impl Model {
         let restored_model = payload.restored_model.clone();
         self.rebuild_transcript_from_replay(payload.transcript);
         self.apply_resumed_model(restored_model);
-        self.show_transient_status_notice(&format!("Resumed session {}", payload.session_id));
+        self.show_toast(
+            ToastSeverity::Info,
+            format!("Resumed session {}", payload.session_id),
+        );
     }
 
     fn rebuild_transcript_from_replay(&mut self, items: Vec<TranscriptReplayItem>) {
@@ -224,7 +298,7 @@ impl Model {
 
     pub(crate) fn transcript_from_replay_items(
         &self,
-        items: Vec<TranscriptReplayItem>,
+        items: impl IntoIterator<Item = TranscriptReplayItem>,
     ) -> crate::transcript::Transcript {
         self.transcript_from_replay_items_with_terminal_snapshots(items, None)
             .0
@@ -232,7 +306,7 @@ impl Model {
 
     pub(crate) fn transcript_from_replay_items_with_tool_activity_render_mode(
         &self,
-        items: Vec<TranscriptReplayItem>,
+        items: impl IntoIterator<Item = TranscriptReplayItem>,
         tool_activity_render_mode: ToolActivityRenderMode,
     ) -> crate::transcript::Transcript {
         self.transcript_from_replay_items_with_terminal_snapshots(
@@ -242,11 +316,46 @@ impl Model {
         .0
     }
 
-    fn transcript_from_replay_items_with_terminal_snapshots(
+    pub(crate) fn transcript_from_session_tree_preview_replay_with_tool_activity_render_mode(
         &self,
-        items: Vec<TranscriptReplayItem>,
+        replay: SessionTreePreviewReplay<'_>,
+        tool_activity_render_mode: ToolActivityRenderMode,
+    ) -> crate::transcript::Transcript {
+        match replay {
+            SessionTreePreviewReplay::Borrowed(items) => self
+                .transcript_from_replay_item_refs_with_tool_activity_render_mode(
+                    items,
+                    tool_activity_render_mode,
+                ),
+            SessionTreePreviewReplay::Fallback(item) => self
+                .transcript_from_replay_items_with_tool_activity_render_mode(
+                    std::iter::once(item),
+                    tool_activity_render_mode,
+                ),
+        }
+    }
+
+    fn transcript_from_replay_item_refs_with_tool_activity_render_mode(
+        &self,
+        items: &[TranscriptReplayItem],
+        tool_activity_render_mode: ToolActivityRenderMode,
+    ) -> crate::transcript::Transcript {
+        self.transcript_from_replay_items_with_terminal_snapshots(
+            items.iter(),
+            Some(tool_activity_render_mode),
+        )
+        .0
+    }
+
+    fn transcript_from_replay_items_with_terminal_snapshots<I, T>(
+        &self,
+        items: I,
         tool_activity_render_mode: Option<ToolActivityRenderMode>,
-    ) -> (crate::transcript::Transcript, Vec<RuntimeTerminalSnapshot>) {
+    ) -> (crate::transcript::Transcript, Vec<RuntimeTerminalSnapshot>)
+    where
+        I: IntoIterator<Item = T>,
+        T: TranscriptReplayItemSource,
+    {
         let mut transcript = crate::transcript::Transcript::new(self.palette);
         transcript.set_gap(1);
         if self.has_window {
@@ -257,12 +366,11 @@ impl Model {
         }
         let mut terminal_snapshots = Vec::new();
         for item in items {
-            if let TranscriptReplayItem::TerminalSnapshot { snapshot } = &item {
+            if let Some(snapshot) = item.terminal_snapshot() {
                 upsert_replay_terminal_snapshot(&mut terminal_snapshots, snapshot.clone());
             }
-            append_transcript_replay_item(
+            item.append_to_transcript(
                 &mut transcript,
-                item,
                 self.style_mode,
                 self.reasoning_display_mode,
             );
@@ -284,6 +392,65 @@ impl Model {
         self.selected_model = Some(selection);
         self.requires_model_selection = true;
         self.bump_status_line_revision();
+    }
+}
+
+trait TranscriptReplayItemSource {
+    fn terminal_snapshot(&self) -> Option<&RuntimeTerminalSnapshot>;
+
+    fn append_to_transcript(
+        self,
+        transcript: &mut crate::transcript::Transcript,
+        style_mode: crate::style_mode::StyleMode,
+        reasoning_display_mode: crate::ReasoningDisplayMode,
+    );
+}
+
+impl TranscriptReplayItemSource for TranscriptReplayItem {
+    fn terminal_snapshot(&self) -> Option<&RuntimeTerminalSnapshot> {
+        transcript_replay_item_terminal_snapshot(self)
+    }
+
+    fn append_to_transcript(
+        self,
+        transcript: &mut crate::transcript::Transcript,
+        style_mode: crate::style_mode::StyleMode,
+        reasoning_display_mode: crate::ReasoningDisplayMode,
+    ) {
+        append_transcript_replay_item(transcript, self, style_mode, reasoning_display_mode);
+    }
+}
+
+impl TranscriptReplayItemSource for &TranscriptReplayItem {
+    fn terminal_snapshot(&self) -> Option<&RuntimeTerminalSnapshot> {
+        transcript_replay_item_terminal_snapshot(self)
+    }
+
+    fn append_to_transcript(
+        self,
+        transcript: &mut crate::transcript::Transcript,
+        style_mode: crate::style_mode::StyleMode,
+        reasoning_display_mode: crate::ReasoningDisplayMode,
+    ) {
+        append_transcript_replay_item(
+            transcript,
+            (*self).clone(),
+            style_mode,
+            reasoning_display_mode,
+        );
+    }
+}
+
+fn transcript_replay_item_terminal_snapshot(
+    item: &TranscriptReplayItem,
+) -> Option<&RuntimeTerminalSnapshot> {
+    match item {
+        TranscriptReplayItem::TerminalSnapshot { snapshot } => Some(snapshot),
+        TranscriptReplayItem::Message { .. }
+        | TranscriptReplayItem::Reasoning { .. }
+        | TranscriptReplayItem::ToolActivity { .. }
+        | TranscriptReplayItem::ToolResult { .. }
+        | TranscriptReplayItem::System { .. } => None,
     }
 }
 

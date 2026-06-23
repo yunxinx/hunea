@@ -4,6 +4,7 @@ use runtime_domain::session::SessionPreviewPayload;
 
 use crate::{
     AppEffect, Model,
+    overlay_input_result::OverlayInputResult,
     render_frame::RenderFrame,
     transcript::{
         Transcript, latest_preview_offset as latest_session_preview_offset,
@@ -54,6 +55,7 @@ impl Model {
         preview.overlay.scroll_offset =
             latest_session_preview_offset(&mut preview.transcript, content_height);
         self.session_preview = Some(preview);
+        self.close_composer_attached_ui();
     }
 
     pub(crate) fn apply_session_preview_payload(&mut self, payload: SessionPreviewPayload) {
@@ -65,37 +67,37 @@ impl Model {
         self.session_preview = None;
     }
 
-    pub(crate) fn handle_session_preview_key(
-        &mut self,
-        key: KeyEvent,
-    ) -> Option<Option<AppEffect>> {
+    pub(crate) fn handle_session_preview_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if !self.session_preview_active() {
-            return None;
+            return OverlayInputResult::Ignored;
         }
 
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
-                let session_id = self
+                let Some(session_id) = self
                     .session_preview
                     .as_ref()
-                    .map(|preview| preview.session_id.clone())?;
+                    .map(|preview| preview.session_id.clone())
+                else {
+                    return OverlayInputResult::Ignored;
+                };
                 self.close_session_preview();
                 self.session_picker = None;
-                Some(Some(AppEffect::ResumeSession { session_id }))
+                OverlayInputResult::Effect(AppEffect::ResumeSession { session_id })
             }
             KeyCode::Esc | KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 self.close_session_preview();
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Left | KeyCode::Up | KeyCode::Char('h') if key.modifiers.is_empty() => {
                 self.move_session_preview_page(-1);
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Right | KeyCode::Down | KeyCode::Char('l') if key.modifiers.is_empty() => {
                 self.move_session_preview_page(1);
-                Some(None)
+                OverlayInputResult::Handled
             }
-            _ => Some(None),
+            _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
 

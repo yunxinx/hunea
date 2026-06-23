@@ -4,9 +4,10 @@ use crossterm::event::MouseButton;
 use ratatui::{layout::Rect, text::Line};
 
 use super::{
-    AppEffect, Model,
+    Model,
     display_width::display_width,
     document::{DocumentLayout, DocumentViewport},
+    overlay_input_result::OverlayInputResult,
     render_frame::RenderFrame,
     status_line::truncate_display_width,
     theme::tertiary_text_style,
@@ -78,9 +79,9 @@ impl Model {
         button: MouseButton,
         column: u16,
         row: u16,
-    ) -> Option<Option<AppEffect>> {
+    ) -> OverlayInputResult {
         if !self.history_scroll_indicator_hit(column, row) {
-            return None;
+            return OverlayInputResult::Ignored;
         }
 
         self.cancel_exit_confirmation();
@@ -89,15 +90,15 @@ impl Model {
             MouseButton::Middle => {
                 self.clear_pending_composer_cursor_click();
                 self.reset_selection_click();
-                Some(self.request_copy_selection())
+                OverlayInputResult::from_effect(self.request_copy_selection())
             }
             MouseButton::Left => {
                 self.stop_selection_auto_scroll();
                 self.clear_pending_composer_cursor_click();
                 self.clear_selection();
-                Some(None)
+                OverlayInputResult::Handled
             }
-            _ => Some(None),
+            _ => OverlayInputResult::Handled,
         }
     }
 

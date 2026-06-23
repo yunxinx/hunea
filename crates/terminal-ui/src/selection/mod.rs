@@ -7,7 +7,9 @@ mod state;
 mod viewport;
 use std::time::Instant;
 
-use crate::{AppEffect, Model, display_width::display_width, document::DocumentLayout};
+use crate::{
+    AppEffect, Model, display_width::display_width, document::DocumentLayout, toast::ToastSeverity,
+};
 
 pub(super) use self::copy::selection_text;
 pub(super) use self::range::{
@@ -28,9 +30,9 @@ const SELECTION_COPY_FAILED_NOTICE_TEXT: &str = "Copy selection failed";
 impl Model {
     pub(crate) fn handle_selection_copy_completed(&mut self, success: bool) {
         if success {
-            self.show_transient_status_notice(SELECTION_COPIED_NOTICE_TEXT);
+            self.show_toast(ToastSeverity::Info, SELECTION_COPIED_NOTICE_TEXT);
         } else {
-            self.show_transient_status_notice(SELECTION_COPY_FAILED_NOTICE_TEXT);
+            self.show_toast(ToastSeverity::Error, SELECTION_COPY_FAILED_NOTICE_TEXT);
         }
     }
 
@@ -142,22 +144,17 @@ impl Model {
             .map(|(start_column, _)| start_column)
             .unwrap_or_default();
         let focus = if line_index + 1 < layout.line_count() {
-            let next_anchor = layout
-                .line_anchor_at(line_index + 1)
-                .expect("next line should expose an anchor");
-            SelectionPoint::new(next_anchor, 0)
+            match layout.line_anchor_at(line_index + 1) {
+                Some(next_anchor) => SelectionPoint::new(next_anchor, 0),
+                None => SelectionPoint::new(
+                    point.anchor(),
+                    line_selection_end_column(line_index, layout),
+                ),
+            }
         } else {
             SelectionPoint::new(
                 point.anchor(),
-                selectable
-                    .content_columns()
-                    .map(|(_, end_column)| end_column)
-                    .unwrap_or_else(|| {
-                        layout
-                            .selection_line_at(line_index)
-                            .map(|line| display_width(&line.text))
-                            .unwrap_or_default()
-                    }),
+                line_selection_end_column(line_index, layout),
             )
         };
 
@@ -281,6 +278,17 @@ impl Model {
         self.selection_runtime.auto_scroll_deadline =
             Some(Instant::now() + SELECTION_AUTO_SCROLL_INTERVAL);
     }
+}
+
+fn line_selection_end_column(line_index: usize, layout: &DocumentLayout) -> usize {
+    layout
+        .selection_line_at(line_index)
+        .map(|line| {
+            line.selectable
+                .content_columns()
+                .map_or_else(|| display_width(&line.text), |(_, end_column)| end_column)
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

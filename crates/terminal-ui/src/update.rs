@@ -3,7 +3,7 @@ use std::{path::PathBuf, time::Duration};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use runtime_domain::{
     model_catalog::{ModelSelection, ProviderSyncRequest},
-    session::{ConversationTurnRequest, RuntimeTarget},
+    session::{ConversationTurnRequest, RuntimeTarget, SessionLoadRequestId},
 };
 
 use super::{
@@ -14,9 +14,12 @@ use super::{
     },
     document::DocumentAnchorRegion,
     exit_confirmation::EXIT_CONFIRMATION_PROMPT,
+    modal_layer::ModalLayer,
+    overlay_input_result::OverlayInputResult,
     path_resolve::resolve_configured_current_dir,
     terminal_text::sanitize_terminal_text,
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},
+    toast::ToastSeverity,
 };
 
 /// `STARTUP_PROBE_TIMEOUT` 是启动阶段等待主题探测结果的最长时长。
@@ -27,6 +30,7 @@ pub const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 pub enum AppEffect {
     LaunchExternalEditor(ExternalEditorLaunch),
     CopySelection(String),
+    OpenCopyPicker,
     ResetRuntimeSession,
     RespondRuntimePermission {
         target: RuntimeTarget,
@@ -47,6 +51,7 @@ pub enum AppEffect {
         prefill: Option<String>,
     },
     OpenBranchPreview {
+        request_id: SessionLoadRequestId,
         branch_row_id: String,
     },
     SwitchBranch {
@@ -121,15 +126,16 @@ pub enum AppEvent {
     SelectionCopyCompleted {
         success: bool,
     },
+    ToastNoticeTimeout {
+        token: usize,
+    },
     StartupReadyTimeout,
 }
 
 impl Model {
     pub(crate) fn terminal_input_coalescing(&self) -> crate::runner::TerminalInputCoalescing {
         crate::runner::TerminalInputCoalescing {
-            has_page_scroll_burst_coalescing: self.session_preview_active()
-                || self.session_picker_active()
-                || self.entry_tree_active(),
+            has_page_scroll_burst_coalescing: self.modal_has_page_scroll_burst_coalescing(),
         }
     }
 
@@ -138,13 +144,7 @@ impl Model {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
             AppEvent::Paste(text) => {
-                if self.transcript_overlay_active()
-                    || self.tool_approval_fullscreen_preview_active()
-                    || self.session_preview_active()
-                    || self.session_picker_active()
-                    || self.entry_tree_active()
-                    || self.model_panel_active()
-                {
+                if self.blocks_composer_input() {
                     self.cancel_exit_confirmation();
                     None
                 } else {
@@ -157,28 +157,9 @@ impl Model {
             }
             AppEvent::MouseWheel { delta_lines } => {
                 self.cancel_exit_confirmation();
-                if self.tool_approval_fullscreen_preview_active() {
-                    self.scroll_tool_approval_fullscreen_preview_by(delta_lines);
-                    return None;
-                }
-                if self.session_preview_active() {
-                    self.move_session_preview_page(delta_lines.signum());
-                    return None;
-                }
-                if self.session_picker_active() {
-                    self.move_session_picker_selection(delta_lines.signum());
-                    return None;
-                }
-                if self.entry_tree_active() {
-                    if self.entry_tree_preview_active() {
-                        self.move_entry_tree_preview_page(delta_lines.signum());
-                    } else {
-                        self.move_entry_tree_selection(delta_lines.signum());
-                    }
-                    return None;
-                }
-                if self.transcript_overlay_active() {
-                    return None;
+                let result = self.handle_overlay_mouse_wheel(delta_lines);
+                if !result.is_ignored() {
+                    return result.into_effect();
                 }
                 let before_document_viewport_y = self.document_runtime.viewport_y;
                 let before_composer_viewport_y = self.composer.viewport_offset();
@@ -204,15 +185,9 @@ impl Model {
                 column,
                 row,
             } => {
-                if self.entry_tree_active() {
-                    return self.handle_entry_tree_mouse_down(button, column, row);
-                }
-                if self.transcript_overlay_active()
-                    || self.tool_approval_fullscreen_preview_active()
-                    || self.session_preview_active()
-                    || self.session_picker_active()
-                {
-                    return None;
+                let result = self.handle_overlay_mouse_down(button, column, row);
+                if !result.is_ignored() {
+                    return result.into_effect();
                 }
                 self.handle_mouse_down(button, column, row)
             }
@@ -221,13 +196,9 @@ impl Model {
                 column,
                 row,
             } => {
-                if self.transcript_overlay_active()
-                    || self.tool_approval_fullscreen_preview_active()
-                    || self.session_preview_active()
-                    || self.session_picker_active()
-                    || self.entry_tree_active()
-                {
-                    return None;
+                let result = self.handle_overlay_pointer_passthrough_blocker();
+                if !result.is_ignored() {
+                    return result.into_effect();
                 }
                 self.handle_mouse_up(button, column, row)
             }
@@ -236,13 +207,9 @@ impl Model {
                 column,
                 row,
             } => {
-                if self.transcript_overlay_active()
-                    || self.tool_approval_fullscreen_preview_active()
-                    || self.session_preview_active()
-                    || self.session_picker_active()
-                    || self.entry_tree_active()
-                {
-                    return None;
+                let result = self.handle_overlay_pointer_passthrough_blocker();
+                if !result.is_ignored() {
+                    return result.into_effect();
                 }
                 self.handle_mouse_drag(button, column, row)
             }
@@ -289,6 +256,10 @@ impl Model {
                 self.handle_selection_copy_completed(success);
                 None
             }
+            AppEvent::ToastNoticeTimeout { token } => {
+                self.handle_toast_timeout(token);
+                None
+            }
             AppEvent::StartupReadyTimeout => {
                 if !self.has_palette() {
                     self.set_palette(terminal_default_palette(), false);
@@ -296,6 +267,101 @@ impl Model {
                 None
             }
         }
+    }
+
+    fn handle_overlay_mouse_wheel(&mut self, delta_lines: isize) -> OverlayInputResult {
+        match self.top_modal_layer() {
+            Some(ModalLayer::ToolApprovalFullscreenPreview) => {
+                self.scroll_tool_approval_fullscreen_preview_by(delta_lines);
+                OverlayInputResult::Handled
+            }
+            Some(ModalLayer::SessionPreview) => {
+                self.move_session_preview_page(delta_lines.signum());
+                OverlayInputResult::Handled
+            }
+            Some(ModalLayer::SessionPicker) => {
+                self.move_session_picker_selection_by_delta(delta_lines.signum());
+                OverlayInputResult::Handled
+            }
+            Some(ModalLayer::CopyPicker) => {
+                if self.copy_picker_preview_active() {
+                    self.move_copy_picker_preview_page(delta_lines.signum());
+                } else {
+                    self.move_copy_picker_selection_by_delta(delta_lines.signum());
+                }
+                OverlayInputResult::Handled
+            }
+            Some(ModalLayer::EntryTree) => {
+                if self.entry_tree_preview_active() {
+                    self.move_entry_tree_preview_page(delta_lines.signum());
+                } else {
+                    self.move_entry_tree_selection_by_delta(delta_lines.signum());
+                }
+                OverlayInputResult::Handled
+            }
+            Some(ModalLayer::TranscriptOverlay) => OverlayInputResult::Handled,
+            None => OverlayInputResult::Ignored,
+        }
+    }
+
+    fn handle_overlay_mouse_down(
+        &mut self,
+        button: MouseButton,
+        column: u16,
+        row: u16,
+    ) -> OverlayInputResult {
+        match self.top_modal_layer() {
+            Some(ModalLayer::CopyPicker) => self.handle_copy_picker_mouse_down(button, column, row),
+            Some(ModalLayer::EntryTree) => self.handle_entry_tree_mouse_down(button, column, row),
+            Some(_) => OverlayInputResult::Handled,
+            None => OverlayInputResult::Ignored,
+        }
+    }
+
+    fn handle_overlay_pointer_passthrough_blocker(&self) -> OverlayInputResult {
+        if self.modal_blocks_pointer_passthrough() {
+            OverlayInputResult::Handled
+        } else {
+            OverlayInputResult::Ignored
+        }
+    }
+
+    fn handle_modal_layer_key(&mut self, layer: ModalLayer, key: KeyEvent) -> OverlayInputResult {
+        match layer {
+            ModalLayer::ToolApprovalFullscreenPreview => self.handle_tool_approval_panel_key(key),
+            ModalLayer::TranscriptOverlay => self.handle_active_transcript_overlay_key(key),
+            ModalLayer::SessionPreview => self.handle_session_preview_key(key),
+            ModalLayer::SessionPicker => self.handle_session_picker_key(key),
+            ModalLayer::CopyPicker => self.handle_copy_picker_key(key),
+            ModalLayer::EntryTree => self.handle_entry_tree_key(key),
+        }
+    }
+
+    fn handle_top_modal_layer_key(&mut self, key: KeyEvent) -> OverlayInputResult {
+        let Some(layer) = self.top_modal_layer() else {
+            return OverlayInputResult::Ignored;
+        };
+        self.handle_modal_layer_key(layer, key)
+    }
+
+    fn handle_modal_layer_key_before_global_shortcuts(
+        &mut self,
+        key: KeyEvent,
+    ) -> OverlayInputResult {
+        let Some(layer) = self
+            .top_modal_layer()
+            .filter(|layer| layer.handles_key_before_global_shortcuts())
+        else {
+            return OverlayInputResult::Ignored;
+        };
+        self.handle_modal_layer_key(layer, key)
+    }
+
+    fn handle_current_modal_or_panel_key(&mut self, key: KeyEvent) -> OverlayInputResult {
+        if self.tool_approval_panel_active() {
+            return self.handle_tool_approval_panel_key(key);
+        }
+        self.handle_top_modal_layer_key(key)
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<AppEffect> {
@@ -315,14 +381,10 @@ impl Model {
         let is_ctrl_c =
             key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
         self.clear_history_scroll_indicator();
-        if self.transcript_overlay_active() {
+        let result = self.handle_modal_layer_key_before_global_shortcuts(key);
+        if !result.is_ignored() {
             self.cancel_exit_confirmation();
-            if let Some(effect) = self.handle_message_revisit_overlay_key(key) {
-                return effect;
-            }
-            if let Some(effect) = self.handle_transcript_overlay_key(key) {
-                return effect;
-            }
+            return result.into_effect();
         }
 
         if !is_plain_esc {
@@ -351,24 +413,14 @@ impl Model {
             return None;
         }
 
-        if let Some(effect) = self.handle_tool_approval_panel_key(key) {
-            return effect;
+        let result = self.handle_current_modal_or_panel_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
-        if let Some(effect) = self.handle_session_preview_key(key) {
-            return effect;
-        }
-
-        if let Some(effect) = self.handle_session_picker_key(key) {
-            return effect;
-        }
-
-        if let Some(effect) = self.handle_entry_tree_key(key) {
-            return effect;
-        }
-
-        if let Some(effect) = self.handle_transcript_overlay_key(key) {
-            return effect;
+        let result = self.handle_transcript_overlay_global_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
         if is_plain_esc && let Some(effect) = self.handle_chat_interrupt_key() {
@@ -377,8 +429,9 @@ impl Model {
             self.reset_chat_interrupt_esc_count();
         }
 
-        if let Some(effect) = self.handle_model_panel_key(key) {
-            return effect;
+        let result = self.handle_model_panel_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
         if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -387,16 +440,21 @@ impl Model {
                 .map(AppEffect::LaunchExternalEditor);
         }
 
-        if let Some(effect) = self.handle_command_panel_key(key) {
-            return effect;
+        let result = self.handle_command_panel_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
-        if let Some(effect) = self.handle_file_picker_key(key) {
-            return effect;
+        let result = self.handle_file_picker_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
         }
 
-        if is_plain_esc && let Some(effect) = self.handle_message_revisit_main_esc_key() {
-            return effect;
+        if is_plain_esc {
+            let result = self.handle_message_revisit_main_esc_key();
+            if !result.is_ignored() {
+                return result.into_effect();
+            }
         }
 
         if key.code == KeyCode::Enter {
@@ -666,11 +724,11 @@ impl Model {
             return None;
         }
         if self.requires_model_selection && self.selected_model.is_none() {
-            self.show_transient_status_notice("Select a model before sending");
+            self.show_toast(ToastSeverity::Error, "Select a model before sending");
             return None;
         }
         if self.stream_activity.is_some() {
-            self.show_transient_status_notice("Chat request is already running");
+            self.show_toast(ToastSeverity::Error, "Chat request is already running");
             return None;
         }
         if let Some(selection) = self.selected_model.clone()
@@ -728,6 +786,8 @@ impl Model {
         self.sync_composer_height();
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         self.restore_transcript_overlay_scroll_anchor(transcript_overlay_anchor);
+        self.sync_copy_picker_preview_follow_bottom();
+        self.sync_entry_tree_preview_follow_bottom();
     }
 }
 
@@ -741,7 +801,7 @@ impl Model {
             .model_catalog
             .enabled_provider_by_id(&selection.provider_id)
         else {
-            self.show_transient_status_notice("Selected provider is not available");
+            self.show_toast(ToastSeverity::Error, "Selected provider is not available");
             return None;
         };
         let connection = provider.connection();
@@ -761,7 +821,7 @@ impl Model {
             .model_catalog
             .enabled_provider_by_id(&selection.provider_id)
         else {
-            self.show_transient_status_notice("Selected provider is not available");
+            self.show_toast(ToastSeverity::Error, "Selected provider is not available");
             return false;
         };
 
@@ -773,7 +833,7 @@ impl Model {
                 .as_ref()
                 .is_none_or(|value| value.trim().is_empty())
         {
-            self.show_transient_status_notice("Selected provider has no base_url");
+            self.show_toast(ToastSeverity::Error, "Selected provider has no base_url");
             return false;
         }
 

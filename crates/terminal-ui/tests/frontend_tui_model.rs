@@ -116,7 +116,7 @@ fn configured_default_model_is_trusted_when_it_is_outside_allowlist() {
 }
 
 #[test]
-fn enter_with_required_empty_model_shows_notice_without_sending() {
+fn enter_with_required_empty_model_keeps_draft_unsent() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
         ModelOptions {
@@ -137,11 +137,11 @@ fn enter_with_required_empty_model_shows_notice_without_sending() {
     for character in "hello".chars() {
         model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(character))));
     }
-    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
+    assert!(effect.is_none());
     assert_eq!(model.composer_text(), "hello");
     assert_eq!(model.transcript_plain_items().len(), 1);
-    assert!(rendered_model_text(&mut model).contains("Select a model before sending"));
 }
 
 #[test]
@@ -269,7 +269,6 @@ fn enter_with_openai_compatible_provider_without_base_url_keeps_draft_unsent() {
     assert!(effect.is_none());
     assert_eq!(model.composer_text(), "hello");
     assert_eq!(model.transcript_plain_items().len(), 1);
-    assert!(rendered_model_text(&mut model).contains("Selected provider has no base_url"));
 }
 
 #[test]
@@ -425,10 +424,6 @@ fn buffer_text(buffer: &Buffer) -> String {
     }
 
     rendered
-}
-
-fn rendered_model_text(model: &mut Model) -> String {
-    buffer_text(&render_model_buffer(model, 80, 24))
 }
 
 fn render_model_buffer(model: &mut Model, width: u16, height: u16) -> Buffer {

@@ -1,27 +1,25 @@
-//! 工具审批面板状态、输入处理与渲染装配。
+//! 工具审批面板状态与渲染装配。
 
-use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     style::Modifier,
     text::{Line, Span},
 };
 
 mod file_preview;
+mod input;
 
 use super::{
-    AppEffect, Model,
+    Model,
     inline_panel::{
         InlinePanelRenderResult, append_wrapped_inline_value, inline_panel_render_result,
         inline_panel_rule_line, wrap_inline_text,
     },
     runtime::tool_activity_preview::ToolApprovalPreview,
     theme::{primary_text_style, secondary_text_style, tertiary_text_style},
-    tool_result::ToolResultKind,
     transcript::markdown_highlight::{highlight_code_chunks, wrap_highlight_chunks},
 };
 use file_preview::{
-    FilePreviewRenderCache, build_file_preview_panel_lines, file_preview_fullscreen_content_height,
-    file_preview_fullscreen_max_offset,
+    FilePreviewRenderCache, build_file_preview_panel_lines, file_preview_fullscreen_max_offset,
 };
 use runtime_domain::session::RuntimeTarget;
 
@@ -108,7 +106,7 @@ impl Model {
         details: Vec<ToolApprovalDetail>,
         preview: Option<ToolApprovalPreview>,
     ) {
-        self.close_transcript_overlay();
+        self.close_fullscreen_modal_layers();
         self.pause_stream_activity();
         self.close_model_panel();
         self.tool_approval_panel = ToolApprovalPanelState {
@@ -124,8 +122,7 @@ impl Model {
         };
         self.sync_tool_approval_preview_mode();
         self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
-        self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.close_composer_attached_ui();
         self.sync_composer_height();
         self.sync_document_viewport_for_composer_cursor();
     }
@@ -149,82 +146,6 @@ impl Model {
             Some(ToolApprovalSource::RuntimePermission { .. })
         ) {
             self.close_tool_approval_panel();
-        }
-    }
-
-    pub(crate) fn handle_tool_approval_panel_key(
-        &mut self,
-        key: KeyEvent,
-    ) -> Option<Option<AppEffect>> {
-        if !self.tool_approval_panel_active() {
-            return None;
-        }
-
-        if self.tool_approval_fullscreen_preview_active() {
-            return Some(self.handle_tool_approval_fullscreen_preview_key(key));
-        }
-        if self.tool_approval_panel.preview.is_some() {
-            return Some(self.handle_tool_approval_inline_file_preview_key(key));
-        }
-
-        match key.code {
-            KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
-                move_tool_approval_selection(
-                    &mut self.tool_approval_panel,
-                    if key.code == KeyCode::Up {
-                        ToolApprovalSelectionMove::Up
-                    } else {
-                        ToolApprovalSelectionMove::Down
-                    },
-                );
-                self.tool_approval_panel_revision =
-                    self.tool_approval_panel_revision.saturating_add(1);
-                Some(None)
-            }
-            KeyCode::Left | KeyCode::Right if key.modifiers.is_empty() => {
-                move_tool_approval_selection(
-                    &mut self.tool_approval_panel,
-                    if key.code == KeyCode::Left {
-                        ToolApprovalSelectionMove::Left
-                    } else {
-                        ToolApprovalSelectionMove::Right
-                    },
-                );
-                self.tool_approval_panel_revision =
-                    self.tool_approval_panel_revision.saturating_add(1);
-                Some(None)
-            }
-            KeyCode::Enter if key.modifiers.is_empty() => {
-                let choices = tool_approval_choices(&self.tool_approval_panel);
-                let choice = choices
-                    .get(self.tool_approval_panel.selected)
-                    .copied()
-                    .unwrap_or(ToolApprovalChoice::Deny);
-                Some(self.resolve_tool_approval_choice(choice))
-            }
-            KeyCode::Char('y') | KeyCode::Char('Y') => Some(
-                self.resolve_tool_approval_choice(
-                    preferred_tool_approval_choice(
-                        &self.tool_approval_panel,
-                        &[
-                            ToolApprovalChoice::Allow,
-                            ToolApprovalChoice::AllowInSession,
-                        ],
-                    )
-                    .unwrap_or(ToolApprovalChoice::Allow),
-                ),
-            ),
-            KeyCode::Char('n') | KeyCode::Char('N') => Some(
-                self.resolve_tool_approval_choice(
-                    preferred_tool_approval_choice(
-                        &self.tool_approval_panel,
-                        &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
-                    )
-                    .unwrap_or(ToolApprovalChoice::Deny),
-                ),
-            ),
-            KeyCode::Esc if key.modifiers.is_empty() => Some(self.cancel_tool_approval_panel()),
-            _ => Some(None),
         }
     }
 
@@ -284,115 +205,6 @@ impl Model {
         self.tool_approval_panel.preview_scroll_offset = next;
     }
 
-    fn handle_tool_approval_fullscreen_preview_key(&mut self, key: KeyEvent) -> Option<AppEffect> {
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
-                self.scroll_tool_approval_fullscreen_preview_by(-1);
-                None
-            }
-            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
-                self.scroll_tool_approval_fullscreen_preview_by(1);
-                None
-            }
-            KeyCode::PageUp => {
-                let page = file_preview_fullscreen_content_height(self)
-                    .saturating_sub(1)
-                    .max(1);
-                self.scroll_tool_approval_fullscreen_preview_by(-(page as isize));
-                None
-            }
-            KeyCode::PageDown => {
-                let page = file_preview_fullscreen_content_height(self)
-                    .saturating_sub(1)
-                    .max(1);
-                self.scroll_tool_approval_fullscreen_preview_by(page as isize);
-                None
-            }
-            KeyCode::Char('u') if key.modifiers == crossterm::event::KeyModifiers::CONTROL => {
-                let half_page = file_preview_fullscreen_content_height(self) / 2;
-                self.scroll_tool_approval_fullscreen_preview_by(-(half_page.max(1) as isize));
-                None
-            }
-            KeyCode::Char('d') if key.modifiers == crossterm::event::KeyModifiers::CONTROL => {
-                let half_page = file_preview_fullscreen_content_height(self) / 2;
-                self.scroll_tool_approval_fullscreen_preview_by(half_page.max(1) as isize);
-                None
-            }
-            KeyCode::Home => {
-                self.tool_approval_panel.preview_scroll_offset = 0;
-                None
-            }
-            KeyCode::End => {
-                self.tool_approval_panel.preview_scroll_offset =
-                    file_preview_fullscreen_max_offset(self);
-                None
-            }
-            KeyCode::Enter if key.modifiers.is_empty() => self.resolve_tool_approval_choice(
-                preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                )
-                .unwrap_or(ToolApprovalChoice::Deny),
-            ),
-            KeyCode::Char('y') | KeyCode::Char('Y') => self.resolve_tool_approval_choice(
-                preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                )
-                .unwrap_or(ToolApprovalChoice::Allow),
-            ),
-            KeyCode::Char('n') | KeyCode::Char('N') => self.resolve_tool_approval_choice(
-                preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
-                )
-                .unwrap_or(ToolApprovalChoice::Deny),
-            ),
-            KeyCode::Esc if key.modifiers.is_empty() => self.cancel_tool_approval_panel(),
-            _ => None,
-        }
-    }
-
-    fn handle_tool_approval_inline_file_preview_key(&mut self, key: KeyEvent) -> Option<AppEffect> {
-        match key.code {
-            KeyCode::Enter if key.modifiers.is_empty() => self.resolve_tool_approval_choice(
-                preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                )
-                .unwrap_or(ToolApprovalChoice::Deny),
-            ),
-            KeyCode::Char('y') | KeyCode::Char('Y') => self.resolve_tool_approval_choice(
-                preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[
-                        ToolApprovalChoice::Allow,
-                        ToolApprovalChoice::AllowInSession,
-                    ],
-                )
-                .unwrap_or(ToolApprovalChoice::Allow),
-            ),
-            KeyCode::Char('n') | KeyCode::Char('N') => self.resolve_tool_approval_choice(
-                preferred_tool_approval_choice(
-                    &self.tool_approval_panel,
-                    &[ToolApprovalChoice::Deny, ToolApprovalChoice::DenyInSession],
-                )
-                .unwrap_or(ToolApprovalChoice::Deny),
-            ),
-            KeyCode::Esc if key.modifiers.is_empty() => self.cancel_tool_approval_panel(),
-            _ => None,
-        }
-    }
-
     fn clamp_tool_approval_fullscreen_preview_scroll(&mut self) {
         if !self.tool_approval_panel.preview_is_fullscreen {
             self.tool_approval_panel.preview_scroll_offset = 0;
@@ -403,83 +215,6 @@ impl Model {
             .tool_approval_panel
             .preview_scroll_offset
             .min(max_offset);
-    }
-
-    fn resolve_tool_approval_choice(&mut self, choice: ToolApprovalChoice) -> Option<AppEffect> {
-        let source = self.tool_approval_panel.source.clone()?;
-        let title = self.tool_approval_panel.title.clone();
-        self.tool_approval_panel = ToolApprovalPanelState::default();
-        self.clear_runtime_tool_activity_approval_suspensions_from_runtime();
-        self.resume_stream_activity();
-        self.tool_approval_panel_revision = self.tool_approval_panel_revision.saturating_add(1);
-        self.sync_composer_height();
-        self.sync_document_viewport_for_composer_cursor();
-
-        match source {
-            ToolApprovalSource::RuntimePermission {
-                target,
-                request_id,
-                allow_option_id,
-                allow_always_option_id,
-                reject_option_id,
-                reject_always_option_id,
-            } => {
-                let option_id = match choice {
-                    ToolApprovalChoice::Allow => allow_option_id,
-                    ToolApprovalChoice::AllowInSession => allow_always_option_id,
-                    ToolApprovalChoice::Deny => reject_option_id,
-                    ToolApprovalChoice::DenyInSession => reject_always_option_id,
-                };
-                Some(AppEffect::RespondRuntimePermission {
-                    target,
-                    request_id,
-                    option_id,
-                })
-            }
-            ToolApprovalSource::Preview => {
-                self.append_tool_result_from_runtime(
-                    approval_result_content(choice, &title),
-                    approval_result_kind(choice),
-                );
-                None
-            }
-        }
-    }
-
-    fn cancel_tool_approval_panel(&mut self) -> Option<AppEffect> {
-        let source = self.tool_approval_panel.source.clone();
-        self.close_tool_approval_panel();
-
-        match source {
-            Some(ToolApprovalSource::RuntimePermission {
-                target, request_id, ..
-            }) => Some(AppEffect::RespondRuntimePermission {
-                target,
-                request_id,
-                option_id: None,
-            }),
-            Some(ToolApprovalSource::Preview) | None => None,
-        }
-    }
-}
-
-fn approval_result_kind(choice: ToolApprovalChoice) -> ToolResultKind {
-    match choice {
-        ToolApprovalChoice::Allow | ToolApprovalChoice::AllowInSession => ToolResultKind::Ran,
-        ToolApprovalChoice::Deny | ToolApprovalChoice::DenyInSession => ToolResultKind::Rejected,
-    }
-}
-
-fn approval_result_content(choice: ToolApprovalChoice, title: &str) -> String {
-    let verb = match approval_result_kind(choice) {
-        ToolResultKind::Ran => "Ran",
-        ToolResultKind::Rejected => "Reject",
-    };
-    let title = title.trim();
-    if title.is_empty() {
-        verb.to_string()
-    } else {
-        format!("{verb} {title}")
     }
 }
 
@@ -630,47 +365,6 @@ fn tool_approval_choices(state: &ToolApprovalPanelState) -> Vec<ToolApprovalChoi
         ],
         None => Vec::new(),
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolApprovalSelectionMove {
-    Up,
-    Down,
-    Left,
-    Right,
-}
-
-fn move_tool_approval_selection(
-    state: &mut ToolApprovalPanelState,
-    direction: ToolApprovalSelectionMove,
-) {
-    let choices = tool_approval_choices(state);
-    let choice_count = choices.len();
-    if choice_count == 0 {
-        state.selected = 0;
-        return;
-    }
-
-    state.selected = match direction {
-        ToolApprovalSelectionMove::Up | ToolApprovalSelectionMove::Left => state
-            .selected
-            .checked_sub(1)
-            .unwrap_or(choice_count.saturating_sub(1)),
-        ToolApprovalSelectionMove::Down | ToolApprovalSelectionMove::Right => {
-            (state.selected + 1) % choice_count
-        }
-    };
-}
-
-fn preferred_tool_approval_choice(
-    state: &ToolApprovalPanelState,
-    preferred: &[ToolApprovalChoice],
-) -> Option<ToolApprovalChoice> {
-    let choices = tool_approval_choices(state);
-    preferred
-        .iter()
-        .copied()
-        .find(|preferred_choice| choices.contains(preferred_choice))
 }
 
 #[cfg(test)]

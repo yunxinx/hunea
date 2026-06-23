@@ -1,6 +1,6 @@
-use crate::Model;
 #[cfg(test)]
 use crate::runtime::RuntimeEventApply;
+use crate::{Model, toast::ToastSeverity};
 #[cfg(test)]
 use runtime_domain::session::{
     ConversationEvent, RuntimeEvent, RuntimeRequestMetrics, RuntimeTarget,
@@ -87,6 +87,6 @@ pub(super) fn run_send_conversation_turn_effect(
             model.show_stream_activity(activity_label)
         }
         Ok(_) => {}
-        Err(message) => model.show_transient_status_notice(&message),
+        Err(message) => model.show_toast(ToastSeverity::Error, message),
     }
 }

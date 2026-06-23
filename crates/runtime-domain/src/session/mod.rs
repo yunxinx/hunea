@@ -4,6 +4,7 @@ mod command;
 mod conversation;
 mod event;
 mod identity;
+mod load_request;
 mod metrics;
 mod permission;
 mod recovery;
@@ -22,6 +23,7 @@ pub use conversation::{
 };
 pub use event::RuntimeEvent;
 pub use identity::{RuntimeAgentCapabilities, RuntimeIdentity, RuntimePromptCapabilities};
+pub use load_request::SessionLoadRequestId;
 pub use metrics::RuntimeRequestMetrics;
 pub use permission::{
     RuntimePermissionOption, RuntimePermissionOptionKind, RuntimePermissionRequest,

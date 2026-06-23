@@ -8,28 +8,41 @@ use ratatui::{
     },
 };
 use runtime_domain::session::{
-    SessionBranchTreeNode, SessionBranchTreePayload, SessionTreeBranchChoice, SessionTreePayload,
-    SessionTreeRow, SessionTreeRowKind, TranscriptReplayItem,
+    SessionBranchTreeNode, SessionBranchTreePayload, SessionLoadRequestId, SessionTreeBranchChoice,
+    SessionTreePayload, SessionTreeRow, SessionTreeRowKind,
 };
 
 use crate::{
     AppEffect, Model,
     display_width::display_width,
+    fullscreen_list_chrome::{
+        FULLSCREEN_LIST_CHROME_HEIGHT as ENTRY_TREE_CHROME_HEIGHT,
+        FULLSCREEN_LIST_HEADER_HEIGHT as ENTRY_TREE_HEADER_HEIGHT,
+        FULLSCREEN_LIST_HEADER_RULE_HEIGHT as ENTRY_TREE_HEADER_RULE_HEIGHT,
+        fullscreen_list_body_visible_offset_for_row, fullscreen_list_chrome_rects,
+        fullscreen_list_page_size_for_height,
+    },
+    list_selection::ListNavigationDirection,
+    overlay_input_result::OverlayInputResult,
     render_frame::RenderFrame,
+    session_tree_preview_replay::SessionTreePreviewReplay,
+    session_tree_row_kind_view::{
+        SESSION_TREE_ROW_KIND_PREFIX_WIDTH, SESSION_TREE_ROW_KIND_WIDTH,
+        TreeRowKindPrefixAlignment, session_tree_row_kind_label_style,
+        session_tree_row_kind_prefix,
+    },
     status_line::truncate_display_width_with_ellipsis,
     theme::{
-        accent_text_style, approval_rejected_text_style, command_accent_text_style,
-        muted_text_style, primary_text_style, secondary_text_style, subtle_rule_line,
+        TerminalPalette, accent_text_style, approval_rejected_text_style,
+        command_accent_text_style, primary_text_style, secondary_text_style, subtle_rule_line,
         system_error_text_style, table_header_text_style, tertiary_text_style,
     },
     time::current_unix_timestamp_ms,
+    toast::ToastSeverity,
     tool_result::ToolActivityRenderMode,
-    transcript::{
-        ReasoningRenderMode, latest_preview_offset as latest_entry_tree_preview_offset,
-        preview_page_offset as entry_tree_preview_page_offset,
-    },
+    transcript::{ReasoningRenderMode, preview_page_offset as entry_tree_preview_page_offset},
     transcript_overlay::{
-        TranscriptOverlayProgressStyle, TranscriptOverlayRenderOptions, TranscriptOverlayState,
+        TranscriptOverlayProgressStyle, TranscriptOverlayRenderOptions,
         render_transcript_overlay_view,
     },
 };
@@ -37,14 +50,6 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
-const ENTRY_TREE_HEADER_HEIGHT: u16 = 1;
-const ENTRY_TREE_HEADER_RULE_HEIGHT: u16 = 1;
-const ENTRY_TREE_PAGE_RULE_HEIGHT: u16 = 1;
-const ENTRY_TREE_FOOTER_HEIGHT: u16 = 1;
-const ENTRY_TREE_CHROME_HEIGHT: u16 = ENTRY_TREE_HEADER_HEIGHT
-    + ENTRY_TREE_HEADER_RULE_HEIGHT
-    + ENTRY_TREE_PAGE_RULE_HEIGHT
-    + ENTRY_TREE_FOOTER_HEIGHT;
 const BRANCH_TREE_ROOT_HEIGHT: u16 = 1;
 const BRANCH_TREE_SUMMARY_GAP_HEIGHT: u16 = 1;
 const BRANCH_TREE_SUMMARY_HEIGHT: u16 = 1;
@@ -52,8 +57,8 @@ pub(crate) const BRANCH_PICKER_LIST_ROWS_MIN: u16 = 3;
 pub(crate) const BRANCH_PICKER_LIST_ROWS_MAX: u16 = 14;
 pub(crate) const BRANCH_PICKER_LIST_ROWS_DEFAULT: u16 = 7;
 const ENTRY_TREE_BODY_HORIZONTAL_PADDING: usize = 2;
-const ENTRY_TREE_KIND_WIDTH: usize = 9;
-const ENTRY_TREE_KIND_PREFIX_WIDTH: usize = ENTRY_TREE_KIND_WIDTH + 1;
+const ENTRY_TREE_KIND_WIDTH: usize = SESSION_TREE_ROW_KIND_WIDTH;
+const ENTRY_TREE_KIND_PREFIX_WIDTH: usize = SESSION_TREE_ROW_KIND_PREFIX_WIDTH;
 const ENTRY_TREE_GRAPH_MAX_WIDTH: usize = 12;
 const ENTRY_TREE_GRAPH_MIN_WIDTH: usize = 2;
 const ENTRY_TREE_GRAPH_FLAT_WIDTH: usize = 2;
@@ -79,7 +84,6 @@ pub(crate) use state::EntryTreeState;
 use state::{
     EntryTreeBranchPickerState, EntryTreeBranchPreviewMetadata, EntryTreeBranchPreviewSource,
     EntryTreeBranchPreviewState, EntryTreeBranchTreeState, EntryTreePreviewState,
-    clamp_branch_picker_scroll,
 };
 
 fn entry_tree_branch_tree_page_size_for_height(height: u16) -> usize {
@@ -134,12 +138,8 @@ const fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
 }
 
-fn entry_tree_preview_replay_items(row: &SessionTreeRow) -> Vec<TranscriptReplayItem> {
-    row.preview_replay_items.clone()
-}
-
-fn entry_tree_page_size_for_height(height: u16) -> usize {
-    usize::from(height.saturating_sub(ENTRY_TREE_CHROME_HEIGHT)).max(1)
+pub(crate) fn entry_tree_page_size_for_height(height: u16) -> usize {
+    fullscreen_list_page_size_for_height(height)
 }
 
 fn is_entry_tree_branch_tree_shortcut(key: KeyEvent) -> bool {

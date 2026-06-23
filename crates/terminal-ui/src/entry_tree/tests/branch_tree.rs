@@ -161,11 +161,11 @@ fn entry_tree_branch_tree_space_previews_non_current_branch() {
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
 
-    assert_eq!(
+    assert_open_branch_preview_effect(
+        &model,
         effect,
-        Some(AppEffect::OpenBranchPreview {
-            branch_row_id: "child-one".to_string()
-        })
+        "child-one",
+        "Space should request preview for selected non-current branch",
     );
     assert!(model.entry_tree_branch_preview_active());
 }
@@ -179,11 +179,11 @@ fn entry_tree_branch_tree_preview_title_shows_branch_metadata() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
-    assert_eq!(
+    assert_open_branch_preview_effect(
+        &model,
         effect,
-        Some(AppEffect::OpenBranchPreview {
-            branch_row_id: "child-one".to_string()
-        })
+        "child-one",
+        "Space should request preview for selected non-current branch",
     );
 
     model.apply_entry_tree_branch_preview_payload(SessionTreePayload {
@@ -228,6 +228,98 @@ fn entry_tree_branch_tree_enter_switches_non_current_branch() {
 }
 
 #[test]
+fn late_branch_tree_payload_after_exit_does_not_reopen_branch_tree() {
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![numbered_tree_row(0)],
+        current_row_id: Some("row-0".to_string()),
+    });
+    model.open_entry_tree_branch_tree_loading();
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert!(!model.entry_tree_branch_tree_active());
+
+    model.apply_entry_tree_branch_tree_payload(branch_tree_payload());
+
+    assert!(model.entry_tree_active());
+    assert!(!model.entry_tree_branch_tree_active());
+}
+
+#[test]
+fn branch_tree_loading_state_tracks_only_pending_branch_tree_payload() {
+    let mut model = ready_model();
+
+    assert!(!model.entry_tree_branch_tree_loading());
+
+    model.open_entry_tree_branch_tree_loading();
+    assert!(model.entry_tree_branch_tree_loading());
+
+    model.apply_entry_tree_branch_tree_payload(branch_tree_payload());
+    assert!(!model.entry_tree_branch_tree_loading());
+    assert!(model.entry_tree_branch_tree_active());
+}
+
+#[test]
+fn branch_tree_load_failure_renders_overlay_error() {
+    let mut model = ready_model();
+    model.open_entry_tree_branch_tree_loading();
+    let request_id = model
+        .entry_tree_branch_tree_pending_request_id_for_test()
+        .unwrap();
+
+    model.apply_runtime_event(RuntimeEvent::SessionBranchTreeLoadFailed {
+        request_id,
+        message: "branch tree index is corrupt".to_string(),
+    });
+
+    assert!(!model.entry_tree_branch_tree_loading());
+    assert!(model.entry_tree_branch_tree_active());
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 10));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("branch tree index is corrupt")),
+        "branch tree load failure should render inside the active overlay: {rows:?}"
+    );
+}
+
+#[test]
+fn stale_branch_tree_payload_is_ignored_after_branch_tree_reopens_loading() {
+    let mut model = ready_model();
+
+    let stale_request_id = model.open_entry_tree_branch_tree_loading();
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    let current_request_id = model.open_entry_tree_branch_tree_loading();
+
+    let mut stale_payload = branch_tree_payload();
+    stale_payload.nodes[0].branch.branch_row_id = "stale-root".to_string();
+    model.apply_runtime_event(RuntimeEvent::SessionBranchTreeLoaded {
+        request_id: stale_request_id,
+        payload: stale_payload,
+    });
+
+    assert!(model.entry_tree_branch_tree_loading());
+    assert_eq!(
+        model.entry_tree_branch_tree_row_ids_for_test(),
+        Vec::<&str>::new()
+    );
+
+    let mut current_payload = branch_tree_payload();
+    current_payload.nodes[0].branch.branch_row_id = "current-root".to_string();
+    model.apply_runtime_event(RuntimeEvent::SessionBranchTreeLoaded {
+        request_id: current_request_id,
+        payload: current_payload,
+    });
+
+    assert!(!model.entry_tree_branch_tree_loading());
+    assert!(
+        model
+            .entry_tree_branch_tree_row_ids_for_test()
+            .contains(&"current-root")
+    );
+}
+
+#[test]
 fn entry_tree_branch_tree_left_click_selects_visible_branch_node() {
     let mut model = ready_model();
     model.set_window(112, 14);
@@ -243,12 +335,11 @@ fn entry_tree_branch_tree_left_click_selects_visible_branch_node() {
     });
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
 
-    assert_eq!(
+    assert_open_branch_preview_effect(
+        &model,
         effect,
-        Some(AppEffect::OpenBranchPreview {
-            branch_row_id: "child-one".to_string()
-        }),
-        "clicking a visible branch tree row should move branch selection before Space"
+        "child-one",
+        "clicking a visible branch tree row should move branch selection before Space",
     );
 }
 

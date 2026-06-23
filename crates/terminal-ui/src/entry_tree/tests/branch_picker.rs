@@ -390,6 +390,13 @@ fn entry_tree_branch_picker_relative_age_label_uses_two_highest_units() {
     assert_eq!(
         crate::entry_tree::render::branch_picker_relative_age_label(
             now_ms,
+            now_ms - (3 * 86_400_000 + 2 * 3_600_000 + 125_000),
+        ),
+        "3d·2h"
+    );
+    assert_eq!(
+        crate::entry_tree::render::branch_picker_relative_age_label(
+            now_ms,
             now_ms - 90 * 86_400_000
         ),
         "3mo·0d"
@@ -639,11 +646,11 @@ fn entry_tree_branch_picker_space_requests_preview_for_focused_branch() {
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
 
-    assert_eq!(
+    assert_open_branch_preview_effect(
+        &model,
         effect,
-        Some(AppEffect::OpenBranchPreview {
-            branch_row_id: "assistant-b".to_string()
-        })
+        "assistant-b",
+        "Space should request preview for focused branch",
     );
 }
 
@@ -869,12 +876,11 @@ fn entry_tree_branch_picker_mouse_wheel_moves_focused_branch() {
     model.update(AppEvent::MouseWheel { delta_lines: 3 });
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
 
-    assert_eq!(
+    assert_open_branch_preview_effect(
+        &model,
         effect,
-        Some(AppEffect::OpenBranchPreview {
-            branch_row_id: "assistant-b".to_string()
-        }),
-        "wheel down in L2 should move focus before Space opens preview"
+        "assistant-b",
+        "wheel down in L2 should move focus before Space opens preview",
     );
 }
 
@@ -916,12 +922,11 @@ fn entry_tree_branch_picker_left_click_selects_branch_item() {
     let preview_effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
 
     assert_eq!(click_effect, None);
-    assert_eq!(
+    assert_open_branch_preview_effect(
+        &model,
         preview_effect,
-        Some(AppEffect::OpenBranchPreview {
-            branch_row_id: "assistant-b".to_string()
-        }),
-        "left click inside the picker should select that branch item instead of selecting the tree row below"
+        "assistant-b",
+        "left click inside the picker should select that branch item instead of selecting the tree row below",
     );
 }
 

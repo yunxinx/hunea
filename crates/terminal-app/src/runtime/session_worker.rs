@@ -9,13 +9,13 @@ use std::{
 
 use conversation_runtime::ProviderConversation;
 use runtime_domain::session::{
-    RuntimeEvent, SessionPickerRow, SessionResumePayload, SessionTreePayload,
+    RuntimeEvent, SessionLoadRequestId, SessionPickerRow, SessionResumePayload, SessionTreePayload,
 };
 use session_store::{ProjectDir, SessionHeader, SessionId, SessionListOptions, SessionStore};
 
 use super::{
     session_branch_tree_payload, session_picker_row_from_meta, session_preview_payload,
-    session_resume_payload, session_tree_payload,
+    session_resume_payload, session_tree_load::SessionTreeLoadConsumer, session_tree_payload,
 };
 
 const SESSION_EVENT_DRAIN_WAIT: Duration = Duration::from_millis(2);
@@ -32,6 +32,7 @@ pub(super) enum SessionStoreWorkerEvent {
     Runtime {
         event: RuntimeEvent,
         completes_command: bool,
+        is_mutation: bool,
     },
     Restored {
         conversation: ProviderConversation,
@@ -40,6 +41,7 @@ pub(super) enum SessionStoreWorkerEvent {
     RestoredWithTree {
         conversation: ProviderConversation,
         resume_payload: SessionResumePayload,
+        tree_request_id: SessionLoadRequestId,
         tree_payload: SessionTreePayload,
     },
     Noop,
@@ -64,23 +66,28 @@ enum SessionStoreCommand {
         header: SessionHeader,
         session_id: SessionId,
     },
-    LoadEntryTree {
+    LoadSessionTree {
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
+        consumer: SessionTreeLoadConsumer,
     },
     LoadBranchTree {
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
     },
     LoadBranchPreview {
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
         branch_row_id: String,
     },
     SwitchBranch {
         store: Arc<dyn SessionStore>,
         header: SessionHeader,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
         leaf_id: String,
     },
     SelectEntryRewind {
@@ -110,6 +117,8 @@ impl SessionStoreWorker {
     pub(super) fn new() -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
+        // session store 可能包含阻塞文件系统路径；这里固定为专用 OS 线程，
+        // 线程内用 current-thread runtime 驱动 store 的 async trait，避免阻塞 TUI 主循环。
         thread::spawn(move || run_session_worker(command_receiver, event_sender));
         Self {
             command_sender,
@@ -192,13 +201,20 @@ impl SessionStoreWorker {
         )
     }
 
-    pub(super) fn load_entry_tree(
+    pub(super) fn load_session_tree(
         &mut self,
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        consumer: SessionTreeLoadConsumer,
+        request_id: SessionLoadRequestId,
     ) -> Result<(), String> {
         self.send_command(
-            SessionStoreCommand::LoadEntryTree { store, session_id },
+            SessionStoreCommand::LoadSessionTree {
+                store,
+                session_id,
+                request_id,
+                consumer,
+            },
             false,
         )
     }
@@ -207,9 +223,14 @@ impl SessionStoreWorker {
         &mut self,
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
     ) -> Result<(), String> {
         self.send_command(
-            SessionStoreCommand::LoadBranchTree { store, session_id },
+            SessionStoreCommand::LoadBranchTree {
+                store,
+                session_id,
+                request_id,
+            },
             false,
         )
     }
@@ -218,12 +239,14 @@ impl SessionStoreWorker {
         &mut self,
         store: Arc<dyn SessionStore>,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
         branch_row_id: String,
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::LoadBranchPreview {
                 store,
                 session_id,
+                request_id,
                 branch_row_id,
             },
             false,
@@ -235,6 +258,7 @@ impl SessionStoreWorker {
         store: Arc<dyn SessionStore>,
         header: SessionHeader,
         session_id: SessionId,
+        request_id: SessionLoadRequestId,
         leaf_id: String,
     ) -> Result<(), String> {
         self.send_command(
@@ -242,6 +266,7 @@ impl SessionStoreWorker {
                 store,
                 header,
                 session_id,
+                request_id,
                 leaf_id,
             },
             true,
@@ -322,6 +347,15 @@ impl SessionStoreWorkerEvent {
         Self::Runtime {
             event,
             completes_command: true,
+            is_mutation: false,
+        }
+    }
+
+    fn runtime_mutation(event: RuntimeEvent) -> Self {
+        Self::Runtime {
+            event,
+            completes_command: true,
+            is_mutation: true,
         }
     }
 
@@ -329,6 +363,7 @@ impl SessionStoreWorkerEvent {
         Self::Runtime {
             event,
             completes_command: false,
+            is_mutation: false,
         }
     }
 
@@ -347,7 +382,11 @@ impl SessionStoreWorkerEvent {
     fn is_mutation_result(&self) -> bool {
         matches!(
             self,
-            Self::Restored { .. }
+            Self::Runtime {
+                completes_command: true,
+                is_mutation: true,
+                ..
+            } | Self::Restored { .. }
                 | Self::RestoredWithTree { .. }
                 | Self::Noop
                 | Self::Failed {
@@ -482,53 +521,80 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
             },
             Err(message) => failed(message, true),
         },
-        SessionStoreCommand::LoadEntryTree { store, session_id } => {
-            match store.load_session_tree(&session_id).await {
-                Ok(snapshot) => SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionTreeLoaded {
-                    payload: session_tree_payload(snapshot),
-                }),
-                Err(error) => failed(error.to_string(), false),
+        SessionStoreCommand::LoadSessionTree {
+            store,
+            session_id,
+            request_id,
+            consumer,
+        } => match store.load_session_tree(&session_id).await {
+            Ok(snapshot) => SessionStoreWorkerEvent::runtime(
+                consumer.loaded_event(request_id, session_tree_payload(snapshot)),
+            ),
+            Err(error) => SessionStoreWorkerEvent::runtime(
+                consumer.failed_event(request_id, error.to_string()),
+            ),
+        },
+        SessionStoreCommand::LoadBranchTree {
+            store,
+            session_id,
+            request_id,
+        } => match store.load_session_branch_tree(&session_id).await {
+            Ok(snapshot) => {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchTreeLoaded {
+                    request_id,
+                    payload: session_branch_tree_payload(snapshot),
+                })
             }
-        }
-        SessionStoreCommand::LoadBranchTree { store, session_id } => {
-            match store.load_session_branch_tree(&session_id).await {
-                Ok(snapshot) => {
-                    SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchTreeLoaded {
-                        payload: session_branch_tree_payload(snapshot),
-                    })
-                }
-                Err(error) => failed(error.to_string(), false),
+            Err(error) => {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchTreeLoadFailed {
+                    request_id,
+                    message: error.to_string(),
+                })
             }
-        }
+        },
         SessionStoreCommand::LoadBranchPreview {
             store,
             session_id,
+            request_id,
             branch_row_id,
         } => match store
             .load_session_branch_preview(&session_id, &branch_row_id)
             .await
         {
             Ok(snapshot) => {
-                SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionTreePreviewLoaded {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchPreviewLoaded {
+                    request_id,
                     payload: session_tree_payload(snapshot),
                 })
             }
-            Err(error) => failed(error.to_string(), false),
+            Err(error) => {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::SessionBranchPreviewLoadFailed {
+                    request_id,
+                    message: error.to_string(),
+                })
+            }
         },
         SessionStoreCommand::SwitchBranch {
             store,
             header,
             session_id,
+            request_id,
             leaf_id,
         } => match switch_branch(store, header, session_id, leaf_id).await {
             Ok((conversation, resume_payload, tree_payload)) => {
                 SessionStoreWorkerEvent::RestoredWithTree {
                     conversation,
                     resume_payload,
+                    tree_request_id: request_id,
                     tree_payload,
                 }
             }
-            Err(message) => failed(message, true),
+            Err(message) => {
+                SessionStoreWorkerEvent::runtime_mutation(RuntimeEvent::SessionBranchSwitchFailed {
+                    request_id,
+                    message,
+                })
+            }
         },
         SessionStoreCommand::SelectEntryRewind {
             store,
@@ -564,11 +630,7 @@ async fn list_session_rows(
     let metas = store.list_sessions(project_dir, options).await?;
     Ok(metas
         .into_iter()
-        .filter(|meta| {
-            active_session_id
-                .map(|session_id| meta.session_id != *session_id)
-                .unwrap_or(true)
-        })
+        .filter(|meta| active_session_id.is_none_or(|session_id| meta.session_id != *session_id))
         .map(session_picker_row_from_meta)
         .collect())
 }

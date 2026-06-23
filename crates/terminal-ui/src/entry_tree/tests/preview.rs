@@ -126,6 +126,157 @@ fn entry_tree_space_preview_renders_assistant_tool_call_json_with_highlighting()
 }
 
 #[test]
+fn entry_tree_preview_render_does_not_change_scroll_offset() {
+    let mut model = ready_model();
+    model.set_window(60, 8);
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_preview_replay_items(
+            "assistant-long",
+            SessionTreeRowKind::Assistant,
+            "assistant preview",
+            vec![TranscriptReplayItem::Message {
+                role: TranscriptReplayRole::Assistant,
+                content: (0..20)
+                    .map(|index| format!("preview line {index}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }],
+        )],
+        current_row_id: Some("assistant-long".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert!(model.entry_tree_preview_active());
+
+    let preview = model
+        .entry_tree
+        .as_mut()
+        .and_then(|state| state.preview.as_mut())
+        .expect("entry tree preview should be open");
+    preview.is_following_bottom = true;
+    preview.overlay.scroll_offset = 0;
+
+    let _ = render_model_buffer(&mut model, 60, 8);
+
+    let scroll_offset = model
+        .entry_tree
+        .as_ref()
+        .and_then(|state| state.preview.as_ref())
+        .map(|preview| preview.overlay.scroll_offset);
+    assert_eq!(
+        scroll_offset,
+        Some(0),
+        "rendering must not repair or advance preview scroll state"
+    );
+}
+
+#[test]
+fn entry_tree_preview_transcript_tracks_resize_after_opening() {
+    let mut model = ready_model();
+    model.set_window(80, 12);
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_preview_replay_items(
+            "assistant-long",
+            SessionTreeRowKind::Assistant,
+            "assistant preview",
+            vec![TranscriptReplayItem::Message {
+                role: TranscriptReplayRole::Assistant,
+                content: "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+                    .to_string(),
+            }],
+        )],
+        current_row_id: Some("assistant-long".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert!(model.entry_tree_preview_active());
+
+    let wide_line_count = model
+        .entry_tree
+        .as_mut()
+        .and_then(|state| state.preview.as_mut())
+        .map(|preview| {
+            preview
+                .transcript
+                .progressive_item_metrics_index()
+                .line_count
+        })
+        .expect("entry tree preview should be open");
+
+    model.update(AppEvent::Resized {
+        width: 18,
+        height: 12,
+    });
+
+    let narrow_line_count = model
+        .entry_tree
+        .as_mut()
+        .and_then(|state| state.preview.as_mut())
+        .map(|preview| {
+            preview
+                .transcript
+                .progressive_item_metrics_index()
+                .line_count
+        })
+        .expect("entry tree preview should stay open after resize");
+    assert!(
+        narrow_line_count > wide_line_count,
+        "open entry tree preview should rewrap after resize: wide={wide_line_count}, narrow={narrow_line_count}"
+    );
+}
+
+#[test]
+fn entry_tree_preview_transcript_tracks_palette_after_opening() {
+    let mut model = ready_model();
+    model.set_window(80, 12);
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_preview_replay_items(
+            "user-message",
+            SessionTreeRowKind::User,
+            "user preview",
+            vec![TranscriptReplayItem::Message {
+                role: TranscriptReplayRole::User,
+                content: "surface-backed user message".to_string(),
+            }],
+        )],
+        current_row_id: Some("user-message".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert!(model.entry_tree_preview_active());
+
+    let surface_line_count = model
+        .entry_tree
+        .as_mut()
+        .and_then(|state| state.preview.as_mut())
+        .map(|preview| {
+            preview
+                .transcript
+                .progressive_item_metrics_index()
+                .line_count
+        })
+        .expect("entry tree preview should be open");
+
+    model.set_palette(terminal_default_palette(), false);
+
+    let terminal_default_line_count = model
+        .entry_tree
+        .as_mut()
+        .and_then(|state| state.preview.as_mut())
+        .map(|preview| {
+            preview
+                .transcript
+                .progressive_item_metrics_index()
+                .line_count
+        })
+        .expect("entry tree preview should stay open after palette change");
+    assert!(
+        terminal_default_line_count < surface_line_count,
+        "open entry tree preview should refresh user-message surface metrics after palette change: surface={surface_line_count}, terminal_default={terminal_default_line_count}"
+    );
+}
+
+#[test]
 fn entry_tree_space_preview_renders_tool_activity_in_detailed_mode() {
     let mut model = ready_model();
     model.open_entry_tree_loading();

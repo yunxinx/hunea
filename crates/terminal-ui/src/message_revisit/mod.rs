@@ -1,6 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::{AppEffect, Model, Sender, transcript::TranscriptItem};
+use crate::{
+    AppEffect, Model, Sender, overlay_input_result::OverlayInputResult, toast::ToastSeverity,
+    transcript::TranscriptItem,
+};
 
 #[cfg(test)]
 mod tests;
@@ -28,7 +31,7 @@ impl Model {
             return None;
         }
         if !self.has_message_revisit_target() {
-            self.show_transient_status_notice("No previous user message");
+            self.show_toast(ToastSeverity::Info, "No previous user message");
             return None;
         }
 
@@ -39,7 +42,7 @@ impl Model {
         None
     }
 
-    pub(crate) fn handle_message_revisit_main_esc_key(&mut self) -> Option<Option<AppEffect>> {
+    pub(crate) fn handle_message_revisit_main_esc_key(&mut self) -> OverlayInputResult {
         if self.message_revisit.is_armed
             && self.current_status_notice_text() != MESSAGE_REVISIT_HINT
         {
@@ -48,70 +51,72 @@ impl Model {
 
         if self.stream_activity.is_some() || !self.composer_text().is_empty() {
             self.reset_message_revisit_state();
-            return None;
+            return OverlayInputResult::Ignored;
         }
 
         if !self.has_message_revisit_target() {
             self.reset_message_revisit_state();
-            return None;
+            return OverlayInputResult::Ignored;
         }
 
         if !self.message_revisit.is_armed {
             self.message_revisit.is_armed = true;
             self.message_revisit.selected_message_index = None;
             self.show_transient_status_notice(MESSAGE_REVISIT_HINT);
-            return Some(None);
+            return OverlayInputResult::Handled;
         }
 
         if matches!(self.esc_rewind_mode, crate::EscRewindMode::Entry) {
             self.clear_message_revisit_notice();
             self.reset_message_revisit_state();
-            return Some(Some(AppEffect::OpenEntryRewind));
+            return OverlayInputResult::Effect(AppEffect::OpenEntryRewind);
         }
 
         self.clear_message_revisit_notice();
         self.open_transcript_overlay();
         self.message_revisit.is_overlay_active = true;
         self.select_latest_message_revisit_target();
-        Some(None)
+        OverlayInputResult::Handled
     }
 
     pub(crate) fn handle_message_revisit_overlay_key(
         &mut self,
         key: KeyEvent,
-    ) -> Option<Option<AppEffect>> {
+    ) -> OverlayInputResult {
         if !self.message_revisit.is_overlay_active {
-            return None;
+            return OverlayInputResult::Ignored;
         }
 
         match key.code {
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.close_transcript_overlay();
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.close_transcript_overlay();
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.close_transcript_overlay();
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Left if key.modifiers.is_empty() => {
                 self.step_message_revisit_selection(-1);
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Right if key.modifiers.is_empty() => {
                 self.step_message_revisit_selection(1);
-                Some(None)
+                OverlayInputResult::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let selection = self.current_message_revisit_selection();
                 self.close_transcript_overlay();
                 if let Some(selection) = selection {
-                    return Some(self.apply_message_revisit_selection(selection));
+                    return OverlayInputResult::from_effect(
+                        self.apply_message_revisit_selection(selection),
+                    );
                 }
-                Some(None)
+                OverlayInputResult::Handled
             }
             _ => self.handle_transcript_overlay_key(key),
         }

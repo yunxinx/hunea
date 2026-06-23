@@ -1,11 +1,13 @@
 use color_eyre::eyre::Result;
 use runtime_domain::session::{RuntimeCommand, RuntimeCommandReceipt, RuntimeTarget};
 
-use crate::{AppEffect, Model};
+use crate::{AppEffect, Model, toast::ToastSeverity};
 
 use super::RuntimeCoordinator;
 use super::conversation::run_send_conversation_turn_effect;
-use super::external_io::{run_copy_selection_effect, run_external_editor_effect};
+use super::external_io::{
+    ExternalIoRuntime, run_copy_selection_effect, run_external_editor_effect,
+};
 use super::model_refresh::{persist_selected_model, run_refresh_model_provider_effect};
 use super::terminal::TuiTerminal;
 
@@ -13,6 +15,7 @@ pub(super) fn apply_effect_if_needed(
     terminal: &mut TuiTerminal,
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
+    external_io: &mut ExternalIoRuntime,
     effect: Option<AppEffect>,
 ) -> Result<()> {
     let Some(effect) = effect else {
@@ -23,7 +26,7 @@ pub(super) fn apply_effect_if_needed(
         AppEffect::LaunchExternalEditor(launch) => {
             run_external_editor_effect(terminal, model, launch)
         }
-        AppEffect::CopySelection(text) => run_copy_selection_effect(terminal, model, &text),
+        AppEffect::CopySelection(text) => run_copy_selection_effect(model, external_io, text),
         AppEffect::ResetRuntimeSession => {
             reset_runtime_session_after_clear(runtime_coordinator);
             Ok(())
@@ -51,6 +54,10 @@ pub(super) fn apply_effect_if_needed(
             );
             Ok(())
         }
+        AppEffect::OpenCopyPicker => {
+            run_open_copy_picker_effect(model, runtime_coordinator);
+            Ok(())
+        }
         AppEffect::OpenSessionPreview { session_id } => {
             run_simple_runtime_command_effect(
                 model,
@@ -68,21 +75,16 @@ pub(super) fn apply_effect_if_needed(
             Ok(())
         }
         AppEffect::OpenEntryRewind => {
-            model.open_entry_tree_loading();
+            let request_id = model.open_entry_tree_loading();
             run_simple_runtime_command_effect(
                 model,
                 runtime_coordinator,
-                RuntimeCommand::LoadEntryTree,
+                RuntimeCommand::LoadEntryTree { request_id },
             );
             Ok(())
         }
         AppEffect::OpenBranchTree => {
-            model.open_entry_tree_branch_tree_loading();
-            run_simple_runtime_command_effect(
-                model,
-                runtime_coordinator,
-                RuntimeCommand::LoadBranchTree,
-            );
+            run_open_branch_tree_effect(model, runtime_coordinator);
             Ok(())
         }
         AppEffect::SelectEntryRewind { entry_id, prefill } => {
@@ -96,12 +98,11 @@ pub(super) fn apply_effect_if_needed(
             );
             Ok(())
         }
-        AppEffect::OpenBranchPreview { branch_row_id } => {
-            run_simple_runtime_command_effect(
-                model,
-                runtime_coordinator,
-                RuntimeCommand::LoadBranchPreview { branch_row_id },
-            );
+        AppEffect::OpenBranchPreview {
+            request_id,
+            branch_row_id,
+        } => {
+            run_open_branch_preview_effect(model, runtime_coordinator, request_id, branch_row_id);
             Ok(())
         }
         AppEffect::SwitchBranch { leaf_id } => {
@@ -138,11 +139,53 @@ pub(super) fn run_switch_branch_effect(
     runtime_coordinator: &mut impl RuntimeCoordinator,
     leaf_id: &str,
 ) {
+    let request_id = model.next_session_load_request_id();
     match runtime_coordinator.dispatch_runtime_command(RuntimeCommand::SwitchBranch {
+        request_id,
         leaf_id: leaf_id.to_string(),
     }) {
-        Ok(_) => model.open_entry_tree_loading(),
+        Ok(_) => model.open_entry_tree_loading_for_request(request_id),
         Err(message) => model.show_entry_tree_branch_picker_error(&message),
+    }
+}
+
+pub(super) fn run_open_copy_picker_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) {
+    let request_id = model.open_copy_picker_loading();
+    if let Err(message) = runtime_coordinator
+        .dispatch_runtime_command(RuntimeCommand::LoadCopyPickerTree { request_id })
+    {
+        model.show_copy_picker_error(&message);
+    }
+}
+
+pub(super) fn run_open_branch_tree_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) {
+    let request_id = model.open_entry_tree_branch_tree_loading();
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadBranchTree { request_id })
+    {
+        model.show_entry_tree_branch_tree_error(&message);
+    }
+}
+
+pub(super) fn run_open_branch_preview_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+    request_id: runtime_domain::session::SessionLoadRequestId,
+    branch_row_id: String,
+) {
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadBranchPreview {
+            request_id,
+            branch_row_id,
+        })
+    {
+        model.show_entry_tree_branch_preview_error(&message);
     }
 }
 
@@ -152,7 +195,7 @@ fn run_simple_runtime_command_effect(
     command: RuntimeCommand,
 ) {
     if let Err(message) = runtime_coordinator.dispatch_runtime_command(command) {
-        model.show_transient_status_notice(&message);
+        model.show_toast(ToastSeverity::Error, message);
     }
 }
 
@@ -164,7 +207,7 @@ fn run_truncate_conversation_effect(
     if let Err(message) = runtime_coordinator
         .dispatch_runtime_command(RuntimeCommand::truncate_conversation(retained_user_turns))
     {
-        model.show_transient_status_notice(&message);
+        model.show_toast(ToastSeverity::Error, message);
     }
 }
 
@@ -182,7 +225,7 @@ fn run_respond_runtime_permission_effect(
             option_id,
         })
     {
-        model.show_transient_status_notice(&message);
+        model.show_toast(ToastSeverity::Error, message);
     }
 }
 
@@ -202,6 +245,6 @@ pub(super) fn run_interrupt_current_turn_effect(
         }
         Ok(RuntimeCommandReceipt::Interrupted { .. }) => {}
         Ok(_) => {}
-        Err(message) => model.show_transient_status_notice(&message),
+        Err(message) => model.show_toast(ToastSeverity::Error, message),
     }
 }

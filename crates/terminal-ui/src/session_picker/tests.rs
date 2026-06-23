@@ -10,6 +10,15 @@ use crate::runtime::RuntimeEventApply;
 use crate::test_helpers::{render_model_buffer, rendered_rows};
 use crate::{AppEffect, AppEvent, Model, StartupBannerOptions, theme::default_palette};
 
+use super::session_picker_page_size_for_height;
+
+#[test]
+fn session_picker_page_size_uses_fullscreen_chrome_with_multi_line_rows() {
+    assert_eq!(session_picker_page_size_for_height(12), 2);
+    assert_eq!(session_picker_page_size_for_height(20), 4);
+    assert_eq!(session_picker_page_size_for_height(7), 1);
+}
+
 #[test]
 fn session_picker_filters_and_resumes_selected_session() {
     let mut model = ready_model();

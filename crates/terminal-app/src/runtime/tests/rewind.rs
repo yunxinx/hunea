@@ -77,7 +77,9 @@ fn select_entry_rewind_rebuilds_provider_history_to_selected_entry() {
     wait_for_session_resumed(&mut coordinator);
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadEntryTree)
+        .handle_runtime_command(RuntimeCommand::LoadEntryTree {
+            request_id: request_id(30),
+        })
         .expect("load entry tree should succeed");
     let payload = wait_for_session_tree(&mut coordinator);
     let assistant_row = payload
@@ -168,7 +170,9 @@ fn select_entry_rewind_ignores_reasoning_without_restore_target() {
     wait_for_session_resumed(&mut coordinator);
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadEntryTree)
+        .handle_runtime_command(RuntimeCommand::LoadEntryTree {
+            request_id: request_id(31),
+        })
         .expect("load entry tree should succeed");
     let payload = wait_for_session_tree(&mut coordinator);
     let reasoning_row = payload

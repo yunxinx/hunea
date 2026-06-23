@@ -329,13 +329,8 @@ fn model_panel_enter_selects_model_and_restores_composer() {
         "panel should close after selecting a model: {rows:?}"
     );
     assert!(
-        rows.iter()
-            .any(|row| row.contains("Model selected: [DeepSeek] deepseek-reasoner")),
-        "selection notice should use the provider display name, got: {rows:?}"
-    );
-    assert!(
         rows.iter().all(|row| !row.contains("deepseek/deepseek")),
-        "selection notice should not use provider/model machine formatting, got: {rows:?}"
+        "closed model panel should not show provider/model machine formatting, got: {rows:?}"
     );
 }
 

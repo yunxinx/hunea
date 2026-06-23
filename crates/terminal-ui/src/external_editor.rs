@@ -6,7 +6,7 @@ use std::{
 
 use runtime_domain::envinfo;
 
-use super::Model;
+use super::{Model, toast::ToastSeverity};
 
 pub(crate) const EXTERNAL_EDITOR_HELPER_WINDOW: Duration = Duration::from_secs(3);
 
@@ -23,7 +23,10 @@ impl Model {
         let editor = match envinfo::resolve_external_editor(&self.external_editor) {
             Ok(editor) => editor,
             Err(error) => {
-                self.show_transient_status_notice(external_editor_unavailable_text(&error));
+                self.show_toast(
+                    ToastSeverity::Error,
+                    external_editor_unavailable_text(&error),
+                );
                 return None;
             }
         };
@@ -32,7 +35,7 @@ impl Model {
         let draft_path = match write_external_editor_draft(&original_draft) {
             Ok(path) => path,
             Err(_) => {
-                self.show_transient_status_notice("Failed to prepare external editor");
+                self.show_toast(ToastSeverity::Error, "Failed to prepare external editor");
                 return None;
             }
         };
@@ -64,7 +67,7 @@ impl Model {
             self.sync_document_viewport_after_composer_interaction(
                 &old_value, old_line, old_column,
             );
-            self.show_transient_status_notice("External editor failed");
+            self.show_toast(ToastSeverity::Error, "External editor failed");
             let _ = fs::remove_file(draft_path);
             return;
         }
@@ -76,7 +79,7 @@ impl Model {
                 self.sync_document_viewport_after_composer_interaction(
                     &old_value, old_line, old_column,
                 );
-                self.show_transient_status_notice("Failed to read external editor draft");
+                self.show_toast(ToastSeverity::Error, "Failed to read external editor draft");
                 let _ = fs::remove_file(draft_path);
                 return;
             }
@@ -413,6 +416,23 @@ mod tests {
             KeyModifiers::CONTROL,
         )));
 
+        assert_eq!(model.composer_text(), "before");
+    }
+
+    #[test]
+    fn external_editor_failure_uses_toast_not_status_notice() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.composer_mut().insert_text("before");
+        let draft_path =
+            write_external_editor_draft("before").expect("draft file should be written");
+
+        model.apply_external_editor_finished(&draft_path, "before", true);
+
+        assert_eq!(model.current_status_notice_text(), "");
+        assert_eq!(
+            model.active_toast_text_for_test(),
+            Some("External editor failed")
+        );
         assert_eq!(model.composer_text(), "before");
     }
 }

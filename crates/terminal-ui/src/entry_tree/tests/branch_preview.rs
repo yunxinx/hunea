@@ -256,6 +256,349 @@ fn entry_tree_branch_preview_space_opens_message_preview_and_esc_returns_to_l3()
 }
 
 #[test]
+fn late_branch_preview_payload_after_exit_does_not_reopen_branch_preview() {
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_branch_choices(
+            "user-a",
+            SessionTreeRowKind::User,
+            "root question",
+            vec![
+                branch_choice("assistant-b", "assistant-b", "inactive answer", false),
+                branch_choice("assistant-c", "user-d", "current follow up", true),
+            ],
+        )],
+        current_row_id: Some("user-a".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    assert!(!model.entry_tree_branch_preview_active());
+    assert!(model.entry_tree_branch_picker_active());
+
+    model.apply_entry_tree_branch_preview_payload(SessionTreePayload {
+        rows: vec![tree_row_with_parent_at_depth(
+            "assistant-b",
+            None,
+            SessionTreeRowKind::Assistant,
+            "inactive answer",
+            0,
+            true,
+            true,
+        )],
+        current_row_id: Some("assistant-b".to_string()),
+    });
+
+    assert!(model.entry_tree_branch_picker_active());
+    assert!(!model.entry_tree_branch_preview_active());
+}
+
+#[test]
+fn branch_preview_loading_state_tracks_only_pending_branch_preview_payload() {
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_branch_choices(
+            "user-a",
+            SessionTreeRowKind::User,
+            "root question",
+            vec![
+                branch_choice("assistant-b", "assistant-b", "inactive answer", false),
+                branch_choice("assistant-c", "user-d", "current follow up", true),
+            ],
+        )],
+        current_row_id: Some("user-a".to_string()),
+    });
+
+    assert!(!model.entry_tree_branch_preview_loading());
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert!(model.entry_tree_branch_preview_loading());
+
+    model.apply_entry_tree_branch_preview_payload(SessionTreePayload {
+        rows: vec![tree_row_with_parent_at_depth(
+            "assistant-b",
+            None,
+            SessionTreeRowKind::Assistant,
+            "inactive answer",
+            0,
+            true,
+            true,
+        )],
+        current_row_id: Some("assistant-b".to_string()),
+    });
+
+    assert!(!model.entry_tree_branch_preview_loading());
+    assert!(model.entry_tree_branch_preview_active());
+}
+
+#[test]
+fn branch_preview_load_failure_renders_overlay_error() {
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_branch_choices(
+            "user-a",
+            SessionTreeRowKind::User,
+            "root question",
+            vec![
+                branch_choice("assistant-b", "assistant-b", "inactive answer", false),
+                branch_choice("assistant-c", "user-d", "current follow up", true),
+            ],
+        )],
+        current_row_id: Some("user-a".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert!(model.entry_tree_branch_preview_loading());
+    let request_id = model
+        .entry_tree_branch_preview_pending_request_id_for_test()
+        .unwrap();
+
+    model.apply_runtime_event(RuntimeEvent::SessionBranchPreviewLoadFailed {
+        request_id,
+        message: "branch preview index is corrupt".to_string(),
+    });
+
+    assert!(!model.entry_tree_branch_preview_loading());
+    assert!(model.entry_tree_branch_preview_active());
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 10));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("branch preview index is corrupt")),
+        "branch preview load failure should render inside the active overlay: {rows:?}"
+    );
+}
+
+#[test]
+fn stale_branch_preview_payload_is_ignored_after_preview_switches_branch() {
+    let mut model = ready_model();
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_branch_choices(
+            "user-a",
+            SessionTreeRowKind::User,
+            "root question",
+            vec![
+                branch_choice("assistant-a", "assistant-a", "inactive answer A", false),
+                branch_choice("assistant-b", "assistant-b", "inactive answer B", false),
+                branch_choice("assistant-c", "assistant-c", "current answer", true),
+            ],
+        )],
+        current_row_id: Some("user-a".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+
+    let stale_effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    let (stale_request_id, stale_branch_row_id) = match stale_effect {
+        Some(AppEffect::OpenBranchPreview {
+            request_id,
+            branch_row_id,
+        }) => (request_id, branch_row_id),
+        effect => panic!("expected branch preview effect, got {effect:?}"),
+    };
+    assert_eq!(stale_branch_row_id, "assistant-a");
+    assert!(model.entry_tree_branch_preview_loading());
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    let current_effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    let (current_request_id, current_branch_row_id) = match current_effect {
+        Some(AppEffect::OpenBranchPreview {
+            request_id,
+            branch_row_id,
+        }) => (request_id, branch_row_id),
+        effect => panic!("expected branch preview effect, got {effect:?}"),
+    };
+    assert_eq!(current_branch_row_id, "assistant-b");
+
+    model.apply_runtime_event(RuntimeEvent::SessionBranchPreviewLoaded {
+        request_id: stale_request_id,
+        payload: SessionTreePayload {
+            rows: vec![tree_row_with_parent_at_depth(
+                "assistant-a",
+                None,
+                SessionTreeRowKind::Assistant,
+                "inactive answer A",
+                0,
+                true,
+                true,
+            )],
+            current_row_id: Some("assistant-a".to_string()),
+        },
+    });
+
+    assert!(model.entry_tree_branch_preview_loading());
+    assert_eq!(
+        model.entry_tree_branch_preview_row_ids_for_test(),
+        Vec::<&str>::new()
+    );
+
+    model.apply_runtime_event(RuntimeEvent::SessionBranchPreviewLoaded {
+        request_id: current_request_id,
+        payload: SessionTreePayload {
+            rows: vec![tree_row_with_parent_at_depth(
+                "assistant-b",
+                None,
+                SessionTreeRowKind::Assistant,
+                "inactive answer B",
+                0,
+                true,
+                true,
+            )],
+            current_row_id: Some("assistant-b".to_string()),
+        },
+    });
+
+    assert!(!model.entry_tree_branch_preview_loading());
+    assert_eq!(
+        model.entry_tree_branch_preview_row_ids_for_test(),
+        vec!["assistant-b"]
+    );
+}
+
+#[test]
+fn entry_tree_branch_message_preview_transcript_tracks_resize_after_opening() {
+    let mut model = ready_model();
+    model.set_window(80, 12);
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_branch_choices(
+            "user-a",
+            SessionTreeRowKind::User,
+            "root question",
+            vec![
+                branch_choice("assistant-b", "assistant-b", "inactive answer", false),
+                branch_choice("assistant-c", "user-d", "current follow up", true),
+            ],
+        )],
+        current_row_id: Some("user-a".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    model.apply_entry_tree_branch_preview_payload(SessionTreePayload {
+        rows: vec![tree_row_with_preview_replay_items(
+            "assistant-b",
+            SessionTreeRowKind::Assistant,
+            "inactive answer",
+            vec![TranscriptReplayItem::Message {
+                role: TranscriptReplayRole::Assistant,
+                content: "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+                    .to_string(),
+            }],
+        )],
+        current_row_id: Some("assistant-b".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert!(model.entry_tree_preview_active());
+
+    let wide_line_count = model
+        .entry_tree
+        .as_mut()
+        .and_then(|state| state.branch_preview.as_mut())
+        .and_then(|preview| preview.message_preview.as_mut())
+        .map(|preview| {
+            preview
+                .transcript
+                .progressive_item_metrics_index()
+                .line_count
+        })
+        .expect("branch message preview should be open");
+
+    model.update(AppEvent::Resized {
+        width: 18,
+        height: 12,
+    });
+
+    let narrow_line_count = model
+        .entry_tree
+        .as_mut()
+        .and_then(|state| state.branch_preview.as_mut())
+        .and_then(|preview| preview.message_preview.as_mut())
+        .map(|preview| {
+            preview
+                .transcript
+                .progressive_item_metrics_index()
+                .line_count
+        })
+        .expect("branch message preview should stay open after resize");
+    assert!(
+        narrow_line_count > wide_line_count,
+        "open branch message preview should rewrap after resize: wide={wide_line_count}, narrow={narrow_line_count}"
+    );
+}
+
+#[test]
+fn entry_tree_branch_message_preview_transcript_tracks_palette_after_opening() {
+    let mut model = ready_model();
+    model.set_window(80, 12);
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_branch_choices(
+            "user-a",
+            SessionTreeRowKind::User,
+            "root question",
+            vec![
+                branch_choice("assistant-b", "assistant-b", "inactive answer", false),
+                branch_choice("assistant-c", "user-d", "current follow up", true),
+            ],
+        )],
+        current_row_id: Some("user-a".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    model.apply_entry_tree_branch_preview_payload(SessionTreePayload {
+        rows: vec![tree_row_with_preview_replay_items(
+            "user-b",
+            SessionTreeRowKind::User,
+            "user reply",
+            vec![TranscriptReplayItem::Message {
+                role: TranscriptReplayRole::User,
+                content: "surface-backed user message".to_string(),
+            }],
+        )],
+        current_row_id: Some("user-b".to_string()),
+    });
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(' '))));
+    assert!(model.entry_tree_preview_active());
+
+    let surface_line_count = model
+        .entry_tree
+        .as_mut()
+        .and_then(|state| state.branch_preview.as_mut())
+        .and_then(|preview| preview.message_preview.as_mut())
+        .map(|preview| {
+            preview
+                .transcript
+                .progressive_item_metrics_index()
+                .line_count
+        })
+        .expect("branch message preview should be open");
+
+    model.set_palette(terminal_default_palette(), false);
+
+    let terminal_default_line_count = model
+        .entry_tree
+        .as_mut()
+        .and_then(|state| state.branch_preview.as_mut())
+        .and_then(|preview| preview.message_preview.as_mut())
+        .map(|preview| {
+            preview
+                .transcript
+                .progressive_item_metrics_index()
+                .line_count
+        })
+        .expect("branch message preview should stay open after palette change");
+    assert!(
+        terminal_default_line_count < surface_line_count,
+        "open branch message preview should refresh user-message surface metrics after palette change: surface={surface_line_count}, terminal_default={terminal_default_line_count}"
+    );
+}
+
+#[test]
 fn entry_tree_esc_pops_l4_l3_l2_l1_in_order() {
     let mut model = ready_model();
     model.open_entry_tree_loading();

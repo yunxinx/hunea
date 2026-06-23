@@ -1,8 +1,8 @@
 use super::{
     ConversationResponse, RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics,
     RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
-    SessionBranchTreePayload, SessionPickerRow, SessionPreviewPayload, SessionResumePayload,
-    SessionTreePayload,
+    SessionBranchTreePayload, SessionLoadRequestId, SessionPickerRow, SessionPreviewPayload,
+    SessionResumePayload, SessionTreePayload,
 };
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
@@ -78,13 +78,40 @@ pub enum RuntimeEvent {
         payload: SessionResumePayload,
     },
     SessionTreeLoaded {
+        request_id: SessionLoadRequestId,
         payload: SessionTreePayload,
+    },
+    SessionTreeLoadFailed {
+        request_id: SessionLoadRequestId,
+        message: String,
+    },
+    CopyPickerTreeLoaded {
+        request_id: SessionLoadRequestId,
+        payload: SessionTreePayload,
+    },
+    CopyPickerTreeLoadFailed {
+        request_id: SessionLoadRequestId,
+        message: String,
     },
     SessionBranchTreeLoaded {
+        request_id: SessionLoadRequestId,
         payload: SessionBranchTreePayload,
     },
-    SessionTreePreviewLoaded {
+    SessionBranchTreeLoadFailed {
+        request_id: SessionLoadRequestId,
+        message: String,
+    },
+    SessionBranchPreviewLoaded {
+        request_id: SessionLoadRequestId,
         payload: SessionTreePayload,
+    },
+    SessionBranchPreviewLoadFailed {
+        request_id: SessionLoadRequestId,
+        message: String,
+    },
+    SessionBranchSwitchFailed {
+        request_id: SessionLoadRequestId,
+        message: String,
     },
     MessageFinished {
         target: Option<RuntimeTarget>,
@@ -132,8 +159,14 @@ impl RuntimeEvent {
             | Self::SessionPreviewLoaded { .. }
             | Self::SessionResumed { .. }
             | Self::SessionTreeLoaded { .. }
+            | Self::SessionTreeLoadFailed { .. }
+            | Self::CopyPickerTreeLoaded { .. }
+            | Self::CopyPickerTreeLoadFailed { .. }
             | Self::SessionBranchTreeLoaded { .. }
-            | Self::SessionTreePreviewLoaded { .. } => None,
+            | Self::SessionBranchTreeLoadFailed { .. }
+            | Self::SessionBranchPreviewLoaded { .. }
+            | Self::SessionBranchPreviewLoadFailed { .. }
+            | Self::SessionBranchSwitchFailed { .. } => None,
         }
     }
 }

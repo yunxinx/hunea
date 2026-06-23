@@ -33,7 +33,7 @@ fn current_status_notice_still_renders_below_command_panel() {
         },
     );
     model.set_window(24, 6);
-    model.show_transient_status_notice("Selection copied");
+    model.show_transient_status_notice("Press Esc again to interrupt");
     model.composer.reset_text_and_move_to_end("/");
     model.sync_command_panel_navigation();
     model.sync_composer_height();
@@ -58,7 +58,7 @@ fn command_panel_rows_are_inserted_into_document_before_status_notice() {
     model.set_window(32, 8);
     model.composer.reset_text_and_move_to_end("/");
     model.sync_command_panel_navigation();
-    model.show_transient_status_notice("Selection copied");
+    model.show_transient_status_notice("Press Esc again to interrupt");
 
     let layout = model.build_document_layout();
     let plain_lines = layout.all_plain_lines();
@@ -68,7 +68,7 @@ fn command_panel_rows_are_inserted_into_document_before_status_notice() {
         .expect("command panel row should exist");
     let notice_line = plain_lines
         .iter()
-        .position(|line| line.contains("Selection copied"))
+        .position(|line| line.contains("Press Esc again to interrupt"))
         .expect("status notice should exist");
     let command_panel_rows = layout
         .all_line_anchors()

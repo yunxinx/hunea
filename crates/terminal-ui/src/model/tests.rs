@@ -4,6 +4,8 @@ use std::{
 };
 
 use super::*;
+use session_store::MessageHistoryEntry;
+
 use crate::{
     AppEffect, AppEvent, Sender, StyleMode,
     document::DocumentAnchorRegion,
@@ -416,10 +418,7 @@ fn conversation_turn_request_carries_only_current_user_message() {
         crossterm::event::KeyCode::Enter,
     )));
 
-    let Some(AppEffect::SendConversationTurn {
-        request,
-    }) = effect
-    else {
+    let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert!(request.is_user_message());
@@ -456,10 +455,7 @@ fn conversation_turn_request_ignores_runtime_system_messages_in_transcript() {
         crossterm::event::KeyCode::Enter,
     )));
 
-    let Some(AppEffect::SendConversationTurn {
-        request,
-    }) = effect
-    else {
+    let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert!(request.is_user_message());
@@ -484,10 +480,7 @@ fn conversation_turn_request_preserves_at_file_reference_as_text() {
         .insert_text("review @assets/sample.png @src/code.py");
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
-    let Some(AppEffect::SendConversationTurn {
-        request,
-    }) = effect
-    else {
+    let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect");
     };
 
@@ -520,10 +513,7 @@ fn conversation_turn_request_does_not_reuse_structured_transcript_history() {
         .append_message(Sender::Assistant, "first answer");
     model.composer_mut().insert_text("follow up");
     let second = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
-    let Some(AppEffect::SendConversationTurn {
-        request,
-    }) = second
-    else {
+    let Some(AppEffect::SendConversationTurn { request }) = second else {
         panic!("expected conversation turn effect");
     };
 
@@ -740,10 +730,7 @@ fn at_file_picker_enter_on_exact_visible_path_submits_prompt() {
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendConversationTurn {
-        request,
-    }) = effect
-    else {
+    let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert!(request.is_user_message());
@@ -815,10 +802,7 @@ fn at_file_picker_enter_on_explicit_gitignored_file_submits_prompt() {
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendConversationTurn {
-        request,
-    }) = effect
-    else {
+    let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert!(request.is_user_message());
@@ -850,10 +834,7 @@ fn at_file_picker_enter_on_explicit_absolute_file_submits_prompt() {
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendConversationTurn {
-        request,
-    }) = effect
-    else {
+    let Some(AppEffect::SendConversationTurn { request }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert!(request.is_user_message());
@@ -2808,8 +2789,14 @@ fn send_emits_conversation_turn_without_separate_record_effect() {
     let mut model = conversation_test_model();
     type_text(&mut model, "hello history");
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
-    assert!(matches!(effect, Some(AppEffect::SendConversationTurn { .. })));
-    assert!(!matches!(effect, Some(AppEffect::RecordMessageHistory { .. })));
+    assert!(matches!(
+        effect,
+        Some(AppEffect::SendConversationTurn { .. })
+    ));
+    assert!(!matches!(
+        effect,
+        Some(AppEffect::RecordMessageHistory { .. })
+    ));
 }
 
 #[test]
@@ -2817,8 +2804,99 @@ fn slash_command_enter_does_not_emit_message_history_effects() {
     let mut model = conversation_test_model();
     type_text(&mut model, "/exit");
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
-    assert!(!matches!(effect, Some(AppEffect::RecordMessageHistory { .. })));
-    assert!(!matches!(effect, Some(AppEffect::SendConversationTurn { .. })));
+    assert!(!matches!(
+        effect,
+        Some(AppEffect::RecordMessageHistory { .. })
+    ));
+    assert!(!matches!(
+        effect,
+        Some(AppEffect::SendConversationTurn { .. })
+    ));
+}
+
+/// `texts` 为 oldest-first；与 SQLite `ORDER BY id DESC` 查询结果一致地反转后写入缓存。
+fn seed_blind_recall_cache(model: &mut Model, texts_oldest_first: &[&str]) {
+    let recent_newest_first: Vec<MessageHistoryEntry> = texts_oldest_first
+        .iter()
+        .rev()
+        .map(|text| MessageHistoryEntry {
+            ts: 1,
+            text: (*text).to_string(),
+        })
+        .collect();
+    let _ = model.update(AppEvent::MessageHistoryStartupCache(recent_newest_first));
+}
+
+#[test]
+fn blind_recall_up_from_empty_recalls_newest() {
+    let mut model = conversation_test_model();
+    seed_blind_recall_cache(&mut model, &["older", "newer"]);
+    assert!(model.composer_text().is_empty());
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert_eq!(model.composer_text(), "newer");
+    assert_eq!(model.blind_recall.history_cursor(), Some(1));
+}
+
+#[test]
+fn blind_recall_repeated_up_walks_older_and_noops_at_oldest() {
+    let mut model = conversation_test_model();
+    seed_blind_recall_cache(&mut model, &["a", "b", "c"]);
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert_eq!(model.composer_text(), "c");
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert_eq!(model.composer_text(), "b");
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert_eq!(model.composer_text(), "a");
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert_eq!(model.composer_text(), "a");
+}
+
+#[test]
+fn blind_recall_down_past_newest_clears_composer() {
+    let mut model = conversation_test_model();
+    seed_blind_recall_cache(&mut model, &["only"]);
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert_eq!(model.composer_text(), "only");
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    assert!(model.composer_text().is_empty());
+    assert_eq!(model.blind_recall.history_cursor(), None);
+}
+
+#[test]
+fn blind_recall_after_edit_does_not_recall_on_up() {
+    let mut model = conversation_test_model();
+    seed_blind_recall_cache(&mut model, &["old", "keep"]);
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert_eq!(model.composer_text(), "keep");
+    type_text(&mut model, "!");
+    assert_eq!(model.composer_text(), "keep!");
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert_eq!(model.composer_text(), "keep!");
+}
+
+#[test]
+fn blind_recall_empty_history_does_not_recall_on_up() {
+    let mut model = conversation_test_model();
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert!(model.composer_text().is_empty());
+}
+
+#[test]
+fn send_pushes_blind_recall_cache_and_adjacent_dedup() {
+    let mut model = conversation_test_model();
+    type_text(&mut model, "same");
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    assert_eq!(model.blind_recall.cache().len(), 1);
+    type_text(&mut model, "same");
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    assert_eq!(model.blind_recall.cache().len(), 1);
+    type_text(&mut model, "other");
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    assert_eq!(model.blind_recall.cache().len(), 2);
+    assert_eq!(
+        model.blind_recall.cache().last().map(|e| e.text.as_str()),
+        Some("other")
+    );
 }
 
 fn rendered_rows_for_model(model: &mut Model, width: u16, height: u16) -> Vec<String> {

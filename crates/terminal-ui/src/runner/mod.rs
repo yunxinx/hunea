@@ -78,6 +78,12 @@ pub trait RuntimeCoordinator {
     ) -> std::result::Result<(), String> {
         Ok(())
     }
+
+    fn load_message_history_startup_cache(
+        &mut self,
+    ) -> std::result::Result<Vec<session_store::MessageHistoryEntry>, String> {
+        Ok(Vec::new())
+    }
 }
 
 /// `NoopRuntimeCoordinator` 让纯 TUI 构建可以独立运行到模型更新层。
@@ -144,6 +150,19 @@ pub fn run_with_runtime_coordinator(
         },
         "initial terminal resize",
     );
+
+    match runtime_coordinator.load_message_history_startup_cache() {
+        Ok(entries) => {
+            apply_model_event_without_effect(
+                &mut model,
+                AppEvent::MessageHistoryStartupCache(entries),
+                "message history startup cache",
+            );
+        }
+        Err(message) => {
+            model.show_toast(crate::toast::ToastSeverity::Error, message);
+        }
+    }
 
     let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;
     let mut render_needed = true;

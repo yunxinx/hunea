@@ -23,6 +23,7 @@ use super::{
     external_editor::ExternalEditorLaunch,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT, FilePickerState},
     file_search::FileSearchCache,
+    message_history_recall::BlindRecallState,
     message_revisit::MessageRevisitState,
     model_panel::ModelPanelState,
     render_frame::RenderFrame,
@@ -93,6 +94,7 @@ pub struct Model {
     pub(super) swap_enter_and_send: bool,
     pub(super) ctrl_c_clears_input: bool,
     pub(super) message_history_limit: usize,
+    pub(super) blind_recall: BlindRecallState,
     pub(super) esc_interrupt_presses: u8,
     pub(super) esc_rewind_mode: EscRewindMode,
     pub(super) show_esc_interrupt_hint: bool,
@@ -215,6 +217,7 @@ impl Model {
             swap_enter_and_send: options.swap_enter_and_send,
             ctrl_c_clears_input: options.ctrl_c_clears_input,
             message_history_limit: options.message_history_limit,
+            blind_recall: BlindRecallState::default(),
             esc_interrupt_presses: options.esc_interrupt_presses.clamp(1, 3),
             esc_rewind_mode: options.esc_rewind_mode,
             show_esc_interrupt_hint: options.show_esc_interrupt_hint,
@@ -402,6 +405,12 @@ impl Model {
 
     pub(crate) fn composer_mut(&mut self) -> &mut Composer {
         &mut self.composer
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)] // 供 model/tests 断言；clippy lib-test 单元有时未关联到调用点
+    pub(crate) fn blind_recall(&self) -> &BlindRecallState {
+        &self.blind_recall
     }
 
     pub(crate) fn transcript_mut(&mut self) -> &mut Transcript {

@@ -5,6 +5,7 @@ use runtime_domain::{
     model_catalog::{ModelSelection, ProviderSyncRequest},
     session::{ConversationTurnRequest, RuntimeTarget, SessionLoadRequestId},
 };
+use session_store::MessageHistoryEntry;
 
 use super::{
     ExternalEditorLaunch, Model, Sender,
@@ -14,6 +15,7 @@ use super::{
     },
     document::DocumentAnchorRegion,
     exit_confirmation::EXIT_CONFIRMATION_PROMPT,
+    message_history_recall::{BlindRecallNavigateResult, startup_cache_from_recent},
     modal_layer::ModalLayer,
     overlay_input_result::OverlayInputResult,
     path_resolve::resolve_configured_current_dir,
@@ -133,6 +135,7 @@ pub enum AppEvent {
         token: usize,
     },
     StartupReadyTimeout,
+    MessageHistoryStartupCache(Vec<MessageHistoryEntry>),
 }
 
 impl Model {
@@ -267,6 +270,11 @@ impl Model {
                 if !self.has_palette() {
                     self.set_palette(terminal_default_palette(), false);
                 }
+                None
+            }
+            AppEvent::MessageHistoryStartupCache(entries) => {
+                self.blind_recall
+                    .replace_cache(startup_cache_from_recent(entries));
                 None
             }
         }
@@ -512,6 +520,10 @@ impl Model {
             return None;
         }
 
+        if self.try_handle_blind_recall_key(key) {
+            return None;
+        }
+
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
@@ -587,6 +599,58 @@ impl Model {
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
         None
+    }
+
+    fn try_handle_blind_recall_key(&mut self, key: KeyEvent) -> bool {
+        if key.modifiers != KeyModifiers::empty() {
+            return false;
+        }
+        if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            return false;
+        }
+
+        let text = self.composer_text();
+        let cursor = self.composer.cursor_byte_offset();
+        if !self.blind_recall.should_handle_navigation(text, cursor) {
+            return false;
+        }
+
+        let old_value = text.to_string();
+        let old_line = self.composer.line();
+        let old_column = self.composer.column();
+
+        let apply = match key.code {
+            KeyCode::Up => match self.blind_recall.navigate_up() {
+                BlindRecallNavigateResult::ApplyText(t) => Some(t),
+                BlindRecallNavigateResult::NoOp => None,
+            },
+            KeyCode::Down => self.blind_recall.navigate_down().map(|r| match r {
+                BlindRecallNavigateResult::ApplyText(t) => t,
+                BlindRecallNavigateResult::NoOp => String::new(),
+            }),
+            _ => None,
+        };
+
+        let Some(apply_text) = apply else {
+            return true;
+        };
+
+        self.apply_blind_recall_text(&apply_text);
+        self.sync_command_panel_navigation();
+        self.sync_file_picker_state();
+        self.sync_external_editor_helper_after_draft_change(&old_value);
+        self.sync_composer_height();
+        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
+        true
+    }
+
+    fn apply_blind_recall_text(&mut self, text: &str) {
+        if text.is_empty() {
+            self.composer_mut().clear_for_edit();
+        } else {
+            self.composer_mut()
+                .reset_text_and_move_to_end(text.to_string());
+        }
     }
 
     fn handle_composer_editing_key(&mut self, key: KeyEvent) {
@@ -710,6 +774,9 @@ impl Model {
 
     fn handle_composer_clear_input(&mut self) -> Option<AppEffect> {
         let old_value = self.composer_text().to_string();
+        if !old_value.is_empty() {
+            self.blind_recall.push_local_entry(old_value.clone());
+        }
         let record_effect = if !old_value.is_empty() {
             Some(AppEffect::RecordMessageHistory {
                 text: old_value.clone(),
@@ -746,6 +813,8 @@ impl Model {
         {
             return None;
         }
+
+        self.blind_recall.push_local_entry(content.clone());
 
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let style_mode = self.style_mode;

@@ -3175,6 +3175,7 @@ dependencies = [
  "ratatui",
  "runtime-domain",
  "serde_json",
+ "session-store",
  "syntect",
  "tachyonfx",
  "terminal-light",

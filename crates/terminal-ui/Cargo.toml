@@ -17,6 +17,7 @@ diffy.workspace = true
 ignore.workspace = true
 libc.workspace = true
 runtime-domain.workspace = true
+session-store.workspace = true
 percent-encoding.workspace = true
 pulldown-cmark.workspace = true
 ratatui.workspace = true

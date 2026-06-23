@@ -139,6 +139,22 @@ impl MessageHistoryPickerState {
         self.selection().page_count(page_size)
     }
 
+    pub(super) fn select_visible_row(&mut self, page_size: usize, visible_offset: usize) -> bool {
+        if self.filtered_indices.is_empty() {
+            self.selected = 0;
+            return false;
+        }
+        if let Some(position) = self
+            .selection()
+            .select_visible_index(page_size, visible_offset)
+        {
+            self.selected = position;
+            true
+        } else {
+            false
+        }
+    }
+
     pub(super) fn selected_position_label(&self) -> usize {
         self.selection().selected_position_label()
     }

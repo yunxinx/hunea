@@ -324,6 +324,9 @@ impl Model {
         match self.top_modal_layer() {
             Some(ModalLayer::CopyPicker) => self.handle_copy_picker_mouse_down(button, column, row),
             Some(ModalLayer::EntryTree) => self.handle_entry_tree_mouse_down(button, column, row),
+            Some(ModalLayer::MessageHistory) => {
+                self.handle_message_history_picker_mouse_down(button, column, row)
+            }
             Some(_) => OverlayInputResult::Handled,
             None => OverlayInputResult::Ignored,
         }

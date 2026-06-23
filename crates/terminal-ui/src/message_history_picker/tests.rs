@@ -1,7 +1,13 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use runtime_domain::session::MessageHistoryRow;
 
-use crate::{AppEffect, AppEvent, Model, StartupBannerOptions, modal_layer::ModalLayer};
+use crate::{
+    AppEffect, AppEvent, Model, StartupBannerOptions, modal_layer::ModalLayer,
+    overlay_input_result::OverlayInputResult,
+};
+
+#[cfg(test)]
+mod render;
 
 fn ctrl_r() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
@@ -393,6 +399,25 @@ fn filter_preserves_selected_row_when_still_visible() {
     assert_eq!(
         state.selected_row().map(|r| r.text.as_str()),
         Some("cargo test")
+    );
+}
+
+#[test]
+fn message_history_picker_mouse_down_selects_visible_row() {
+    let mut inactive = Model::new(StartupBannerOptions::default());
+    assert_eq!(
+        inactive.handle_message_history_picker_mouse_down(MouseButton::Left, 4, 2),
+        OverlayInputResult::Ignored
+    );
+
+    let mut model = ready_picker_model();
+    model.set_window(80, 12);
+    assert_eq!(model.message_history_picker.as_ref().unwrap().selected, 1);
+    let _ = model.handle_message_history_picker_mouse_down(MouseButton::Left, 4, 2);
+    assert_eq!(model.message_history_picker.as_ref().unwrap().selected, 0);
+    assert_eq!(
+        model.handle_message_history_picker_mouse_down(MouseButton::Right, 4, 2),
+        OverlayInputResult::Handled
     );
 }
 

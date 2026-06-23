@@ -1,10 +1,15 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use runtime_domain::session::MessageHistoryRow;
 
 use crate::{
-    AppEffect, Model, fullscreen_list_chrome::fullscreen_list_page_size_for_height,
-    list_selection::ListNavigationDirection, overlay_input_result::OverlayInputResult,
-    text_search::is_picker_search_text_key, time::current_unix_timestamp_ms,
+    AppEffect, Model,
+    fullscreen_list_chrome::{
+        fullscreen_list_body_visible_offset_for_row, fullscreen_list_page_size_for_height,
+    },
+    list_selection::ListNavigationDirection,
+    overlay_input_result::OverlayInputResult,
+    text_search::is_picker_search_text_key,
+    time::current_unix_timestamp_ms,
 };
 
 use super::MessageHistoryPickerState;
@@ -205,6 +210,31 @@ impl Model {
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
+    }
+
+    pub(crate) fn handle_message_history_picker_mouse_down(
+        &mut self,
+        button: MouseButton,
+        _column: u16,
+        row: u16,
+    ) -> OverlayInputResult {
+        if !self.message_history_picker_active() {
+            return OverlayInputResult::Ignored;
+        }
+
+        if button != MouseButton::Left || self.message_history_picker_preview_active() {
+            return OverlayInputResult::Handled;
+        }
+
+        let Some(visible_offset) = fullscreen_list_body_visible_offset_for_row(self.height, row)
+        else {
+            return OverlayInputResult::Handled;
+        };
+        let page_size = fullscreen_list_page_size_for_height(self.height);
+        if let Some(state) = self.message_history_picker.as_mut() {
+            state.select_visible_row(page_size, visible_offset);
+        }
+        OverlayInputResult::Handled
     }
 
     pub(crate) fn can_open_message_history_picker_via_ctrl_r(&self) -> bool {

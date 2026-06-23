@@ -1,13 +1,26 @@
-target/
-.codex
-.docs/
-.lumos/
-.hunea/
-.planning/
-docs/
-AGENTS.md
-.agents/
-.claude/
-.trellis/
-skills-lock.json
-CONTEXT.md
+# Cargo / Rust 构建产物
+/target/
+
+# rustfmt 等产生的备份
+**/*.rs.bk
+
+# 覆盖率
+*.profraw
+*.profdata
+/coverage/
+/tarpaulin-report.html
+/cobertura.xml
+/lcov.info
+
+# 本地 release / 打包输出
+/dist/
+
+# Windows 调试符号
+*.pdb
+
+# 合并冲突备份
+*.orig
+
+# 常见 OS 杂项
+.DS_Store
+Thumbs.db

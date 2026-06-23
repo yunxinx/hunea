@@ -3,7 +3,7 @@
 use runtime_domain::session::{
     MessageHistoryEntry, MessageHistoryRow, should_record_message_history_text,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::SessionStoreError;
 
@@ -17,7 +17,10 @@ pub(crate) fn record_message_history(
     }
 
     crate::metadata::with_connection(index_path, |conn| {
-        let last_text: Option<String> = conn
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_err)?;
+        let last_text: Option<String> = transaction
             .query_row(
                 "SELECT text FROM message_history ORDER BY id DESC LIMIT 1",
                 [],
@@ -31,13 +34,15 @@ pub(crate) fn record_message_history(
         }
 
         let ts = crate::store::current_timestamp_ms()?;
-        conn.execute(
-            "INSERT INTO message_history (ts, text) VALUES (?1, ?2)",
-            params![ts, text],
-        )
-        .map_err(sqlite_err)?;
+        transaction
+            .execute(
+                "INSERT INTO message_history (ts, text) VALUES (?1, ?2)",
+                params![ts, text],
+            )
+            .map_err(sqlite_err)?;
 
-        trim_message_history(conn, limit)?;
+        trim_message_history(&transaction, limit)?;
+        transaction.commit().map_err(sqlite_err)?;
         Ok(())
     })
 }

@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::Arc;
 
 use crate::metadata::MetadataIndex;
 
@@ -75,6 +76,42 @@ async fn record_skips_whitespace_only_text() {
     let all = index.load_message_history_all().await.expect("load");
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].text, "real");
+
+    let _ = fs::remove_dir_all(path.parent().expect("parent"));
+}
+
+#[tokio::test]
+async fn concurrent_adjacent_duplicate_records_once() {
+    let path = temp_index_path("concurrent-dedup");
+    let index = Arc::new(MetadataIndex::open(&path).await.expect("index should open"));
+
+    for round in 0..8 {
+        let text = format!("same concurrent prompt {round}");
+        let barrier = Arc::new(tokio::sync::Barrier::new(129));
+        let mut tasks = Vec::new();
+        for _ in 0..128 {
+            let index = Arc::clone(&index);
+            let barrier = Arc::clone(&barrier);
+            let text = text.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                index
+                    .record_message_history(text, 100)
+                    .await
+                    .expect("record should succeed")
+            }));
+        }
+        barrier.wait().await;
+        for task in tasks {
+            task.await.expect("record task should not panic");
+        }
+    }
+
+    let all = index.load_message_history_all().await.expect("load");
+    assert_eq!(all.len(), 8);
+    for (round, row) in all.iter().enumerate() {
+        assert_eq!(row.text, format!("same concurrent prompt {round}"));
+    }
 
     let _ = fs::remove_dir_all(path.parent().expect("parent"));
 }

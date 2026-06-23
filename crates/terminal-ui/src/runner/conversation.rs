@@ -1,6 +1,7 @@
 #[cfg(test)]
 use crate::runtime::RuntimeEventApply;
 use crate::{Model, toast::ToastSeverity};
+use runtime_domain::session::should_record_message_history_text;
 #[cfg(test)]
 use runtime_domain::session::{
     ConversationEvent, RuntimeEvent, RuntimeRequestMetrics, RuntimeTarget,
@@ -80,11 +81,22 @@ pub(super) fn run_send_conversation_turn_effect(
     runtime_coordinator: &mut impl RuntimeCoordinator,
     request: ConversationTurnRequest,
 ) {
+    let message_history_text = request.message_text();
     match runtime_coordinator
         .dispatch_runtime_command(RuntimeCommand::submit_conversation_turn(request))
     {
         Ok(RuntimeCommandReceipt::ConversationStarted { activity_label }) => {
-            model.show_stream_activity(activity_label)
+            model.show_stream_activity(activity_label);
+            if should_record_message_history_text(&message_history_text)
+                && let Err(message) = runtime_coordinator.dispatch_runtime_command(
+                    RuntimeCommand::RecordMessageHistory {
+                        text: message_history_text,
+                        limit: model.message_history_limit,
+                    },
+                )
+            {
+                model.show_toast(ToastSeverity::Error, message);
+            }
         }
         Ok(_) => {}
         Err(message) => model.show_toast(ToastSeverity::Error, message),

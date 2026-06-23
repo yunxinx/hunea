@@ -76,6 +76,7 @@ impl Model {
         state.error = Some(message.to_string());
         state.rows.clear();
         state.selected = 0;
+        state.selected_row_id = None;
         self.message_history_picker = Some(state);
     }
 

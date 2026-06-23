@@ -54,6 +54,26 @@ fn diverse_rows() -> Vec<MessageHistoryRow> {
     ]
 }
 
+fn selection_stability_rows() -> Vec<MessageHistoryRow> {
+    vec![
+        MessageHistoryRow {
+            id: 10,
+            ts: 1_000,
+            text: "unmatched first".to_string(),
+        },
+        MessageHistoryRow {
+            id: 20,
+            ts: 2_000,
+            text: "target one".to_string(),
+        },
+        MessageHistoryRow {
+            id: 30,
+            ts: 3_000,
+            text: "target two".to_string(),
+        },
+    ]
+}
+
 fn ready_picker_model() -> Model {
     let mut model = Model::new(StartupBannerOptions::default());
     model.set_window(80, 24);
@@ -482,6 +502,33 @@ fn filter_preserves_selected_row_when_still_visible() {
 }
 
 #[test]
+fn filter_preserves_selected_row_when_matching_position_changes() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(80, 24);
+    let request_id = model.open_message_history_picker_loading_at(10_000);
+    model.apply_message_history_picker_rows(request_id, selection_stability_rows());
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert_eq!(
+        model
+            .message_history_picker
+            .as_ref()
+            .unwrap()
+            .selected_row()
+            .map(|row| row.id),
+        Some(20)
+    );
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('/'))));
+    for ch in "target".chars() {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(ch))));
+    }
+
+    let state = model.message_history_picker.as_ref().unwrap();
+    assert_eq!(state.filtered_indices, vec![1, 2]);
+    assert_eq!(state.selected_row().map(|row| row.id), Some(20));
+}
+
+#[test]
 fn message_history_picker_mouse_down_selects_visible_row() {
     let mut inactive = Model::new(StartupBannerOptions::default());
     assert_eq!(
@@ -501,7 +548,7 @@ fn message_history_picker_mouse_down_selects_visible_row() {
 }
 
 #[test]
-fn noop_coordinator_keeps_picker_loading_until_runtime_rows_event() {
+fn noop_coordinator_reports_picker_unavailable_in_overlay() {
     use crate::runner::{NoopRuntimeCoordinator, run_open_message_history_picker_effect};
 
     let mut coordinator = NoopRuntimeCoordinator;
@@ -509,13 +556,8 @@ fn noop_coordinator_keeps_picker_loading_until_runtime_rows_event() {
     model.set_window(80, 24);
     run_open_message_history_picker_effect(&mut model, &mut coordinator);
     assert!(model.message_history_picker_active());
-    assert!(model.message_history_picker.as_ref().unwrap().is_loading);
-    assert!(
-        model
-            .message_history_picker
-            .as_ref()
-            .unwrap()
-            .rows
-            .is_empty()
-    );
+    let state = model.message_history_picker.as_ref().unwrap();
+    assert!(!state.is_loading);
+    assert_eq!(state.error.as_deref(), Some("Runtime is not available"));
+    assert!(state.rows.is_empty());
 }

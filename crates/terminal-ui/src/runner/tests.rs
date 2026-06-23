@@ -37,6 +37,7 @@ struct TestRuntimeCoordinator {
     conversation_running: bool,
     conversation_interrupted: bool,
     conversation_request: Option<ConversationTurnRequest>,
+    commands: Vec<RuntimeCommand>,
     last_command: Option<RuntimeCommand>,
     next_runtime_error: Option<String>,
     reset_count: usize,
@@ -71,6 +72,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
         &mut self,
         command: RuntimeCommand,
     ) -> Result<RuntimeCommandReceipt, String> {
+        self.commands.push(command.clone());
         self.last_command = Some(command.clone());
         if let Some(message) = self.next_runtime_error.take() {
             return Err(message);
@@ -1625,6 +1627,31 @@ fn conversation_send_effect_starts_conversation_target() {
 }
 
 #[test]
+fn conversation_send_effect_records_history_after_conversation_start() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+    let request = ConversationTurnRequest::new_user_text(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "qwen3",
+        None,
+        None,
+        None,
+        "hello history",
+    );
+
+    run_send_conversation_turn_effect(&mut model, &mut runtime_coordinator, request);
+
+    assert!(matches!(
+        runtime_coordinator.commands.as_slice(),
+        [
+            RuntimeCommand::SubmitConversationTurn { .. },
+            RuntimeCommand::RecordMessageHistory { text, limit }
+        ] if text == "hello history" && *limit == model.message_history_limit
+    ));
+}
+
+#[test]
 fn conversation_send_effect_failure_uses_toast_not_status_notice() {
     let mut model = Model::new(StartupBannerOptions::default());
     let mut runtime_coordinator = TestRuntimeCoordinator {
@@ -1648,6 +1675,10 @@ fn conversation_send_effect_failure_uses_toast_not_status_notice() {
         model.active_toast_text_for_test(),
         Some("runtime unavailable")
     );
+    assert!(matches!(
+        runtime_coordinator.commands.as_slice(),
+        [RuntimeCommand::SubmitConversationTurn { .. }]
+    ));
     assert!(!model.current_stream_activity_render_result().has_content);
 }
 

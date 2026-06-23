@@ -139,17 +139,6 @@ pub(super) fn apply_effect_if_needed(
             Ok(())
         }
         AppEffect::SendConversationTurn { request } => {
-            let text = request.message_text();
-            if !text.is_empty()
-                && let Err(message) = runtime_coordinator.dispatch_runtime_command(
-                    RuntimeCommand::RecordMessageHistory {
-                        text,
-                        limit: model.message_history_limit,
-                    },
-                )
-            {
-                model.show_toast(ToastSeverity::Error, message);
-            }
             run_send_conversation_turn_effect(model, runtime_coordinator, request);
             Ok(())
         }

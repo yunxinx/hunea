@@ -140,7 +140,7 @@ impl SessionPickerState {
         self.selection().page_start(page_size)
     }
 
-    pub(super) fn page_indices(&self, page_size: usize) -> impl Iterator<Item = usize> + '_ {
+    pub(super) fn page_indices(&self, page_size: usize) -> impl Iterator<Item = usize> {
         self.filtered_indices
             .get(self.selection().page_indices(page_size))
             .into_iter()

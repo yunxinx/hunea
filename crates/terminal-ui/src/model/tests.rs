@@ -2918,6 +2918,30 @@ fn send_pushes_blind_recall_cache_and_adjacent_dedup() {
     );
 }
 
+#[test]
+fn late_startup_cache_load_preserves_locally_recorded_blind_recall_entries() {
+    let mut model = conversation_test_model();
+    type_text(&mut model, "local send while startup load is pending");
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    seed_blind_recall_cache(&mut model, &["persisted older", "persisted newer"]);
+
+    let cached_texts = model
+        .blind_recall
+        .cache()
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cached_texts,
+        vec![
+            "persisted older",
+            "persisted newer",
+            "local send while startup load is pending"
+        ]
+    );
+}
+
 fn rendered_rows_for_model(model: &mut Model, width: u16, height: u16) -> Vec<String> {
     let buffer = render_model_buffer(model, width, height);
     rendered_rows(&buffer)

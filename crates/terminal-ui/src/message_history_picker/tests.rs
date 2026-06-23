@@ -373,6 +373,27 @@ fn search_filters_case_insensitive_on_full_text() {
 }
 
 #[test]
+fn search_mode_treats_lowercase_c_as_query_text_not_copy_command() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.set_window(80, 24);
+    let request_id = model.open_message_history_picker_loading_at(10_000);
+    model.apply_message_history_picker_rows(request_id, diverse_rows());
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('/'))));
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('c'))));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('a'))));
+
+    let state = model.message_history_picker.as_ref().unwrap();
+    assert_eq!(effect, None);
+    assert_eq!(state.search_query, "ca");
+    assert_eq!(state.filtered_indices.len(), 1);
+    assert_eq!(
+        state.selected_row().map(|row| row.text.as_str()),
+        Some("cargo test")
+    );
+}
+
+#[test]
 fn search_no_match_shows_empty_filter_state() {
     let mut model = ready_picker_model();
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('/'))));

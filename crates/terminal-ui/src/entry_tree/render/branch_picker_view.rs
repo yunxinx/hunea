@@ -179,9 +179,9 @@ fn entry_tree_branch_picker_header_line(
     palette: crate::theme::TerminalPalette,
 ) -> Line<'static> {
     let left_pad = " ".repeat(BRANCH_PICKER_METADATA_LEFT_PADDING);
-    let msgs = crate::relative_age::pad_display_width_left("Msgs", BRANCH_PICKER_MSGS_WIDTH);
-    let created = crate::relative_age::pad_display_width_left("Created", BRANCH_PICKER_TIME_WIDTH);
-    let updated = crate::relative_age::pad_display_width_left("Updated", BRANCH_PICKER_TIME_WIDTH);
+    let msgs = crate::relative_age::left_pad_display_width("Msgs", BRANCH_PICKER_MSGS_WIDTH);
+    let created = crate::relative_age::left_pad_display_width("Created", BRANCH_PICKER_TIME_WIDTH);
+    let updated = crate::relative_age::left_pad_display_width("Updated", BRANCH_PICKER_TIME_WIDTH);
     let text = format!("{left_pad}{msgs} {created} {updated}");
 
     Line::styled(
@@ -221,7 +221,7 @@ fn branch_picker_item_text(item: &SessionTreeBranchChoice, now_ms: i64, width: u
     let width = width.max(1);
     let branch = &item.branch;
     let left_pad = " ".repeat(BRANCH_PICKER_METADATA_LEFT_PADDING);
-    let message_count = crate::relative_age::pad_display_width_left(
+    let message_count = crate::relative_age::left_pad_display_width(
         &branch_message_count_label(branch.message_count),
         BRANCH_PICKER_MSGS_WIDTH,
     );

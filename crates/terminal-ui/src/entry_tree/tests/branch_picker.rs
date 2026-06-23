@@ -372,7 +372,9 @@ fn entry_tree_branch_picker_relative_age_uses_shared_label_strategy() {
         (now_ms - 125_000, "2m·05s"),
         (now_ms - 7_200_000, "2h·00m"),
         (now_ms - (3 * 86_400_000 + 125_000), "3d·02m"),
-        (now_ms - 90 * 86_400_000, "3mo·00d"),
+        (now_ms - 90 * 86_400_000, "3M·00d"),
+        (now_ms - 300 * 86_400_000, "10M·00d"),
+        (now_ms - 400 * 86_400_000, "1y·01M"),
     ];
     for (ts, expected) in cases {
         assert_eq!(relative_age_label(now_ms, ts), expected);

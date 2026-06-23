@@ -49,7 +49,7 @@ pub(crate) fn relative_age_label(now_ms: i64, timestamp_ms: i64) -> String {
         },
         RelativeAgeUnit {
             value: months,
-            suffix: "mo",
+            suffix: "M",
         },
         RelativeAgeUnit {
             value: days,
@@ -132,8 +132,8 @@ pub(crate) fn relative_age_label_table_field(now_ms: i64, timestamp_ms: i64) -> 
     )
 }
 
-/// 在固定显示列宽内左对齐文本（用于与 `{:<n}` 字符宽区分）。
-pub(crate) fn pad_display_width_left(text: &str, width: usize) -> String {
+/// 在固定显示列宽内左侧补空格，实现按 terminal display width 右对齐。
+pub(crate) fn left_pad_display_width(text: &str, width: usize) -> String {
     let width = width.max(1);
     let current = display_width(text);
     if current >= width {
@@ -203,6 +203,18 @@ mod tests {
         assert_eq!(relative_age_label(now_ms, now_ms - 5_000), "05s");
         assert_eq!(relative_age_label(now_ms, now_ms - 125_000), "2m·05s");
         assert_eq!(relative_age_label(now_ms, now_ms - 7_200_000), "2h·00m");
+        assert_eq!(
+            relative_age_label(now_ms, now_ms - 90 * 86_400_000),
+            "3M·00d"
+        );
+        assert_eq!(
+            relative_age_label(now_ms, now_ms - 300 * 86_400_000),
+            "10M·00d"
+        );
+        assert_eq!(
+            relative_age_label(now_ms, now_ms - 400 * 86_400_000),
+            "1y·01M"
+        );
         assert!(!relative_age_label(now_ms, now_ms - 125_000).contains("· "));
     }
 
@@ -258,6 +270,18 @@ mod tests {
         let a = relative_age_label_table_field(now_ms, now_ms - 125_000);
         let b = relative_age_label_table_field(now_ms, now_ms - 12 * 60_000 - 34_000);
         assert_eq!(a.find('·'), b.find('·'), "{a:?} vs {b:?}");
+        let ten_months = relative_age_label_table_field(now_ms, now_ms - 300 * 86_400_000);
+        assert_eq!(
+            display_width(&ten_months),
+            RELATIVE_AGE_BRANCH_PICKER_TIME_COLUMN_WIDTH
+        );
+        assert_eq!(ten_months.trim(), "10M·00d");
+        let year_and_month = relative_age_label_table_field(now_ms, now_ms - 400 * 86_400_000);
+        assert_eq!(
+            display_width(&year_and_month),
+            RELATIVE_AGE_BRANCH_PICKER_TIME_COLUMN_WIDTH
+        );
+        assert_eq!(year_and_month.trim(), "1y·01M");
         let suffix_col = |s: &str| -> usize {
             s.char_indices()
                 .rev()

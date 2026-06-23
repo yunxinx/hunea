@@ -123,10 +123,6 @@ impl Model {
             .as_ref()
             .is_some_and(|state| state.is_searching);
 
-        if key.code == KeyCode::Char('c') && key.modifiers.is_empty() {
-            return OverlayInputResult::from_effect(self.message_history_picker_copy_effect());
-        }
-
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 if let Some(state) = self.message_history_picker.as_mut()
@@ -163,6 +159,9 @@ impl Model {
                     state.is_searching = true;
                 }
                 OverlayInputResult::Handled
+            }
+            KeyCode::Char('c') if key.modifiers.is_empty() => {
+                OverlayInputResult::from_effect(self.message_history_picker_copy_effect())
             }
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
                 if let Some(state) = self.message_history_picker.as_mut() {

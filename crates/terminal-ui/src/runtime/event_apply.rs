@@ -183,7 +183,7 @@ impl RuntimeEventApply for Model {
                 }
             }
             RuntimeEvent::MessageHistoryStartupCacheLoaded { entries } => {
-                self.blind_recall.replace_cache(entries);
+                self.blind_recall.apply_startup_cache(entries);
             }
             RuntimeEvent::MessageHistoryStartupCacheLoadFailed { message } => {
                 self.show_toast(ToastSeverity::Error, message);

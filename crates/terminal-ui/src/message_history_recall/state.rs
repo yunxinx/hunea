@@ -12,6 +12,18 @@ pub(crate) struct BlindRecallState {
 }
 
 impl BlindRecallState {
+    pub(crate) fn apply_startup_cache(&mut self, entries: Vec<MessageHistoryEntry>) {
+        if self.cache.is_empty() {
+            self.replace_cache(entries);
+            return;
+        }
+
+        let local_entries = std::mem::take(&mut self.cache);
+        self.cache = merged_message_history_cache(entries, local_entries);
+        self.history_cursor = None;
+        self.last_history_text = None;
+    }
+
     pub(crate) fn replace_cache(&mut self, entries: Vec<MessageHistoryEntry>) {
         self.cache = entries;
         self.history_cursor = None;
@@ -105,18 +117,45 @@ impl BlindRecallState {
         }
 
         let ts = current_unix_timestamp_ms();
-        self.cache.push(MessageHistoryEntry { ts, text });
-
-        if self.cache.len() > MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN {
-            let overflow = self.cache.len() - MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN;
-            self.cache.drain(0..overflow);
-            self.history_cursor = None;
-        }
+        push_cache_entry_with_adjacent_dedup(&mut self.cache, MessageHistoryEntry { ts, text });
+        trim_cache_to_blind_recall_limit(&mut self.cache);
     }
 
     /// Picker Enter 恢复全文后，与盲回溯 Up 填入条目一致的门控状态。
     pub(crate) fn apply_recalled_text(&mut self, text: &str) {
         self.history_cursor = self.cache.iter().rposition(|entry| entry.text == text);
         self.last_history_text = Some(text.to_string());
+    }
+}
+
+fn merged_message_history_cache(
+    persisted_entries: Vec<MessageHistoryEntry>,
+    local_entries: Vec<MessageHistoryEntry>,
+) -> Vec<MessageHistoryEntry> {
+    let mut cache = Vec::with_capacity(persisted_entries.len() + local_entries.len());
+    for entry in persisted_entries.into_iter().chain(local_entries) {
+        push_cache_entry_with_adjacent_dedup(&mut cache, entry);
+    }
+    trim_cache_to_blind_recall_limit(&mut cache);
+    cache
+}
+
+fn push_cache_entry_with_adjacent_dedup(
+    cache: &mut Vec<MessageHistoryEntry>,
+    entry: MessageHistoryEntry,
+) {
+    if cache
+        .last()
+        .is_some_and(|previous| previous.text == entry.text)
+    {
+        return;
+    }
+    cache.push(entry);
+}
+
+fn trim_cache_to_blind_recall_limit(cache: &mut Vec<MessageHistoryEntry>) {
+    if cache.len() > MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN {
+        let overflow = cache.len() - MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN;
+        cache.drain(0..overflow);
     }
 }

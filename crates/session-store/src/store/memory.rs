@@ -5,11 +5,12 @@ use runtime_domain::session::TranscriptReplayItem;
 use tokio::sync::RwLock;
 
 use crate::{
-    ConfigSnapshot, ProjectDir, ResolveError, ResolvedSessionState, SessionBranchTreeSnapshot,
-    SessionEntry, SessionEntryKind, SessionHeader, SessionId, SessionListOptions, SessionMeta,
-    SessionStoreError, SessionTreeSnapshot, generate_entry_id, resolve as resolve_entries,
-    resolve_state, session_branch_preview_snapshot, session_branch_tree_snapshot, session_filename,
-    session_tree_snapshot, session_tree_snapshot_for_leaf,
+    ConfigSnapshot, MessageHistoryEntry, MessageHistoryRow, ProjectDir, ResolveError,
+    ResolvedSessionState, SessionBranchTreeSnapshot, SessionEntry, SessionEntryKind, SessionHeader,
+    SessionId, SessionListOptions, SessionMeta, SessionStoreError, SessionTreeSnapshot,
+    generate_entry_id, resolve as resolve_entries, resolve_state, session_branch_preview_snapshot,
+    session_branch_tree_snapshot, session_filename, session_tree_snapshot,
+    session_tree_snapshot_for_leaf,
 };
 
 use super::{
@@ -18,8 +19,12 @@ use super::{
 };
 
 /// `InMemorySessionStore` 为运行时测试提供不落盘的 mock 实现。
+///
+/// 全局 message history 在内存中按与 `LocalSessionStore` 相同的相邻去重与条数上限语义维护，
+/// 便于不依赖 SQLite 的集成测试。
 pub struct InMemorySessionStore {
     sessions: RwLock<HashMap<SessionId, InMemorySession>>,
+    message_history: RwLock<Vec<MessageHistoryEntry>>,
 }
 
 struct InMemorySession {
@@ -33,7 +38,29 @@ impl InMemorySessionStore {
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            message_history: RwLock::new(Vec::new()),
         }
+    }
+
+    async fn record_message_history_entry(
+        &self,
+        text: String,
+        limit: usize,
+    ) -> Result<(), SessionStoreError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let mut history = self.message_history.write().await;
+        if history.last().is_some_and(|prev| prev.text == text) {
+            return Ok(());
+        }
+        let ts = current_timestamp_ms()?;
+        history.push(MessageHistoryEntry { ts, text });
+        if history.len() > limit {
+            let overflow = history.len() - limit;
+            history.drain(0..overflow);
+        }
+        Ok(())
     }
 
     async fn append_entry(
@@ -388,34 +415,40 @@ impl SessionStore for InMemorySessionStore {
 
     fn record_message_history<'a>(
         &'a self,
-        _text: String,
-        _limit: usize,
+        text: String,
+        limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move { self.record_message_history_entry(text, limit).await })
     }
 
     fn load_message_history_recent<'a>(
         &'a self,
-        _limit: usize,
+        limit: usize,
     ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<crate::MessageHistoryEntry>, SessionStoreError>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn Future<Output = Result<Vec<MessageHistoryEntry>, SessionStoreError>> + Send + 'a>,
     > {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            let history = self.message_history.read().await;
+            let start = history.len().saturating_sub(limit);
+            Ok(history[start..].to_vec())
+        })
     }
 
     fn load_message_history_all<'a>(
         &'a self,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<crate::MessageHistoryRow>, SessionStoreError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async { Ok(Vec::new()) })
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MessageHistoryRow>, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let history = self.message_history.read().await;
+            Ok(history
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| MessageHistoryRow {
+                    id: i64::try_from(index + 1).unwrap_or(i64::MAX),
+                    ts: entry.ts,
+                    text: entry.text.clone(),
+                })
+                .collect())
+        })
     }
 }

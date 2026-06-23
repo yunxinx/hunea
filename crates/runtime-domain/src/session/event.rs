@@ -125,6 +125,9 @@ pub enum RuntimeEvent {
     MessageHistoryPickerRowsLoadFailed {
         message: String,
     },
+    MessageHistoryRecordFailed {
+        message: String,
+    },
     MessageFinished {
         target: Option<RuntimeTarget>,
         response: ConversationResponse,
@@ -182,7 +185,8 @@ impl RuntimeEvent {
             | Self::MessageHistoryStartupCacheLoaded { .. }
             | Self::MessageHistoryStartupCacheLoadFailed { .. }
             | Self::MessageHistoryPickerRowsLoaded { .. }
-            | Self::MessageHistoryPickerRowsLoadFailed { .. } => None,
+            | Self::MessageHistoryPickerRowsLoadFailed { .. }
+            | Self::MessageHistoryRecordFailed { .. } => None,
         }
     }
 }

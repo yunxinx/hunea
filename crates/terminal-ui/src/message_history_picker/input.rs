@@ -1,12 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use runtime_domain::session::MessageHistoryRow;
 
 use crate::{
     AppEffect, Model, fullscreen_list_chrome::fullscreen_list_page_size_for_height,
     list_selection::ListNavigationDirection, overlay_input_result::OverlayInputResult,
-    text_search::is_picker_search_text_key,
+    text_search::is_picker_search_text_key, time::current_unix_timestamp_ms,
 };
 
 use super::MessageHistoryPickerState;
@@ -17,7 +15,7 @@ impl Model {
     }
 
     pub(crate) fn open_message_history_picker_loading(&mut self) {
-        self.open_message_history_picker_loading_at(current_unix_time_ms());
+        self.open_message_history_picker_loading_at(current_unix_timestamp_ms());
     }
 
     pub(crate) fn open_message_history_picker_loading_at(&mut self, opened_at_ms: i64) {
@@ -216,11 +214,4 @@ impl Model {
             && !self.command_panel_active()
             && !self.file_picker_active()
     }
-}
-
-fn current_unix_time_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }

@@ -690,7 +690,11 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
         SessionStoreCommand::RecordMessageHistory { store, text, limit } => {
             match store.record_message_history(text, limit).await {
                 Ok(()) => SessionStoreWorkerEvent::Noop,
-                Err(error) => failed(error.to_string(), false),
+                Err(error) => {
+                    SessionStoreWorkerEvent::runtime(RuntimeEvent::MessageHistoryRecordFailed {
+                        message: error.to_string(),
+                    })
+                }
             }
         }
     }

@@ -1,14 +1,7 @@
 use runtime_domain::session::MessageHistoryEntry;
 use session_store::MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN;
 
-/// 盲回溯导航结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum BlindRecallNavigateResult {
-    /// 将 `text` 填入 composer（含 Down 越过最新后清空）。
-    ApplyText(String),
-    /// 已在最旧条目，Up 无操作。
-    NoOp,
-}
+use crate::time::current_unix_timestamp_ms;
 
 /// 固定 25 条、oldest-first 的 shell 风格 history 状态机（无 async fetch）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -54,25 +47,26 @@ impl BlindRecallState {
         matches!(&self.last_history_text, Some(prev) if prev == text)
     }
 
-    pub(crate) fn navigate_up(&mut self) -> BlindRecallNavigateResult {
+    /// 上一条 history；成功时写入 `last_history_text`，调用方用 [`Self::active_history_text`] 取正文。
+    pub(crate) fn navigate_up(&mut self) -> bool {
         let len = self.cache.len();
         if len == 0 {
-            return BlindRecallNavigateResult::NoOp;
+            return false;
         }
 
         let next_idx = match self.history_cursor {
             None => len - 1,
-            Some(0) => return BlindRecallNavigateResult::NoOp,
+            Some(0) => return false,
             Some(idx) => idx - 1,
         };
 
         self.history_cursor = Some(next_idx);
-        let text = self.cache[next_idx].text.clone();
-        self.last_history_text = Some(text.clone());
-        BlindRecallNavigateResult::ApplyText(text)
+        self.last_history_text = Some(self.cache[next_idx].text.clone());
+        true
     }
 
-    pub(crate) fn navigate_down(&mut self) -> Option<BlindRecallNavigateResult> {
+    /// 下一条 history；`Some(true)` 为条目正文，`Some(false)` 为越过最新后清空 composer。
+    pub(crate) fn navigate_down(&mut self) -> Option<bool> {
         let len = self.cache.len();
         if len == 0 {
             return None;
@@ -83,15 +77,19 @@ impl BlindRecallState {
             Some(idx) if idx + 1 >= len => {
                 self.history_cursor = None;
                 self.last_history_text = None;
-                return Some(BlindRecallNavigateResult::ApplyText(String::new()));
+                return Some(false);
             }
             Some(idx) => idx + 1,
         };
 
         self.history_cursor = Some(next);
-        let text = self.cache[next].text.clone();
-        self.last_history_text = Some(text.clone());
-        Some(BlindRecallNavigateResult::ApplyText(text))
+        self.last_history_text = Some(self.cache[next].text.clone());
+        Some(true)
+    }
+
+    /// 最近一次导航或 recall 后的 history 正文（清空 composer 时为 `None`）。
+    pub(crate) fn active_history_text(&self) -> Option<&str> {
+        self.last_history_text.as_deref()
     }
 
     /// 本地写入（发送 / Ctrl-C 清输入）：相邻去重、trim 至 25、重置导航。
@@ -106,7 +104,7 @@ impl BlindRecallState {
             return;
         }
 
-        let ts = current_ts_millis();
+        let ts = current_unix_timestamp_ms();
         self.cache.push(MessageHistoryEntry { ts, text });
 
         if self.cache.len() > MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN {
@@ -121,15 +119,4 @@ impl BlindRecallState {
         self.history_cursor = self.cache.iter().rposition(|entry| entry.text == text);
         self.last_history_text = Some(text.to_string());
     }
-}
-
-fn current_ts_millis() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis(),
-    )
-    .unwrap_or(i64::MAX)
 }

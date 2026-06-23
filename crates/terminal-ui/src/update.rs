@@ -8,7 +8,6 @@ use super::{
     },
     document::DocumentAnchorRegion,
     exit_confirmation::EXIT_CONFIRMATION_PROMPT,
-    message_history_recall::BlindRecallNavigateResult,
     modal_layer::ModalLayer,
     overlay_input_result::OverlayInputResult,
     path_resolve::resolve_configured_current_dir,
@@ -628,22 +627,21 @@ impl Model {
         let old_line = self.composer.line();
         let old_column = self.composer.column();
 
-        let apply = match key.code {
-            KeyCode::Up => match self.blind_recall.navigate_up() {
-                BlindRecallNavigateResult::ApplyText(t) => Some(t),
-                BlindRecallNavigateResult::NoOp => None,
-            },
-            KeyCode::Down => self.blind_recall.navigate_down().map(|r| match r {
-                BlindRecallNavigateResult::ApplyText(t) => t,
-                BlindRecallNavigateResult::NoOp => String::new(),
-            }),
-            _ => None,
+        let applied = match key.code {
+            KeyCode::Up => self.blind_recall.navigate_up(),
+            KeyCode::Down => self.blind_recall.navigate_down().is_some(),
+            _ => false,
         };
 
-        let Some(apply_text) = apply else {
+        if !applied {
             return true;
-        };
+        }
 
+        let apply_text = self
+            .blind_recall
+            .active_history_text()
+            .unwrap_or("")
+            .to_string();
         self.apply_blind_recall_text(&apply_text);
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();

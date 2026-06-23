@@ -5,4 +5,4 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use state::{BlindRecallNavigateResult, BlindRecallState};
+pub(crate) use state::BlindRecallState;

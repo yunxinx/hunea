@@ -194,6 +194,9 @@ impl RuntimeEventApply for Model {
             RuntimeEvent::MessageHistoryPickerRowsLoadFailed { message } => {
                 self.show_message_history_picker_error(&message);
             }
+            RuntimeEvent::MessageHistoryRecordFailed { message } => {
+                self.show_toast(ToastSeverity::Error, message);
+            }
             RuntimeEvent::SessionResumed { payload } => {
                 self.apply_session_resume_payload(payload);
             }

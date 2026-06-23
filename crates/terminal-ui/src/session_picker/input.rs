@@ -1,11 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use runtime_domain::session::SessionPickerRow;
 
 use crate::{
     AppEffect, Model, list_selection::ListNavigationDirection,
     overlay_input_result::OverlayInputResult, text_search::is_picker_search_text_key,
+    time::current_unix_timestamp_ms,
 };
 
 use super::{SessionPickerState, session_picker_page_size_for_height};
@@ -25,7 +24,7 @@ impl Model {
     }
 
     pub(crate) fn open_session_picker_loading(&mut self) {
-        self.open_session_picker_loading_at(current_unix_time_ms());
+        self.open_session_picker_loading_at(current_unix_timestamp_ms());
     }
 
     pub(crate) fn open_session_picker_loading_at(&mut self, opened_at_ms: i64) {
@@ -172,12 +171,4 @@ impl Model {
             _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
-}
-
-fn current_unix_time_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(i64::MAX)
 }

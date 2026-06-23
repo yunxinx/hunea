@@ -1,6 +1,6 @@
 use runtime_domain::session::MessageHistoryEntry;
 
-use super::state::{BlindRecallNavigateResult, BlindRecallState};
+use super::state::BlindRecallState;
 
 fn entry(text: &str) -> MessageHistoryEntry {
     MessageHistoryEntry {
@@ -38,10 +38,8 @@ fn gate_requires_last_history_text_and_boundary_cursor() {
 fn navigate_up_from_empty_starts_at_newest() {
     let mut state = BlindRecallState::default();
     state.replace_cache(vec![entry("old"), entry("new")]);
-    assert_eq!(
-        state.navigate_up(),
-        BlindRecallNavigateResult::ApplyText("new".to_string())
-    );
+    assert!(state.navigate_up());
+    assert_eq!(state.active_history_text(), Some("new"));
     assert_eq!(state.history_cursor(), Some(1));
 }
 
@@ -49,11 +47,8 @@ fn navigate_up_from_empty_starts_at_newest() {
 fn navigate_up_at_oldest_is_noop() {
     let mut state = BlindRecallState::default();
     state.replace_cache(vec![entry("only")]);
-    assert_eq!(
-        state.navigate_up(),
-        BlindRecallNavigateResult::ApplyText("only".to_string())
-    );
-    assert_eq!(state.navigate_up(), BlindRecallNavigateResult::NoOp);
+    assert!(state.navigate_up());
+    assert!(!state.navigate_up());
 }
 
 #[test]
@@ -63,14 +58,9 @@ fn navigate_down_past_newest_clears() {
     let _ = state.navigate_up();
     let _ = state.navigate_up();
     assert_eq!(state.history_cursor(), Some(0));
-    assert_eq!(
-        state.navigate_down(),
-        Some(BlindRecallNavigateResult::ApplyText("b".to_string()))
-    );
-    assert_eq!(
-        state.navigate_down(),
-        Some(BlindRecallNavigateResult::ApplyText(String::new()))
-    );
+    assert_eq!(state.navigate_down(), Some(true));
+    assert_eq!(state.active_history_text(), Some("b"));
+    assert_eq!(state.navigate_down(), Some(false));
     assert_eq!(state.history_cursor(), None);
     assert_eq!(state.last_history_text(), None);
 }

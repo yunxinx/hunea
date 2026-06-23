@@ -15,7 +15,12 @@ pub(crate) fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
             .any(|window| window.eq_ignore_ascii_case(needle_bytes));
     }
 
-    haystack.to_lowercase().contains(&needle.to_lowercase())
+    let needle_lower = needle.to_lowercase();
+    haystack
+        .chars()
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+        .contains(&needle_lower)
 }
 
 /// 搜索模式下可追加到 query 的可打印字符键（与 session picker 一致）。

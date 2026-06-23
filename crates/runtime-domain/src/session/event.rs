@@ -109,6 +109,10 @@ pub enum RuntimeEvent {
         request_id: SessionLoadRequestId,
         message: String,
     },
+    SessionBranchSwitchFailed {
+        request_id: SessionLoadRequestId,
+        message: String,
+    },
     MessageFinished {
         target: Option<RuntimeTarget>,
         response: ConversationResponse,
@@ -161,7 +165,8 @@ impl RuntimeEvent {
             | Self::SessionBranchTreeLoaded { .. }
             | Self::SessionBranchTreeLoadFailed { .. }
             | Self::SessionBranchPreviewLoaded { .. }
-            | Self::SessionBranchPreviewLoadFailed { .. } => None,
+            | Self::SessionBranchPreviewLoadFailed { .. }
+            | Self::SessionBranchSwitchFailed { .. } => None,
         }
     }
 }

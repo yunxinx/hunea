@@ -362,7 +362,10 @@ fn switch_branch_failure_keeps_committed_leaf_unchanged() {
     let error = wait_for_runtime_event(
         &mut coordinator,
         |event| match event {
-            RuntimeEvent::Failed { message, .. } => Some(message),
+            RuntimeEvent::SessionBranchSwitchFailed {
+                request_id: actual_request_id,
+                message,
+            } if actual_request_id == request_id(25) => Some(message),
             _ => None,
         },
         "invalid leaf failure",

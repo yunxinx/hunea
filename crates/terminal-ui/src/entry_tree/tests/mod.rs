@@ -187,6 +187,51 @@ fn stale_entry_tree_payload_is_ignored_after_tree_reopens_loading() {
 }
 
 #[test]
+fn switch_branch_async_failure_renders_entry_tree_error_for_matching_request() {
+    let mut model = ready_model();
+    let request_id = SessionLoadRequestId::new(31);
+    model.open_entry_tree_loading_for_request(request_id);
+
+    model.apply_runtime_event(RuntimeEvent::SessionBranchSwitchFailed {
+        request_id,
+        message: "branch leaf is missing".to_string(),
+    });
+
+    assert!(!model.entry_tree_loading());
+    assert!(model.entry_tree_active());
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 10));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("branch leaf is missing")),
+        "matching switch failure should render in the active entry tree overlay: {rows:?}"
+    );
+}
+
+#[test]
+fn stale_switch_branch_async_failure_is_ignored_after_tree_reopens_loading() {
+    let mut model = ready_model();
+    let stale_request_id = model.open_entry_tree_loading();
+    let current_request_id = model.open_entry_tree_loading();
+
+    model.apply_runtime_event(RuntimeEvent::SessionBranchSwitchFailed {
+        request_id: stale_request_id,
+        message: "stale branch switch failed".to_string(),
+    });
+
+    assert!(model.entry_tree_loading());
+    assert_eq!(
+        model.entry_tree_pending_request_id_for_test(),
+        Some(current_request_id)
+    );
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 10));
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("stale branch switch failed")),
+        "stale switch failure must not replace the current loading state: {rows:?}"
+    );
+}
+
+#[test]
 fn entry_tree_enter_selects_logical_row_with_prefill() {
     let mut model = ready_model();
     model.open_entry_tree_loading();

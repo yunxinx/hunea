@@ -32,6 +32,7 @@ pub(super) enum SessionStoreWorkerEvent {
     Runtime {
         event: RuntimeEvent,
         completes_command: bool,
+        is_mutation: bool,
     },
     Restored {
         conversation: ProviderConversation,
@@ -346,6 +347,15 @@ impl SessionStoreWorkerEvent {
         Self::Runtime {
             event,
             completes_command: true,
+            is_mutation: false,
+        }
+    }
+
+    fn runtime_mutation(event: RuntimeEvent) -> Self {
+        Self::Runtime {
+            event,
+            completes_command: true,
+            is_mutation: true,
         }
     }
 
@@ -353,6 +363,7 @@ impl SessionStoreWorkerEvent {
         Self::Runtime {
             event,
             completes_command: false,
+            is_mutation: false,
         }
     }
 
@@ -371,7 +382,11 @@ impl SessionStoreWorkerEvent {
     fn is_mutation_result(&self) -> bool {
         matches!(
             self,
-            Self::Restored { .. }
+            Self::Runtime {
+                completes_command: true,
+                is_mutation: true,
+                ..
+            } | Self::Restored { .. }
                 | Self::RestoredWithTree { .. }
                 | Self::Noop
                 | Self::Failed {
@@ -574,7 +589,12 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                     tree_payload,
                 }
             }
-            Err(message) => failed(message, true),
+            Err(message) => {
+                SessionStoreWorkerEvent::runtime_mutation(RuntimeEvent::SessionBranchSwitchFailed {
+                    request_id,
+                    message,
+                })
+            }
         },
         SessionStoreCommand::SelectEntryRewind {
             store,

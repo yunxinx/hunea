@@ -167,6 +167,14 @@ impl RuntimeEventApply for Model {
                     self.show_entry_tree_branch_preview_error(&message);
                 }
             }
+            RuntimeEvent::SessionBranchSwitchFailed {
+                request_id,
+                message,
+            } => {
+                if self.entry_tree_load_request_matches(request_id) {
+                    self.show_entry_tree_error(&message);
+                }
+            }
             RuntimeEvent::SessionResumed { payload } => {
                 self.apply_session_resume_payload(payload);
             }

@@ -20,6 +20,7 @@ mod file_picker;
 mod file_search;
 mod floating;
 mod fullscreen_list_chrome;
+mod fullscreen_search_list;
 mod history_scroll_indicator;
 mod inline_panel;
 mod list_selection;

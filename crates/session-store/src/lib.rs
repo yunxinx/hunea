@@ -18,7 +18,6 @@ pub(crate) mod recorder;
 mod store;
 pub(crate) mod util;
 
-pub use runtime_domain::session::{MessageHistoryEntry, MessageHistoryRow};
 pub use store::{InMemorySessionStore, LocalSessionStore, SessionStore};
 
 /// 短 entry id 固定为 8 个 hex 字符。

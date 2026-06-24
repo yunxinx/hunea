@@ -9,11 +9,11 @@ use std::{
 };
 
 use provider_protocol::ConversationItem;
-use runtime_domain::session::TranscriptReplayItem;
+use runtime_domain::session::{MessageHistoryEntry, MessageHistoryRow, TranscriptReplayItem};
 use session_store::{
-    ConfigSnapshot, InMemorySessionStore, MessageHistoryEntry, MessageHistoryRow, ProjectDir,
-    ResolvedSessionState, SessionHeader, SessionId, SessionListOptions, SessionMeta, SessionStore,
-    SessionStoreError, SessionTreeSnapshot,
+    ConfigSnapshot, InMemorySessionStore, ProjectDir, ResolvedSessionState, SessionHeader,
+    SessionId, SessionListOptions, SessionMeta, SessionStore, SessionStoreError,
+    SessionTreeSnapshot,
 };
 
 pub(super) struct LoadCountingSessionStore {

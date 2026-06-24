@@ -112,7 +112,8 @@ fn session_picker_search_mode_treats_space_as_query_text() {
         .as_ref()
         .expect("picker should stay open while search is active");
     assert_eq!(
-        state.search_query, " ",
+        state.search_query(),
+        " ",
         "space should be typed into the search query instead of opening preview"
     );
     assert!(!model.session_preview_active());
@@ -440,7 +441,7 @@ fn session_picker_esc_closes_while_search_is_active() {
             .session_picker
             .as_ref()
             .expect("picker should stay open after leaving search")
-            .is_searching,
+            .is_searching(),
         "Esc should leave search mode before closing the picker"
     );
     assert!(
@@ -448,7 +449,7 @@ fn session_picker_esc_closes_while_search_is_active() {
             .session_picker
             .as_ref()
             .expect("picker should stay open after leaving search")
-            .search_query
+            .search_query()
             .is_empty(),
         "Esc should clear the active search filter"
     );
@@ -515,9 +516,9 @@ fn session_picker_keeps_selection_when_empty_search_exits() {
         .session_picker
         .as_ref()
         .expect("picker should stay open after leaving search");
-    assert!(!state.is_searching);
+    assert!(!state.is_searching());
     assert_eq!(
-        state.selected, 2,
+        state.list.selected, 2,
         "leaving empty search should preserve the previously selected session"
     );
     let rows = rendered_rows(&render_model_buffer(&mut model, 60, 12));
@@ -621,11 +622,11 @@ fn session_picker_clearing_query_keeps_search_mode_active() {
         .as_ref()
         .expect("picker should stay open after clearing search query");
     assert!(
-        state.is_searching,
+        state.is_searching(),
         "Backspace should clear text without leaving search mode"
     );
     assert!(
-        state.search_query.is_empty(),
+        state.search_query().is_empty(),
         "Backspace should remove the final search character"
     );
 
@@ -658,11 +659,12 @@ fn session_picker_search_mode_treats_hjkl_as_query_text() {
         .as_ref()
         .expect("picker should stay open while search is active");
     assert_eq!(
-        state.search_query, "hjkl",
+        state.search_query(),
+        "hjkl",
         "hjkl should be typed into search instead of driving list navigation"
     );
     assert_eq!(
-        state.selected, 0,
+        state.list.selected, 0,
         "hjkl text input should not move the selected list position"
     );
 

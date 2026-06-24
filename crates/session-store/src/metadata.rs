@@ -108,7 +108,7 @@ impl MetadataIndex {
     pub(crate) async fn load_message_history_recent(
         &self,
         limit: usize,
-    ) -> Result<Vec<crate::MessageHistoryEntry>, SessionStoreError> {
+    ) -> Result<Vec<runtime_domain::session::MessageHistoryEntry>, SessionStoreError> {
         let index_path = (*self.index_path).clone();
         spawn_index_task(move || {
             crate::message_history::load_message_history_recent(&index_path, limit)
@@ -118,7 +118,7 @@ impl MetadataIndex {
 
     pub(crate) async fn load_message_history_all(
         &self,
-    ) -> Result<Vec<crate::MessageHistoryRow>, SessionStoreError> {
+    ) -> Result<Vec<runtime_domain::session::MessageHistoryRow>, SessionStoreError> {
         let index_path = (*self.index_path).clone();
         spawn_index_task(move || crate::message_history::load_message_history_all(&index_path))
             .await

@@ -46,7 +46,7 @@ impl Model {
         let wrapped_line_count = self
             .message_history_picker
             .as_ref()
-            .and_then(|state| state.rows.get(row_index))
+            .and_then(|state| state.list.rows().get(row_index))
             .map(|row| wrap_prompt_text(&row.text, wrap_width, 0).len())
             .unwrap_or(0);
         let page_size = self.message_history_picker_preview_content_height();
@@ -72,7 +72,7 @@ impl Model {
             let Some(row_index) = state.selected_row_index() else {
                 return;
             };
-            if state.rows.get(row_index).is_none() {
+            if state.list.rows().get(row_index).is_none() {
                 return;
             }
             row_index
@@ -126,7 +126,7 @@ impl Model {
     pub(crate) fn message_history_picker_preview_wrapped_lines(&self) -> Option<Vec<String>> {
         let state = self.message_history_picker.as_ref()?;
         let preview = state.preview.as_ref()?;
-        let row = state.rows.get(preview.row_index)?;
+        let row = state.list.rows().get(preview.row_index)?;
         let wrap_width = message_history_preview_wrap_width(self.width);
         Some(wrap_prompt_text(&row.text, wrap_width, 0))
     }

@@ -129,8 +129,11 @@ fn resend_command_clears_composer_and_opens_picker_effect() {
 fn apply_rows_selects_newest_row() {
     let model = ready_picker_model();
     let state = model.message_history_picker.as_ref().unwrap();
-    assert_eq!(state.selected, 1);
-    assert_eq!(state.rows[state.selected].text.as_str(), "newest prompt");
+    assert_eq!(state.list.selected, 1);
+    assert_eq!(
+        state.list.rows()[state.list.selected].text.as_str(),
+        "newest prompt"
+    );
 }
 
 #[test]
@@ -186,7 +189,10 @@ fn enter_with_nonempty_composer_records_draft_then_restores() {
         .composer_mut()
         .replace_text_and_move_to_end_for_edit("draft kept".to_string());
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
-    assert_eq!(model.message_history_picker.as_ref().unwrap().selected, 0);
+    assert_eq!(
+        model.message_history_picker.as_ref().unwrap().list.selected,
+        0
+    );
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
@@ -219,9 +225,15 @@ fn enter_does_not_emit_rewind_or_session_effects() {
 #[test]
 fn up_moves_from_newest_to_older_row() {
     let mut model = ready_picker_model();
-    assert_eq!(model.message_history_picker.as_ref().unwrap().selected, 1);
+    assert_eq!(
+        model.message_history_picker.as_ref().unwrap().list.selected,
+        1
+    );
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
-    assert_eq!(model.message_history_picker.as_ref().unwrap().selected, 0);
+    assert_eq!(
+        model.message_history_picker.as_ref().unwrap().list.selected,
+        0
+    );
 }
 
 #[test]
@@ -261,7 +273,7 @@ fn stale_rows_from_previous_open_do_not_replace_current_picker() {
 
     let state = model.message_history_picker.as_ref().unwrap();
     assert!(!state.is_loading);
-    assert_eq!(state.rows.len(), 2);
+    assert_eq!(state.list.rows().len(), 2);
 }
 
 #[test]
@@ -370,8 +382,8 @@ fn slash_enters_search_without_typing_in_composer() {
     assert_eq!(model.composer_text(), "");
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('/'))));
     let state = model.message_history_picker.as_ref().unwrap();
-    assert!(state.is_searching);
-    assert!(state.search_query.is_empty());
+    assert!(state.is_searching());
+    assert!(state.search_query().is_empty());
 }
 
 #[test]
@@ -385,7 +397,7 @@ fn search_filters_case_insensitive_on_full_text() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('i'))));
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('t'))));
     let state = model.message_history_picker.as_ref().unwrap();
-    assert_eq!(state.filtered_indices.len(), 2);
+    assert_eq!(state.list.filtered_indices.len(), 2);
     assert_eq!(
         state.selected_row().map(|r| r.text.as_str()),
         Some("GIT diff")
@@ -405,8 +417,8 @@ fn search_mode_treats_lowercase_c_as_query_text_not_copy_command() {
 
     let state = model.message_history_picker.as_ref().unwrap();
     assert_eq!(effect, None);
-    assert_eq!(state.search_query, "ca");
-    assert_eq!(state.filtered_indices.len(), 1);
+    assert_eq!(state.search_query(), "ca");
+    assert_eq!(state.list.filtered_indices.len(), 1);
     assert_eq!(
         state.selected_row().map(|row| row.text.as_str()),
         Some("cargo test")
@@ -421,7 +433,7 @@ fn search_no_match_shows_empty_filter_state() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('z'))));
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('z'))));
     let state = model.message_history_picker.as_ref().unwrap();
-    assert!(state.filtered_indices.is_empty());
+    assert!(state.list.filtered_indices.is_empty());
 }
 
 #[test]
@@ -435,8 +447,8 @@ fn esc_exits_search_then_closes_picker() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
     assert!(model.message_history_picker_active());
     let state = model.message_history_picker.as_ref().unwrap();
-    assert!(!state.is_searching);
-    assert!(state.search_query.is_empty());
+    assert!(!state.is_searching());
+    assert!(state.search_query().is_empty());
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
     assert!(!model.message_history_picker_active());
     assert_eq!(model.composer_text(), "composer unchanged");
@@ -450,16 +462,16 @@ fn backspace_and_ctrl_u_in_search_mode() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('e'))));
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Backspace)));
     let state = model.message_history_picker.as_ref().unwrap();
-    assert!(state.is_searching);
-    assert_eq!(state.search_query, "n");
+    assert!(state.is_searching());
+    assert_eq!(state.search_query(), "n");
     model.update(AppEvent::Key(KeyEvent::new(
         KeyCode::Char('u'),
         KeyModifiers::CONTROL,
     )));
     let state = model.message_history_picker.as_ref().unwrap();
-    assert!(state.is_searching);
-    assert!(state.search_query.is_empty());
-    assert_eq!(state.filtered_indices.len(), 2);
+    assert!(state.is_searching());
+    assert!(state.search_query().is_empty());
+    assert_eq!(state.list.filtered_indices.len(), 2);
 }
 
 #[test]
@@ -470,9 +482,9 @@ fn search_hjkl_are_query_text_not_navigation() {
         model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char(ch))));
     }
     let state = model.message_history_picker.as_ref().unwrap();
-    assert_eq!(state.search_query, "hjkl");
-    assert_eq!(state.filtered_indices.len(), 0);
-    assert_eq!(state.selected, 0);
+    assert_eq!(state.search_query(), "hjkl");
+    assert_eq!(state.list.filtered_indices.len(), 0);
+    assert_eq!(state.list.selected, 0);
 }
 
 #[test]
@@ -524,7 +536,7 @@ fn filter_preserves_selected_row_when_matching_position_changes() {
     }
 
     let state = model.message_history_picker.as_ref().unwrap();
-    assert_eq!(state.filtered_indices, vec![1, 2]);
+    assert_eq!(state.list.filtered_indices, vec![1, 2]);
     assert_eq!(state.selected_row().map(|row| row.id), Some(20));
 }
 
@@ -538,9 +550,15 @@ fn message_history_picker_mouse_down_selects_visible_row() {
 
     let mut model = ready_picker_model();
     model.set_window(80, 12);
-    assert_eq!(model.message_history_picker.as_ref().unwrap().selected, 1);
+    assert_eq!(
+        model.message_history_picker.as_ref().unwrap().list.selected,
+        1
+    );
     let _ = model.handle_message_history_picker_mouse_down(MouseButton::Left, 4, 2);
-    assert_eq!(model.message_history_picker.as_ref().unwrap().selected, 0);
+    assert_eq!(
+        model.message_history_picker.as_ref().unwrap().list.selected,
+        0
+    );
     assert_eq!(
         model.handle_message_history_picker_mouse_down(MouseButton::Right, 4, 2),
         OverlayInputResult::Handled
@@ -559,5 +577,5 @@ fn noop_coordinator_reports_picker_unavailable_in_overlay() {
     let state = model.message_history_picker.as_ref().unwrap();
     assert!(!state.is_loading);
     assert_eq!(state.error.as_deref(), Some("Runtime is not available"));
-    assert!(state.rows.is_empty());
+    assert!(state.list.rows().is_empty());
 }

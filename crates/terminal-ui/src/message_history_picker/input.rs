@@ -50,11 +50,10 @@ impl Model {
             self.message_history_picker = Some(state);
             return;
         }
-        state.rows = rows;
+        state.replace_rows(rows);
         state.is_loading = false;
         state.pending_request_id = None;
         state.error = None;
-        state.apply_filter();
         state.select_latest_row();
         self.message_history_picker = Some(state);
     }
@@ -74,9 +73,7 @@ impl Model {
         state.is_loading = false;
         state.pending_request_id = None;
         state.error = Some(message.to_string());
-        state.rows.clear();
-        state.selected = 0;
-        state.selected_row_id = None;
+        state.replace_rows(Vec::new());
         self.message_history_picker = Some(state);
     }
 
@@ -122,7 +119,7 @@ impl Model {
         let is_searching = self
             .message_history_picker
             .as_ref()
-            .is_some_and(|state| state.is_searching);
+            .is_some_and(MessageHistoryPickerState::is_searching);
 
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
@@ -157,7 +154,7 @@ impl Model {
             }
             KeyCode::Char('/') if key.modifiers.is_empty() => {
                 if let Some(state) = self.message_history_picker.as_mut() {
-                    state.is_searching = true;
+                    state.start_search();
                 }
                 OverlayInputResult::Handled
             }

@@ -321,8 +321,12 @@ impl SessionStore for LocalSessionStore {
         limit: usize,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<Vec<crate::MessageHistoryEntry>, SessionStoreError>>
-                + Send
+            dyn Future<
+                    Output = Result<
+                        Vec<runtime_domain::session::MessageHistoryEntry>,
+                        SessionStoreError,
+                    >,
+                > + Send
                 + 'a,
         >,
     > {
@@ -333,8 +337,12 @@ impl SessionStore for LocalSessionStore {
         &'a self,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<Vec<crate::MessageHistoryRow>, SessionStoreError>>
-                + Send
+            dyn Future<
+                    Output = Result<
+                        Vec<runtime_domain::session::MessageHistoryRow>,
+                        SessionStoreError,
+                    >,
+                > + Send
                 + 'a,
         >,
     > {

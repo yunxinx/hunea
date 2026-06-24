@@ -38,10 +38,9 @@ impl Model {
 
     pub(crate) fn apply_session_picker_rows(&mut self, rows: Vec<SessionPickerRow>) {
         let mut state = self.session_picker.take().unwrap_or_default();
-        state.rows = rows;
+        state.replace_rows(rows);
         state.is_loading = false;
         state.error = None;
-        state.apply_filter();
         self.session_picker = Some(state);
     }
 
@@ -53,7 +52,7 @@ impl Model {
         let is_searching = self
             .session_picker
             .as_ref()
-            .is_some_and(|state| state.is_searching);
+            .is_some_and(SessionPickerState::is_searching);
 
         match key.code {
             KeyCode::Esc => {
@@ -152,7 +151,7 @@ impl Model {
             }
             KeyCode::Char('/') if key.modifiers.is_empty() => {
                 if let Some(state) = self.session_picker.as_mut() {
-                    state.is_searching = true;
+                    state.start_search();
                 }
                 OverlayInputResult::Handled
             }

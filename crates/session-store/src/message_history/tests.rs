@@ -139,3 +139,27 @@ async fn lowered_limit_trims_on_next_insert() {
 
     let _ = fs::remove_dir_all(path.parent().expect("parent"));
 }
+
+#[tokio::test]
+async fn lowered_limit_trims_on_adjacent_duplicate() {
+    let path = temp_index_path("lower-limit-duplicate");
+    let index = MetadataIndex::open(&path).await.expect("index should open");
+
+    for i in 0..5 {
+        index
+            .record_message_history(format!("line-{i}"), 100)
+            .await
+            .expect("record");
+    }
+    index
+        .record_message_history("line-4".to_string(), 2)
+        .await
+        .expect("duplicate record with lower limit");
+
+    let all = index.load_message_history_all().await.expect("load");
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].text, "line-3");
+    assert_eq!(all[1].text, "line-4");
+
+    let _ = fs::remove_dir_all(path.parent().expect("parent"));
+}

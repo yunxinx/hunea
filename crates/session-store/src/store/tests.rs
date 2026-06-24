@@ -43,6 +43,30 @@ async fn in_memory_store_skips_whitespace_only_message_history() {
 }
 
 #[tokio::test]
+async fn in_memory_store_trims_lowered_limit_on_adjacent_duplicate() {
+    let store = InMemorySessionStore::new();
+
+    for i in 0..5 {
+        store
+            .record_message_history(format!("line-{i}"), 100)
+            .await
+            .expect("history should record");
+    }
+    store
+        .record_message_history("line-4".to_string(), 2)
+        .await
+        .expect("duplicate should still enforce lower limit");
+
+    let rows = store
+        .load_message_history_all()
+        .await
+        .expect("history should load");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].text, "line-3");
+    assert_eq!(rows[1].text, "line-4");
+}
+
+#[tokio::test]
 async fn local_session_read_paths_do_not_wait_for_write_operation_lock() {
     let root = temp_test_dir("read-with-pending-write-lock");
     let work_dir = root.join("workspace");

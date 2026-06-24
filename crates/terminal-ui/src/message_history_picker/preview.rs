@@ -15,12 +15,15 @@ impl Model {
 
     pub(crate) fn move_message_history_picker_preview_page(&mut self, direction: isize) {
         let page_size = self.message_history_picker_preview_content_height();
+        let line_count = self
+            .message_history_picker_preview_wrapped_lines()
+            .map_or(0, |lines| lines.len());
         if let Some(preview) = self
             .message_history_picker
             .as_mut()
             .and_then(|state| state.preview.as_mut())
         {
-            let max_offset = preview.wrapped_lines.len().saturating_sub(page_size);
+            let max_offset = line_count.saturating_sub(page_size);
             let delta = direction.signum() * isize::try_from(page_size).unwrap_or(0);
             let next = isize::try_from(preview.scroll_offset)
                 .unwrap_or(0)
@@ -29,8 +32,6 @@ impl Model {
             preview.scroll_offset = usize::try_from(next.clamp(0, max_offset_i)).unwrap_or(0);
         }
     }
-
-    pub(crate) fn sync_message_history_picker_preview_follow_bottom(&mut self) {}
 
     pub(crate) fn sync_message_history_picker_preview_width(&mut self, width: u16) {
         let row_index = self
@@ -41,14 +42,13 @@ impl Model {
         let Some(row_index) = row_index else {
             return;
         };
-        let text = self
+        let wrap_width = message_history_preview_wrap_width(width);
+        let wrapped_line_count = self
             .message_history_picker
             .as_ref()
             .and_then(|state| state.rows.get(row_index))
-            .map(|row| row.text.clone())
-            .unwrap_or_default();
-        let wrap_width = message_history_preview_wrap_width(width);
-        let wrapped_lines = wrap_prompt_text(&text, wrap_width, 0);
+            .map(|row| wrap_prompt_text(&row.text, wrap_width, 0).len())
+            .unwrap_or(0);
         let page_size = self.message_history_picker_preview_content_height();
         let Some(preview) = self
             .message_history_picker
@@ -57,19 +57,12 @@ impl Model {
         else {
             return;
         };
-        let max_offset = wrapped_lines.len().saturating_sub(page_size);
-        preview.wrapped_lines = wrapped_lines;
+        let max_offset = wrapped_line_count.saturating_sub(page_size);
         preview.scroll_offset = preview.scroll_offset.min(max_offset);
     }
 
-    pub(crate) fn sync_message_history_picker_preview_palette(
-        &mut self,
-        _palette: crate::theme::TerminalPalette,
-    ) {
-    }
-
     pub(super) fn open_message_history_picker_preview(&mut self) {
-        let preview_target = {
+        let row_index = {
             let Some(state) = self.message_history_picker.as_ref() else {
                 return;
             };
@@ -79,18 +72,14 @@ impl Model {
             let Some(row_index) = state.selected_row_index() else {
                 return;
             };
-            let Some(row) = state.rows.get(row_index) else {
+            if state.rows.get(row_index).is_none() {
                 return;
-            };
-            (row_index, row.text.clone())
+            }
+            row_index
         };
 
-        let (row_index, text) = preview_target;
-        let wrap_width = message_history_preview_wrap_width(self.width);
-        let wrapped_lines = wrap_prompt_text(&text, wrap_width, 0);
         let preview = MessageHistoryPickerPreviewState {
             row_index,
-            wrapped_lines,
             scroll_offset: 0,
         };
 
@@ -132,6 +121,14 @@ impl Model {
 
     pub(crate) fn message_history_picker_preview_content_height(&self) -> usize {
         usize::from(self.height.saturating_sub(2).max(1))
+    }
+
+    pub(crate) fn message_history_picker_preview_wrapped_lines(&self) -> Option<Vec<String>> {
+        let state = self.message_history_picker.as_ref()?;
+        let preview = state.preview.as_ref()?;
+        let row = state.rows.get(preview.row_index)?;
+        let wrap_width = message_history_preview_wrap_width(self.width);
+        Some(wrap_prompt_text(&row.text, wrap_width, 0))
     }
 }
 

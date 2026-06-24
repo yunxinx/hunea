@@ -1,5 +1,7 @@
-use runtime_domain::session::MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN;
-use runtime_domain::session::MessageHistoryEntry;
+use runtime_domain::session::{
+    MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN, MessageHistoryEntry, append_message_history_entry,
+    merge_message_history_entries,
+};
 
 use crate::time::current_unix_timestamp_ms;
 
@@ -8,7 +10,13 @@ use crate::time::current_unix_timestamp_ms;
 pub(crate) struct BlindRecallState {
     cache: Vec<MessageHistoryEntry>,
     history_cursor: Option<usize>,
-    last_history_text: Option<String>,
+    active_recall: Option<BlindRecallAnchor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BlindRecallAnchor {
+    CacheIndex(usize),
+    ExternalText(String),
 }
 
 impl BlindRecallState {
@@ -21,13 +29,17 @@ impl BlindRecallState {
         let local_entries = std::mem::take(&mut self.cache);
         self.cache = merged_message_history_cache(entries, local_entries);
         self.history_cursor = None;
-        self.last_history_text = None;
+        self.active_recall = None;
     }
 
     pub(crate) fn replace_cache(&mut self, entries: Vec<MessageHistoryEntry>) {
-        self.cache = entries;
+        self.cache = merge_message_history_entries(
+            entries,
+            Vec::new(),
+            MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN,
+        );
         self.history_cursor = None;
-        self.last_history_text = None;
+        self.active_recall = None;
     }
 
     #[cfg(test)]
@@ -42,7 +54,7 @@ impl BlindRecallState {
 
     #[cfg(test)]
     pub(crate) fn last_history_text(&self) -> Option<&str> {
-        self.last_history_text.as_deref()
+        self.active_history_text()
     }
 
     /// 是否应由 Up/Down 走 history 而非 composer 行内移动。
@@ -56,10 +68,10 @@ impl BlindRecallState {
         if cursor != 0 && cursor != text.len() {
             return false;
         }
-        matches!(&self.last_history_text, Some(prev) if prev == text)
+        self.active_history_text() == Some(text)
     }
 
-    /// 上一条 history；成功时写入 `last_history_text`，调用方用 [`Self::active_history_text`] 取正文。
+    /// 上一条 history；成功时只保存缓存索引，调用方用 [`Self::active_history_text`] 取正文。
     pub(crate) fn navigate_up(&mut self) -> bool {
         let len = self.cache.len();
         if len == 0 {
@@ -73,7 +85,7 @@ impl BlindRecallState {
         };
 
         self.history_cursor = Some(next_idx);
-        self.last_history_text = Some(self.cache[next_idx].text.clone());
+        self.active_recall = Some(BlindRecallAnchor::CacheIndex(next_idx));
         true
     }
 
@@ -88,20 +100,25 @@ impl BlindRecallState {
             None => return None,
             Some(idx) if idx + 1 >= len => {
                 self.history_cursor = None;
-                self.last_history_text = None;
+                self.active_recall = None;
                 return Some(false);
             }
             Some(idx) => idx + 1,
         };
 
         self.history_cursor = Some(next);
-        self.last_history_text = Some(self.cache[next].text.clone());
+        self.active_recall = Some(BlindRecallAnchor::CacheIndex(next));
         Some(true)
     }
 
     /// 最近一次导航或 recall 后的 history 正文（清空 composer 时为 `None`）。
     pub(crate) fn active_history_text(&self) -> Option<&str> {
-        self.last_history_text.as_deref()
+        match self.active_recall.as_ref()? {
+            BlindRecallAnchor::CacheIndex(index) => {
+                self.cache.get(*index).map(|entry| entry.text.as_str())
+            }
+            BlindRecallAnchor::ExternalText(text) => Some(text.as_str()),
+        }
     }
 
     /// 本地写入（发送 / Ctrl-C 清输入）：相邻去重、trim 至 25、重置导航。
@@ -110,21 +127,23 @@ impl BlindRecallState {
             return;
         }
         self.history_cursor = None;
-        self.last_history_text = None;
-
-        if self.cache.last().is_some_and(|prev| prev.text == text) {
-            return;
-        }
+        self.active_recall = None;
 
         let ts = current_unix_timestamp_ms();
-        push_cache_entry_with_adjacent_dedup(&mut self.cache, MessageHistoryEntry { ts, text });
-        trim_cache_to_blind_recall_limit(&mut self.cache);
+        append_message_history_entry(
+            &mut self.cache,
+            MessageHistoryEntry { ts, text },
+            MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN,
+        );
     }
 
     /// Picker Enter 恢复全文后，与盲回溯 Up 填入条目一致的门控状态。
     pub(crate) fn apply_recalled_text(&mut self, text: &str) {
         self.history_cursor = self.cache.iter().rposition(|entry| entry.text == text);
-        self.last_history_text = Some(text.to_string());
+        self.active_recall = Some(match self.history_cursor {
+            Some(index) => BlindRecallAnchor::CacheIndex(index),
+            None => BlindRecallAnchor::ExternalText(text.to_string()),
+        });
     }
 }
 
@@ -132,30 +151,9 @@ fn merged_message_history_cache(
     persisted_entries: Vec<MessageHistoryEntry>,
     local_entries: Vec<MessageHistoryEntry>,
 ) -> Vec<MessageHistoryEntry> {
-    let mut cache = Vec::with_capacity(persisted_entries.len() + local_entries.len());
-    for entry in persisted_entries.into_iter().chain(local_entries) {
-        push_cache_entry_with_adjacent_dedup(&mut cache, entry);
-    }
-    trim_cache_to_blind_recall_limit(&mut cache);
-    cache
-}
-
-fn push_cache_entry_with_adjacent_dedup(
-    cache: &mut Vec<MessageHistoryEntry>,
-    entry: MessageHistoryEntry,
-) {
-    if cache
-        .last()
-        .is_some_and(|previous| previous.text == entry.text)
-    {
-        return;
-    }
-    cache.push(entry);
-}
-
-fn trim_cache_to_blind_recall_limit(cache: &mut Vec<MessageHistoryEntry>) {
-    if cache.len() > MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN {
-        let overflow = cache.len() - MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN;
-        cache.drain(0..overflow);
-    }
+    merge_message_history_entries(
+        persisted_entries,
+        local_entries,
+        MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN,
+    )
 }

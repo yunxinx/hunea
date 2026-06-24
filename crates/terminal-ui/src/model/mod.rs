@@ -398,7 +398,6 @@ impl Model {
         }
         self.sync_copy_picker_preview_palette(palette);
         self.sync_entry_tree_preview_palette(palette);
-        self.sync_message_history_picker_preview_palette(palette);
         if palette_changed {
             self.sync_transcript_render();
         }

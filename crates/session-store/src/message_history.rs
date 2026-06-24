@@ -1,7 +1,8 @@
 //! 全局 message history 持久化（`index.sqlite` 的 `message_history` 表）。
 
 use runtime_domain::session::{
-    MessageHistoryEntry, MessageHistoryRow, should_record_message_history_text,
+    MessageHistoryEntry, MessageHistoryRow, message_history_is_adjacent_duplicate,
+    message_history_trim_excess_count, should_record_message_history_text,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -29,7 +30,9 @@ pub(crate) fn record_message_history(
             .optional()
             .map_err(sqlite_err)?;
 
-        if last_text.as_deref() == Some(text) {
+        if message_history_is_adjacent_duplicate(last_text.as_deref(), text) {
+            trim_message_history(&transaction, limit)?;
+            transaction.commit().map_err(sqlite_err)?;
             return Ok(());
         }
 
@@ -102,11 +105,14 @@ fn trim_message_history(conn: &Connection, limit: usize) -> Result<(), SessionSt
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM message_history", [], |row| row.get(0))
         .map_err(sqlite_err)?;
-    let limit_i64 = i64::try_from(limit).map_err(|_| SessionStoreError::CorruptIndex {
-        message: "message_history_limit exceeds sqlite INTEGER range".to_string(),
+    let count = usize::try_from(count).map_err(|_| SessionStoreError::CorruptIndex {
+        message: "message_history row count exceeds usize range".to_string(),
     })?;
-    let excess = count.saturating_sub(limit_i64);
+    let excess = message_history_trim_excess_count(count, limit);
     if excess > 0 {
+        let excess = i64::try_from(excess).map_err(|_| SessionStoreError::CorruptIndex {
+            message: "message_history trim count exceeds sqlite INTEGER range".to_string(),
+        })?;
         conn.execute(
             "DELETE FROM message_history WHERE id IN (
                 SELECT id FROM message_history ORDER BY id ASC LIMIT ?1

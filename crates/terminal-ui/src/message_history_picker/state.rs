@@ -2,7 +2,7 @@ use runtime_domain::session::{MessageHistoryRow, SessionLoadRequestId};
 
 use crate::{
     list_selection::{ListNavigationDirection, PagedSelection},
-    text_search::contains_case_insensitive,
+    text_search::CaseInsensitiveQuery,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +23,6 @@ pub(crate) struct MessageHistoryPickerState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MessageHistoryPickerPreviewState {
     pub(super) row_index: usize,
-    pub(super) wrapped_lines: Vec<String>,
     pub(super) scroll_offset: usize,
 }
 
@@ -52,6 +51,7 @@ impl MessageHistoryPickerState {
 
     pub(super) fn apply_filter(&mut self) {
         let query = self.search_query.trim();
+        let query = CaseInsensitiveQuery::new(query);
         let selected_row_id = self
             .selected_row_id
             .or_else(|| self.selected_row().map(|row| row.id));
@@ -59,9 +59,7 @@ impl MessageHistoryPickerState {
             .rows
             .iter()
             .enumerate()
-            .filter_map(|(index, row)| {
-                (query.is_empty() || message_history_row_matches(&row.text, query)).then_some(index)
-            })
+            .filter_map(|(index, row)| query.matches(&row.text).then_some(index))
             .collect();
         self.restore_selected_row_or_clamp(selected_row_id);
     }
@@ -218,8 +216,4 @@ impl MessageHistoryPickerState {
         }
         self.selected_row().map(|row| row.text.clone())
     }
-}
-
-fn message_history_row_matches(text: &str, query: &str) -> bool {
-    contains_case_insensitive(text, query)
 }

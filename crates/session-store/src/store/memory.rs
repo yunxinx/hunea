@@ -1,7 +1,10 @@
 use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin};
 
 use provider_protocol::ConversationItem;
-use runtime_domain::session::{TranscriptReplayItem, should_record_message_history_text};
+use runtime_domain::session::{
+    TranscriptReplayItem, append_message_history_entry, message_history_is_adjacent_duplicate,
+    should_record_message_history_text, trim_message_history_entries,
+};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -51,15 +54,15 @@ impl InMemorySessionStore {
             return Ok(());
         }
         let mut history = self.message_history.write().await;
-        if history.last().is_some_and(|prev| prev.text == text) {
+        if message_history_is_adjacent_duplicate(
+            history.last().map(|prev| prev.text.as_str()),
+            &text,
+        ) {
+            trim_message_history_entries(&mut history, limit);
             return Ok(());
         }
         let ts = current_timestamp_ms()?;
-        history.push(MessageHistoryEntry { ts, text });
-        if history.len() > limit {
-            let overflow = history.len() - limit;
-            history.drain(0..overflow);
-        }
+        append_message_history_entry(&mut history, MessageHistoryEntry { ts, text }, limit);
         Ok(())
     }
 

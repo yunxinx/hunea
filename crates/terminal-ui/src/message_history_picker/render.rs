@@ -25,7 +25,8 @@ use crate::{
     },
 };
 
-const MESSAGE_HISTORY_BODY_HORIZONTAL_PADDING: usize = 2;
+const MESSAGE_HISTORY_BODY_LEFT_PADDING: &str = "  ";
+const MESSAGE_HISTORY_BODY_HORIZONTAL_PADDING: usize = MESSAGE_HISTORY_BODY_LEFT_PADDING.len();
 const MESSAGE_HISTORY_TIME_GAP_WIDTH: usize = 1;
 
 impl Model {
@@ -178,14 +179,13 @@ impl Model {
         is_even: bool,
         opened_at_ms: i64,
     ) -> Line<'static> {
-        let left_padding = " ".repeat(MESSAGE_HISTORY_BODY_HORIZONTAL_PADDING);
         let timestamp = relative_age_label_fixed_column(
             opened_at_ms,
             row.ts,
             RELATIVE_AGE_LIST_COLUMN_WIDTH,
             RELATIVE_AGE_LIST_BEFORE_DOT_WIDTH,
         );
-        let prefix_width = display_width(&left_padding)
+        let prefix_width = display_width(MESSAGE_HISTORY_BODY_LEFT_PADDING)
             + RELATIVE_AGE_LIST_COLUMN_WIDTH
             + MESSAGE_HISTORY_TIME_GAP_WIDTH;
         let text_width = width
@@ -200,7 +200,7 @@ impl Model {
         };
 
         Line::from(vec![
-            Span::raw(left_padding),
+            Span::raw(MESSAGE_HISTORY_BODY_LEFT_PADDING),
             Span::styled(timestamp, tertiary_text_style(self.palette)),
             Span::raw(" "),
             Span::styled(
@@ -212,10 +212,15 @@ impl Model {
     }
 
     fn render_message_history_picker_preview(&mut self, frame: &mut RenderFrame<'_>, area: Rect) {
-        let Some(state) = self.message_history_picker.as_ref() else {
+        let Some(preview_scroll_offset) = self
+            .message_history_picker
+            .as_ref()
+            .and_then(|state| state.preview.as_ref())
+            .map(|preview| preview.scroll_offset)
+        else {
             return;
         };
-        let Some(preview) = state.preview.as_ref() else {
+        let Some(wrapped_lines) = self.message_history_picker_preview_wrapped_lines() else {
             return;
         };
         if area.width == 0 || area.height == 0 {
@@ -226,22 +231,20 @@ impl Model {
         let content_height = usize::from(area.height.saturating_sub(2).max(1));
         let text_style = primary_text_style(palette);
         let page_size = content_height.max(1);
-        let max_offset = preview.wrapped_lines.len().saturating_sub(page_size);
-        let scroll_offset = preview.scroll_offset.min(max_offset);
+        let max_offset = wrapped_lines.len().saturating_sub(page_size);
+        let scroll_offset = preview_scroll_offset.min(max_offset);
         let (page_number, page_count) =
             crate::transcript_overlay::render::transcript_overlay_page_progress(
-                preview.wrapped_lines.len(),
+                wrapped_lines.len(),
                 content_height,
                 scroll_offset,
             );
 
-        let left_pad = " ".repeat(MESSAGE_HISTORY_BODY_HORIZONTAL_PADDING);
         let content_bottom = area
             .y
             .saturating_add(u16::try_from(content_height).unwrap_or(u16::MAX));
         let mut row = area.y;
-        for line in preview
-            .wrapped_lines
+        for line in wrapped_lines
             .iter()
             .skip(scroll_offset)
             .take(content_height)
@@ -251,7 +254,7 @@ impl Model {
             }
             render_line_with_full_width_background(
                 &Line::from(vec![
-                    Span::raw(left_pad.clone()),
+                    Span::raw(MESSAGE_HISTORY_BODY_LEFT_PADDING),
                     Span::styled(line.as_str(), text_style),
                 ]),
                 Rect::new(area.x, row, area.width, 1),

@@ -2,7 +2,7 @@ use runtime_domain::session::SessionPickerRow;
 
 use crate::{
     list_selection::{ListNavigationDirection, PagedSelection},
-    text_search::contains_case_insensitive,
+    text_search::CaseInsensitiveQuery,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -25,13 +25,12 @@ impl SessionPickerState {
 
     pub(super) fn apply_filter(&mut self) {
         let query = self.search_query.trim();
+        let query = CaseInsensitiveQuery::new(query);
         self.filtered_indices = self
             .rows
             .iter()
             .enumerate()
-            .filter_map(|(index, row)| {
-                (query.is_empty() || session_picker_row_matches(row, query)).then_some(index)
-            })
+            .filter_map(|(index, row)| session_picker_row_matches(row, &query).then_some(index))
             .collect();
         self.restore_selected_session_or_clamp();
     }
@@ -164,13 +163,13 @@ impl SessionPickerState {
     }
 }
 
-fn session_picker_row_matches(row: &SessionPickerRow, query: &str) -> bool {
-    contains_case_insensitive(&row.title, query)
-        || contains_case_insensitive(&row.first_user_message, query)
-        || contains_case_insensitive(&row.last_assistant_message, query)
-        || contains_case_insensitive(&row.work_dir, query)
+fn session_picker_row_matches(row: &SessionPickerRow, query: &CaseInsensitiveQuery<'_>) -> bool {
+    query.matches(&row.title)
+        || query.matches(&row.first_user_message)
+        || query.matches(&row.last_assistant_message)
+        || query.matches(&row.work_dir)
         || row
             .model
             .as_deref()
-            .is_some_and(|model| contains_case_insensitive(model, query))
+            .is_some_and(|model| query.matches(model))
 }

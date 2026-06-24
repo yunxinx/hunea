@@ -878,7 +878,6 @@ impl Model {
         self.restore_transcript_overlay_scroll_anchor(transcript_overlay_anchor);
         self.sync_copy_picker_preview_follow_bottom();
         self.sync_entry_tree_preview_follow_bottom();
-        self.sync_message_history_picker_preview_follow_bottom();
     }
 }
 

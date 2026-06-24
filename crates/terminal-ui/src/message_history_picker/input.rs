@@ -223,12 +223,7 @@ impl Model {
 
         self.message_history_picker = None;
 
-        let record_effect = if runtime_domain::session::should_record_message_history_text(&draft) {
-            self.blind_recall.push_local_entry(draft.clone());
-            Some(AppEffect::RecordMessageHistory { text: draft })
-        } else {
-            None
-        };
+        let record_effect = crate::message_history_recall::commit_message_history(self, draft);
 
         self.apply_message_history_picker_recall(&recalled);
 

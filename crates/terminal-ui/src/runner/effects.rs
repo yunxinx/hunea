@@ -139,6 +139,17 @@ pub(super) fn apply_effect_if_needed(
             Ok(())
         }
         AppEffect::SendConversationTurn { request } => {
+            if let Some(AppEffect::RecordMessageHistory { text }) =
+                crate::message_history_recall::message_history_record_effect(request.message_text())
+                && let Err(message) = runtime_coordinator.dispatch_runtime_command(
+                    RuntimeCommand::RecordMessageHistory {
+                        text,
+                        limit: model.message_history_limit,
+                    },
+                )
+            {
+                model.show_toast(ToastSeverity::Error, message);
+            }
             run_send_conversation_turn_effect(model, runtime_coordinator, request);
             Ok(())
         }

@@ -12,6 +12,7 @@ use super::input::{
 use super::*;
 use crate::{
     AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem,
+    message_history_recall::message_history_record_effect,
     runtime::RuntimeEventApply,
     test_helpers::{branch_choice, render_model_buffer, rendered_rows},
     theme::default_palette,
@@ -75,7 +76,15 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
         self.commands.push(command.clone());
         self.last_command = Some(command.clone());
         if let Some(message) = self.next_runtime_error.take() {
-            return Err(message);
+            if matches!(
+                command,
+                RuntimeCommand::RecordMessageHistory { .. }
+                    | RuntimeCommand::LoadMessageHistoryStartupCache
+            ) {
+                self.next_runtime_error = Some(message);
+            } else {
+                return Err(message);
+            }
         }
         match command {
             RuntimeCommand::Reset => {
@@ -1640,13 +1649,13 @@ fn conversation_send_effect_records_history_after_conversation_start() {
         "hello history",
     );
 
-    run_send_conversation_turn_effect(&mut model, &mut runtime_coordinator, request);
+    apply_send_conversation_turn_effect_for_test(&mut model, &mut runtime_coordinator, request);
 
     assert!(matches!(
         runtime_coordinator.commands.as_slice(),
         [
+            RuntimeCommand::RecordMessageHistory { text, limit },
             RuntimeCommand::SubmitConversationTurn { .. },
-            RuntimeCommand::RecordMessageHistory { text, limit }
         ] if text == "hello history" && *limit == model.message_history_limit
     ));
 }
@@ -1668,7 +1677,7 @@ fn conversation_send_effect_failure_uses_toast_not_status_notice() {
         "hello",
     );
 
-    run_send_conversation_turn_effect(&mut model, &mut runtime_coordinator, request);
+    apply_send_conversation_turn_effect_for_test(&mut model, &mut runtime_coordinator, request);
 
     assert_eq!(model.current_status_notice_text(), "");
     assert_eq!(
@@ -1677,7 +1686,10 @@ fn conversation_send_effect_failure_uses_toast_not_status_notice() {
     );
     assert!(matches!(
         runtime_coordinator.commands.as_slice(),
-        [RuntimeCommand::SubmitConversationTurn { .. }]
+        [
+            RuntimeCommand::RecordMessageHistory { text, limit: _ },
+            RuntimeCommand::SubmitConversationTurn { .. },
+        ] if text == "hello"
     ));
     assert!(!model.current_stream_activity_render_result().has_content);
 }
@@ -1981,6 +1993,24 @@ fn switch_branch_tree_payload() -> SessionTreePayload {
         }],
         current_row_id: Some("user-a".to_string()),
     }
+}
+
+fn apply_send_conversation_turn_effect_for_test(
+    model: &mut Model,
+    runtime_coordinator: &mut TestRuntimeCoordinator,
+    request: ConversationTurnRequest,
+) {
+    if let Some(AppEffect::RecordMessageHistory { text }) =
+        message_history_record_effect(request.message_text())
+        && let Err(message) =
+            runtime_coordinator.dispatch_runtime_command(RuntimeCommand::RecordMessageHistory {
+                text,
+                limit: model.message_history_limit,
+            })
+    {
+        model.show_toast(crate::toast::ToastSeverity::Error, message);
+    }
+    run_send_conversation_turn_effect(model, runtime_coordinator, request);
 }
 
 fn apply_effect_if_needed_for_test(

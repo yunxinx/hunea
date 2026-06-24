@@ -2,8 +2,8 @@ use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin};
 
 use provider_protocol::ConversationItem;
 use runtime_domain::session::{
-    MessageHistoryEntry, MessageHistoryRow, TranscriptReplayItem,
-    message_history_is_adjacent_duplicate, should_record_message_history_text,
+    MessageHistoryEntry, MessageHistoryRow, TranscriptReplayItem, append_message_history_entry,
+    should_record_message_history_text,
 };
 use tokio::sync::RwLock;
 
@@ -65,14 +65,9 @@ impl InMemorySessionStore {
         if !should_record_message_history_text(&text) {
             return Ok(());
         }
-        let mut history = self.message_history.write().await;
-        if message_history_is_adjacent_duplicate(history.last_text(), &text) {
-            history.trim_to_limit(limit);
-            return Ok(());
-        }
         let ts = current_timestamp_ms()?;
-        history.push(ts, text);
-        history.trim_to_limit(limit);
+        let mut history = self.message_history.write().await;
+        history.apply_domain_append(MessageHistoryEntry { ts, text }, limit);
         Ok(())
     }
 
@@ -476,21 +471,36 @@ impl InMemoryMessageHistoryState {
         self.entries.iter()
     }
 
-    fn last_text(&self) -> Option<&str> {
-        self.entries.last().map(|entry| entry.text.as_str())
-    }
+    fn apply_domain_append(&mut self, entry: MessageHistoryEntry, limit: usize) {
+        let old_entries = std::mem::take(&mut self.entries);
+        let mut logical: Vec<MessageHistoryEntry> = old_entries
+            .iter()
+            .map(|stored| MessageHistoryEntry {
+                ts: stored.ts,
+                text: stored.text.clone(),
+            })
+            .collect();
+        append_message_history_entry(&mut logical, entry, limit);
 
-    fn push(&mut self, ts: i64, text: String) {
-        let id = self.allocate_row_id();
-        self.entries
-            .push(InMemoryMessageHistoryEntry { id, ts, text });
-    }
+        let mut old_by_key: std::collections::HashMap<(i64, String), i64> = old_entries
+            .into_iter()
+            .map(|stored| ((stored.ts, stored.text), stored.id))
+            .collect();
 
-    fn trim_to_limit(&mut self, limit: usize) {
-        let excess = self.entries.len().saturating_sub(limit);
-        if excess > 0 {
-            self.entries.drain(0..excess);
-        }
+        self.entries = logical
+            .into_iter()
+            .map(|entry| {
+                let key = (entry.ts, entry.text.clone());
+                let id = old_by_key
+                    .remove(&key)
+                    .unwrap_or_else(|| self.allocate_row_id());
+                InMemoryMessageHistoryEntry {
+                    id,
+                    ts: entry.ts,
+                    text: entry.text,
+                }
+            })
+            .collect();
     }
 
     fn allocate_row_id(&mut self) -> i64 {

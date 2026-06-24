@@ -121,3 +121,14 @@ fn apply_recalled_text_sets_last_history_and_cursor_when_in_cache() {
     assert_eq!(state.history_cursor(), Some(1));
     assert!(state.should_handle_navigation("b", 1));
 }
+
+#[test]
+fn revert_failed_persist_removes_tail_and_resets_navigation() {
+    let mut state = BlindRecallState::default();
+    state.push_local_entry("saved");
+    let _ = state.navigate_up();
+    assert!(state.revert_failed_persist("saved"));
+    assert!(state.cache().is_empty());
+    assert_eq!(state.history_cursor(), None);
+    assert!(!state.revert_failed_persist("saved"));
+}

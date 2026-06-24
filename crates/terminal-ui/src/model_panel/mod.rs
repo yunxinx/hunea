@@ -17,7 +17,7 @@ use super::{
         inline_panel_rule_line, inline_panel_visible_rows, wrap_inline_text,
     },
     overlay_input_result::OverlayInputResult,
-    text_search::contains_case_insensitive,
+    text_search::CaseInsensitiveQuery,
     theme::{
         command_accent_text_style, primary_text_style, secondary_text_style, surface_text_style,
         tertiary_text_style,
@@ -698,26 +698,26 @@ fn append_model_lines(
 }
 
 fn filtered_model_indices(provider: &ModelProvider, search_query: &str) -> Vec<usize> {
-    if search_query.is_empty() {
+    let trimmed = search_query.trim();
+    if trimmed.is_empty() {
         return (0..provider.models.len()).collect();
     }
+    let query = CaseInsensitiveQuery::new(trimmed);
 
     provider
         .models
         .iter()
         .enumerate()
-        .filter_map(|(index, entry)| {
-            model_entry_matches_search(entry, search_query).then_some(index)
-        })
+        .filter_map(|(index, entry)| model_entry_matches_search(entry, &query).then_some(index))
         .collect()
 }
 
-fn model_entry_matches_search(entry: &ModelEntry, query: &str) -> bool {
-    contains_case_insensitive(entry.id.as_str(), query)
+fn model_entry_matches_search(entry: &ModelEntry, query: &CaseInsensitiveQuery<'_>) -> bool {
+    query.matches(entry.id.as_str())
         || entry
             .description
             .as_ref()
-            .is_some_and(|description| contains_case_insensitive(description, query))
+            .is_some_and(|description| query.matches(description))
 }
 
 fn append_model_entry_lines(

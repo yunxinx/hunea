@@ -3,7 +3,6 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use provider_protocol::ConversationItem;
@@ -253,13 +252,8 @@ pub(super) fn derive_store_session_meta(
 }
 
 pub(super) fn current_timestamp_ms() -> Result<i64, SessionStoreError> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| SessionStoreError::CorruptIndex {
-            message: format!("system time is before unix epoch: {error}"),
-        })?;
-    i64::try_from(duration.as_millis()).map_err(|_| SessionStoreError::CorruptIndex {
-        message: "system time exceeds i64 millisecond range".to_string(),
+    runtime_domain::time::unix_timestamp_ms().map_err(|_| SessionStoreError::CorruptIndex {
+        message: "system clock is before Unix epoch or exceeds i64 millisecond range".to_string(),
     })
 }
 

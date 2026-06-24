@@ -1,10 +1,11 @@
-use runtime_domain::session::{
-    MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN, MessageHistoryEntry, append_message_history_entry,
-    merge_message_history_entries, message_history_is_adjacent_duplicate,
-    should_record_message_history_text,
+use runtime_domain::{
+    session::{
+        MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN, MessageHistoryEntry, append_message_history_entry,
+        merge_message_history_entries, message_history_is_adjacent_duplicate,
+        revert_message_history_tail_entry, should_record_message_history_text,
+    },
+    time::unix_timestamp_ms,
 };
-
-use crate::time::current_unix_timestamp_ms;
 
 /// 固定 25 条、oldest-first 的 shell 风格 history 状态机（无 async fetch）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -124,7 +125,7 @@ impl BlindRecallState {
 
     /// 本地写入（发送 / Ctrl-C 清输入）：相邻同文 no-op，否则追加并 trim 至 25，重置导航。
     ///
-    /// 若实际写入了新条目，返回应用层应持久化的正文（与缓存内条目各持有一份 `String`，无读回后再 clone）。
+    /// 若实际写入了新条目，返回应用层应持久化的正文（与缓存条目共享同一份 `String`）。
     pub(crate) fn push_local_entry(&mut self, text: &str) -> Option<String> {
         if !should_record_message_history_text(text) {
             return None;
@@ -139,7 +140,7 @@ impl BlindRecallState {
             return None;
         }
 
-        let ts = current_unix_timestamp_ms();
+        let ts = unix_timestamp_ms().unwrap_or(0);
         let persisted_text = text.to_string();
         append_message_history_entry(
             &mut self.cache,
@@ -150,6 +151,16 @@ impl BlindRecallState {
             MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN,
         );
         Some(persisted_text)
+    }
+
+    /// 异步持久化失败时回滚盲回溯缓存末尾一条（与 [`push_local_entry`] 写入的正文一致时）。
+    pub(crate) fn revert_failed_persist(&mut self, text: &str) -> bool {
+        if !revert_message_history_tail_entry(&mut self.cache, text) {
+            return false;
+        }
+        self.history_cursor = None;
+        self.active_recall = None;
+        true
     }
 
     /// Picker Enter 恢复全文后，与盲回溯 Up 填入条目一致的门控状态。

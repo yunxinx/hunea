@@ -49,11 +49,6 @@ impl<'a> CaseInsensitiveQuery<'a> {
     }
 }
 
-/// 在 `haystack` 中查找 `needle` 的子串（大小写不敏感）。
-pub(crate) fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
-    CaseInsensitiveQuery::new(needle).matches(haystack)
-}
-
 fn contains_folded_unicode(haystack: &str, needle: &FoldedUnicodeNeedle) -> bool {
     if needle.chars.is_empty() {
         return true;
@@ -108,15 +103,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contains_case_insensitive_ascii() {
-        assert!(contains_case_insensitive("Hello World", "world"));
-        assert!(contains_case_insensitive("Hello World", "HELLO"));
-        assert!(!contains_case_insensitive("Hello World", "xyz"));
+    fn case_insensitive_query_ascii() {
+        let world = CaseInsensitiveQuery::new("world");
+        let hello = CaseInsensitiveQuery::new("HELLO");
+        let xyz = CaseInsensitiveQuery::new("xyz");
+        assert!(world.matches("Hello World"));
+        assert!(hello.matches("Hello World"));
+        assert!(!xyz.matches("Hello World"));
     }
 
     #[test]
     fn empty_needle_matches_all() {
-        assert!(contains_case_insensitive("anything", ""));
+        let empty = CaseInsensitiveQuery::new("");
+        assert!(empty.matches("anything"));
     }
 
     #[test]

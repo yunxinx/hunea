@@ -128,6 +128,7 @@ pub enum RuntimeEvent {
         message: String,
     },
     MessageHistoryRecordFailed {
+        text: String,
         message: String,
     },
     MessageFinished {

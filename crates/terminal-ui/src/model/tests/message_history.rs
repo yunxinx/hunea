@@ -160,6 +160,22 @@ fn send_pushes_blind_recall_cache_and_adjacent_dedup() {
 }
 
 #[test]
+fn message_history_record_failed_reverts_blind_recall_tail() {
+    let mut model = conversation_test_model();
+    type_text(&mut model, "will fail to persist");
+    let _ = model.update(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+    assert_eq!(model.blind_recall.cache().len(), 1);
+    model.apply_runtime_event(RuntimeEvent::MessageHistoryRecordFailed {
+        text: "will fail to persist".to_string(),
+        message: "disk full".to_string(),
+    });
+    assert!(model.blind_recall.cache().is_empty());
+}
+
+#[test]
 fn late_startup_cache_load_preserves_locally_recorded_blind_recall_entries() {
     let mut model = conversation_test_model();
     type_text(&mut model, "local send while startup load is pending");

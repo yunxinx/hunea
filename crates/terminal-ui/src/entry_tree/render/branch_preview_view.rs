@@ -104,6 +104,7 @@ fn entry_tree_branch_preview_title(
         return format!("Branch Preview ({position})");
     };
 
+    // 标题为自由文案，用裸标签即可；branch picker 列表行才用 table_field 列对齐。
     let created = crate::relative_age::relative_age_label(
         metadata.metadata_now_ms,
         metadata.branch_created_at_ms,

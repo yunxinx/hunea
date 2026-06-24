@@ -1,6 +1,9 @@
 //! 两档相对时间标签（`y`…`s`）及固定列宽排版；message history 列表与 entry tree branch picker 共用。
 //!
 //! 月份后缀为 `M`（不用 `mo`），与分钟 `m` 区分；见 `CONTEXT.md`「Relative age label」。
+//!
+//! 展示分两类：`relative_age_label` 用于嵌入自由文案（如 branch preview 标题）；
+//! `relative_age_label_table_field` / `relative_age_label_fixed_column` 用于列表列对齐，勿混用。
 
 use crate::display_width::display_width;
 
@@ -16,6 +19,8 @@ pub(crate) const RELATIVE_AGE_BRANCH_PICKER_BEFORE_DOT_WIDTH: usize = 3;
 const RELATIVE_AGE_SECOND_NUMBER_DISPLAY_WIDTH: usize = 2;
 
 /// 将 `timestamp_ms` 相对 `now_ms` 格式化为紧凑英文标签，例如 `2h·05m`、`3d·02h`。
+///
+/// 不做固定列宽填充；嵌入句子或标题时用此 API，列表时间列请用 [`relative_age_label_table_field`] 等。
 pub(crate) fn relative_age_label(now_ms: i64, timestamp_ms: i64) -> String {
     const SECONDS_PER_MINUTE: i64 = 60;
     const MINUTES_PER_HOUR: i64 = 60;

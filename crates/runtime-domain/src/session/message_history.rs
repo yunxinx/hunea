@@ -53,20 +53,6 @@ pub fn trim_message_history_entries(entries: &mut Vec<MessageHistoryEntry>, limi
     }
 }
 
-/// 持久化失败时撤销刚写入盲回溯缓存的一条（仅当该条为缓存末尾且正文一致时）。
-pub fn revert_message_history_tail_entry(
-    entries: &mut Vec<MessageHistoryEntry>,
-    text: &str,
-) -> bool {
-    match entries.last() {
-        Some(entry) if entry.text == text => {
-            entries.pop();
-            true
-        }
-        _ => false,
-    }
-}
-
 /// 按统一策略追加一条 message history：相邻同文整条 no-op（不插入、不裁剪）；否则追加并在超限时裁掉最旧条目。
 pub fn append_message_history_entry(
     entries: &mut Vec<MessageHistoryEntry>,
@@ -164,15 +150,6 @@ mod tests {
         assert_eq!(message_history_trim_excess_count(3, 5), 0);
         assert_eq!(message_history_trim_excess_count(5, 5), 0);
         assert_eq!(message_history_trim_excess_count(8, 5), 3);
-    }
-
-    #[test]
-    fn revert_tail_only_when_last_entry_matches() {
-        let mut entries = vec![entry(1, "a"), entry(2, "b")];
-        assert!(!super::revert_message_history_tail_entry(&mut entries, "a"));
-        assert!(super::revert_message_history_tail_entry(&mut entries, "b"));
-        assert_eq!(texts(&entries), ["a"]);
-        assert!(!super::revert_message_history_tail_entry(&mut entries, "b"));
     }
 
     #[test]

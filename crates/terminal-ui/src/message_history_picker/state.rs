@@ -164,8 +164,8 @@ impl MessageHistoryPickerState {
     }
 }
 
-fn message_history_row_matches(row: &MessageHistoryRow, query: &str) -> bool {
-    CaseInsensitiveQuery::new(query).matches(&row.text)
+fn message_history_row_matches(row: &MessageHistoryRow, query: &CaseInsensitiveQuery<'_>) -> bool {
+    query.matches(&row.text)
 }
 
 fn message_history_row_id(row: &MessageHistoryRow) -> i64 {

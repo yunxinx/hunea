@@ -114,8 +114,7 @@ impl SessionPickerState {
     }
 }
 
-fn session_picker_row_matches(row: &SessionPickerRow, query: &str) -> bool {
-    let query = CaseInsensitiveQuery::new(query);
+fn session_picker_row_matches(row: &SessionPickerRow, query: &CaseInsensitiveQuery<'_>) -> bool {
     query.matches(&row.title)
         || query.matches(&row.first_user_message)
         || query.matches(&row.last_assistant_message)

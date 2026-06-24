@@ -82,6 +82,16 @@ fn push_local_skips_whitespace_only() {
 }
 
 #[test]
+fn push_local_entry_returns_none_on_adjacent_duplicate() {
+    let mut state = BlindRecallState::default();
+    assert_eq!(
+        state.push_local_entry("one".to_string()),
+        Some("one".to_string())
+    );
+    assert_eq!(state.push_local_entry("one".to_string()), None);
+}
+
+#[test]
 fn push_local_adjacent_dedup_and_trim() {
     let mut state = BlindRecallState::default();
     state.push_local_entry("one".to_string());

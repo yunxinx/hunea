@@ -1,6 +1,7 @@
 use runtime_domain::session::{
     MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN, MessageHistoryEntry, append_message_history_entry,
-    merge_message_history_entries,
+    merge_message_history_entries, message_history_is_adjacent_duplicate,
+    should_record_message_history_text,
 };
 
 use crate::time::current_unix_timestamp_ms;
@@ -122,12 +123,21 @@ impl BlindRecallState {
     }
 
     /// 本地写入（发送 / Ctrl-C 清输入）：相邻同文 no-op，否则追加并 trim 至 25，重置导航。
-    pub(crate) fn push_local_entry(&mut self, text: String) {
-        if !runtime_domain::session::should_record_message_history_text(&text) {
-            return;
+    ///
+    /// 若实际写入了新条目，返回应用层应持久化的正文（单次 move，避免与 effect 重复 clone）。
+    pub(crate) fn push_local_entry(&mut self, text: String) -> Option<String> {
+        if !should_record_message_history_text(&text) {
+            return None;
         }
         self.history_cursor = None;
         self.active_recall = None;
+
+        if message_history_is_adjacent_duplicate(
+            self.cache.last().map(|previous| previous.text.as_str()),
+            &text,
+        ) {
+            return None;
+        }
 
         let ts = current_unix_timestamp_ms();
         append_message_history_entry(
@@ -135,6 +145,7 @@ impl BlindRecallState {
             MessageHistoryEntry { ts, text },
             MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN,
         );
+        self.cache.last().map(|entry| entry.text.clone())
     }
 
     /// Picker Enter 恢复全文后，与盲回溯 Up 填入条目一致的门控状态。

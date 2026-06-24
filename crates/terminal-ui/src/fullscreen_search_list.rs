@@ -1,4 +1,7 @@
-use crate::list_selection::{ListNavigationDirection, PagedSelection};
+use crate::{
+    list_selection::{ListNavigationDirection, PagedSelection},
+    text_search::CaseInsensitiveQuery,
+};
 
 /// 全屏 picker 共用的搜索、过滤、分页与稳定选中状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +75,7 @@ where
     pub(crate) fn replace_rows(
         &mut self,
         rows: Vec<Row>,
-        matches_query: impl Fn(&Row, &str) -> bool,
+        matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,
         row_id: impl Fn(&Row) -> Id,
     ) {
         self.rows = rows;
@@ -81,21 +84,28 @@ where
 
     pub(crate) fn apply_filter(
         &mut self,
-        matches_query: impl Fn(&Row, &str) -> bool,
+        matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,
         row_id: impl Fn(&Row) -> Id,
     ) {
         let selected_id = self
             .selected_id
             .clone()
             .or_else(|| self.selected_row().map(&row_id));
-        let query = self.search_query.trim();
+        self.rebuild_filtered_indices(matches_query);
+        self.restore_selected_id_or_clamp(selected_id, row_id);
+    }
+
+    fn rebuild_filtered_indices(
+        &mut self,
+        matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,
+    ) {
+        let query = CaseInsensitiveQuery::new(self.search_query.trim());
         self.filtered_indices = self
             .rows
             .iter()
             .enumerate()
-            .filter_map(|(index, row)| matches_query(row, query).then_some(index))
+            .filter_map(|(index, row)| matches_query(row, &query).then_some(index))
             .collect();
-        self.restore_selected_id_or_clamp(selected_id, row_id);
     }
 
     pub(crate) fn select_last_row(&mut self, row_id: impl Fn(&Row) -> Id) {
@@ -140,7 +150,7 @@ where
     pub(crate) fn push_search_character(
         &mut self,
         character: char,
-        matches_query: impl Fn(&Row, &str) -> bool,
+        matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,
         row_id: impl Fn(&Row) -> Id,
     ) {
         self.search_query.push(character);
@@ -149,7 +159,7 @@ where
 
     pub(crate) fn backspace_search(
         &mut self,
-        matches_query: impl Fn(&Row, &str) -> bool,
+        matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,
         row_id: impl Fn(&Row) -> Id,
     ) {
         if self.search_query.pop().is_some() {
@@ -159,7 +169,7 @@ where
 
     pub(crate) fn clear_search(
         &mut self,
-        matches_query: impl Fn(&Row, &str) -> bool,
+        matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,
         row_id: impl Fn(&Row) -> Id,
     ) -> bool {
         if self.search_query.is_empty() && !self.is_searching {
@@ -167,14 +177,14 @@ where
         }
         let selected_id = self.selected_row().map(&row_id);
         self.search_query.clear();
-        self.apply_filter(matches_query, |row| row_id(row));
+        self.rebuild_filtered_indices(matches_query);
         self.restore_selected_id_or_clamp(selected_id, row_id);
         true
     }
 
     pub(crate) fn exit_search(
         &mut self,
-        matches_query: impl Fn(&Row, &str) -> bool,
+        matches_query: impl Fn(&Row, &CaseInsensitiveQuery<'_>) -> bool,
         row_id: impl Fn(&Row) -> Id,
     ) -> bool {
         if !self.is_searching && self.search_query.is_empty() {
@@ -185,7 +195,7 @@ where
         self.search_query.clear();
         self.is_searching = false;
         if had_query {
-            self.apply_filter(matches_query, |row| row_id(row));
+            self.rebuild_filtered_indices(matches_query);
             self.restore_selected_id_or_clamp(selected_id, row_id);
         }
         true

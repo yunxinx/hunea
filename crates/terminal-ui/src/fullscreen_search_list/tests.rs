@@ -1,9 +1,15 @@
+use crate::text_search::CaseInsensitiveQuery;
+
 use super::FullscreenSearchListState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Row {
     id: &'static str,
     text: &'static str,
+}
+
+fn row_text_matches(row: &Row, query: &CaseInsensitiveQuery<'_>) -> bool {
+    query.matches(row.text)
 }
 
 fn sample_rows() -> Vec<Row> {
@@ -26,15 +32,11 @@ fn sample_rows() -> Vec<Row> {
 #[test]
 fn filter_restores_selected_row_by_stable_id() {
     let mut state = FullscreenSearchListState::default();
-    state.replace_rows(
-        sample_rows(),
-        |row, query| row.text.contains(query),
-        |row| row.id,
-    );
+    state.replace_rows(sample_rows(), row_text_matches, |row| row.id);
     state.selected = 1;
     state.sync_selected_id(|row| row.id);
 
-    state.push_search_character('b', |row, query| row.text.contains(query), |row| row.id);
+    state.push_search_character('b', row_text_matches, |row| row.id);
 
     assert_eq!(state.filtered_indices_for_test(), &[1, 2]);
     assert_eq!(state.selected_visible_position(), Some(0));
@@ -44,19 +46,15 @@ fn filter_restores_selected_row_by_stable_id() {
 #[test]
 fn exit_search_preserves_selected_row_and_clears_query() {
     let mut state = FullscreenSearchListState::default();
-    state.replace_rows(
-        sample_rows(),
-        |row, query| row.text.contains(query),
-        |row| row.id,
-    );
+    state.replace_rows(sample_rows(), row_text_matches, |row| row.id);
     state.selected = 2;
     state.sync_selected_id(|row| row.id);
     state.start_search();
 
-    state.push_search_character('b', |row, query| row.text.contains(query), |row| row.id);
+    state.push_search_character('b', row_text_matches, |row| row.id);
     assert_eq!(state.selected_row().map(|row| row.id), Some("three"));
 
-    assert!(state.exit_search(|row, query| row.text.contains(query), |row| row.id));
+    assert!(state.exit_search(row_text_matches, |row| row.id));
     assert!(!state.is_searching());
     assert!(state.search_query().is_empty());
     assert_eq!(state.selected_row().map(|row| row.id), Some("three"));
@@ -65,15 +63,11 @@ fn exit_search_preserves_selected_row_and_clears_query() {
 #[test]
 fn clear_search_keeps_search_mode_active() {
     let mut state = FullscreenSearchListState::default();
-    state.replace_rows(
-        sample_rows(),
-        |row, query| row.text.contains(query),
-        |row| row.id,
-    );
+    state.replace_rows(sample_rows(), row_text_matches, |row| row.id);
     state.start_search();
-    state.push_search_character('b', |row, query| row.text.contains(query), |row| row.id);
+    state.push_search_character('b', row_text_matches, |row| row.id);
 
-    assert!(state.clear_search(|row, query| row.text.contains(query), |row| row.id));
+    assert!(state.clear_search(row_text_matches, |row| row.id));
     assert!(state.is_searching());
     assert!(state.search_query().is_empty());
     assert_eq!(state.filtered_indices_for_test(), &[0, 1, 2]);

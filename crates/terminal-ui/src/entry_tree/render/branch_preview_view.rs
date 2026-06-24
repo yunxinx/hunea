@@ -1,7 +1,7 @@
 use crate::theme::build_page_rule;
 
 use super::{
-    shared::{EntryTreeRowsRenderState, EntryTreeWidget, branch_picker_relative_age_label},
+    shared::{EntryTreeRowsRenderState, EntryTreeWidget},
     *,
 };
 
@@ -104,9 +104,13 @@ fn entry_tree_branch_preview_title(
         return format!("Branch Preview ({position})");
     };
 
-    let created =
-        branch_picker_relative_age_label(metadata.metadata_now_ms, metadata.branch_created_at_ms);
-    let updated =
-        branch_picker_relative_age_label(metadata.metadata_now_ms, metadata.latest_updated_at_ms);
+    let created = crate::relative_age::relative_age_label(
+        metadata.metadata_now_ms,
+        metadata.branch_created_at_ms,
+    );
+    let updated = crate::relative_age::relative_age_label(
+        metadata.metadata_now_ms,
+        metadata.latest_updated_at_ms,
+    );
     format!("Branch Preview ({position} · Created {created} · Updated {updated})")
 }

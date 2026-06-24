@@ -101,24 +101,54 @@ impl MessageHistoryPickerState {
         self.list.selected_position_label()
     }
 
+    pub(super) fn filtered_count(&self) -> usize {
+        self.list.filtered_count()
+    }
+
+    pub(super) fn has_rows(&self) -> bool {
+        self.list.has_rows()
+    }
+
+    pub(super) fn has_filtered_rows(&self) -> bool {
+        self.list.has_filtered_rows()
+    }
+
+    #[cfg(test)]
+    pub(super) fn selected_visible_position(&self) -> Option<usize> {
+        self.list.selected_visible_position()
+    }
+
+    pub(super) fn is_selected_visible_position(&self, visible_position: usize) -> bool {
+        self.list.is_selected_visible_position(visible_position)
+    }
+
     pub(super) fn selected_row(&self) -> Option<&MessageHistoryRow> {
         self.list.selected_row()
+    }
+
+    pub(super) fn row(&self, row_index: usize) -> Option<&MessageHistoryRow> {
+        self.list.rows().get(row_index)
     }
 
     pub(super) fn selected_row_index(&self) -> Option<usize> {
         self.list.selected_row_index()
     }
 
+    #[cfg(test)]
+    pub(super) fn filtered_indices_for_test(&self) -> &[usize] {
+        self.list.filtered_indices_for_test()
+    }
+
     pub(super) fn is_searching(&self) -> bool {
-        self.list.is_searching
+        self.list.is_searching()
     }
 
     pub(super) fn search_query(&self) -> &str {
-        &self.list.search_query
+        self.list.search_query()
     }
 
     pub(super) fn start_search(&mut self) {
-        self.list.is_searching = true;
+        self.list.start_search();
     }
 
     /// 复制完整消息正文（列表截断宽度不影响 payload）。

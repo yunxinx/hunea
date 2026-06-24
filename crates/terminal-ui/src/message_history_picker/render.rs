@@ -93,7 +93,7 @@ impl Model {
         let title = format!(
             "Message history ({} of {})",
             state.selected_position_label(),
-            state.list.filtered_indices.len()
+            state.filtered_count()
         );
         let title_width = width.saturating_sub(2).max(1);
         let mut spans = vec![
@@ -137,12 +137,12 @@ impl Model {
                 truncate_display_width_with_ellipsis(&format!("  {error}"), width),
                 tertiary_text_style(self.palette),
             ));
-        } else if state.list.rows().is_empty() {
+        } else if !state.has_rows() {
             lines.push(Line::styled(
                 "  No sent messages yet",
                 tertiary_text_style(self.palette),
             ));
-        } else if state.list.filtered_indices.is_empty() {
+        } else if !state.has_filtered_rows() {
             let empty_message = if state.search_query().is_empty() {
                 "  No sent messages yet"
             } else {
@@ -155,12 +155,14 @@ impl Model {
         } else {
             let page_start = state.page_start(page_size);
             for (visible_position, row_index) in state.page_indices(page_size).enumerate() {
-                let row = &state.list.rows()[row_index];
+                let Some(row) = state.row(row_index) else {
+                    continue;
+                };
                 let absolute_position = page_start + visible_position;
                 lines.push(self.message_history_picker_row_line(
                     row,
                     width,
-                    absolute_position == state.list.selected,
+                    state.is_selected_visible_position(absolute_position),
                     absolute_position.is_multiple_of(2),
                     state.opened_at_ms,
                 ));

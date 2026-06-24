@@ -212,11 +212,3 @@ pub(in crate::entry_tree::render) fn branch_message_count_label(message_count: u
         message_count.to_string()
     }
 }
-
-/// Branch preview 标题等行内文案（无表格列宽 padding）。
-pub(in crate::entry_tree) fn branch_picker_relative_age_label(
-    now_ms: i64,
-    timestamp_ms: i64,
-) -> String {
-    crate::relative_age::relative_age_label(now_ms, timestamp_ms)
-}

@@ -2,7 +2,7 @@
 
 use runtime_domain::session::{
     MessageHistoryEntry, MessageHistoryRow, message_history_is_adjacent_duplicate,
-    message_history_trim_excess_count, should_record_message_history_text,
+    should_record_message_history_text,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -102,25 +102,17 @@ fn sqlite_err(source: rusqlite::Error) -> SessionStoreError {
 }
 
 fn trim_message_history(conn: &Connection, limit: usize) -> Result<(), SessionStoreError> {
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM message_history", [], |row| row.get(0))
-        .map_err(sqlite_err)?;
-    let count = usize::try_from(count).map_err(|_| SessionStoreError::CorruptIndex {
-        message: "message_history row count exceeds usize range".to_string(),
+    let limit = i64::try_from(limit).map_err(|_| SessionStoreError::CorruptIndex {
+        message: "message_history limit exceeds sqlite INTEGER range".to_string(),
     })?;
-    let excess = message_history_trim_excess_count(count, limit);
-    if excess > 0 {
-        let excess = i64::try_from(excess).map_err(|_| SessionStoreError::CorruptIndex {
-            message: "message_history trim count exceeds sqlite INTEGER range".to_string(),
-        })?;
-        conn.execute(
-            "DELETE FROM message_history WHERE id IN (
-                SELECT id FROM message_history ORDER BY id ASC LIMIT ?1
-            )",
-            params![excess],
-        )
-        .map_err(sqlite_err)?;
-    }
+    conn.execute(
+        "DELETE FROM message_history
+         WHERE id NOT IN (
+             SELECT id FROM message_history ORDER BY id DESC LIMIT ?1
+         )",
+        params![limit],
+    )
+    .map_err(sqlite_err)?;
     Ok(())
 }
 

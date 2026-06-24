@@ -378,10 +378,6 @@ fn entry_tree_branch_picker_relative_age_uses_shared_label_strategy() {
     ];
     for (ts, expected) in cases {
         assert_eq!(relative_age_label(now_ms, ts), expected);
-        assert_eq!(
-            crate::entry_tree::render::branch_picker_relative_age_label(now_ms, ts),
-            expected
-        );
     }
 }
 

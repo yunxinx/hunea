@@ -2,9 +2,8 @@ use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin};
 
 use provider_protocol::ConversationItem;
 use runtime_domain::session::{
-    MessageHistoryEntry, MessageHistoryRow, TranscriptReplayItem, append_message_history_entry,
+    MessageHistoryEntry, MessageHistoryRow, TranscriptReplayItem,
     message_history_is_adjacent_duplicate, should_record_message_history_text,
-    trim_message_history_entries,
 };
 use tokio::sync::RwLock;
 
@@ -27,12 +26,25 @@ use super::{
 /// 便于不依赖 SQLite 的集成测试。
 pub struct InMemorySessionStore {
     sessions: RwLock<HashMap<SessionId, InMemorySession>>,
-    message_history: RwLock<Vec<MessageHistoryEntry>>,
+    message_history: RwLock<InMemoryMessageHistoryState>,
 }
 
 struct InMemorySession {
     entries: Vec<SessionEntry>,
     jsonl_path: PathBuf,
+}
+
+#[derive(Default)]
+struct InMemoryMessageHistoryState {
+    next_row_id: i64,
+    entries: Vec<InMemoryMessageHistoryEntry>,
+}
+
+#[derive(Clone)]
+struct InMemoryMessageHistoryEntry {
+    id: i64,
+    ts: i64,
+    text: String,
 }
 
 impl InMemorySessionStore {
@@ -41,7 +53,7 @@ impl InMemorySessionStore {
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
-            message_history: RwLock::new(Vec::new()),
+            message_history: RwLock::new(InMemoryMessageHistoryState::default()),
         }
     }
 
@@ -54,15 +66,13 @@ impl InMemorySessionStore {
             return Ok(());
         }
         let mut history = self.message_history.write().await;
-        if message_history_is_adjacent_duplicate(
-            history.last().map(|prev| prev.text.as_str()),
-            &text,
-        ) {
-            trim_message_history_entries(&mut history, limit);
+        if message_history_is_adjacent_duplicate(history.last_text(), &text) {
+            history.trim_to_limit(limit);
             return Ok(());
         }
         let ts = current_timestamp_ms()?;
-        append_message_history_entry(&mut history, MessageHistoryEntry { ts, text }, limit);
+        history.push(ts, text);
+        history.trim_to_limit(limit);
         Ok(())
     }
 
@@ -432,8 +442,14 @@ impl SessionStore for InMemorySessionStore {
     > {
         Box::pin(async move {
             let history = self.message_history.read().await;
-            let start = history.len().saturating_sub(limit);
-            Ok(history[start..].to_vec())
+            let start = history.entries.len().saturating_sub(limit);
+            Ok(history.entries[start..]
+                .iter()
+                .map(|entry| MessageHistoryEntry {
+                    ts: entry.ts,
+                    text: entry.text.clone(),
+                })
+                .collect())
         })
     }
 
@@ -445,13 +461,40 @@ impl SessionStore for InMemorySessionStore {
             let history = self.message_history.read().await;
             Ok(history
                 .iter()
-                .enumerate()
-                .map(|(index, entry)| MessageHistoryRow {
-                    id: i64::try_from(index + 1).unwrap_or(i64::MAX),
+                .map(|entry| MessageHistoryRow {
+                    id: entry.id,
                     ts: entry.ts,
                     text: entry.text.clone(),
                 })
                 .collect())
         })
+    }
+}
+
+impl InMemoryMessageHistoryState {
+    fn iter(&self) -> impl Iterator<Item = &InMemoryMessageHistoryEntry> {
+        self.entries.iter()
+    }
+
+    fn last_text(&self) -> Option<&str> {
+        self.entries.last().map(|entry| entry.text.as_str())
+    }
+
+    fn push(&mut self, ts: i64, text: String) {
+        let id = self.allocate_row_id();
+        self.entries
+            .push(InMemoryMessageHistoryEntry { id, ts, text });
+    }
+
+    fn trim_to_limit(&mut self, limit: usize) {
+        let excess = self.entries.len().saturating_sub(limit);
+        if excess > 0 {
+            self.entries.drain(0..excess);
+        }
+    }
+
+    fn allocate_row_id(&mut self) -> i64 {
+        self.next_row_id = self.next_row_id.saturating_add(1).max(1);
+        self.next_row_id
     }
 }

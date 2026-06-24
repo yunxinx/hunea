@@ -4,11 +4,11 @@ use crate::list_selection::{ListNavigationDirection, PagedSelection};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FullscreenSearchListState<Row, Id> {
     rows: Vec<Row>,
-    pub(crate) filtered_indices: Vec<usize>,
-    pub(crate) selected: usize,
+    filtered_indices: Vec<usize>,
+    selected: usize,
     selected_id: Option<Id>,
-    pub(crate) search_query: String,
-    pub(crate) is_searching: bool,
+    search_query: String,
+    is_searching: bool,
 }
 
 impl<Row, Id> Default for FullscreenSearchListState<Row, Id> {
@@ -34,6 +34,39 @@ where
 
     pub(crate) fn rows(&self) -> &[Row] {
         &self.rows
+    }
+
+    pub(crate) fn has_rows(&self) -> bool {
+        !self.rows.is_empty()
+    }
+
+    pub(crate) fn filtered_count(&self) -> usize {
+        self.filtered_indices.len()
+    }
+
+    pub(crate) fn has_filtered_rows(&self) -> bool {
+        !self.filtered_indices.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_visible_position(&self) -> Option<usize> {
+        self.has_filtered_rows().then_some(self.selected)
+    }
+
+    pub(crate) fn is_selected_visible_position(&self, visible_position: usize) -> bool {
+        self.has_filtered_rows() && self.selected == visible_position
+    }
+
+    pub(crate) fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
+    pub(crate) fn is_searching(&self) -> bool {
+        self.is_searching
+    }
+
+    pub(crate) fn start_search(&mut self) {
+        self.is_searching = true;
     }
 
     pub(crate) fn replace_rows(
@@ -212,6 +245,11 @@ where
 
     pub(crate) fn selected_row_index(&self) -> Option<usize> {
         self.filtered_indices.get(self.selected).copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn filtered_indices_for_test(&self) -> &[usize] {
+        &self.filtered_indices
     }
 
     pub(crate) fn sync_selected_id(&mut self, row_id: impl Fn(&Row) -> Id) {

@@ -518,7 +518,8 @@ fn session_picker_keeps_selection_when_empty_search_exits() {
         .expect("picker should stay open after leaving search");
     assert!(!state.is_searching());
     assert_eq!(
-        state.list.selected, 2,
+        state.selected_visible_position(),
+        Some(2),
         "leaving empty search should preserve the previously selected session"
     );
     let rows = rendered_rows(&render_model_buffer(&mut model, 60, 12));
@@ -664,8 +665,9 @@ fn session_picker_search_mode_treats_hjkl_as_query_text() {
         "hjkl should be typed into search instead of driving list navigation"
     );
     assert_eq!(
-        state.list.selected, 0,
-        "hjkl text input should not move the selected list position"
+        state.filtered_count(),
+        0,
+        "hjkl query should produce no visible matches"
     );
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 60, 12));
@@ -868,6 +870,43 @@ fn session_picker_meta_uses_picker_open_time_as_relative_age_reference() {
             .any(|row| row.contains("5m · /tmp/project · 1.5 KiB")),
         "relative age should use the picker opening time, not the current render time: {rows:?}"
     );
+}
+
+#[test]
+fn session_picker_exposes_render_state_without_leaking_list_internals() {
+    let mut model = ready_model();
+    model.open_session_picker_loading();
+    model.apply_session_picker_rows(vec![
+        picker_row(
+            "session-a",
+            "alpha work",
+            "first alpha",
+            "answer alpha",
+            "/tmp/alpha",
+        ),
+        picker_row(
+            "session-b",
+            "beta work",
+            "first beta",
+            "answer beta",
+            "/tmp/beta",
+        ),
+    ]);
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('/'))));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Char('b'))));
+
+    let state = model
+        .session_picker
+        .as_ref()
+        .expect("picker should stay open while filtering");
+    assert_eq!(state.filtered_count(), 1);
+    assert!(state.has_rows());
+    assert!(state.has_filtered_rows());
+    assert_eq!(state.selected_visible_position(), Some(0));
+    assert!(state.is_selected_visible_position(0));
+    assert!(!state.is_selected_visible_position(1));
 }
 
 fn assert_text_cells_use_color(buffer: &Buffer, text: &str, expected: Color) {

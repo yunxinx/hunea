@@ -182,6 +182,35 @@ impl RuntimeEventApply for Model {
                     self.show_entry_tree_error(&message);
                 }
             }
+            RuntimeEvent::MessageHistoryStartupCacheLoaded { entries } => {
+                self.blind_recall.apply_startup_cache(entries);
+            }
+            RuntimeEvent::MessageHistoryStartupCacheLoadFailed { message } => {
+                self.show_toast(ToastSeverity::Error, message);
+            }
+            RuntimeEvent::MessageHistoryPickerRowsLoaded { request_id, rows } => {
+                if self.message_history_picker_load_request_matches(request_id) {
+                    self.apply_message_history_picker_rows(request_id, rows);
+                }
+            }
+            RuntimeEvent::MessageHistoryPickerRowsLoadFailed {
+                request_id,
+                message,
+            } => {
+                if self.message_history_picker_load_request_matches(request_id) {
+                    self.show_message_history_picker_error(request_id, &message);
+                }
+            }
+            RuntimeEvent::MessageHistoryRecorded { entry_id } => {
+                self.blind_recall.confirm_persisted(entry_id);
+            }
+            RuntimeEvent::MessageHistoryRecordFailed { entry_id, message } => {
+                self.blind_recall.revert_failed_persist(entry_id);
+                self.show_toast(
+                    ToastSeverity::Error,
+                    format!("Message history not saved: {message}"),
+                );
+            }
             RuntimeEvent::SessionResumed { payload } => {
                 self.apply_session_resume_payload(payload);
             }

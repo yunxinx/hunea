@@ -9,6 +9,7 @@ pub(crate) enum ModalLayer {
     SessionPicker,
     CopyPicker,
     EntryTree,
+    MessageHistory,
 }
 
 impl ModalLayer {
@@ -16,7 +17,11 @@ impl ModalLayer {
     pub(crate) const fn has_page_scroll_burst_coalescing(self) -> bool {
         matches!(
             self,
-            Self::SessionPreview | Self::SessionPicker | Self::CopyPicker | Self::EntryTree
+            Self::SessionPreview
+                | Self::SessionPicker
+                | Self::CopyPicker
+                | Self::EntryTree
+                | Self::MessageHistory
         )
     }
 
@@ -46,6 +51,9 @@ impl Model {
         }
         if self.entry_tree_active() {
             return Some(ModalLayer::EntryTree);
+        }
+        if self.message_history_picker_active() {
+            return Some(ModalLayer::MessageHistory);
         }
         None
     }
@@ -79,7 +87,10 @@ impl Model {
             ModalLayer::CopyPicker if self.copy_picker_preview_active() => {
                 Some(TerminalMouseModePreference::NativeWithAlternateScroll)
             }
-            ModalLayer::EntryTree | ModalLayer::CopyPicker => {
+            ModalLayer::MessageHistory if self.message_history_picker_preview_active() => {
+                Some(TerminalMouseModePreference::NativeWithAlternateScroll)
+            }
+            ModalLayer::EntryTree | ModalLayer::CopyPicker | ModalLayer::MessageHistory => {
                 Some(TerminalMouseModePreference::CaptureWithAlternateScroll)
             }
             ModalLayer::ToolApprovalFullscreenPreview
@@ -97,6 +108,7 @@ impl Model {
         self.session_picker = None;
         self.copy_picker = None;
         self.entry_tree = None;
+        self.message_history_picker = None;
     }
 }
 
@@ -162,6 +174,16 @@ mod tests {
         assert_eq!(model.top_modal_layer(), Some(ModalLayer::CopyPicker));
         assert_eq!(press_key(&mut model, KeyCode::Esc), None);
         assert_eq!(model.top_modal_layer(), Some(ModalLayer::EntryTree));
+        assert_eq!(press_key(&mut model, KeyCode::Esc), None);
+        assert_eq!(model.top_modal_layer(), None);
+    }
+
+    #[test]
+    fn message_history_modal_closes_with_esc_when_top_layer() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        model.set_window(80, 12);
+        model.open_message_history_picker_loading();
+        assert_eq!(model.top_modal_layer(), Some(ModalLayer::MessageHistory));
         assert_eq!(press_key(&mut model, KeyCode::Esc), None);
         assert_eq!(model.top_modal_layer(), None);
     }

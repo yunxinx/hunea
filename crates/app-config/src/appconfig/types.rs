@@ -14,6 +14,12 @@ pub const COMPOSER_UNDO_MIN_LIMIT: usize = 1;
 pub const COMPOSER_UNDO_MAX_LIMIT: usize = 200;
 /// Composer undo 默认保留 50 条，覆盖常见短编辑而不制造过多隐藏状态。
 pub const COMPOSER_UNDO_DEFAULT_LIMIT: usize = 50;
+/// Message history 至少保留 100 条。
+pub const MESSAGE_HISTORY_LIMIT_MIN: usize = 100;
+/// Message history 最多保留 1000 条。
+pub const MESSAGE_HISTORY_LIMIT_MAX: usize = 1000;
+/// Message history 默认保留 100 条。
+pub const MESSAGE_HISTORY_LIMIT_DEFAULT: usize = 100;
 
 /// `Config` 表示当前 hunea 支持的启动配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +46,7 @@ pub struct TuiConfig {
     pub file_picker_popup_height: u16,
     pub branch_picker_list_rows: u16,
     pub composer_undo_limit: usize,
+    pub message_history_limit: usize,
     pub print_transcript_on_exit: bool,
     pub show_reasoning_content: bool,
     pub reasoning_content_display: ReasoningContentDisplay,

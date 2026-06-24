@@ -23,6 +23,7 @@ use super::{
     external_editor::ExternalEditorLaunch,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT, FilePickerState},
     file_search::FileSearchCache,
+    message_history_recall::BlindRecallState,
     message_revisit::MessageRevisitState,
     model_panel::ModelPanelState,
     render_frame::RenderFrame,
@@ -74,6 +75,8 @@ pub struct Model {
     pub(super) session_preview: Option<crate::session_preview::SessionPreviewState>,
     pub(super) entry_tree: Option<crate::entry_tree::EntryTreeState>,
     pub(super) copy_picker: Option<CopyPickerState>,
+    pub(super) message_history_picker:
+        Option<crate::message_history_picker::MessageHistoryPickerState>,
     pub(super) next_session_load_request_id: u64,
     pub(super) message_revisit: MessageRevisitState,
     pub(super) runtime_terminal_snapshots: Vec<RuntimeTerminalSnapshot>,
@@ -92,6 +95,8 @@ pub struct Model {
     pub(super) copy_on_mouse_selection_release: bool,
     pub(super) swap_enter_and_send: bool,
     pub(super) ctrl_c_clears_input: bool,
+    pub(super) message_history_limit: usize,
+    pub(super) blind_recall: BlindRecallState,
     pub(super) esc_interrupt_presses: u8,
     pub(super) esc_rewind_mode: EscRewindMode,
     pub(super) show_esc_interrupt_hint: bool,
@@ -189,6 +194,7 @@ impl Model {
             session_preview: None,
             entry_tree: None,
             copy_picker: None,
+            message_history_picker: None,
             next_session_load_request_id: 1,
             message_revisit: MessageRevisitState::default(),
             runtime_terminal_snapshots: Vec::new(),
@@ -213,6 +219,8 @@ impl Model {
             copy_on_mouse_selection_release: options.copy_on_mouse_selection_release,
             swap_enter_and_send: options.swap_enter_and_send,
             ctrl_c_clears_input: options.ctrl_c_clears_input,
+            message_history_limit: options.message_history_limit,
+            blind_recall: BlindRecallState::default(),
             esc_interrupt_presses: options.esc_interrupt_presses.clamp(1, 3),
             esc_rewind_mode: options.esc_rewind_mode,
             show_esc_interrupt_hint: options.show_esc_interrupt_hint,
@@ -361,6 +369,7 @@ impl Model {
         }
         self.sync_copy_picker_preview_width(width);
         self.sync_entry_tree_preview_width(width);
+        self.sync_message_history_picker_preview_width(width);
         self.composer.set_width(width);
         if width_changed {
             self.sync_transcript_render();
@@ -400,6 +409,12 @@ impl Model {
 
     pub(crate) fn composer_mut(&mut self) -> &mut Composer {
         &mut self.composer
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)] // 供 model/tests 断言；clippy lib-test 单元有时未关联到调用点
+    pub(crate) fn blind_recall(&self) -> &BlindRecallState {
+        &self.blind_recall
     }
 
     pub(crate) fn transcript_mut(&mut self) -> &mut Transcript {

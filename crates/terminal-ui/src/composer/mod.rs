@@ -438,6 +438,11 @@ impl Composer {
         self.cursor_revision
     }
 
+    /// 当前光标在 `value` 中的字符索引（盲回溯行边界门控用）。
+    pub(crate) fn cursor_char_index(&self) -> usize {
+        self.cursor
+    }
+
     pub(crate) fn viewport_offset(&self) -> usize {
         self.viewport_y
     }

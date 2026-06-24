@@ -14,6 +14,10 @@ fn tui_has_no_runtime_crate_dependencies() {
         !dependencies.contains("provider-protocol"),
         "terminal-ui should not depend on provider protocol types for render or composer state"
     );
+    assert!(
+        !dependencies.contains("session-store"),
+        "terminal-ui should consume message-history DTOs through runtime-domain, not depend on persistence crates"
+    );
 }
 
 #[test]

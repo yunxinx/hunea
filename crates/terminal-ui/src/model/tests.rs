@@ -4,6 +4,7 @@ use std::{
 };
 
 use super::*;
+
 use crate::{
     AppEffect, AppEvent, Sender, StyleMode,
     document::DocumentAnchorRegion,
@@ -17,6 +18,8 @@ use runtime_domain::model_catalog::{
 use runtime_domain::phrases::StatusPhraseOrder;
 use runtime_domain::provider::ProviderKind;
 use std::path::{Path, PathBuf};
+
+mod message_history;
 
 fn progressive_exactization_fixture() -> Model {
     let mut model = Model::new_with_style_mode(StartupBannerOptions::default(), StyleMode::Ms);
@@ -416,7 +419,7 @@ fn conversation_turn_request_carries_only_current_user_message() {
         crossterm::event::KeyCode::Enter,
     )));
 
-    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+    let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert!(request.is_user_message());
@@ -453,7 +456,7 @@ fn conversation_turn_request_ignores_runtime_system_messages_in_transcript() {
         crossterm::event::KeyCode::Enter,
     )));
 
-    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+    let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert!(request.is_user_message());
@@ -478,7 +481,7 @@ fn conversation_turn_request_preserves_at_file_reference_as_text() {
         .insert_text("review @assets/sample.png @src/code.py");
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
-    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+    let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
         panic!("expected conversation turn effect");
     };
 
@@ -511,7 +514,7 @@ fn conversation_turn_request_does_not_reuse_structured_transcript_history() {
         .append_message(Sender::Assistant, "first answer");
     model.composer_mut().insert_text("follow up");
     let second = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
-    let Some(AppEffect::SendConversationTurn { request }) = second else {
+    let Some(AppEffect::SendConversationTurn { request, .. }) = second else {
         panic!("expected conversation turn effect");
     };
 
@@ -728,7 +731,7 @@ fn at_file_picker_enter_on_exact_visible_path_submits_prompt() {
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+    let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert!(request.is_user_message());
@@ -800,7 +803,7 @@ fn at_file_picker_enter_on_explicit_gitignored_file_submits_prompt() {
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+    let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert!(request.is_user_message());
@@ -832,7 +835,7 @@ fn at_file_picker_enter_on_explicit_absolute_file_submits_prompt() {
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+    let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert!(request.is_user_message());

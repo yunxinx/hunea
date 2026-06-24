@@ -71,7 +71,7 @@ fn configured_default_model_is_kept_when_provider_models_are_not_loaded() {
     }
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+    let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert_eq!(request.provider_id(), "local");
@@ -108,7 +108,7 @@ fn configured_default_model_is_trusted_when_it_is_outside_allowlist() {
     }
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+    let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert_eq!(request.provider_id(), "local");
@@ -187,7 +187,7 @@ fn enter_with_selected_provider_model_returns_conversation_turn_effect() {
     }
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+    let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert_eq!(request.provider_id(), "local");
@@ -224,7 +224,7 @@ fn enter_with_provider_api_key_returns_conversation_turn_effect_with_direct_key(
     }
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+    let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert_eq!(
@@ -296,7 +296,7 @@ fn clear_command_removes_previous_conversation_context() {
     }
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    let Some(AppEffect::SendConversationTurn { request }) = effect else {
+    let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert!(request.is_user_message());

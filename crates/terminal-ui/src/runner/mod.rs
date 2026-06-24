@@ -14,6 +14,8 @@ use super::{
 
 mod conversation;
 mod effects;
+#[cfg(test)]
+pub(crate) use effects::run_open_message_history_picker_effect;
 mod event_pipeline;
 mod external_io;
 mod input;
@@ -76,7 +78,21 @@ pub trait RuntimeCoordinator {
 #[derive(Debug, Default)]
 pub struct NoopRuntimeCoordinator;
 
-impl RuntimeCoordinator for NoopRuntimeCoordinator {}
+impl RuntimeCoordinator for NoopRuntimeCoordinator {
+    fn dispatch_runtime_command(
+        &mut self,
+        command: RuntimeCommand,
+    ) -> std::result::Result<RuntimeCommandReceipt, String> {
+        match command {
+            RuntimeCommand::LoadMessageHistoryStartupCache
+            | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
+            _ => Err(match command.target() {
+                Some(target) => format!("Runtime is not available: {}", target.display_label()),
+                None => "Runtime is not available".to_string(),
+            }),
+        }
+    }
+}
 
 /// `run` 启动交互式 TUI，并在退出后返回最终模型。
 pub fn run(startup_banner_options: StartupBannerOptions) -> Result<Model> {
@@ -136,6 +152,12 @@ pub fn run_with_runtime_coordinator(
         },
         "initial terminal resize",
     );
+
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadMessageHistoryStartupCache)
+    {
+        model.show_toast(crate::toast::ToastSeverity::Error, message);
+    }
 
     let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;
     let mut render_needed = true;

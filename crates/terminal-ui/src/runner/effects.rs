@@ -11,6 +11,25 @@ use super::external_io::{
 use super::model_refresh::{persist_selected_model, run_refresh_model_provider_effect};
 use super::terminal::TuiTerminal;
 
+pub(crate) fn dispatch_record_message_history(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+    entry_id: runtime_domain::session::MessageHistoryEntryId,
+    text: String,
+) {
+    let limit = model.message_history_limit;
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::RecordMessageHistory {
+            entry_id,
+            text,
+            limit,
+        })
+    {
+        model.blind_recall.revert_failed_persist(entry_id);
+        model.show_toast(ToastSeverity::Error, message);
+    }
+}
+
 pub(super) fn apply_effect_if_needed(
     terminal: &mut TuiTerminal,
     model: &mut Model,
@@ -56,6 +75,10 @@ pub(super) fn apply_effect_if_needed(
         }
         AppEffect::OpenCopyPicker => {
             run_open_copy_picker_effect(model, runtime_coordinator);
+            Ok(())
+        }
+        AppEffect::OpenMessageHistory => {
+            run_open_message_history_picker_effect(model, runtime_coordinator);
             Ok(())
         }
         AppEffect::OpenSessionPreview { session_id } => {
@@ -123,8 +146,18 @@ pub(super) fn apply_effect_if_needed(
             run_refresh_model_provider_effect(model, runtime_coordinator, request);
             Ok(())
         }
-        AppEffect::SendConversationTurn { request } => {
-            run_send_conversation_turn_effect(model, runtime_coordinator, request);
+        AppEffect::RecordMessageHistory { entry_id, text } => {
+            dispatch_record_message_history(model, runtime_coordinator, entry_id, text);
+            Ok(())
+        }
+        AppEffect::SendConversationTurn {
+            request,
+            record_message_history,
+        } => {
+            if let Some(entry) = record_message_history {
+                dispatch_record_message_history(model, runtime_coordinator, entry.id, entry.text);
+            }
+            run_send_conversation_turn_effect(model, runtime_coordinator, *request);
             Ok(())
         }
         AppEffect::InterruptCurrentTurn => {
@@ -158,6 +191,18 @@ pub(super) fn run_open_copy_picker_effect(
         .dispatch_runtime_command(RuntimeCommand::LoadCopyPickerTree { request_id })
     {
         model.show_copy_picker_error(&message);
+    }
+}
+
+pub(crate) fn run_open_message_history_picker_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) {
+    let request_id = model.open_message_history_picker_loading();
+    if let Err(message) = runtime_coordinator
+        .dispatch_runtime_command(RuntimeCommand::LoadMessageHistoryPickerRows { request_id })
+    {
+        model.show_message_history_picker_error(request_id, &message);
     }
 }
 

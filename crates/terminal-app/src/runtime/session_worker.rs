@@ -9,7 +9,8 @@ use std::{
 
 use conversation_runtime::ProviderConversation;
 use runtime_domain::session::{
-    RuntimeEvent, SessionLoadRequestId, SessionPickerRow, SessionResumePayload, SessionTreePayload,
+    MessageHistoryEntryId, RuntimeEvent, SessionLoadRequestId, SessionPickerRow,
+    SessionResumePayload, SessionTreePayload,
 };
 use session_store::{ProjectDir, SessionHeader, SessionId, SessionListOptions, SessionStore};
 
@@ -104,6 +105,19 @@ enum SessionStoreCommand {
     FlushAll {
         store: Arc<dyn SessionStore>,
         ack: Sender<Result<(), String>>,
+    },
+    LoadMessageHistoryStartupCache {
+        store: Arc<dyn SessionStore>,
+    },
+    LoadMessageHistoryPickerRows {
+        store: Arc<dyn SessionStore>,
+        request_id: SessionLoadRequestId,
+    },
+    RecordMessageHistory {
+        store: Arc<dyn SessionStore>,
+        entry_id: MessageHistoryEntryId,
+        text: String,
+        limit: usize,
     },
 }
 
@@ -315,6 +329,45 @@ impl SessionStoreWorker {
         receiver
             .recv_timeout(SESSION_SHUTDOWN_WAIT)
             .map_err(|_| "session store flush timed out".to_string())?
+    }
+
+    pub(super) fn load_message_history_startup_cache(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::LoadMessageHistoryStartupCache { store },
+            false,
+        )
+    }
+
+    pub(super) fn load_message_history_picker_rows(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        request_id: SessionLoadRequestId,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::LoadMessageHistoryPickerRows { store, request_id },
+            false,
+        )
+    }
+
+    pub(super) fn record_message_history(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        entry_id: MessageHistoryEntryId,
+        text: String,
+        limit: usize,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::RecordMessageHistory {
+                store,
+                entry_id,
+                text,
+                limit,
+            },
+            false,
+        )
     }
 
     fn send_command(
@@ -618,6 +671,50 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
             Err(error) => failed(error.to_string(), true),
         },
         SessionStoreCommand::FlushAll { .. } => unreachable!("flush is handled by worker loop"),
+        SessionStoreCommand::LoadMessageHistoryStartupCache { store } => {
+            match store.load_message_history_startup_cache().await {
+                Ok(entries) => SessionStoreWorkerEvent::runtime(
+                    RuntimeEvent::MessageHistoryStartupCacheLoaded { entries },
+                ),
+                Err(error) => SessionStoreWorkerEvent::runtime(
+                    RuntimeEvent::MessageHistoryStartupCacheLoadFailed {
+                        message: error.to_string(),
+                    },
+                ),
+            }
+        }
+        SessionStoreCommand::LoadMessageHistoryPickerRows { store, request_id } => {
+            match store.load_message_history_all().await {
+                Ok(rows) => {
+                    SessionStoreWorkerEvent::runtime(RuntimeEvent::MessageHistoryPickerRowsLoaded {
+                        request_id,
+                        rows,
+                    })
+                }
+                Err(error) => SessionStoreWorkerEvent::runtime(
+                    RuntimeEvent::MessageHistoryPickerRowsLoadFailed {
+                        request_id,
+                        message: error.to_string(),
+                    },
+                ),
+            }
+        }
+        SessionStoreCommand::RecordMessageHistory {
+            store,
+            entry_id,
+            text,
+            limit,
+        } => match store.record_message_history(&text, limit).await {
+            Ok(()) => {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::MessageHistoryRecorded { entry_id })
+            }
+            Err(error) => {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::MessageHistoryRecordFailed {
+                    entry_id,
+                    message: error.to_string(),
+                })
+            }
+        },
     }
 }
 

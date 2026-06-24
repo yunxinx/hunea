@@ -188,6 +188,22 @@ fn config_error_rows(error: &appconfig::AppConfigError) -> Vec<(&'static str, St
                 ),
             ],
         ),
+        AppConfigError::InvalidMessageHistoryLimit { path, value } => rows_with_optional_file(
+            path,
+            vec![
+                ("Setting", "tui.message_history_limit".to_string()),
+                ("Value", value.to_string()),
+                ("Reason", "Invalid message history limit".to_string()),
+                (
+                    "Expected",
+                    format!(
+                        "{}..{}",
+                        crate::appconfig::MESSAGE_HISTORY_LIMIT_MIN,
+                        crate::appconfig::MESSAGE_HISTORY_LIMIT_MAX
+                    ),
+                ),
+            ],
+        ),
         AppConfigError::InvalidReasoningContentDisplay { path, value } => validation_rows(
             path,
             "tui.reasoning_content_display",

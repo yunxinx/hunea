@@ -1,6 +1,7 @@
 use super::{
-    ConversationResponse, RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics,
-    RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
+    ConversationResponse, MessageHistoryEntry, MessageHistoryEntryId, MessageHistoryRow,
+    RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics, RuntimeTarget,
+    RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
     SessionBranchTreePayload, SessionLoadRequestId, SessionPickerRow, SessionPreviewPayload,
     SessionResumePayload, SessionTreePayload,
 };
@@ -113,6 +114,27 @@ pub enum RuntimeEvent {
         request_id: SessionLoadRequestId,
         message: String,
     },
+    MessageHistoryStartupCacheLoaded {
+        entries: Vec<MessageHistoryEntry>,
+    },
+    MessageHistoryStartupCacheLoadFailed {
+        message: String,
+    },
+    MessageHistoryPickerRowsLoaded {
+        request_id: SessionLoadRequestId,
+        rows: Vec<MessageHistoryRow>,
+    },
+    MessageHistoryPickerRowsLoadFailed {
+        request_id: SessionLoadRequestId,
+        message: String,
+    },
+    MessageHistoryRecorded {
+        entry_id: MessageHistoryEntryId,
+    },
+    MessageHistoryRecordFailed {
+        entry_id: MessageHistoryEntryId,
+        message: String,
+    },
     MessageFinished {
         target: Option<RuntimeTarget>,
         response: ConversationResponse,
@@ -166,7 +188,13 @@ impl RuntimeEvent {
             | Self::SessionBranchTreeLoadFailed { .. }
             | Self::SessionBranchPreviewLoaded { .. }
             | Self::SessionBranchPreviewLoadFailed { .. }
-            | Self::SessionBranchSwitchFailed { .. } => None,
+            | Self::SessionBranchSwitchFailed { .. }
+            | Self::MessageHistoryStartupCacheLoaded { .. }
+            | Self::MessageHistoryStartupCacheLoadFailed { .. }
+            | Self::MessageHistoryPickerRowsLoaded { .. }
+            | Self::MessageHistoryPickerRowsLoadFailed { .. }
+            | Self::MessageHistoryRecorded { .. }
+            | Self::MessageHistoryRecordFailed { .. } => None,
         }
     }
 }

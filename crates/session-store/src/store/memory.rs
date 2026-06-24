@@ -1,7 +1,10 @@
 use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin};
 
 use provider_protocol::ConversationItem;
-use runtime_domain::session::TranscriptReplayItem;
+use runtime_domain::session::{
+    MessageHistoryEntry, MessageHistoryRow, TranscriptReplayItem, append_message_history_entry,
+    should_record_message_history_text,
+};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -18,13 +21,30 @@ use super::{
 };
 
 /// `InMemorySessionStore` 为运行时测试提供不落盘的 mock 实现。
+///
+/// 全局 message history 在内存中按与 `LocalSessionStore` 相同的相邻去重与条数上限语义维护，
+/// 便于不依赖 SQLite 的集成测试。
 pub struct InMemorySessionStore {
     sessions: RwLock<HashMap<SessionId, InMemorySession>>,
+    message_history: RwLock<InMemoryMessageHistoryState>,
 }
 
 struct InMemorySession {
     entries: Vec<SessionEntry>,
     jsonl_path: PathBuf,
+}
+
+#[derive(Default)]
+struct InMemoryMessageHistoryState {
+    next_row_id: i64,
+    entries: Vec<InMemoryMessageHistoryEntry>,
+}
+
+#[derive(Clone)]
+struct InMemoryMessageHistoryEntry {
+    id: i64,
+    ts: i64,
+    text: String,
 }
 
 impl InMemorySessionStore {
@@ -33,7 +53,22 @@ impl InMemorySessionStore {
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            message_history: RwLock::new(InMemoryMessageHistoryState::default()),
         }
+    }
+
+    async fn record_message_history_entry(
+        &self,
+        text: String,
+        limit: usize,
+    ) -> Result<(), SessionStoreError> {
+        if !should_record_message_history_text(&text) {
+            return Ok(());
+        }
+        let ts = current_timestamp_ms()?;
+        let mut history = self.message_history.write().await;
+        history.apply_domain_append(MessageHistoryEntry { ts, text }, limit);
+        Ok(())
     }
 
     async fn append_entry(
@@ -384,5 +419,93 @@ impl SessionStore for InMemorySessionStore {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
+    }
+
+    fn record_message_history<'a>(
+        &'a self,
+        text: &'a str,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        let text = text.to_string();
+        Box::pin(async move { self.record_message_history_entry(text, limit).await })
+    }
+
+    fn load_message_history_recent<'a>(
+        &'a self,
+        limit: usize,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Vec<MessageHistoryEntry>, SessionStoreError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let history = self.message_history.read().await;
+            let start = history.entries.len().saturating_sub(limit);
+            Ok(history.entries[start..]
+                .iter()
+                .map(|entry| MessageHistoryEntry {
+                    ts: entry.ts,
+                    text: entry.text.clone(),
+                })
+                .collect())
+        })
+    }
+
+    fn load_message_history_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MessageHistoryRow>, SessionStoreError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let history = self.message_history.read().await;
+            Ok(history
+                .iter()
+                .map(|entry| MessageHistoryRow {
+                    id: entry.id,
+                    ts: entry.ts,
+                    text: entry.text.clone(),
+                })
+                .collect())
+        })
+    }
+}
+
+impl InMemoryMessageHistoryState {
+    fn iter(&self) -> impl Iterator<Item = &InMemoryMessageHistoryEntry> {
+        self.entries.iter()
+    }
+
+    fn apply_domain_append(&mut self, entry: MessageHistoryEntry, limit: usize) {
+        let old_entries = std::mem::take(&mut self.entries);
+        let mut logical: Vec<MessageHistoryEntry> = old_entries
+            .iter()
+            .map(|stored| MessageHistoryEntry {
+                ts: stored.ts,
+                text: stored.text.clone(),
+            })
+            .collect();
+        append_message_history_entry(&mut logical, entry, limit);
+
+        let mut old_by_key: std::collections::HashMap<(i64, String), i64> = old_entries
+            .into_iter()
+            .map(|stored| ((stored.ts, stored.text), stored.id))
+            .collect();
+
+        self.entries = logical
+            .into_iter()
+            .map(|entry| {
+                let key = (entry.ts, entry.text.clone());
+                let id = old_by_key
+                    .remove(&key)
+                    .unwrap_or_else(|| self.allocate_row_id());
+                InMemoryMessageHistoryEntry {
+                    id,
+                    ts: entry.ts,
+                    text: entry.text,
+                }
+            })
+            .collect();
+    }
+
+    fn allocate_row_id(&mut self) -> i64 {
+        self.next_row_id = self.next_row_id.saturating_add(1).max(1);
+        self.next_row_id
     }
 }

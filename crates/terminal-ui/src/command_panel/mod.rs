@@ -28,6 +28,7 @@ pub(super) enum CommandPanelAction {
     Exit,
     OpenResumePicker,
     OpenCopyPicker,
+    OpenMessageHistory,
     OpenEntryRewind,
     OpenCoarseRewind,
     OpenModelPanel,
@@ -402,6 +403,13 @@ impl Model {
                 self.sync_composer_height();
                 Some(AppEffect::OpenCopyPicker)
             }
+            CommandPanelAction::OpenMessageHistory => {
+                self.composer_mut().clear();
+                self.sync_command_panel_navigation();
+                self.sync_file_picker_state();
+                self.sync_composer_height();
+                Some(AppEffect::OpenMessageHistory)
+            }
             CommandPanelAction::OpenEntryRewind => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
@@ -508,6 +516,12 @@ fn filter_base_command_panel_items(
         aliases: Vec::new(),
         description: "Pick messages to copy".to_string(),
         action: CommandPanelAction::OpenCopyPicker,
+    });
+    items.push(CommandPanelItem {
+        name: "/resend".to_string(),
+        aliases: Vec::new(),
+        description: "Recall a previously sent message".to_string(),
+        action: CommandPanelAction::OpenMessageHistory,
     });
     if matches!(esc_rewind_mode, EscRewindMode::Entry) {
         items.push(CommandPanelItem {

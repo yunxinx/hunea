@@ -7,9 +7,6 @@ mod main_list;
 mod message_preview;
 mod shared;
 
-#[cfg(test)]
-pub(super) use shared::branch_picker_relative_age_label;
-
 impl Model {
     pub(crate) fn render_entry_tree(&mut self, frame: &mut RenderFrame<'_>, area: Rect) {
         if self.entry_tree_preview_active() {

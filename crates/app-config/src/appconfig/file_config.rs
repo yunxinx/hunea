@@ -28,6 +28,7 @@ pub(super) struct FileTuiConfig {
     pub(super) file_picker_popup_height: Option<usize>,
     pub(super) branch_picker_list_rows: Option<usize>,
     pub(super) composer_undo_limit: Option<usize>,
+    pub(super) message_history_limit: Option<usize>,
     pub(super) print_transcript_on_exit: Option<bool>,
     pub(super) show_reasoning_content: Option<bool>,
     pub(super) reasoning_content_display: Option<String>,

@@ -1,6 +1,7 @@
 use super::{
     BRANCH_PICKER_LIST_ROWS_DEFAULT, COMPOSER_UNDO_DEFAULT_LIMIT, Config, DebugConfig,
-    ReasoningContentDisplay, RuntimeConfig, TuiConfig, UserInputStyle,
+    MESSAGE_HISTORY_LIMIT_DEFAULT, ReasoningContentDisplay, RuntimeConfig, TuiConfig,
+    UserInputStyle,
 };
 
 impl Config {
@@ -21,6 +22,7 @@ impl Config {
                 file_picker_popup_height: 7,
                 branch_picker_list_rows: BRANCH_PICKER_LIST_ROWS_DEFAULT,
                 composer_undo_limit: COMPOSER_UNDO_DEFAULT_LIMIT,
+                message_history_limit: MESSAGE_HISTORY_LIMIT_DEFAULT,
                 print_transcript_on_exit: false,
                 show_reasoning_content: false,
                 reasoning_content_display: ReasoningContentDisplay::Collapsed,

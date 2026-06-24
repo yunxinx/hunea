@@ -113,8 +113,8 @@ fn entry_tree_branch_picker_renders_metadata_header_and_rows() {
     );
     assert!(
         inactive_row.contains("2")
-            && inactive_row.contains("3m·0s")
-            && inactive_row.contains("1m·0s")
+            && inactive_row.contains("3m·00s")
+            && inactive_row.contains("1m·00s")
             && inactive_row.contains("inactive answer"),
         "branch picker row should render message count, created age, updated age, and branch content: {inactive_row:?}"
     );
@@ -355,59 +355,30 @@ fn entry_tree_branch_picker_uses_open_time_snapshot_for_relative_times() {
         .expect("inactive branch row should render");
 
     assert!(
-        inactive_row.contains("2m·0s") && inactive_row.contains("1m·0s"),
+        inactive_row.contains("2m·00s") && inactive_row.contains("1m·00s"),
         "branch picker should render relative times from the picker snapshot time, not the current render time: {inactive_row:?}"
     );
 }
 
 #[test]
-fn entry_tree_branch_picker_relative_age_label_uses_two_highest_units() {
-    let now_ms = 1_800_000_000_000;
+fn entry_tree_branch_picker_relative_age_uses_shared_label_strategy() {
+    use crate::relative_age::relative_age_label;
 
-    assert_eq!(
-        crate::entry_tree::render::branch_picker_relative_age_label(now_ms, now_ms),
-        "0s"
-    );
-    assert_eq!(
-        crate::entry_tree::render::branch_picker_relative_age_label(now_ms, now_ms - 42_000),
-        "42s"
-    );
-    assert_eq!(
-        crate::entry_tree::render::branch_picker_relative_age_label(now_ms, now_ms - 125_000),
-        "2m·5s"
-    );
-    assert_eq!(
-        crate::entry_tree::render::branch_picker_relative_age_label(now_ms, now_ms - 7_200_000),
-        "2h·0m"
-    );
-    assert_eq!(
-        crate::entry_tree::render::branch_picker_relative_age_label(
-            now_ms,
-            now_ms - (3 * 86_400_000 + 125_000),
-        ),
-        "3d·2m"
-    );
-    assert_eq!(
-        crate::entry_tree::render::branch_picker_relative_age_label(
-            now_ms,
-            now_ms - (3 * 86_400_000 + 2 * 3_600_000 + 125_000),
-        ),
-        "3d·2h"
-    );
-    assert_eq!(
-        crate::entry_tree::render::branch_picker_relative_age_label(
-            now_ms,
-            now_ms - 90 * 86_400_000
-        ),
-        "3mo·0d"
-    );
-    assert_eq!(
-        crate::entry_tree::render::branch_picker_relative_age_label(
-            now_ms,
-            now_ms - 400 * 86_400_000
-        ),
-        "1y·1mo"
-    );
+    let now_ms = 1_800_000_000_000;
+    let cases = [
+        (now_ms, "now"),
+        (now_ms - 42_000, "42s"),
+        (now_ms - 5_000, "05s"),
+        (now_ms - 125_000, "2m·05s"),
+        (now_ms - 7_200_000, "2h·00m"),
+        (now_ms - (3 * 86_400_000 + 125_000), "3d·02m"),
+        (now_ms - 90 * 86_400_000, "3M·00d"),
+        (now_ms - 300 * 86_400_000, "10M·00d"),
+        (now_ms - 400 * 86_400_000, "1y·01M"),
+    ];
+    for (ts, expected) in cases {
+        assert_eq!(relative_age_label(now_ms, ts), expected);
+    }
 }
 
 #[test]

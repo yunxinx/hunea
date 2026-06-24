@@ -1,11 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use runtime_domain::session::SessionPickerRow;
 
 use crate::{
     AppEffect, Model, list_selection::ListNavigationDirection,
-    overlay_input_result::OverlayInputResult,
+    overlay_input_result::OverlayInputResult, text_search::is_picker_search_text_key,
+    time::current_unix_timestamp_ms,
 };
 
 use super::{SessionPickerState, session_picker_page_size_for_height};
@@ -25,7 +24,7 @@ impl Model {
     }
 
     pub(crate) fn open_session_picker_loading(&mut self) {
-        self.open_session_picker_loading_at(current_unix_time_ms());
+        self.open_session_picker_loading_at(current_unix_timestamp_ms());
     }
 
     pub(crate) fn open_session_picker_loading_at(&mut self, opened_at_ms: i64) {
@@ -39,10 +38,9 @@ impl Model {
 
     pub(crate) fn apply_session_picker_rows(&mut self, rows: Vec<SessionPickerRow>) {
         let mut state = self.session_picker.take().unwrap_or_default();
-        state.rows = rows;
+        state.replace_rows(rows);
         state.is_loading = false;
         state.error = None;
-        state.apply_filter();
         self.session_picker = Some(state);
     }
 
@@ -54,7 +52,7 @@ impl Model {
         let is_searching = self
             .session_picker
             .as_ref()
-            .is_some_and(|state| state.is_searching);
+            .is_some_and(SessionPickerState::is_searching);
 
         match key.code {
             KeyCode::Esc => {
@@ -66,7 +64,7 @@ impl Model {
                 self.session_picker = None;
                 OverlayInputResult::Handled
             }
-            KeyCode::Char(character) if is_searching && is_session_picker_search_text_key(&key) => {
+            KeyCode::Char(character) if is_searching && is_picker_search_text_key(&key) => {
                 if let Some(state) = self.session_picker.as_mut() {
                     state.push_search_character(character);
                 }
@@ -153,7 +151,7 @@ impl Model {
             }
             KeyCode::Char('/') if key.modifiers.is_empty() => {
                 if let Some(state) = self.session_picker.as_mut() {
-                    state.is_searching = true;
+                    state.start_search();
                 }
                 OverlayInputResult::Handled
             }
@@ -172,21 +170,4 @@ impl Model {
             _ => OverlayInputResult::Handled, // 模态覆盖层吞掉未绑定输入，防止落入 composer
         }
     }
-}
-
-fn is_session_picker_search_text_key(key: &KeyEvent) -> bool {
-    let KeyCode::Char(character) = key.code else {
-        return false;
-    };
-    !character.is_ascii_control()
-        && !key.modifiers.contains(KeyModifiers::CONTROL)
-        && !key.modifiers.contains(KeyModifiers::ALT)
-}
-
-fn current_unix_time_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(i64::MAX)
 }

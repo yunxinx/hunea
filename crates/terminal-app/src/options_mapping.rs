@@ -126,6 +126,7 @@ fn model_options_from_configs(
         file_picker_popup_height: tui_config.file_picker_popup_height,
         branch_picker_list_rows: tui_config.branch_picker_list_rows,
         composer_undo_limit: tui_config.composer_undo_limit,
+        message_history_limit: tui_config.message_history_limit,
         show_reasoning_content: tui_config.show_reasoning_content,
         reasoning_display_mode: reasoning_display_mode_from_config(
             tui_config.reasoning_content_display,

@@ -3,11 +3,13 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use provider_protocol::ConversationItem;
-use runtime_domain::session::TranscriptReplayItem;
+use runtime_domain::session::{
+    MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN, MessageHistoryEntry, MessageHistoryRow,
+    TranscriptReplayItem,
+};
 use tokio::task;
 
 use crate::{
@@ -133,6 +135,35 @@ pub trait SessionStore: Send + Sync {
     fn flush_all<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
+
+    #[must_use]
+    fn record_message_history<'a>(
+        &'a self,
+        text: &'a str,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
+
+    #[must_use]
+    fn load_message_history_recent<'a>(
+        &'a self,
+        limit: usize,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Vec<MessageHistoryEntry>, SessionStoreError>> + Send + 'a>,
+    >;
+
+    #[must_use]
+    fn load_message_history_all<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MessageHistoryRow>, SessionStoreError>> + Send + 'a>>;
+
+    /// 启动盲回溯缓存（固定 25 条，oldest-first）。
+    fn load_message_history_startup_cache<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Vec<MessageHistoryEntry>, SessionStoreError>> + Send + 'a>,
+    > {
+        self.load_message_history_recent(MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN)
+    }
 }
 
 pub(super) fn requested_leaf_id<'a>(
@@ -221,13 +252,8 @@ pub(super) fn derive_store_session_meta(
 }
 
 pub(super) fn current_timestamp_ms() -> Result<i64, SessionStoreError> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| SessionStoreError::CorruptIndex {
-            message: format!("system time is before unix epoch: {error}"),
-        })?;
-    i64::try_from(duration.as_millis()).map_err(|_| SessionStoreError::CorruptIndex {
-        message: "system time exceeds i64 millisecond range".to_string(),
+    runtime_domain::time::unix_timestamp_ms().map_err(|_| SessionStoreError::CorruptIndex {
+        message: "system clock is before Unix epoch or exceeds i64 millisecond range".to_string(),
     })
 }
 

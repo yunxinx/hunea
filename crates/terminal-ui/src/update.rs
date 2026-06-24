@@ -1,11 +1,5 @@
 use std::{path::PathBuf, time::Duration};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
-use runtime_domain::{
-    model_catalog::{ModelSelection, ProviderSyncRequest},
-    session::{ConversationTurnRequest, RuntimeTarget, SessionLoadRequestId},
-};
-
 use super::{
     ExternalEditorLaunch, Model, Sender,
     composer::{
@@ -21,6 +15,14 @@ use super::{
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},
     toast::ToastSeverity,
 };
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
+use runtime_domain::{
+    model_catalog::{ModelSelection, ProviderSyncRequest},
+    session::{
+        ConversationTurnRequest, MessageHistoryEntryId, PendingMessageHistoryEntry, RuntimeTarget,
+        SessionLoadRequestId,
+    },
+};
 
 /// `STARTUP_PROBE_TIMEOUT` 是启动阶段等待主题探测结果的最长时长。
 pub const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
@@ -31,6 +33,7 @@ pub enum AppEffect {
     LaunchExternalEditor(ExternalEditorLaunch),
     CopySelection(String),
     OpenCopyPicker,
+    OpenMessageHistory,
     ResetRuntimeSession,
     RespondRuntimePermission {
         target: RuntimeTarget,
@@ -61,7 +64,9 @@ pub enum AppEffect {
         retained_user_turns: usize,
     },
     SendConversationTurn {
-        request: ConversationTurnRequest,
+        request: Box<ConversationTurnRequest>,
+        /// 发送前已写入盲回溯、需异步落库的正文；相邻重复或未写入时为 `None`。
+        record_message_history: Option<PendingMessageHistoryEntry>,
     },
     InterruptCurrentTurn,
     PersistSelectedModel {
@@ -69,6 +74,10 @@ pub enum AppEffect {
     },
     RefreshModelProvider {
         request: ProviderSyncRequest,
+    },
+    RecordMessageHistory {
+        entry_id: MessageHistoryEntryId,
+        text: String,
     },
 }
 
@@ -299,6 +308,14 @@ impl Model {
                 }
                 OverlayInputResult::Handled
             }
+            Some(ModalLayer::MessageHistory) => {
+                if self.message_history_picker_preview_active() {
+                    self.move_message_history_picker_preview_page(delta_lines.signum());
+                } else {
+                    self.move_message_history_picker_selection_by_delta(delta_lines.signum());
+                }
+                OverlayInputResult::Handled
+            }
             Some(ModalLayer::TranscriptOverlay) => OverlayInputResult::Handled,
             None => OverlayInputResult::Ignored,
         }
@@ -313,6 +330,9 @@ impl Model {
         match self.top_modal_layer() {
             Some(ModalLayer::CopyPicker) => self.handle_copy_picker_mouse_down(button, column, row),
             Some(ModalLayer::EntryTree) => self.handle_entry_tree_mouse_down(button, column, row),
+            Some(ModalLayer::MessageHistory) => {
+                self.handle_message_history_picker_mouse_down(button, column, row)
+            }
             Some(_) => OverlayInputResult::Handled,
             None => OverlayInputResult::Ignored,
         }
@@ -334,6 +354,7 @@ impl Model {
             ModalLayer::SessionPicker => self.handle_session_picker_key(key),
             ModalLayer::CopyPicker => self.handle_copy_picker_key(key),
             ModalLayer::EntryTree => self.handle_entry_tree_key(key),
+            ModalLayer::MessageHistory => self.handle_message_history_picker_key(key),
         }
     }
 
@@ -450,6 +471,13 @@ impl Model {
             return result.into_effect();
         }
 
+        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.can_open_message_history_picker_via_ctrl_r() {
+                return Some(AppEffect::OpenMessageHistory);
+            }
+            return None;
+        }
+
         if is_plain_esc {
             let result = self.handle_message_revisit_main_esc_key();
             if !result.is_ignored() {
@@ -506,6 +534,10 @@ impl Model {
                     &old_value, old_line, old_column,
                 );
             }
+            return None;
+        }
+
+        if self.try_handle_blind_recall_key(key) {
             return None;
         }
 
@@ -584,6 +616,57 @@ impl Model {
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
         None
+    }
+
+    fn try_handle_blind_recall_key(&mut self, key: KeyEvent) -> bool {
+        if key.modifiers != KeyModifiers::empty() {
+            return false;
+        }
+        if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            return false;
+        }
+
+        let text = self.composer_text();
+        let cursor = self.composer.cursor_char_index();
+        if !self.blind_recall.should_handle_navigation(text, cursor) {
+            return false;
+        }
+
+        let old_value = text.to_string();
+        let old_line = self.composer.line();
+        let old_column = self.composer.column();
+
+        let applied = match key.code {
+            KeyCode::Up => self.blind_recall.navigate_up(),
+            KeyCode::Down => self.blind_recall.navigate_down().is_some(),
+            _ => false,
+        };
+
+        if !applied {
+            return true;
+        }
+
+        let apply_text = self
+            .blind_recall
+            .active_history_text()
+            .unwrap_or("")
+            .to_string();
+        self.apply_blind_recall_text(&apply_text);
+        self.sync_command_panel_navigation();
+        self.sync_file_picker_state();
+        self.sync_external_editor_helper_after_draft_change(&old_value);
+        self.sync_composer_height();
+        self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
+        true
+    }
+
+    fn apply_blind_recall_text(&mut self, text: &str) {
+        if text.is_empty() {
+            self.composer_mut().clear_for_edit();
+        } else {
+            self.composer_mut()
+                .reset_text_and_move_to_end(text.to_string());
+        }
     }
 
     fn handle_composer_editing_key(&mut self, key: KeyEvent) {
@@ -709,13 +792,14 @@ impl Model {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
+        let record_effect = crate::message_history_recall::commit_message_history(self, &old_value);
         self.composer_mut().clear_for_edit();
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
-        None
+        record_effect
     }
 
     fn handle_composer_send(&mut self) -> Option<AppEffect> {
@@ -736,6 +820,9 @@ impl Model {
         {
             return None;
         }
+
+        let record_message_history =
+            crate::message_history_recall::stage_message_history_recall(self, &content);
 
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let style_mode = self.style_mode;
@@ -758,7 +845,10 @@ impl Model {
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         let selection = self.selected_model.clone()?;
         self.conversation_turn_request_for_selection(&selection, source_message)
-            .map(|request| AppEffect::SendConversationTurn { request })
+            .map(|request| AppEffect::SendConversationTurn {
+                request: Box::new(request),
+                record_message_history,
+            })
     }
 
     fn prompt_root(&self) -> PathBuf {

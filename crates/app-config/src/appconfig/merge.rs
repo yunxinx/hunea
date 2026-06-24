@@ -7,8 +7,9 @@ use super::{
     validate::{
         normalize_request_retry_delays, validate_branch_picker_list_rows,
         validate_composer_undo_limit, validate_external_editor, validate_file_picker_popup_height,
-        validate_request_retry_attempts, validate_request_timeout_seconds,
-        validate_status_line_items_for_path, validate_tool_max_turns,
+        validate_message_history_limit, validate_request_retry_attempts,
+        validate_request_timeout_seconds, validate_status_line_items_for_path,
+        validate_tool_max_turns,
     },
 };
 
@@ -131,6 +132,10 @@ pub(super) fn merge_config_file(
 
     if let Some(limit) = file_config.tui.composer_undo_limit {
         config.tui.composer_undo_limit = validate_composer_undo_limit(limit, path)?;
+    }
+
+    if let Some(limit) = file_config.tui.message_history_limit {
+        config.tui.message_history_limit = validate_message_history_limit(limit, path)?;
     }
 
     if let Some(print_transcript_on_exit) = file_config.tui.print_transcript_on_exit {

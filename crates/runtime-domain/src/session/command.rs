@@ -1,4 +1,4 @@
-use super::{ConversationTurnRequest, RuntimeTarget, SessionLoadRequestId};
+use super::{ConversationTurnRequest, MessageHistoryEntryId, RuntimeTarget, SessionLoadRequestId};
 
 /// `RuntimeCommand` 描述 TUI 向交互式 runtime 发出的统一命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +44,15 @@ pub enum RuntimeCommand {
     },
     SelectEntryRewind {
         entry_id: String,
+    },
+    LoadMessageHistoryStartupCache,
+    LoadMessageHistoryPickerRows {
+        request_id: SessionLoadRequestId,
+    },
+    RecordMessageHistory {
+        entry_id: MessageHistoryEntryId,
+        text: String,
+        limit: usize,
     },
     Reset,
 }
@@ -105,6 +114,9 @@ impl RuntimeCommand {
             | Self::LoadBranchPreview { .. }
             | Self::SwitchBranch { .. }
             | Self::SelectEntryRewind { .. }
+            | Self::LoadMessageHistoryStartupCache
+            | Self::LoadMessageHistoryPickerRows { .. }
+            | Self::RecordMessageHistory { .. }
             | Self::Reset => None,
         }
     }

@@ -84,7 +84,7 @@ pub(super) fn run_send_conversation_turn_effect(
         .dispatch_runtime_command(RuntimeCommand::submit_conversation_turn(request))
     {
         Ok(RuntimeCommandReceipt::ConversationStarted { activity_label }) => {
-            model.show_stream_activity(activity_label)
+            model.show_stream_activity(activity_label);
         }
         Ok(_) => {}
         Err(message) => model.show_toast(ToastSeverity::Error, message),

@@ -11,6 +11,7 @@ use thiserror::Error;
 use uuid::{Uuid, Version};
 
 pub(crate) mod jsonl;
+pub(crate) mod message_history;
 pub(crate) mod meta_derive;
 pub(crate) mod metadata;
 pub(crate) mod recorder;

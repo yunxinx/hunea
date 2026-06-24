@@ -1,5 +1,8 @@
 use super::*;
-use crate::{ModelOptions, StartupBannerOptions, tool_approval_panel::ToolApprovalSource};
+use crate::{
+    ModelOptions, StartupBannerOptions, text_search::CaseInsensitiveQuery,
+    tool_approval_panel::ToolApprovalSource,
+};
 use runtime_domain::model_catalog::{ModelCatalog, ModelProvider, ModelSource};
 use runtime_domain::provider::ProviderKind;
 
@@ -148,9 +151,12 @@ fn model_entry_search_matches_ascii_without_case_sensitivity() {
         ModelSource::Configured,
     );
 
-    assert!(model_entry_matches_search(&entry, "deepseek"));
-    assert!(model_entry_matches_search(&entry, "chat"));
-    assert!(!model_entry_matches_search(&entry, "qwen"));
+    let deepseek = CaseInsensitiveQuery::new("deepseek");
+    let chat = CaseInsensitiveQuery::new("chat");
+    let qwen = CaseInsensitiveQuery::new("qwen");
+    assert!(model_entry_matches_search(&entry, &deepseek));
+    assert!(model_entry_matches_search(&entry, &chat));
+    assert!(!model_entry_matches_search(&entry, &qwen));
 }
 
 #[test]
@@ -161,7 +167,8 @@ fn model_entry_search_keeps_unicode_case_insensitive_matching() {
         ModelSource::Configured,
     );
 
-    assert!(model_entry_matches_search(&entry, "i\u{307}stanbul"));
+    let istanbul = CaseInsensitiveQuery::new("i\u{307}stanbul");
+    assert!(model_entry_matches_search(&entry, &istanbul));
 }
 
 fn model_with_single_provider() -> Model {

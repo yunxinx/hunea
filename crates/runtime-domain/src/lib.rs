@@ -5,4 +5,5 @@ pub mod phrases;
 pub mod provider;
 pub mod request_policy;
 pub mod session;
+pub mod time;
 pub mod token_count;

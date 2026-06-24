@@ -24,6 +24,7 @@ fn load_defaults_to_cx_when_no_config_exists() {
     assert_eq!(config.tui.file_picker_popup_height, 7);
     assert_eq!(config.tui.branch_picker_list_rows, 7);
     assert_eq!(config.tui.composer_undo_limit, 50);
+    assert_eq!(config.tui.message_history_limit, 100);
     assert!(!config.debug.enabled);
 }
 
@@ -589,6 +590,56 @@ fn load_rejects_composer_undo_limit_above_maximum() {
         error
             .to_string()
             .contains("tui.composer_undo_limit must be between 1 and 200"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_accepts_configured_message_history_limit() {
+    let working_dir = temp_test_dir("load-message-history-limit-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nmessage_history_limit = 500\n",
+    );
+
+    let config = load_from_paths(Some(working_dir.as_path()), None)
+        .expect("message history limit should accept 500");
+
+    assert_eq!(config.tui.message_history_limit, 500);
+}
+
+#[test]
+fn load_rejects_message_history_limit_below_minimum() {
+    let working_dir = temp_test_dir("load-low-message-history-limit-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nmessage_history_limit = 99\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("message history limit should reject 99");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tui.message_history_limit must be between 100 and 1000"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn load_rejects_unknown_tui_key() {
+    let working_dir = temp_test_dir("load-unknown-tui-key-working");
+    write_config(
+        &working_dir.join(".hunea").join("config.toml"),
+        "[tui]\nnot_a_real_tui_key = true\n",
+    );
+
+    let error = load_from_paths(Some(working_dir.as_path()), None)
+        .expect_err("unknown tui keys should be rejected");
+
+    assert!(
+        error.to_string().contains("unknown field"),
         "unexpected error: {error}"
     );
 }

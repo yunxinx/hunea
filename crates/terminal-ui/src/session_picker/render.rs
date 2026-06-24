@@ -83,7 +83,7 @@ impl Model {
         let title = format!(
             "Resume Session ({} of {})",
             state.selected_position_label(),
-            state.filtered_indices.len()
+            state.filtered_count()
         );
         let title_width = width.saturating_sub(2).max(1);
         let mut spans = vec![
@@ -94,14 +94,14 @@ impl Model {
             ),
         ];
 
-        if state.is_searching || !state.search_query.is_empty() {
+        if state.is_searching() || !state.search_query().is_empty() {
             spans.push(Span::styled(" · ", primary_text_style(self.palette).bold()));
             spans.push(Span::styled(
                 "Search:",
                 command_accent_text_style(self.palette).bold(),
             ));
             spans.push(Span::styled(
-                format!(" {}", state.search_query),
+                format!(" {}", state.search_query()),
                 primary_text_style(self.palette).bold(),
             ));
         }
@@ -129,8 +129,8 @@ impl Model {
                 truncate_display_width_with_ellipsis(error, width),
                 tertiary_text_style(self.palette),
             ));
-        } else if state.filtered_indices.is_empty() {
-            let empty_message = if state.search_query.is_empty() {
+        } else if !state.has_filtered_rows() {
+            let empty_message = if state.search_query().is_empty() {
                 "No sessions"
             } else {
                 "No sessions match search"
@@ -142,8 +142,10 @@ impl Model {
         } else {
             let page_start = state.page_start(page_size);
             for (visible_position, row_index) in state.page_indices(page_size).enumerate() {
-                let row = &state.rows[row_index];
-                let is_selected = page_start + visible_position == state.selected;
+                let Some(row) = state.row(row_index) else {
+                    continue;
+                };
+                let is_selected = state.is_selected_visible_position(page_start + visible_position);
                 lines.extend(self.session_picker_row_lines(
                     row,
                     width,

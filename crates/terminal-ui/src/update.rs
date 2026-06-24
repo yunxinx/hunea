@@ -61,7 +61,9 @@ pub enum AppEffect {
         retained_user_turns: usize,
     },
     SendConversationTurn {
-        request: ConversationTurnRequest,
+        request: Box<ConversationTurnRequest>,
+        /// 发送前已写入盲回溯、需异步落库的正文；相邻重复或未写入时为 `None`。
+        record_message_history: Option<String>,
     },
     InterruptCurrentTurn,
     PersistSelectedModel {
@@ -815,7 +817,8 @@ impl Model {
             return None;
         }
 
-        crate::message_history_recall::stage_message_history_recall(self, &content);
+        let record_message_history =
+            crate::message_history_recall::stage_message_history_recall(self, &content);
 
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let style_mode = self.style_mode;
@@ -838,7 +841,10 @@ impl Model {
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         let selection = self.selected_model.clone()?;
         self.conversation_turn_request_for_selection(&selection, source_message)
-            .map(|request| AppEffect::SendConversationTurn { request })
+            .map(|request| AppEffect::SendConversationTurn {
+                request: Box::new(request),
+                record_message_history,
+            })
     }
 
     fn prompt_root(&self) -> PathBuf {

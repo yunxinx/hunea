@@ -4,28 +4,32 @@ use runtime_domain::session::{RuntimeCommand, RuntimeCommandReceipt, RuntimeTarg
 use crate::{AppEffect, Model, toast::ToastSeverity};
 
 use super::RuntimeCoordinator;
-
-pub(crate) fn dispatch_record_message_history(
-    model: &mut Model,
-    runtime_coordinator: &mut impl RuntimeCoordinator,
-    text: String,
-) {
-    if let Err(message) =
-        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::RecordMessageHistory {
-            text: text.clone(),
-            limit: model.message_history_limit,
-        })
-    {
-        model.blind_recall.revert_failed_persist(&text);
-        model.show_toast(ToastSeverity::Error, message);
-    }
-}
 use super::conversation::run_send_conversation_turn_effect;
 use super::external_io::{
     ExternalIoRuntime, run_copy_selection_effect, run_external_editor_effect,
 };
 use super::model_refresh::{persist_selected_model, run_refresh_model_provider_effect};
 use super::terminal::TuiTerminal;
+
+pub(crate) fn dispatch_record_message_history(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+    text: String,
+) {
+    let limit = model.message_history_limit;
+    if let Err(message) = runtime_coordinator
+        .dispatch_runtime_command(RuntimeCommand::RecordMessageHistory { text, limit })
+    {
+        let revert_tail = model
+            .blind_recall
+            .tail_entry_text_for_persist_revert()
+            .map(str::to_string);
+        if let Some(tail) = revert_tail.as_deref() {
+            model.blind_recall.revert_failed_persist(tail);
+        }
+        model.show_toast(ToastSeverity::Error, message);
+    }
+}
 
 pub(super) fn apply_effect_if_needed(
     terminal: &mut TuiTerminal,
@@ -147,13 +151,14 @@ pub(super) fn apply_effect_if_needed(
             dispatch_record_message_history(model, runtime_coordinator, text);
             Ok(())
         }
-        AppEffect::SendConversationTurn { request } => {
-            if let Some(AppEffect::RecordMessageHistory { text }) =
-                crate::message_history_recall::message_history_record_effect(request.message_text())
-            {
+        AppEffect::SendConversationTurn {
+            request,
+            record_message_history,
+        } => {
+            if let Some(text) = record_message_history {
                 dispatch_record_message_history(model, runtime_coordinator, text);
             }
-            run_send_conversation_turn_effect(model, runtime_coordinator, request);
+            run_send_conversation_turn_effect(model, runtime_coordinator, *request);
             Ok(())
         }
         AppEffect::InterruptCurrentTurn => {

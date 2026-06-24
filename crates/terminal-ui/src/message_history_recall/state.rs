@@ -49,6 +49,11 @@ impl BlindRecallState {
         &self.cache
     }
 
+    /// 盲回溯缓存末尾正文（持久化调度失败时用于回滚键）。
+    pub(crate) fn tail_entry_text_for_persist_revert(&self) -> Option<&str> {
+        self.cache.last().map(|entry| entry.text.as_str())
+    }
+
     #[cfg(test)]
     pub(crate) fn history_cursor(&self) -> Option<usize> {
         self.history_cursor
@@ -141,15 +146,16 @@ impl BlindRecallState {
         }
 
         let ts = unix_timestamp_ms().unwrap_or(0);
+        let persisted_text = text.to_string();
         append_message_history_entry(
             &mut self.cache,
             MessageHistoryEntry {
                 ts,
-                text: text.to_string(),
+                text: persisted_text.clone(),
             },
             MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN,
         );
-        self.cache.last().map(|entry| entry.text.clone())
+        Some(persisted_text)
     }
 
     /// 异步持久化失败时回滚盲回溯缓存末尾一条（与 [`push_local_entry`] 写入的正文一致时）。

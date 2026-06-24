@@ -13,7 +13,6 @@ use super::input::{
 use super::*;
 use crate::{
     AppEffect, AppEvent, ReasoningDisplayMode, Sender, StatusLineItem,
-    message_history_recall::message_history_record_effect,
     runtime::RuntimeEventApply,
     test_helpers::{branch_choice, render_model_buffer, rendered_rows},
     theme::default_palette,
@@ -1656,7 +1655,12 @@ fn conversation_send_effect_records_history_after_conversation_start() {
         "hello history",
     );
 
-    apply_send_conversation_turn_effect_for_test(&mut model, &mut runtime_coordinator, request);
+    apply_send_conversation_turn_effect_for_test(
+        &mut model,
+        &mut runtime_coordinator,
+        request,
+        Some("hello history".to_string()),
+    );
 
     assert!(matches!(
         runtime_coordinator.commands.as_slice(),
@@ -1684,7 +1688,12 @@ fn conversation_send_effect_failure_uses_toast_not_status_notice() {
         "hello",
     );
 
-    apply_send_conversation_turn_effect_for_test(&mut model, &mut runtime_coordinator, request);
+    apply_send_conversation_turn_effect_for_test(
+        &mut model,
+        &mut runtime_coordinator,
+        request,
+        Some("hello".to_string()),
+    );
 
     assert_eq!(model.current_status_notice_text(), "");
     assert_eq!(
@@ -2040,10 +2049,9 @@ fn apply_send_conversation_turn_effect_for_test(
     model: &mut Model,
     runtime_coordinator: &mut TestRuntimeCoordinator,
     request: ConversationTurnRequest,
+    record_message_history: Option<String>,
 ) {
-    if let Some(AppEffect::RecordMessageHistory { text }) =
-        message_history_record_effect(request.message_text())
-    {
+    if let Some(text) = record_message_history {
         dispatch_record_message_history(model, runtime_coordinator, text);
     }
     run_send_conversation_turn_effect(model, runtime_coordinator, request);

@@ -6,7 +6,5 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use commit::{
-    commit_message_history, message_history_record_effect, stage_message_history_recall,
-};
+pub(crate) use commit::{commit_message_history, stage_message_history_recall};
 pub(crate) use state::BlindRecallState;

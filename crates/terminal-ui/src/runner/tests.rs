@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use super::conversation::{apply_conversation_event, run_send_conversation_turn_effect};
 use super::effects::{
-    run_interrupt_current_turn_effect, run_open_branch_preview_effect, run_open_branch_tree_effect,
-    run_open_copy_picker_effect, run_open_message_history_picker_effect, run_switch_branch_effect,
+    dispatch_record_message_history, run_interrupt_current_turn_effect,
+    run_open_branch_preview_effect, run_open_branch_tree_effect, run_open_copy_picker_effect,
+    run_open_message_history_picker_effect, run_switch_branch_effect,
 };
 use super::input::{
     TerminalInputAction, TerminalInputCoalescing, coalesced_input_actions,
@@ -41,6 +42,7 @@ struct TestRuntimeCoordinator {
     commands: Vec<RuntimeCommand>,
     last_command: Option<RuntimeCommand>,
     next_runtime_error: Option<String>,
+    next_record_message_history_error: Option<String>,
     reset_count: usize,
     conversation_retained_user_turns: Option<usize>,
 }
@@ -75,6 +77,11 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
     ) -> Result<RuntimeCommandReceipt, String> {
         self.commands.push(command.clone());
         self.last_command = Some(command.clone());
+        if let RuntimeCommand::RecordMessageHistory { .. } = &command
+            && let Some(message) = self.next_record_message_history_error.take()
+        {
+            return Err(message);
+        }
         if let Some(message) = self.next_runtime_error.take() {
             if matches!(
                 command,
@@ -1695,6 +1702,40 @@ fn conversation_send_effect_failure_uses_toast_not_status_notice() {
 }
 
 #[test]
+fn record_message_history_dispatch_failure_reverts_blind_recall_cache() {
+    use runtime_domain::session::MessageHistoryEntry;
+
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.apply_runtime_event(RuntimeEvent::MessageHistoryStartupCacheLoaded {
+        entries: vec![MessageHistoryEntry {
+            ts: 1,
+            text: "prior".to_string(),
+        }],
+    });
+    crate::message_history_recall::stage_message_history_recall(&mut model, "hello");
+    assert_eq!(model.blind_recall.cache().len(), 2);
+
+    let mut runtime_coordinator = TestRuntimeCoordinator {
+        next_record_message_history_error: Some("session store worker stopped".to_string()),
+        ..TestRuntimeCoordinator::default()
+    };
+    apply_effect_if_needed_for_test(
+        &mut model,
+        &mut runtime_coordinator,
+        Some(AppEffect::RecordMessageHistory {
+            text: "hello".to_string(),
+        }),
+    );
+
+    assert_eq!(model.blind_recall.cache().len(), 1);
+    assert_eq!(model.blind_recall.cache()[0].text, "prior");
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("session store worker stopped")
+    );
+}
+
+#[test]
 fn truncate_conversation_command_records_retained_turns() {
     let mut runtime_coordinator = TestRuntimeCoordinator::default();
 
@@ -2002,13 +2043,8 @@ fn apply_send_conversation_turn_effect_for_test(
 ) {
     if let Some(AppEffect::RecordMessageHistory { text }) =
         message_history_record_effect(request.message_text())
-        && let Err(message) =
-            runtime_coordinator.dispatch_runtime_command(RuntimeCommand::RecordMessageHistory {
-                text,
-                limit: model.message_history_limit,
-            })
     {
-        model.show_toast(crate::toast::ToastSeverity::Error, message);
+        dispatch_record_message_history(model, runtime_coordinator, text);
     }
     run_send_conversation_turn_effect(model, runtime_coordinator, request);
 }
@@ -2018,7 +2054,13 @@ fn apply_effect_if_needed_for_test(
     runtime_coordinator: &mut TestRuntimeCoordinator,
     effect: Option<AppEffect>,
 ) {
-    if let Some(AppEffect::InterruptCurrentTurn) = effect {
-        run_interrupt_current_turn_effect(model, runtime_coordinator);
+    match effect {
+        Some(AppEffect::RecordMessageHistory { text }) => {
+            dispatch_record_message_history(model, runtime_coordinator, text);
+        }
+        Some(AppEffect::InterruptCurrentTurn) => {
+            run_interrupt_current_turn_effect(model, runtime_coordinator);
+        }
+        _ => {}
     }
 }

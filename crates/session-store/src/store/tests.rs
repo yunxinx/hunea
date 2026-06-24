@@ -26,11 +26,11 @@ async fn in_memory_store_skips_whitespace_only_message_history() {
     let store = InMemorySessionStore::new();
 
     store
-        .record_message_history("   \t\n  ".to_string(), 25)
+        .record_message_history("   \t\n  ", 25)
         .await
         .expect("whitespace record should be accepted as a no-op");
     store
-        .record_message_history("real".to_string(), 25)
+        .record_message_history("real", 25)
         .await
         .expect("real history should be recorded");
 
@@ -48,12 +48,12 @@ async fn in_memory_store_adjacent_duplicate_does_not_trim_to_lower_limit() {
 
     for i in 0..5 {
         store
-            .record_message_history(format!("line-{i}"), 100)
+            .record_message_history(&format!("line-{i}"), 100)
             .await
             .expect("history should record");
     }
     store
-        .record_message_history("line-4".to_string(), 2)
+        .record_message_history("line-4", 2)
         .await
         .expect("adjacent duplicate should be no-op");
 
@@ -71,12 +71,12 @@ async fn in_memory_store_preserves_history_row_ids_when_lowered_limit_trims_on_i
 
     for i in 0..5 {
         store
-            .record_message_history(format!("line-{i}"), 100)
+            .record_message_history(&format!("line-{i}"), 100)
             .await
             .expect("history should record");
     }
     store
-        .record_message_history("line-extra".to_string(), 2)
+        .record_message_history("line-extra", 2)
         .await
         .expect("insert with lower limit should trim to newest rows");
 
@@ -97,12 +97,12 @@ async fn in_memory_store_preserves_history_row_ids_on_adjacent_duplicate() {
 
     for i in 0..5 {
         store
-            .record_message_history(format!("line-{i}"), 100)
+            .record_message_history(&format!("line-{i}"), 100)
             .await
             .expect("history should record");
     }
     store
-        .record_message_history("line-4".to_string(), 2)
+        .record_message_history("line-4", 2)
         .await
         .expect("adjacent duplicate should be no-op");
 

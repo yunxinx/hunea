@@ -220,7 +220,7 @@ impl SessionStore for FailingSessionStore {
 
     fn record_message_history<'a>(
         &'a self,
-        text: String,
+        text: &'a str,
         limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.record_message_history(text, limit)
@@ -397,7 +397,7 @@ impl SessionStore for DelayedListSessionStore {
 
     fn record_message_history<'a>(
         &'a self,
-        text: String,
+        text: &'a str,
         limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.record_message_history(text, limit)
@@ -571,7 +571,7 @@ impl SessionStore for LoadCountingSessionStore {
 
     fn record_message_history<'a>(
         &'a self,
-        text: String,
+        text: &'a str,
         limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.record_message_history(text, limit)
@@ -756,7 +756,7 @@ impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
 
     fn record_message_history<'a>(
         &'a self,
-        text: String,
+        text: &'a str,
         limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         self.inner.record_message_history(text, limit)

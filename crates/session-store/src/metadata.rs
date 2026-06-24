@@ -95,10 +95,11 @@ impl MetadataIndex {
 
     pub(crate) async fn record_message_history(
         &self,
-        text: String,
+        text: &str,
         limit: usize,
     ) -> Result<(), SessionStoreError> {
         let index_path = (*self.index_path).clone();
+        let text = text.to_owned();
         spawn_index_task(move || {
             crate::message_history::record_message_history(&index_path, &text, limit)
         })

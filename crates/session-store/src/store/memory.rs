@@ -423,9 +423,10 @@ impl SessionStore for InMemorySessionStore {
 
     fn record_message_history<'a>(
         &'a self,
-        text: String,
+        text: &'a str,
         limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        let text = text.to_string();
         Box::pin(async move { self.record_message_history_entry(text, limit).await })
     }
 

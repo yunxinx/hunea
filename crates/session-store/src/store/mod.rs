@@ -139,7 +139,7 @@ pub trait SessionStore: Send + Sync {
     #[must_use]
     fn record_message_history<'a>(
         &'a self,
-        text: String,
+        text: &'a str,
         limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
 

@@ -36,12 +36,12 @@ async fn record_dedup_adjacent_is_noop_without_trim() {
 
     for i in 0..5 {
         index
-            .record_message_history(format!("msg-{i}"), 3)
+            .record_message_history(&format!("msg-{i}"), 3)
             .await
             .expect("record");
     }
     index
-        .record_message_history("msg-4".to_string(), 3)
+        .record_message_history("msg-4", 3)
         .await
         .expect("adjacent dup");
 
@@ -65,11 +65,11 @@ async fn record_skips_whitespace_only_text() {
     let index = MetadataIndex::open(&path).await.expect("index should open");
 
     index
-        .record_message_history("   \t\n  ".to_string(), 25)
+        .record_message_history("   \t\n  ", 25)
         .await
         .expect("record");
     index
-        .record_message_history("real".to_string(), 25)
+        .record_message_history("real", 25)
         .await
         .expect("record");
 
@@ -96,7 +96,7 @@ async fn concurrent_adjacent_duplicate_records_once() {
             tasks.push(tokio::spawn(async move {
                 barrier.wait().await;
                 index
-                    .record_message_history(text, 100)
+                    .record_message_history(&text, 100)
                     .await
                     .expect("record should succeed")
             }));
@@ -123,12 +123,12 @@ async fn lowered_limit_trims_on_next_insert() {
 
     for i in 0..5 {
         index
-            .record_message_history(format!("line-{i}"), 100)
+            .record_message_history(&format!("line-{i}"), 100)
             .await
             .expect("record");
     }
     index
-        .record_message_history("line-extra".to_string(), 2)
+        .record_message_history("line-extra", 2)
         .await
         .expect("record with lower limit");
 
@@ -147,12 +147,12 @@ async fn lowered_limit_does_not_trim_on_adjacent_duplicate() {
 
     for i in 0..5 {
         index
-            .record_message_history(format!("line-{i}"), 100)
+            .record_message_history(&format!("line-{i}"), 100)
             .await
             .expect("record");
     }
     index
-        .record_message_history("line-4".to_string(), 2)
+        .record_message_history("line-4", 2)
         .await
         .expect("adjacent duplicate should be no-op");
 

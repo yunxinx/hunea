@@ -310,7 +310,7 @@ impl SessionStore for LocalSessionStore {
 
     fn record_message_history<'a>(
         &'a self,
-        text: String,
+        text: &'a str,
         limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
         Box::pin(async move { self.index.record_message_history(text, limit).await })

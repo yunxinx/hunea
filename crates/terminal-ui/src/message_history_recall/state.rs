@@ -125,7 +125,7 @@ impl BlindRecallState {
 
     /// 本地写入（发送 / Ctrl-C 清输入）：相邻同文 no-op，否则追加并 trim 至 25，重置导航。
     ///
-    /// 若实际写入了新条目，返回应用层应持久化的正文（与缓存条目共享同一份 `String`）。
+    /// 若实际写入了新条目，返回应用层应持久化的正文（与缓存末尾条目内容一致）。
     pub(crate) fn push_local_entry(&mut self, text: &str) -> Option<String> {
         if !should_record_message_history_text(text) {
             return None;
@@ -141,16 +141,15 @@ impl BlindRecallState {
         }
 
         let ts = unix_timestamp_ms().unwrap_or(0);
-        let persisted_text = text.to_string();
         append_message_history_entry(
             &mut self.cache,
             MessageHistoryEntry {
                 ts,
-                text: persisted_text.clone(),
+                text: text.to_string(),
             },
             MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN,
         );
-        Some(persisted_text)
+        self.cache.last().map(|entry| entry.text.clone())
     }
 
     /// 异步持久化失败时回滚盲回溯缓存末尾一条（与 [`push_local_entry`] 写入的正文一致时）。

@@ -220,10 +220,8 @@ impl Model {
         };
 
         let draft = self.composer_text().to_string();
-
         self.message_history_picker = None;
-
-        let record_effect = crate::message_history_recall::commit_message_history(self, draft);
+        let record_effect = crate::message_history_recall::commit_message_history(self, &draft);
 
         self.apply_message_history_picker_recall(&recalled);
 

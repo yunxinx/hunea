@@ -75,31 +75,28 @@ fn navigate_down_when_not_browsing_is_none() {
 #[test]
 fn push_local_skips_whitespace_only() {
     let mut state = BlindRecallState::default();
-    state.push_local_entry("   ".to_string());
+    state.push_local_entry("   ");
     assert!(state.cache().is_empty());
-    state.push_local_entry("ok".to_string());
+    state.push_local_entry("ok");
     assert_eq!(state.cache().len(), 1);
 }
 
 #[test]
 fn push_local_entry_returns_none_on_adjacent_duplicate() {
     let mut state = BlindRecallState::default();
-    assert_eq!(
-        state.push_local_entry("one".to_string()),
-        Some("one".to_string())
-    );
-    assert_eq!(state.push_local_entry("one".to_string()), None);
+    assert_eq!(state.push_local_entry("one"), Some("one".to_string()));
+    assert_eq!(state.push_local_entry("one"), None);
 }
 
 #[test]
 fn push_local_adjacent_dedup_and_trim() {
     let mut state = BlindRecallState::default();
-    state.push_local_entry("one".to_string());
-    state.push_local_entry("one".to_string());
+    state.push_local_entry("one");
+    state.push_local_entry("one");
     assert_eq!(state.cache().len(), 1);
 
     for i in 0..30 {
-        state.push_local_entry(format!("m-{i}"));
+        state.push_local_entry(&format!("m-{i}"));
     }
     assert_eq!(state.cache().len(), 25);
     assert_eq!(state.cache().last().map(|e| e.text.as_str()), Some("m-29"));
@@ -110,7 +107,7 @@ fn push_local_resets_navigation() {
     let mut state = BlindRecallState::default();
     state.replace_cache(vec![entry("x")]);
     let _ = state.navigate_up();
-    state.push_local_entry("fresh".to_string());
+    state.push_local_entry("fresh");
     assert_eq!(state.history_cursor(), None);
     assert_eq!(state.last_history_text(), None);
 }

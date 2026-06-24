@@ -784,10 +784,9 @@ impl Model {
 
     fn handle_composer_clear_input(&mut self) -> Option<AppEffect> {
         let old_value = self.composer_text().to_string();
-        let record_effect =
-            crate::message_history_recall::commit_message_history(self, old_value.clone());
         let old_line = self.composer.line();
         let old_column = self.composer.column();
+        let record_effect = crate::message_history_recall::commit_message_history(self, &old_value);
         self.composer_mut().clear_for_edit();
         self.sync_command_panel_navigation();
         self.sync_file_picker_state();
@@ -816,7 +815,7 @@ impl Model {
             return None;
         }
 
-        crate::message_history_recall::stage_message_history_recall(self, content.clone());
+        crate::message_history_recall::stage_message_history_recall(self, &content);
 
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let style_mode = self.style_mode;

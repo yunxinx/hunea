@@ -533,7 +533,7 @@ mod tests {
                     "2️⃣",
                     Style::default().add_modifier(Modifier::REVERSED),
                 );
-                buffer[(1, 0)].set_skip(true);
+                buffer[(1, 0)].set_diff_option(ratatui::buffer::CellDiffOption::Skip);
                 None
             })
             .unwrap();

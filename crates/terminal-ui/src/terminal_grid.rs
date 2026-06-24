@@ -1,5 +1,5 @@
 use ratatui::{
-    buffer::{Buffer, Cell},
+    buffer::{Buffer, Cell, CellDiffOption},
     style::Color,
 };
 
@@ -59,7 +59,9 @@ pub(crate) fn diff_terminal_buffers<'a>(
     for (index, (current_cell, previous_cell)) in
         current_cells.iter().zip(previous_cells.iter()).enumerate()
     {
-        if !current_cell.skip && (current_cell != previous_cell || invalidated > 0) && to_skip == 0
+        if !cell_is_skipped(current_cell)
+            && (current_cell != previous_cell || invalidated > 0)
+            && to_skip == 0
         {
             let (x, y) = current.pos_of(index);
             let row = index / current.area.width as usize;
@@ -96,7 +98,7 @@ fn row_clear_from(row: &[Cell], trailing_bg: Color) -> usize {
     while column < row.len() {
         let cell = &row[column];
         let width = display_width(cell.symbol()).max(1);
-        if !cell.skip && cell_requires_visible_cell(cell, trailing_bg) {
+        if !cell_is_skipped(cell) && cell_requires_visible_cell(cell, trailing_bg) {
             content_end = column.saturating_add(width).min(row.len());
         }
         column += width;
@@ -110,7 +112,10 @@ fn previous_tail_needs_clear(row: &[Cell], clear_from: usize, clear_bg: Color) -
     while column < row.len() {
         let cell = &row[column];
         let width = display_width(cell.symbol()).max(1);
-        if !cell.skip && column < clear_from && column.saturating_add(width) > clear_from {
+        if !cell_is_skipped(cell)
+            && column < clear_from
+            && column.saturating_add(width) > clear_from
+        {
             return true;
         }
         column += width;
@@ -118,7 +123,11 @@ fn previous_tail_needs_clear(row: &[Cell], clear_from: usize, clear_bg: Color) -
 
     row[clear_from..]
         .iter()
-        .any(|cell| !cell.skip && cell_requires_clear(cell, clear_bg))
+        .any(|cell| !cell_is_skipped(cell) && cell_requires_clear(cell, clear_bg))
+}
+
+fn cell_is_skipped(cell: &Cell) -> bool {
+    matches!(cell.diff_option, CellDiffOption::Skip)
 }
 
 fn cell_requires_visible_cell(cell: &Cell, trailing_bg: Color) -> bool {
@@ -179,7 +188,7 @@ fn tail_has_visible_style(cell: &Cell) -> bool {
 #[cfg(test)]
 mod tests {
     use ratatui::{
-        buffer::Buffer,
+        buffer::{Buffer, CellDiffOption},
         layout::Rect,
         style::{Color, Modifier, Style},
     };
@@ -231,11 +240,11 @@ mod tests {
     }
 
     #[test]
-    fn terminal_grid_diff_respects_explicit_skip_cells() {
+    fn terminal_grid_diff_respects_explicit_diff_option_skip_cells() {
         let previous = Buffer::empty(Rect::new(0, 0, 4, 1));
         let mut current = Buffer::empty(Rect::new(0, 0, 4, 1));
         current.set_string(0, 0, "abcd", Style::default());
-        current[(1, 0)].set_skip(true);
+        current[(1, 0)].set_diff_option(CellDiffOption::Skip);
 
         let diff = super::diff_terminal_buffers(&previous, &current);
         let updates = diff

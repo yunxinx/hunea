@@ -98,8 +98,23 @@ mod tests {
         assert_eq!(encoding_name_for_model("gpt-4o-mini"), "o200k_base");
         assert_eq!(encoding_name_for_model("local-gpt-4.1"), "o200k_base");
         assert_eq!(encoding_name_for_model("local-gpt-4o"), "o200k_base");
-        assert_eq!(encoding_name_for_model("gpt-oss-120b"), "o200k_base");
         assert_eq!(encoding_name_for_model("custom-gpt-local"), "o200k_base");
+    }
+
+    #[test]
+    fn encoding_name_for_model_uses_harmony_for_gpt_oss_aliases() {
+        assert_eq!(encoding_name_for_model("gpt-oss-120b"), "o200k_harmony");
+        assert_eq!(encoding_name_for_model("gpt-oss-20b"), "o200k_harmony");
+    }
+
+    #[test]
+    fn gpt_oss_plain_text_estimates_match_o200k_base() {
+        let text = "plain text stays on the same BPE path";
+
+        assert_eq!(
+            estimate_text_tokens("gpt-oss-120b", text),
+            estimate_text_tokens_with_encoding_name(FALLBACK_ENCODING, text)
+        );
     }
 
     #[test]

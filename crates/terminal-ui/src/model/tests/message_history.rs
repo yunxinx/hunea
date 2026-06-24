@@ -113,6 +113,16 @@ fn blind_recall_repeated_up_walks_older_and_noops_at_oldest() {
 }
 
 #[test]
+fn blind_recall_two_messages_second_up_reaches_older_without_edit() {
+    let mut model = conversation_test_model();
+    seed_blind_recall_cache(&mut model, &["第一条消息", "第二条消息"]);
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert_eq!(model.composer_text(), "第二条消息");
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Up)));
+    assert_eq!(model.composer_text(), "第一条消息");
+}
+
+#[test]
 fn blind_recall_down_past_newest_clears_composer() {
     let mut model = conversation_test_model();
     seed_blind_recall_cache(&mut model, &["only"]);

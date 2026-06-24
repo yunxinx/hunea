@@ -39,6 +39,19 @@ fn gate_requires_last_history_text_and_boundary_cursor() {
 }
 
 #[test]
+fn gate_boundary_cursor_uses_char_index_not_byte_len() {
+    let mut state = BlindRecallState::default();
+    state.replace_cache(vec![entry("第一条"), entry("第二条")]);
+    state.apply_recalled_text("第二条");
+
+    let text = "第二条";
+    let char_len = text.chars().count();
+    assert_ne!(text.len(), char_len);
+    assert!(state.should_handle_navigation(text, char_len));
+    assert!(!state.should_handle_navigation(text, text.len()));
+}
+
+#[test]
 fn navigate_up_from_empty_starts_at_newest() {
     let mut state = BlindRecallState::default();
     state.replace_cache(vec![entry("old"), entry("new")]);

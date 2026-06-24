@@ -627,7 +627,7 @@ impl Model {
         }
 
         let text = self.composer_text();
-        let cursor = self.composer.cursor_byte_offset();
+        let cursor = self.composer.cursor_char_index();
         if !self.blind_recall.should_handle_navigation(text, cursor) {
             return false;
         }

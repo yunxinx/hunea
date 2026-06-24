@@ -438,8 +438,8 @@ impl Composer {
         self.cursor_revision
     }
 
-    /// 当前光标在 `value` 中的 UTF-8 字节偏移（盲回溯门控用）。
-    pub(crate) fn cursor_byte_offset(&self) -> usize {
+    /// 当前光标在 `value` 中的字符索引（盲回溯行边界门控用）。
+    pub(crate) fn cursor_char_index(&self) -> usize {
         self.cursor
     }
 

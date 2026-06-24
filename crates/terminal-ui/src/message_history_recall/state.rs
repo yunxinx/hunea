@@ -76,7 +76,9 @@ impl BlindRecallState {
         if text.is_empty() {
             return true;
         }
-        if cursor != 0 && cursor != text.len() {
+        // composer 光标是字符索引，不是 UTF-8 字节偏移。
+        let char_len = text.chars().count();
+        if cursor != 0 && cursor != char_len {
             return false;
         }
         self.active_history_text() == Some(text)

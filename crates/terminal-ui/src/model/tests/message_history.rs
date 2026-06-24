@@ -36,12 +36,13 @@ fn ctrl_c_clear_records_message_history_when_enabled() {
         KeyCode::Char('c'),
         KeyModifiers::CONTROL,
     )));
-    assert_eq!(
-        effect,
-        Some(AppEffect::RecordMessageHistory {
-            text: "draft to save".to_string(),
-        })
-    );
+    match effect {
+        Some(AppEffect::RecordMessageHistory { entry_id, text }) => {
+            assert_eq!(entry_id, runtime_domain::session::MessageHistoryEntryId(1));
+            assert_eq!(text, "draft to save");
+        }
+        other => panic!("expected RecordMessageHistory effect, got {other:?}"),
+    }
     assert!(model.composer_text().is_empty());
 }
 
@@ -163,13 +164,17 @@ fn send_pushes_blind_recall_cache_and_adjacent_dedup() {
 fn message_history_record_failed_reverts_blind_recall_tail() {
     let mut model = conversation_test_model();
     type_text(&mut model, "will fail to persist");
-    let _ = model.update(AppEvent::Key(KeyEvent::new(
+    let effect = model.update(AppEvent::Key(KeyEvent::new(
         KeyCode::Char('c'),
         KeyModifiers::CONTROL,
     )));
+    let entry_id = match effect {
+        Some(AppEffect::RecordMessageHistory { entry_id, .. }) => entry_id,
+        other => panic!("expected RecordMessageHistory effect, got {other:?}"),
+    };
     assert_eq!(model.blind_recall.cache().len(), 1);
     model.apply_runtime_event(RuntimeEvent::MessageHistoryRecordFailed {
-        text: "will fail to persist".to_string(),
+        entry_id,
         message: "disk full".to_string(),
     });
     assert!(model.blind_recall.cache().is_empty());
@@ -183,9 +188,8 @@ fn late_startup_cache_load_preserves_locally_recorded_blind_recall_entries() {
 
     seed_blind_recall_cache(&mut model, &["persisted older", "persisted newer"]);
 
-    let cached_texts = model
-        .blind_recall
-        .cache()
+    let cached_entries = model.blind_recall.cache();
+    let cached_texts = cached_entries
         .iter()
         .map(|entry| entry.text.as_str())
         .collect::<Vec<_>>();

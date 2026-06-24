@@ -128,9 +128,11 @@ impl AppRuntimeCoordinator {
             RuntimeCommand::LoadMessageHistoryPickerRows { request_id } => {
                 self.load_message_history_picker_rows(request_id)
             }
-            RuntimeCommand::RecordMessageHistory { text, limit } => {
-                self.record_message_history(text, limit)
-            }
+            RuntimeCommand::RecordMessageHistory {
+                entry_id,
+                text,
+                limit,
+            } => self.record_message_history(entry_id, text, limit),
             RuntimeCommand::Reset => {
                 self.conversation_worker.reset_after_clear();
                 self.provider_conversation.clear();

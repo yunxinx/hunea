@@ -1,8 +1,9 @@
 use super::{
-    ConversationResponse, MessageHistoryEntry, MessageHistoryRow, RuntimeIdentity,
-    RuntimePermissionRequest, RuntimeRequestMetrics, RuntimeTarget, RuntimeTerminalSnapshot,
-    RuntimeToolActivity, RuntimeToolActivityUpdate, SessionBranchTreePayload, SessionLoadRequestId,
-    SessionPickerRow, SessionPreviewPayload, SessionResumePayload, SessionTreePayload,
+    ConversationResponse, MessageHistoryEntry, MessageHistoryEntryId, MessageHistoryRow,
+    RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics, RuntimeTarget,
+    RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
+    SessionBranchTreePayload, SessionLoadRequestId, SessionPickerRow, SessionPreviewPayload,
+    SessionResumePayload, SessionTreePayload,
 };
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
@@ -127,8 +128,11 @@ pub enum RuntimeEvent {
         request_id: SessionLoadRequestId,
         message: String,
     },
+    MessageHistoryRecorded {
+        entry_id: MessageHistoryEntryId,
+    },
     MessageHistoryRecordFailed {
-        text: String,
+        entry_id: MessageHistoryEntryId,
         message: String,
     },
     MessageFinished {
@@ -189,6 +193,7 @@ impl RuntimeEvent {
             | Self::MessageHistoryStartupCacheLoadFailed { .. }
             | Self::MessageHistoryPickerRowsLoaded { .. }
             | Self::MessageHistoryPickerRowsLoadFailed { .. }
+            | Self::MessageHistoryRecorded { .. }
             | Self::MessageHistoryRecordFailed { .. } => None,
         }
     }

@@ -201,8 +201,11 @@ impl RuntimeEventApply for Model {
                     self.show_message_history_picker_error(request_id, &message);
                 }
             }
-            RuntimeEvent::MessageHistoryRecordFailed { text, message } => {
-                self.blind_recall.revert_failed_persist(&text);
+            RuntimeEvent::MessageHistoryRecorded { entry_id } => {
+                self.blind_recall.confirm_persisted(entry_id);
+            }
+            RuntimeEvent::MessageHistoryRecordFailed { entry_id, message } => {
+                self.blind_recall.revert_failed_persist(entry_id);
                 self.show_toast(
                     ToastSeverity::Error,
                     format!("Message history not saved: {message}"),

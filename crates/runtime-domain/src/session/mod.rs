@@ -26,11 +26,11 @@ pub use event::RuntimeEvent;
 pub use identity::{RuntimeAgentCapabilities, RuntimeIdentity, RuntimePromptCapabilities};
 pub use load_request::SessionLoadRequestId;
 pub use message_history::{
-    MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN, MessageHistoryEntry, MessageHistoryRow,
-    append_message_history_entry, merge_message_history_entries,
-    message_history_is_adjacent_duplicate, message_history_trim_excess_count,
-    revert_message_history_tail_entry, should_record_message_history_text,
-    trim_message_history_entries,
+    MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN, MessageHistoryEntry, MessageHistoryEntryId,
+    MessageHistoryRow, PendingMessageHistoryEntry, append_message_history_entry,
+    merge_message_history_entries, message_history_is_adjacent_duplicate,
+    message_history_trim_excess_count, revert_message_history_tail_entry,
+    should_record_message_history_text, trim_message_history_entries,
 };
 pub use metrics::RuntimeRequestMetrics;
 pub use permission::{

@@ -9,7 +9,8 @@ use std::{
 
 use conversation_runtime::ProviderConversation;
 use runtime_domain::session::{
-    RuntimeEvent, SessionLoadRequestId, SessionPickerRow, SessionResumePayload, SessionTreePayload,
+    MessageHistoryEntryId, RuntimeEvent, SessionLoadRequestId, SessionPickerRow,
+    SessionResumePayload, SessionTreePayload,
 };
 use session_store::{ProjectDir, SessionHeader, SessionId, SessionListOptions, SessionStore};
 
@@ -114,6 +115,7 @@ enum SessionStoreCommand {
     },
     RecordMessageHistory {
         store: Arc<dyn SessionStore>,
+        entry_id: MessageHistoryEntryId,
         text: String,
         limit: usize,
     },
@@ -353,11 +355,17 @@ impl SessionStoreWorker {
     pub(super) fn record_message_history(
         &mut self,
         store: Arc<dyn SessionStore>,
+        entry_id: MessageHistoryEntryId,
         text: String,
         limit: usize,
     ) -> Result<(), String> {
         self.send_command(
-            SessionStoreCommand::RecordMessageHistory { store, text, limit },
+            SessionStoreCommand::RecordMessageHistory {
+                store,
+                entry_id,
+                text,
+                limit,
+            },
             false,
         )
     }
@@ -691,17 +699,22 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                 ),
             }
         }
-        SessionStoreCommand::RecordMessageHistory { store, text, limit } => {
-            match store.record_message_history(&text, limit).await {
-                Ok(()) => SessionStoreWorkerEvent::Noop,
-                Err(error) => {
-                    SessionStoreWorkerEvent::runtime(RuntimeEvent::MessageHistoryRecordFailed {
-                        text,
-                        message: error.to_string(),
-                    })
-                }
+        SessionStoreCommand::RecordMessageHistory {
+            store,
+            entry_id,
+            text,
+            limit,
+        } => match store.record_message_history(&text, limit).await {
+            Ok(()) => {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::MessageHistoryRecorded { entry_id })
             }
-        }
+            Err(error) => {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::MessageHistoryRecordFailed {
+                    entry_id,
+                    message: error.to_string(),
+                })
+            }
+        },
     }
 }
 

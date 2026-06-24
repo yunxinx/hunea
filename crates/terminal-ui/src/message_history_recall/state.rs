@@ -1,8 +1,8 @@
 use runtime_domain::{
     session::{
-        MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN, MessageHistoryEntry, append_message_history_entry,
-        merge_message_history_entries, message_history_is_adjacent_duplicate,
-        revert_message_history_tail_entry, should_record_message_history_text,
+        MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN, MessageHistoryEntry, MessageHistoryEntryId,
+        PendingMessageHistoryEntry, append_message_history_entry, merge_message_history_entries,
+        message_history_is_adjacent_duplicate, should_record_message_history_text,
     },
     time::unix_timestamp_ms,
 };
@@ -10,6 +10,9 @@ use runtime_domain::{
 /// 固定 25 条、oldest-first 的 shell 风格 history 状态机（无 async fetch）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct BlindRecallState {
+    persisted_cache: Vec<MessageHistoryEntry>,
+    pending_entries: Vec<PendingMessageHistoryEntry>,
+    next_entry_id: u64,
     cache: Vec<MessageHistoryEntry>,
     history_cursor: Option<usize>,
     active_recall: Option<BlindRecallAnchor>,
@@ -23,35 +26,36 @@ enum BlindRecallAnchor {
 
 impl BlindRecallState {
     pub(crate) fn apply_startup_cache(&mut self, entries: Vec<MessageHistoryEntry>) {
-        if self.cache.is_empty() {
-            self.replace_cache(entries);
-            return;
-        }
-
-        let local_entries = std::mem::take(&mut self.cache);
-        self.cache = merged_message_history_cache(entries, local_entries);
-        self.history_cursor = None;
-        self.active_recall = None;
-    }
-
-    pub(crate) fn replace_cache(&mut self, entries: Vec<MessageHistoryEntry>) {
-        self.cache = merge_message_history_entries(
+        self.persisted_cache = merge_message_history_entries(
             entries,
             Vec::new(),
             MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN,
         );
-        self.history_cursor = None;
-        self.active_recall = None;
+        self.rebuild_cache();
+        self.reset_navigation();
     }
 
     #[cfg(test)]
-    pub(crate) fn cache(&self) -> &[MessageHistoryEntry] {
-        &self.cache
+    pub(crate) fn replace_cache(&mut self, entries: Vec<MessageHistoryEntry>) {
+        self.persisted_cache = merge_message_history_entries(
+            entries,
+            Vec::new(),
+            MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN,
+        );
+        self.pending_entries.clear();
+        self.next_entry_id = 0;
+        self.rebuild_cache();
+        self.reset_navigation();
     }
 
-    /// 盲回溯缓存末尾正文（持久化调度失败时用于回滚键）。
-    pub(crate) fn tail_entry_text_for_persist_revert(&self) -> Option<&str> {
-        self.cache.last().map(|entry| entry.text.as_str())
+    #[cfg(test)]
+    pub(crate) fn cache(&self) -> Vec<MessageHistoryEntry> {
+        self.cache.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_entry_id_for_test(&self) -> Option<MessageHistoryEntryId> {
+        self.pending_entries.last().map(|entry| entry.id)
     }
 
     #[cfg(test)]
@@ -130,13 +134,29 @@ impl BlindRecallState {
 
     /// 本地写入（发送 / Ctrl-C 清输入）：相邻同文 no-op，否则追加并 trim 至 25，重置导航。
     ///
-    /// 若实际写入了新条目，返回应用层应持久化的正文（与缓存末尾条目内容一致）。
-    pub(crate) fn push_local_entry(&mut self, text: &str) -> Option<String> {
+    /// 若实际写入了新条目，返回应用层应持久化的待提交条目。
+    pub(crate) fn push_local_entry(&mut self, text: &str) -> Option<PendingMessageHistoryEntry> {
+        self.push_local_entry_with_timestamp(text, unix_timestamp_ms().ok())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_local_entry_with_timestamp_for_test(
+        &mut self,
+        text: &str,
+        timestamp_ms: Option<i64>,
+    ) -> Option<PendingMessageHistoryEntry> {
+        self.push_local_entry_with_timestamp(text, timestamp_ms)
+    }
+
+    fn push_local_entry_with_timestamp(
+        &mut self,
+        text: &str,
+        timestamp_ms: Option<i64>,
+    ) -> Option<PendingMessageHistoryEntry> {
         if !should_record_message_history_text(text) {
             return None;
         }
-        self.history_cursor = None;
-        self.active_recall = None;
+        self.reset_navigation();
 
         if message_history_is_adjacent_duplicate(
             self.cache.last().map(|previous| previous.text.as_str()),
@@ -145,26 +165,47 @@ impl BlindRecallState {
             return None;
         }
 
-        let ts = unix_timestamp_ms().unwrap_or(0);
-        let persisted_text = text.to_string();
-        append_message_history_entry(
-            &mut self.cache,
-            MessageHistoryEntry {
-                ts,
-                text: persisted_text.clone(),
-            },
-            MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN,
-        );
-        Some(persisted_text)
+        let pending_entry = PendingMessageHistoryEntry {
+            id: self.allocate_entry_id(),
+            ts: timestamp_ms?,
+            text: text.to_string(),
+        };
+        self.pending_entries.push(pending_entry.clone());
+        self.rebuild_cache();
+        Some(pending_entry)
     }
 
-    /// 异步持久化失败时回滚盲回溯缓存末尾一条（与 [`push_local_entry`] 写入的正文一致时）。
-    pub(crate) fn revert_failed_persist(&mut self, text: &str) -> bool {
-        if !revert_message_history_tail_entry(&mut self.cache, text) {
+    /// 记录异步持久化成功，将该条目从待提交队列晋升到已持久化缓存。
+    pub(crate) fn confirm_persisted(&mut self, entry_id: MessageHistoryEntryId) -> bool {
+        let Some(index) = self
+            .pending_entries
+            .iter()
+            .position(|entry| entry.id == entry_id)
+        else {
             return false;
-        }
-        self.history_cursor = None;
-        self.active_recall = None;
+        };
+        let persisted = self.pending_entries.remove(index);
+        append_message_history_entry(
+            &mut self.persisted_cache,
+            persisted.as_history_entry(),
+            MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN,
+        );
+        self.rebuild_cache();
+        true
+    }
+
+    /// 异步持久化失败时回滚对应的待提交条目，并根据剩余 pending/persisted 状态重建可见缓存。
+    pub(crate) fn revert_failed_persist(&mut self, entry_id: MessageHistoryEntryId) -> bool {
+        let Some(index) = self
+            .pending_entries
+            .iter()
+            .position(|entry| entry.id == entry_id)
+        else {
+            return false;
+        };
+        self.pending_entries.remove(index);
+        self.rebuild_cache();
+        self.reset_navigation();
         true
     }
 
@@ -175,6 +216,26 @@ impl BlindRecallState {
             Some(index) => BlindRecallAnchor::CacheIndex(index),
             None => BlindRecallAnchor::ExternalText(text.to_string()),
         });
+    }
+
+    fn rebuild_cache(&mut self) {
+        self.cache = merged_message_history_cache(
+            self.persisted_cache.clone(),
+            self.pending_entries
+                .iter()
+                .map(PendingMessageHistoryEntry::as_history_entry)
+                .collect(),
+        );
+    }
+
+    fn allocate_entry_id(&mut self) -> MessageHistoryEntryId {
+        self.next_entry_id = self.next_entry_id.saturating_add(1).max(1);
+        MessageHistoryEntryId(self.next_entry_id)
+    }
+
+    fn reset_navigation(&mut self) {
+        self.history_cursor = None;
+        self.active_recall = None;
     }
 }
 

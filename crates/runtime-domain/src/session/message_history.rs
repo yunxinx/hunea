@@ -3,9 +3,21 @@
 /// 盲回溯启动缓存固定条数。
 pub const MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN: usize = 25;
 
+/// 本地 message history 乐观写入的稳定标识。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MessageHistoryEntryId(pub u64);
+
 /// 盲回溯启动缓存单条记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageHistoryEntry {
+    pub ts: i64,
+    pub text: String,
+}
+
+/// 本地已写入 blind recall、待异步持久化的一条记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMessageHistoryEntry {
+    pub id: MessageHistoryEntryId,
     pub ts: i64,
     pub text: String,
 }
@@ -85,10 +97,21 @@ pub fn merge_message_history_entries(
     merged
 }
 
+impl PendingMessageHistoryEntry {
+    /// 投影为不带本地事务标识的 message history 条目。
+    pub fn as_history_entry(&self) -> MessageHistoryEntry {
+        MessageHistoryEntry {
+            ts: self.ts,
+            text: self.text.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        MessageHistoryEntry, append_message_history_entry, merge_message_history_entries,
+        MessageHistoryEntry, MessageHistoryEntryId, PendingMessageHistoryEntry,
+        append_message_history_entry, merge_message_history_entries,
         message_history_trim_excess_count, should_record_message_history_text,
     };
 
@@ -150,6 +173,23 @@ mod tests {
         assert!(super::revert_message_history_tail_entry(&mut entries, "b"));
         assert_eq!(texts(&entries), ["a"]);
         assert!(!super::revert_message_history_tail_entry(&mut entries, "b"));
+    }
+
+    #[test]
+    fn pending_entry_projects_to_history_entry() {
+        let pending = PendingMessageHistoryEntry {
+            id: MessageHistoryEntryId(7),
+            ts: 42,
+            text: "hello".to_string(),
+        };
+
+        assert_eq!(
+            pending.as_history_entry(),
+            MessageHistoryEntry {
+                ts: 42,
+                text: "hello".to_string(),
+            }
+        );
     }
 
     fn entry(ts: i64, text: &str) -> MessageHistoryEntry {

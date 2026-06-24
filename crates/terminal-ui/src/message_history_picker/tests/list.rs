@@ -65,12 +65,13 @@ fn enter_with_nonempty_composer_records_draft_then_restores() {
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    assert_eq!(
-        effect,
-        Some(AppEffect::RecordMessageHistory {
-            text: "draft kept".to_string(),
-        })
-    );
+    match effect {
+        Some(AppEffect::RecordMessageHistory { entry_id, text }) => {
+            assert_eq!(entry_id, runtime_domain::session::MessageHistoryEntryId(1));
+            assert_eq!(text, "draft kept");
+        }
+        other => panic!("expected RecordMessageHistory effect, got {other:?}"),
+    }
     assert!(!model.message_history_picker_active());
     assert_eq!(model.composer_text(), "older prompt");
     assert_eq!(

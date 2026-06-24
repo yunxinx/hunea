@@ -14,19 +14,18 @@ use super::terminal::TuiTerminal;
 pub(crate) fn dispatch_record_message_history(
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
+    entry_id: runtime_domain::session::MessageHistoryEntryId,
     text: String,
 ) {
     let limit = model.message_history_limit;
-    if let Err(message) = runtime_coordinator
-        .dispatch_runtime_command(RuntimeCommand::RecordMessageHistory { text, limit })
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::RecordMessageHistory {
+            entry_id,
+            text,
+            limit,
+        })
     {
-        let revert_tail = model
-            .blind_recall
-            .tail_entry_text_for_persist_revert()
-            .map(str::to_string);
-        if let Some(tail) = revert_tail.as_deref() {
-            model.blind_recall.revert_failed_persist(tail);
-        }
+        model.blind_recall.revert_failed_persist(entry_id);
         model.show_toast(ToastSeverity::Error, message);
     }
 }
@@ -147,16 +146,16 @@ pub(super) fn apply_effect_if_needed(
             run_refresh_model_provider_effect(model, runtime_coordinator, request);
             Ok(())
         }
-        AppEffect::RecordMessageHistory { text } => {
-            dispatch_record_message_history(model, runtime_coordinator, text);
+        AppEffect::RecordMessageHistory { entry_id, text } => {
+            dispatch_record_message_history(model, runtime_coordinator, entry_id, text);
             Ok(())
         }
         AppEffect::SendConversationTurn {
             request,
             record_message_history,
         } => {
-            if let Some(text) = record_message_history {
-                dispatch_record_message_history(model, runtime_coordinator, text);
+            if let Some(entry) = record_message_history {
+                dispatch_record_message_history(model, runtime_coordinator, entry.id, entry.text);
             }
             run_send_conversation_turn_effect(model, runtime_coordinator, *request);
             Ok(())

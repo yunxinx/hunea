@@ -93,12 +93,13 @@ impl AppRuntimeCoordinator {
 
     pub(super) fn record_message_history(
         &mut self,
+        entry_id: runtime_domain::session::MessageHistoryEntryId,
         text: String,
         limit: usize,
     ) -> Result<RuntimeCommandReceipt, String> {
         let store = self.session_store()?;
         self.session_store_worker
-            .record_message_history(store, text, limit)?;
+            .record_message_history(store, entry_id, text, limit)?;
         Ok(RuntimeCommandReceipt::Accepted)
     }
 

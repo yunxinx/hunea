@@ -18,7 +18,10 @@ use super::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use runtime_domain::{
     model_catalog::{ModelSelection, ProviderSyncRequest},
-    session::{ConversationTurnRequest, RuntimeTarget, SessionLoadRequestId},
+    session::{
+        ConversationTurnRequest, MessageHistoryEntryId, PendingMessageHistoryEntry, RuntimeTarget,
+        SessionLoadRequestId,
+    },
 };
 
 /// `STARTUP_PROBE_TIMEOUT` 是启动阶段等待主题探测结果的最长时长。
@@ -63,7 +66,7 @@ pub enum AppEffect {
     SendConversationTurn {
         request: Box<ConversationTurnRequest>,
         /// 发送前已写入盲回溯、需异步落库的正文；相邻重复或未写入时为 `None`。
-        record_message_history: Option<String>,
+        record_message_history: Option<PendingMessageHistoryEntry>,
     },
     InterruptCurrentTurn,
     PersistSelectedModel {
@@ -73,6 +76,7 @@ pub enum AppEffect {
         request: ProviderSyncRequest,
     },
     RecordMessageHistory {
+        entry_id: MessageHistoryEntryId,
         text: String,
     },
 }

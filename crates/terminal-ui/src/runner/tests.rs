@@ -1659,15 +1659,25 @@ fn conversation_send_effect_records_history_after_conversation_start() {
         &mut model,
         &mut runtime_coordinator,
         request,
-        Some("hello history".to_string()),
+        Some(runtime_domain::session::PendingMessageHistoryEntry {
+            id: runtime_domain::session::MessageHistoryEntryId(1),
+            ts: 11,
+            text: "hello history".to_string(),
+        }),
     );
 
     assert!(matches!(
         runtime_coordinator.commands.as_slice(),
         [
-            RuntimeCommand::RecordMessageHistory { text, limit },
+            RuntimeCommand::RecordMessageHistory {
+                entry_id,
+                text,
+                limit,
+            },
             RuntimeCommand::SubmitConversationTurn { .. },
-        ] if text == "hello history" && *limit == model.message_history_limit
+        ] if *entry_id == runtime_domain::session::MessageHistoryEntryId(1)
+            && text == "hello history"
+            && *limit == model.message_history_limit
     ));
 }
 
@@ -1692,7 +1702,11 @@ fn conversation_send_effect_failure_uses_toast_not_status_notice() {
         &mut model,
         &mut runtime_coordinator,
         request,
-        Some("hello".to_string()),
+        Some(runtime_domain::session::PendingMessageHistoryEntry {
+            id: runtime_domain::session::MessageHistoryEntryId(1),
+            ts: 11,
+            text: "hello".to_string(),
+        }),
     );
 
     assert_eq!(model.current_status_notice_text(), "");
@@ -1703,9 +1717,13 @@ fn conversation_send_effect_failure_uses_toast_not_status_notice() {
     assert!(matches!(
         runtime_coordinator.commands.as_slice(),
         [
-            RuntimeCommand::RecordMessageHistory { text, limit: _ },
+            RuntimeCommand::RecordMessageHistory {
+                entry_id,
+                text,
+                limit: _,
+            },
             RuntimeCommand::SubmitConversationTurn { .. },
-        ] if text == "hello"
+        ] if *entry_id == runtime_domain::session::MessageHistoryEntryId(1) && text == "hello"
     ));
     assert!(!model.current_stream_activity_render_result().has_content);
 }
@@ -1721,7 +1739,8 @@ fn record_message_history_dispatch_failure_reverts_blind_recall_cache() {
             text: "prior".to_string(),
         }],
     });
-    crate::message_history_recall::stage_message_history_recall(&mut model, "hello");
+    let entry = crate::message_history_recall::stage_message_history_recall(&mut model, "hello")
+        .expect("hello should stage a pending persist");
     assert_eq!(model.blind_recall.cache().len(), 2);
 
     let mut runtime_coordinator = TestRuntimeCoordinator {
@@ -1732,6 +1751,7 @@ fn record_message_history_dispatch_failure_reverts_blind_recall_cache() {
         &mut model,
         &mut runtime_coordinator,
         Some(AppEffect::RecordMessageHistory {
+            entry_id: entry.id,
             text: "hello".to_string(),
         }),
     );
@@ -2049,10 +2069,10 @@ fn apply_send_conversation_turn_effect_for_test(
     model: &mut Model,
     runtime_coordinator: &mut TestRuntimeCoordinator,
     request: ConversationTurnRequest,
-    record_message_history: Option<String>,
+    record_message_history: Option<runtime_domain::session::PendingMessageHistoryEntry>,
 ) {
-    if let Some(text) = record_message_history {
-        dispatch_record_message_history(model, runtime_coordinator, text);
+    if let Some(entry) = record_message_history {
+        dispatch_record_message_history(model, runtime_coordinator, entry.id, entry.text);
     }
     run_send_conversation_turn_effect(model, runtime_coordinator, request);
 }
@@ -2063,8 +2083,8 @@ fn apply_effect_if_needed_for_test(
     effect: Option<AppEffect>,
 ) {
     match effect {
-        Some(AppEffect::RecordMessageHistory { text }) => {
-            dispatch_record_message_history(model, runtime_coordinator, text);
+        Some(AppEffect::RecordMessageHistory { entry_id, text }) => {
+            dispatch_record_message_history(model, runtime_coordinator, entry_id, text);
         }
         Some(AppEffect::InterruptCurrentTurn) => {
             run_interrupt_current_turn_effect(model, runtime_coordinator);

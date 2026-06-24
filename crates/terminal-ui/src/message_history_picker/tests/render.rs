@@ -7,7 +7,7 @@ use crate::{
     theme::default_palette,
 };
 
-use super::{ready_picker_model, sample_rows};
+use super::common::{ready_picker_model, sample_rows};
 
 #[test]
 fn message_history_picker_render_shows_chrome_hint_and_cursor_marker() {

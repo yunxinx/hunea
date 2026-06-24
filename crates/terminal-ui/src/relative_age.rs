@@ -1,4 +1,6 @@
 //! 两档相对时间标签（`y`…`s`）及固定列宽排版；message history 列表与 entry tree branch picker 共用。
+//!
+//! 月份后缀为 `M`（不用 `mo`），与分钟 `m` 区分；见 `CONTEXT.md`「Relative age label」。
 
 use crate::display_width::display_width;
 

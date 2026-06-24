@@ -31,7 +31,6 @@ pub(crate) fn record_message_history(
             .map_err(sqlite_err)?;
 
         if message_history_is_adjacent_duplicate(last_text.as_deref(), text) {
-            trim_message_history(&transaction, limit)?;
             transaction.commit().map_err(sqlite_err)?;
             return Ok(());
         }

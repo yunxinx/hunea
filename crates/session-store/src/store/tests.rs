@@ -43,7 +43,7 @@ async fn in_memory_store_skips_whitespace_only_message_history() {
 }
 
 #[tokio::test]
-async fn in_memory_store_trims_lowered_limit_on_adjacent_duplicate() {
+async fn in_memory_store_adjacent_duplicate_does_not_trim_to_lower_limit() {
     let store = InMemorySessionStore::new();
 
     for i in 0..5 {
@@ -55,15 +55,14 @@ async fn in_memory_store_trims_lowered_limit_on_adjacent_duplicate() {
     store
         .record_message_history("line-4".to_string(), 2)
         .await
-        .expect("duplicate should still enforce lower limit");
+        .expect("adjacent duplicate should be no-op");
 
     let rows = store
         .load_message_history_all()
         .await
         .expect("history should load");
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].text, "line-3");
-    assert_eq!(rows[1].text, "line-4");
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows[4].text, "line-4");
 }
 
 #[tokio::test]
@@ -93,7 +92,7 @@ async fn in_memory_store_preserves_history_row_ids_when_lowered_limit_trims_on_i
 }
 
 #[tokio::test]
-async fn in_memory_store_preserves_history_row_ids_when_lowered_limit_trims_on_duplicate() {
+async fn in_memory_store_preserves_history_row_ids_on_adjacent_duplicate() {
     let store = InMemorySessionStore::new();
 
     for i in 0..5 {
@@ -105,17 +104,16 @@ async fn in_memory_store_preserves_history_row_ids_when_lowered_limit_trims_on_d
     store
         .record_message_history("line-4".to_string(), 2)
         .await
-        .expect("duplicate should still enforce lower limit");
+        .expect("adjacent duplicate should be no-op");
 
     let rows = store
         .load_message_history_all()
         .await
         .expect("history should load");
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].id, 4);
-    assert_eq!(rows[0].text, "line-3");
-    assert_eq!(rows[1].id, 5);
-    assert_eq!(rows[1].text, "line-4");
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[4].id, 5);
+    assert_eq!(rows[4].text, "line-4");
 }
 
 #[tokio::test]

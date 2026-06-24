@@ -41,7 +41,7 @@ pub fn trim_message_history_entries(entries: &mut Vec<MessageHistoryEntry>, limi
     }
 }
 
-/// 按统一策略追加一条 message history：相邻同文跳过，超限时裁掉最旧条目。
+/// 按统一策略追加一条 message history：相邻同文整条 no-op（不插入、不裁剪）；否则追加并在超限时裁掉最旧条目。
 pub fn append_message_history_entry(
     entries: &mut Vec<MessageHistoryEntry>,
     entry: MessageHistoryEntry,
@@ -51,7 +51,6 @@ pub fn append_message_history_entry(
         entries.last().map(|previous| previous.text.as_str()),
         &entry.text,
     ) {
-        trim_message_history_entries(entries, limit);
         return;
     }
 
@@ -89,7 +88,15 @@ mod tests {
     }
 
     #[test]
-    fn appends_with_adjacent_dedup_and_trim() {
+    fn adjacent_duplicate_is_noop_without_trim() {
+        let mut entries = vec![entry(1, "a"), entry(2, "b"), entry(3, "c")];
+
+        append_message_history_entry(&mut entries, entry(4, "c"), 3);
+        assert_eq!(texts(&entries), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn appends_with_adjacent_dedup_and_trim_on_new_entry() {
         let mut entries = vec![
             entry(1, "older"),
             entry(2, "same"),
@@ -98,7 +105,7 @@ mod tests {
         ];
 
         append_message_history_entry(&mut entries, entry(5, "newer"), 3);
-        assert_eq!(texts(&entries), ["same", "same", "newer"]);
+        assert_eq!(texts(&entries), ["older", "same", "same", "newer"]);
 
         append_message_history_entry(&mut entries, entry(6, "fresh"), 3);
         assert_eq!(texts(&entries), ["same", "newer", "fresh"]);

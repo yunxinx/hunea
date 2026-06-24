@@ -30,7 +30,7 @@ async fn message_history_table_exists_after_index_open() {
 }
 
 #[tokio::test]
-async fn record_dedup_adjacent_and_trim() {
+async fn record_dedup_adjacent_is_noop_without_trim() {
     let path = temp_index_path("dedup-trim");
     let index = MetadataIndex::open(&path).await.expect("index should open");
 
@@ -141,7 +141,7 @@ async fn lowered_limit_trims_on_next_insert() {
 }
 
 #[tokio::test]
-async fn lowered_limit_trims_on_adjacent_duplicate() {
+async fn lowered_limit_does_not_trim_on_adjacent_duplicate() {
     let path = temp_index_path("lower-limit-duplicate");
     let index = MetadataIndex::open(&path).await.expect("index should open");
 
@@ -154,12 +154,11 @@ async fn lowered_limit_trims_on_adjacent_duplicate() {
     index
         .record_message_history("line-4".to_string(), 2)
         .await
-        .expect("duplicate record with lower limit");
+        .expect("adjacent duplicate should be no-op");
 
     let all = index.load_message_history_all().await.expect("load");
-    assert_eq!(all.len(), 2);
-    assert_eq!(all[0].text, "line-3");
-    assert_eq!(all[1].text, "line-4");
+    assert_eq!(all.len(), 5);
+    assert_eq!(all[4].text, "line-4");
 
     let _ = fs::remove_dir_all(path.parent().expect("parent"));
 }

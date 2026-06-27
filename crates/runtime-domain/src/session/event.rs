@@ -6,8 +6,34 @@ use super::{
     SessionResumePayload, SessionTreePayload,
 };
 
-/// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
+/// Context budget snapshot payload for the `/context` overlay.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextBudgetSnapshotPayload {
+    pub model_id: String,
+    pub segments: Vec<ContextBudgetSegmentPayload>,
+    pub total_estimated_tokens: usize,
+    pub context_limit: Option<u32>,
+    pub display: ContextBudgetDisplayPayload,
+}
+
+/// One segment in a context budget snapshot event.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextBudgetSegmentPayload {
+    pub kind_tag: String,
+    pub stack_order: u16,
+    pub estimated_tokens: usize,
+    pub label: String,
+}
+
+/// Display mode for context budget header and legend.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ContextBudgetDisplayPayload {
+    Relative { used: u32 },
+    Absolute { limit: u32, used: u32, percent: f32 },
+}
+
+/// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
+#[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeEvent {
     Started {
         target: RuntimeTarget,
@@ -92,6 +118,12 @@ pub enum RuntimeEvent {
     },
     CopyPickerTreeLoadFailed {
         request_id: SessionLoadRequestId,
+        message: String,
+    },
+    ContextBudgetSnapshotLoaded {
+        payload: ContextBudgetSnapshotPayload,
+    },
+    ContextBudgetSnapshotLoadFailed {
         message: String,
     },
     SessionBranchTreeLoaded {
@@ -194,7 +226,9 @@ impl RuntimeEvent {
             | Self::MessageHistoryPickerRowsLoaded { .. }
             | Self::MessageHistoryPickerRowsLoadFailed { .. }
             | Self::MessageHistoryRecorded { .. }
-            | Self::MessageHistoryRecordFailed { .. } => None,
+            | Self::MessageHistoryRecordFailed { .. }
+            | Self::ContextBudgetSnapshotLoaded { .. }
+            | Self::ContextBudgetSnapshotLoadFailed { .. } => None,
         }
     }
 }

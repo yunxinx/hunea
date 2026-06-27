@@ -80,6 +80,8 @@ pub(crate) fn runtime_options_from_app_config_and_models(
 ) -> AppRuntimeOptions {
     AppRuntimeOptions {
         model_config_path: loaded_models.source_path.clone(),
+        model_catalog: loaded_models.catalog.clone(),
+        context_limits: loaded_models.context_limits.clone(),
         runtime_request_policy: runtime_request_policy_from_config(&config.runtime),
         managed_search_tools: managed_search_tools_from_config(&config.runtime),
         managed_search_authorization_config_path: appconfig::user_config_file_path(),

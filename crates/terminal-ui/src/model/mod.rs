@@ -18,6 +18,7 @@ use runtime_domain::{
 use super::{
     ReasoningDisplayMode, StartupBannerOptions,
     composer::{Composer, PendingComposerCursorClick},
+    context_budget::ContextBudgetState,
     copy_picker::CopyPickerState,
     entry_tree::{BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN},
     external_editor::ExternalEditorLaunch,
@@ -74,6 +75,7 @@ pub struct Model {
     pub(super) session_picker: Option<crate::session_picker::SessionPickerState>,
     pub(super) session_preview: Option<crate::session_preview::SessionPreviewState>,
     pub(super) entry_tree: Option<crate::entry_tree::EntryTreeState>,
+    pub(super) context_budget: Option<ContextBudgetState>,
     pub(super) copy_picker: Option<CopyPickerState>,
     pub(super) message_history_picker:
         Option<crate::message_history_picker::MessageHistoryPickerState>,
@@ -193,6 +195,7 @@ impl Model {
             session_picker: None,
             session_preview: None,
             entry_tree: None,
+            context_budget: None,
             copy_picker: None,
             message_history_picker: None,
             next_session_load_request_id: 1,

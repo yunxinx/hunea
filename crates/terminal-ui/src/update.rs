@@ -33,6 +33,7 @@ pub enum AppEffect {
     LaunchExternalEditor(ExternalEditorLaunch),
     CopySelection(String),
     OpenCopyPicker,
+    OpenContextBudget,
     OpenMessageHistory,
     ResetRuntimeSession,
     RespondRuntimePermission {
@@ -316,7 +317,9 @@ impl Model {
                 }
                 OverlayInputResult::Handled
             }
-            Some(ModalLayer::TranscriptOverlay) => OverlayInputResult::Handled,
+            Some(ModalLayer::TranscriptOverlay) | Some(ModalLayer::ContextBudget) => {
+                OverlayInputResult::Handled
+            }
             None => OverlayInputResult::Ignored,
         }
     }
@@ -355,6 +358,7 @@ impl Model {
             ModalLayer::CopyPicker => self.handle_copy_picker_key(key),
             ModalLayer::EntryTree => self.handle_entry_tree_key(key),
             ModalLayer::MessageHistory => self.handle_message_history_picker_key(key),
+            ModalLayer::ContextBudget => self.handle_context_budget_key(key),
         }
     }
 

@@ -10,6 +10,7 @@ pub(crate) enum ModalLayer {
     CopyPicker,
     EntryTree,
     MessageHistory,
+    ContextBudget,
 }
 
 impl ModalLayer {
@@ -55,6 +56,9 @@ impl Model {
         if self.message_history_picker_active() {
             return Some(ModalLayer::MessageHistory);
         }
+        if self.context_budget_active() {
+            return Some(ModalLayer::ContextBudget);
+        }
         None
     }
 
@@ -96,7 +100,8 @@ impl Model {
             ModalLayer::ToolApprovalFullscreenPreview
             | ModalLayer::TranscriptOverlay
             | ModalLayer::SessionPreview
-            | ModalLayer::SessionPicker => {
+            | ModalLayer::SessionPicker
+            | ModalLayer::ContextBudget => {
                 Some(TerminalMouseModePreference::NativeWithAlternateScroll)
             }
         }
@@ -109,6 +114,7 @@ impl Model {
         self.copy_picker = None;
         self.entry_tree = None;
         self.message_history_picker = None;
+        self.close_context_budget();
     }
 }
 

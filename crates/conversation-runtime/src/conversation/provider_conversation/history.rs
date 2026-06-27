@@ -120,7 +120,7 @@ impl ProviderConversation {
         Ok(())
     }
 
-    fn provider_items(&self) -> Vec<ConversationItem> {
+    pub(crate) fn provider_items(&self) -> Vec<ConversationItem> {
         let mut items = Vec::with_capacity(
             self.persisted_history.len() + usize::from(self.system_prompt.is_some()),
         );

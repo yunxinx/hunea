@@ -138,7 +138,23 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             | RuntimeCommand::SelectEntryRewind { .. }
             | RuntimeCommand::LoadMessageHistoryStartupCache
             | RuntimeCommand::LoadMessageHistoryPickerRows { .. }
-            | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
+            | RuntimeCommand::RecordMessageHistory { .. }
+            | RuntimeCommand::LoadContextBudgetSnapshot { .. } => {
+                self.runtime_events
+                    .push(RuntimeEvent::ContextBudgetSnapshotLoaded {
+                        payload: runtime_domain::session::ContextBudgetSnapshotPayload {
+                            model_id: "qwen3".to_string(),
+                            segments: vec![],
+                            total_estimated_tokens: 0,
+                            context_limit: None,
+                            display:
+                                runtime_domain::session::ContextBudgetDisplayPayload::Relative {
+                                    used: 0,
+                                },
+                        },
+                    });
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
         }
     }
 

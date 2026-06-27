@@ -1,3 +1,4 @@
+mod context_budget_command;
 mod conversation_commands;
 mod event_mapping;
 mod managed_search_authorization;
@@ -11,7 +12,8 @@ use conversation_runtime::{
     ConversationWorker, ModelRefreshWorker, ProviderConversation, models as provider_models,
 };
 use runtime_domain::{
-    model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
+    model_catalog::{ModelCatalog, ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
+    model_context_limit::ModelContextLimits,
     request_policy::RuntimeRequestPolicy,
     session::{
         ConversationEvent, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
@@ -40,6 +42,8 @@ use self::{
 #[derive(Clone, Default)]
 pub(crate) struct AppRuntimeOptions {
     pub(crate) model_config_path: Option<PathBuf>,
+    pub(crate) model_catalog: ModelCatalog,
+    pub(crate) context_limits: ModelContextLimits,
     pub(crate) runtime_request_policy: RuntimeRequestPolicy,
     pub(crate) managed_search_tools: ManagedSearchToolConfig,
     pub(crate) managed_search_authorization_config_path: Option<PathBuf>,
@@ -111,6 +115,9 @@ impl AppRuntimeCoordinator {
             RuntimeCommand::LoadEntryTree { request_id } => self.load_entry_tree(request_id),
             RuntimeCommand::LoadCopyPickerTree { request_id } => {
                 self.load_copy_picker_tree(request_id)
+            }
+            RuntimeCommand::LoadContextBudgetSnapshot { selection } => {
+                self.load_context_budget_snapshot_command(&selection)
             }
             RuntimeCommand::LoadBranchTree { request_id } => self.load_branch_tree(request_id),
             RuntimeCommand::LoadBranchPreview {

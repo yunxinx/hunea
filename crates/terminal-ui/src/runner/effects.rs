@@ -77,6 +77,10 @@ pub(super) fn apply_effect_if_needed(
             run_open_copy_picker_effect(model, runtime_coordinator);
             Ok(())
         }
+        AppEffect::OpenContextBudget => {
+            run_open_context_budget_effect(model, runtime_coordinator);
+            Ok(())
+        }
         AppEffect::OpenMessageHistory => {
             run_open_message_history_picker_effect(model, runtime_coordinator);
             Ok(())
@@ -191,6 +195,25 @@ pub(super) fn run_open_copy_picker_effect(
         .dispatch_runtime_command(RuntimeCommand::LoadCopyPickerTree { request_id })
     {
         model.show_copy_picker_error(&message);
+    }
+}
+
+pub(super) fn run_open_context_budget_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) {
+    let Some(selection) = model.selected_model.clone() else {
+        model.show_toast(
+            crate::toast::ToastSeverity::Error,
+            "Select a model before opening context budget",
+        );
+        return;
+    };
+    model.open_context_budget_loading();
+    if let Err(message) = runtime_coordinator
+        .dispatch_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot { selection })
+    {
+        model.show_context_budget_error(&message);
     }
 }
 

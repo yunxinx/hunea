@@ -221,6 +221,19 @@ impl ProviderConversation {
         self.system_prompt.as_deref()
     }
 
+    /// Provider-visible items for context budget when no turn is being prepared.
+    ///
+    /// Includes persisted history and system prompt. If a user turn is pending in
+    /// `prepare_turn`, that message is appended (same ordering as a prepared request).
+    #[must_use]
+    pub fn provider_items_for_context_budget_probe(&self) -> Vec<ConversationItem> {
+        let mut items = self.provider_items();
+        if let Some(pending) = self.pending_user_message.as_ref() {
+            items.push(pending.clone());
+        }
+        items
+    }
+
     /// `session_id` 返回当前持久化 session id。
     #[must_use]
     pub fn session_id(&self) -> Option<&SessionId> {

@@ -22,7 +22,10 @@ pub use conversation::{
     ConversationEvent, ConversationRequest, ConversationResponse, ConversationTurnRequest,
     ManagedSearchTool, ProviderRequest, ProviderRequestMetrics,
 };
-pub use event::RuntimeEvent;
+pub use event::{
+    ContextBudgetDisplayPayload, ContextBudgetSegmentPayload, ContextBudgetSnapshotPayload,
+    RuntimeEvent,
+};
 pub use identity::{RuntimeAgentCapabilities, RuntimeIdentity, RuntimePromptCapabilities};
 pub use load_request::SessionLoadRequestId;
 pub use message_history::{

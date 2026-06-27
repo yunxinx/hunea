@@ -73,6 +73,8 @@ pub fn run_with_writer<W: Write>(
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
     let mut runtime_options = AppRuntimeOptions {
         model_config_path: loaded_models.source_path.clone(),
+        model_catalog: loaded_models.catalog.clone(),
+        context_limits: loaded_models.context_limits.clone(),
         ..AppRuntimeOptions::default()
     };
     attach_default_session_persistence(&mut runtime_options, &loaded_models)

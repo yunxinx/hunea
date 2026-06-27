@@ -142,6 +142,12 @@ impl RuntimeEventApply for Model {
                     self.show_copy_picker_error(&message);
                 }
             }
+            RuntimeEvent::ContextBudgetSnapshotLoaded { payload } => {
+                self.apply_context_budget_snapshot(payload);
+            }
+            RuntimeEvent::ContextBudgetSnapshotLoadFailed { message } => {
+                self.show_context_budget_error(&message);
+            }
             RuntimeEvent::SessionBranchTreeLoaded {
                 request_id,
                 payload,

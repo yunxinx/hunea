@@ -9,12 +9,21 @@ impl Model {
     }
 
     pub(crate) fn open_context_budget_loading(&mut self) {
-        self.context_budget = Some(ContextBudgetState::default());
         self.close_composer_attached_ui();
+        self.close_tool_approval_panel();
+        self.close_model_panel();
+        self.context_budget = Some(ContextBudgetState::default());
+        self.sync_composer_height();
+        self.sync_document_viewport_for_composer_cursor();
     }
 
     pub(crate) fn close_context_budget(&mut self) {
+        if self.context_budget.is_none() {
+            return;
+        }
         self.context_budget = None;
+        self.sync_composer_height();
+        self.sync_document_viewport_for_composer_cursor();
     }
 
     pub(crate) fn apply_context_budget_snapshot(

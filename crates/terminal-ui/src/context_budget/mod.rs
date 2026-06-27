@@ -1,4 +1,4 @@
-//! Context budget view (`/context`) overlay.
+//! Context budget view (`/context`) inline panel.
 
 mod heatmap;
 mod input;
@@ -8,6 +8,7 @@ mod render;
 mod segment_colors;
 mod state;
 
+pub(crate) use render::ContextBudgetRenderResult;
 pub(crate) use state::ContextBudgetState;
 
 #[cfg(test)]

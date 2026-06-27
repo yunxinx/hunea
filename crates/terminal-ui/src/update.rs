@@ -317,9 +317,7 @@ impl Model {
                 }
                 OverlayInputResult::Handled
             }
-            Some(ModalLayer::TranscriptOverlay) | Some(ModalLayer::ContextBudget) => {
-                OverlayInputResult::Handled
-            }
+            Some(ModalLayer::TranscriptOverlay) => OverlayInputResult::Handled,
             None => OverlayInputResult::Ignored,
         }
     }
@@ -358,7 +356,6 @@ impl Model {
             ModalLayer::CopyPicker => self.handle_copy_picker_key(key),
             ModalLayer::EntryTree => self.handle_entry_tree_key(key),
             ModalLayer::MessageHistory => self.handle_message_history_picker_key(key),
-            ModalLayer::ContextBudget => self.handle_context_budget_key(key),
         }
     }
 
@@ -385,6 +382,9 @@ impl Model {
     fn handle_current_modal_or_panel_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if self.tool_approval_panel_active() {
             return self.handle_tool_approval_panel_key(key);
+        }
+        if self.context_budget_active() {
+            return self.handle_context_budget_key(key);
         }
         self.handle_top_modal_layer_key(key)
     }

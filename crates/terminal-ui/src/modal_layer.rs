@@ -10,7 +10,6 @@ pub(crate) enum ModalLayer {
     CopyPicker,
     EntryTree,
     MessageHistory,
-    ContextBudget,
 }
 
 impl ModalLayer {
@@ -56,9 +55,6 @@ impl Model {
         if self.message_history_picker_active() {
             return Some(ModalLayer::MessageHistory);
         }
-        if self.context_budget_active() {
-            return Some(ModalLayer::ContextBudget);
-        }
         None
     }
 
@@ -66,6 +62,7 @@ impl Model {
     pub(crate) fn blocks_composer_input(&self) -> bool {
         self.top_modal_layer().is_some()
             || self.model_panel_active()
+            || self.context_budget_active()
             || self.tool_approval_panel_active()
     }
 
@@ -100,8 +97,7 @@ impl Model {
             ModalLayer::ToolApprovalFullscreenPreview
             | ModalLayer::TranscriptOverlay
             | ModalLayer::SessionPreview
-            | ModalLayer::SessionPicker
-            | ModalLayer::ContextBudget => {
+            | ModalLayer::SessionPicker => {
                 Some(TerminalMouseModePreference::NativeWithAlternateScroll)
             }
         }
@@ -114,7 +110,6 @@ impl Model {
         self.copy_picker = None;
         self.entry_tree = None;
         self.message_history_picker = None;
-        self.close_context_budget();
     }
 }
 
@@ -253,6 +248,17 @@ mod tests {
         let mut model = Model::new(StartupBannerOptions::default());
 
         model.open_model_panel();
+
+        assert_eq!(model.top_modal_layer(), None);
+        assert!(model.blocks_composer_input());
+        assert!(!model.modal_blocks_pointer_passthrough());
+    }
+
+    #[test]
+    fn context_budget_blocks_composer_without_becoming_fullscreen_modal() {
+        let mut model = Model::new(StartupBannerOptions::default());
+
+        model.open_context_budget_loading();
 
         assert_eq!(model.top_modal_layer(), None);
         assert!(model.blocks_composer_input());

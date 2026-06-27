@@ -135,7 +135,6 @@ fn render_active_overlay(model: &mut Model, frame: &mut RenderFrame<'_>, area: R
         ModalLayer::CopyPicker => model.render_copy_picker(frame, area),
         ModalLayer::EntryTree => model.render_entry_tree(frame, area),
         ModalLayer::MessageHistory => model.render_message_history_picker(frame, area),
-        ModalLayer::ContextBudget => model.render_context_budget(frame, area),
     }
     true
 }

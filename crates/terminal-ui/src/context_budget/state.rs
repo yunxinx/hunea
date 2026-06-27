@@ -1,10 +1,18 @@
 use runtime_domain::context_budget::SegmentKind;
-use runtime_domain::session::{
-    ContextBudgetDisplayPayload, ContextBudgetSegmentPayload, ContextBudgetSnapshotPayload,
-};
+use runtime_domain::session::{ContextBudgetDisplayPayload, ContextBudgetSnapshotPayload};
+
+/// Legend row aggregated by stable context category.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextBudgetLegendEntry {
+    pub(crate) kind_tag: String,
+    pub(crate) label: String,
+    pub(crate) estimated_tokens: usize,
+    pub(crate) first_stack_order: u16,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ContextBudgetState {
+    pub(crate) revision: usize,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
     pub(crate) snapshot: Option<ContextBudgetSnapshotPayload>,
@@ -13,6 +21,7 @@ pub(crate) struct ContextBudgetState {
 impl Default for ContextBudgetState {
     fn default() -> Self {
         Self {
+            revision: 1,
             loading: true,
             error: None,
             snapshot: None,
@@ -22,12 +31,14 @@ impl Default for ContextBudgetState {
 
 impl ContextBudgetState {
     pub(crate) fn apply_snapshot(&mut self, payload: ContextBudgetSnapshotPayload) {
+        self.revision = self.revision.saturating_add(1);
         self.loading = false;
         self.error = None;
         self.snapshot = Some(payload);
     }
 
     pub(crate) fn set_error(&mut self, message: String) {
+        self.revision = self.revision.saturating_add(1);
         self.loading = false;
         self.error = Some(message);
         self.snapshot = None;
@@ -71,33 +82,46 @@ pub(crate) fn header_summary(model_id: &str, display: ContextBudgetDisplayPayloa
     }
 }
 
-pub(crate) fn segment_share_percent(
-    segment_tokens: usize,
-    total_tokens: usize,
-    display: ContextBudgetDisplayPayload,
-) -> f32 {
+pub(crate) fn segment_share_percent(segment_tokens: usize, total_tokens: usize) -> f32 {
     if total_tokens == 0 {
         return 0.0;
     }
-    match display {
-        ContextBudgetDisplayPayload::Relative { .. } => {
-            (segment_tokens as f32 / total_tokens as f32) * 100.0
-        }
-        ContextBudgetDisplayPayload::Absolute { limit, .. } => {
-            (segment_tokens as f32 / limit as f32) * 100.0
-        }
-    }
+    (segment_tokens as f32 / total_tokens as f32) * 100.0
 }
 
-pub(crate) fn sorted_legend_indices(segments: &[ContextBudgetSegmentPayload]) -> Vec<usize> {
-    let mut indices: Vec<usize> = (0..segments.len()).collect();
-    indices.sort_by(|&a, &b| {
-        segments[b]
-            .estimated_tokens
-            .cmp(&segments[a].estimated_tokens)
-            .then_with(|| segments[a].stack_order.cmp(&segments[b].stack_order))
+pub(crate) fn build_legend_entries(
+    snapshot: &ContextBudgetSnapshotPayload,
+) -> Vec<ContextBudgetLegendEntry> {
+    let mut entries: Vec<ContextBudgetLegendEntry> = Vec::new();
+
+    for segment in &snapshot.segments {
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|entry| entry.kind_tag == segment.kind_tag)
+        {
+            existing.estimated_tokens = existing
+                .estimated_tokens
+                .saturating_add(segment.estimated_tokens);
+            existing.first_stack_order = existing.first_stack_order.min(segment.stack_order);
+            continue;
+        }
+
+        entries.push(ContextBudgetLegendEntry {
+            kind_tag: segment.kind_tag.clone(),
+            label: segment_kind_from_tag(&segment.kind_tag)
+                .default_label()
+                .to_string(),
+            estimated_tokens: segment.estimated_tokens,
+            first_stack_order: segment.stack_order,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        b.estimated_tokens
+            .cmp(&a.estimated_tokens)
+            .then_with(|| a.first_stack_order.cmp(&b.first_stack_order))
     });
-    indices
+    entries
 }
 
 pub(crate) fn segment_kind_from_tag(tag: &str) -> SegmentKind {
@@ -109,5 +133,59 @@ pub(crate) fn segment_kind_from_tag(tag: &str) -> SegmentKind {
         "reasoning" => SegmentKind::Reasoning,
         "tools" => SegmentKind::ToolDefinitions,
         _ => SegmentKind::System,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtime_domain::session::ContextBudgetSegmentPayload;
+
+    #[test]
+    fn build_legend_entries_merges_duplicate_segment_kinds() {
+        let snapshot = ContextBudgetSnapshotPayload {
+            model_id: "model".to_string(),
+            segments: vec![
+                segment("user", 0, 120),
+                segment("assistant", 1, 200),
+                segment("user", 2, 80),
+                segment("reasoning", 3, 40),
+            ],
+            total_estimated_tokens: 440,
+            context_limit: Some(1_000),
+            display: ContextBudgetDisplayPayload::Absolute {
+                limit: 1_000,
+                used: 440,
+                percent: 44.0,
+            },
+        };
+
+        let entries = build_legend_entries(&snapshot);
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].kind_tag, "user");
+        assert_eq!(entries[0].estimated_tokens, 200);
+        assert_eq!(entries[1].kind_tag, "assistant");
+        assert_eq!(entries[1].estimated_tokens, 200);
+        assert_eq!(entries[0].first_stack_order, 0);
+    }
+
+    #[test]
+    fn segment_share_percent_uses_used_token_total() {
+        let percent = segment_share_percent(200, 500);
+        assert!((percent - 40.0).abs() < f32::EPSILON);
+    }
+
+    fn segment(
+        kind_tag: &str,
+        stack_order: u16,
+        estimated_tokens: usize,
+    ) -> ContextBudgetSegmentPayload {
+        ContextBudgetSegmentPayload {
+            kind_tag: kind_tag.to_string(),
+            stack_order,
+            estimated_tokens,
+            label: kind_tag.to_string(),
+        }
     }
 }

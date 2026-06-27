@@ -296,6 +296,7 @@ impl Model {
 
     pub(crate) fn close_composer_attached_ui(&mut self) {
         self.close_file_picker();
+        self.close_context_budget();
         self.command_panel_selected = 0;
         self.command_panel_scroll = 0;
     }

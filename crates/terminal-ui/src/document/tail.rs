@@ -6,6 +6,7 @@ use crate::{
     Model,
     command_panel::CommandPanelRenderResult,
     composer,
+    context_budget::ContextBudgetRenderResult,
     inline_panel::InlinePanelRenderResult,
     model_panel::ModelPanelRenderResult,
     selection::{SelectableLineRange, selectable_range_for_plain_line},
@@ -41,6 +42,8 @@ pub(crate) struct DocumentTailLayoutKey {
     pub(crate) model_panel_model_index: usize,
     pub(crate) model_panel_scroll: usize,
     pub(crate) model_panel_revision: usize,
+    pub(crate) context_budget_active: bool,
+    pub(crate) context_budget_revision: usize,
     pub(crate) selected_model: Option<String>,
     pub(crate) status_line_config: u8,
     pub(crate) status_line_2_config: u8,
@@ -86,6 +89,7 @@ pub(crate) struct DocumentTailLayoutInput {
     pub(crate) command_panel: CommandPanelRenderResult,
     pub(crate) tool_approval_panel: ToolApprovalPanelRenderResult,
     pub(crate) model_panel: ModelPanelRenderResult,
+    pub(crate) context_budget: ContextBudgetRenderResult,
     pub(crate) status_line_gap_before: usize,
     pub(crate) status_line: StatusLineRenderResult,
     pub(crate) status_line_2: StatusLineRenderResult,
@@ -132,6 +136,12 @@ impl Model {
             model_panel_model_index: self.model_panel.model_index,
             model_panel_scroll: self.model_panel.scroll,
             model_panel_revision: self.model_panel.revision,
+            context_budget_active: self.context_budget_active(),
+            context_budget_revision: self
+                .context_budget
+                .as_ref()
+                .map(|state| state.revision)
+                .unwrap_or_default(),
             selected_model: self
                 .selected_model
                 .as_ref()
@@ -200,6 +210,7 @@ impl Model {
             command_panel: self.current_inline_command_panel_render_result(),
             tool_approval_panel: self.current_inline_tool_approval_panel_render_result(),
             model_panel: self.current_inline_model_panel_render_result(),
+            context_budget: self.current_inline_context_budget_render_result(),
             status_line_gap_before: configured_status_line_gap_before(self.style_mode),
             status_line: self.current_status_line_render_result(),
             status_line_2: self.current_status_line_2_render_result(),
@@ -228,6 +239,7 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.command_panel.lines.len()
             + input.tool_approval_panel.lines.len()
             + input.model_panel.lines.len()
+            + input.context_budget.lines.len()
             + status_line_rows,
     );
     let mut text_lines = Vec::with_capacity(
@@ -239,6 +251,7 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.command_panel.plain_lines.len()
             + input.tool_approval_panel.plain_lines.len()
             + input.model_panel.plain_lines.len()
+            + input.context_budget.plain_lines.len()
             + status_line_rows,
     );
     let mut anchors = Vec::with_capacity(
@@ -250,6 +263,7 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.command_panel.lines.len()
             + input.tool_approval_panel.lines.len()
             + input.model_panel.lines.len()
+            + input.context_budget.lines.len()
             + status_line_rows,
     );
     let mut selectable = Vec::with_capacity(
@@ -261,6 +275,7 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
             + input.command_panel.lines.len()
             + input.tool_approval_panel.lines.len()
             + input.model_panel.lines.len()
+            + input.context_budget.lines.len()
             + status_line_rows,
     );
 
@@ -283,6 +298,35 @@ pub(crate) fn compose_document_tail_layout(input: DocumentTailLayoutInput) -> Do
     if input.model_panel.has_content {
         append_model_panel(
             &input.model_panel,
+            &mut lines,
+            &mut text_lines,
+            &mut anchors,
+            &mut selectable,
+        );
+
+        if lines.is_empty() {
+            lines.push(Line::raw(""));
+            text_lines.push(String::new());
+            anchors.push(DocumentLineAnchor::default());
+            selectable.push(SelectableLineRange::default());
+        }
+
+        let cursor_y = lines.len().saturating_add(1);
+        return DocumentTailLayout {
+            lines,
+            text_lines,
+            anchors,
+            selectable,
+            composer_slot: SlotFrame::new(0, false, 0),
+            cursor_x: 0,
+            cursor_y,
+        };
+    }
+
+    if input.context_budget.has_content {
+        append_inline_panel(
+            &input.context_budget,
+            DocumentAnchorRegion::ContextBudgetPanel,
             &mut lines,
             &mut text_lines,
             &mut anchors,

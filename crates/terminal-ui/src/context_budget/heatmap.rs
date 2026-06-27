@@ -263,4 +263,10 @@ mod tests {
             "heatmap should paint remaining capacity cells explicitly instead of leaving blanks"
         );
     }
+
+    #[test]
+    fn heatmap_grid_columns_keep_the_tighter_initial_density() {
+        assert_eq!(heatmap_grid_columns(72), 36);
+        assert_eq!(heatmap_grid_columns(76), 38);
+    }
 }

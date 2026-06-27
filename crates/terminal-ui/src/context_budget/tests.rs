@@ -39,26 +39,46 @@ fn context_overlay_header_relative_question_mark() {
 }
 
 #[test]
-fn context_overlay_renders_page_rule_body_divider_and_empty_capacity_grid() {
+fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
     let mut model = ready_model();
-    model.set_window(72, 14);
+    model.transcript_mut().clear();
+    model.set_window(72, 20);
     model.set_palette(default_palette(), true);
     model.open_context_budget_loading();
     model.apply_context_budget_snapshot(context_budget_snapshot());
 
-    let buffer = render_model_buffer(&mut model, 72, 14);
+    let buffer = render_model_buffer(&mut model, 72, 20);
     let rows = rendered_rows(&buffer);
     let empty_cell_color = default_palette()
         .surface
         .expect("default palette should expose a surface color");
 
     assert!(
-        rows.iter().any(|row| row.contains(" Page 1/1 ")),
-        "context overlay should render fullscreen page rule chrome: {rows:?}"
+        rows.iter()
+            .any(|row| row.contains("Context budget · local/qwen3")),
+        "context panel should render its inline summary header: {rows:?}"
+    );
+    assert_eq!(
+        rows.iter().filter(|row| row.contains('━')).count(),
+        1,
+        "context panel should only render the models-style top rule: {rows:?}"
+    );
+    let first_legend_row = rows
+        .iter()
+        .position(|row| row.contains("assistant"))
+        .expect("legend should render the leading segment row");
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("■") && row.contains("assistant")),
+        "context panel should render heatmap and legend in the same row-oriented two-column body: {rows:?}"
     );
     assert!(
-        rows.iter().filter(|row| row.contains('╌')).count() >= 2,
-        "context overlay should render both header rule and body divider: {rows:?}"
+        rows.iter().all(|row| !row.contains("Page 1/1")),
+        "inline context panel must not render fullscreen page chrome: {rows:?}"
+    );
+    assert!(
+        first_legend_row < 18,
+        "legend should stay inside a medium-height inline panel instead of being pushed into a fullscreen body: {rows:?}"
     );
     let empty_capacity = buffer
         .content()
@@ -68,6 +88,54 @@ fn context_overlay_renders_page_rule_body_divider_and_empty_capacity_grid() {
     assert!(
         empty_capacity > 0,
         "heatmap should keep visible empty-capacity cells instead of leaving trailing blanks"
+    );
+
+    let colored_heatmap_cells = buffer
+        .content()
+        .iter()
+        .filter(|cell| {
+            cell.symbol() == "■"
+                && cell.fg != empty_cell_color
+                && cell.fg != ratatui::style::Color::Reset
+        })
+        .count();
+    assert!(
+        colored_heatmap_cells <= 110,
+        "heatmap should stay around one hundred filled cells instead of expanding to the previous denser grid: {colored_heatmap_cells}"
+    );
+}
+
+#[test]
+fn context_panel_only_uses_left_side_of_the_terminal_width() {
+    let mut model = ready_model();
+    model.transcript_mut().clear();
+    model.set_window(72, 20);
+    model.set_palette(default_palette(), true);
+    model.open_context_budget_loading();
+    model.apply_context_budget_snapshot(context_budget_snapshot());
+
+    let render = model.current_inline_context_budget_render_result();
+    let top_rule_width = render
+        .lines
+        .first()
+        .map(ratatui::text::Line::width)
+        .unwrap_or_default();
+    let body_width = render
+        .lines
+        .iter()
+        .skip(3)
+        .take(10)
+        .map(ratatui::text::Line::width)
+        .max()
+        .unwrap_or_default();
+
+    assert!(
+        top_rule_width == 72,
+        "context panel rule should remain full width even when the content area is narrower: {top_rule_width}"
+    );
+    assert!(
+        body_width <= 45,
+        "context panel body should stay around the left 60% of the terminal width: {body_width}"
     );
 }
 

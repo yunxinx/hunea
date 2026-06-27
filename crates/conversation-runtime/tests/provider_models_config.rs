@@ -250,6 +250,187 @@ models = ["qwen3"]
     );
 }
 
+#[test]
+fn models_config_resolves_default_context_window() {
+    let working_dir = temp_test_dir("default-context-window");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+default = "local/qwen3"
+
+[defaults]
+context_window = 128000
+
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+models = ["qwen3"]
+"#,
+    )
+    .expect("models config should be written");
+
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
+    let selection = ModelSelection::new("local", "qwen3");
+
+    assert_eq!(loaded.context_limit_for(&selection), Some(128_000));
+}
+
+#[test]
+fn models_config_resolves_per_provider_model_profile() {
+    let working_dir = temp_test_dir("provider-model-profile");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+default = "local/qwen3"
+
+[defaults]
+context_window = 128000
+
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+models = ["qwen3"]
+
+[providers.local.model_profiles.qwen3]
+context_window = 32768
+"#,
+    )
+    .expect("models config should be written");
+
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
+    let selection = ModelSelection::new("local", "qwen3");
+
+    assert_eq!(loaded.context_limit_for(&selection), Some(32_768));
+}
+
+#[test]
+fn models_config_project_overlay_overrides_user_defaults_context_window() {
+    let user_dir = temp_test_dir("user-config-dir");
+    let working_dir = temp_test_dir("project-overlay-context");
+    fs::write(
+        user_dir.join("models.toml"),
+        r#"
+[defaults]
+context_window = 64000
+
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+models = ["qwen3"]
+"#,
+    )
+    .expect("user models config should be written");
+    fs::create_dir_all(working_dir.join(".hunea")).expect("project config dir");
+    fs::write(
+        working_dir.join(".hunea").join("models.toml"),
+        r#"
+[defaults]
+context_window = 200000
+"#,
+    )
+    .expect("project models config should be written");
+
+    let loaded = load_from_paths(Some(&working_dir), Some(&user_dir))
+        .expect("merged models config should load");
+    let selection = ModelSelection::new("local", "qwen3");
+
+    assert_eq!(loaded.context_limit_for(&selection), Some(200_000));
+}
+
+#[test]
+fn models_config_rejects_invalid_context_window() {
+    let working_dir = temp_test_dir("invalid-context-window");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+[defaults]
+context_window = 0
+
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+"#,
+    )
+    .expect("models config should be written");
+
+    let error = load_from_paths(Some(&working_dir), None)
+        .expect_err("zero context_window should fail validation");
+    let message = error.to_string();
+    assert!(
+        message.contains("invalid") && message.contains("context_window"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn models_config_resolution_prefers_profile_over_defaults_and_builtin() {
+    let working_dir = temp_test_dir("resolution-order");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+[defaults]
+context_window = 64000
+
+[providers.openai]
+enabled = true
+kind = "openai"
+models = ["gpt-4o"]
+
+[providers.openai.model_profiles."gpt-4o"]
+context_window = 100000
+"#,
+    )
+    .expect("models config should be written");
+
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
+    let selection = ModelSelection::new("openai", "gpt-4o");
+
+    assert_eq!(loaded.context_limit_for(&selection), Some(100_000));
+}
+
+#[test]
+fn models_config_unknown_model_without_defaults_resolves_none() {
+    let working_dir = temp_test_dir("unknown-no-defaults");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+models = ["custom-local-7b"]
+"#,
+    )
+    .expect("models config should be written");
+
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
+    let selection = ModelSelection::new("local", "custom-local-7b");
+
+    assert_eq!(loaded.context_limit_for(&selection), None);
+}
+
+#[test]
+fn models_config_rejects_unknown_provider_field() {
+    let working_dir = temp_test_dir("deny-unknown-provider");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+unexpected_field = true
+"#,
+    )
+    .expect("models config should be written");
+
+    load_from_paths(Some(&working_dir), None).expect_err("unknown provider keys should fail");
+}
+
 fn temp_test_dir(name: &str) -> std::path::PathBuf {
     let unique = format!(
         "{}-{}",

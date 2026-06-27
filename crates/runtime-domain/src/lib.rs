@@ -1,5 +1,6 @@
 pub mod envinfo;
 pub mod model_catalog;
+pub mod model_context_limit;
 pub mod paths;
 pub mod phrases;
 pub mod provider;

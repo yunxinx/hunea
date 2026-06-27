@@ -13,6 +13,7 @@ use runtime_domain::{
     model_catalog::{
         ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderSyncRequest,
     },
+    model_context_limit::ModelContextLimits,
     provider::{ProviderApiKey, ProviderKind},
     session::ProviderRequest,
 };
@@ -24,9 +25,18 @@ type ModelSyncResult = Result<Vec<String>, String>;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LoadedModelCatalog {
     pub catalog: ModelCatalog,
+    pub context_limits: ModelContextLimits,
     pub selected_model: Option<ModelSelection>,
     pub source_path: Option<PathBuf>,
     pub requires_model_selection: bool,
+}
+
+impl LoadedModelCatalog {
+    /// `context_limit_for` 解析指定模型选择的 context limit（tokens）。
+    pub fn context_limit_for(&self, selection: &ModelSelection) -> Option<u32> {
+        self.catalog
+            .context_limit_for(&self.context_limits, selection)
+    }
 }
 
 /// `ModelsConfigError` 描述模型配置读取或校验失败。
@@ -53,14 +63,26 @@ pub enum ModelsConfigError {
         provider: String,
         value: String,
     },
+    InvalidContextWindow {
+        path: PathBuf,
+        field: String,
+        value: u64,
+    },
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileModelsConfig {
     default: Option<String>,
+    defaults: Option<FileModelsDefaults>,
     #[serde(default)]
     providers: BTreeMap<String, FileModelProviderConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileModelsDefaults {
+    context_window: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -73,11 +95,20 @@ struct FileModelProviderConfig {
     api_key: Option<String>,
     api_key_env: Option<String>,
     models: Option<Vec<String>>,
+    #[serde(default)]
+    model_profiles: BTreeMap<String, FileModelProfileConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileModelProfileConfig {
+    context_window: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct MergedModelsConfig {
     default: Option<String>,
+    defaults: Option<FileModelsDefaults>,
     providers: BTreeMap<String, FileModelProviderConfig>,
 }
 
@@ -107,6 +138,12 @@ impl fmt::Display for ModelsConfigError {
                 provider,
                 value
             ),
+            Self::InvalidContextWindow { path, field, value } => write!(
+                f,
+                "validate model config file {}: invalid {} context_window {value}",
+                path.display(),
+                field
+            ),
         }
     }
 }
@@ -118,7 +155,7 @@ impl std::error::Error for ModelsConfigError {
             Self::Decode { source, .. } => Some(source),
             Self::Edit { source, .. } => Some(source),
             Self::Write { source, .. } => Some(source),
-            Self::InvalidProviderKind { .. } => None,
+            Self::InvalidProviderKind { .. } | Self::InvalidContextWindow { .. } => None,
         }
     }
 }
@@ -150,10 +187,12 @@ pub fn load_from_paths(
     }
 
     let catalog = catalog_from_config(&merged, source_path.as_deref())?;
+    let context_limits = context_limits_from_merged(&merged, source_path.as_deref())?;
     let selected_model = selection_from_default(merged.default.as_deref(), &catalog);
 
     Ok(LoadedModelCatalog {
         catalog,
+        context_limits,
         selected_model,
         source_path,
         requires_model_selection: true,
@@ -241,10 +280,56 @@ fn merge_models_config(target: &mut MergedModelsConfig, source: FileModelsConfig
     if let Some(default) = source.default {
         target.default = Some(default);
     }
+    if let Some(defaults) = source.defaults {
+        target.defaults = Some(defaults);
+    }
 
     for (provider_id, provider) in source.providers {
         target.providers.insert(provider_id, provider);
     }
+}
+
+fn context_limits_from_merged(
+    config: &MergedModelsConfig,
+    source_path: Option<&Path>,
+) -> Result<ModelContextLimits, ModelsConfigError> {
+    let path = source_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(MODELS_FILE_NAME));
+
+    let defaults = match config.defaults.as_ref().and_then(|d| d.context_window) {
+        Some(value) => Some(validate_positive_context_window(value, "defaults", &path)?),
+        None => None,
+    };
+
+    let mut by_provider_model = BTreeMap::new();
+    for (provider_id, provider) in &config.providers {
+        for (model_id, profile) in &provider.model_profiles {
+            let Some(value) = profile.context_window else {
+                continue;
+            };
+            let field = format!("providers.{provider_id}.model_profiles.{model_id}");
+            let limit = validate_positive_context_window(value, &field, &path)?;
+            by_provider_model.insert((provider_id.clone(), model_id.clone()), limit);
+        }
+    }
+
+    Ok(ModelContextLimits::new(defaults, by_provider_model))
+}
+
+fn validate_positive_context_window(
+    value: u64,
+    field: &str,
+    path: &Path,
+) -> Result<u32, ModelsConfigError> {
+    if value == 0 || value > u32::MAX as u64 {
+        return Err(ModelsConfigError::InvalidContextWindow {
+            path: path.to_path_buf(),
+            field: field.to_string(),
+            value,
+        });
+    }
+    Ok(value as u32)
 }
 
 fn catalog_from_config(

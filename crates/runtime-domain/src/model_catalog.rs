@@ -1,4 +1,7 @@
-use crate::provider::{ProviderApiKey, ProviderKind};
+use crate::{
+    model_context_limit::ModelContextLimits,
+    provider::{ProviderApiKey, ProviderKind},
+};
 
 /// `ModelCatalog` 保存 TUI 可展示与可选择的模型目录。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -87,6 +90,15 @@ impl ModelCatalog {
     pub fn enabled_provider_index_for(&self, provider_id: &str) -> Option<usize> {
         self.enabled_providers()
             .position(|provider| provider.id == provider_id)
+    }
+
+    /// `context_limit_for` 解析当前选择的 context limit（tokens）。
+    pub fn context_limit_for(
+        &self,
+        limits: &ModelContextLimits,
+        selection: &ModelSelection,
+    ) -> Option<u32> {
+        limits.resolve(self, selection)
     }
 }
 

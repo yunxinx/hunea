@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::model_catalog::{ModelCatalog, ModelSelection};
 
+const DEFAULT_CONTEXT_LIMIT: u32 = 256_000;
+
 /// `ModelContextLimits` 保存从 `models.toml` 合并后的 context limit 配置。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ModelContextLimits {
@@ -61,7 +63,7 @@ fn built_in_context_limit(model_id: &str) -> Option<u32> {
     if lower.contains("claude-sonnet-4") || lower.contains("claude-opus-4") {
         return Some(200_000);
     }
-    None
+    Some(DEFAULT_CONTEXT_LIMIT)
 }
 
 #[cfg(test)]
@@ -117,10 +119,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_returns_none_for_unknown_model() {
+    fn resolve_uses_default_fallback_for_unknown_model() {
         let limits = ModelContextLimits::default();
         let selection = ModelSelection::new("local", "totally-custom");
 
-        assert_eq!(limits.resolve(&catalog_with_local_qwen(), &selection), None);
+        assert_eq!(
+            limits.resolve(&catalog_with_local_qwen(), &selection),
+            Some(DEFAULT_CONTEXT_LIMIT)
+        );
     }
 }

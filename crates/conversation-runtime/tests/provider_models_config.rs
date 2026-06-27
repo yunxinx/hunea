@@ -393,7 +393,7 @@ context_window = 100000
 }
 
 #[test]
-fn models_config_unknown_model_without_defaults_resolves_none() {
+fn models_config_unknown_model_without_defaults_uses_default_fallback() {
     let working_dir = temp_test_dir("unknown-no-defaults");
     fs::write(
         working_dir.join("models.toml"),
@@ -410,7 +410,7 @@ models = ["custom-local-7b"]
     let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
     let selection = ModelSelection::new("local", "custom-local-7b");
 
-    assert_eq!(loaded.context_limit_for(&selection), None);
+    assert_eq!(loaded.context_limit_for(&selection), Some(256_000));
 }
 
 #[test]

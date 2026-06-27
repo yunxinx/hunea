@@ -100,15 +100,15 @@ mod tests {
         let second_row = row_text(&buffer, 1);
         let third_row = row_text(&buffer, 2);
         assert!(
-            first_row.contains("assistant"),
-            "largest aggregated category should stay at the top of the single-column legend: {first_row:?}"
+            first_row.contains("system"),
+            "legend should use stable semantic order instead of size order: {first_row:?}"
         );
         assert!(
-            second_row.contains("system"),
+            second_row.contains("user"),
             "second row should continue vertically with canonical category labels: {second_row:?}"
         );
         assert!(
-            third_row.contains("user"),
+            third_row.contains("assistant"),
             "subsequent rows should keep the same single legend column: {third_row:?}"
         );
     }

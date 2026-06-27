@@ -1,12 +1,12 @@
 //! Heatmap cell allocation for context budget segments.
 
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-use runtime_domain::context_budget::ContextSegment;
+use runtime_domain::context_budget::{ContextSegment, SegmentKind};
 use runtime_domain::session::ContextBudgetSnapshotPayload;
 
 use super::{
     segment_colors::{context_budget_color_for_kind, context_budget_empty_color},
-    state::segment_kind_from_tag,
+    state::{segment_kind_display_rank, segment_kind_from_tag},
 };
 use crate::theme::TerminalPalette;
 
@@ -98,7 +98,7 @@ pub(super) fn render_context_budget_heatmap(
 
     clear_heatmap_area(buffer, area);
 
-    let segments = ordered_segments_for_heatmap(snapshot);
+    let segments = aggregated_segments_for_heatmap(snapshot);
     let occupied_cells = occupied_heatmap_cells(snapshot, total_cells, segments.len());
     let counts = allocate_heatmap_cells(&segments, occupied_cells);
     let mut fill_kinds = Vec::with_capacity(total_cells);
@@ -152,21 +152,37 @@ fn occupied_heatmap_cells(
     }
 }
 
-pub(super) fn ordered_segments_for_heatmap(
+pub(super) fn aggregated_segments_for_heatmap(
     snapshot: &ContextBudgetSnapshotPayload,
 ) -> Vec<ContextSegment> {
-    let mut segments: Vec<ContextSegment> = snapshot
-        .segments
-        .iter()
-        .map(|segment| ContextSegment {
-            kind: segment_kind_from_tag(&segment.kind_tag),
-            stack_order: segment.stack_order,
-            estimated_tokens: segment.estimated_tokens,
-            label: segment.label.clone(),
+    let mut aggregated_tokens = [0usize; 6];
+
+    for segment in &snapshot.segments {
+        let kind = segment_kind_from_tag(&segment.kind_tag);
+        let rank = segment_kind_display_rank(kind);
+        aggregated_tokens[rank] = aggregated_tokens[rank].saturating_add(segment.estimated_tokens);
+    }
+
+    [
+        SegmentKind::System,
+        SegmentKind::UserMessage,
+        SegmentKind::AssistantMessage,
+        SegmentKind::ToolResult,
+        SegmentKind::Reasoning,
+        SegmentKind::ToolDefinitions,
+    ]
+    .into_iter()
+    .filter_map(|kind| {
+        let rank = segment_kind_display_rank(kind);
+        let estimated_tokens = aggregated_tokens[rank];
+        (estimated_tokens > 0).then(|| ContextSegment {
+            kind,
+            stack_order: u16::try_from(rank).unwrap_or(u16::MAX),
+            estimated_tokens,
+            label: kind.default_label().to_string(),
         })
-        .collect();
-    segments.sort_by_key(|segment| segment.stack_order);
-    segments
+    })
+    .collect()
 }
 
 fn clear_heatmap_area(buffer: &mut Buffer, area: Rect) {
@@ -223,6 +239,63 @@ mod tests {
             vec![1, 1, 1],
             "each non-zero segment should stay visible when the grid can fit every segment"
         );
+    }
+
+    #[test]
+    fn heatmap_aggregates_by_kind_instead_of_message_order() {
+        let snapshot = ContextBudgetSnapshotPayload {
+            model_id: "local/qwen3".to_string(),
+            segments: vec![
+                ContextBudgetSegmentPayload {
+                    kind_tag: "assistant".to_string(),
+                    stack_order: 0,
+                    estimated_tokens: 100,
+                    label: "assistant".to_string(),
+                },
+                ContextBudgetSegmentPayload {
+                    kind_tag: "user".to_string(),
+                    stack_order: 1,
+                    estimated_tokens: 40,
+                    label: "user".to_string(),
+                },
+                ContextBudgetSegmentPayload {
+                    kind_tag: "assistant".to_string(),
+                    stack_order: 2,
+                    estimated_tokens: 60,
+                    label: "assistant".to_string(),
+                },
+                ContextBudgetSegmentPayload {
+                    kind_tag: "system".to_string(),
+                    stack_order: 3,
+                    estimated_tokens: 20,
+                    label: "system".to_string(),
+                },
+            ],
+            total_estimated_tokens: 220,
+            context_limit: Some(256_000),
+            display: ContextBudgetDisplayPayload::Absolute {
+                limit: 256_000,
+                used: 220,
+                percent: 0.1,
+            },
+        };
+
+        let segments = aggregated_segments_for_heatmap(&snapshot);
+
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                SegmentKind::System,
+                SegmentKind::UserMessage,
+                SegmentKind::AssistantMessage,
+            ]
+        );
+        assert_eq!(segments[0].estimated_tokens, 20);
+        assert_eq!(segments[1].estimated_tokens, 40);
+        assert_eq!(segments[2].estimated_tokens, 160);
     }
 
     #[test]

@@ -89,6 +89,17 @@ pub(crate) fn segment_share_percent(segment_tokens: usize, total_tokens: usize) 
     (segment_tokens as f32 / total_tokens as f32) * 100.0
 }
 
+pub(crate) fn segment_kind_display_rank(kind: SegmentKind) -> usize {
+    match kind {
+        SegmentKind::System => 0,
+        SegmentKind::UserMessage => 1,
+        SegmentKind::AssistantMessage => 2,
+        SegmentKind::ToolResult => 3,
+        SegmentKind::Reasoning => 4,
+        SegmentKind::ToolDefinitions => 5,
+    }
+}
+
 pub(crate) fn build_legend_entries(
     snapshot: &ContextBudgetSnapshotPayload,
 ) -> Vec<ContextBudgetLegendEntry> {
@@ -117,8 +128,10 @@ pub(crate) fn build_legend_entries(
     }
 
     entries.sort_by(|a, b| {
-        b.estimated_tokens
-            .cmp(&a.estimated_tokens)
+        let a_kind = segment_kind_from_tag(&a.kind_tag);
+        let b_kind = segment_kind_from_tag(&b.kind_tag);
+        segment_kind_display_rank(a_kind)
+            .cmp(&segment_kind_display_rank(b_kind))
             .then_with(|| a.first_stack_order.cmp(&b.first_stack_order))
     });
     entries
@@ -167,6 +180,7 @@ mod tests {
         assert_eq!(entries[0].estimated_tokens, 200);
         assert_eq!(entries[1].kind_tag, "assistant");
         assert_eq!(entries[1].estimated_tokens, 200);
+        assert_eq!(entries[2].kind_tag, "reasoning");
         assert_eq!(entries[0].first_stack_order, 0);
     }
 

@@ -5,12 +5,16 @@ use runtime_domain::context_budget::SegmentKind;
 
 use crate::theme::TerminalPalette;
 
-const CONTEXT_BUDGET_SLOT_COUNT: usize = 8;
+const CONTEXT_BUDGET_SLOT_COUNT: usize = 6;
 
 /// Maps a segment kind to a stable palette slot (extensible without changing heatmap logic).
 pub(crate) fn context_budget_color_for_kind(kind: SegmentKind, palette: &TerminalPalette) -> Color {
     let slot = kind_palette_slot(kind);
     context_budget_slot_color(slot, palette)
+}
+
+pub(crate) fn context_budget_empty_color(palette: &TerminalPalette) -> Color {
+    palette.surface.unwrap_or(palette.tertiary)
 }
 
 fn kind_palette_slot(kind: SegmentKind) -> usize {
@@ -26,17 +30,32 @@ fn kind_palette_slot(kind: SegmentKind) -> usize {
 
 fn context_budget_slot_color(slot: usize, palette: &TerminalPalette) -> Color {
     let slot = slot % CONTEXT_BUDGET_SLOT_COUNT;
-    // Use distinct hues from secondary/tertiary/surface family — not error or command accent.
-    match slot {
-        0 => palette.secondary,
-        1 => palette.tertiary,
-        2 => palette.main,
-        3 => palette.table_header,
-        4 => palette.quote,
-        5 => palette.muted,
-        6 => palette.accent,
-        7 => palette.command_accent,
+    let dark_background = color_brightness(palette.main) > 127.0;
+    match (dark_background, slot) {
+        (true, 0) => Color::Rgb(96, 165, 250),
+        (true, 1) => Color::Rgb(251, 191, 36),
+        (true, 2) => Color::Rgb(74, 222, 128),
+        (true, 3) => Color::Rgb(248, 113, 113),
+        (true, 4) => Color::Rgb(167, 139, 250),
+        (true, 5) => Color::Rgb(34, 211, 238),
+        (false, 0) => Color::Rgb(29, 78, 216),
+        (false, 1) => Color::Rgb(180, 83, 9),
+        (false, 2) => Color::Rgb(21, 128, 61),
+        (false, 3) => Color::Rgb(185, 28, 28),
+        (false, 4) => Color::Rgb(109, 40, 217),
+        (false, 5) => Color::Rgb(8, 145, 178),
         _ => palette.secondary,
+    }
+}
+
+fn color_brightness(color: Color) -> f32 {
+    match color {
+        Color::Rgb(red, green, blue) => (red as f32 + green as f32 + blue as f32) / 3.0,
+        Color::White | Color::Gray | Color::LightBlue | Color::LightCyan | Color::LightGreen => {
+            255.0
+        }
+        Color::Black | Color::DarkGray => 0.0,
+        _ => 127.0,
     }
 }
 

@@ -1,3 +1,4 @@
+use runtime_domain::context_budget::SegmentKind;
 use runtime_domain::session::{
     ContextBudgetDisplayPayload, ContextBudgetSegmentPayload, ContextBudgetSnapshotPayload,
 };
@@ -94,6 +95,19 @@ pub(crate) fn sorted_legend_indices(segments: &[ContextBudgetSegmentPayload]) ->
         segments[b]
             .estimated_tokens
             .cmp(&segments[a].estimated_tokens)
+            .then_with(|| segments[a].stack_order.cmp(&segments[b].stack_order))
     });
     indices
+}
+
+pub(crate) fn segment_kind_from_tag(tag: &str) -> SegmentKind {
+    match tag {
+        "system" => SegmentKind::System,
+        "user" => SegmentKind::UserMessage,
+        "assistant" => SegmentKind::AssistantMessage,
+        "tool_result" => SegmentKind::ToolResult,
+        "reasoning" => SegmentKind::Reasoning,
+        "tools" => SegmentKind::ToolDefinitions,
+        _ => SegmentKind::System,
+    }
 }

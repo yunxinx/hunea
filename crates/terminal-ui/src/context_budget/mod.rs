@@ -2,6 +2,8 @@
 
 mod heatmap;
 mod input;
+mod layout;
+mod legend;
 mod render;
 mod segment_colors;
 mod state;

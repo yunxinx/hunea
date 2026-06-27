@@ -1,0 +1,88 @@
+//! Context budget helpers for prepared turns.
+
+use provider_protocol::ConversationItem;
+use runtime_domain::context_budget::{ContextBudgetSnapshot, build_context_budget_snapshot};
+
+use crate::PreparedConversationRequest;
+
+/// Builds a context budget snapshot from a prepared turn request.
+///
+/// Uses `request.items()` in order (same as provider send). Optional `tool_definitions_text`
+/// is appended as a single tools segment after all items.
+pub fn context_budget_from_prepared_request(
+    request: &PreparedConversationRequest,
+    tool_definitions_text: Option<&str>,
+    context_limit: Option<u32>,
+) -> ContextBudgetSnapshot {
+    build_context_budget_snapshot(
+        request.model_id(),
+        request.items(),
+        tool_definitions_text,
+        context_limit,
+    )
+}
+
+/// Same as [`context_budget_from_prepared_request`] with explicit inputs (for tests or callers without full request).
+pub fn context_budget_from_items(
+    model_id: &str,
+    items: &[ConversationItem],
+    tool_definitions_text: Option<&str>,
+    context_limit: Option<u32>,
+) -> ContextBudgetSnapshot {
+    build_context_budget_snapshot(model_id, items, tool_definitions_text, context_limit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provider_protocol::{ConversationItem, Role};
+    use runtime_domain::context_budget::SegmentKind;
+    use runtime_domain::session::ConversationTurnRequest;
+
+    use crate::conversation::PersistedConversationItem;
+    use crate::{ProviderConversation, ProviderKind};
+
+    #[test]
+    fn prepare_turn_items_match_snapshot_segment_kinds_and_order() {
+        let mut session = ProviderConversation::new();
+        session.set_system_prompt(Some("You are helpful".to_string()));
+        session.commit_turn_items([PersistedConversationItem {
+            entry_id: None,
+            item: ConversationItem::text(Role::User, "first"),
+        }]);
+        session.commit_turn_items([PersistedConversationItem {
+            entry_id: None,
+            item: ConversationItem::text(Role::Assistant, "answer"),
+        }]);
+
+        let request = session
+            .prepare_turn(&ConversationTurnRequest::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "gpt-4o",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                None,
+                None,
+                ConversationItem::text(Role::User, "follow up"),
+            ))
+            .expect("turn should prepare");
+
+        let snapshot =
+            context_budget_from_prepared_request(&request, Some("schema"), Some(200_000));
+
+        assert_eq!(
+            snapshot.segments.iter().map(|s| s.kind).collect::<Vec<_>>(),
+            vec![
+                SegmentKind::System,
+                SegmentKind::UserMessage,
+                SegmentKind::AssistantMessage,
+                SegmentKind::UserMessage,
+                SegmentKind::ToolDefinitions,
+            ]
+        );
+        assert!(matches!(
+            snapshot.display,
+            runtime_domain::context_budget::ContextLimitDisplay::Absolute { limit: 200_000, .. }
+        ));
+    }
+}

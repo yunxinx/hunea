@@ -2,7 +2,7 @@ const APPROX_BYTES_PER_TOKEN: usize = 4;
 const FALLBACK_ENCODING: &str = "o200k_base";
 const LEGACY_GPT_ENCODING: &str = "cl100k_base";
 
-pub(crate) fn estimate_text_tokens(model_id: &str, text: &str) -> usize {
+pub fn estimate_text_tokens(model_id: &str, text: &str) -> usize {
     if text.is_empty() {
         return 0;
     }

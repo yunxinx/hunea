@@ -1,8 +1,10 @@
 use crossterm::event::KeyCode;
+use ratatui::style::Color;
 use runtime_domain::session::ContextBudgetDisplayPayload;
 
 use crate::{
     Model, ModelOptions, StartupBannerOptions,
+    context_budget::heatmap::is_context_budget_heatmap_cell,
     test_helpers::{render_model_buffer, rendered_rows},
     theme::default_palette,
     update::AppEffect,
@@ -55,7 +57,7 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
 
     assert!(
         rows.iter()
-            .any(|row| row.contains("Context budget · local/qwen3")),
+            .any(|row| row.contains("Context Usage · local/qwen3")),
         "context panel should render its inline summary header: {rows:?}"
     );
     assert_eq!(
@@ -67,9 +69,25 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
         .iter()
         .position(|row| row.contains("assistant"))
         .expect("legend should render the leading segment row");
+    let assistant_row_index = rows
+        .iter()
+        .position(|row| row.contains("assistant"))
+        .expect("legend should render assistant row");
+    let assistant_row = &rows[assistant_row_index];
+    let legend_x = assistant_row
+        .find("assistant")
+        .expect("assistant label should exist in rendered row");
+    let has_heatmap_before_legend = (0..legend_x).any(|x| {
+        is_context_budget_heatmap_cell(
+            &buffer[(
+                u16::try_from(x).unwrap_or(0),
+                u16::try_from(assistant_row_index).unwrap_or(0),
+            )],
+            default_palette(),
+        )
+    });
     assert!(
-        rows.iter()
-            .any(|row| row.contains("■") && row.contains("assistant")),
+        has_heatmap_before_legend,
         "context panel should render heatmap and legend in the same row-oriented two-column body: {rows:?}"
     );
     assert!(
@@ -83,7 +101,9 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
     let empty_capacity = buffer
         .content()
         .iter()
-        .filter(|cell| cell.symbol() == "■" && cell.fg == empty_cell_color)
+        .filter(|cell| {
+            is_context_budget_heatmap_cell(cell, default_palette()) && cell.fg == empty_cell_color
+        })
         .count();
     assert!(
         empty_capacity > 0,
@@ -94,14 +114,14 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
         .content()
         .iter()
         .filter(|cell| {
-            cell.symbol() == "■"
+            is_context_budget_heatmap_cell(cell, default_palette())
                 && cell.fg != empty_cell_color
-                && cell.fg != ratatui::style::Color::Reset
+                && cell.fg != Color::Reset
         })
         .count();
     assert!(
-        colored_heatmap_cells <= 110,
-        "heatmap should stay around one hundred filled cells instead of expanding to the previous denser grid: {colored_heatmap_cells}"
+        colored_heatmap_cells <= 70,
+        "heatmap should stay closer to the reduced-density grid instead of expanding back out: {colored_heatmap_cells}"
     );
 }
 

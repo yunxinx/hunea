@@ -63,7 +63,7 @@ pub(crate) fn header_summary(model_id: &str, display: ContextBudgetDisplayPayloa
     match display {
         ContextBudgetDisplayPayload::Relative { used } => {
             format!(
-                "Context budget · {model_id} · {} / ?",
+                "Context Usage · {model_id} · {} / ?",
                 format_compact_tokens(used)
             )
         }
@@ -73,7 +73,7 @@ pub(crate) fn header_summary(model_id: &str, display: ContextBudgetDisplayPayloa
             percent,
         } => {
             format!(
-                "Context budget · {model_id} · {} / {} · {:.1}%",
+                "Context Usage · {model_id} · {} / {} · {:.1}%",
                 format_compact_tokens(used),
                 format_compact_tokens(limit),
                 percent

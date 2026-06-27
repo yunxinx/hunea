@@ -78,7 +78,7 @@ fn context_budget_header_line(model: &Model, width: usize) -> Line<'static> {
         .context_budget
         .as_ref()
         .map(context_budget_header_text)
-        .unwrap_or_else(|| "Context budget".to_string());
+        .unwrap_or_else(|| "Context Usage".to_string());
     Line::from(vec![
         Span::raw("  "),
         Span::styled(
@@ -92,11 +92,11 @@ fn context_budget_header_text(state: &super::state::ContextBudgetState) -> Strin
     if let Some(snapshot) = state.snapshot.as_ref() {
         header_summary(&snapshot.model_id, snapshot.display)
     } else if state.loading {
-        "Context budget · loading…".to_string()
+        "Context Usage · loading…".to_string()
     } else if let Some(error) = state.error.as_ref() {
-        format!("Context budget · {error}")
+        format!("Context Usage · {error}")
     } else {
-        "Context budget".to_string()
+        "Context Usage".to_string()
     }
 }
 

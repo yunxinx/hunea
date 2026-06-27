@@ -10,8 +10,14 @@ use super::{
 };
 use crate::theme::TerminalPalette;
 
-const HEATMAP_CELL_SYMBOL: &str = "■";
-const HEATMAP_CELL_WIDTH: usize = 2;
+const HEATMAP_FULL_SYMBOL: &str = "◼";
+const HEATMAP_EMPTY_SYMBOL: &str = "⛶";
+const HEATMAP_CELL_WIDTH: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeatmapCellFill {
+    kind: Option<SegmentKind>,
+}
 
 /// Assigns grid cells to segments proportional to token share (largest remainder).
 /// Returns per-segment cell counts in segment slice order (`stack_order` order).
@@ -104,13 +110,15 @@ pub(super) fn render_context_budget_heatmap(
     let mut fill_kinds = Vec::with_capacity(total_cells);
     for (segment, count) in segments.iter().zip(counts.iter()) {
         for _ in 0..*count {
-            fill_kinds.push(Some(segment.kind));
+            fill_kinds.push(HeatmapCellFill {
+                kind: Some(segment.kind),
+            });
         }
     }
-    fill_kinds.resize(total_cells, None);
+    fill_kinds.resize(total_cells, HeatmapCellFill { kind: None });
 
     let empty_color = context_budget_empty_color(&palette);
-    for (cell_index, kind) in fill_kinds.into_iter().enumerate() {
+    for (cell_index, fill) in fill_kinds.into_iter().enumerate() {
         let row = cell_index / grid_columns;
         let column = cell_index % grid_columns;
         let x =
@@ -120,11 +128,12 @@ pub(super) fn render_context_budget_heatmap(
             continue;
         }
 
-        let color = kind
+        let color = fill
+            .kind
             .map(|kind| context_budget_color_for_kind(kind, &palette))
             .unwrap_or(empty_color);
         if let Some(cell) = buffer.cell_mut((x, y)) {
-            cell.set_symbol(HEATMAP_CELL_SYMBOL);
+            cell.set_symbol(heatmap_symbol(fill));
             cell.set_style(Style::new().fg(color));
         }
     }
@@ -193,6 +202,34 @@ fn clear_heatmap_area(buffer: &mut Buffer, area: Rect) {
                 cell.set_style(Style::default());
             }
         }
+    }
+}
+
+#[cfg(test)]
+use ratatui::buffer::Cell;
+
+#[cfg(test)]
+pub(super) fn is_context_budget_heatmap_cell(cell: &Cell, palette: TerminalPalette) -> bool {
+    let empty_color = context_budget_empty_color(&palette);
+    let heatmap_symbols = [HEATMAP_FULL_SYMBOL, HEATMAP_EMPTY_SYMBOL];
+    let heatmap_colors = [
+        SegmentKind::System,
+        SegmentKind::UserMessage,
+        SegmentKind::AssistantMessage,
+        SegmentKind::ToolResult,
+        SegmentKind::Reasoning,
+        SegmentKind::ToolDefinitions,
+    ]
+    .map(|kind| context_budget_color_for_kind(kind, &palette));
+
+    heatmap_symbols.contains(&cell.symbol())
+        && (cell.fg == empty_color || heatmap_colors.contains(&cell.fg))
+}
+
+fn heatmap_symbol(fill: HeatmapCellFill) -> &'static str {
+    match fill.kind {
+        None => HEATMAP_EMPTY_SYMBOL,
+        Some(_) => HEATMAP_FULL_SYMBOL,
     }
 }
 
@@ -329,7 +366,9 @@ mod tests {
         let empty_cells = buffer
             .content()
             .iter()
-            .filter(|cell| cell.symbol() == HEATMAP_CELL_SYMBOL && cell.fg == empty_color)
+            .filter(|cell| {
+                is_context_budget_heatmap_cell(cell, default_palette()) && cell.fg == empty_color
+            })
             .count();
         assert!(
             empty_cells > 0,
@@ -338,8 +377,28 @@ mod tests {
     }
 
     #[test]
-    fn heatmap_grid_columns_keep_the_tighter_initial_density() {
-        assert_eq!(heatmap_grid_columns(72), 36);
-        assert_eq!(heatmap_grid_columns(76), 38);
+    fn heatmap_grid_columns_reduce_density_for_chunk_map_style_blocks() {
+        assert_eq!(heatmap_grid_columns(72), 24);
+        assert_eq!(heatmap_grid_columns(76), 26);
+    }
+
+    #[test]
+    fn heatmap_marks_cells_by_used_and_empty_symbols() {
+        let palette = default_palette();
+        let used_color = context_budget_color_for_kind(SegmentKind::System, &palette);
+        let empty_color = context_budget_empty_color(&palette);
+
+        let mut used = Cell::default();
+        used.set_symbol(HEATMAP_FULL_SYMBOL);
+        used.set_style(Style::new().fg(used_color));
+        assert!(is_context_budget_heatmap_cell(&used, palette));
+
+        let mut empty = Cell::default();
+        empty.set_symbol(HEATMAP_EMPTY_SYMBOL);
+        empty.set_style(Style::new().fg(empty_color));
+        assert!(is_context_budget_heatmap_cell(&empty, palette));
+
+        let plain = Cell::default();
+        assert!(!is_context_budget_heatmap_cell(&plain, palette));
     }
 }

@@ -1,4 +1,4 @@
-/// `SessionLoadRequestId` 标识一次由 TUI 发起的 session 视图异步加载。
+/// `SessionLoadRequestId` 标识一次由 TUI 发起的异步加载请求。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionLoadRequestId(u64);
 

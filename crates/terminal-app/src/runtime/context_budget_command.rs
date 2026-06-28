@@ -8,7 +8,7 @@ use runtime_domain::{
     model_catalog::ModelSelection,
     session::{
         ContextBudgetDisplayPayload, ContextBudgetSegmentPayload, ContextBudgetSnapshotPayload,
-        RuntimeCommandReceipt, RuntimeEvent,
+        RuntimeCommandReceipt, RuntimeEvent, SessionLoadRequestId,
     },
 };
 
@@ -17,6 +17,7 @@ use super::AppRuntimeCoordinator;
 impl AppRuntimeCoordinator {
     pub(super) fn load_context_budget_snapshot_command(
         &mut self,
+        request_id: SessionLoadRequestId,
         selection: &ModelSelection,
     ) -> Result<RuntimeCommandReceipt, String> {
         let provider = self
@@ -48,6 +49,7 @@ impl AppRuntimeCoordinator {
         .map_err(|error| error.to_string())?;
         self.pending_runtime_events
             .push(RuntimeEvent::ContextBudgetSnapshotLoaded {
+                request_id,
                 payload: snapshot_to_payload(snapshot),
             });
         Ok(RuntimeCommandReceipt::Accepted)

@@ -209,11 +209,14 @@ pub(super) fn run_open_context_budget_effect(
         );
         return;
     };
-    model.open_context_budget_loading();
-    if let Err(message) = runtime_coordinator
-        .dispatch_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot { selection })
+    let request_id = model.open_context_budget_loading();
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id,
+            selection,
+        })
     {
-        model.show_context_budget_error(&message);
+        model.show_context_budget_error(request_id, &message);
     }
 }
 

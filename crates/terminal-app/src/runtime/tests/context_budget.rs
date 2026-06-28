@@ -20,15 +20,22 @@ fn context_budget_snapshot_includes_provider_visible_tool_definitions() {
         ..AppRuntimeOptions::default()
     });
     let selection = ModelSelection::new("local", "qwen3");
+    let request_id = request_id(40);
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot { selection })
+        .handle_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id,
+            selection,
+        })
         .expect("context budget snapshot command should be accepted");
 
     let payload = wait_for_runtime_event(
         &mut coordinator,
         |event| match event {
-            RuntimeEvent::ContextBudgetSnapshotLoaded { payload } => Some(payload),
+            RuntimeEvent::ContextBudgetSnapshotLoaded {
+                request_id: actual_request_id,
+                payload,
+            } if actual_request_id == request_id => Some(payload),
             _ => None,
         },
         "context budget snapshot payload",

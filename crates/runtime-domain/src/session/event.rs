@@ -123,9 +123,11 @@ pub enum RuntimeEvent {
         message: String,
     },
     ContextBudgetSnapshotLoaded {
+        request_id: SessionLoadRequestId,
         payload: ContextBudgetSnapshotPayload,
     },
     ContextBudgetSnapshotLoadFailed {
+        request_id: SessionLoadRequestId,
         message: String,
     },
     SessionBranchTreeLoaded {

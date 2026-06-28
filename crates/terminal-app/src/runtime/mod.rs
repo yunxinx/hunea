@@ -116,9 +116,10 @@ impl AppRuntimeCoordinator {
             RuntimeCommand::LoadCopyPickerTree { request_id } => {
                 self.load_copy_picker_tree(request_id)
             }
-            RuntimeCommand::LoadContextBudgetSnapshot { selection } => {
-                self.load_context_budget_snapshot_command(&selection)
-            }
+            RuntimeCommand::LoadContextBudgetSnapshot {
+                request_id,
+                selection,
+            } => self.load_context_budget_snapshot_command(request_id, &selection),
             RuntimeCommand::LoadBranchTree { request_id } => self.load_branch_tree(request_id),
             RuntimeCommand::LoadBranchPreview {
                 request_id,

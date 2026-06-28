@@ -5,6 +5,7 @@ use runtime_domain::session::ContextBudgetDisplayPayload;
 use crate::{
     Model, ModelOptions, StartupBannerOptions,
     context_budget::heatmap::is_context_budget_heatmap_cell,
+    runtime::RuntimeEventApply,
     test_helpers::{render_model_buffer, rendered_rows},
     theme::default_palette,
     update::AppEffect,
@@ -46,8 +47,8 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
     model.transcript_mut().clear();
     model.set_window(72, 20);
     model.set_palette(default_palette(), true);
-    model.open_context_budget_loading();
-    model.apply_context_budget_snapshot(context_budget_snapshot());
+    let request_id = model.open_context_budget_loading();
+    model.apply_context_budget_snapshot(request_id, context_budget_snapshot());
 
     let buffer = render_model_buffer(&mut model, 72, 20);
     let rows = rendered_rows(&buffer);
@@ -140,8 +141,8 @@ fn context_panel_uses_available_terminal_width_for_body_content() {
     model.transcript_mut().clear();
     model.set_window(120, 20);
     model.set_palette(default_palette(), true);
-    model.open_context_budget_loading();
-    model.apply_context_budget_snapshot(context_budget_snapshot());
+    let request_id = model.open_context_budget_loading();
+    model.apply_context_budget_snapshot(request_id, context_budget_snapshot());
 
     let render = model.current_inline_context_budget_render_result();
     let top_rule_width = render
@@ -183,18 +184,21 @@ fn context_panel_summary_row_keeps_full_model_usage_text_when_width_allows() {
     model.transcript_mut().clear();
     model.set_window(160, 20);
     model.set_palette(default_palette(), true);
-    model.open_context_budget_loading();
-    model.apply_context_budget_snapshot(ContextBudgetSnapshotPayload {
-        model_id: "deepseek-v4-flash".to_string(),
-        segments: context_budget_snapshot().segments,
-        total_estimated_tokens: 1_200,
-        context_limit: Some(256_000),
-        display: ContextBudgetDisplayPayload::Absolute {
-            limit: 256_000,
-            used: 1_200,
-            percent: 0.5,
+    let request_id = model.open_context_budget_loading();
+    model.apply_context_budget_snapshot(
+        request_id,
+        ContextBudgetSnapshotPayload {
+            model_id: "deepseek-v4-flash".to_string(),
+            segments: context_budget_snapshot().segments,
+            total_estimated_tokens: 1_200,
+            context_limit: Some(256_000),
+            display: ContextBudgetDisplayPayload::Absolute {
+                limit: 256_000,
+                used: 1_200,
+                percent: 0.5,
+            },
         },
-    });
+    );
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 160, 20));
 
@@ -203,6 +207,92 @@ fn context_panel_summary_row_keeps_full_model_usage_text_when_width_allows() {
             .any(|row| row.contains("deepseek-v4-flash · 1.2k/256k tokens (0.5%)")),
         "summary row should use the available right-side width before truncating: {rows:?}"
     );
+}
+
+#[test]
+fn stale_context_budget_snapshot_is_ignored_after_panel_reopens_loading() {
+    let mut model = ready_model();
+
+    let stale_request_id = model.open_context_budget_loading();
+    model.update(AppEvent::Key(KeyCode::Esc.into()));
+    let current_request_id = model.open_context_budget_loading();
+
+    model.apply_runtime_event(
+        runtime_domain::session::RuntimeEvent::ContextBudgetSnapshotLoaded {
+            request_id: stale_request_id,
+            payload: ContextBudgetSnapshotPayload {
+                model_id: "stale-model".to_string(),
+                ..context_budget_snapshot()
+            },
+        },
+    );
+
+    let state = model
+        .context_budget
+        .as_ref()
+        .expect("context budget should stay open");
+    assert!(state.loading);
+    assert_eq!(
+        model.context_budget_pending_request_id_for_test(),
+        Some(current_request_id)
+    );
+
+    model.apply_runtime_event(
+        runtime_domain::session::RuntimeEvent::ContextBudgetSnapshotLoaded {
+            request_id: current_request_id,
+            payload: ContextBudgetSnapshotPayload {
+                model_id: "current-model".to_string(),
+                ..context_budget_snapshot()
+            },
+        },
+    );
+
+    let state = model
+        .context_budget
+        .as_ref()
+        .expect("context budget should be loaded");
+    assert!(!state.loading);
+    assert_eq!(
+        state
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.model_id.as_str()),
+        Some("current-model")
+    );
+}
+
+#[test]
+fn late_context_budget_snapshot_after_close_does_not_reopen_panel() {
+    let mut model = ready_model();
+
+    let request_id = model.open_context_budget_loading();
+    model.update(AppEvent::Key(KeyCode::Esc.into()));
+
+    model.apply_runtime_event(
+        runtime_domain::session::RuntimeEvent::ContextBudgetSnapshotLoaded {
+            request_id,
+            payload: context_budget_snapshot(),
+        },
+    );
+
+    assert!(!model.context_budget_active());
+}
+
+#[test]
+fn late_context_budget_error_after_close_does_not_reopen_panel() {
+    let mut model = ready_model();
+
+    let request_id = model.open_context_budget_loading();
+    model.update(AppEvent::Key(KeyCode::Esc.into()));
+
+    model.apply_runtime_event(
+        runtime_domain::session::RuntimeEvent::ContextBudgetSnapshotLoadFailed {
+            request_id,
+            message: "stale failure".to_string(),
+        },
+    );
+
+    assert!(!model.context_budget_active());
 }
 
 fn context_budget_snapshot() -> ContextBudgetSnapshotPayload {

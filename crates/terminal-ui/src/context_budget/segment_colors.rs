@@ -7,6 +7,14 @@ use super::state::ContextBudgetCategoryKind;
 use crate::theme::TerminalPalette;
 
 const CONTEXT_BUDGET_SLOT_COUNT: usize = 6;
+const TERMINAL_DEFAULT_CONTEXT_BUDGET_COLORS: [Color; CONTEXT_BUDGET_SLOT_COUNT] = [
+    Color::Blue,
+    Color::Yellow,
+    Color::Green,
+    Color::Red,
+    Color::Magenta,
+    Color::Cyan,
+];
 
 /// Maps a segment kind to a stable palette slot (extensible without changing heatmap logic).
 pub(crate) fn context_budget_color_for_kind(kind: SegmentKind, palette: &TerminalPalette) -> Color {
@@ -49,6 +57,10 @@ fn kind_palette_slot(kind: SegmentKind) -> usize {
 
 fn context_budget_slot_color(slot: usize, palette: &TerminalPalette) -> Color {
     let slot = slot % CONTEXT_BUDGET_SLOT_COUNT;
+    if palette.uses_terminal_default_colors() {
+        return TERMINAL_DEFAULT_CONTEXT_BUDGET_COLORS[slot];
+    }
+
     let dark_background = color_brightness(palette.main) > 127.0;
     match (dark_background, slot) {
         (true, 0) => Color::Rgb(96, 165, 250),
@@ -81,7 +93,7 @@ fn color_brightness(color: Color) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::default_palette;
+    use crate::theme::{default_palette, terminal_default_palette};
 
     #[test]
     fn distinct_kinds_map_to_colors_without_panic() {
@@ -94,5 +106,36 @@ mod tests {
         ] {
             let _ = context_budget_color_for_kind(kind, &palette);
         }
+    }
+
+    #[test]
+    fn terminal_default_palette_uses_ansi_safe_segment_colors() {
+        let palette = terminal_default_palette();
+
+        assert_eq!(
+            context_budget_color_for_kind(SegmentKind::System, &palette),
+            Color::Blue
+        );
+        assert_eq!(
+            context_budget_color_for_kind(SegmentKind::UserMessage, &palette),
+            Color::Yellow
+        );
+        assert_eq!(
+            context_budget_color_for_kind(SegmentKind::AssistantMessage, &palette),
+            Color::Green
+        );
+        assert_eq!(
+            context_budget_color_for_kind(SegmentKind::ToolResult, &palette),
+            Color::Red
+        );
+        assert_eq!(
+            context_budget_color_for_kind(SegmentKind::Reasoning, &palette),
+            Color::Magenta
+        );
+        assert_eq!(
+            context_budget_color_for_kind(SegmentKind::ToolDefinitions, &palette),
+            Color::Cyan
+        );
+        assert_eq!(context_budget_empty_color(&palette), Color::Reset);
     }
 }

@@ -1,5 +1,7 @@
 use runtime_domain::context_budget::SegmentKind;
-use runtime_domain::session::{ContextBudgetDisplayPayload, ContextBudgetSnapshotPayload};
+use runtime_domain::session::{
+    ContextBudgetDisplayPayload, ContextBudgetSnapshotPayload, SessionLoadRequestId,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextBudgetCategoryKind {
@@ -21,6 +23,7 @@ pub(crate) struct ContextBudgetLegendEntry {
 pub(crate) struct ContextBudgetState {
     pub(crate) revision: usize,
     pub(crate) loading: bool,
+    pub(crate) pending_request_id: Option<SessionLoadRequestId>,
     pub(crate) error: Option<String>,
     pub(crate) snapshot: Option<ContextBudgetSnapshotPayload>,
 }
@@ -30,6 +33,7 @@ impl Default for ContextBudgetState {
         Self {
             revision: 1,
             loading: true,
+            pending_request_id: None,
             error: None,
             snapshot: None,
         }
@@ -40,6 +44,7 @@ impl ContextBudgetState {
     pub(crate) fn apply_snapshot(&mut self, payload: ContextBudgetSnapshotPayload) {
         self.revision = self.revision.saturating_add(1);
         self.loading = false;
+        self.pending_request_id = None;
         self.error = None;
         self.snapshot = Some(payload);
     }
@@ -47,6 +52,7 @@ impl ContextBudgetState {
     pub(crate) fn set_error(&mut self, message: String) {
         self.revision = self.revision.saturating_add(1);
         self.loading = false;
+        self.pending_request_id = None;
         self.error = Some(message);
         self.snapshot = None;
     }

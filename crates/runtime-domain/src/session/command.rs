@@ -32,6 +32,7 @@ pub enum RuntimeCommand {
         request_id: SessionLoadRequestId,
     },
     LoadContextBudgetSnapshot {
+        request_id: SessionLoadRequestId,
         selection: crate::model_catalog::ModelSelection,
     },
     LoadBranchTree {

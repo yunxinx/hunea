@@ -139,9 +139,10 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             | RuntimeCommand::LoadMessageHistoryStartupCache
             | RuntimeCommand::LoadMessageHistoryPickerRows { .. }
             | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
-            RuntimeCommand::LoadContextBudgetSnapshot { .. } => {
+            RuntimeCommand::LoadContextBudgetSnapshot { request_id, .. } => {
                 self.runtime_events
                     .push(RuntimeEvent::ContextBudgetSnapshotLoaded {
+                        request_id,
                         payload: runtime_domain::session::ContextBudgetSnapshotPayload {
                             model_id: "qwen3".to_string(),
                             segments: vec![],
@@ -211,6 +212,28 @@ fn unrelated_runtime_commands_do_not_inject_context_budget_events() {
     assert!(
         runtime_coordinator.runtime_events.is_empty(),
         "non-context commands should not enqueue fake context budget events"
+    );
+}
+
+#[test]
+fn open_context_budget_effect_dispatches_snapshot_load_with_request_id() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.selected_model = Some(runtime_domain::model_catalog::ModelSelection::new(
+        "local", "qwen3",
+    ));
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+
+    super::effects::run_open_context_budget_effect(&mut model, &mut runtime_coordinator);
+
+    let request_id = model
+        .context_budget_pending_request_id_for_test()
+        .expect("context budget should keep a pending request id");
+    assert_eq!(
+        runtime_coordinator.last_command,
+        Some(RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id,
+            selection: runtime_domain::model_catalog::ModelSelection::new("local", "qwen3"),
+        })
     );
 }
 

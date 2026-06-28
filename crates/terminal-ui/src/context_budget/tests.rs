@@ -32,12 +32,12 @@ fn context_command_emits_open_effect() {
 
 #[test]
 fn context_overlay_header_relative_question_mark() {
-    use crate::context_budget::state::header_summary;
-    let text = header_summary(
+    use crate::context_budget::state::context_usage_summary;
+    let text = context_usage_summary(
         "local/qwen3",
         ContextBudgetDisplayPayload::Relative { used: 1_200 },
     );
-    assert!(text.contains("/ ?"));
+    assert_eq!(text, "local/qwen3 · 1.2k tokens");
 }
 
 #[test]
@@ -54,9 +54,13 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
     let empty_cell_color = default_palette().tertiary;
 
     assert!(
+        rows.iter().any(|row| row.trim() == "Context Usage"),
+        "context panel title should keep only the stable Context Usage header: {rows:?}"
+    );
+    assert!(
         rows.iter()
-            .any(|row| row.contains("Context Usage · local/qwen3")),
-        "context panel should render its inline summary header: {rows:?}"
+            .any(|row| row.contains("local/qwen3 · 540")),
+        "context panel should keep the model name and render legend-style usage summary on the first right-side row: {rows:?}"
     );
     assert_eq!(
         rows.iter().filter(|row| row.contains('━')).count(),

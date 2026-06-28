@@ -66,11 +66,15 @@ pub(crate) fn format_compact_tokens(tokens: usize) -> String {
     }
 }
 
-pub(crate) fn header_summary(model_id: &str, display: ContextBudgetDisplayPayload) -> String {
+/// `context_usage_summary` 返回右侧图示首行使用的模型与上下文摘要。
+pub(crate) fn context_usage_summary(
+    model_id: &str,
+    display: ContextBudgetDisplayPayload,
+) -> String {
     match display {
         ContextBudgetDisplayPayload::Relative { used } => {
             format!(
-                "Context Usage · {model_id} · {} / ?",
+                "{model_id} · {} tokens",
                 format_compact_tokens(used as usize)
             )
         }
@@ -80,10 +84,10 @@ pub(crate) fn header_summary(model_id: &str, display: ContextBudgetDisplayPayloa
             percent,
         } => {
             format!(
-                "Context Usage · {model_id} · {} / {} · {:.1}%",
+                "{model_id} · {}/{} tokens ({:.0}%)",
                 format_compact_tokens(used as usize),
                 format_compact_tokens(limit as usize),
-                percent
+                percent,
             )
         }
     }
@@ -301,6 +305,30 @@ mod tests {
     fn segment_share_percent_uses_provided_total() {
         let percent = segment_share_percent(200, 500);
         assert!((percent - 40.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn context_usage_summary_omits_total_percent() {
+        let text = context_usage_summary(
+            "gpt-4o",
+            ContextBudgetDisplayPayload::Absolute {
+                limit: 128_000,
+                used: 32_000,
+                percent: 25.0,
+            },
+        );
+
+        assert_eq!(text, "gpt-4o · 32k/128k tokens (25%)");
+    }
+
+    #[test]
+    fn context_usage_summary_relative_uses_used_tokens_only() {
+        let text = context_usage_summary(
+            "local/qwen3",
+            ContextBudgetDisplayPayload::Relative { used: 1_200 },
+        );
+
+        assert_eq!(text, "local/qwen3 · 1.2k tokens");
     }
 
     #[test]

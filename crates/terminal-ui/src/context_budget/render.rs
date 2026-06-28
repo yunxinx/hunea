@@ -7,7 +7,7 @@ use ratatui::{
 
 use super::{
     heatmap::render_context_budget_heatmap, layout::context_budget_body_layout,
-    legend::render_context_budget_legend, state::header_summary,
+    legend::render_context_budget_legend,
 };
 use crate::{
     Model,
@@ -74,30 +74,13 @@ fn context_budget_panel_width(total_width: usize) -> usize {
 }
 
 fn context_budget_header_line(model: &Model, width: usize) -> Line<'static> {
-    let text = model
-        .context_budget
-        .as_ref()
-        .map(context_budget_header_text)
-        .unwrap_or_else(|| "Context Usage".to_string());
     Line::from(vec![
         Span::raw("  "),
         Span::styled(
-            truncate_display_width_with_ellipsis(&text, width.saturating_sub(2).max(1)),
+            truncate_display_width_with_ellipsis("Context Usage", width.saturating_sub(2).max(1)),
             primary_text_style(model.palette).bold(),
         ),
     ])
-}
-
-fn context_budget_header_text(state: &super::state::ContextBudgetState) -> String {
-    if let Some(snapshot) = state.snapshot.as_ref() {
-        header_summary(&snapshot.model_id, snapshot.display)
-    } else if state.loading {
-        "Context Usage · loading…".to_string()
-    } else if let Some(error) = state.error.as_ref() {
-        format!("Context Usage · {error}")
-    } else {
-        "Context Usage".to_string()
-    }
 }
 
 fn context_budget_footer_lines(model: &Model) -> [Line<'static>; 1] {
@@ -226,21 +209,21 @@ fn pad_body_lines(mut lines: Vec<Line<'static>>, body_height: usize) -> Vec<Line
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context_budget::state::context_usage_summary;
     use runtime_domain::session::ContextBudgetDisplayPayload;
 
     #[test]
-    fn header_relative_shows_question_mark_limit() {
-        let text = header_summary(
+    fn usage_summary_relative_shows_question_mark_limit() {
+        let text = context_usage_summary(
             "qwen3",
             ContextBudgetDisplayPayload::Relative { used: 42_000 },
         );
-        assert!(text.contains("qwen3"));
-        assert!(text.contains("/ ?"));
+        assert_eq!(text, "qwen3 · 42k tokens");
     }
 
     #[test]
-    fn header_absolute_shows_limit_and_percent() {
-        let text = header_summary(
+    fn usage_summary_absolute_shows_limit_without_percent() {
+        let text = context_usage_summary(
             "gpt-4o",
             ContextBudgetDisplayPayload::Absolute {
                 limit: 128_000,
@@ -249,7 +232,9 @@ mod tests {
             },
         );
         assert!(text.contains("128k"));
-        assert!(text.contains("25.0%"));
+        assert!(text.contains("gpt-4o"));
+        assert!(text.contains("tokens"));
+        assert!(text.contains("(25%)"));
     }
 
     #[test]

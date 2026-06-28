@@ -1,28 +1,35 @@
 //! Heatmap cell allocation for context budget segments.
 
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-use runtime_domain::context_budget::{ContextSegment, SegmentKind};
 use runtime_domain::session::ContextBudgetSnapshotPayload;
 
 use super::{
-    segment_colors::{context_budget_color_for_kind, context_budget_empty_color},
-    state::{segment_kind_display_rank, segment_kind_from_tag},
+    segment_colors::{context_budget_color_for_category, context_budget_empty_color},
+    state::{ContextBudgetCategoryKind, aggregated_category_totals},
 };
 use crate::theme::TerminalPalette;
 
 const HEATMAP_FULL_SYMBOL: &str = "◼";
 const HEATMAP_EMPTY_SYMBOL: &str = "⛶";
-const HEATMAP_CELL_WIDTH: usize = 3;
+const HEATMAP_CELL_WIDTH: usize = 2;
+const HEATMAP_GRID_COLUMNS: usize = 10;
+const HEATMAP_GRID_ROWS: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HeatmapCellFill {
-    kind: Option<SegmentKind>,
+    kind: Option<ContextBudgetCategoryKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct HeatmapCategory {
+    kind: ContextBudgetCategoryKind,
+    estimated_tokens: usize,
 }
 
 /// Assigns grid cells to segments proportional to token share (largest remainder).
 /// Returns per-segment cell counts in segment slice order (`stack_order` order).
 pub(crate) fn allocate_heatmap_cells(
-    segments: &[ContextSegment],
+    segments: &[HeatmapCategory],
     total_cells: usize,
 ) -> Vec<usize> {
     if total_cells == 0 || segments.is_empty() {
@@ -96,7 +103,7 @@ pub(super) fn render_context_budget_heatmap(
     }
 
     let grid_columns = heatmap_grid_columns(area.width);
-    let grid_rows = usize::from(area.height);
+    let grid_rows = heatmap_grid_rows(area.height);
     let total_cells = grid_columns.saturating_mul(grid_rows);
     if total_cells == 0 {
         return;
@@ -104,7 +111,7 @@ pub(super) fn render_context_budget_heatmap(
 
     clear_heatmap_area(buffer, area);
 
-    let segments = aggregated_segments_for_heatmap(snapshot);
+    let segments = aggregated_categories_for_heatmap(snapshot);
     let occupied_cells = occupied_heatmap_cells(snapshot, total_cells, segments.len());
     let counts = allocate_heatmap_cells(&segments, occupied_cells);
     let mut fill_kinds = Vec::with_capacity(total_cells);
@@ -130,20 +137,23 @@ pub(super) fn render_context_budget_heatmap(
 
         let color = fill
             .kind
-            .map(|kind| context_budget_color_for_kind(kind, &palette))
+            .map(|kind| context_budget_color_for_category(kind, &palette))
             .unwrap_or(empty_color);
-        if let Some(cell) = buffer.cell_mut((x, y)) {
-            cell.set_symbol(heatmap_symbol(fill));
-            cell.set_style(Style::new().fg(color));
-        }
+        render_heatmap_cell(buffer, x, y, area, fill, color);
     }
 }
 
 pub(super) fn heatmap_grid_columns(width: u16) -> usize {
-    usize::from(width.max(1)).div_ceil(HEATMAP_CELL_WIDTH)
+    usize::from(width.max(1))
+        .div_ceil(HEATMAP_CELL_WIDTH)
+        .min(HEATMAP_GRID_COLUMNS)
 }
 
-fn occupied_heatmap_cells(
+fn heatmap_grid_rows(height: u16) -> usize {
+    usize::from(height).min(HEATMAP_GRID_ROWS)
+}
+
+pub(super) fn occupied_heatmap_cells(
     snapshot: &ContextBudgetSnapshotPayload,
     total_cells: usize,
     segment_count: usize,
@@ -161,37 +171,18 @@ fn occupied_heatmap_cells(
     }
 }
 
-pub(super) fn aggregated_segments_for_heatmap(
+pub(super) fn aggregated_categories_for_heatmap(
     snapshot: &ContextBudgetSnapshotPayload,
-) -> Vec<ContextSegment> {
-    let mut aggregated_tokens = [0usize; 6];
-
-    for segment in &snapshot.segments {
-        let kind = segment_kind_from_tag(&segment.kind_tag);
-        let rank = segment_kind_display_rank(kind);
-        aggregated_tokens[rank] = aggregated_tokens[rank].saturating_add(segment.estimated_tokens);
-    }
-
-    [
-        SegmentKind::System,
-        SegmentKind::UserMessage,
-        SegmentKind::AssistantMessage,
-        SegmentKind::ToolResult,
-        SegmentKind::Reasoning,
-        SegmentKind::ToolDefinitions,
-    ]
-    .into_iter()
-    .filter_map(|kind| {
-        let rank = segment_kind_display_rank(kind);
-        let estimated_tokens = aggregated_tokens[rank];
-        (estimated_tokens > 0).then(|| ContextSegment {
-            kind,
-            stack_order: u16::try_from(rank).unwrap_or(u16::MAX),
-            estimated_tokens,
-            label: kind.default_label().to_string(),
+) -> Vec<HeatmapCategory> {
+    aggregated_category_totals(snapshot)
+        .into_iter()
+        .filter_map(|(kind, estimated_tokens)| {
+            (estimated_tokens > 0).then_some(HeatmapCategory {
+                kind,
+                estimated_tokens,
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
 fn clear_heatmap_area(buffer: &mut Buffer, area: Rect) {
@@ -205,6 +196,29 @@ fn clear_heatmap_area(buffer: &mut Buffer, area: Rect) {
     }
 }
 
+fn render_heatmap_cell(
+    buffer: &mut Buffer,
+    x: u16,
+    y: u16,
+    area: Rect,
+    fill: HeatmapCellFill,
+    color: ratatui::style::Color,
+) {
+    let style = Style::new().fg(color);
+    if let Some(cell) = buffer.cell_mut((x, y)) {
+        cell.set_symbol(heatmap_symbol(fill));
+        cell.set_style(style);
+    }
+
+    let spacer_x = x.saturating_add(1);
+    if spacer_x < area.x + area.width
+        && let Some(cell) = buffer.cell_mut((spacer_x, y))
+    {
+        cell.set_symbol(" ");
+        cell.set_style(style);
+    }
+}
+
 #[cfg(test)]
 use ratatui::buffer::Cell;
 
@@ -213,14 +227,11 @@ pub(super) fn is_context_budget_heatmap_cell(cell: &Cell, palette: TerminalPalet
     let empty_color = context_budget_empty_color(&palette);
     let heatmap_symbols = [HEATMAP_FULL_SYMBOL, HEATMAP_EMPTY_SYMBOL];
     let heatmap_colors = [
-        SegmentKind::System,
-        SegmentKind::UserMessage,
-        SegmentKind::AssistantMessage,
-        SegmentKind::ToolResult,
-        SegmentKind::Reasoning,
-        SegmentKind::ToolDefinitions,
+        ContextBudgetCategoryKind::SystemPrompt,
+        ContextBudgetCategoryKind::ToolDefinitions,
+        ContextBudgetCategoryKind::Messages,
     ]
-    .map(|kind| context_budget_color_for_kind(kind, &palette));
+    .map(|kind| context_budget_color_for_category(kind, &palette));
 
     heatmap_symbols.contains(&cell.symbol())
         && (cell.fg == empty_color || heatmap_colors.contains(&cell.fg))
@@ -236,26 +247,23 @@ fn heatmap_symbol(fill: HeatmapCellFill) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtime_domain::context_budget::{ContextSegment, SegmentKind};
     use runtime_domain::session::{ContextBudgetDisplayPayload, ContextBudgetSegmentPayload};
 
     use crate::theme::default_palette;
 
-    fn seg(kind: SegmentKind, tokens: usize, order: u16) -> ContextSegment {
-        ContextSegment {
+    fn seg(kind: ContextBudgetCategoryKind, tokens: usize) -> HeatmapCategory {
+        HeatmapCategory {
             kind,
-            stack_order: order,
             estimated_tokens: tokens,
-            label: kind.default_label().to_string(),
         }
     }
 
     #[test]
     fn allocate_cells_sum_equals_grid_size() {
         let segments = vec![
-            seg(SegmentKind::System, 100, 0),
-            seg(SegmentKind::UserMessage, 200, 1),
-            seg(SegmentKind::AssistantMessage, 100, 2),
+            seg(ContextBudgetCategoryKind::SystemPrompt, 100),
+            seg(ContextBudgetCategoryKind::ToolDefinitions, 80),
+            seg(ContextBudgetCategoryKind::Messages, 220),
         ];
         let counts = allocate_heatmap_cells(&segments, 24);
         assert_eq!(counts.iter().sum::<usize>(), 24);
@@ -264,9 +272,9 @@ mod tests {
     #[test]
     fn non_zero_segments_get_one_cell_when_grid_can_fit_all_segments() {
         let segments = vec![
-            seg(SegmentKind::System, 1_000, 0),
-            seg(SegmentKind::UserMessage, 1, 1),
-            seg(SegmentKind::AssistantMessage, 1, 2),
+            seg(ContextBudgetCategoryKind::SystemPrompt, 1_000),
+            seg(ContextBudgetCategoryKind::ToolDefinitions, 1),
+            seg(ContextBudgetCategoryKind::Messages, 1),
         ];
 
         let counts = allocate_heatmap_cells(&segments, 3);
@@ -279,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn heatmap_aggregates_by_kind_instead_of_message_order() {
+    fn heatmap_aggregates_into_context_budget_source_buckets() {
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "local/qwen3".to_string(),
             segments: vec![
@@ -317,7 +325,7 @@ mod tests {
             },
         };
 
-        let segments = aggregated_segments_for_heatmap(&snapshot);
+        let segments = aggregated_categories_for_heatmap(&snapshot);
 
         assert_eq!(
             segments
@@ -325,14 +333,12 @@ mod tests {
                 .map(|segment| segment.kind)
                 .collect::<Vec<_>>(),
             vec![
-                SegmentKind::System,
-                SegmentKind::UserMessage,
-                SegmentKind::AssistantMessage,
+                ContextBudgetCategoryKind::SystemPrompt,
+                ContextBudgetCategoryKind::Messages,
             ]
         );
         assert_eq!(segments[0].estimated_tokens, 20);
-        assert_eq!(segments[1].estimated_tokens, 40);
-        assert_eq!(segments[2].estimated_tokens, 160);
+        assert_eq!(segments[1].estimated_tokens, 200);
     }
 
     #[test]
@@ -353,11 +359,11 @@ mod tests {
                 percent: 12.5,
             },
         };
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 8, 2));
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 10));
 
         render_context_budget_heatmap(
             &mut buffer,
-            Rect::new(0, 0, 8, 2),
+            Rect::new(0, 0, 20, 10),
             &snapshot,
             default_palette(),
         );
@@ -377,15 +383,18 @@ mod tests {
     }
 
     #[test]
-    fn heatmap_grid_columns_reduce_density_for_chunk_map_style_blocks() {
-        assert_eq!(heatmap_grid_columns(72), 24);
-        assert_eq!(heatmap_grid_columns(76), 26);
+    fn heatmap_grid_uses_fixed_ten_by_ten_layout() {
+        assert_eq!(heatmap_grid_columns(72), 10);
+        assert_eq!(heatmap_grid_columns(20), 10);
+        assert_eq!(heatmap_grid_rows(15), 10);
+        assert_eq!(heatmap_grid_rows(10), 10);
     }
 
     #[test]
     fn heatmap_marks_cells_by_used_and_empty_symbols() {
         let palette = default_palette();
-        let used_color = context_budget_color_for_kind(SegmentKind::System, &palette);
+        let used_color =
+            context_budget_color_for_category(ContextBudgetCategoryKind::Messages, &palette);
         let empty_color = context_budget_empty_color(&palette);
 
         let mut used = Cell::default();
@@ -400,5 +409,22 @@ mod tests {
 
         let plain = Cell::default();
         assert!(!is_context_budget_heatmap_cell(&plain, palette));
+    }
+
+    #[test]
+    fn occupied_heatmap_cells_rounds_usage_against_fixed_hundred_cell_grid() {
+        let snapshot = ContextBudgetSnapshotPayload {
+            model_id: "local/qwen3".to_string(),
+            segments: Vec::new(),
+            total_estimated_tokens: 0,
+            context_limit: Some(1_000),
+            display: ContextBudgetDisplayPayload::Absolute {
+                limit: 1_000,
+                used: 421,
+                percent: 42.1,
+            },
+        };
+
+        assert_eq!(occupied_heatmap_cells(&snapshot, 100, 3), 42);
     }
 }

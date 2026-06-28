@@ -3,6 +3,7 @@
 use ratatui::style::Color;
 use runtime_domain::context_budget::SegmentKind;
 
+use super::state::ContextBudgetCategoryKind;
 use crate::theme::TerminalPalette;
 
 const CONTEXT_BUDGET_SLOT_COUNT: usize = 6;
@@ -14,7 +15,25 @@ pub(crate) fn context_budget_color_for_kind(kind: SegmentKind, palette: &Termina
 }
 
 pub(crate) fn context_budget_empty_color(palette: &TerminalPalette) -> Color {
-    palette.surface.unwrap_or(palette.tertiary)
+    palette.tertiary
+}
+
+pub(crate) fn context_budget_color_for_category(
+    kind: ContextBudgetCategoryKind,
+    palette: &TerminalPalette,
+) -> Color {
+    match kind {
+        ContextBudgetCategoryKind::SystemPrompt => {
+            context_budget_color_for_kind(SegmentKind::System, palette)
+        }
+        ContextBudgetCategoryKind::ToolDefinitions => {
+            context_budget_color_for_kind(SegmentKind::ToolDefinitions, palette)
+        }
+        ContextBudgetCategoryKind::Messages => {
+            context_budget_color_for_kind(SegmentKind::AssistantMessage, palette)
+        }
+        ContextBudgetCategoryKind::FreeSpace => context_budget_empty_color(palette),
+    }
 }
 
 fn kind_palette_slot(kind: SegmentKind) -> usize {

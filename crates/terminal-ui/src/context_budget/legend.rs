@@ -2,19 +2,22 @@ use ratatui::{buffer::Buffer, style::Style};
 use runtime_domain::session::ContextBudgetSnapshotPayload;
 
 use super::{
-    segment_colors::context_budget_color_for_kind,
-    state::{build_legend_entries, segment_kind_from_tag, segment_share_percent},
+    segment_colors::context_budget_color_for_category,
+    state::{
+        ContextBudgetCategoryKind, build_legend_entries, format_compact_tokens, legend_share_total,
+        segment_share_percent,
+    },
 };
 use crate::{
+    display_width::display_width,
     status_line::truncate_display_width_with_ellipsis,
     theme::{TerminalPalette, primary_text_style, tertiary_text_style},
 };
 
-const LEGEND_SWATCH_SYMBOL: &str = "■";
+const LEGEND_SWATCH_SYMBOL: &str = "◼";
+const LEGEND_FREE_SYMBOL: &str = "⛶";
 const LEGEND_SWATCH_WIDTH: usize = 1;
 const LEGEND_SWATCH_GAP: usize = 1;
-const LEGEND_PERCENT_GAP: usize = 1;
-const LEGEND_PERCENT_WIDTH: usize = 6;
 
 pub(super) fn render_context_budget_legend(
     buffer: &mut Buffer,
@@ -27,7 +30,7 @@ pub(super) fn render_context_budget_legend(
     }
 
     let entries = build_legend_entries(snapshot);
-    let total_tokens = snapshot.total_estimated_tokens;
+    let total_tokens = legend_share_total(snapshot);
     for (row, entry) in entries.iter().enumerate() {
         if row >= usize::from(area.height) {
             break;
@@ -51,24 +54,50 @@ fn render_legend_row(
         return;
     }
 
-    let percent = segment_share_percent(entry.estimated_tokens, total_tokens);
-    let percent_text = format!("{percent:>5.1}%");
-    let fixed_width =
-        LEGEND_SWATCH_WIDTH + LEGEND_SWATCH_GAP + LEGEND_PERCENT_GAP + LEGEND_PERCENT_WIDTH;
-    let label_width = row_width.saturating_sub(fixed_width);
-    let label = truncate_display_width_with_ellipsis(&entry.label, label_width.max(1));
-    let label_x = area.x + u16::try_from(LEGEND_SWATCH_WIDTH + LEGEND_SWATCH_GAP).unwrap_or(0);
-    let percent_x =
-        area.x + u16::try_from(row_width.saturating_sub(LEGEND_PERCENT_WIDTH)).unwrap_or(u16::MAX);
+    let text_x = area.x + u16::try_from(LEGEND_SWATCH_WIDTH + LEGEND_SWATCH_GAP).unwrap_or(0);
+    let text_width = row_width.saturating_sub(LEGEND_SWATCH_WIDTH + LEGEND_SWATCH_GAP);
+    let prefix = format!("{}: ", entry.label);
+    let prefix_width = display_width(&prefix);
+    let detail = legend_detail_text(entry, total_tokens);
 
-    let color = context_budget_color_for_kind(segment_kind_from_tag(&entry.kind_tag), &palette);
+    let color = context_budget_color_for_category(entry.kind, &palette);
 
     if let Some(cell) = buffer.cell_mut((area.x, y)) {
-        cell.set_symbol(LEGEND_SWATCH_SYMBOL);
+        cell.set_symbol(legend_symbol(entry.kind));
         cell.set_style(Style::new().fg(color));
     }
-    buffer.set_string(label_x, y, label, primary_text_style(palette));
-    buffer.set_string(percent_x, y, percent_text, tertiary_text_style(palette));
+
+    if prefix_width >= text_width {
+        let truncated = truncate_display_width_with_ellipsis(&prefix, text_width.max(1));
+        buffer.set_string(text_x, y, truncated, primary_text_style(palette));
+        return;
+    }
+
+    buffer.set_string(text_x, y, prefix, primary_text_style(palette));
+    let detail_x = text_x + u16::try_from(prefix_width).unwrap_or(u16::MAX);
+    let detail_width = text_width.saturating_sub(prefix_width);
+    let truncated_detail = truncate_display_width_with_ellipsis(&detail, detail_width.max(1));
+    buffer.set_string(detail_x, y, truncated_detail, tertiary_text_style(palette));
+}
+
+fn legend_symbol(kind: ContextBudgetCategoryKind) -> &'static str {
+    match kind {
+        ContextBudgetCategoryKind::FreeSpace => LEGEND_FREE_SYMBOL,
+        ContextBudgetCategoryKind::SystemPrompt
+        | ContextBudgetCategoryKind::ToolDefinitions
+        | ContextBudgetCategoryKind::Messages => LEGEND_SWATCH_SYMBOL,
+    }
+}
+
+fn legend_detail_text(
+    entry: &super::state::ContextBudgetLegendEntry,
+    total_tokens: usize,
+) -> String {
+    let percent = segment_share_percent(entry.estimated_tokens, total_tokens);
+    format!(
+        "{} tokens ({percent:.1}%)",
+        format_compact_tokens(entry.estimated_tokens)
+    )
 }
 
 #[cfg(test)]
@@ -78,8 +107,8 @@ mod tests {
     use runtime_domain::session::ContextBudgetSegmentPayload;
 
     #[test]
-    fn legend_uses_single_column_layout() {
-        let area = ratatui::layout::Rect::new(0, 0, 28, 4);
+    fn legend_keeps_stable_source_bucket_order_for_non_zero_categories() {
+        let area = ratatui::layout::Rect::new(0, 0, 48, 4);
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "model".to_string(),
             segments: vec![
@@ -89,33 +118,41 @@ mod tests {
                 segment("reasoning", 60, "reasoning"),
             ],
             total_estimated_tokens: 540,
-            context_limit: None,
-            display: runtime_domain::session::ContextBudgetDisplayPayload::Relative { used: 540 },
+            context_limit: Some(1_000),
+            display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
+                limit: 1_000,
+                used: 540,
+                percent: 54.0,
+            },
         };
-        let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 28, 4));
+        let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 48, 4));
 
         render_context_budget_legend(&mut buffer, area, &snapshot, default_palette());
 
         let first_row = row_text(&buffer, 0);
+        assert!(
+            first_row.contains("System prompt"),
+            "legend should start with the system bucket: {first_row:?}"
+        );
+        assert!(
+            !first_row.contains("Tool definitions"),
+            "zero-token tool definitions should not render at all: {first_row:?}"
+        );
         let second_row = row_text(&buffer, 1);
+        assert!(
+            second_row.contains("Messages"),
+            "legend should aggregate message roles into one Messages row after the system row: {second_row:?}"
+        );
         let third_row = row_text(&buffer, 2);
         assert!(
-            first_row.contains("system"),
-            "legend should use stable semantic order instead of size order: {first_row:?}"
-        );
-        assert!(
-            second_row.contains("user"),
-            "second row should continue vertically with canonical category labels: {second_row:?}"
-        );
-        assert!(
-            third_row.contains("assistant"),
-            "subsequent rows should keep the same single legend column: {third_row:?}"
+            third_row.contains("Free space"),
+            "legend should include the free-space row when capacity remains: {third_row:?}"
         );
     }
 
     #[test]
-    fn legend_merges_duplicate_categories_and_shows_share_of_used_tokens() {
-        let area = ratatui::layout::Rect::new(0, 0, 28, 3);
+    fn legend_uses_natural_token_and_percent_copy() {
+        let area = ratatui::layout::Rect::new(0, 0, 48, 4);
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "model".to_string(),
             segments: vec![
@@ -131,25 +168,54 @@ mod tests {
                 percent: 40.0,
             },
         };
-        let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 28, 3));
+        let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 48, 4));
 
         render_context_budget_legend(&mut buffer, area, &snapshot, default_palette());
 
-        let rows = (0..3).map(|row| row_text(&buffer, row)).collect::<Vec<_>>();
-        assert_eq!(
-            rows.iter().filter(|row| row.contains("user")).count(),
-            1,
-            "duplicate user segments should be merged into one legend row: {rows:?}"
+        let rows = (0..4).map(|row| row_text(&buffer, row)).collect::<Vec<_>>();
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Messages: 400 tokens (40.0%)")),
+            "messages row should use compact natural-language token copy: {rows:?}"
         );
         assert!(
             rows.iter()
-                .any(|row| row.contains("assistant") && row.contains(" 50.0%")),
-            "assistant share should be based on used tokens: {rows:?}"
+                .any(|row| row.contains("Free space: 600 tokens (60.0%)")),
+            "free-space row should use the same full-limit percent baseline: {rows:?}"
         );
+    }
+
+    #[test]
+    fn legend_hides_zero_token_categories() {
+        let area = ratatui::layout::Rect::new(0, 0, 48, 4);
+        let snapshot = ContextBudgetSnapshotPayload {
+            model_id: "model".to_string(),
+            segments: vec![segment("assistant", 400, "assistant")],
+            total_estimated_tokens: 400,
+            context_limit: Some(400),
+            display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
+                limit: 400,
+                used: 400,
+                percent: 100.0,
+            },
+        };
+        let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 48, 4));
+
+        render_context_budget_legend(&mut buffer, area, &snapshot, default_palette());
+
+        let rows = (0..4).map(|row| row_text(&buffer, row)).collect::<Vec<_>>();
         assert!(
             rows.iter()
-                .any(|row| row.contains("user") && row.contains(" 50.0%")),
-            "merged user share should be based on used tokens: {rows:?}"
+                .any(|row| row.contains("Messages: 400 tokens (100.0%)")),
+            "non-zero message categories should still render: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|row| !row.contains("System prompt")),
+            "zero-token system categories should be omitted entirely: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|row| !row.contains("Free space")),
+            "zero-token free space should also be omitted: {rows:?}"
         );
     }
 

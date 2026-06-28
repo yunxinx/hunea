@@ -100,14 +100,11 @@ fn context_budget_header_text(state: &super::state::ContextBudgetState) -> Strin
     }
 }
 
-fn context_budget_footer_lines(model: &Model) -> [Line<'static>; 2] {
-    [
-        Line::raw(""),
-        Line::styled(
-            "  Esc close",
-            tertiary_text_style(model.palette).add_modifier(Modifier::ITALIC),
-        ),
-    ]
+fn context_budget_footer_lines(model: &Model) -> [Line<'static>; 1] {
+    [Line::styled(
+        "  Esc close",
+        tertiary_text_style(model.palette).add_modifier(Modifier::ITALIC),
+    )]
 }
 
 fn context_budget_body_lines(

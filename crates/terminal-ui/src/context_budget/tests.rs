@@ -51,9 +51,7 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
 
     let buffer = render_model_buffer(&mut model, 72, 20);
     let rows = rendered_rows(&buffer);
-    let empty_cell_color = default_palette()
-        .surface
-        .expect("default palette should expose a surface color");
+    let empty_cell_color = default_palette().tertiary;
 
     assert!(
         rows.iter()
@@ -67,36 +65,36 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
     );
     let first_legend_row = rows
         .iter()
-        .position(|row| row.contains("assistant"))
+        .position(|row| row.contains("Messages"))
         .expect("legend should render the leading segment row");
-    let assistant_row_index = rows
+    let messages_row_index = rows
         .iter()
-        .position(|row| row.contains("assistant"))
-        .expect("legend should render assistant row");
-    let assistant_row = &rows[assistant_row_index];
-    let legend_x = assistant_row
-        .find("assistant")
-        .expect("assistant label should exist in rendered row");
+        .position(|row| row.contains("Messages:"))
+        .expect("legend should render the messages row");
+    let messages_row = &rows[messages_row_index];
+    let legend_x = messages_row
+        .find("Messages:")
+        .expect("messages legend text should exist in the rendered row");
     let has_heatmap_before_legend = (0..legend_x).any(|x| {
         is_context_budget_heatmap_cell(
             &buffer[(
                 u16::try_from(x).unwrap_or(0),
-                u16::try_from(assistant_row_index).unwrap_or(0),
+                u16::try_from(messages_row_index).unwrap_or(0),
             )],
             default_palette(),
         )
     });
     assert!(
         has_heatmap_before_legend,
-        "context panel should render heatmap and legend in the same row-oriented two-column body: {rows:?}"
+        "context panel should render heatmap on the left and legend on the right in the same row: {rows:?}"
     );
     assert!(
         rows.iter().all(|row| !row.contains("Page 1/1")),
         "inline context panel must not render fullscreen page chrome: {rows:?}"
     );
     assert!(
-        first_legend_row < 18,
-        "legend should stay inside a medium-height inline panel instead of being pushed into a fullscreen body: {rows:?}"
+        first_legend_row < 16,
+        "legend should stay inside the inline panel body instead of falling below the heatmap: {rows:?}"
     );
     let empty_capacity = buffer
         .content()
@@ -123,6 +121,14 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
         colored_heatmap_cells <= 70,
         "heatmap should stay closer to the reduced-density grid instead of expanding back out: {colored_heatmap_cells}"
     );
+    assert!(
+        rows.iter().any(|row| row.contains("Free space")),
+        "legend should include the free-space row for the full source-based breakdown: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("Messages:")),
+        "legend rows should use natural language labels instead of the old percent-only format: {rows:?}"
+    );
 }
 
 #[test]
@@ -140,11 +146,16 @@ fn context_panel_only_uses_left_side_of_the_terminal_width() {
         .first()
         .map(ratatui::text::Line::width)
         .unwrap_or_default();
+    let header_gap_width = render
+        .lines
+        .get(2)
+        .map(ratatui::text::Line::width)
+        .unwrap_or_default();
     let body_width = render
         .lines
         .iter()
         .skip(3)
-        .take(10)
+        .take(11)
         .map(ratatui::text::Line::width)
         .max()
         .unwrap_or_default();
@@ -152,6 +163,10 @@ fn context_panel_only_uses_left_side_of_the_terminal_width() {
     assert!(
         top_rule_width == 72,
         "context panel rule should remain full width even when the content area is narrower: {top_rule_width}"
+    );
+    assert!(
+        header_gap_width == 0,
+        "context panel should keep one blank row between the header and the body"
     );
     assert!(
         body_width <= 45,

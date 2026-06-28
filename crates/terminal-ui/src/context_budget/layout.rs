@@ -1,10 +1,11 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 
-pub(super) const CONTEXT_BUDGET_BODY_HORIZONTAL_PADDING: u16 = 2;
-pub(super) const CONTEXT_BUDGET_COLUMN_GAP: u16 = 3;
-pub(super) const CONTEXT_BUDGET_HEATMAP_WIDTH: u16 = 20;
+use super::{
+    CONTEXT_BUDGET_COLUMN_GAP, CONTEXT_BUDGET_HEATMAP_WIDTH, CONTEXT_BUDGET_MIN_LEGEND_WIDTH,
+    CONTEXT_BUDGET_PANEL_INSET_WIDTH,
+};
+
 pub(super) const CONTEXT_BUDGET_MIN_HEATMAP_WIDTH: u16 = CONTEXT_BUDGET_HEATMAP_WIDTH;
-pub(super) const CONTEXT_BUDGET_MIN_LEGEND_WIDTH: u16 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ContextBudgetBodyLayout {
@@ -15,7 +16,7 @@ pub(super) struct ContextBudgetBodyLayout {
 
 pub(super) fn context_budget_body_layout(body: Rect) -> Option<ContextBudgetBodyLayout> {
     let [_, content] = Layout::horizontal([
-        Constraint::Length(CONTEXT_BUDGET_BODY_HORIZONTAL_PADDING),
+        Constraint::Length(CONTEXT_BUDGET_PANEL_INSET_WIDTH),
         Constraint::Fill(1),
     ])
     .areas(body);
@@ -56,13 +57,12 @@ mod tests {
 
         assert_eq!(
             layout.content.x,
-            body.x + CONTEXT_BUDGET_BODY_HORIZONTAL_PADDING,
+            body.x + CONTEXT_BUDGET_PANEL_INSET_WIDTH,
             "content should start after the declared left padding"
         );
         assert_eq!(
             layout.content.width,
-            body.width
-                .saturating_sub(CONTEXT_BUDGET_BODY_HORIZONTAL_PADDING),
+            body.width.saturating_sub(CONTEXT_BUDGET_PANEL_INSET_WIDTH),
             "content width should drop only the declared left padding"
         );
     }
@@ -73,15 +73,21 @@ mod tests {
 
         let layout = context_budget_body_layout(body).expect("layout should exist");
 
-        assert_eq!(layout.content.x, 2);
-        assert_eq!(layout.content.width, 70);
+        assert_eq!(layout.content.x, CONTEXT_BUDGET_PANEL_INSET_WIDTH);
+        assert_eq!(
+            layout.content.width,
+            body.width.saturating_sub(CONTEXT_BUDGET_PANEL_INSET_WIDTH)
+        );
         assert_eq!(layout.heatmap.x, layout.content.x);
-        assert_eq!(layout.heatmap.width, 20);
+        assert_eq!(layout.heatmap.width, CONTEXT_BUDGET_HEATMAP_WIDTH);
         assert_eq!(layout.heatmap.height, layout.content.height);
         assert_eq!(layout.legend.height, layout.content.height);
-        assert_eq!(layout.legend.x, layout.heatmap.x + layout.heatmap.width + 3);
         assert_eq!(
-            layout.legend.width + layout.heatmap.width + 3,
+            layout.legend.x,
+            layout.heatmap.x + layout.heatmap.width + CONTEXT_BUDGET_COLUMN_GAP
+        );
+        assert_eq!(
+            layout.legend.width + layout.heatmap.width + CONTEXT_BUDGET_COLUMN_GAP,
             layout.content.width,
             "legend should consume all remaining width after the fixed heatmap column"
         );
@@ -112,7 +118,16 @@ mod tests {
 
     #[test]
     fn body_layout_returns_none_when_too_narrow_for_two_columns() {
-        let body = Rect::new(0, 0, 44, 10);
+        let body = Rect::new(
+            0,
+            0,
+            CONTEXT_BUDGET_PANEL_INSET_WIDTH
+                + CONTEXT_BUDGET_MIN_HEATMAP_WIDTH
+                + CONTEXT_BUDGET_COLUMN_GAP
+                + CONTEXT_BUDGET_MIN_LEGEND_WIDTH
+                - 1,
+            10,
+        );
 
         assert_eq!(context_budget_body_layout(body), None);
     }

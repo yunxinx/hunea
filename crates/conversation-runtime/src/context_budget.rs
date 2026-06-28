@@ -61,12 +61,15 @@ pub fn context_budget_from_items(
         }
     };
 
-    let mut segments =
-        Vec::with_capacity(items.len() + usize::from(projection.tools_text.is_some()));
-    for (stack_order, (item, projection_text)) in items
-        .iter()
-        .zip(projection.message_texts.iter())
-        .enumerate()
+    let message_texts = projection
+        .serialized_message_texts()
+        .map_err(|source| ContextBudgetError::Projection { source })?;
+    let tools_text = projection
+        .serialized_tools_text()
+        .map_err(|source| ContextBudgetError::Projection { source })?;
+
+    let mut segments = Vec::with_capacity(items.len() + usize::from(tools_text.is_some()));
+    for (stack_order, (item, projection_text)) in items.iter().zip(message_texts.iter()).enumerate()
     {
         segments.push(ContextSegment {
             kind: segment_kind(item),
@@ -76,7 +79,7 @@ pub fn context_budget_from_items(
         });
     }
 
-    if let Some(tools_text) = projection.tools_text.as_deref() {
+    if let Some(tools_text) = tools_text.as_deref() {
         segments.push(ContextSegment {
             kind: SegmentKind::ToolDefinitions,
             stack_order: u16::try_from(segments.len()).unwrap_or(u16::MAX),

@@ -1,13 +1,13 @@
 use ratatui::{
-    buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::Modifier,
     text::{Line, Span},
 };
 
 use super::{
-    heatmap::render_context_budget_heatmap, layout::context_budget_body_layout,
-    legend::render_context_budget_legend,
+    CONTEXT_BUDGET_PANEL_INSET_WIDTH, CONTEXT_BUDGET_SECTION_GAP_ROWS,
+    heatmap::build_context_budget_heatmap_lines, layout::context_budget_body_layout,
+    legend::build_context_budget_legend_lines,
 };
 use crate::{
     Model,
@@ -48,26 +48,31 @@ fn build_panel_lines(
     let mut lines = vec![
         inline_panel_rule_line(terminal_width, model.palette),
         context_budget_header_line(model, terminal_width),
-        Line::raw(""),
     ];
+    append_blank_lines(&mut lines, CONTEXT_BUDGET_SECTION_GAP_ROWS);
     let footer_lines = context_budget_footer_lines(model);
     let body_height = visible_rows
-        .saturating_sub(lines.len() + footer_lines.len())
+        .saturating_sub(lines.len() + CONTEXT_BUDGET_SECTION_GAP_ROWS + footer_lines.len())
         .max(1);
     lines.extend(context_budget_body_lines(
         model,
         terminal_width,
         body_height,
     ));
+    append_blank_lines(&mut lines, CONTEXT_BUDGET_SECTION_GAP_ROWS);
     lines.extend(footer_lines);
     lines
 }
 
 fn context_budget_header_line(model: &Model, width: usize) -> Line<'static> {
+    let inset = usize::from(CONTEXT_BUDGET_PANEL_INSET_WIDTH);
     Line::from(vec![
-        Span::raw("  "),
+        Span::raw(panel_inset_text()),
         Span::styled(
-            truncate_display_width_with_ellipsis("Context Usage", width.saturating_sub(2).max(1)),
+            truncate_display_width_with_ellipsis(
+                "Context Usage",
+                width.saturating_sub(inset).max(1),
+            ),
             primary_text_style(model.palette).bold(),
         ),
     ])
@@ -75,7 +80,7 @@ fn context_budget_header_line(model: &Model, width: usize) -> Line<'static> {
 
 fn context_budget_footer_lines(model: &Model) -> [Line<'static>; 1] {
     [Line::styled(
-        "  Esc close",
+        format!("{}Esc close", panel_inset_text()),
         tertiary_text_style(model.palette).add_modifier(Modifier::ITALIC),
     )]
 }
@@ -106,7 +111,7 @@ fn context_budget_body_lines(
     if state.loading {
         return pad_body_lines(
             vec![Line::styled(
-                "  Loading context budget...",
+                format!("{}Loading context budget...", panel_inset_text()),
                 tertiary_text_style(model.palette),
             )],
             body_height,
@@ -117,7 +122,7 @@ fn context_budget_body_lines(
         return pad_body_lines(
             vec![Line::styled(
                 truncate_display_width_with_ellipsis(
-                    &format!("  {error}"),
+                    &format!("{}{error}", panel_inset_text()),
                     usize::from(area.width).max(1),
                 ),
                 tertiary_text_style(model.palette),
@@ -137,63 +142,71 @@ fn context_budget_snapshot_body_lines(
     let Some(layout) = context_budget_body_layout(area) else {
         return pad_body_lines(
             vec![Line::styled(
-                "  Terminal too small for context budget",
+                format!(
+                    "{}Terminal too small for context budget",
+                    panel_inset_text()
+                ),
                 tertiary_text_style(palette),
             )],
             usize::from(area.height),
         );
     };
+    let left_padding = usize::from(layout.content.x.saturating_sub(area.x));
+    let row_count = usize::from(layout.content.height);
+    let heatmap_lines = build_context_budget_heatmap_lines(layout.heatmap, snapshot, palette);
+    let legend_lines = build_context_budget_legend_lines(layout.legend, snapshot, palette);
 
-    let mut buffer = Buffer::empty(area);
-    render_context_budget_heatmap(&mut buffer, layout.heatmap, snapshot, palette);
-    render_context_budget_legend(&mut buffer, layout.legend, snapshot, palette);
-    buffer_rows_to_lines(&buffer, area)
-}
-
-fn buffer_rows_to_lines(buffer: &Buffer, area: Rect) -> Vec<Line<'static>> {
-    (0..area.height)
-        .map(|row| buffer_row_to_line(buffer, area, area.y + row))
+    (0..row_count)
+        .map(|row| {
+            let mut spans = Vec::new();
+            if left_padding > 0 {
+                spans.push(Span::raw(" ".repeat(left_padding)));
+            }
+            spans.extend(
+                heatmap_lines
+                    .get(row)
+                    .cloned()
+                    .unwrap_or_else(|| blank_line(usize::from(layout.heatmap.width)))
+                    .spans,
+            );
+            if layout.legend.x > layout.heatmap.x + layout.heatmap.width {
+                spans.push(Span::raw(" ".repeat(usize::from(
+                    layout.legend.x - (layout.heatmap.x + layout.heatmap.width),
+                ))));
+            }
+            spans.extend(
+                legend_lines
+                    .get(row)
+                    .cloned()
+                    .unwrap_or_else(|| blank_line(usize::from(layout.legend.width)))
+                    .spans,
+            );
+            Line::from(spans)
+        })
         .collect()
-}
-
-fn buffer_row_to_line(buffer: &Buffer, area: Rect, y: u16) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut current_style: Option<Style> = None;
-    let mut current_text = String::new();
-
-    for x in area.x..area.x + area.width {
-        let cell = &buffer[(x, y)];
-        let style = Style::default()
-            .fg(cell.fg)
-            .bg(cell.bg)
-            .add_modifier(cell.modifier);
-        if current_style == Some(style) {
-            current_text.push_str(cell.symbol());
-            continue;
-        }
-
-        if let Some(style) = current_style {
-            spans.push(Span::styled(std::mem::take(&mut current_text), style));
-        } else if !current_text.is_empty() {
-            spans.push(Span::raw(std::mem::take(&mut current_text)));
-        }
-
-        current_style = Some(style);
-        current_text.push_str(cell.symbol());
-    }
-
-    if let Some(style) = current_style {
-        spans.push(Span::styled(current_text, style));
-    } else if !current_text.is_empty() {
-        spans.push(Span::raw(current_text));
-    }
-
-    Line::from(spans)
 }
 
 fn pad_body_lines(mut lines: Vec<Line<'static>>, body_height: usize) -> Vec<Line<'static>> {
     lines.resize(body_height.max(lines.len()), Line::raw(""));
     lines
+}
+
+fn blank_line(width: usize) -> Line<'static> {
+    if width == 0 {
+        Line::raw("")
+    } else {
+        Line::raw(" ".repeat(width))
+    }
+}
+
+fn append_blank_lines(lines: &mut Vec<Line<'static>>, count: usize) {
+    for _ in 0..count {
+        lines.push(Line::raw(""));
+    }
+}
+
+fn panel_inset_text() -> String {
+    " ".repeat(usize::from(CONTEXT_BUDGET_PANEL_INSET_WIDTH))
 }
 
 #[cfg(test)]

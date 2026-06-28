@@ -210,6 +210,34 @@ fn context_panel_summary_row_keeps_full_model_usage_text_when_width_allows() {
 }
 
 #[test]
+fn context_panel_keeps_blank_row_above_footer_hint() {
+    let mut model = ready_model();
+    model.transcript_mut().clear();
+    model.set_window(72, 20);
+    model.set_palette(default_palette(), true);
+    let request_id = model.open_context_budget_loading();
+    model.apply_context_budget_snapshot(request_id, context_budget_snapshot());
+
+    let render = model.current_inline_context_budget_render_result();
+    let footer_index = render
+        .plain_lines
+        .iter()
+        .position(|line| line.contains("Esc close"))
+        .expect("footer hint should render");
+
+    assert!(
+        footer_index > 0,
+        "footer hint should not be the first row: {:?}",
+        render.plain_lines
+    );
+    assert!(
+        render.plain_lines[footer_index - 1].trim().is_empty(),
+        "context panel should keep a blank spacer row above the footer hint: {:?}",
+        render.plain_lines
+    );
+}
+
+#[test]
 fn stale_context_budget_snapshot_is_ignored_after_panel_reopens_loading() {
     let mut model = ready_model();
 

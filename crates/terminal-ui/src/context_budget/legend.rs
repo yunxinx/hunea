@@ -1,7 +1,12 @@
-use ratatui::{buffer::Buffer, style::Style};
+use ratatui::{
+    style::Style,
+    text::{Line, Span},
+};
 use runtime_domain::session::ContextBudgetSnapshotPayload;
 
 use super::{
+    CONTEXT_BUDGET_LEGEND_SWATCH_GAP, CONTEXT_BUDGET_LEGEND_SWATCH_WIDTH,
+    CONTEXT_BUDGET_SECTION_GAP_ROWS,
     segment_colors::context_budget_color_for_category,
     state::{
         ContextBudgetCategoryKind, build_legend_entries, context_usage_summary,
@@ -16,86 +21,107 @@ use crate::{
 
 const LEGEND_SWATCH_SYMBOL: &str = "◼";
 const LEGEND_FREE_SYMBOL: &str = "⛶";
-const LEGEND_SWATCH_WIDTH: usize = 1;
-const LEGEND_SWATCH_GAP: usize = 1;
-const LEGEND_BODY_START_ROW: usize = 2;
+const LEGEND_BODY_START_ROW: usize = 1 + CONTEXT_BUDGET_SECTION_GAP_ROWS;
 
-pub(super) fn render_context_budget_legend(
-    buffer: &mut Buffer,
+pub(super) fn build_context_budget_legend_lines(
     area: ratatui::layout::Rect,
     snapshot: &ContextBudgetSnapshotPayload,
     palette: TerminalPalette,
-) {
+) -> Vec<Line<'static>> {
     if area.width == 0 || area.height == 0 {
-        return;
+        return Vec::new();
     }
 
-    render_legend_summary_row(buffer, area, snapshot, palette);
-    if area.height <= u16::try_from(LEGEND_BODY_START_ROW).unwrap_or(u16::MAX) {
-        return;
+    let row_width = usize::from(area.width);
+    let row_count = usize::from(area.height);
+    let mut lines = Vec::with_capacity(row_count);
+    lines.push(build_legend_summary_row_line(row_width, snapshot, palette));
+    if row_count <= LEGEND_BODY_START_ROW {
+        while lines.len() < row_count {
+            lines.push(padded_blank_line(row_width));
+        }
+        return lines;
     }
-
+    for _ in 0..CONTEXT_BUDGET_SECTION_GAP_ROWS {
+        lines.push(padded_blank_line(row_width));
+    }
     let entries = build_legend_entries(snapshot);
     let total_tokens = legend_share_total(snapshot);
-    for (row, entry) in entries.iter().enumerate() {
-        let legend_row = row.saturating_add(LEGEND_BODY_START_ROW);
-        if legend_row >= usize::from(area.height) {
+    for entry in &entries {
+        if lines.len() >= row_count {
             break;
         }
-
-        render_legend_row(buffer, area, legend_row, entry, total_tokens, palette);
+        lines.push(build_legend_row_line(
+            row_width,
+            entry,
+            total_tokens,
+            palette,
+        ));
     }
+    while lines.len() < row_count {
+        lines.push(padded_blank_line(row_width));
+    }
+    lines
 }
 
-fn render_legend_summary_row(
-    buffer: &mut Buffer,
-    area: ratatui::layout::Rect,
+fn build_legend_summary_row_line(
+    row_width: usize,
     snapshot: &ContextBudgetSnapshotPayload,
     palette: TerminalPalette,
-) {
+) -> Line<'static> {
     let text = context_usage_summary(&snapshot.model_id, snapshot.display);
-    let truncated = truncate_display_width_with_ellipsis(&text, usize::from(area.width).max(1));
-    buffer.set_string(area.x, area.y, truncated, tertiary_text_style(palette));
+    let truncated = truncate_display_width_with_ellipsis(&text, row_width.max(1));
+    padded_styled_line(truncated, row_width, tertiary_text_style(palette))
 }
 
-fn render_legend_row(
-    buffer: &mut Buffer,
-    area: ratatui::layout::Rect,
-    row: usize,
+fn build_legend_row_line(
+    row_width: usize,
     entry: &super::state::ContextBudgetLegendEntry,
     total_tokens: usize,
     palette: TerminalPalette,
-) {
-    let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
-    let row_width = usize::from(area.width);
+) -> Line<'static> {
     if row_width == 0 {
-        return;
+        return Line::raw("");
     }
 
-    let text_x = area.x + u16::try_from(LEGEND_SWATCH_WIDTH + LEGEND_SWATCH_GAP).unwrap_or(0);
-    let text_width = row_width.saturating_sub(LEGEND_SWATCH_WIDTH + LEGEND_SWATCH_GAP);
+    let text_width = row_width
+        .saturating_sub(CONTEXT_BUDGET_LEGEND_SWATCH_WIDTH + CONTEXT_BUDGET_LEGEND_SWATCH_GAP);
     let prefix = format!("{}: ", entry.label);
     let prefix_width = display_width(&prefix);
     let detail = legend_detail_text(entry, total_tokens);
 
     let color = context_budget_color_for_category(entry.kind, &palette);
+    let mut spans = vec![Span::styled(
+        legend_symbol(entry.kind).to_string(),
+        Style::new().fg(color),
+    )];
+    let mut rendered_width = CONTEXT_BUDGET_LEGEND_SWATCH_WIDTH;
 
-    if let Some(cell) = buffer.cell_mut((area.x, y)) {
-        cell.set_symbol(legend_symbol(entry.kind));
-        cell.set_style(Style::new().fg(color));
+    if row_width > CONTEXT_BUDGET_LEGEND_SWATCH_WIDTH {
+        spans.push(Span::raw(" "));
+        rendered_width += CONTEXT_BUDGET_LEGEND_SWATCH_GAP;
     }
 
     if prefix_width >= text_width {
         let truncated = truncate_display_width_with_ellipsis(&prefix, text_width.max(1));
-        buffer.set_string(text_x, y, truncated, primary_text_style(palette));
-        return;
+        rendered_width += display_width(&truncated);
+        spans.push(Span::styled(truncated, primary_text_style(palette)));
+        if rendered_width < row_width {
+            spans.push(Span::raw(" ".repeat(row_width - rendered_width)));
+        }
+        return Line::from(spans);
     }
 
-    buffer.set_string(text_x, y, prefix, primary_text_style(palette));
-    let detail_x = text_x + u16::try_from(prefix_width).unwrap_or(u16::MAX);
+    rendered_width += prefix_width;
+    spans.push(Span::styled(prefix, primary_text_style(palette)));
     let detail_width = text_width.saturating_sub(prefix_width);
     let truncated_detail = truncate_display_width_with_ellipsis(&detail, detail_width.max(1));
-    buffer.set_string(detail_x, y, truncated_detail, tertiary_text_style(palette));
+    rendered_width += display_width(&truncated_detail);
+    spans.push(Span::styled(truncated_detail, tertiary_text_style(palette)));
+    if rendered_width < row_width {
+        spans.push(Span::raw(" ".repeat(row_width - rendered_width)));
+    }
+    Line::from(spans)
 }
 
 fn legend_symbol(kind: ContextBudgetCategoryKind) -> &'static str {
@@ -118,10 +144,28 @@ fn legend_detail_text(
     )
 }
 
+fn padded_styled_line(text: String, width: usize, style: Style) -> Line<'static> {
+    let text_width = display_width(&text);
+    let mut spans = vec![Span::styled(text, style)];
+    if text_width < width {
+        spans.push(Span::raw(" ".repeat(width - text_width)));
+    }
+    Line::from(spans)
+}
+
+fn padded_blank_line(width: usize) -> Line<'static> {
+    if width == 0 {
+        Line::raw("")
+    } else {
+        Line::raw(" ".repeat(width))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::theme::default_palette;
+    use ratatui::buffer::Buffer;
     use runtime_domain::context_budget::SegmentKind;
     use runtime_domain::session::ContextBudgetSegmentPayload;
 
@@ -145,8 +189,10 @@ mod tests {
             },
         };
         let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 48, 5));
-
-        render_context_budget_legend(&mut buffer, area, &snapshot, default_palette());
+        let lines = build_context_budget_legend_lines(area, &snapshot, default_palette());
+        for (row, line) in lines.iter().enumerate() {
+            buffer.set_line(0, u16::try_from(row).unwrap_or(0), line, area.width);
+        }
 
         let first_row = row_text(&buffer, 0);
         assert!(
@@ -203,8 +249,10 @@ mod tests {
             },
         };
         let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 48, 5));
-
-        render_context_budget_legend(&mut buffer, area, &snapshot, default_palette());
+        let lines = build_context_budget_legend_lines(area, &snapshot, default_palette());
+        for (row, line) in lines.iter().enumerate() {
+            buffer.set_line(0, u16::try_from(row).unwrap_or(0), line, area.width);
+        }
 
         let rows = (0..5).map(|row| row_text(&buffer, row)).collect::<Vec<_>>();
         assert!(
@@ -242,8 +290,10 @@ mod tests {
             },
         };
         let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 48, 5));
-
-        render_context_budget_legend(&mut buffer, area, &snapshot, default_palette());
+        let lines = build_context_budget_legend_lines(area, &snapshot, default_palette());
+        for (row, line) in lines.iter().enumerate() {
+            buffer.set_line(0, u16::try_from(row).unwrap_or(0), line, area.width);
+        }
 
         let rows = (0..5).map(|row| row_text(&buffer, row)).collect::<Vec<_>>();
         assert!(
@@ -263,6 +313,30 @@ mod tests {
             rows.iter().all(|row| !row.contains("Free space")),
             "zero-token free space should also be omitted: {rows:?}"
         );
+    }
+
+    #[test]
+    fn build_legend_lines_fill_requested_area_width() {
+        let snapshot = ContextBudgetSnapshotPayload {
+            model_id: "model".to_string(),
+            segments: vec![segment(SegmentKind::AssistantMessage, 400, "assistant")],
+            total_estimated_tokens: 400,
+            context_limit: Some(1_000),
+            display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
+                limit: 1_000,
+                used: 400,
+                percent: 40.0,
+            },
+        };
+
+        let lines = build_context_budget_legend_lines(
+            ratatui::layout::Rect::new(0, 0, 24, 4),
+            &snapshot,
+            default_palette(),
+        );
+
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(|line| line.width() == 24));
     }
 
     fn row_text(buffer: &Buffer, y: u16) -> String {

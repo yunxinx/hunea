@@ -1,9 +1,15 @@
 //! Heatmap cell allocation for context budget segments.
 
-use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use ratatui::{
+    layout::Rect,
+    style::Style,
+    text::{Line, Span},
+};
 use runtime_domain::session::ContextBudgetSnapshotPayload;
 
 use super::{
+    CONTEXT_BUDGET_HEATMAP_CELL_WIDTH, CONTEXT_BUDGET_HEATMAP_GRID_COLUMNS,
+    CONTEXT_BUDGET_HEATMAP_GRID_ROWS,
     segment_colors::{context_budget_color_for_category, context_budget_empty_color},
     state::{ContextBudgetCategoryKind, aggregated_category_totals},
 };
@@ -11,9 +17,6 @@ use crate::theme::TerminalPalette;
 
 const HEATMAP_FULL_SYMBOL: &str = "◼";
 const HEATMAP_EMPTY_SYMBOL: &str = "⛶";
-const HEATMAP_CELL_WIDTH: usize = 2;
-const HEATMAP_GRID_COLUMNS: usize = 10;
-const HEATMAP_GRID_ROWS: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HeatmapCellFill {
@@ -92,28 +95,78 @@ pub(crate) fn allocate_heatmap_cells(
     counts
 }
 
-pub(super) fn render_context_budget_heatmap(
-    buffer: &mut Buffer,
+pub(super) fn build_context_budget_heatmap_lines(
     area: Rect,
     snapshot: &ContextBudgetSnapshotPayload,
     palette: TerminalPalette,
-) {
-    if area.is_empty() {
-        return;
+) -> Vec<Line<'static>> {
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
     }
 
     let grid_columns = heatmap_grid_columns(area.width);
     let grid_rows = heatmap_grid_rows(area.height);
     let total_cells = grid_columns.saturating_mul(grid_rows);
     if total_cells == 0 {
-        return;
+        return blank_heatmap_lines(area);
     }
-
-    clear_heatmap_area(buffer, area);
 
     let segments = aggregated_categories_for_heatmap(snapshot);
     let occupied_cells = occupied_heatmap_cells(snapshot, total_cells, segments.len());
     let counts = allocate_heatmap_cells(&segments, occupied_cells);
+    let fill_kinds = build_heatmap_fill_kinds(total_cells, &segments, &counts);
+    let row_width = usize::from(area.width);
+    let row_count = usize::from(area.height);
+    let empty_color = context_budget_empty_color(&palette);
+
+    (0..row_count)
+        .map(|row| {
+            let mut spans = Vec::with_capacity(grid_columns.saturating_add(1));
+            let mut rendered_width = 0usize;
+
+            for column in 0..grid_columns {
+                let remaining_width = row_width.saturating_sub(rendered_width);
+                if remaining_width == 0 {
+                    break;
+                }
+
+                let cell_index = row.saturating_mul(grid_columns).saturating_add(column);
+                let fill = fill_kinds
+                    .get(cell_index)
+                    .copied()
+                    .unwrap_or(HeatmapCellFill { kind: None });
+                let color = fill
+                    .kind
+                    .map(|kind| context_budget_color_for_category(kind, &palette))
+                    .unwrap_or(empty_color);
+                let style = Style::new().fg(color);
+                let cell_text = if remaining_width == 1 {
+                    heatmap_symbol(fill).to_string()
+                } else {
+                    format!("{} ", heatmap_symbol(fill))
+                };
+                rendered_width = rendered_width.saturating_add(if remaining_width == 1 {
+                    1
+                } else {
+                    CONTEXT_BUDGET_HEATMAP_CELL_WIDTH
+                });
+                spans.push(Span::styled(cell_text, style));
+            }
+
+            if rendered_width < row_width {
+                spans.push(Span::raw(" ".repeat(row_width - rendered_width)));
+            }
+
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn build_heatmap_fill_kinds(
+    total_cells: usize,
+    segments: &[HeatmapCategory],
+    counts: &[usize],
+) -> Vec<HeatmapCellFill> {
     let mut fill_kinds = Vec::with_capacity(total_cells);
     for (segment, count) in segments.iter().zip(counts.iter()) {
         for _ in 0..*count {
@@ -123,34 +176,23 @@ pub(super) fn render_context_budget_heatmap(
         }
     }
     fill_kinds.resize(total_cells, HeatmapCellFill { kind: None });
+    fill_kinds
+}
 
-    let empty_color = context_budget_empty_color(&palette);
-    for (cell_index, fill) in fill_kinds.into_iter().enumerate() {
-        let row = cell_index / grid_columns;
-        let column = cell_index % grid_columns;
-        let x =
-            area.x + u16::try_from(column.saturating_mul(HEATMAP_CELL_WIDTH)).unwrap_or(u16::MAX);
-        let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
-        if x >= area.x + area.width {
-            continue;
-        }
-
-        let color = fill
-            .kind
-            .map(|kind| context_budget_color_for_category(kind, &palette))
-            .unwrap_or(empty_color);
-        render_heatmap_cell(buffer, x, y, area, fill, color);
-    }
+fn blank_heatmap_lines(area: Rect) -> Vec<Line<'static>> {
+    (0..area.height)
+        .map(|_| padded_blank_line(usize::from(area.width)))
+        .collect()
 }
 
 pub(super) fn heatmap_grid_columns(width: u16) -> usize {
     usize::from(width.max(1))
-        .div_ceil(HEATMAP_CELL_WIDTH)
-        .min(HEATMAP_GRID_COLUMNS)
+        .div_ceil(CONTEXT_BUDGET_HEATMAP_CELL_WIDTH)
+        .min(CONTEXT_BUDGET_HEATMAP_GRID_COLUMNS)
 }
 
 fn heatmap_grid_rows(height: u16) -> usize {
-    usize::from(height).min(HEATMAP_GRID_ROWS)
+    usize::from(height).min(CONTEXT_BUDGET_HEATMAP_GRID_ROWS)
 }
 
 pub(super) fn occupied_heatmap_cells(
@@ -185,42 +227,8 @@ pub(super) fn aggregated_categories_for_heatmap(
         .collect()
 }
 
-fn clear_heatmap_area(buffer: &mut Buffer, area: Rect) {
-    for y in area.y..area.y + area.height {
-        for x in area.x..area.x + area.width {
-            if let Some(cell) = buffer.cell_mut((x, y)) {
-                cell.set_symbol(" ");
-                cell.set_style(Style::default());
-            }
-        }
-    }
-}
-
-fn render_heatmap_cell(
-    buffer: &mut Buffer,
-    x: u16,
-    y: u16,
-    area: Rect,
-    fill: HeatmapCellFill,
-    color: ratatui::style::Color,
-) {
-    let style = Style::new().fg(color);
-    if let Some(cell) = buffer.cell_mut((x, y)) {
-        cell.set_symbol(heatmap_symbol(fill));
-        cell.set_style(style);
-    }
-
-    let spacer_x = x.saturating_add(1);
-    if spacer_x < area.x + area.width
-        && let Some(cell) = buffer.cell_mut((spacer_x, y))
-    {
-        cell.set_symbol(" ");
-        cell.set_style(style);
-    }
-}
-
 #[cfg(test)]
-use ratatui::buffer::Cell;
+use ratatui::buffer::{Buffer, Cell};
 
 #[cfg(test)]
 pub(super) fn is_context_budget_heatmap_cell(cell: &Cell, palette: TerminalPalette) -> bool {
@@ -244,9 +252,18 @@ fn heatmap_symbol(fill: HeatmapCellFill) -> &'static str {
     }
 }
 
+fn padded_blank_line(width: usize) -> Line<'static> {
+    if width == 0 {
+        Line::raw("")
+    } else {
+        Line::raw(" ".repeat(width))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context_budget::CONTEXT_BUDGET_HEATMAP_WIDTH;
     use runtime_domain::context_budget::SegmentKind;
     use runtime_domain::session::{ContextBudgetDisplayPayload, ContextBudgetSegmentPayload};
 
@@ -360,14 +377,30 @@ mod tests {
                 percent: 12.5,
             },
         };
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 10));
-
-        render_context_budget_heatmap(
-            &mut buffer,
-            Rect::new(0, 0, 20, 10),
+        let mut buffer = Buffer::empty(Rect::new(
+            0,
+            0,
+            CONTEXT_BUDGET_HEATMAP_WIDTH,
+            CONTEXT_BUDGET_HEATMAP_GRID_ROWS as u16,
+        ));
+        let lines = build_context_budget_heatmap_lines(
+            Rect::new(
+                0,
+                0,
+                CONTEXT_BUDGET_HEATMAP_WIDTH,
+                CONTEXT_BUDGET_HEATMAP_GRID_ROWS as u16,
+            ),
             &snapshot,
             default_palette(),
         );
+        for (row, line) in lines.iter().enumerate() {
+            buffer.set_line(
+                0,
+                u16::try_from(row).unwrap_or(0),
+                line,
+                CONTEXT_BUDGET_HEATMAP_WIDTH,
+            );
+        }
 
         let empty_color = context_budget_empty_color(&default_palette());
         let empty_cells = buffer
@@ -384,11 +417,53 @@ mod tests {
     }
 
     #[test]
+    fn build_heatmap_lines_fill_requested_area_width() {
+        let snapshot = ContextBudgetSnapshotPayload {
+            model_id: "local/qwen3".to_string(),
+            segments: vec![ContextBudgetSegmentPayload {
+                kind: SegmentKind::System,
+                stack_order: 0,
+                estimated_tokens: 10,
+                label: "system".to_string(),
+            }],
+            total_estimated_tokens: 10,
+            context_limit: Some(80),
+            display: ContextBudgetDisplayPayload::Absolute {
+                limit: 80,
+                used: 10,
+                percent: 12.5,
+            },
+        };
+
+        let lines = build_context_budget_heatmap_lines(
+            Rect::new(0, 0, CONTEXT_BUDGET_HEATMAP_WIDTH, 3),
+            &snapshot,
+            default_palette(),
+        );
+
+        assert_eq!(lines.len(), 3);
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.width() == usize::from(CONTEXT_BUDGET_HEATMAP_WIDTH))
+        );
+    }
+
+    #[test]
     fn heatmap_grid_uses_fixed_ten_by_ten_layout() {
-        assert_eq!(heatmap_grid_columns(72), 10);
-        assert_eq!(heatmap_grid_columns(20), 10);
-        assert_eq!(heatmap_grid_rows(15), 10);
-        assert_eq!(heatmap_grid_rows(10), 10);
+        assert_eq!(
+            heatmap_grid_columns(72),
+            CONTEXT_BUDGET_HEATMAP_GRID_COLUMNS
+        );
+        assert_eq!(
+            heatmap_grid_columns(CONTEXT_BUDGET_HEATMAP_WIDTH),
+            CONTEXT_BUDGET_HEATMAP_GRID_COLUMNS
+        );
+        assert_eq!(heatmap_grid_rows(15), CONTEXT_BUDGET_HEATMAP_GRID_ROWS);
+        assert_eq!(
+            heatmap_grid_rows(CONTEXT_BUDGET_HEATMAP_GRID_ROWS as u16),
+            CONTEXT_BUDGET_HEATMAP_GRID_ROWS
+        );
     }
 
     #[test]

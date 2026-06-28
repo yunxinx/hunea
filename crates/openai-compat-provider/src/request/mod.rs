@@ -6,47 +6,69 @@ use provider_protocol::{
 };
 use serde_json::{Value, json};
 
-/// `PromptRequestProjection` 保存按 OpenAI-compatible 请求格式投影后的可估算文本。
+/// `PromptRequestProjection` 保存按 OpenAI-compatible 请求格式投影后的 payload 片段。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptRequestProjection {
-    pub message_texts: Vec<String>,
-    pub tools_text: Option<String>,
+    message_values: Vec<Value>,
+    message_fragments: Vec<Option<Value>>,
+    tools_value: Option<Value>,
 }
 
-/// `prompt_request_projection` 将 prompt request 投影为 provider-side 可估算文本片段。
+impl PromptRequestProjection {
+    pub fn message_values(&self) -> &[Value] {
+        &self.message_values
+    }
+
+    pub fn tools_value(&self) -> Option<&Value> {
+        self.tools_value.as_ref()
+    }
+
+    pub fn serialized_message_texts(&self) -> Result<Vec<String>, ProviderError> {
+        self.message_fragments
+            .iter()
+            .map(|fragment| match fragment {
+                Some(value) => serialize_json(value),
+                None => Ok(String::new()),
+            })
+            .collect()
+    }
+
+    pub fn serialized_tools_text(&self) -> Result<Option<String>, ProviderError> {
+        self.tools_value.as_ref().map(serialize_json).transpose()
+    }
+}
+
+/// `prompt_request_projection` 将 prompt request 投影为 provider-side payload 片段。
 pub fn prompt_request_projection(
     request: &PromptRequest,
 ) -> Result<PromptRequestProjection, ProviderError> {
+    let (message_values, message_fragments) =
+        project_items_to_messages_and_fragments(&request.items)?;
     Ok(PromptRequestProjection {
-        message_texts: project_items_to_message_texts(&request.items)?,
-        tools_text: project_tools_text(&request.tools)?,
+        message_values,
+        message_fragments,
+        tools_value: project_tools_value(&request.tools)?,
     })
 }
 
 pub(crate) fn chat_completion_request_body(
     request: &PromptRequest,
 ) -> Result<Value, ProviderError> {
-    let messages = project_items_to_messages(&request.items)?;
+    let projection = prompt_request_projection(request)?;
     let mut body = serde_json::Map::new();
     body.insert("model".to_string(), Value::String(request.model.clone()));
-    body.insert("messages".to_string(), Value::Array(messages));
+    body.insert(
+        "messages".to_string(),
+        Value::Array(projection.message_values.clone()),
+    );
     body.insert("stream".to_string(), Value::Bool(true));
     body.insert(
         "stream_options".to_string(),
         json!({ "include_usage": true }),
     );
 
-    if !request.tools.is_empty() {
-        body.insert(
-            "tools".to_string(),
-            Value::Array(
-                request
-                    .tools
-                    .iter()
-                    .map(openai_tool_from_definition)
-                    .collect(),
-            ),
-        );
+    if let Some(tools) = projection.tools_value {
+        body.insert("tools".to_string(), tools);
     }
     if let Some(temperature) = request.options.temperature {
         body.insert("temperature".to_string(), json!(temperature));
@@ -67,60 +89,13 @@ pub(crate) fn chat_completion_request_body(
     Ok(Value::Object(body))
 }
 
-fn project_items_to_messages(items: &[ConversationItem]) -> Result<Vec<Value>, ProviderError> {
+fn project_items_to_messages_and_fragments(
+    items: &[ConversationItem],
+) -> Result<(Vec<Value>, Vec<Option<Value>>), ProviderError> {
     validate_openai_projection_items(items)?;
 
     let mut messages = Vec::new();
-    let mut pending_reasoning: Option<&str> = None;
-    let mut pending_tool_results: Vec<&ConversationItem> = Vec::new();
-
-    for item in items {
-        match item {
-            ConversationItem::Message {
-                role: Role::System,
-                content,
-            } => {
-                flush_tool_results(&mut pending_tool_results, &mut messages)?;
-                pending_reasoning = None;
-                messages.push(system_message_value(content)?);
-            }
-            ConversationItem::Message {
-                role: Role::User,
-                content,
-            } => {
-                flush_tool_results(&mut pending_tool_results, &mut messages)?;
-                pending_reasoning = None;
-                messages.push(user_message_value(content)?);
-            }
-            ConversationItem::Message {
-                role: Role::Assistant,
-                content,
-            } => {
-                flush_tool_results(&mut pending_tool_results, &mut messages)?;
-                let reasoning = pending_reasoning.take();
-                messages.push(assistant_message_value(content, reasoning)?);
-            }
-            ConversationItem::ToolResult { .. } => {
-                pending_tool_results.push(item);
-            }
-            ConversationItem::Reasoning { content, .. } => {
-                flush_tool_results(&mut pending_tool_results, &mut messages)?;
-                pending_reasoning = Some(content.as_str());
-            }
-        }
-    }
-
-    flush_tool_results(&mut pending_tool_results, &mut messages)?;
-
-    Ok(messages)
-}
-
-fn project_items_to_message_texts(
-    items: &[ConversationItem],
-) -> Result<Vec<String>, ProviderError> {
-    validate_openai_projection_items(items)?;
-
-    let mut message_texts = vec![String::new(); items.len()];
+    let mut message_fragments = vec![None; items.len()];
     let mut pending_reasoning: Option<(usize, &str)> = None;
     let mut pending_tool_results: Vec<(usize, &ConversationItem)> = Vec::new();
 
@@ -130,47 +105,77 @@ fn project_items_to_message_texts(
                 role: Role::System,
                 content,
             } => {
-                flush_tool_result_texts(&mut pending_tool_results, &mut message_texts)?;
+                flush_tool_results(
+                    &mut pending_tool_results,
+                    &mut messages,
+                    &mut message_fragments,
+                )?;
                 pending_reasoning = None;
-                message_texts[index] = serialize_json(&system_message_value(content)?)?;
+                let value = system_message_value(content)?;
+                message_fragments[index] = Some(value.clone());
+                messages.push(value);
             }
             ConversationItem::Message {
                 role: Role::User,
                 content,
             } => {
-                flush_tool_result_texts(&mut pending_tool_results, &mut message_texts)?;
+                flush_tool_results(
+                    &mut pending_tool_results,
+                    &mut messages,
+                    &mut message_fragments,
+                )?;
                 pending_reasoning = None;
-                message_texts[index] = serialize_json(&user_message_value(content)?)?;
+                let value = user_message_value(content)?;
+                message_fragments[index] = Some(value.clone());
+                messages.push(value);
             }
             ConversationItem::Message {
                 role: Role::Assistant,
                 content,
             } => {
-                flush_tool_result_texts(&mut pending_tool_results, &mut message_texts)?;
+                flush_tool_results(
+                    &mut pending_tool_results,
+                    &mut messages,
+                    &mut message_fragments,
+                )?;
                 let has_tool_calls = content.iter().any(|block| block.as_tool_call().is_some());
-                if has_tool_calls
-                    && let Some((reasoning_index, reasoning)) = pending_reasoning.take()
-                {
-                    message_texts[reasoning_index] =
-                        serialize_json(&json!({ "reasoning_content": reasoning }))?;
+                let reasoning = if has_tool_calls {
+                    pending_reasoning.take()
                 } else {
                     pending_reasoning = None;
+                    None
+                };
+                if let Some((reasoning_index, reasoning_text)) = reasoning {
+                    message_fragments[reasoning_index] =
+                        Some(json!({ "reasoning_content": reasoning_text }));
                 }
-                message_texts[index] = serialize_json(&assistant_message_value(content, None)?)?;
+                let fragment_value = assistant_message_value(content, None)?;
+                let message_value =
+                    assistant_message_value(content, reasoning.map(|(_, text)| text))?;
+                message_fragments[index] = Some(fragment_value);
+                messages.push(message_value);
             }
             ConversationItem::ToolResult { .. } => {
                 pending_tool_results.push((index, item));
             }
             ConversationItem::Reasoning { content, .. } => {
-                flush_tool_result_texts(&mut pending_tool_results, &mut message_texts)?;
+                flush_tool_results(
+                    &mut pending_tool_results,
+                    &mut messages,
+                    &mut message_fragments,
+                )?;
                 pending_reasoning = Some((index, content.as_str()));
             }
         }
     }
 
-    flush_tool_result_texts(&mut pending_tool_results, &mut message_texts)?;
+    flush_tool_results(
+        &mut pending_tool_results,
+        &mut messages,
+        &mut message_fragments,
+    )?;
 
-    Ok(message_texts)
+    Ok((messages, message_fragments))
 }
 
 fn validate_openai_projection_items(items: &[ConversationItem]) -> Result<(), ProviderError> {
@@ -231,30 +236,18 @@ fn ensure_no_pending_tool_calls(
 }
 
 fn flush_tool_results(
-    pending: &mut Vec<&ConversationItem>,
-    messages: &mut Vec<Value>,
-) -> Result<(), ProviderError> {
-    for item in pending.drain(..) {
-        if let ConversationItem::ToolResult {
-            call_id, content, ..
-        } = item
-        {
-            messages.push(tool_result_message_value(call_id, content)?);
-        }
-    }
-    Ok(())
-}
-
-fn flush_tool_result_texts(
     pending: &mut Vec<(usize, &ConversationItem)>,
-    message_texts: &mut [String],
+    messages: &mut Vec<Value>,
+    message_fragments: &mut [Option<Value>],
 ) -> Result<(), ProviderError> {
     for (index, item) in pending.drain(..) {
         if let ConversationItem::ToolResult {
             call_id, content, ..
         } = item
         {
-            message_texts[index] = serialize_json(&tool_result_message_value(call_id, content)?)?;
+            let value = tool_result_message_value(call_id, content)?;
+            message_fragments[index] = Some(value.clone());
+            messages.push(value);
         }
     }
     Ok(())
@@ -337,14 +330,13 @@ fn assistant_message_value(
     Ok(Value::Object(value))
 }
 
-fn project_tools_text(tools: &[ToolDefinition]) -> Result<Option<String>, ProviderError> {
+fn project_tools_value(tools: &[ToolDefinition]) -> Result<Option<Value>, ProviderError> {
     if tools.is_empty() {
         return Ok(None);
     }
-    serialize_json(&Value::Array(
+    Ok(Some(Value::Array(
         tools.iter().map(openai_tool_from_definition).collect(),
-    ))
-    .map(Some)
+    )))
 }
 
 fn serialize_json(value: &Value) -> Result<String, ProviderError> {
@@ -620,11 +612,50 @@ mod tests {
 
         let projection =
             prompt_request_projection(&request).expect("projection should build successfully");
-        let tools_text = projection.tools_text.expect("tools text should exist");
+        let tools_text = projection
+            .serialized_tools_text()
+            .expect("tools text should serialize successfully")
+            .expect("tools text should exist");
 
         assert!(tools_text.contains(r#""type":"function""#));
         assert!(tools_text.contains(r#""name":"list_dir""#));
         assert!(tools_text.contains(r#""required":["path"]"#));
+    }
+
+    #[test]
+    fn prompt_request_projection_reuses_exact_provider_payload_fragments() {
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![
+                ConversationItem::reasoning("thinking about it"),
+                ConversationItem::assistant_with_tool_calls(
+                    String::new(),
+                    vec![ToolCall::new("c1", "bash", "{}")],
+                ),
+                ConversationItem::tool_result("c1", vec![ContentBlock::Text("done".into())], false),
+            ],
+        )
+        .with_tools(vec![ToolDefinition::new(
+            "list_dir",
+            "List a workspace directory",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+            }),
+        )]);
+
+        let projection =
+            prompt_request_projection(&request).expect("projection should build successfully");
+        let body = chat_completion_request_body(&request).expect("request should build");
+
+        assert_eq!(
+            projection.message_values(),
+            body["messages"]
+                .as_array()
+                .expect("messages should remain an array"),
+        );
+        assert_eq!(projection.tools_value(), body.get("tools"));
     }
 
     #[test]
@@ -666,11 +697,15 @@ mod tests {
         let projection =
             prompt_request_projection(&request).expect("projection should build successfully");
 
-        assert_eq!(projection.message_texts.len(), 3);
-        assert!(projection.message_texts[0].contains(r#""reasoning_content":"thinking about it""#));
-        assert!(projection.message_texts[1].contains(r#""tool_calls""#));
-        assert!(!projection.message_texts[1].contains(r#""reasoning_content""#));
-        assert!(projection.message_texts[2].contains(r#""tool_call_id":"c1""#));
+        let message_texts = projection
+            .serialized_message_texts()
+            .expect("projection texts should serialize successfully");
+
+        assert_eq!(message_texts.len(), 3);
+        assert!(message_texts[0].contains(r#""reasoning_content":"thinking about it""#));
+        assert!(message_texts[1].contains(r#""tool_calls""#));
+        assert!(!message_texts[1].contains(r#""reasoning_content""#));
+        assert!(message_texts[2].contains(r#""tool_call_id":"c1""#));
     }
 
     #[test]

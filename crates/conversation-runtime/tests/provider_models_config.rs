@@ -367,6 +367,42 @@ base_url = "http://127.0.0.1:1234/v1"
 }
 
 #[test]
+fn models_config_invalid_context_window_reports_the_real_source_file() {
+    let user_dir = temp_test_dir("invalid-context-window-user-source");
+    let working_dir = temp_test_dir("invalid-context-window-project-overlay");
+    fs::write(
+        user_dir.join("models.toml"),
+        r#"
+[defaults]
+context_window = 0
+"#,
+    )
+    .expect("user models config should be written");
+    fs::create_dir_all(working_dir.join(".hunea")).expect("project config dir");
+    fs::write(
+        working_dir.join(".hunea").join("models.toml"),
+        r#"
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+models = ["qwen3"]
+"#,
+    )
+    .expect("project models config should be written");
+
+    let error = load_from_paths(Some(&working_dir), Some(&user_dir))
+        .expect_err("invalid user config should keep its original source path");
+    let message = error.to_string();
+    let user_path = user_dir.join("models.toml");
+
+    assert!(
+        message.contains(&user_path.display().to_string()),
+        "invalid context_window should report the user config path, got: {message}"
+    );
+}
+
+#[test]
 fn models_config_resolution_prefers_profile_over_defaults_and_builtin() {
     let working_dir = temp_test_dir("resolution-order");
     fs::write(
@@ -429,6 +465,41 @@ unexpected_field = true
     .expect("models config should be written");
 
     load_from_paths(Some(&working_dir), None).expect_err("unknown provider keys should fail");
+}
+
+#[test]
+fn models_config_invalid_provider_kind_reports_the_real_source_file() {
+    let user_dir = temp_test_dir("invalid-provider-kind-user-source");
+    let working_dir = temp_test_dir("invalid-provider-kind-project-overlay");
+    fs::write(
+        user_dir.join("models.toml"),
+        r#"
+[providers.remote]
+enabled = true
+kind = "definitely_not_real"
+base_url = "http://127.0.0.1:1234/v1"
+"#,
+    )
+    .expect("user models config should be written");
+    fs::create_dir_all(working_dir.join(".hunea")).expect("project config dir");
+    fs::write(
+        working_dir.join(".hunea").join("models.toml"),
+        r#"
+[defaults]
+context_window = 128000
+"#,
+    )
+    .expect("project models config should be written");
+
+    let error = load_from_paths(Some(&working_dir), Some(&user_dir))
+        .expect_err("invalid provider kind should keep its original source path");
+    let message = error.to_string();
+    let user_path = user_dir.join("models.toml");
+
+    assert!(
+        message.contains(&user_path.display().to_string()),
+        "invalid provider kind should report the user config path, got: {message}"
+    );
 }
 
 fn temp_test_dir(name: &str) -> std::path::PathBuf {

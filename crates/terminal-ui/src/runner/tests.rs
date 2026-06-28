@@ -138,8 +138,8 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             | RuntimeCommand::SelectEntryRewind { .. }
             | RuntimeCommand::LoadMessageHistoryStartupCache
             | RuntimeCommand::LoadMessageHistoryPickerRows { .. }
-            | RuntimeCommand::RecordMessageHistory { .. }
-            | RuntimeCommand::LoadContextBudgetSnapshot { .. } => {
+            | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
+            RuntimeCommand::LoadContextBudgetSnapshot { .. } => {
                 self.runtime_events
                     .push(RuntimeEvent::ContextBudgetSnapshotLoaded {
                         payload: runtime_domain::session::ContextBudgetSnapshotPayload {
@@ -197,6 +197,20 @@ fn open_copy_picker_effect_dispatches_copy_picker_tree_load() {
     assert_eq!(
         runtime_coordinator.last_command,
         Some(RuntimeCommand::LoadCopyPickerTree { request_id })
+    );
+}
+
+#[test]
+fn unrelated_runtime_commands_do_not_inject_context_budget_events() {
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+
+    runtime_coordinator
+        .dispatch_runtime_command(RuntimeCommand::ListSessions)
+        .expect("list sessions should be accepted");
+
+    assert!(
+        runtime_coordinator.runtime_events.is_empty(),
+        "non-context commands should not enqueue fake context budget events"
     );
 }
 

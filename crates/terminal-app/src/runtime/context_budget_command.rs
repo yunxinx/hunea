@@ -1,7 +1,7 @@
 //! Builds context budget snapshot for the `/context` overlay.
 
 use conversation_runtime::context_budget::{
-    context_budget_from_items, context_budget_tool_definitions_text,
+    context_budget_from_items, context_budget_tool_definitions,
 };
 use runtime_domain::{
     context_budget::{ContextBudgetSnapshot, ContextLimitDisplay},
@@ -19,6 +19,16 @@ impl AppRuntimeCoordinator {
         &mut self,
         selection: &ModelSelection,
     ) -> Result<RuntimeCommandReceipt, String> {
+        let provider = self
+            .options
+            .model_catalog
+            .enabled_provider_by_id(&selection.provider_id)
+            .ok_or_else(|| {
+                format!(
+                    "Cannot load context budget for unknown provider {}",
+                    selection.provider_id
+                )
+            })?;
         let model_id = selection.model_id.clone();
         let context_limit = self
             .options
@@ -27,14 +37,15 @@ impl AppRuntimeCoordinator {
         let items = self
             .provider_conversation
             .provider_items_for_context_budget_probe();
-        let tool_definitions_text = context_budget_tool_definitions_text(&self.workspace_tools)
-            .map_err(|error| format!("Serialize provider-visible tool definitions: {error}"))?;
+        let tool_definitions = context_budget_tool_definitions(&self.workspace_tools);
         let snapshot = context_budget_from_items(
+            provider.connection().kind,
             &model_id,
             &items,
-            tool_definitions_text.as_deref(),
+            &tool_definitions,
             context_limit,
-        );
+        )
+        .map_err(|error| error.to_string())?;
         self.pending_runtime_events
             .push(RuntimeEvent::ContextBudgetSnapshotLoaded {
                 payload: snapshot_to_payload(snapshot),

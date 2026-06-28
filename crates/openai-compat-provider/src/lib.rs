@@ -9,3 +9,4 @@ mod stream;
 
 pub use client::OpenAiChatCompletionsClient;
 pub use config::{DEFAULT_OPENAI_BASE_URL, OpenAiClientConfig};
+pub use request::{PromptRequestProjection, prompt_request_projection};

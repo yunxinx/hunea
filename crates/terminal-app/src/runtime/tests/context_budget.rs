@@ -2,7 +2,23 @@ use super::support::*;
 
 #[test]
 fn context_budget_snapshot_includes_provider_visible_tool_definitions() {
-    let mut coordinator = runtime_coordinator(AppRuntimeOptions::default());
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        model_catalog: runtime_domain::model_catalog::ModelCatalog::new(vec![
+            runtime_domain::model_catalog::ModelProvider::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                runtime_domain::model_catalog::ModelSource::Configured,
+                vec![runtime_domain::model_catalog::ModelEntry::new(
+                    "qwen3",
+                    None,
+                    runtime_domain::model_catalog::ModelSource::Configured,
+                )],
+            ),
+        ]),
+        ..AppRuntimeOptions::default()
+    });
     let selection = ModelSelection::new("local", "qwen3");
 
     coordinator

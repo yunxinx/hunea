@@ -109,7 +109,14 @@ struct FileModelProfileConfig {
 struct MergedModelsConfig {
     default: Option<String>,
     defaults: Option<FileModelsDefaults>,
-    providers: BTreeMap<String, FileModelProviderConfig>,
+    defaults_source_path: Option<PathBuf>,
+    providers: BTreeMap<String, SourcedFileModelProviderConfig>,
+}
+
+#[derive(Debug, Clone)]
+struct SourcedFileModelProviderConfig {
+    config: FileModelProviderConfig,
+    source_path: PathBuf,
 }
 
 impl fmt::Display for ModelsConfigError {
@@ -178,7 +185,7 @@ pub fn load_from_paths(
         let Some(file_config) = read_models_config(&path)? else {
             continue;
         };
-        merge_models_config(&mut merged, file_config);
+        merge_models_config(&mut merged, file_config, &path);
         source_path = Some(path);
     }
 
@@ -276,16 +283,23 @@ fn read_models_config(path: &Path) -> Result<Option<FileModelsConfig>, ModelsCon
     Ok(Some(config))
 }
 
-fn merge_models_config(target: &mut MergedModelsConfig, source: FileModelsConfig) {
+fn merge_models_config(target: &mut MergedModelsConfig, source: FileModelsConfig, path: &Path) {
     if let Some(default) = source.default {
         target.default = Some(default);
     }
     if let Some(defaults) = source.defaults {
         target.defaults = Some(defaults);
+        target.defaults_source_path = Some(path.to_path_buf());
     }
 
     for (provider_id, provider) in source.providers {
-        target.providers.insert(provider_id, provider);
+        target.providers.insert(
+            provider_id,
+            SourcedFileModelProviderConfig {
+                config: provider,
+                source_path: path.to_path_buf(),
+            },
+        );
     }
 }
 
@@ -293,23 +307,29 @@ fn context_limits_from_merged(
     config: &MergedModelsConfig,
     source_path: Option<&Path>,
 ) -> Result<ModelContextLimits, ModelsConfigError> {
-    let path = source_path
-        .map(Path::to_path_buf)
+    let defaults_path = config
+        .defaults_source_path
+        .clone()
+        .or_else(|| source_path.map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from(MODELS_FILE_NAME));
 
     let defaults = match config.defaults.as_ref().and_then(|d| d.context_window) {
-        Some(value) => Some(validate_positive_context_window(value, "defaults", &path)?),
+        Some(value) => Some(validate_positive_context_window(
+            value,
+            "defaults",
+            &defaults_path,
+        )?),
         None => None,
     };
 
     let mut by_provider_model = BTreeMap::new();
     for (provider_id, provider) in &config.providers {
-        for (model_id, profile) in &provider.model_profiles {
+        for (model_id, profile) in &provider.config.model_profiles {
             let Some(value) = profile.context_window else {
                 continue;
             };
             let field = format!("providers.{provider_id}.model_profiles.{model_id}");
-            let limit = validate_positive_context_window(value, &field, &path)?;
+            let limit = validate_positive_context_window(value, &field, &provider.source_path)?;
             by_provider_model.insert((provider_id.clone(), model_id.clone()), limit);
         }
     }
@@ -334,12 +354,12 @@ fn validate_positive_context_window(
 
 fn catalog_from_config(
     config: &MergedModelsConfig,
-    source_path: Option<&Path>,
+    _source_path: Option<&Path>,
 ) -> Result<ModelCatalog, ModelsConfigError> {
     let mut providers = Vec::with_capacity(config.providers.len());
     for (provider_id, provider) in &config.providers {
-        validate_provider_kind(provider_id, provider, source_path)?;
-        providers.push(provider_from_config(provider_id, provider));
+        validate_provider_kind(provider_id, provider)?;
+        providers.push(provider_from_config(provider_id, &provider.config));
     }
 
     Ok(ModelCatalog::new(providers))
@@ -347,16 +367,17 @@ fn catalog_from_config(
 
 fn validate_provider_kind(
     provider_id: &str,
-    provider: &FileModelProviderConfig,
-    source_path: Option<&Path>,
+    provider: &SourcedFileModelProviderConfig,
 ) -> Result<(), ModelsConfigError> {
-    let kind = provider.kind.as_deref().unwrap_or("openai_compatible");
+    let kind = provider
+        .config
+        .kind
+        .as_deref()
+        .unwrap_or("openai_compatible");
     ProviderKind::from_config_value(kind)
         .map(|_| ())
         .ok_or_else(|| ModelsConfigError::InvalidProviderKind {
-            path: source_path
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from(MODELS_FILE_NAME)),
+            path: provider.source_path.clone(),
             provider: provider_id.to_string(),
             value: kind.to_string(),
         })

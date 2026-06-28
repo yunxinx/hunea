@@ -58,8 +58,7 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
         "context panel title should keep only the stable Context Usage header: {rows:?}"
     );
     assert!(
-        rows.iter()
-            .any(|row| row.contains("local/qwen3 · 540")),
+        rows.iter().any(|row| row.contains("local/qwen3 · 540")),
         "context panel should keep the model name and render legend-style usage summary on the first right-side row: {rows:?}"
     );
     assert_eq!(
@@ -206,7 +205,7 @@ fn segment(
     label: &str,
 ) -> ContextBudgetSegmentPayload {
     ContextBudgetSegmentPayload {
-        kind_tag: kind.default_label().to_string(),
+        kind,
         stack_order,
         estimated_tokens,
         label: label.to_string(),

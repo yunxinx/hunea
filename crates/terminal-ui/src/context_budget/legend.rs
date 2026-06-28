@@ -122,6 +122,7 @@ fn legend_detail_text(
 mod tests {
     use super::*;
     use crate::theme::default_palette;
+    use runtime_domain::context_budget::SegmentKind;
     use runtime_domain::session::ContextBudgetSegmentPayload;
 
     #[test]
@@ -130,10 +131,10 @@ mod tests {
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "model".to_string(),
             segments: vec![
-                segment("assistant", 200, "assistant history"),
-                segment("system", 160, "system prompt"),
-                segment("user", 120, "user history"),
-                segment("reasoning", 60, "reasoning"),
+                segment(SegmentKind::AssistantMessage, 200, "assistant history"),
+                segment(SegmentKind::System, 160, "system prompt"),
+                segment(SegmentKind::UserMessage, 120, "user history"),
+                segment(SegmentKind::Reasoning, 60, "reasoning"),
             ],
             total_estimated_tokens: 540,
             context_limit: Some(1_000),
@@ -189,9 +190,9 @@ mod tests {
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "model".to_string(),
             segments: vec![
-                segment("user", 120, "user"),
-                segment("assistant", 200, "assistant"),
-                segment("user", 80, "user"),
+                segment(SegmentKind::UserMessage, 120, "user"),
+                segment(SegmentKind::AssistantMessage, 200, "assistant"),
+                segment(SegmentKind::UserMessage, 80, "user"),
             ],
             total_estimated_tokens: 400,
             context_limit: Some(1_000),
@@ -231,7 +232,7 @@ mod tests {
         let area = ratatui::layout::Rect::new(0, 0, 48, 5);
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "model".to_string(),
-            segments: vec![segment("assistant", 400, "assistant")],
+            segments: vec![segment(SegmentKind::AssistantMessage, 400, "assistant")],
             total_estimated_tokens: 400,
             context_limit: Some(400),
             display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
@@ -271,12 +272,12 @@ mod tests {
     }
 
     fn segment(
-        kind_tag: &str,
+        kind: SegmentKind,
         estimated_tokens: usize,
         label: &str,
     ) -> ContextBudgetSegmentPayload {
         ContextBudgetSegmentPayload {
-            kind_tag: kind_tag.to_string(),
+            kind,
             stack_order: 0,
             estimated_tokens,
             label: label.to_string(),

@@ -247,6 +247,7 @@ fn heatmap_symbol(fill: HeatmapCellFill) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtime_domain::context_budget::SegmentKind;
     use runtime_domain::session::{ContextBudgetDisplayPayload, ContextBudgetSegmentPayload};
 
     use crate::theme::default_palette;
@@ -292,25 +293,25 @@ mod tests {
             model_id: "local/qwen3".to_string(),
             segments: vec![
                 ContextBudgetSegmentPayload {
-                    kind_tag: "assistant".to_string(),
+                    kind: SegmentKind::AssistantMessage,
                     stack_order: 0,
                     estimated_tokens: 100,
                     label: "assistant".to_string(),
                 },
                 ContextBudgetSegmentPayload {
-                    kind_tag: "user".to_string(),
+                    kind: SegmentKind::UserMessage,
                     stack_order: 1,
                     estimated_tokens: 40,
                     label: "user".to_string(),
                 },
                 ContextBudgetSegmentPayload {
-                    kind_tag: "assistant".to_string(),
+                    kind: SegmentKind::AssistantMessage,
                     stack_order: 2,
                     estimated_tokens: 60,
                     label: "assistant".to_string(),
                 },
                 ContextBudgetSegmentPayload {
-                    kind_tag: "system".to_string(),
+                    kind: SegmentKind::System,
                     stack_order: 3,
                     estimated_tokens: 20,
                     label: "system".to_string(),
@@ -346,7 +347,7 @@ mod tests {
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "local/qwen3".to_string(),
             segments: vec![ContextBudgetSegmentPayload {
-                kind_tag: "system".to_string(),
+                kind: SegmentKind::System,
                 stack_order: 0,
                 estimated_tokens: 10,
                 label: "system".to_string(),

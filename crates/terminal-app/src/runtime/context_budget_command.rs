@@ -1,8 +1,10 @@
 //! Builds context budget snapshot for the `/context` overlay.
 
-use conversation_runtime::context_budget::context_budget_from_items;
+use conversation_runtime::context_budget::{
+    context_budget_from_items, context_budget_tool_definitions_text,
+};
 use runtime_domain::{
-    context_budget::{ContextBudgetSnapshot, ContextLimitDisplay, SegmentKind},
+    context_budget::{ContextBudgetSnapshot, ContextLimitDisplay},
     model_catalog::ModelSelection,
     session::{
         ContextBudgetDisplayPayload, ContextBudgetSegmentPayload, ContextBudgetSnapshotPayload,
@@ -25,7 +27,14 @@ impl AppRuntimeCoordinator {
         let items = self
             .provider_conversation
             .provider_items_for_context_budget_probe();
-        let snapshot = context_budget_from_items(&model_id, &items, None, context_limit);
+        let tool_definitions_text = context_budget_tool_definitions_text(&self.workspace_tools)
+            .map_err(|error| format!("Serialize provider-visible tool definitions: {error}"))?;
+        let snapshot = context_budget_from_items(
+            &model_id,
+            &items,
+            tool_definitions_text.as_deref(),
+            context_limit,
+        );
         self.pending_runtime_events
             .push(RuntimeEvent::ContextBudgetSnapshotLoaded {
                 payload: snapshot_to_payload(snapshot),
@@ -44,7 +53,7 @@ fn snapshot_to_payload(snapshot: ContextBudgetSnapshot) -> ContextBudgetSnapshot
             .segments
             .into_iter()
             .map(|segment| ContextBudgetSegmentPayload {
-                kind_tag: segment_kind_tag(segment.kind),
+                kind: segment.kind,
                 stack_order: segment.stack_order,
                 estimated_tokens: segment.estimated_tokens,
                 label: segment.label,
@@ -66,8 +75,4 @@ fn display_to_payload(display: ContextLimitDisplay) -> ContextBudgetDisplayPaylo
             percent,
         },
     }
-}
-
-fn segment_kind_tag(kind: SegmentKind) -> String {
-    kind.default_label().to_string()
 }

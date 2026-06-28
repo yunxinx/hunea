@@ -1,6 +1,7 @@
 mod support;
 
 mod branch_tree;
+mod context_budget;
 mod conversation;
 mod rewind;
 mod session_list;

@@ -14,10 +14,7 @@ mod state;
 mod streaming;
 mod types;
 
-use execution::{
-    ToolCallExecutionContext, ai_tool_definitions_from_registry, execute_tool_call,
-    interrupted_tool_execution,
-};
+use execution::{ToolCallExecutionContext, execute_tool_call, interrupted_tool_execution};
 use state::{
     RuntimeTurnState, runtime_tool_activity_update_duplicates_tool_arguments,
     runtime_tool_activity_update_token_text,
@@ -26,6 +23,7 @@ use streaming::{
     append_provider_context_item, append_provider_context_items, stream_provider_turn,
 };
 
+pub use execution::provider_tool_definitions_from_registry;
 pub use types::{
     ToolLoopClock, ToolLoopCompletion, ToolLoopOptions, ToolLoopProgress, ToolLoopResponse,
 };
@@ -51,7 +49,7 @@ where
     }
 
     let tool_definitions = executor.definitions();
-    request.tools = ai_tool_definitions_from_registry(&tool_definitions);
+    request.tools = provider_tool_definitions_from_registry(&tool_definitions);
     let mut state = RuntimeTurnState::new(request.model.clone());
     let clock = options.clock.clone();
     let mut tool_turns = 0usize;

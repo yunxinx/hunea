@@ -2,6 +2,8 @@
 
 use provider_protocol::ConversationItem;
 use runtime_domain::context_budget::{ContextBudgetSnapshot, build_context_budget_snapshot};
+use tool_loop_runtime::provider_tool_definitions_from_registry;
+use tool_runtime::ToolExecutorRegistry;
 
 use crate::PreparedConversationRequest;
 
@@ -32,12 +34,26 @@ pub fn context_budget_from_items(
     build_context_budget_snapshot(model_id, items, tool_definitions_text, context_limit)
 }
 
+/// Serializes provider-visible tool definitions exactly as the provider path exports them.
+pub fn context_budget_tool_definitions_text(
+    executor: &ToolExecutorRegistry,
+) -> Result<Option<String>, serde_json::Error> {
+    let tool_definitions = provider_tool_definitions_from_registry(&executor.definitions());
+    if tool_definitions.is_empty() {
+        return Ok(None);
+    }
+
+    serde_json::to_string(&tool_definitions).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use provider_protocol::{ConversationItem, Role};
     use runtime_domain::context_budget::SegmentKind;
     use runtime_domain::session::ConversationTurnRequest;
+    use serde_json::json;
+    use tool_runtime::{Tool, ToolDefinition, ToolExecutionFuture, ToolExecutorRegistry};
 
     use crate::conversation::PersistedConversationItem;
     use crate::{ProviderConversation, ProviderKind};
@@ -84,5 +100,41 @@ mod tests {
             snapshot.display,
             runtime_domain::context_budget::ContextLimitDisplay::Absolute { limit: 200_000, .. }
         ));
+    }
+
+    #[test]
+    fn tool_definitions_text_matches_provider_visible_registry_export() {
+        struct FakeTool;
+
+        impl Tool for FakeTool {
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition::new("read")
+                    .with_description("Read a file")
+                    .with_input_schema(json!({
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" }
+                        }
+                    }))
+            }
+
+            fn execute<'a>(
+                &'a self,
+                _call: tool_runtime::ToolCall,
+                _cancellation: &'a tokio_util::sync::CancellationToken,
+            ) -> ToolExecutionFuture<'a> {
+                Box::pin(async { tool_runtime::ToolResult::success("call-1", "") })
+            }
+        }
+
+        let mut executor = ToolExecutorRegistry::new();
+        executor.insert(FakeTool);
+
+        let text = context_budget_tool_definitions_text(&executor)
+            .expect("tool definitions should serialize")
+            .expect("tool definitions should not be empty");
+
+        assert!(text.contains("\"name\":\"read\""));
+        assert!(text.contains("\"description\":\"Read a file\""));
     }
 }

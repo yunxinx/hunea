@@ -155,8 +155,7 @@ pub(crate) fn aggregated_category_totals(
     let mut totals = [0usize; 3];
 
     for segment in &snapshot.segments {
-        let kind = segment_kind_from_tag(&segment.kind_tag);
-        let category = context_budget_category_from_segment_kind(kind);
+        let category = context_budget_category_from_segment_kind(segment.kind);
         let rank = context_budget_category_display_rank(category);
         if rank < totals.len() {
             totals[rank] = totals[rank].saturating_add(segment.estimated_tokens);
@@ -195,18 +194,6 @@ pub(crate) fn build_legend_entries(
     entries
 }
 
-pub(crate) fn segment_kind_from_tag(tag: &str) -> SegmentKind {
-    match tag {
-        "system" => SegmentKind::System,
-        "user" => SegmentKind::UserMessage,
-        "assistant" => SegmentKind::AssistantMessage,
-        "tool_result" => SegmentKind::ToolResult,
-        "reasoning" => SegmentKind::Reasoning,
-        "tools" => SegmentKind::ToolDefinitions,
-        _ => SegmentKind::System,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,10 +204,10 @@ mod tests {
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "model".to_string(),
             segments: vec![
-                segment("user", 0, 120),
-                segment("assistant", 1, 200),
-                segment("user", 2, 80),
-                segment("reasoning", 3, 40),
+                segment(SegmentKind::UserMessage, 0, 120),
+                segment(SegmentKind::AssistantMessage, 1, 200),
+                segment(SegmentKind::UserMessage, 2, 80),
+                segment(SegmentKind::Reasoning, 3, 40),
             ],
             total_estimated_tokens: 440,
             context_limit: Some(1_000),
@@ -245,11 +232,11 @@ mod tests {
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "model".to_string(),
             segments: vec![
-                segment("system", 0, 100),
-                segment("assistant", 1, 120),
-                segment("user", 2, 80),
-                segment("tool_result", 3, 40),
-                segment("tools", 4, 20),
+                segment(SegmentKind::System, 0, 100),
+                segment(SegmentKind::AssistantMessage, 1, 120),
+                segment(SegmentKind::UserMessage, 2, 80),
+                segment(SegmentKind::ToolResult, 3, 40),
+                segment(SegmentKind::ToolDefinitions, 4, 20),
             ],
             total_estimated_tokens: 360,
             context_limit: Some(1_000),
@@ -359,15 +346,15 @@ mod tests {
     }
 
     fn segment(
-        kind_tag: &str,
+        kind: SegmentKind,
         stack_order: u16,
         estimated_tokens: usize,
     ) -> ContextBudgetSegmentPayload {
         ContextBudgetSegmentPayload {
-            kind_tag: kind_tag.to_string(),
+            kind,
             stack_order,
             estimated_tokens,
-            label: kind_tag.to_string(),
+            label: kind.default_label().to_string(),
         }
     }
 }

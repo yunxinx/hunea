@@ -1,3 +1,5 @@
+use crate::context_budget::SegmentKind;
+
 use super::{
     ConversationResponse, MessageHistoryEntry, MessageHistoryEntryId, MessageHistoryRow,
     RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics, RuntimeTarget,
@@ -19,7 +21,7 @@ pub struct ContextBudgetSnapshotPayload {
 /// One segment in a context budget snapshot event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextBudgetSegmentPayload {
-    pub kind_tag: String,
+    pub kind: SegmentKind,
     pub stack_order: u16,
     pub estimated_tokens: usize,
     pub label: String,

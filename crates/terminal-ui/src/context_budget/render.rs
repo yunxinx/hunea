@@ -45,7 +45,6 @@ fn build_panel_lines(
     visible_rows: usize,
 ) -> Vec<Line<'static>> {
     let terminal_width = terminal_width.max(1);
-    let content_width = context_budget_panel_width(terminal_width);
     let mut lines = vec![
         inline_panel_rule_line(terminal_width, model.palette),
         context_budget_header_line(model, terminal_width),
@@ -55,13 +54,13 @@ fn build_panel_lines(
     let body_height = visible_rows
         .saturating_sub(lines.len() + footer_lines.len())
         .max(1);
-    lines.extend(context_budget_body_lines(model, content_width, body_height));
+    lines.extend(context_budget_body_lines(
+        model,
+        terminal_width,
+        body_height,
+    ));
     lines.extend(footer_lines);
     lines
-}
-
-fn context_budget_panel_width(total_width: usize) -> usize {
-    total_width.max(1)
 }
 
 fn context_budget_header_line(model: &Model, width: usize) -> Line<'static> {
@@ -199,7 +198,6 @@ fn pad_body_lines(mut lines: Vec<Line<'static>>, body_height: usize) -> Vec<Line
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::context_budget::state::context_usage_summary;
     use runtime_domain::session::ContextBudgetDisplayPayload;
 
@@ -226,12 +224,5 @@ mod tests {
         assert!(text.contains("gpt-4o"));
         assert!(text.contains("tokens"));
         assert!(text.contains("(25%)"));
-    }
-
-    #[test]
-    fn panel_width_uses_full_terminal_width() {
-        assert_eq!(context_budget_panel_width(45), 45);
-        assert_eq!(context_budget_panel_width(72), 72);
-        assert_eq!(context_budget_panel_width(80), 80);
     }
 }

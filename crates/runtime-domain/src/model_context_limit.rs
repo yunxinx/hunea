@@ -21,13 +21,15 @@ impl ModelContextLimits {
     }
 
     /// `resolve` 按 profile → defaults → built-in → None 解析 context limit。
-    pub fn resolve(&self, _catalog: &ModelCatalog, selection: &ModelSelection) -> Option<u32> {
+    pub fn resolve(&self, catalog: &ModelCatalog, selection: &ModelSelection) -> Option<u32> {
         let key = (selection.provider_id.clone(), selection.model_id.clone());
         if let Some(limit) = self.by_provider_model.get(&key) {
             return Some(*limit);
         }
 
-        if let Some(limit) = self.model_id_only_profile_limit(selection.model_id.as_str()) {
+        if catalog.selection_has_unique_model_id(selection)
+            && let Some(limit) = self.model_id_only_profile_limit(selection.model_id.as_str())
+        {
             return Some(limit);
         }
 
@@ -83,6 +85,27 @@ mod tests {
         )])
     }
 
+    fn catalog_with_ambiguous_qwen() -> ModelCatalog {
+        ModelCatalog::new(vec![
+            ModelProvider::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            ),
+            ModelProvider::new(
+                "remote",
+                ProviderKind::OpenAiCompatible,
+                "Remote",
+                Some("https://example.test/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            ),
+        ])
+    }
+
     #[test]
     fn resolve_uses_provider_model_profile_first() {
         let mut profiles = BTreeMap::new();
@@ -125,6 +148,19 @@ mod tests {
 
         assert_eq!(
             limits.resolve(&catalog_with_local_qwen(), &selection),
+            Some(DEFAULT_CONTEXT_LIMIT)
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_reuse_other_provider_profile_when_model_id_is_ambiguous() {
+        let mut profiles = BTreeMap::new();
+        profiles.insert(("local".to_string(), "qwen3".to_string()), 32_768);
+        let limits = ModelContextLimits::new(None, profiles);
+        let selection = ModelSelection::new("remote", "qwen3");
+
+        assert_eq!(
+            limits.resolve(&catalog_with_ambiguous_qwen(), &selection),
             Some(DEFAULT_CONTEXT_LIMIT)
         );
     }

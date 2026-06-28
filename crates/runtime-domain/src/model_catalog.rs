@@ -86,6 +86,15 @@ impl ModelCatalog {
         ))
     }
 
+    /// `selection_has_unique_model_id` 判断 selection 的 `model_id`
+    /// 是否能在当前 catalog 中唯一映射回同一个 provider。
+    pub fn selection_has_unique_model_id(&self, selection: &ModelSelection) -> bool {
+        match self.selection_for_model_id(selection.model_id.as_str()) {
+            Some(unique_selection) => unique_selection.provider_id == selection.provider_id,
+            None => false,
+        }
+    }
+
     /// `enabled_provider_index_for` 返回指定 provider 在展示列表中的索引。
     pub fn enabled_provider_index_for(&self, provider_id: &str) -> Option<usize> {
         self.enabled_providers()
@@ -384,5 +393,45 @@ mod tests {
         ]);
 
         assert_eq!(catalog.selection_for_model_id("shared"), None);
+    }
+
+    #[test]
+    fn catalog_reports_unique_model_id_only_for_matching_provider() {
+        let catalog = ModelCatalog::new(vec![ModelProvider::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "Local",
+            None,
+            ModelSource::Configured,
+            vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+        )]);
+
+        assert!(catalog.selection_has_unique_model_id(&ModelSelection::new("local", "qwen3")));
+        assert!(!catalog.selection_has_unique_model_id(&ModelSelection::new("other", "qwen3")));
+    }
+
+    #[test]
+    fn catalog_rejects_ambiguous_model_id_uniqueness_check() {
+        let catalog = ModelCatalog::new(vec![
+            ModelProvider::new(
+                "first",
+                ProviderKind::OpenAiCompatible,
+                "First",
+                None,
+                ModelSource::Configured,
+                vec![ModelEntry::new("shared", None, ModelSource::Configured)],
+            ),
+            ModelProvider::new(
+                "second",
+                ProviderKind::OpenAiCompatible,
+                "Second",
+                None,
+                ModelSource::Configured,
+                vec![ModelEntry::new("shared", None, ModelSource::Configured)],
+            ),
+        ]);
+
+        assert!(!catalog.selection_has_unique_model_id(&ModelSelection::new("first", "shared")));
+        assert!(!catalog.selection_has_unique_model_id(&ModelSelection::new("second", "shared")));
     }
 }

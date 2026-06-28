@@ -20,7 +20,6 @@ use crate::{
 };
 
 const CONTEXT_BUDGET_PANEL_VISIBLE_ROWS: usize = 15;
-const CONTEXT_BUDGET_MIN_PANEL_WIDTH: usize = 45;
 
 pub(crate) type ContextBudgetRenderResult = InlinePanelRenderResult;
 
@@ -62,15 +61,7 @@ fn build_panel_lines(
 }
 
 fn context_budget_panel_width(total_width: usize) -> usize {
-    if total_width <= CONTEXT_BUDGET_MIN_PANEL_WIDTH {
-        return total_width.max(1);
-    }
-
-    total_width
-        .saturating_mul(3)
-        .div_ceil(5)
-        .max(CONTEXT_BUDGET_MIN_PANEL_WIDTH)
-        .min(total_width)
+    total_width.max(1)
 }
 
 fn context_budget_header_line(model: &Model, width: usize) -> Line<'static> {
@@ -238,8 +229,9 @@ mod tests {
     }
 
     #[test]
-    fn panel_width_uses_about_sixty_percent_when_terminal_is_wide_enough() {
-        assert_eq!(context_budget_panel_width(72), 45);
-        assert_eq!(context_budget_panel_width(80), 48);
+    fn panel_width_uses_full_terminal_width() {
+        assert_eq!(context_budget_panel_width(45), 45);
+        assert_eq!(context_budget_panel_width(72), 72);
+        assert_eq!(context_budget_panel_width(80), 80);
     }
 }

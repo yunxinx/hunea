@@ -135,10 +135,10 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
 }
 
 #[test]
-fn context_panel_only_uses_left_side_of_the_terminal_width() {
+fn context_panel_uses_available_terminal_width_for_body_content() {
     let mut model = ready_model();
     model.transcript_mut().clear();
-    model.set_window(72, 20);
+    model.set_window(120, 20);
     model.set_palette(default_palette(), true);
     model.open_context_budget_loading();
     model.apply_context_budget_snapshot(context_budget_snapshot());
@@ -164,16 +164,44 @@ fn context_panel_only_uses_left_side_of_the_terminal_width() {
         .unwrap_or_default();
 
     assert!(
-        top_rule_width == 72,
-        "context panel rule should remain full width even when the content area is narrower: {top_rule_width}"
+        top_rule_width == 120,
+        "context panel rule should span the full terminal width: {top_rule_width}"
     );
     assert!(
         header_gap_width == 0,
         "context panel should keep one blank row between the header and the body"
     );
     assert!(
-        body_width <= 45,
-        "context panel body should stay around the left 60% of the terminal width: {body_width}"
+        body_width > 80,
+        "context panel body should use the available terminal width instead of staying capped on the left: {body_width}"
+    );
+}
+
+#[test]
+fn context_panel_summary_row_keeps_full_model_usage_text_when_width_allows() {
+    let mut model = ready_model();
+    model.transcript_mut().clear();
+    model.set_window(160, 20);
+    model.set_palette(default_palette(), true);
+    model.open_context_budget_loading();
+    model.apply_context_budget_snapshot(ContextBudgetSnapshotPayload {
+        model_id: "deepseek-v4-flash".to_string(),
+        segments: context_budget_snapshot().segments,
+        total_estimated_tokens: 1_200,
+        context_limit: Some(256_000),
+        display: ContextBudgetDisplayPayload::Absolute {
+            limit: 256_000,
+            used: 1_200,
+            percent: 0.5,
+        },
+    });
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 160, 20));
+
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("deepseek-v4-flash · 1.2k/256k tokens (0.5%)")),
+        "summary row should use the available right-side width before truncating: {rows:?}"
     );
 }
 

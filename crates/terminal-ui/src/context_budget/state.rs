@@ -66,6 +66,17 @@ pub(crate) fn format_compact_tokens(tokens: usize) -> String {
     }
 }
 
+fn format_compact_percent(percent: f32) -> String {
+    let tenths = (percent * 10.0).round() as i32;
+    let whole = tenths / 10;
+    let fraction = tenths % 10;
+    if fraction == 0 {
+        format!("{whole}%")
+    } else {
+        format!("{whole}.{fraction}%")
+    }
+}
+
 /// `context_usage_summary` 返回右侧图示首行使用的模型与上下文摘要。
 pub(crate) fn context_usage_summary(
     model_id: &str,
@@ -84,10 +95,10 @@ pub(crate) fn context_usage_summary(
             percent,
         } => {
             format!(
-                "{model_id} · {}/{} tokens ({:.0}%)",
+                "{model_id} · {}/{} tokens ({})",
                 format_compact_tokens(used as usize),
                 format_compact_tokens(limit as usize),
-                percent,
+                format_compact_percent(percent),
             )
         }
     }
@@ -306,6 +317,20 @@ mod tests {
         );
 
         assert_eq!(text, "gpt-4o · 32k/128k tokens (25%)");
+    }
+
+    #[test]
+    fn context_usage_summary_keeps_fractional_percent_when_needed() {
+        let text = context_usage_summary(
+            "deepseek-v4-flash",
+            ContextBudgetDisplayPayload::Absolute {
+                limit: 256_000,
+                used: 1_200,
+                percent: 0.5,
+            },
+        );
+
+        assert_eq!(text, "deepseek-v4-flash · 1.2k/256k tokens (0.5%)");
     }
 
     #[test]

@@ -5,7 +5,6 @@ pub(super) const CONTEXT_BUDGET_COLUMN_GAP: u16 = 3;
 pub(super) const CONTEXT_BUDGET_HEATMAP_WIDTH: u16 = 20;
 pub(super) const CONTEXT_BUDGET_MIN_HEATMAP_WIDTH: u16 = CONTEXT_BUDGET_HEATMAP_WIDTH;
 pub(super) const CONTEXT_BUDGET_MIN_LEGEND_WIDTH: u16 = 20;
-pub(super) const CONTEXT_BUDGET_MAX_LEGEND_WIDTH: u16 = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ContextBudgetBodyLayout {
@@ -31,10 +30,7 @@ pub(super) fn context_budget_body_layout(body: Rect) -> Option<ContextBudgetBody
     let legend_width = content
         .width
         .saturating_sub(heatmap_width + CONTEXT_BUDGET_COLUMN_GAP)
-        .clamp(
-            CONTEXT_BUDGET_MIN_LEGEND_WIDTH,
-            CONTEXT_BUDGET_MAX_LEGEND_WIDTH,
-        );
+        .max(CONTEXT_BUDGET_MIN_LEGEND_WIDTH);
     let heatmap = Rect::new(content.x, content.y, heatmap_width, content.height);
     let legend = Rect::new(
         heatmap.x + heatmap.width + CONTEXT_BUDGET_COLUMN_GAP,
@@ -69,20 +65,25 @@ mod tests {
 
     #[test]
     fn body_layout_uses_right_side_legend_column() {
-        let body = Rect::new(0, 2, 45, 10);
+        let body = Rect::new(0, 2, 72, 10);
 
         let layout = context_budget_body_layout(body).expect("layout should exist");
 
         assert_eq!(layout.content.x, 2);
-        assert_eq!(layout.content.width, 43);
+        assert_eq!(layout.content.width, 70);
         assert_eq!(layout.heatmap.x, layout.content.x);
         assert_eq!(layout.heatmap.width, 20);
         assert_eq!(layout.heatmap.height, layout.content.height);
         assert_eq!(layout.legend.height, layout.content.height);
         assert_eq!(layout.legend.x, layout.heatmap.x + layout.heatmap.width + 3);
+        assert_eq!(
+            layout.legend.width + layout.heatmap.width + 3,
+            layout.content.width,
+            "legend should consume all remaining width after the fixed heatmap column"
+        );
         assert!(
-            layout.legend.width >= CONTEXT_BUDGET_MIN_LEGEND_WIDTH,
-            "legend should keep enough room for visible natural-copy legend rows"
+            layout.legend.width > CONTEXT_BUDGET_MIN_LEGEND_WIDTH,
+            "legend should expand into the remaining width instead of stopping at the minimum"
         );
     }
 

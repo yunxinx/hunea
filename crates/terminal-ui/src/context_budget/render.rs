@@ -216,12 +216,16 @@ mod tests {
     use runtime_domain::session::ContextBudgetDisplayPayload;
 
     #[test]
-    fn usage_summary_relative_shows_question_mark_limit() {
+    fn usage_summary_absolute_shows_documented_display_limit() {
         let text = context_usage_summary(
             "qwen3",
-            ContextBudgetDisplayPayload::Relative { used: 42_000 },
+            ContextBudgetDisplayPayload::Absolute {
+                limit: 256_000,
+                used: 42_000,
+                percent: 16.4,
+            },
         );
-        assert_eq!(text, "qwen3 · 42k tokens");
+        assert_eq!(text, "qwen3 · 42k/256k tokens (16.4%)");
     }
 
     #[test]

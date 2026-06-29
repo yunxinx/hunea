@@ -32,13 +32,17 @@ fn context_command_emits_open_effect() {
 }
 
 #[test]
-fn context_overlay_header_relative_question_mark() {
+fn context_overlay_header_shows_documented_absolute_limit() {
     use crate::context_budget::state::context_usage_summary;
     let text = context_usage_summary(
         "local/qwen3",
-        ContextBudgetDisplayPayload::Relative { used: 1_200 },
+        ContextBudgetDisplayPayload::Absolute {
+            limit: 256_000,
+            used: 1_200,
+            percent: 0.5,
+        },
     );
-    assert_eq!(text, "local/qwen3 · 1.2k tokens");
+    assert_eq!(text, "local/qwen3 · 1.2k/256k tokens (0.5%)");
 }
 
 #[test]
@@ -191,7 +195,7 @@ fn context_panel_summary_row_keeps_full_model_usage_text_when_width_allows() {
             model_id: "deepseek-v4-flash".to_string(),
             segments: context_budget_snapshot().segments,
             total_estimated_tokens: 1_200,
-            context_limit: Some(256_000),
+            context_limit: 256_000,
             display: ContextBudgetDisplayPayload::Absolute {
                 limit: 256_000,
                 used: 1_200,
@@ -316,9 +320,7 @@ fn late_context_budget_error_after_close_does_not_reopen_panel() {
     model.apply_runtime_event(
         runtime_domain::session::RuntimeEvent::ContextBudgetSnapshotLoadFailed {
             request_id,
-            error: runtime_domain::session::ContextBudgetLoadErrorPayload::ProjectionFailed {
-                kind: runtime_domain::session::ContextBudgetProjectionErrorKind::Internal,
-                status: None,
+            error: runtime_domain::session::ContextBudgetLoadErrorPayload::RuntimeInternal {
                 detail: Some("stale failure".to_string()),
             },
         },
@@ -370,7 +372,7 @@ fn context_budget_snapshot() -> ContextBudgetSnapshotPayload {
             segment(SegmentKind::ToolDefinitions, 5, 12),
         ],
         total_estimated_tokens: 540,
-        context_limit: Some(1_280),
+        context_limit: 1_280,
         display: ContextBudgetDisplayPayload::Absolute {
             limit: 1_280,
             used: 540,

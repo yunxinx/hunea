@@ -46,7 +46,6 @@ impl ContextSegment {
 /// How context limit is shown relative to estimated usage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ContextLimitDisplay {
-    Relative { used: u32 },
     Absolute { limit: u32, used: u32, percent: f32 },
 }
 
@@ -56,23 +55,20 @@ pub struct ContextBudgetSnapshot {
     pub model_id: String,
     pub segments: Vec<ContextSegment>,
     pub total_estimated_tokens: usize,
-    pub context_limit: Option<u32>,
+    pub context_limit: u32,
     pub display: ContextLimitDisplay,
 }
 
-/// `context_limit_display` 根据总 token 数与可选上限构造展示模式。
+/// `context_limit_display` 根据总 token 数与展示上限构造绝对展示模式。
 pub fn context_limit_display(
     total_estimated_tokens: usize,
-    context_limit: Option<u32>,
+    context_limit: u32,
 ) -> ContextLimitDisplay {
     let used = u32::try_from(total_estimated_tokens).unwrap_or(u32::MAX);
-    match context_limit {
-        Some(limit) if limit > 0 => ContextLimitDisplay::Absolute {
-            limit,
-            used,
-            percent: (used as f32 / limit as f32) * 100.0,
-        },
-        _ => ContextLimitDisplay::Relative { used },
+    ContextLimitDisplay::Absolute {
+        limit: context_limit,
+        used,
+        percent: (used as f32 / context_limit as f32) * 100.0,
     }
 }
 
@@ -81,16 +77,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn relative_display_when_no_context_limit() {
-        assert!(matches!(
-            context_limit_display(12_345, None),
-            ContextLimitDisplay::Relative { used: 12_345 }
-        ));
+    fn absolute_display_uses_documented_fallback_limit() {
+        match context_limit_display(12_345, 256_000) {
+            ContextLimitDisplay::Absolute {
+                limit,
+                used,
+                percent,
+            } => {
+                assert_eq!(limit, 256_000);
+                assert_eq!(used, 12_345);
+                assert!((percent - (used as f32 / 256_000.0 * 100.0)).abs() < 0.01);
+            }
+        }
     }
 
     #[test]
     fn absolute_display_when_context_limit_set() {
-        match context_limit_display(32_000, Some(128_000)) {
+        match context_limit_display(32_000, 128_000) {
             ContextLimitDisplay::Absolute {
                 limit,
                 used,
@@ -100,7 +103,6 @@ mod tests {
                 assert_eq!(used, 32_000);
                 assert!((percent - (used as f32 / 128_000.0 * 100.0)).abs() < 0.01);
             }
-            ContextLimitDisplay::Relative { .. } => panic!("expected absolute display"),
         }
     }
 }

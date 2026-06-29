@@ -85,7 +85,6 @@ fn snapshot_to_payload(snapshot: ContextBudgetSnapshot) -> ContextBudgetSnapshot
 
 fn display_to_payload(display: ContextLimitDisplay) -> ContextBudgetDisplayPayload {
     match display {
-        ContextLimitDisplay::Relative { used } => ContextBudgetDisplayPayload::Relative { used },
         ContextLimitDisplay::Absolute {
             limit,
             used,

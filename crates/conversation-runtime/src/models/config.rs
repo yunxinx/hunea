@@ -33,7 +33,7 @@ pub struct LoadedModelCatalog {
 
 impl LoadedModelCatalog {
     /// `context_limit_for` 解析指定模型选择的 context limit（tokens）。
-    pub fn context_limit_for(&self, selection: &ModelSelection) -> Option<u32> {
+    pub fn context_limit_for(&self, selection: &ModelSelection) -> u32 {
         self.catalog
             .context_limit_for(&self.context_limits, selection)
     }

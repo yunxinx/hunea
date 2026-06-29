@@ -181,7 +181,7 @@ mod tests {
                 segment(SegmentKind::Reasoning, 60),
             ],
             total_estimated_tokens: 540,
-            context_limit: Some(1_000),
+            context_limit: 1_000,
             display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
                 limit: 1_000,
                 used: 540,
@@ -241,7 +241,7 @@ mod tests {
                 segment(SegmentKind::UserMessage, 80),
             ],
             total_estimated_tokens: 400,
-            context_limit: Some(1_000),
+            context_limit: 1_000,
             display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
                 limit: 1_000,
                 used: 400,
@@ -282,7 +282,7 @@ mod tests {
             model_id: "model".to_string(),
             segments: vec![segment(SegmentKind::AssistantMessage, 400)],
             total_estimated_tokens: 400,
-            context_limit: Some(400),
+            context_limit: 400,
             display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
                 limit: 400,
                 used: 400,
@@ -321,7 +321,7 @@ mod tests {
             model_id: "model".to_string(),
             segments: vec![segment(SegmentKind::AssistantMessage, 400)],
             total_estimated_tokens: 400,
-            context_limit: Some(1_000),
+            context_limit: 1_000,
             display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
                 limit: 1_000,
                 used: 400,

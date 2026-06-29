@@ -67,10 +67,10 @@ pub(crate) fn context_budget_error_message(error: &ContextBudgetLoadErrorPayload
         ContextBudgetLoadErrorPayload::UnsupportedProvider { provider_kind } => {
             format!("{provider_kind} cannot show context budget; use OpenAI/OpenAI-compatible.")
         }
+        ContextBudgetLoadErrorPayload::RuntimeInternal { .. } => {
+            "Failed to load context budget in the runtime.".to_string()
+        }
         ContextBudgetLoadErrorPayload::ProjectionFailed { kind, .. } => match kind {
-            ContextBudgetProjectionErrorKind::Internal => {
-                "Failed to load context budget in the runtime.".to_string()
-            }
             ContextBudgetProjectionErrorKind::Protocol => {
                 "Failed to build context budget from provider payload.".to_string()
             }
@@ -116,12 +116,6 @@ pub(crate) fn context_usage_summary(
     display: ContextBudgetDisplayPayload,
 ) -> String {
     match display {
-        ContextBudgetDisplayPayload::Relative { used } => {
-            format!(
-                "{model_id} · {} tokens",
-                format_compact_tokens(used as usize)
-            )
-        }
         ContextBudgetDisplayPayload::Absolute {
             limit,
             used,
@@ -176,21 +170,13 @@ pub(crate) fn context_budget_category_from_segment_kind(
 }
 
 pub(crate) fn free_space_tokens(snapshot: &ContextBudgetSnapshotPayload) -> Option<usize> {
-    match snapshot.display {
-        ContextBudgetDisplayPayload::Absolute { limit, used, .. } => {
-            Some(usize::try_from(limit.saturating_sub(used)).unwrap_or(usize::MAX))
-        }
-        ContextBudgetDisplayPayload::Relative { .. } => None,
-    }
+    let ContextBudgetDisplayPayload::Absolute { limit, used, .. } = snapshot.display;
+    Some(usize::try_from(limit.saturating_sub(used)).unwrap_or(usize::MAX))
 }
 
 pub(crate) fn legend_share_total(snapshot: &ContextBudgetSnapshotPayload) -> usize {
-    match snapshot.display {
-        ContextBudgetDisplayPayload::Absolute { limit, .. } => {
-            usize::try_from(limit).unwrap_or(usize::MAX)
-        }
-        ContextBudgetDisplayPayload::Relative { .. } => snapshot.total_estimated_tokens,
-    }
+    let ContextBudgetDisplayPayload::Absolute { limit, .. } = snapshot.display;
+    usize::try_from(limit).unwrap_or(usize::MAX)
 }
 
 pub(crate) fn aggregated_category_totals(
@@ -254,7 +240,7 @@ mod tests {
                 segment(SegmentKind::Reasoning, 3, 40),
             ],
             total_estimated_tokens: 440,
-            context_limit: Some(1_000),
+            context_limit: 1_000,
             display: ContextBudgetDisplayPayload::Absolute {
                 limit: 1_000,
                 used: 440,
@@ -283,7 +269,7 @@ mod tests {
                 segment(SegmentKind::ToolDefinitions, 4, 20),
             ],
             total_estimated_tokens: 360,
-            context_limit: Some(1_000),
+            context_limit: 1_000,
             display: ContextBudgetDisplayPayload::Absolute {
                 limit: 1_000,
                 used: 360,
@@ -304,7 +290,7 @@ mod tests {
             model_id: "model".to_string(),
             segments: Vec::new(),
             total_estimated_tokens: 400,
-            context_limit: Some(1_000),
+            context_limit: 1_000,
             display: ContextBudgetDisplayPayload::Absolute {
                 limit: 1_000,
                 used: 400,
@@ -321,7 +307,7 @@ mod tests {
             model_id: "model".to_string(),
             segments: Vec::new(),
             total_estimated_tokens: 400,
-            context_limit: Some(1_000),
+            context_limit: 1_000,
             display: ContextBudgetDisplayPayload::Absolute {
                 limit: 1_000,
                 used: 400,
@@ -367,13 +353,17 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_summary_relative_uses_used_tokens_only() {
+    fn context_usage_summary_uses_documented_absolute_limit() {
         let text = context_usage_summary(
             "local/qwen3",
-            ContextBudgetDisplayPayload::Relative { used: 1_200 },
+            ContextBudgetDisplayPayload::Absolute {
+                limit: 256_000,
+                used: 1_200,
+                percent: 0.5,
+            },
         );
 
-        assert_eq!(text, "local/qwen3 · 1.2k tokens");
+        assert_eq!(text, "local/qwen3 · 1.2k/256k tokens (0.5%)");
     }
 
     #[test]
@@ -395,6 +385,15 @@ mod tests {
             text,
             "Failed to build context budget from provider payload."
         );
+    }
+
+    #[test]
+    fn runtime_internal_error_message_uses_runtime_copy() {
+        let text = context_budget_error_message(&ContextBudgetLoadErrorPayload::RuntimeInternal {
+            detail: Some("dispatch failed".to_string()),
+        });
+
+        assert_eq!(text, "Failed to load context budget in the runtime.");
     }
 
     #[test]

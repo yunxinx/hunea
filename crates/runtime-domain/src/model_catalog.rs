@@ -106,7 +106,7 @@ impl ModelCatalog {
         &self,
         limits: &ModelContextLimits,
         selection: &ModelSelection,
-    ) -> Option<u32> {
+    ) -> u32 {
         limits.resolve(self, selection)
     }
 }

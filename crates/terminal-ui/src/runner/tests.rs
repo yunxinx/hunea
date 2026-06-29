@@ -147,10 +147,12 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                             model_id: "qwen3".to_string(),
                             segments: vec![],
                             total_estimated_tokens: 0,
-                            context_limit: None,
+                            context_limit: 256_000,
                             display:
-                                runtime_domain::session::ContextBudgetDisplayPayload::Relative {
+                                runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
+                                    limit: 256_000,
                                     used: 0,
+                                    percent: 0.0,
                                 },
                         },
                     });
@@ -235,6 +237,31 @@ fn open_context_budget_effect_dispatches_snapshot_load_with_request_id() {
             selection: runtime_domain::model_catalog::ModelSelection::new("local", "qwen3"),
         })
     );
+}
+
+#[test]
+fn open_context_budget_effect_dispatch_failure_uses_runtime_internal_error() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.selected_model = Some(runtime_domain::model_catalog::ModelSelection::new(
+        "local", "qwen3",
+    ));
+    let mut runtime_coordinator = TestRuntimeCoordinator {
+        next_runtime_error: Some("runtime unavailable".to_string()),
+        ..TestRuntimeCoordinator::default()
+    };
+
+    super::effects::run_open_context_budget_effect(&mut model, &mut runtime_coordinator);
+
+    let state = model
+        .context_budget
+        .as_ref()
+        .expect("context budget state should stay available");
+    assert!(matches!(
+        state.error,
+        Some(runtime_domain::session::ContextBudgetLoadErrorPayload::RuntimeInternal {
+            detail: Some(ref detail),
+        }) if detail == "runtime unavailable"
+    ));
 }
 
 #[test]

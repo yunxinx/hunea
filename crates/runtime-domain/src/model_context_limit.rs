@@ -23,21 +23,23 @@ impl ModelContextLimits {
 
     /// `resolve` 按 provider/model profile → 唯一 model_id profile → defaults → built-in 解析 context limit。
     ///
-    /// 当没有显式配置时，built-in fallback 会继续返回稳定默认值 `256_000`。
-    pub fn resolve(&self, catalog: &ModelCatalog, selection: &ModelSelection) -> Option<u32> {
+    /// `/context` 面板始终需要一个可展示的上限。
+    /// 当没有显式配置时，built-in fallback 会继续返回稳定默认值 `256_000`，
+    /// 避免把“未配置”误渲染成“无上限”或相对模式。
+    pub fn resolve(&self, catalog: &ModelCatalog, selection: &ModelSelection) -> u32 {
         let key = (selection.provider_id.clone(), selection.model_id.clone());
         if let Some(limit) = self.by_provider_model.get(&key) {
-            return Some(*limit);
+            return *limit;
         }
 
         if catalog.selection_has_unique_model_id(selection)
             && let Some(limit) = self.model_id_only_profile_limit(selection.model_id.as_str())
         {
-            return Some(limit);
+            return limit;
         }
 
         if let Some(limit) = self.defaults {
-            return Some(limit);
+            return limit;
         }
 
         built_in_context_limit(selection.model_id.as_str())
@@ -57,12 +59,10 @@ impl ModelContextLimits {
     }
 }
 
-fn built_in_context_limit(model_id: &str) -> Option<u32> {
-    Some(
-        classify_model_family(model_id)
-            .built_in_context_limit()
-            .unwrap_or(DEFAULT_CONTEXT_LIMIT),
-    )
+fn built_in_context_limit(model_id: &str) -> u32 {
+    classify_model_family(model_id)
+        .built_in_context_limit()
+        .unwrap_or(DEFAULT_CONTEXT_LIMIT)
 }
 
 #[cfg(test)]
@@ -112,7 +112,7 @@ mod tests {
 
         assert_eq!(
             limits.resolve(&catalog_with_local_qwen(), &selection),
-            Some(32_768)
+            32_768
         );
     }
 
@@ -123,7 +123,7 @@ mod tests {
 
         assert_eq!(
             limits.resolve(&catalog_with_local_qwen(), &selection),
-            Some(64_000)
+            64_000
         );
     }
 
@@ -134,7 +134,7 @@ mod tests {
 
         assert_eq!(
             limits.resolve(&ModelCatalog::default(), &selection),
-            Some(128_000)
+            128_000
         );
     }
 
@@ -145,7 +145,7 @@ mod tests {
 
         assert_eq!(
             limits.resolve(&catalog_with_local_qwen(), &selection),
-            Some(DEFAULT_CONTEXT_LIMIT)
+            DEFAULT_CONTEXT_LIMIT
         );
     }
 
@@ -156,7 +156,7 @@ mod tests {
 
         assert_eq!(
             limits.resolve(&catalog_with_local_qwen(), &selection),
-            Some(DEFAULT_CONTEXT_LIMIT)
+            DEFAULT_CONTEXT_LIMIT
         );
     }
 
@@ -167,7 +167,7 @@ mod tests {
 
         assert_eq!(
             limits.resolve(&catalog_with_local_qwen(), &selection),
-            Some(DEFAULT_CONTEXT_LIMIT)
+            DEFAULT_CONTEXT_LIMIT
         );
     }
 
@@ -180,7 +180,7 @@ mod tests {
 
         assert_eq!(
             limits.resolve(&catalog_with_ambiguous_qwen(), &selection),
-            Some(DEFAULT_CONTEXT_LIMIT)
+            DEFAULT_CONTEXT_LIMIT
         );
     }
 }

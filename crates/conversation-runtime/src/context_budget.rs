@@ -43,7 +43,7 @@ pub struct ContextBudgetProbe<'a> {
     model_id: &'a str,
     items: Vec<Cow<'a, ConversationItem>>,
     tool_definitions: &'a [ToolDefinition],
-    context_limit: Option<u32>,
+    context_limit: u32,
 }
 
 impl<'a> ContextBudgetProbe<'a> {
@@ -53,7 +53,7 @@ impl<'a> ContextBudgetProbe<'a> {
         model_id: &'a str,
         items: Vec<Cow<'a, ConversationItem>>,
         tool_definitions: &'a [ToolDefinition],
-        context_limit: Option<u32>,
+        context_limit: u32,
     ) -> Self {
         Self {
             provider_kind,
@@ -68,7 +68,7 @@ impl<'a> ContextBudgetProbe<'a> {
     pub fn from_prepared_request(
         request: &'a PreparedConversationRequest,
         tool_definitions: &'a [ToolDefinition],
-        context_limit: Option<u32>,
+        context_limit: u32,
     ) -> Self {
         Self::new(
             request.provider_kind(),
@@ -235,7 +235,7 @@ mod tests {
                 "Read a file",
                 json!({"type": "object"}),
             )],
-            Some(200_000),
+            200_000,
         ))
         .expect("context budget snapshot should build");
 
@@ -281,7 +281,7 @@ mod tests {
                 "Read a file",
                 json!({"type": "object"}),
             )],
-            Some(200_000),
+            200_000,
         ))
         .expect("context budget snapshot should build");
 
@@ -306,7 +306,7 @@ mod tests {
             "gpt-4o",
             items.iter().map(Cow::Borrowed).collect(),
             &[],
-            Some(200_000),
+            200_000,
         ))
         .expect("context budget snapshot should build");
 
@@ -359,7 +359,7 @@ mod tests {
             "claude-sonnet-4-5",
             items.iter().map(Cow::Borrowed).collect(),
             &[],
-            Some(200_000),
+            200_000,
         ))
         .expect_err("unsupported provider kinds should be explicit");
 
@@ -372,24 +372,29 @@ mod tests {
     }
 
     #[test]
-    fn stack_order_preserves_large_provider_item_indices() {
-        let items = (0..=u16::MAX as usize)
-            .map(|index| ConversationItem::text(Role::User, index.to_string()))
-            .collect::<Vec<_>>();
+    fn stack_order_matches_provider_item_index_for_small_probe() {
+        let items = [
+            ConversationItem::text(Role::User, "first"),
+            ConversationItem::text(Role::Assistant, "second"),
+            ConversationItem::text(Role::User, "third"),
+        ];
 
         let snapshot = build_context_budget_snapshot(ContextBudgetProbe::new(
             ProviderKind::OpenAiCompatible,
             "gpt-4o",
             items.iter().map(Cow::Borrowed).collect(),
             &[],
-            Some(200_000),
+            200_000,
         ))
-        .expect("context budget snapshot should build for large conversations");
+        .expect("context budget snapshot should build for a small probe");
 
-        let last_segment = snapshot
-            .segments
-            .last()
-            .expect("large conversation should produce at least one segment");
-        assert_eq!(last_segment.stack_order, u16::MAX as usize);
+        assert_eq!(
+            snapshot
+                .segments
+                .iter()
+                .map(|segment| segment.stack_order)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 }

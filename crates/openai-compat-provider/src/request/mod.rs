@@ -4,7 +4,7 @@ use provider_protocol::{
     ContentBlock, ConversationItem, PromptRequest, ProviderError, Role, ToolCall, ToolDefinition,
     visible_text_from_blocks,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 /// `PromptRequestProjection` 保存按 OpenAI-compatible 请求格式投影后的 payload 片段。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +12,12 @@ pub struct PromptRequestProjection {
     message_values: Vec<Value>,
     message_fragments: Vec<MessageFragmentProjection>,
     tools_value: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AssistantProjection {
+    full_message: Value,
+    fragment_message: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,19 +89,21 @@ pub(crate) fn chat_completion_request_body(
     request: &PromptRequest,
 ) -> Result<Value, ProviderError> {
     let projection = prompt_request_projection(request)?;
+    let PromptRequestProjection {
+        message_values,
+        tools_value,
+        ..
+    } = projection;
     let mut body = serde_json::Map::new();
     body.insert("model".to_string(), Value::String(request.model.clone()));
-    body.insert(
-        "messages".to_string(),
-        Value::Array(projection.message_values.clone()),
-    );
+    body.insert("messages".to_string(), Value::Array(message_values));
     body.insert("stream".to_string(), Value::Bool(true));
     body.insert(
         "stream_options".to_string(),
         json!({ "include_usage": true }),
     );
 
-    if let Some(tools) = projection.tools_value().cloned() {
+    if let Some(tools) = tools_value {
         body.insert("tools".to_string(), tools);
     }
     if let Some(temperature) = request.options.temperature {
@@ -183,16 +191,17 @@ where
                         }));
                 }
                 if let Some((_, reasoning_text)) = reasoning {
-                    let message_value = assistant_message_value(content, Some(reasoning_text))?;
-                    let fragment_value = assistant_message_value(content, None)?;
-                    message_fragments[index] =
-                        MessageFragmentProjection::Standalone(fragment_value);
-                    messages.push(message_value);
+                    let projection = assistant_projection(content, Some(reasoning_text))?;
+                    if let Some(fragment_value) = projection.fragment_message {
+                        message_fragments[index] =
+                            MessageFragmentProjection::Standalone(fragment_value);
+                    }
+                    messages.push(projection.full_message);
                 } else {
-                    let message_value = assistant_message_value(content, None)?;
+                    let projection = assistant_projection(content, None)?;
                     message_fragments[index] =
                         MessageFragmentProjection::SharedMessage(messages.len());
-                    messages.push(message_value);
+                    messages.push(projection.full_message);
                 }
             }
             ConversationItem::ToolResult { .. } => {
@@ -331,10 +340,10 @@ fn tool_result_message_value(
     }))
 }
 
-fn assistant_message_value(
+fn assistant_projection(
     content: &[ContentBlock],
     reasoning: Option<&str>,
-) -> Result<Value, ProviderError> {
+) -> Result<AssistantProjection, ProviderError> {
     let text = visible_text_from_blocks(content);
     let tool_calls = content
         .iter()
@@ -342,36 +351,51 @@ fn assistant_message_value(
         .collect::<Vec<_>>();
     let has_tool_calls = !tool_calls.is_empty();
 
-    let mut value = serde_json::Map::new();
-    value.insert("role".to_string(), Value::String("assistant".to_string()));
-    value.insert(
-        "content".to_string(),
-        if text.is_empty() {
-            Value::Null
-        } else {
-            Value::String(text)
-        },
-    );
+    let content_value = if text.is_empty() {
+        Value::Null
+    } else {
+        Value::String(text)
+    };
+    let tool_calls_value = has_tool_calls.then(|| {
+        Value::Array(
+            tool_calls
+                .into_iter()
+                .map(openai_tool_call_from_call)
+                .collect(),
+        )
+    });
+
+    let mut full_message = Map::new();
+    full_message.insert("role".to_string(), Value::String("assistant".to_string()));
+    full_message.insert("content".to_string(), content_value.clone());
     if let Some(reasoning) = reasoning
         && has_tool_calls
     {
-        value.insert(
+        full_message.insert(
             "reasoning_content".to_string(),
             Value::String(reasoning.to_string()),
         );
     }
-    if has_tool_calls {
-        value.insert(
-            "tool_calls".to_string(),
-            Value::Array(
-                tool_calls
-                    .iter()
-                    .map(|call| openai_tool_call_from_call(call))
-                    .collect(),
-            ),
-        );
+    if let Some(tool_calls) = tool_calls_value.as_ref() {
+        full_message.insert("tool_calls".to_string(), tool_calls.clone());
     }
-    Ok(Value::Object(value))
+
+    let fragment_message = if reasoning.is_some() && has_tool_calls {
+        let mut fragment_message = Map::new();
+        fragment_message.insert("role".to_string(), Value::String("assistant".to_string()));
+        fragment_message.insert("content".to_string(), content_value);
+        if let Some(tool_calls) = tool_calls_value {
+            fragment_message.insert("tool_calls".to_string(), tool_calls);
+        }
+        Some(Value::Object(fragment_message))
+    } else {
+        None
+    };
+
+    Ok(AssistantProjection {
+        full_message: Value::Object(full_message),
+        fragment_message,
+    })
 }
 
 fn project_tools_value(tools: &[ToolDefinition]) -> Result<Option<Value>, ProviderError> {
@@ -521,10 +545,12 @@ mod tests {
         ContentBlock, ConversationItem, PromptRequest, ProviderError, Role, ToolCall,
         ToolDefinition,
     };
+    use serde_json::{Value, json};
 
     use super::{
-        MessageFragmentProjection, PromptRequestProjection, chat_completion_request_body,
-        prompt_request_projection, prompt_request_projection_from_parts,
+        AssistantProjection, MessageFragmentProjection, PromptRequestProjection,
+        assistant_projection, chat_completion_request_body, prompt_request_projection,
+        prompt_request_projection_from_parts,
     };
 
     #[test]
@@ -809,6 +835,40 @@ mod tests {
         assert!(message_texts[1].contains(r#""tool_calls""#));
         assert!(!message_texts[1].contains(r#""reasoning_content""#));
         assert!(message_texts[2].contains(r#""tool_call_id":"c1""#));
+    }
+
+    #[test]
+    fn assistant_projection_reuses_one_intermediate_shape_for_reasoning_tool_calls() {
+        let projection = assistant_projection(
+            &[ContentBlock::ToolCall(ToolCall::new("c1", "bash", "{}"))],
+            Some("thinking about it"),
+        )
+        .expect("assistant projection should build");
+
+        assert_eq!(
+            projection,
+            AssistantProjection {
+                full_message: json!({
+                    "role": "assistant",
+                    "content": Value::Null,
+                    "reasoning_content": "thinking about it",
+                    "tool_calls": [{
+                        "id": "c1",
+                        "type": "function",
+                        "function": { "name": "bash", "arguments": "{}" }
+                    }]
+                }),
+                fragment_message: Some(json!({
+                    "role": "assistant",
+                    "content": Value::Null,
+                    "tool_calls": [{
+                        "id": "c1",
+                        "type": "function",
+                        "function": { "name": "bash", "arguments": "{}" }
+                    }]
+                })),
+            }
+        );
     }
 
     #[test]

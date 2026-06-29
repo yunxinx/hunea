@@ -7,7 +7,7 @@ pub struct ContextBudgetSnapshotPayload {
     pub model_id: String,
     pub segments: Vec<ContextBudgetSegmentPayload>,
     pub total_estimated_tokens: usize,
-    pub context_limit: Option<u32>,
+    pub context_limit: u32,
     pub display: ContextBudgetDisplayPayload,
 }
 
@@ -22,14 +22,12 @@ pub struct ContextBudgetSegmentPayload {
 /// Display mode for context budget header and legend.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ContextBudgetDisplayPayload {
-    Relative { used: u32 },
     Absolute { limit: u32, used: u32, percent: f32 },
 }
 
 /// Stable error category for context budget projection failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextBudgetProjectionErrorKind {
-    Internal,
     Protocol,
     Transport,
     Provider,
@@ -43,6 +41,9 @@ pub enum ContextBudgetLoadErrorPayload {
     },
     UnsupportedProvider {
         provider_kind: ProviderKind,
+    },
+    RuntimeInternal {
+        detail: Option<String>,
     },
     ProjectionFailed {
         kind: ContextBudgetProjectionErrorKind,

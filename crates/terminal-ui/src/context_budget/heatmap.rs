@@ -200,17 +200,14 @@ pub(super) fn occupied_heatmap_cells(
     total_cells: usize,
     segment_count: usize,
 ) -> usize {
-    match snapshot.display {
-        runtime_domain::session::ContextBudgetDisplayPayload::Relative { .. } => total_cells,
-        runtime_domain::session::ContextBudgetDisplayPayload::Absolute { limit, used, .. } => {
-            if limit == 0 || total_cells == 0 || used == 0 {
-                return 0;
-            }
-            let exact = (used as f64 / limit as f64) * total_cells as f64;
-            let occupied = exact.round() as usize;
-            occupied.clamp(segment_count.min(total_cells), total_cells)
-        }
+    let runtime_domain::session::ContextBudgetDisplayPayload::Absolute { limit, used, .. } =
+        snapshot.display;
+    if limit == 0 || total_cells == 0 || used == 0 {
+        return 0;
     }
+    let exact = (used as f64 / limit as f64) * total_cells as f64;
+    let occupied = exact.round() as usize;
+    occupied.clamp(segment_count.min(total_cells), total_cells)
 }
 
 pub(super) fn aggregated_categories_for_heatmap(
@@ -331,7 +328,7 @@ mod tests {
                 },
             ],
             total_estimated_tokens: 220,
-            context_limit: Some(256_000),
+            context_limit: 256_000,
             display: ContextBudgetDisplayPayload::Absolute {
                 limit: 256_000,
                 used: 220,
@@ -365,7 +362,7 @@ mod tests {
                 estimated_tokens: 10,
             }],
             total_estimated_tokens: 10,
-            context_limit: Some(80),
+            context_limit: 80,
             display: ContextBudgetDisplayPayload::Absolute {
                 limit: 80,
                 used: 10,
@@ -421,7 +418,7 @@ mod tests {
                 estimated_tokens: 10,
             }],
             total_estimated_tokens: 10,
-            context_limit: Some(80),
+            context_limit: 80,
             display: ContextBudgetDisplayPayload::Absolute {
                 limit: 80,
                 used: 10,
@@ -487,7 +484,7 @@ mod tests {
             model_id: "local/qwen3".to_string(),
             segments: Vec::new(),
             total_estimated_tokens: 0,
-            context_limit: Some(1_000),
+            context_limit: 1_000,
             display: ContextBudgetDisplayPayload::Absolute {
                 limit: 1_000,
                 used: 421,

@@ -1,7 +1,7 @@
 //! Builds context budget snapshot for the `/context` overlay.
 
 use conversation_runtime::context_budget::{
-    context_budget_from_items, context_budget_tool_definitions,
+    ContextBudgetProbe, build_context_budget_snapshot, context_budget_tool_definitions,
 };
 use runtime_domain::{
     context_budget::{ContextBudgetSnapshot, ContextLimitDisplay},
@@ -37,17 +37,15 @@ impl AppRuntimeCoordinator {
         };
         let model_id = selection.model_id.clone();
         let context_limit = self.options.loaded_models.context_limit_for(selection);
-        let items = self
-            .provider_conversation
-            .provider_items_for_context_budget_probe();
+        let items = self.provider_conversation.context_budget_probe_items();
         let tool_definitions = context_budget_tool_definitions(&self.workspace_tools);
-        let snapshot = match context_budget_from_items(
+        let snapshot = match build_context_budget_snapshot(ContextBudgetProbe::new(
             provider.connection().kind,
             &model_id,
-            &items,
+            items,
             &tool_definitions,
             context_limit,
-        ) {
+        )) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 self.pending_runtime_events
@@ -107,9 +105,11 @@ fn context_budget_load_error_payload(
         conversation_runtime::ContextBudgetError::UnsupportedProvider { provider_kind } => {
             ContextBudgetLoadErrorPayload::UnsupportedProvider { provider_kind }
         }
-        conversation_runtime::ContextBudgetError::Projection { source } => {
+        conversation_runtime::ContextBudgetError::Projection { failure, .. } => {
             ContextBudgetLoadErrorPayload::ProjectionFailed {
-                message: source.to_string(),
+                kind: failure.kind,
+                status: failure.status,
+                detail: failure.detail,
             }
         }
     }

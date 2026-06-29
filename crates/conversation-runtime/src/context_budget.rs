@@ -1,10 +1,13 @@
 //! Context budget helpers for prepared turns.
 
+use std::borrow::Cow;
+
 use openai_compat_provider::prompt_request_projection_from_parts;
 use provider_protocol::{ConversationItem, ToolDefinition};
 use runtime_domain::{
     context_budget::{ContextBudgetSnapshot, ContextSegment, SegmentKind, context_limit_display},
     provider::ProviderKind,
+    session::ContextBudgetProjectionErrorKind,
     token_count::estimate_text_tokens,
 };
 use tool_loop_runtime::provider_tool_definitions_from_registry;
@@ -19,40 +22,72 @@ pub enum ContextBudgetError {
     UnsupportedProvider { provider_kind: ProviderKind },
     #[error("context budget projection failed: {source}")]
     Projection {
+        failure: ContextBudgetProjectionFailure,
         #[source]
         source: provider_protocol::ProviderError,
     },
 }
 
-/// Builds a context budget snapshot from a prepared turn request.
-///
-/// Uses the same provider-specific projection path as the real provider request.
-pub fn context_budget_from_prepared_request(
-    request: &PreparedConversationRequest,
-    tool_definitions: &[ToolDefinition],
-    context_limit: Option<u32>,
-) -> Result<ContextBudgetSnapshot, ContextBudgetError> {
-    context_budget_from_items(
-        request.provider_kind(),
-        request.model_id(),
-        request.items(),
-        tool_definitions,
-        context_limit,
-    )
+/// `ContextBudgetProjectionFailure` 提供可序列化、可分类的 projection 失败信息。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextBudgetProjectionFailure {
+    pub kind: ContextBudgetProjectionErrorKind,
+    pub status: Option<u16>,
+    pub detail: Option<String>,
 }
 
-/// Same as [`context_budget_from_prepared_request`] with explicit inputs.
-pub fn context_budget_from_items(
+/// `ContextBudgetProbe` 描述一次 context budget 估算所需的 provider 输入。
+#[derive(Debug)]
+pub struct ContextBudgetProbe<'a> {
     provider_kind: ProviderKind,
-    model_id: &str,
-    items: &[ConversationItem],
-    tool_definitions: &[ToolDefinition],
+    model_id: &'a str,
+    items: Vec<Cow<'a, ConversationItem>>,
+    tool_definitions: &'a [ToolDefinition],
     context_limit: Option<u32>,
+}
+
+impl<'a> ContextBudgetProbe<'a> {
+    /// `new` 使用显式 provider 输入构造 context budget 估算请求。
+    pub fn new(
+        provider_kind: ProviderKind,
+        model_id: &'a str,
+        items: Vec<Cow<'a, ConversationItem>>,
+        tool_definitions: &'a [ToolDefinition],
+        context_limit: Option<u32>,
+    ) -> Self {
+        Self {
+            provider_kind,
+            model_id,
+            items,
+            tool_definitions,
+            context_limit,
+        }
+    }
+
+    /// `from_prepared_request` 使用已准备好的 turn request 构造估算请求。
+    pub fn from_prepared_request(
+        request: &'a PreparedConversationRequest,
+        tool_definitions: &'a [ToolDefinition],
+        context_limit: Option<u32>,
+    ) -> Self {
+        Self::new(
+            request.provider_kind(),
+            request.model_id(),
+            request.items().iter().map(Cow::Borrowed).collect(),
+            tool_definitions,
+            context_limit,
+        )
+    }
+}
+
+/// Uses the same provider-specific projection path as the real provider request.
+pub fn build_context_budget_snapshot(
+    probe: ContextBudgetProbe<'_>,
 ) -> Result<ContextBudgetSnapshot, ContextBudgetError> {
-    let projection = match provider_kind {
+    let projection = match probe.provider_kind {
         ProviderKind::OpenAiCompatible | ProviderKind::OpenAi => {
-            prompt_request_projection_from_parts(items, tool_definitions)
-                .map_err(|source| ContextBudgetError::Projection { source })?
+            prompt_request_projection_from_parts(&probe.items, probe.tool_definitions)
+                .map_err(ContextBudgetError::projection)?
         }
         provider_kind => {
             return Err(ContextBudgetError::UnsupportedProvider { provider_kind });
@@ -61,27 +96,28 @@ pub fn context_budget_from_items(
 
     let message_texts = projection
         .serialized_message_texts()
-        .map_err(|source| ContextBudgetError::Projection { source })?;
+        .map_err(ContextBudgetError::projection)?;
     let tools_text = projection
         .serialized_tools_text()
-        .map_err(|source| ContextBudgetError::Projection { source })?;
+        .map_err(ContextBudgetError::projection)?;
 
-    let mut segments = Vec::with_capacity(items.len() + usize::from(tools_text.is_some()));
-    for (stack_order, (item, projection_text)) in items.iter().zip(message_texts.iter()).enumerate()
+    let mut segments = Vec::with_capacity(probe.items.len() + usize::from(tools_text.is_some()));
+    for (stack_order, (item, projection_text)) in
+        probe.items.iter().zip(message_texts.iter()).enumerate()
     {
-        let kind = segment_kind(item);
+        let kind = segment_kind(item.as_ref());
         segments.push(ContextSegment {
             kind,
-            stack_order: u16::try_from(stack_order).unwrap_or(u16::MAX),
-            estimated_tokens: estimate_text_tokens(model_id, projection_text),
+            stack_order,
+            estimated_tokens: estimate_text_tokens(probe.model_id, projection_text),
         });
     }
 
     if let Some(tools_text) = tools_text.as_deref() {
         segments.push(ContextSegment {
             kind: SegmentKind::ToolDefinitions,
-            stack_order: u16::try_from(segments.len()).unwrap_or(u16::MAX),
-            estimated_tokens: estimate_text_tokens(model_id, tools_text),
+            stack_order: segments.len(),
+            estimated_tokens: estimate_text_tokens(probe.model_id, tools_text),
         });
     }
 
@@ -89,15 +125,46 @@ pub fn context_budget_from_items(
         .iter()
         .map(|segment| segment.estimated_tokens)
         .sum();
-    let display = context_limit_display(total_estimated_tokens, context_limit);
+    let display = context_limit_display(total_estimated_tokens, probe.context_limit);
 
     Ok(ContextBudgetSnapshot {
-        model_id: model_id.to_string(),
+        model_id: probe.model_id.to_string(),
         segments,
         total_estimated_tokens,
-        context_limit,
+        context_limit: probe.context_limit,
         display,
     })
+}
+
+impl ContextBudgetError {
+    fn projection(source: provider_protocol::ProviderError) -> Self {
+        Self::Projection {
+            failure: projection_failure(&source),
+            source,
+        }
+    }
+}
+
+fn projection_failure(source: &provider_protocol::ProviderError) -> ContextBudgetProjectionFailure {
+    match source {
+        provider_protocol::ProviderError::Protocol(detail) => ContextBudgetProjectionFailure {
+            kind: ContextBudgetProjectionErrorKind::Protocol,
+            status: None,
+            detail: Some(detail.clone()),
+        },
+        provider_protocol::ProviderError::Transport(detail) => ContextBudgetProjectionFailure {
+            kind: ContextBudgetProjectionErrorKind::Transport,
+            status: None,
+            detail: Some(detail.clone()),
+        },
+        provider_protocol::ProviderError::Provider { status, message } => {
+            ContextBudgetProjectionFailure {
+                kind: ContextBudgetProjectionErrorKind::Provider,
+                status: *status,
+                detail: Some(message.clone()),
+            }
+        }
+    }
 }
 
 /// `context_budget_tool_definitions` 返回 provider-visible tool definitions。
@@ -119,6 +186,8 @@ fn segment_kind(item: &ConversationItem) -> SegmentKind {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
     use provider_protocol::{
         ContentBlock, ConversationItem, Role, ToolCall, ToolDefinition as ProviderToolDefinition,
@@ -159,7 +228,7 @@ mod tests {
             ))
             .expect("turn should prepare");
 
-        let snapshot = context_budget_from_prepared_request(
+        let snapshot = build_context_budget_snapshot(ContextBudgetProbe::from_prepared_request(
             &request,
             &[ProviderToolDefinition::new(
                 "read",
@@ -167,7 +236,7 @@ mod tests {
                 json!({"type": "object"}),
             )],
             Some(200_000),
-        )
+        ))
         .expect("context budget snapshot should build");
 
         assert_eq!(
@@ -188,31 +257,32 @@ mod tests {
 
     #[test]
     fn assistant_tool_calls_count_more_than_visible_text_only() {
-        let snapshot = context_budget_from_items(
+        let items = [
+            ConversationItem::assistant_with_tool_calls(
+                "call it".to_string(),
+                vec![ToolCall {
+                    call_id: "call-1".to_string(),
+                    name: "read".to_string(),
+                    arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                }],
+            ),
+            ConversationItem::tool_result(
+                "call-1",
+                vec![ContentBlock::Text("ok".to_string())],
+                false,
+            ),
+        ];
+        let snapshot = build_context_budget_snapshot(ContextBudgetProbe::new(
             ProviderKind::OpenAiCompatible,
             "gpt-4o",
-            &[
-                ConversationItem::assistant_with_tool_calls(
-                    "call it".to_string(),
-                    vec![ToolCall {
-                        call_id: "call-1".to_string(),
-                        name: "read".to_string(),
-                        arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
-                    }],
-                ),
-                ConversationItem::tool_result(
-                    "call-1",
-                    vec![ContentBlock::Text("ok".to_string())],
-                    false,
-                ),
-            ],
+            items.iter().map(Cow::Borrowed).collect(),
             &[ProviderToolDefinition::new(
                 "read",
                 "Read a file",
                 json!({"type": "object"}),
             )],
             Some(200_000),
-        )
+        ))
         .expect("context budget snapshot should build");
 
         assert!(
@@ -223,20 +293,21 @@ mod tests {
 
     #[test]
     fn multimodal_user_content_counts_more_than_visible_text_only() {
-        let snapshot = context_budget_from_items(
+        let items = [ConversationItem::user(vec![
+            ContentBlock::Text("review ".to_string()),
+            ContentBlock::Image {
+                data_base64: "iVBORw0KGgo=".to_string(),
+                mime_type: "image/png".to_string(),
+                uri: None,
+            },
+        ])];
+        let snapshot = build_context_budget_snapshot(ContextBudgetProbe::new(
             ProviderKind::OpenAiCompatible,
             "gpt-4o",
-            &[ConversationItem::user(vec![
-                ContentBlock::Text("review ".to_string()),
-                ContentBlock::Image {
-                    data_base64: "iVBORw0KGgo=".to_string(),
-                    mime_type: "image/png".to_string(),
-                    uri: None,
-                },
-            ])],
+            items.iter().map(Cow::Borrowed).collect(),
             &[],
             Some(200_000),
-        )
+        ))
         .expect("context budget snapshot should build");
 
         assert!(
@@ -282,13 +353,14 @@ mod tests {
 
     #[test]
     fn unsupported_provider_kind_returns_explicit_error() {
-        let error = context_budget_from_items(
+        let items = [ConversationItem::text(Role::User, "hello")];
+        let error = build_context_budget_snapshot(ContextBudgetProbe::new(
             ProviderKind::Anthropic,
             "claude-sonnet-4-5",
-            &[ConversationItem::text(Role::User, "hello")],
+            items.iter().map(Cow::Borrowed).collect(),
             &[],
             Some(200_000),
-        )
+        ))
         .expect_err("unsupported provider kinds should be explicit");
 
         assert!(matches!(
@@ -297,5 +369,27 @@ mod tests {
                 provider_kind: ProviderKind::Anthropic
             }
         ));
+    }
+
+    #[test]
+    fn stack_order_preserves_large_provider_item_indices() {
+        let items = (0..=u16::MAX as usize)
+            .map(|index| ConversationItem::text(Role::User, index.to_string()))
+            .collect::<Vec<_>>();
+
+        let snapshot = build_context_budget_snapshot(ContextBudgetProbe::new(
+            ProviderKind::OpenAiCompatible,
+            "gpt-4o",
+            items.iter().map(Cow::Borrowed).collect(),
+            &[],
+            Some(200_000),
+        ))
+        .expect("context budget snapshot should build for large conversations");
+
+        let last_segment = snapshot
+            .segments
+            .last()
+            .expect("large conversation should produce at least one segment");
+        assert_eq!(last_segment.stack_order, u16::MAX as usize);
     }
 }

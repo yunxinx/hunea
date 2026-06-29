@@ -1,5 +1,6 @@
 //! Provider-visible conversation assembly.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use provider_protocol::{ConversationItem, Role};
@@ -221,15 +222,30 @@ impl ProviderConversation {
         self.system_prompt.as_deref()
     }
 
-    /// Provider-visible items for context budget when no turn is being prepared.
+    /// `context_budget_probe_items` 返回 `/context` 估算使用的 provider-visible 项。
     ///
-    /// Includes persisted history and system prompt. If a user turn is pending in
-    /// `prepare_turn`, that message is appended (same ordering as a prepared request).
+    /// 历史项与 pending user message 以借用方式暴露，避免为了探测而克隆整段会话。
+    /// 只有会话级 system prompt 需要临时封装成 `ConversationItem`。
     #[must_use]
-    pub fn provider_items_for_context_budget_probe(&self) -> Vec<ConversationItem> {
-        let mut items = self.provider_items();
+    pub fn context_budget_probe_items(&self) -> Vec<Cow<'_, ConversationItem>> {
+        let mut items = Vec::with_capacity(
+            self.persisted_history.len()
+                + usize::from(self.system_prompt.is_some())
+                + usize::from(self.pending_user_message.is_some()),
+        );
+        if let Some(system_prompt) = self.system_prompt.as_deref() {
+            items.push(Cow::Owned(ConversationItem::text(
+                Role::System,
+                system_prompt,
+            )));
+        }
+        items.extend(
+            self.persisted_history
+                .iter()
+                .map(|persisted_item| Cow::Borrowed(&persisted_item.item)),
+        );
         if let Some(pending) = self.pending_user_message.as_ref() {
-            items.push(pending.clone());
+            items.push(Cow::Borrowed(pending));
         }
         items
     }

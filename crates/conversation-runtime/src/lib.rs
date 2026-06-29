@@ -4,7 +4,7 @@ mod llm;
 pub mod models;
 
 pub use context_budget::{
-    ContextBudgetError, context_budget_from_items, context_budget_from_prepared_request,
+    ContextBudgetError, ContextBudgetProbe, build_context_budget_snapshot,
     context_budget_tool_definitions,
 };
 pub use conversation::{ConversationEvent, ConversationWorker};
@@ -20,9 +20,6 @@ pub use llm::ProviderRequestMetrics;
 pub(crate) use llm::{ProviderProgress, list_provider_models};
 pub use models::{ModelProviderRefreshEvent, ModelRefreshWorker};
 pub use provider_protocol::{ConversationItem, Role};
-pub use runtime_domain::context_budget::{
-    ContextBudgetSnapshot, ContextLimitDisplay, ContextSegment, SegmentKind, context_limit_display,
-};
 pub use runtime_domain::provider::{ProviderApiKey, ProviderKind};
 pub use runtime_domain::session::ProviderRequest;
 pub use tokio_util::sync::CancellationToken;

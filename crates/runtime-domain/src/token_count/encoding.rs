@@ -1,6 +1,7 @@
+use crate::model_family::classify_model_family;
+
 const APPROX_BYTES_PER_TOKEN: usize = 4;
 const FALLBACK_ENCODING: &str = "o200k_base";
-const LEGACY_GPT_ENCODING: &str = "cl100k_base";
 
 pub fn estimate_text_tokens(model_id: &str, text: &str) -> usize {
     if text.is_empty() {
@@ -26,37 +27,7 @@ pub(crate) fn encoding_name_for_model(model_id: &str) -> &'static str {
 }
 
 fn alias_encoding_for_model(model_id: &str) -> Option<&'static str> {
-    let lower = model_id.to_ascii_lowercase();
-    if lower.contains("qwen") {
-        return Some("qwen2");
-    }
-    if lower.contains("deepseek") {
-        return Some("deepseek_v3");
-    }
-    if lower.contains("llama") {
-        return Some("llama3");
-    }
-    if lower.contains("mistral") || lower.contains("mixtral") || lower.contains("codestral") {
-        return Some("mistral_v3");
-    }
-    if lower.contains("gpt-3.5") || contains_legacy_gpt4_alias(&lower) {
-        return Some(LEGACY_GPT_ENCODING);
-    }
-    if lower.contains("gpt")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4")
-    {
-        return Some(FALLBACK_ENCODING);
-    }
-    None
-}
-
-fn contains_legacy_gpt4_alias(model_id: &str) -> bool {
-    model_id.contains("gpt-4")
-        && !model_id.contains("gpt-4.1")
-        && !model_id.contains("gpt-4o")
-        && !model_id.contains("gpt-4.5")
+    classify_model_family(model_id).preferred_encoding()
 }
 
 fn approximate_tokens_from_bytes(bytes: usize) -> usize {

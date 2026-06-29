@@ -2,6 +2,7 @@ pub mod context_budget;
 pub mod envinfo;
 pub mod model_catalog;
 pub mod model_context_limit;
+mod model_family;
 pub mod paths;
 pub mod phrases;
 pub mod provider;

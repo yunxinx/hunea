@@ -1,7 +1,7 @@
 use runtime_domain::context_budget::SegmentKind;
 use runtime_domain::session::{
-    ContextBudgetDisplayPayload, ContextBudgetLoadErrorPayload, ContextBudgetSnapshotPayload,
-    SessionLoadRequestId,
+    ContextBudgetDisplayPayload, ContextBudgetLoadErrorPayload, ContextBudgetProjectionErrorKind,
+    ContextBudgetSnapshotPayload, SessionLoadRequestId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,9 +67,21 @@ pub(crate) fn context_budget_error_message(error: &ContextBudgetLoadErrorPayload
         ContextBudgetLoadErrorPayload::UnsupportedProvider { provider_kind } => {
             format!("{provider_kind} cannot show context budget; use OpenAI/OpenAI-compatible.")
         }
-        ContextBudgetLoadErrorPayload::ProjectionFailed { message } => {
-            format!("Failed to build context budget: {message}")
-        }
+        ContextBudgetLoadErrorPayload::ProjectionFailed { kind, .. } => match kind {
+            ContextBudgetProjectionErrorKind::Internal => {
+                "Failed to load context budget in the runtime.".to_string()
+            }
+            ContextBudgetProjectionErrorKind::Protocol => {
+                "Failed to build context budget from provider payload.".to_string()
+            }
+            ContextBudgetProjectionErrorKind::Transport => {
+                "Failed to build context budget because the provider is unavailable.".to_string()
+            }
+            ContextBudgetProjectionErrorKind::Provider => {
+                "Failed to build context budget because the provider rejected the request."
+                    .to_string()
+            }
+        },
     }
 }
 
@@ -372,6 +384,20 @@ mod tests {
     }
 
     #[test]
+    fn projection_error_message_uses_stable_short_copy() {
+        let text = context_budget_error_message(&ContextBudgetLoadErrorPayload::ProjectionFailed {
+            kind: runtime_domain::session::ContextBudgetProjectionErrorKind::Protocol,
+            status: None,
+            detail: Some("protocol error: inconsistent message fragments".to_string()),
+        });
+
+        assert_eq!(
+            text,
+            "Failed to build context budget from provider payload."
+        );
+    }
+
+    #[test]
     fn category_labels_match_context_budget_source_buckets() {
         assert_eq!(
             context_budget_category_label(ContextBudgetCategoryKind::SystemPrompt),
@@ -393,7 +419,7 @@ mod tests {
 
     fn segment(
         kind: SegmentKind,
-        stack_order: u16,
+        stack_order: usize,
         estimated_tokens: usize,
     ) -> ContextBudgetSegmentPayload {
         ContextBudgetSegmentPayload {

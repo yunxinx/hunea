@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{borrow::Borrow, collections::BTreeSet};
 
 use provider_protocol::{
     ContentBlock, ConversationItem, PromptRequest, ProviderError, Role, ToolCall, ToolDefinition,
@@ -34,11 +34,9 @@ impl PromptRequestProjection {
         self.message_fragments
             .iter()
             .map(|fragment| match fragment {
-                MessageFragmentProjection::SharedMessage(index) => serialize_json(
-                    self.message_values
-                        .get(*index)
-                        .expect("shared fragment index should reference a projected message"),
-                ),
+                MessageFragmentProjection::SharedMessage(index) => {
+                    serialize_json(self.projected_message_value(*index)?)
+                }
                 MessageFragmentProjection::Standalone(value) => serialize_json(value),
                 MessageFragmentProjection::Empty => Ok(String::new()),
             })
@@ -47,6 +45,14 @@ impl PromptRequestProjection {
 
     pub fn serialized_tools_text(&self) -> Result<Option<String>, ProviderError> {
         self.tools_value.as_ref().map(serialize_json).transpose()
+    }
+
+    fn projected_message_value(&self, index: usize) -> Result<&Value, ProviderError> {
+        self.message_values.get(index).ok_or_else(|| {
+            ProviderError::Protocol(format!(
+                "OpenAI request projection internal inconsistency: message fragment referenced missing projected message index {index}"
+            ))
+        })
     }
 }
 
@@ -58,10 +64,13 @@ pub fn prompt_request_projection(
 }
 
 /// `prompt_request_projection_from_parts` 允许调用方直接用借用切片投影消息与工具定义。
-pub fn prompt_request_projection_from_parts(
-    items: &[ConversationItem],
+pub fn prompt_request_projection_from_parts<Item>(
+    items: &[Item],
     tools: &[ToolDefinition],
-) -> Result<PromptRequestProjection, ProviderError> {
+) -> Result<PromptRequestProjection, ProviderError>
+where
+    Item: Borrow<ConversationItem>,
+{
     let (message_values, message_fragments) = project_items_to_messages_and_fragments(items)?;
     Ok(PromptRequestProjection {
         message_values,
@@ -108,9 +117,12 @@ pub(crate) fn chat_completion_request_body(
     Ok(Value::Object(body))
 }
 
-fn project_items_to_messages_and_fragments(
-    items: &[ConversationItem],
-) -> Result<(Vec<Value>, Vec<MessageFragmentProjection>), ProviderError> {
+fn project_items_to_messages_and_fragments<Item>(
+    items: &[Item],
+) -> Result<(Vec<Value>, Vec<MessageFragmentProjection>), ProviderError>
+where
+    Item: Borrow<ConversationItem>,
+{
     validate_openai_projection_items(items)?;
 
     let mut messages = Vec::new();
@@ -119,7 +131,7 @@ fn project_items_to_messages_and_fragments(
     let mut pending_tool_results: Vec<(usize, &ConversationItem)> = Vec::new();
 
     for (index, item) in items.iter().enumerate() {
-        match item {
+        match item.borrow() {
             ConversationItem::Message {
                 role: Role::System,
                 content,
@@ -184,7 +196,7 @@ fn project_items_to_messages_and_fragments(
                 }
             }
             ConversationItem::ToolResult { .. } => {
-                pending_tool_results.push((index, item));
+                pending_tool_results.push((index, item.borrow()));
             }
             ConversationItem::Reasoning { content, .. } => {
                 flush_tool_results(
@@ -206,11 +218,15 @@ fn project_items_to_messages_and_fragments(
     Ok((messages, message_fragments))
 }
 
-fn validate_openai_projection_items(items: &[ConversationItem]) -> Result<(), ProviderError> {
+fn validate_openai_projection_items<Item>(items: &[Item]) -> Result<(), ProviderError>
+where
+    Item: Borrow<ConversationItem>,
+{
     let mut pending_tool_call_ids = BTreeSet::new();
     let mut seen_tool_call_ids = BTreeSet::new();
 
     for (index, item) in items.iter().enumerate() {
+        let item = item.borrow();
         item.validate().map_err(|source| {
             ProviderError::Protocol(format!("invalid conversation item {index}: {source}"))
         })?;
@@ -502,12 +518,13 @@ fn resource_text(uri: &str, mime_type: Option<&str>, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use provider_protocol::{
-        ContentBlock, ConversationItem, PromptRequest, Role, ToolCall, ToolDefinition,
+        ContentBlock, ConversationItem, PromptRequest, ProviderError, Role, ToolCall,
+        ToolDefinition,
     };
 
     use super::{
-        chat_completion_request_body, prompt_request_projection,
-        prompt_request_projection_from_parts,
+        MessageFragmentProjection, PromptRequestProjection, chat_completion_request_body,
+        prompt_request_projection, prompt_request_projection_from_parts,
     };
 
     #[test]
@@ -898,6 +915,23 @@ mod tests {
         );
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "next");
+    }
+
+    #[test]
+    fn serialized_message_texts_returns_error_for_inconsistent_fragment_indices() {
+        let projection = PromptRequestProjection {
+            message_values: Vec::new(),
+            message_fragments: vec![MessageFragmentProjection::SharedMessage(0)],
+            tools_value: None,
+        };
+
+        let error = projection
+            .serialized_message_texts()
+            .expect_err("inconsistent fragment indices should return an error");
+
+        assert!(
+            matches!(error, ProviderError::Protocol(message) if message.contains("internal inconsistency"))
+        );
     }
 
     #[test]

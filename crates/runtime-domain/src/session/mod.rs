@@ -1,6 +1,7 @@
 mod activity;
 mod capability;
 mod command;
+pub mod context_budget;
 mod conversation;
 mod event;
 mod identity;
@@ -18,14 +19,15 @@ pub use activity::{
 };
 pub use capability::RuntimeCapability;
 pub use command::{RuntimeCommand, RuntimeCommandReceipt};
+pub use context_budget::{
+    ContextBudgetDisplayPayload, ContextBudgetLoadErrorPayload, ContextBudgetProjectionErrorKind,
+    ContextBudgetSegmentPayload, ContextBudgetSnapshotPayload,
+};
 pub use conversation::{
     ConversationEvent, ConversationRequest, ConversationResponse, ConversationTurnRequest,
     ManagedSearchTool, ProviderRequest, ProviderRequestMetrics,
 };
-pub use event::{
-    ContextBudgetDisplayPayload, ContextBudgetLoadErrorPayload, ContextBudgetSegmentPayload,
-    ContextBudgetSnapshotPayload, RuntimeEvent,
-};
+pub use event::RuntimeEvent;
 pub use identity::{RuntimeAgentCapabilities, RuntimeIdentity, RuntimePromptCapabilities};
 pub use load_request::SessionLoadRequestId;
 pub use message_history::{

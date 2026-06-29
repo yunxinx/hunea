@@ -107,3 +107,68 @@ fn context_budget_snapshot_failure_is_reported_as_runtime_event() {
         "unsupported provider failures should keep their structured provider kind"
     );
 }
+
+#[test]
+fn context_budget_projection_failure_keeps_structured_error_kind() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        loaded_models: conversation_runtime::models::LoadedModelCatalog {
+            catalog: runtime_domain::model_catalog::ModelCatalog::new(vec![
+                runtime_domain::model_catalog::ModelProvider::new(
+                    "local",
+                    ProviderKind::OpenAiCompatible,
+                    "Local",
+                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    runtime_domain::model_catalog::ModelSource::Configured,
+                    vec![runtime_domain::model_catalog::ModelEntry::new(
+                        "qwen3",
+                        None,
+                        runtime_domain::model_catalog::ModelSource::Configured,
+                    )],
+                ),
+            ]),
+            ..conversation_runtime::models::LoadedModelCatalog::default()
+        },
+        ..AppRuntimeOptions::default()
+    });
+    coordinator
+        .provider_conversation
+        .append_items(vec![ConversationItem::tool_result(
+            "missing-call",
+            vec![ContentBlock::Text("tool output".to_string())],
+            false,
+        )])
+        .expect("fixture items should append");
+
+    let request_id = request_id(42);
+    let selection = ModelSelection::new("local", "qwen3");
+
+    let receipt = coordinator
+        .handle_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id,
+            selection,
+        })
+        .expect("projection failures should be reported via runtime event");
+
+    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
+
+    let error_kind = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::ContextBudgetSnapshotLoadFailed {
+                request_id: actual_request_id,
+                error:
+                    runtime_domain::session::ContextBudgetLoadErrorPayload::ProjectionFailed {
+                        kind,
+                        ..
+                    },
+            } if actual_request_id == request_id => Some(kind),
+            _ => None,
+        },
+        "context budget projection failure event",
+    );
+
+    assert_eq!(
+        error_kind,
+        runtime_domain::session::ContextBudgetProjectionErrorKind::Protocol
+    );
+}

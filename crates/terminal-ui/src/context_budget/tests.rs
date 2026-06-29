@@ -317,7 +317,9 @@ fn late_context_budget_error_after_close_does_not_reopen_panel() {
         runtime_domain::session::RuntimeEvent::ContextBudgetSnapshotLoadFailed {
             request_id,
             error: runtime_domain::session::ContextBudgetLoadErrorPayload::ProjectionFailed {
-                message: "stale failure".to_string(),
+                kind: runtime_domain::session::ContextBudgetProjectionErrorKind::Internal,
+                status: None,
+                detail: Some("stale failure".to_string()),
             },
         },
     );
@@ -379,7 +381,7 @@ fn context_budget_snapshot() -> ContextBudgetSnapshotPayload {
 
 fn segment(
     kind: SegmentKind,
-    stack_order: u16,
+    stack_order: usize,
     estimated_tokens: usize,
 ) -> ContextBudgetSegmentPayload {
     ContextBudgetSegmentPayload {

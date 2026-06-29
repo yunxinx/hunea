@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::model_catalog::{ModelCatalog, ModelSelection};
+use crate::model_family::classify_model_family;
 
 const DEFAULT_CONTEXT_LIMIT: u32 = 256_000;
 
@@ -57,46 +58,11 @@ impl ModelContextLimits {
 }
 
 fn built_in_context_limit(model_id: &str) -> Option<u32> {
-    Some(match built_in_model_family(model_id) {
-        BuiltInModelFamily::OpenAiGpt4o | BuiltInModelFamily::OpenAiGpt4oMini => 128_000,
-        BuiltInModelFamily::ClaudeSonnet4 | BuiltInModelFamily::ClaudeOpus4 => 200_000,
-        BuiltInModelFamily::Unknown => DEFAULT_CONTEXT_LIMIT,
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BuiltInModelFamily {
-    OpenAiGpt4o,
-    OpenAiGpt4oMini,
-    ClaudeSonnet4,
-    ClaudeOpus4,
-    Unknown,
-}
-
-fn built_in_model_family(model_id: &str) -> BuiltInModelFamily {
-    let normalized = model_id.trim().to_ascii_lowercase();
-
-    if model_family_matches(&normalized, "gpt-4o-mini") {
-        return BuiltInModelFamily::OpenAiGpt4oMini;
-    }
-    if model_family_matches(&normalized, "gpt-4o") {
-        return BuiltInModelFamily::OpenAiGpt4o;
-    }
-    if model_family_matches(&normalized, "claude-sonnet-4") {
-        return BuiltInModelFamily::ClaudeSonnet4;
-    }
-    if model_family_matches(&normalized, "claude-opus-4") {
-        return BuiltInModelFamily::ClaudeOpus4;
-    }
-
-    BuiltInModelFamily::Unknown
-}
-
-fn model_family_matches(model_id: &str, family: &str) -> bool {
-    model_id == family
-        || model_id
-            .strip_prefix(family)
-            .is_some_and(|suffix| suffix.starts_with('-'))
+    Some(
+        classify_model_family(model_id)
+            .built_in_context_limit()
+            .unwrap_or(DEFAULT_CONTEXT_LIMIT),
+    )
 }
 
 #[cfg(test)]

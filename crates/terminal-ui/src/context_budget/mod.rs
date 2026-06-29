@@ -4,7 +4,6 @@ mod heatmap;
 mod input;
 mod layout;
 mod legend;
-mod payload;
 mod render;
 mod segment_colors;
 mod state;

@@ -29,7 +29,7 @@ impl SegmentKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextSegment {
     pub kind: SegmentKind,
-    pub stack_order: u16,
+    pub stack_order: usize,
     pub estimated_tokens: usize,
 }
 

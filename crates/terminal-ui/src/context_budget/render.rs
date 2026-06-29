@@ -213,13 +213,13 @@ fn panel_inset_text() -> String {
 #[cfg(test)]
 mod tests {
     use crate::context_budget::state::context_usage_summary;
-    use runtime_domain::session::ContextBudgetDisplayPayload;
+    use runtime_domain::session::ContextWindowUsagePayload;
 
     #[test]
     fn usage_summary_absolute_shows_documented_display_limit() {
         let text = context_usage_summary(
             "qwen3",
-            ContextBudgetDisplayPayload::Absolute {
+            ContextWindowUsagePayload {
                 limit: 256_000,
                 used: 42_000,
                 percent: 16.4,
@@ -232,7 +232,7 @@ mod tests {
     fn usage_summary_absolute_shows_limit_without_percent() {
         let text = context_usage_summary(
             "gpt-4o",
-            ContextBudgetDisplayPayload::Absolute {
+            ContextWindowUsagePayload {
                 limit: 128_000,
                 used: 32_000,
                 percent: 25.0,

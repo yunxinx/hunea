@@ -20,8 +20,8 @@ pub use activity::{
 pub use capability::RuntimeCapability;
 pub use command::{RuntimeCommand, RuntimeCommandReceipt};
 pub use context_budget::{
-    ContextBudgetDisplayPayload, ContextBudgetLoadErrorPayload, ContextBudgetProjectionErrorKind,
-    ContextBudgetSegmentPayload, ContextBudgetSnapshotPayload,
+    ContextBudgetLoadErrorPayload, ContextBudgetProjectionErrorKind, ContextBudgetSegmentPayload,
+    ContextBudgetSnapshotPayload, ContextWindowUsagePayload,
 };
 pub use conversation::{
     ConversationEvent, ConversationRequest, ConversationResponse, ConversationTurnRequest,

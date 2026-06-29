@@ -1,4 +1,5 @@
 use crate::{
+    context_budget::ContextTokenLimit,
     model_context_limit::ModelContextLimits,
     provider::{ProviderApiKey, ProviderKind},
 };
@@ -106,7 +107,7 @@ impl ModelCatalog {
         &self,
         limits: &ModelContextLimits,
         selection: &ModelSelection,
-    ) -> u32 {
+    ) -> ContextTokenLimit {
         limits.resolve(self, selection)
     }
 }

@@ -1,6 +1,34 @@
 use super::support::*;
 
 #[test]
+fn context_budget_worker_shutdown_stops_accepting_new_commands() {
+    let mut worker = super::super::context_budget_worker::ContextBudgetWorker::new();
+
+    worker
+        .shutdown()
+        .expect("fresh context budget worker should shut down cleanly");
+
+    assert!(
+        !worker.has_pending_work(),
+        "shutdown should clear background work tracking"
+    );
+    assert!(
+        worker
+            .load_snapshot(
+                request_id(77),
+                ProviderKind::OpenAiCompatible,
+                "qwen3".to_string(),
+                vec![ConversationItem::text(Role::User, "hello")],
+                Vec::new(),
+                runtime_domain::context_budget::ContextTokenLimit::try_from(256_000)
+                    .expect("fixture limit should be valid"),
+            )
+            .is_err(),
+        "shutdown worker should reject new work instead of recreating an implicit thread"
+    );
+}
+
+#[test]
 fn context_budget_snapshot_dispatches_to_background_worker() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         loaded_models: conversation_runtime::models::LoadedModelCatalog {

@@ -1,7 +1,7 @@
 use runtime_domain::context_budget::SegmentKind;
 use runtime_domain::session::{
-    ContextBudgetDisplayPayload, ContextBudgetLoadErrorPayload, ContextBudgetProjectionErrorKind,
-    ContextBudgetSnapshotPayload, SessionLoadRequestId,
+    ContextBudgetLoadErrorPayload, ContextBudgetProjectionErrorKind, ContextBudgetSnapshotPayload,
+    ContextWindowUsagePayload, SessionLoadRequestId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,24 +111,13 @@ fn format_compact_percent(percent: f32) -> String {
 }
 
 /// `context_usage_summary` 返回右侧图示首行使用的模型与上下文摘要。
-pub(crate) fn context_usage_summary(
-    model_id: &str,
-    display: ContextBudgetDisplayPayload,
-) -> String {
-    match display {
-        ContextBudgetDisplayPayload::Absolute {
-            limit,
-            used,
-            percent,
-        } => {
-            format!(
-                "{model_id} · {}/{} tokens ({})",
-                format_compact_tokens(used as usize),
-                format_compact_tokens(limit as usize),
-                format_compact_percent(percent),
-            )
-        }
-    }
+pub(crate) fn context_usage_summary(model_id: &str, usage: ContextWindowUsagePayload) -> String {
+    format!(
+        "{model_id} · {}/{} tokens ({})",
+        format_compact_tokens(usage.used as usize),
+        format_compact_tokens(usage.limit as usize),
+        format_compact_percent(usage.percent),
+    )
 }
 
 pub(crate) fn segment_share_percent(segment_tokens: usize, total_tokens: usize) -> f32 {
@@ -170,13 +159,14 @@ pub(crate) fn context_budget_category_from_segment_kind(
 }
 
 pub(crate) fn free_space_tokens(snapshot: &ContextBudgetSnapshotPayload) -> Option<usize> {
-    let ContextBudgetDisplayPayload::Absolute { limit, used, .. } = snapshot.display;
-    Some(usize::try_from(limit.saturating_sub(used)).unwrap_or(usize::MAX))
+    Some(
+        usize::try_from(snapshot.usage.limit.saturating_sub(snapshot.usage.used))
+            .unwrap_or(usize::MAX),
+    )
 }
 
 pub(crate) fn legend_share_total(snapshot: &ContextBudgetSnapshotPayload) -> usize {
-    let ContextBudgetDisplayPayload::Absolute { limit, .. } = snapshot.display;
-    usize::try_from(limit).unwrap_or(usize::MAX)
+    usize::try_from(snapshot.usage.limit).unwrap_or(usize::MAX)
 }
 
 pub(crate) fn aggregated_category_totals(
@@ -240,8 +230,7 @@ mod tests {
                 segment(SegmentKind::Reasoning, 3, 40),
             ],
             total_estimated_tokens: 440,
-            context_limit: 1_000,
-            display: ContextBudgetDisplayPayload::Absolute {
+            usage: ContextWindowUsagePayload {
                 limit: 1_000,
                 used: 440,
                 percent: 44.0,
@@ -269,8 +258,7 @@ mod tests {
                 segment(SegmentKind::ToolDefinitions, 4, 20),
             ],
             total_estimated_tokens: 360,
-            context_limit: 1_000,
-            display: ContextBudgetDisplayPayload::Absolute {
+            usage: ContextWindowUsagePayload {
                 limit: 1_000,
                 used: 360,
                 percent: 36.0,
@@ -290,8 +278,7 @@ mod tests {
             model_id: "model".to_string(),
             segments: Vec::new(),
             total_estimated_tokens: 400,
-            context_limit: 1_000,
-            display: ContextBudgetDisplayPayload::Absolute {
+            usage: ContextWindowUsagePayload {
                 limit: 1_000,
                 used: 400,
                 percent: 40.0,
@@ -307,8 +294,7 @@ mod tests {
             model_id: "model".to_string(),
             segments: Vec::new(),
             total_estimated_tokens: 400,
-            context_limit: 1_000,
-            display: ContextBudgetDisplayPayload::Absolute {
+            usage: ContextWindowUsagePayload {
                 limit: 1_000,
                 used: 400,
                 percent: 40.0,
@@ -328,7 +314,7 @@ mod tests {
     fn context_usage_summary_omits_total_percent() {
         let text = context_usage_summary(
             "gpt-4o",
-            ContextBudgetDisplayPayload::Absolute {
+            ContextWindowUsagePayload {
                 limit: 128_000,
                 used: 32_000,
                 percent: 25.0,
@@ -342,7 +328,7 @@ mod tests {
     fn context_usage_summary_keeps_fractional_percent_when_needed() {
         let text = context_usage_summary(
             "deepseek-v4-flash",
-            ContextBudgetDisplayPayload::Absolute {
+            ContextWindowUsagePayload {
                 limit: 256_000,
                 used: 1_200,
                 percent: 0.5,
@@ -356,7 +342,7 @@ mod tests {
     fn context_usage_summary_uses_documented_absolute_limit() {
         let text = context_usage_summary(
             "local/qwen3",
-            ContextBudgetDisplayPayload::Absolute {
+            ContextWindowUsagePayload {
                 limit: 256_000,
                 used: 1_200,
                 percent: 0.5,

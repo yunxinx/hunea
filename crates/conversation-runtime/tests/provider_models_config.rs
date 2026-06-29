@@ -273,7 +273,7 @@ models = ["qwen3"]
     let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
     let selection = ModelSelection::new("local", "qwen3");
 
-    assert_eq!(loaded.context_limit_for(&selection), 128_000);
+    assert_eq!(loaded.context_limit_for(&selection).get(), 128_000);
 }
 
 #[test]
@@ -302,7 +302,7 @@ context_window = 32768
     let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
     let selection = ModelSelection::new("local", "qwen3");
 
-    assert_eq!(loaded.context_limit_for(&selection), 32_768);
+    assert_eq!(loaded.context_limit_for(&selection).get(), 32_768);
 }
 
 #[test]
@@ -337,7 +337,7 @@ context_window = 200000
         .expect("merged models config should load");
     let selection = ModelSelection::new("local", "qwen3");
 
-    assert_eq!(loaded.context_limit_for(&selection), 200_000);
+    assert_eq!(loaded.context_limit_for(&selection).get(), 200_000);
 }
 
 #[test]
@@ -425,7 +425,7 @@ context_window = 100000
     let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
     let selection = ModelSelection::new("openai", "gpt-4o");
 
-    assert_eq!(loaded.context_limit_for(&selection), 100_000);
+    assert_eq!(loaded.context_limit_for(&selection).get(), 100_000);
 }
 
 #[test]
@@ -446,7 +446,7 @@ models = ["custom-local-7b"]
     let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
     let selection = ModelSelection::new("local", "custom-local-7b");
 
-    assert_eq!(loaded.context_limit_for(&selection), 256_000);
+    assert_eq!(loaded.context_limit_for(&selection).get(), 256_000);
 }
 
 #[test]

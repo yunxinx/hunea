@@ -7,8 +7,7 @@ pub struct ContextBudgetSnapshotPayload {
     pub model_id: String,
     pub segments: Vec<ContextBudgetSegmentPayload>,
     pub total_estimated_tokens: usize,
-    pub context_limit: u32,
-    pub display: ContextBudgetDisplayPayload,
+    pub usage: ContextWindowUsagePayload,
 }
 
 /// One segment in a context budget snapshot event.
@@ -19,10 +18,12 @@ pub struct ContextBudgetSegmentPayload {
     pub estimated_tokens: usize,
 }
 
-/// Display mode for context budget header and legend.
+/// Absolute usage summary for context budget header and legend.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ContextBudgetDisplayPayload {
-    Absolute { limit: u32, used: u32, percent: f32 },
+pub struct ContextWindowUsagePayload {
+    pub limit: u32,
+    pub used: u32,
+    pub percent: f32,
 }
 
 /// Stable error category for context budget projection failures.

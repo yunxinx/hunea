@@ -10,6 +10,7 @@ use toml_edit::DocumentMut;
 
 use crate::list_provider_models;
 use runtime_domain::{
+    context_budget::ContextTokenLimit,
     model_catalog::{
         ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource, ProviderSyncRequest,
     },
@@ -33,7 +34,7 @@ pub struct LoadedModelCatalog {
 
 impl LoadedModelCatalog {
     /// `context_limit_for` 解析指定模型选择的 context limit（tokens）。
-    pub fn context_limit_for(&self, selection: &ModelSelection) -> u32 {
+    pub fn context_limit_for(&self, selection: &ModelSelection) -> ContextTokenLimit {
         self.catalog
             .context_limit_for(&self.context_limits, selection)
     }
@@ -341,7 +342,7 @@ fn validate_positive_context_window(
     value: u64,
     field: &str,
     path: &Path,
-) -> Result<u32, ModelsConfigError> {
+) -> Result<ContextTokenLimit, ModelsConfigError> {
     if value == 0 || value > u32::MAX as u64 {
         return Err(ModelsConfigError::InvalidContextWindow {
             path: path.to_path_buf(),
@@ -349,7 +350,11 @@ fn validate_positive_context_window(
             value,
         });
     }
-    Ok(value as u32)
+    ContextTokenLimit::try_from(value as u32).map_err(|_| ModelsConfigError::InvalidContextWindow {
+        path: path.to_path_buf(),
+        field: field.to_string(),
+        value,
+    })
 }
 
 fn catalog_from_config(

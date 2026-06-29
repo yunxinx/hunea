@@ -1,6 +1,6 @@
 use crossterm::event::KeyCode;
 use ratatui::style::Color;
-use runtime_domain::session::ContextBudgetDisplayPayload;
+use runtime_domain::session::ContextWindowUsagePayload;
 
 use crate::{
     Model, ModelOptions, StartupBannerOptions,
@@ -36,7 +36,7 @@ fn context_overlay_header_shows_documented_absolute_limit() {
     use crate::context_budget::state::context_usage_summary;
     let text = context_usage_summary(
         "local/qwen3",
-        ContextBudgetDisplayPayload::Absolute {
+        ContextWindowUsagePayload {
             limit: 256_000,
             used: 1_200,
             percent: 0.5,
@@ -195,8 +195,7 @@ fn context_panel_summary_row_keeps_full_model_usage_text_when_width_allows() {
             model_id: "deepseek-v4-flash".to_string(),
             segments: context_budget_snapshot().segments,
             total_estimated_tokens: 1_200,
-            context_limit: 256_000,
-            display: ContextBudgetDisplayPayload::Absolute {
+            usage: ContextWindowUsagePayload {
                 limit: 256_000,
                 used: 1_200,
                 percent: 0.5,
@@ -372,8 +371,7 @@ fn context_budget_snapshot() -> ContextBudgetSnapshotPayload {
             segment(SegmentKind::ToolDefinitions, 5, 12),
         ],
         total_estimated_tokens: 540,
-        context_limit: 1_280,
-        display: ContextBudgetDisplayPayload::Absolute {
+        usage: ContextWindowUsagePayload {
             limit: 1_280,
             used: 540,
             percent: 42.2,

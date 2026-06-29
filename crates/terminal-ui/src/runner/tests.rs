@@ -147,13 +147,11 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                             model_id: "qwen3".to_string(),
                             segments: vec![],
                             total_estimated_tokens: 0,
-                            context_limit: 256_000,
-                            display:
-                                runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
-                                    limit: 256_000,
-                                    used: 0,
-                                    percent: 0.0,
-                                },
+                            usage: runtime_domain::session::ContextWindowUsagePayload {
+                                limit: 256_000,
+                                used: 0,
+                                percent: 0.0,
+                            },
                         },
                     });
                 Ok(RuntimeCommandReceipt::Accepted)

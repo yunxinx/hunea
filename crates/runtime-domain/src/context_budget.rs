@@ -1,5 +1,7 @@
 //! Context budget snapshot for the next prepared provider turn.
 
+use std::{fmt, num::NonZeroU32};
+
 /// Extensible segment kind for context budget breakdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SegmentKind {
@@ -43,10 +45,57 @@ impl ContextSegment {
     }
 }
 
-/// How context limit is shown relative to estimated usage.
+/// `ContextTokenLimit` 表示一个严格大于 0 的 context token 上限。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContextTokenLimit(NonZeroU32);
+
+impl ContextTokenLimit {
+    /// `get` 返回原始的正整数 token 上限。
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+
+    /// `new` 从原始整数构造非零上限。
+    pub const fn new(value: u32) -> Option<Self> {
+        match NonZeroU32::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+}
+
+impl TryFrom<u32> for ContextTokenLimit {
+    type Error = ContextTokenLimitError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or(ContextTokenLimitError)
+    }
+}
+
+impl From<ContextTokenLimit> for u32 {
+    fn from(value: ContextTokenLimit) -> Self {
+        value.get()
+    }
+}
+
+/// `ContextTokenLimitError` 表示 context token 上限不是正整数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextTokenLimitError;
+
+impl fmt::Display for ContextTokenLimitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("context token limit must be greater than zero")
+    }
+}
+
+impl std::error::Error for ContextTokenLimitError {}
+
+/// Absolute usage summary for one context window.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ContextLimitDisplay {
-    Absolute { limit: u32, used: u32, percent: f32 },
+pub struct ContextWindowUsage {
+    pub limit: ContextTokenLimit,
+    pub used: u32,
+    pub percent: f32,
 }
 
 /// Estimated token breakdown for one prepared turn.
@@ -55,20 +104,19 @@ pub struct ContextBudgetSnapshot {
     pub model_id: String,
     pub segments: Vec<ContextSegment>,
     pub total_estimated_tokens: usize,
-    pub context_limit: u32,
-    pub display: ContextLimitDisplay,
+    pub usage: ContextWindowUsage,
 }
 
-/// `context_limit_display` 根据总 token 数与展示上限构造绝对展示模式。
-pub fn context_limit_display(
+/// `context_window_usage` 根据总 token 数与展示上限构造绝对用量摘要。
+pub fn context_window_usage(
     total_estimated_tokens: usize,
-    context_limit: u32,
-) -> ContextLimitDisplay {
+    context_limit: ContextTokenLimit,
+) -> ContextWindowUsage {
     let used = u32::try_from(total_estimated_tokens).unwrap_or(u32::MAX);
-    ContextLimitDisplay::Absolute {
+    ContextWindowUsage {
         limit: context_limit,
         used,
-        percent: (used as f32 / context_limit as f32) * 100.0,
+        percent: (used as f32 / context_limit.get() as f32) * 100.0,
     }
 }
 
@@ -77,32 +125,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn absolute_display_uses_documented_fallback_limit() {
-        match context_limit_display(12_345, 256_000) {
-            ContextLimitDisplay::Absolute {
-                limit,
-                used,
-                percent,
-            } => {
-                assert_eq!(limit, 256_000);
-                assert_eq!(used, 12_345);
-                assert!((percent - (used as f32 / 256_000.0 * 100.0)).abs() < 0.01);
-            }
-        }
+    fn context_token_limit_rejects_zero() {
+        assert!(
+            ContextTokenLimit::try_from(0).is_err(),
+            "zero should stay invalid at the type boundary"
+        );
     }
 
     #[test]
-    fn absolute_display_when_context_limit_set() {
-        match context_limit_display(32_000, 128_000) {
-            ContextLimitDisplay::Absolute {
-                limit,
-                used,
-                percent,
-            } => {
-                assert_eq!(limit, 128_000);
-                assert_eq!(used, 32_000);
-                assert!((percent - (used as f32 / 128_000.0 * 100.0)).abs() < 0.01);
-            }
-        }
+    fn context_window_usage_uses_documented_fallback_limit() {
+        let usage = context_window_usage(
+            12_345,
+            ContextTokenLimit::try_from(256_000).expect("fixture limit should be valid"),
+        );
+
+        assert_eq!(usage.limit.get(), 256_000);
+        assert_eq!(usage.used, 12_345);
+        assert!((usage.percent - (usage.used as f32 / 256_000.0 * 100.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn context_window_usage_when_context_limit_set() {
+        let usage = context_window_usage(
+            32_000,
+            ContextTokenLimit::try_from(128_000).expect("fixture limit should be valid"),
+        );
+
+        assert_eq!(usage.limit.get(), 128_000);
+        assert_eq!(usage.used, 32_000);
+        assert!((usage.percent - (usage.used as f32 / 128_000.0 * 100.0)).abs() < 0.01);
     }
 }

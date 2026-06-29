@@ -181,6 +181,7 @@ impl AppRuntimeCoordinator {
 
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
         self.conversation_worker.reset_after_clear();
+        self.context_budget_worker.shutdown()?;
         if let Some(store) = self.options.session_store.as_ref() {
             self.session_store_worker.flush_all(store.clone())?;
         }

@@ -69,7 +69,7 @@ fn build_legend_summary_row_line(
     snapshot: &ContextBudgetSnapshotPayload,
     palette: TerminalPalette,
 ) -> Line<'static> {
-    let text = context_usage_summary(&snapshot.model_id, snapshot.display);
+    let text = context_usage_summary(&snapshot.model_id, snapshot.usage);
     let truncated = truncate_display_width_with_ellipsis(&text, row_width.max(1));
     padded_styled_line(truncated, row_width, tertiary_text_style(palette))
 }
@@ -181,8 +181,7 @@ mod tests {
                 segment(SegmentKind::Reasoning, 60),
             ],
             total_estimated_tokens: 540,
-            context_limit: 1_000,
-            display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
+            usage: runtime_domain::session::ContextWindowUsagePayload {
                 limit: 1_000,
                 used: 540,
                 percent: 54.0,
@@ -241,8 +240,7 @@ mod tests {
                 segment(SegmentKind::UserMessage, 80),
             ],
             total_estimated_tokens: 400,
-            context_limit: 1_000,
-            display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
+            usage: runtime_domain::session::ContextWindowUsagePayload {
                 limit: 1_000,
                 used: 400,
                 percent: 40.0,
@@ -282,8 +280,7 @@ mod tests {
             model_id: "model".to_string(),
             segments: vec![segment(SegmentKind::AssistantMessage, 400)],
             total_estimated_tokens: 400,
-            context_limit: 400,
-            display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
+            usage: runtime_domain::session::ContextWindowUsagePayload {
                 limit: 400,
                 used: 400,
                 percent: 100.0,
@@ -321,8 +318,7 @@ mod tests {
             model_id: "model".to_string(),
             segments: vec![segment(SegmentKind::AssistantMessage, 400)],
             total_estimated_tokens: 400,
-            context_limit: 1_000,
-            display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
+            usage: runtime_domain::session::ContextWindowUsagePayload {
                 limit: 1_000,
                 used: 400,
                 percent: 40.0,

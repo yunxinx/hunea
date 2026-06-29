@@ -200,9 +200,9 @@ pub(super) fn occupied_heatmap_cells(
     total_cells: usize,
     segment_count: usize,
 ) -> usize {
-    let runtime_domain::session::ContextBudgetDisplayPayload::Absolute { limit, used, .. } =
-        snapshot.display;
-    if limit == 0 || total_cells == 0 || used == 0 {
+    let limit = snapshot.usage.limit;
+    let used = snapshot.usage.used;
+    if total_cells == 0 || used == 0 {
         return 0;
     }
     let exact = (used as f64 / limit as f64) * total_cells as f64;
@@ -262,7 +262,7 @@ mod tests {
     use super::*;
     use crate::context_budget::CONTEXT_BUDGET_HEATMAP_WIDTH;
     use runtime_domain::context_budget::SegmentKind;
-    use runtime_domain::session::{ContextBudgetDisplayPayload, ContextBudgetSegmentPayload};
+    use runtime_domain::session::{ContextBudgetSegmentPayload, ContextWindowUsagePayload};
 
     use crate::theme::default_palette;
 
@@ -328,8 +328,7 @@ mod tests {
                 },
             ],
             total_estimated_tokens: 220,
-            context_limit: 256_000,
-            display: ContextBudgetDisplayPayload::Absolute {
+            usage: ContextWindowUsagePayload {
                 limit: 256_000,
                 used: 220,
                 percent: 0.1,
@@ -362,8 +361,7 @@ mod tests {
                 estimated_tokens: 10,
             }],
             total_estimated_tokens: 10,
-            context_limit: 80,
-            display: ContextBudgetDisplayPayload::Absolute {
+            usage: ContextWindowUsagePayload {
                 limit: 80,
                 used: 10,
                 percent: 12.5,
@@ -418,8 +416,7 @@ mod tests {
                 estimated_tokens: 10,
             }],
             total_estimated_tokens: 10,
-            context_limit: 80,
-            display: ContextBudgetDisplayPayload::Absolute {
+            usage: ContextWindowUsagePayload {
                 limit: 80,
                 used: 10,
                 percent: 12.5,
@@ -484,8 +481,7 @@ mod tests {
             model_id: "local/qwen3".to_string(),
             segments: Vec::new(),
             total_estimated_tokens: 0,
-            context_limit: 1_000,
-            display: ContextBudgetDisplayPayload::Absolute {
+            usage: ContextWindowUsagePayload {
                 limit: 1_000,
                 used: 421,
                 percent: 42.1,

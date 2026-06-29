@@ -3223,6 +3223,7 @@ dependencies = [
  "terminal-ui",
  "tokio",
  "tool-runtime",
+ "tracing",
 ]
 
 [[package]]

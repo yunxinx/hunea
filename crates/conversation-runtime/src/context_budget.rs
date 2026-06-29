@@ -5,7 +5,10 @@ use std::borrow::Cow;
 use openai_compat_provider::prompt_request_projection_from_parts;
 use provider_protocol::{ConversationItem, ToolDefinition};
 use runtime_domain::{
-    context_budget::{ContextBudgetSnapshot, ContextSegment, SegmentKind, context_limit_display},
+    context_budget::{
+        ContextBudgetSnapshot, ContextSegment, ContextTokenLimit, ContextWindowUsage, SegmentKind,
+        context_window_usage,
+    },
     provider::ProviderKind,
     session::ContextBudgetProjectionErrorKind,
     token_count::estimate_text_tokens,
@@ -43,7 +46,7 @@ pub struct ContextBudgetProbe<'a> {
     model_id: &'a str,
     items: Vec<Cow<'a, ConversationItem>>,
     tool_definitions: &'a [ToolDefinition],
-    context_limit: u32,
+    context_limit: ContextTokenLimit,
 }
 
 impl<'a> ContextBudgetProbe<'a> {
@@ -53,7 +56,7 @@ impl<'a> ContextBudgetProbe<'a> {
         model_id: &'a str,
         items: Vec<Cow<'a, ConversationItem>>,
         tool_definitions: &'a [ToolDefinition],
-        context_limit: u32,
+        context_limit: ContextTokenLimit,
     ) -> Self {
         Self {
             provider_kind,
@@ -68,7 +71,7 @@ impl<'a> ContextBudgetProbe<'a> {
     pub fn from_prepared_request(
         request: &'a PreparedConversationRequest,
         tool_definitions: &'a [ToolDefinition],
-        context_limit: u32,
+        context_limit: ContextTokenLimit,
     ) -> Self {
         Self::new(
             request.provider_kind(),
@@ -125,14 +128,14 @@ pub fn build_context_budget_snapshot(
         .iter()
         .map(|segment| segment.estimated_tokens)
         .sum();
-    let display = context_limit_display(total_estimated_tokens, probe.context_limit);
+    let usage: ContextWindowUsage =
+        context_window_usage(total_estimated_tokens, probe.context_limit);
 
     Ok(ContextBudgetSnapshot {
         model_id: probe.model_id.to_string(),
         segments,
         total_estimated_tokens,
-        context_limit: probe.context_limit,
-        display,
+        usage,
     })
 }
 
@@ -235,7 +238,7 @@ mod tests {
                 "Read a file",
                 json!({"type": "object"}),
             )],
-            200_000,
+            ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
         ))
         .expect("context budget snapshot should build");
 
@@ -249,10 +252,7 @@ mod tests {
                 SegmentKind::ToolDefinitions,
             ]
         );
-        assert!(matches!(
-            snapshot.display,
-            runtime_domain::context_budget::ContextLimitDisplay::Absolute { limit: 200_000, .. }
-        ));
+        assert_eq!(snapshot.usage.limit.get(), 200_000);
     }
 
     #[test]
@@ -281,7 +281,7 @@ mod tests {
                 "Read a file",
                 json!({"type": "object"}),
             )],
-            200_000,
+            ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
         ))
         .expect("context budget snapshot should build");
 
@@ -306,7 +306,7 @@ mod tests {
             "gpt-4o",
             items.iter().map(Cow::Borrowed).collect(),
             &[],
-            200_000,
+            ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
         ))
         .expect("context budget snapshot should build");
 
@@ -359,7 +359,7 @@ mod tests {
             "claude-sonnet-4-5",
             items.iter().map(Cow::Borrowed).collect(),
             &[],
-            200_000,
+            ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
         ))
         .expect_err("unsupported provider kinds should be explicit");
 
@@ -384,7 +384,7 @@ mod tests {
             "gpt-4o",
             items.iter().map(Cow::Borrowed).collect(),
             &[],
-            200_000,
+            ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
         ))
         .expect("context budget snapshot should build for a small probe");
 

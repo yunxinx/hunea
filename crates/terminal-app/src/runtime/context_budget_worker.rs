@@ -10,20 +10,22 @@ use conversation_runtime::context_budget::{
 };
 use conversation_runtime::{ConversationItem, ToolDefinition};
 use runtime_domain::{
-    context_budget::{ContextBudgetSnapshot, ContextLimitDisplay},
+    context_budget::{ContextBudgetSnapshot, ContextTokenLimit, ContextWindowUsage},
     provider::ProviderKind,
     session::{
-        ContextBudgetDisplayPayload, ContextBudgetLoadErrorPayload, ContextBudgetSegmentPayload,
-        ContextBudgetSnapshotPayload, RuntimeEvent, SessionLoadRequestId,
+        ContextBudgetLoadErrorPayload, ContextBudgetSegmentPayload, ContextBudgetSnapshotPayload,
+        ContextWindowUsagePayload, RuntimeEvent, SessionLoadRequestId,
     },
 };
 use tool_runtime::ToolExecutorRegistry;
+use tracing::debug;
 
 const CONTEXT_BUDGET_EVENT_DRAIN_WAIT: Duration = Duration::from_millis(2);
 
 pub(super) struct ContextBudgetWorker {
-    command_sender: Sender<ContextBudgetWorkerCommand>,
+    command_sender: Option<Sender<ContextBudgetWorkerCommand>>,
     event_receiver: Receiver<RuntimeEvent>,
+    worker_handle: Option<thread::JoinHandle<()>>,
     pending_commands: usize,
 }
 
@@ -33,7 +35,7 @@ pub(super) struct ContextBudgetWorkerCommand {
     pub(super) model_id: String,
     pub(super) items: Vec<ConversationItem>,
     pub(super) tool_definitions: Vec<ToolDefinition>,
-    pub(super) context_limit: u32,
+    pub(super) context_limit: ContextTokenLimit,
 }
 
 impl Default for ContextBudgetWorker {
@@ -48,10 +50,12 @@ impl ContextBudgetWorker {
         let (event_sender, event_receiver) = mpsc::channel();
         // `/context` 的 projection 与 token 估算是同步 CPU 工作。
         // 专用线程把它移出 TUI 命令热路径，避免在协调器里阻塞事件分发。
-        thread::spawn(move || run_context_budget_worker(command_receiver, event_sender));
+        let worker_handle =
+            thread::spawn(move || run_context_budget_worker(command_receiver, event_sender));
         Self {
-            command_sender,
+            command_sender: Some(command_sender),
             event_receiver,
+            worker_handle: Some(worker_handle),
             pending_commands: 0,
         }
     }
@@ -67,9 +71,12 @@ impl ContextBudgetWorker {
         model_id: String,
         items: Vec<ConversationItem>,
         tool_definitions: Vec<ToolDefinition>,
-        context_limit: u32,
+        context_limit: ContextTokenLimit,
     ) -> Result<(), String> {
-        self.command_sender
+        let Some(command_sender) = self.command_sender.as_ref() else {
+            return Err("context budget worker stopped".to_string());
+        };
+        command_sender
             .send(ContextBudgetWorkerCommand {
                 request_id,
                 provider_kind,
@@ -80,6 +87,18 @@ impl ContextBudgetWorker {
             })
             .map_err(|_| "context budget worker stopped".to_string())?;
         self.pending_commands = self.pending_commands.saturating_add(1);
+        Ok(())
+    }
+
+    pub(super) fn shutdown(&mut self) -> Result<(), String> {
+        self.pending_commands = 0;
+        self.command_sender.take();
+        if let Some(worker_handle) = self.worker_handle.take() {
+            worker_handle
+                .join()
+                .map_err(|_| "context budget worker panicked during shutdown".to_string())?;
+        }
+        while self.event_receiver.try_recv().is_ok() {}
         Ok(())
     }
 
@@ -114,7 +133,10 @@ fn run_context_budget_worker(
 ) {
     while let Ok(command) = command_receiver.recv() {
         let event = handle_context_budget_command(command);
-        let _ = event_sender.send(event);
+        if event_sender.send(event).is_err() {
+            debug!("context budget worker dropped runtime event because receiver closed");
+            break;
+        }
     }
 }
 
@@ -158,8 +180,7 @@ fn snapshot_to_payload(snapshot: ContextBudgetSnapshot) -> ContextBudgetSnapshot
     ContextBudgetSnapshotPayload {
         model_id: snapshot.model_id,
         total_estimated_tokens: snapshot.total_estimated_tokens,
-        context_limit: snapshot.context_limit,
-        display: display_to_payload(snapshot.display),
+        usage: usage_to_payload(snapshot.usage),
         segments: snapshot
             .segments
             .into_iter()
@@ -172,17 +193,11 @@ fn snapshot_to_payload(snapshot: ContextBudgetSnapshot) -> ContextBudgetSnapshot
     }
 }
 
-fn display_to_payload(display: ContextLimitDisplay) -> ContextBudgetDisplayPayload {
-    match display {
-        ContextLimitDisplay::Absolute {
-            limit,
-            used,
-            percent,
-        } => ContextBudgetDisplayPayload::Absolute {
-            limit,
-            used,
-            percent,
-        },
+fn usage_to_payload(usage: ContextWindowUsage) -> ContextWindowUsagePayload {
+    ContextWindowUsagePayload {
+        limit: usage.limit.get(),
+        used: usage.used,
+        percent: usage.percent,
     }
 }
 

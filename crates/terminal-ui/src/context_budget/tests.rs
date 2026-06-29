@@ -316,23 +316,56 @@ fn late_context_budget_error_after_close_does_not_reopen_panel() {
     model.apply_runtime_event(
         runtime_domain::session::RuntimeEvent::ContextBudgetSnapshotLoadFailed {
             request_id,
-            message: "stale failure".to_string(),
+            error: runtime_domain::session::ContextBudgetLoadErrorPayload::ProjectionFailed {
+                message: "stale failure".to_string(),
+            },
         },
     );
 
     assert!(!model.context_budget_active());
 }
 
+#[test]
+fn context_budget_unsupported_provider_error_uses_actionable_copy() {
+    let mut model = ready_model();
+    model.transcript_mut().clear();
+    model.set_window(72, 20);
+    model.set_palette(default_palette(), true);
+
+    let request_id = model.open_context_budget_loading();
+    model.apply_runtime_event(
+        runtime_domain::session::RuntimeEvent::ContextBudgetSnapshotLoadFailed {
+            request_id,
+            error: runtime_domain::session::ContextBudgetLoadErrorPayload::UnsupportedProvider {
+                provider_kind: runtime_domain::provider::ProviderKind::Anthropic,
+            },
+        },
+    );
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 20));
+
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("anthropic cannot show context budget")),
+        "unsupported provider error should render actionable guidance instead of a raw enum dump: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("OpenAI/OpenAI-compatible")),
+        "unsupported provider error should explain which provider family is supported: {rows:?}"
+    );
+}
+
 fn context_budget_snapshot() -> ContextBudgetSnapshotPayload {
     ContextBudgetSnapshotPayload {
         model_id: "local/qwen3".to_string(),
         segments: vec![
-            segment(SegmentKind::System, 0, 140, "system prompt"),
-            segment(SegmentKind::UserMessage, 1, 96, "user history"),
-            segment(SegmentKind::AssistantMessage, 2, 220, "assistant history"),
-            segment(SegmentKind::Reasoning, 3, 44, "reasoning"),
-            segment(SegmentKind::ToolResult, 4, 28, "tool results"),
-            segment(SegmentKind::ToolDefinitions, 5, 12, "tool schemas"),
+            segment(SegmentKind::System, 0, 140),
+            segment(SegmentKind::UserMessage, 1, 96),
+            segment(SegmentKind::AssistantMessage, 2, 220),
+            segment(SegmentKind::Reasoning, 3, 44),
+            segment(SegmentKind::ToolResult, 4, 28),
+            segment(SegmentKind::ToolDefinitions, 5, 12),
         ],
         total_estimated_tokens: 540,
         context_limit: Some(1_280),
@@ -348,12 +381,10 @@ fn segment(
     kind: SegmentKind,
     stack_order: u16,
     estimated_tokens: usize,
-    label: &str,
 ) -> ContextBudgetSegmentPayload {
     ContextBudgetSegmentPayload {
         kind,
         stack_order,
         estimated_tokens,
-        label: label.to_string(),
     }
 }

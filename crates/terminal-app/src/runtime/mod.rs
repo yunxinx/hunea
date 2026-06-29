@@ -12,8 +12,7 @@ use conversation_runtime::{
     ConversationWorker, ModelRefreshWorker, ProviderConversation, models as provider_models,
 };
 use runtime_domain::{
-    model_catalog::{ModelCatalog, ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
-    model_context_limit::ModelContextLimits,
+    model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     request_policy::RuntimeRequestPolicy,
     session::{
         ConversationEvent, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
@@ -41,9 +40,7 @@ use self::{
 /// `AppRuntimeOptions` 保存 app 层对话运行时所需的配置。
 #[derive(Clone, Default)]
 pub(crate) struct AppRuntimeOptions {
-    pub(crate) model_config_path: Option<PathBuf>,
-    pub(crate) model_catalog: ModelCatalog,
-    pub(crate) context_limits: ModelContextLimits,
+    pub(crate) loaded_models: provider_models::LoadedModelCatalog,
     pub(crate) runtime_request_policy: RuntimeRequestPolicy,
     pub(crate) managed_search_tools: ManagedSearchToolConfig,
     pub(crate) managed_search_authorization_config_path: Option<PathBuf>,
@@ -360,9 +357,12 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
     }
 
     fn persist_selected_model(&mut self, selection: &ModelSelection) -> Result<(), String> {
-        provider_models::write_default_model(self.options.model_config_path.as_deref(), selection)
-            .map(|_| ())
-            .map_err(|error| format!("Failed to save default model: {error}"))
+        provider_models::write_default_model(
+            self.options.loaded_models.source_path.as_deref(),
+            selection,
+        )
+        .map(|_| ())
+        .map_err(|error| format!("Failed to save default model: {error}"))
     }
 
     fn refresh_model_provider(&mut self, request: ProviderSyncRequest) -> Result<(), String> {

@@ -20,7 +20,9 @@ impl ModelContextLimits {
         }
     }
 
-    /// `resolve` 按 profile → defaults → built-in → None 解析 context limit。
+    /// `resolve` 按 provider/model profile → 唯一 model_id profile → defaults → built-in 解析 context limit。
+    ///
+    /// 当没有显式配置时，built-in fallback 会继续返回稳定默认值 `256_000`。
     pub fn resolve(&self, catalog: &ModelCatalog, selection: &ModelSelection) -> Option<u32> {
         let key = (selection.provider_id.clone(), selection.model_id.clone());
         if let Some(limit) = self.by_provider_model.get(&key) {
@@ -55,17 +57,46 @@ impl ModelContextLimits {
 }
 
 fn built_in_context_limit(model_id: &str) -> Option<u32> {
-    let lower = model_id.to_ascii_lowercase();
-    if lower.contains("gpt-4o") && !lower.contains("mini") {
-        return Some(128_000);
+    Some(match built_in_model_family(model_id) {
+        BuiltInModelFamily::OpenAiGpt4o | BuiltInModelFamily::OpenAiGpt4oMini => 128_000,
+        BuiltInModelFamily::ClaudeSonnet4 | BuiltInModelFamily::ClaudeOpus4 => 200_000,
+        BuiltInModelFamily::Unknown => DEFAULT_CONTEXT_LIMIT,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuiltInModelFamily {
+    OpenAiGpt4o,
+    OpenAiGpt4oMini,
+    ClaudeSonnet4,
+    ClaudeOpus4,
+    Unknown,
+}
+
+fn built_in_model_family(model_id: &str) -> BuiltInModelFamily {
+    let normalized = model_id.trim().to_ascii_lowercase();
+
+    if model_family_matches(&normalized, "gpt-4o-mini") {
+        return BuiltInModelFamily::OpenAiGpt4oMini;
     }
-    if lower.contains("gpt-4o-mini") {
-        return Some(128_000);
+    if model_family_matches(&normalized, "gpt-4o") {
+        return BuiltInModelFamily::OpenAiGpt4o;
     }
-    if lower.contains("claude-sonnet-4") || lower.contains("claude-opus-4") {
-        return Some(200_000);
+    if model_family_matches(&normalized, "claude-sonnet-4") {
+        return BuiltInModelFamily::ClaudeSonnet4;
     }
-    Some(DEFAULT_CONTEXT_LIMIT)
+    if model_family_matches(&normalized, "claude-opus-4") {
+        return BuiltInModelFamily::ClaudeOpus4;
+    }
+
+    BuiltInModelFamily::Unknown
+}
+
+fn model_family_matches(model_id: &str, family: &str) -> bool {
+    model_id == family
+        || model_id
+            .strip_prefix(family)
+            .is_some_and(|suffix| suffix.starts_with('-'))
 }
 
 #[cfg(test)]
@@ -145,6 +176,28 @@ mod tests {
     fn resolve_uses_default_fallback_for_unknown_model() {
         let limits = ModelContextLimits::default();
         let selection = ModelSelection::new("local", "totally-custom");
+
+        assert_eq!(
+            limits.resolve(&catalog_with_local_qwen(), &selection),
+            Some(DEFAULT_CONTEXT_LIMIT)
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_match_embedded_openai_family_substrings() {
+        let limits = ModelContextLimits::default();
+        let selection = ModelSelection::new("local", "my-gpt-4o-wrapper");
+
+        assert_eq!(
+            limits.resolve(&catalog_with_local_qwen(), &selection),
+            Some(DEFAULT_CONTEXT_LIMIT)
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_match_embedded_claude_family_substrings() {
+        let limits = ModelContextLimits::default();
+        let selection = ModelSelection::new("local", "prefix-claude-sonnet-4-custom");
 
         assert_eq!(
             limits.resolve(&catalog_with_local_qwen(), &selection),

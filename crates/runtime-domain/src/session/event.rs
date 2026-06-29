@@ -1,4 +1,5 @@
 use crate::context_budget::SegmentKind;
+use crate::provider::ProviderKind;
 
 use super::{
     ConversationResponse, MessageHistoryEntry, MessageHistoryEntryId, MessageHistoryRow,
@@ -24,7 +25,6 @@ pub struct ContextBudgetSegmentPayload {
     pub kind: SegmentKind,
     pub stack_order: u16,
     pub estimated_tokens: usize,
-    pub label: String,
 }
 
 /// Display mode for context budget header and legend.
@@ -32,6 +32,14 @@ pub struct ContextBudgetSegmentPayload {
 pub enum ContextBudgetDisplayPayload {
     Relative { used: u32 },
     Absolute { limit: u32, used: u32, percent: f32 },
+}
+
+/// Structured error payload for `/context` snapshot loading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextBudgetLoadErrorPayload {
+    UnknownProvider { provider_id: String },
+    UnsupportedProvider { provider_kind: ProviderKind },
+    ProjectionFailed { message: String },
 }
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
@@ -128,7 +136,7 @@ pub enum RuntimeEvent {
     },
     ContextBudgetSnapshotLoadFailed {
         request_id: SessionLoadRequestId,
-        message: String,
+        error: ContextBudgetLoadErrorPayload,
     },
     SessionBranchTreeLoaded {
         request_id: SessionLoadRequestId,

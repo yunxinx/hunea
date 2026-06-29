@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent};
-use runtime_domain::session::SessionLoadRequestId;
+use runtime_domain::session::{ContextBudgetLoadErrorPayload, SessionLoadRequestId};
 
 use super::ContextBudgetState;
 use crate::{Model, overlay_input_result::OverlayInputResult};
@@ -51,7 +51,7 @@ impl Model {
     pub(crate) fn show_context_budget_error(
         &mut self,
         request_id: SessionLoadRequestId,
-        message: &str,
+        error: ContextBudgetLoadErrorPayload,
     ) {
         let Some(mut state) = self.context_budget.take() else {
             return;
@@ -60,7 +60,7 @@ impl Model {
             self.context_budget = Some(state);
             return;
         }
-        state.set_error(message.to_string());
+        state.set_error(error);
         self.context_budget = Some(state);
     }
 

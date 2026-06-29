@@ -175,10 +175,10 @@ mod tests {
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "model".to_string(),
             segments: vec![
-                segment(SegmentKind::AssistantMessage, 200, "assistant history"),
-                segment(SegmentKind::System, 160, "system prompt"),
-                segment(SegmentKind::UserMessage, 120, "user history"),
-                segment(SegmentKind::Reasoning, 60, "reasoning"),
+                segment(SegmentKind::AssistantMessage, 200),
+                segment(SegmentKind::System, 160),
+                segment(SegmentKind::UserMessage, 120),
+                segment(SegmentKind::Reasoning, 60),
             ],
             total_estimated_tokens: 540,
             context_limit: Some(1_000),
@@ -236,9 +236,9 @@ mod tests {
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "model".to_string(),
             segments: vec![
-                segment(SegmentKind::UserMessage, 120, "user"),
-                segment(SegmentKind::AssistantMessage, 200, "assistant"),
-                segment(SegmentKind::UserMessage, 80, "user"),
+                segment(SegmentKind::UserMessage, 120),
+                segment(SegmentKind::AssistantMessage, 200),
+                segment(SegmentKind::UserMessage, 80),
             ],
             total_estimated_tokens: 400,
             context_limit: Some(1_000),
@@ -280,7 +280,7 @@ mod tests {
         let area = ratatui::layout::Rect::new(0, 0, 48, 5);
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "model".to_string(),
-            segments: vec![segment(SegmentKind::AssistantMessage, 400, "assistant")],
+            segments: vec![segment(SegmentKind::AssistantMessage, 400)],
             total_estimated_tokens: 400,
             context_limit: Some(400),
             display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
@@ -319,7 +319,7 @@ mod tests {
     fn build_legend_lines_fill_requested_area_width() {
         let snapshot = ContextBudgetSnapshotPayload {
             model_id: "model".to_string(),
-            segments: vec![segment(SegmentKind::AssistantMessage, 400, "assistant")],
+            segments: vec![segment(SegmentKind::AssistantMessage, 400)],
             total_estimated_tokens: 400,
             context_limit: Some(1_000),
             display: runtime_domain::session::ContextBudgetDisplayPayload::Absolute {
@@ -345,16 +345,11 @@ mod tests {
             .collect::<String>()
     }
 
-    fn segment(
-        kind: SegmentKind,
-        estimated_tokens: usize,
-        label: &str,
-    ) -> ContextBudgetSegmentPayload {
+    fn segment(kind: SegmentKind, estimated_tokens: usize) -> ContextBudgetSegmentPayload {
         ContextBudgetSegmentPayload {
             kind,
             stack_order: 0,
             estimated_tokens,
-            label: label.to_string(),
         }
     }
 }

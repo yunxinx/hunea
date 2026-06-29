@@ -216,7 +216,10 @@ pub(super) fn run_open_context_budget_effect(
             selection,
         })
     {
-        model.show_context_budget_error(request_id, &message);
+        model.show_context_budget_error(
+            request_id,
+            runtime_domain::session::ContextBudgetLoadErrorPayload::ProjectionFailed { message },
+        );
     }
 }
 

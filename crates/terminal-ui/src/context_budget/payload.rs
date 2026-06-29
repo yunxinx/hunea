@@ -8,7 +8,6 @@ mod tests {
             kind: SegmentKind::ToolDefinitions,
             stack_order: 3,
             estimated_tokens: 42,
-            label: "tool definitions".to_string(),
         };
 
         assert_eq!(payload.kind, SegmentKind::ToolDefinitions);

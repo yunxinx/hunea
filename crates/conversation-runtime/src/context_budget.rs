@@ -1,7 +1,7 @@
 //! Context budget helpers for prepared turns.
 
-use openai_compat_provider::prompt_request_projection;
-use provider_protocol::{ConversationItem, PromptRequest, ToolDefinition};
+use openai_compat_provider::prompt_request_projection_from_parts;
+use provider_protocol::{ConversationItem, ToolDefinition};
 use runtime_domain::{
     context_budget::{ContextBudgetSnapshot, ContextSegment, SegmentKind, context_limit_display},
     provider::ProviderKind,
@@ -49,11 +49,9 @@ pub fn context_budget_from_items(
     tool_definitions: &[ToolDefinition],
     context_limit: Option<u32>,
 ) -> Result<ContextBudgetSnapshot, ContextBudgetError> {
-    let prompt_request = PromptRequest::new(model_id.to_string(), items.to_vec())
-        .with_tools(tool_definitions.to_vec());
     let projection = match provider_kind {
         ProviderKind::OpenAiCompatible | ProviderKind::OpenAi => {
-            prompt_request_projection(&prompt_request)
+            prompt_request_projection_from_parts(items, tool_definitions)
                 .map_err(|source| ContextBudgetError::Projection { source })?
         }
         provider_kind => {
@@ -71,11 +69,11 @@ pub fn context_budget_from_items(
     let mut segments = Vec::with_capacity(items.len() + usize::from(tools_text.is_some()));
     for (stack_order, (item, projection_text)) in items.iter().zip(message_texts.iter()).enumerate()
     {
+        let kind = segment_kind(item);
         segments.push(ContextSegment {
-            kind: segment_kind(item),
+            kind,
             stack_order: u16::try_from(stack_order).unwrap_or(u16::MAX),
             estimated_tokens: estimate_text_tokens(model_id, projection_text),
-            label: segment_kind(item).default_label().to_string(),
         });
     }
 
@@ -84,7 +82,6 @@ pub fn context_budget_from_items(
             kind: SegmentKind::ToolDefinitions,
             stack_order: u16::try_from(segments.len()).unwrap_or(u16::MAX),
             estimated_tokens: estimate_text_tokens(model_id, tools_text),
-            label: SegmentKind::ToolDefinitions.default_label().to_string(),
         });
     }
 

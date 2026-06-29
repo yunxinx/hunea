@@ -7,7 +7,7 @@ use ratatui::{
 use super::{
     CONTEXT_BUDGET_PANEL_INSET_WIDTH, CONTEXT_BUDGET_SECTION_GAP_ROWS,
     heatmap::build_context_budget_heatmap_lines, layout::context_budget_body_layout,
-    legend::build_context_budget_legend_lines,
+    legend::build_context_budget_legend_lines, state::context_budget_error_message,
 };
 use crate::{
     Model,
@@ -119,10 +119,11 @@ fn context_budget_body_lines(
     }
 
     if let Some(error) = state.error.as_ref() {
+        let message = context_budget_error_message(error);
         return pad_body_lines(
             vec![Line::styled(
                 truncate_display_width_with_ellipsis(
-                    &format!("{}{error}", panel_inset_text()),
+                    &format!("{}{message}", panel_inset_text()),
                     usize::from(area.width).max(1),
                 ),
                 tertiary_text_style(model.palette),

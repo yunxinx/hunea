@@ -7,8 +7,8 @@ use runtime_domain::{
     context_budget::{ContextBudgetSnapshot, ContextLimitDisplay},
     model_catalog::ModelSelection,
     session::{
-        ContextBudgetDisplayPayload, ContextBudgetSegmentPayload, ContextBudgetSnapshotPayload,
-        RuntimeCommandReceipt, RuntimeEvent, SessionLoadRequestId,
+        ContextBudgetDisplayPayload, ContextBudgetLoadErrorPayload, ContextBudgetSegmentPayload,
+        ContextBudgetSnapshotPayload, RuntimeCommandReceipt, RuntimeEvent, SessionLoadRequestId,
     },
 };
 
@@ -20,33 +20,44 @@ impl AppRuntimeCoordinator {
         request_id: SessionLoadRequestId,
         selection: &ModelSelection,
     ) -> Result<RuntimeCommandReceipt, String> {
-        let provider = self
+        let Some(provider) = self
             .options
-            .model_catalog
+            .loaded_models
+            .catalog
             .enabled_provider_by_id(&selection.provider_id)
-            .ok_or_else(|| {
-                format!(
-                    "Cannot load context budget for unknown provider {}",
-                    selection.provider_id
-                )
-            })?;
+        else {
+            self.pending_runtime_events
+                .push(RuntimeEvent::ContextBudgetSnapshotLoadFailed {
+                    request_id,
+                    error: ContextBudgetLoadErrorPayload::UnknownProvider {
+                        provider_id: selection.provider_id.clone(),
+                    },
+                });
+            return Ok(RuntimeCommandReceipt::Accepted);
+        };
         let model_id = selection.model_id.clone();
-        let context_limit = self
-            .options
-            .model_catalog
-            .context_limit_for(&self.options.context_limits, selection);
+        let context_limit = self.options.loaded_models.context_limit_for(selection);
         let items = self
             .provider_conversation
             .provider_items_for_context_budget_probe();
         let tool_definitions = context_budget_tool_definitions(&self.workspace_tools);
-        let snapshot = context_budget_from_items(
+        let snapshot = match context_budget_from_items(
             provider.connection().kind,
             &model_id,
             &items,
             &tool_definitions,
             context_limit,
-        )
-        .map_err(|error| error.to_string())?;
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.pending_runtime_events
+                    .push(RuntimeEvent::ContextBudgetSnapshotLoadFailed {
+                        request_id,
+                        error: context_budget_load_error_payload(error),
+                    });
+                return Ok(RuntimeCommandReceipt::Accepted);
+            }
+        };
         self.pending_runtime_events
             .push(RuntimeEvent::ContextBudgetSnapshotLoaded {
                 request_id,
@@ -69,7 +80,6 @@ fn snapshot_to_payload(snapshot: ContextBudgetSnapshot) -> ContextBudgetSnapshot
                 kind: segment.kind,
                 stack_order: segment.stack_order,
                 estimated_tokens: segment.estimated_tokens,
-                label: segment.label,
             })
             .collect(),
     }
@@ -87,5 +97,20 @@ fn display_to_payload(display: ContextLimitDisplay) -> ContextBudgetDisplayPaylo
             used,
             percent,
         },
+    }
+}
+
+fn context_budget_load_error_payload(
+    error: conversation_runtime::ContextBudgetError,
+) -> ContextBudgetLoadErrorPayload {
+    match error {
+        conversation_runtime::ContextBudgetError::UnsupportedProvider { provider_kind } => {
+            ContextBudgetLoadErrorPayload::UnsupportedProvider { provider_kind }
+        }
+        conversation_runtime::ContextBudgetError::Projection { source } => {
+            ContextBudgetLoadErrorPayload::ProjectionFailed {
+                message: source.to_string(),
+            }
+        }
     }
 }

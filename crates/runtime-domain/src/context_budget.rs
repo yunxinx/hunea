@@ -31,7 +31,6 @@ pub struct ContextSegment {
     pub kind: SegmentKind,
     pub stack_order: u16,
     pub estimated_tokens: usize,
-    pub label: String,
 }
 
 impl ContextSegment {

@@ -1,6 +1,7 @@
 use runtime_domain::context_budget::SegmentKind;
 use runtime_domain::session::{
-    ContextBudgetDisplayPayload, ContextBudgetSnapshotPayload, SessionLoadRequestId,
+    ContextBudgetDisplayPayload, ContextBudgetLoadErrorPayload, ContextBudgetSnapshotPayload,
+    SessionLoadRequestId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +25,7 @@ pub(crate) struct ContextBudgetState {
     pub(crate) revision: usize,
     pub(crate) loading: bool,
     pub(crate) pending_request_id: Option<SessionLoadRequestId>,
-    pub(crate) error: Option<String>,
+    pub(crate) error: Option<ContextBudgetLoadErrorPayload>,
     pub(crate) snapshot: Option<ContextBudgetSnapshotPayload>,
 }
 
@@ -49,12 +50,26 @@ impl ContextBudgetState {
         self.snapshot = Some(payload);
     }
 
-    pub(crate) fn set_error(&mut self, message: String) {
+    pub(crate) fn set_error(&mut self, error: ContextBudgetLoadErrorPayload) {
         self.revision = self.revision.saturating_add(1);
         self.loading = false;
         self.pending_request_id = None;
-        self.error = Some(message);
+        self.error = Some(error);
         self.snapshot = None;
+    }
+}
+
+pub(crate) fn context_budget_error_message(error: &ContextBudgetLoadErrorPayload) -> String {
+    match error {
+        ContextBudgetLoadErrorPayload::UnknownProvider { provider_id } => {
+            format!("Context budget could not find provider `{provider_id}`")
+        }
+        ContextBudgetLoadErrorPayload::UnsupportedProvider { provider_kind } => {
+            format!("{provider_kind} cannot show context budget; use OpenAI/OpenAI-compatible.")
+        }
+        ContextBudgetLoadErrorPayload::ProjectionFailed { message } => {
+            format!("Failed to build context budget: {message}")
+        }
     }
 }
 
@@ -385,7 +400,6 @@ mod tests {
             kind,
             stack_order,
             estimated_tokens,
-            label: kind.default_label().to_string(),
         }
     }
 }

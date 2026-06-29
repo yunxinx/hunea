@@ -23,8 +23,8 @@ pub use conversation::{
     ManagedSearchTool, ProviderRequest, ProviderRequestMetrics,
 };
 pub use event::{
-    ContextBudgetDisplayPayload, ContextBudgetSegmentPayload, ContextBudgetSnapshotPayload,
-    RuntimeEvent,
+    ContextBudgetDisplayPayload, ContextBudgetLoadErrorPayload, ContextBudgetSegmentPayload,
+    ContextBudgetSnapshotPayload, RuntimeEvent,
 };
 pub use identity::{RuntimeAgentCapabilities, RuntimeIdentity, RuntimePromptCapabilities};
 pub use load_request::SessionLoadRequestId;

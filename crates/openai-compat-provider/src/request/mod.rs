@@ -10,8 +10,15 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptRequestProjection {
     message_values: Vec<Value>,
-    message_fragments: Vec<Option<Value>>,
+    message_fragments: Vec<MessageFragmentProjection>,
     tools_value: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MessageFragmentProjection {
+    SharedMessage(usize),
+    Standalone(Value),
+    Empty,
 }
 
 impl PromptRequestProjection {
@@ -27,8 +34,13 @@ impl PromptRequestProjection {
         self.message_fragments
             .iter()
             .map(|fragment| match fragment {
-                Some(value) => serialize_json(value),
-                None => Ok(String::new()),
+                MessageFragmentProjection::SharedMessage(index) => serialize_json(
+                    self.message_values
+                        .get(*index)
+                        .expect("shared fragment index should reference a projected message"),
+                ),
+                MessageFragmentProjection::Standalone(value) => serialize_json(value),
+                MessageFragmentProjection::Empty => Ok(String::new()),
             })
             .collect()
     }
@@ -42,12 +54,19 @@ impl PromptRequestProjection {
 pub fn prompt_request_projection(
     request: &PromptRequest,
 ) -> Result<PromptRequestProjection, ProviderError> {
-    let (message_values, message_fragments) =
-        project_items_to_messages_and_fragments(&request.items)?;
+    prompt_request_projection_from_parts(&request.items, &request.tools)
+}
+
+/// `prompt_request_projection_from_parts` 允许调用方直接用借用切片投影消息与工具定义。
+pub fn prompt_request_projection_from_parts(
+    items: &[ConversationItem],
+    tools: &[ToolDefinition],
+) -> Result<PromptRequestProjection, ProviderError> {
+    let (message_values, message_fragments) = project_items_to_messages_and_fragments(items)?;
     Ok(PromptRequestProjection {
         message_values,
         message_fragments,
-        tools_value: project_tools_value(&request.tools)?,
+        tools_value: project_tools_value(tools)?,
     })
 }
 
@@ -67,7 +86,7 @@ pub(crate) fn chat_completion_request_body(
         json!({ "include_usage": true }),
     );
 
-    if let Some(tools) = projection.tools_value {
+    if let Some(tools) = projection.tools_value().cloned() {
         body.insert("tools".to_string(), tools);
     }
     if let Some(temperature) = request.options.temperature {
@@ -91,11 +110,11 @@ pub(crate) fn chat_completion_request_body(
 
 fn project_items_to_messages_and_fragments(
     items: &[ConversationItem],
-) -> Result<(Vec<Value>, Vec<Option<Value>>), ProviderError> {
+) -> Result<(Vec<Value>, Vec<MessageFragmentProjection>), ProviderError> {
     validate_openai_projection_items(items)?;
 
     let mut messages = Vec::new();
-    let mut message_fragments = vec![None; items.len()];
+    let mut message_fragments = vec![MessageFragmentProjection::Empty; items.len()];
     let mut pending_reasoning: Option<(usize, &str)> = None;
     let mut pending_tool_results: Vec<(usize, &ConversationItem)> = Vec::new();
 
@@ -112,7 +131,7 @@ fn project_items_to_messages_and_fragments(
                 )?;
                 pending_reasoning = None;
                 let value = system_message_value(content)?;
-                message_fragments[index] = Some(value.clone());
+                message_fragments[index] = MessageFragmentProjection::SharedMessage(messages.len());
                 messages.push(value);
             }
             ConversationItem::Message {
@@ -126,7 +145,7 @@ fn project_items_to_messages_and_fragments(
                 )?;
                 pending_reasoning = None;
                 let value = user_message_value(content)?;
-                message_fragments[index] = Some(value.clone());
+                message_fragments[index] = MessageFragmentProjection::SharedMessage(messages.len());
                 messages.push(value);
             }
             ConversationItem::Message {
@@ -147,13 +166,22 @@ fn project_items_to_messages_and_fragments(
                 };
                 if let Some((reasoning_index, reasoning_text)) = reasoning {
                     message_fragments[reasoning_index] =
-                        Some(json!({ "reasoning_content": reasoning_text }));
+                        MessageFragmentProjection::Standalone(json!({
+                            "reasoning_content": reasoning_text
+                        }));
                 }
-                let fragment_value = assistant_message_value(content, None)?;
-                let message_value =
-                    assistant_message_value(content, reasoning.map(|(_, text)| text))?;
-                message_fragments[index] = Some(fragment_value);
-                messages.push(message_value);
+                if let Some((_, reasoning_text)) = reasoning {
+                    let message_value = assistant_message_value(content, Some(reasoning_text))?;
+                    let fragment_value = assistant_message_value(content, None)?;
+                    message_fragments[index] =
+                        MessageFragmentProjection::Standalone(fragment_value);
+                    messages.push(message_value);
+                } else {
+                    let message_value = assistant_message_value(content, None)?;
+                    message_fragments[index] =
+                        MessageFragmentProjection::SharedMessage(messages.len());
+                    messages.push(message_value);
+                }
             }
             ConversationItem::ToolResult { .. } => {
                 pending_tool_results.push((index, item));
@@ -238,7 +266,7 @@ fn ensure_no_pending_tool_calls(
 fn flush_tool_results(
     pending: &mut Vec<(usize, &ConversationItem)>,
     messages: &mut Vec<Value>,
-    message_fragments: &mut [Option<Value>],
+    message_fragments: &mut [MessageFragmentProjection],
 ) -> Result<(), ProviderError> {
     for (index, item) in pending.drain(..) {
         if let ConversationItem::ToolResult {
@@ -246,7 +274,7 @@ fn flush_tool_results(
         } = item
         {
             let value = tool_result_message_value(call_id, content)?;
-            message_fragments[index] = Some(value.clone());
+            message_fragments[index] = MessageFragmentProjection::SharedMessage(messages.len());
             messages.push(value);
         }
     }
@@ -477,7 +505,10 @@ mod tests {
         ContentBlock, ConversationItem, PromptRequest, Role, ToolCall, ToolDefinition,
     };
 
-    use super::{chat_completion_request_body, prompt_request_projection};
+    use super::{
+        chat_completion_request_body, prompt_request_projection,
+        prompt_request_projection_from_parts,
+    };
 
     #[test]
     fn multimodal_user_blocks_project_to_chat_completion_parts() {
@@ -656,6 +687,61 @@ mod tests {
                 .expect("messages should remain an array"),
         );
         assert_eq!(projection.tools_value(), body.get("tools"));
+    }
+
+    #[test]
+    fn borrowed_projection_matches_prompt_request_projection_for_messages_and_tools() {
+        let request = PromptRequest::new(
+            "qwen3",
+            vec![
+                ConversationItem::reasoning("thinking about it"),
+                ConversationItem::assistant_with_tool_calls(
+                    String::new(),
+                    vec![ToolCall::new("c1", "bash", "{}")],
+                ),
+                ConversationItem::tool_result("c1", vec![ContentBlock::Text("done".into())], false),
+            ],
+        )
+        .with_tools(vec![ToolDefinition::new(
+            "list_dir",
+            "List a workspace directory",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+            }),
+        )]);
+
+        let owned_projection =
+            prompt_request_projection(&request).expect("owned projection should build");
+        let borrowed_projection =
+            prompt_request_projection_from_parts(&request.items, &request.tools)
+                .expect("borrowed projection should build");
+
+        assert_eq!(
+            borrowed_projection.message_values(),
+            owned_projection.message_values()
+        );
+        assert_eq!(
+            borrowed_projection.tools_value(),
+            owned_projection.tools_value()
+        );
+        assert_eq!(
+            borrowed_projection
+                .serialized_message_texts()
+                .expect("borrowed texts should serialize"),
+            owned_projection
+                .serialized_message_texts()
+                .expect("owned texts should serialize")
+        );
+        assert_eq!(
+            borrowed_projection
+                .serialized_tools_text()
+                .expect("borrowed tools should serialize"),
+            owned_projection
+                .serialized_tools_text()
+                .expect("owned tools should serialize")
+        );
     }
 
     #[test]

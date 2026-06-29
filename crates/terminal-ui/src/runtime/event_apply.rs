@@ -150,12 +150,9 @@ impl RuntimeEventApply for Model {
                     self.apply_context_budget_snapshot(request_id, payload);
                 }
             }
-            RuntimeEvent::ContextBudgetSnapshotLoadFailed {
-                request_id,
-                message,
-            } => {
+            RuntimeEvent::ContextBudgetSnapshotLoadFailed { request_id, error } => {
                 if self.context_budget_load_request_matches(request_id) {
-                    self.show_context_budget_error(request_id, &message);
+                    self.show_context_budget_error(request_id, error);
                 }
             }
             RuntimeEvent::SessionBranchTreeLoaded {

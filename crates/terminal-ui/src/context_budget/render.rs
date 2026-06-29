@@ -212,15 +212,19 @@ fn panel_inset_text() -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::context_budget::state::context_usage_summary;
-    use runtime_domain::session::ContextWindowUsagePayload;
+    use crate::context_budget::summary::context_usage_summary;
+    use runtime_domain::{context_budget::ContextTokenLimit, session::ContextWindowUsagePayload};
+
+    fn limit(value: u32) -> ContextTokenLimit {
+        ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
+    }
 
     #[test]
     fn usage_summary_absolute_shows_documented_display_limit() {
         let text = context_usage_summary(
             "qwen3",
             ContextWindowUsagePayload {
-                limit: 256_000,
+                limit: limit(256_000),
                 used: 42_000,
                 percent: 16.4,
             },
@@ -233,7 +237,7 @@ mod tests {
         let text = context_usage_summary(
             "gpt-4o",
             ContextWindowUsagePayload {
-                limit: 128_000,
+                limit: limit(128_000),
                 used: 32_000,
                 percent: 25.0,
             },

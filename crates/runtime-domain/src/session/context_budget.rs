@@ -1,5 +1,5 @@
 use crate::context_budget::{
-    ContextBudgetSnapshot, ContextSegment, ContextWindowUsage, SegmentKind,
+    ContextBudgetSnapshot, ContextSegment, ContextTokenLimit, ContextWindowUsage, SegmentKind,
 };
 use crate::provider::ProviderKind;
 
@@ -23,7 +23,7 @@ pub struct ContextBudgetSegmentPayload {
 /// Absolute usage summary for context budget header and legend.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContextWindowUsagePayload {
-    pub limit: u32,
+    pub limit: ContextTokenLimit,
     pub used: u32,
     pub percent: f32,
 }
@@ -52,7 +52,7 @@ impl From<ContextSegment> for ContextBudgetSegmentPayload {
 impl From<ContextWindowUsage> for ContextWindowUsagePayload {
     fn from(usage: ContextWindowUsage) -> Self {
         Self {
-            limit: usage.limit.get(),
+            limit: usage.limit,
             used: usage.used,
             percent: usage.percent,
         }
@@ -142,7 +142,7 @@ mod tests {
         assert_eq!(
             payload.usage,
             ContextWindowUsagePayload {
-                limit: 256_000,
+                limit: limit(256_000),
                 used: 192,
                 percent: 0.075,
             }
@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_payload_conversion_uses_raw_limit_value() {
+    fn usage_payload_conversion_keeps_non_zero_limit_type() {
         let payload: ContextWindowUsagePayload = ContextWindowUsage {
             limit: limit(128_000),
             used: 42_000,
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(
             payload,
             ContextWindowUsagePayload {
-                limit: 128_000,
+                limit: limit(128_000),
                 used: 42_000,
                 percent: 32.8125,
             }

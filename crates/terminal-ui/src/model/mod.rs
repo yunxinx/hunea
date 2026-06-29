@@ -76,6 +76,7 @@ pub struct Model {
     pub(super) session_preview: Option<crate::session_preview::SessionPreviewState>,
     pub(super) entry_tree: Option<crate::entry_tree::EntryTreeState>,
     pub(super) context_budget: Option<ContextBudgetState>,
+    pub(super) pending_context_budget_cancellation: bool,
     pub(super) copy_picker: Option<CopyPickerState>,
     pub(super) message_history_picker:
         Option<crate::message_history_picker::MessageHistoryPickerState>,
@@ -196,6 +197,7 @@ impl Model {
             session_preview: None,
             entry_tree: None,
             context_budget: None,
+            pending_context_budget_cancellation: false,
             copy_picker: None,
             message_history_picker: None,
             next_session_load_request_id: 1,

@@ -22,6 +22,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::style::Color;
+use runtime_domain::context_budget::ContextTokenLimit;
 use runtime_domain::model_catalog::ProviderSyncRequest;
 use runtime_domain::provider::ProviderKind;
 use runtime_domain::request_policy::RuntimeRequestPolicy;
@@ -65,6 +66,10 @@ fn ready_model() -> Model {
     model
 }
 
+fn context_limit(value: u32) -> ContextTokenLimit {
+    ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
+}
+
 impl RuntimeCoordinator for TestRuntimeCoordinator {
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         std::mem::take(&mut self.runtime_events)
@@ -97,6 +102,10 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                 self.runtime_events.clear();
                 self.conversation_running = false;
                 self.reset_count += 1;
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
+            RuntimeCommand::CancelContextBudgetSnapshot => {
+                self.runtime_events.clear();
                 Ok(RuntimeCommandReceipt::Accepted)
             }
             RuntimeCommand::TruncateConversation {
@@ -148,7 +157,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                             segments: vec![],
                             total_estimated_tokens: 0,
                             usage: runtime_domain::session::ContextWindowUsagePayload {
-                                limit: 256_000,
+                                limit: context_limit(256_000),
                                 used: 0,
                                 percent: 0.0,
                             },
@@ -260,6 +269,21 @@ fn open_context_budget_effect_dispatch_failure_uses_runtime_internal_error() {
             detail: Some(ref detail),
         }) if detail == "runtime unavailable"
     ));
+}
+
+#[test]
+fn closing_context_budget_dispatches_runtime_cancellation_housekeeping() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.open_context_budget_loading();
+    let effect = model.update(AppEvent::Key(KeyCode::Esc.into()));
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+
+    apply_effect_if_needed_for_test(&mut model, &mut runtime_coordinator, effect);
+
+    assert_eq!(
+        runtime_coordinator.last_command,
+        Some(RuntimeCommand::CancelContextBudgetSnapshot)
+    );
 }
 
 #[test]
@@ -2160,6 +2184,12 @@ fn apply_effect_if_needed_for_test(
     runtime_coordinator: &mut TestRuntimeCoordinator,
     effect: Option<AppEffect>,
 ) {
+    if model.take_context_budget_cancellation_request() {
+        runtime_coordinator
+            .dispatch_runtime_command(RuntimeCommand::CancelContextBudgetSnapshot)
+            .expect("context budget cancel should be accepted in tests");
+    }
+
     match effect {
         Some(AppEffect::RecordMessageHistory { entry_id, text }) => {
             dispatch_record_message_history(model, runtime_coordinator, entry_id, text);

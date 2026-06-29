@@ -1,6 +1,5 @@
 //! Provider-visible conversation assembly.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use provider_protocol::{ConversationItem, Role};
@@ -222,32 +221,30 @@ impl ProviderConversation {
         self.system_prompt.as_deref()
     }
 
-    /// `context_budget_probe_items` 返回 `/context` 估算使用的 provider-visible 项。
+    /// `context_budget_probe_items` 返回 `/context` 估算使用的只读会话快照。
     ///
-    /// 历史项与 pending user message 以借用方式暴露，避免为了探测而克隆整段会话。
-    /// 只有会话级 system prompt 需要临时封装成 `ConversationItem`。
+    /// `/context` 会跨 tokio `spawn_blocking` 边界执行，同步借用最终仍需立刻转成 owned。
+    /// 这里直接构造 `Arc<[ConversationItem]>`，把按需快照的成本表达清楚，避免借用 API
+    /// 与后台输入所有权模型互相打架。
     #[must_use]
-    pub fn context_budget_probe_items(&self) -> Vec<Cow<'_, ConversationItem>> {
+    pub fn context_budget_probe_items(&self) -> Arc<[ConversationItem]> {
         let mut items = Vec::with_capacity(
             self.persisted_history.len()
                 + usize::from(self.system_prompt.is_some())
                 + usize::from(self.pending_user_message.is_some()),
         );
         if let Some(system_prompt) = self.system_prompt.as_deref() {
-            items.push(Cow::Owned(ConversationItem::text(
-                Role::System,
-                system_prompt,
-            )));
+            items.push(ConversationItem::text(Role::System, system_prompt));
         }
         items.extend(
             self.persisted_history
                 .iter()
-                .map(|persisted_item| Cow::Borrowed(&persisted_item.item)),
+                .map(|persisted_item| persisted_item.item.clone()),
         );
         if let Some(pending) = self.pending_user_message.as_ref() {
-            items.push(Cow::Borrowed(pending));
+            items.push(pending.clone());
         }
-        items
+        Arc::from(items)
     }
 
     /// `session_id` 返回当前持久化 session id。

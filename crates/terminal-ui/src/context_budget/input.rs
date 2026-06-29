@@ -28,6 +28,7 @@ impl Model {
             return;
         }
         self.context_budget = None;
+        self.pending_context_budget_cancellation = true;
         self.sync_composer_height();
         self.sync_document_viewport_for_composer_cursor();
     }
@@ -73,6 +74,10 @@ impl Model {
             .is_some_and(|state| state.loading && state.pending_request_id == Some(request_id))
     }
 
+    pub(crate) fn take_context_budget_cancellation_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_context_budget_cancellation)
+    }
+
     #[cfg(test)]
     pub(crate) fn context_budget_pending_request_id_for_test(
         &self,
@@ -81,7 +86,6 @@ impl Model {
             .as_ref()
             .and_then(|state| state.pending_request_id)
     }
-
     pub(crate) fn handle_context_budget_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if self.context_budget.is_none() {
             return OverlayInputResult::Ignored;

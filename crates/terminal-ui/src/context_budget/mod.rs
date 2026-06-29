@@ -7,6 +7,7 @@ mod legend;
 mod render;
 mod segment_colors;
 mod state;
+mod summary;
 
 pub(super) const CONTEXT_BUDGET_SECTION_GAP_ROWS: usize = 1;
 pub(super) const CONTEXT_BUDGET_PANEL_INSET_WIDTH: u16 = 2;

@@ -26,24 +26,28 @@ impl AppRuntimeCoordinator {
             self.context_budget_unknown_provider_event(request_id, selection.provider_id.clone());
             return Ok(RuntimeCommandReceipt::Accepted);
         };
-        let items = self
-            .provider_conversation
-            .context_budget_probe_items()
-            .into_iter()
-            // 后台线程不能借用协调器里的会话历史，这里显式转成 owned 输入。
-            // `/context` 是按需命令，接受一次探测时的 clone，换取主循环不被同步重算阻塞。
-            .map(|item| item.into_owned())
-            .collect();
+        let items = self.provider_conversation.context_budget_probe_items();
         let tool_definitions = context_budget_tool_definitions_for_worker(&self.workspace_tools);
-        self.context_budget_worker.load_snapshot(
+        if let Err(error) = self.context_budget_worker.load_snapshot(
             request_id,
             provider.connection().kind,
             selection.model_id.clone(),
             items,
             tool_definitions,
             self.options.loaded_models.context_limit_for(selection),
-        )?;
+        ) {
+            self.pending_runtime_events
+                .push(RuntimeEvent::ContextBudgetSnapshotLoadFailed {
+                    request_id,
+                    error: error.into_payload(),
+                });
+        }
         Ok(RuntimeCommandReceipt::Accepted)
+    }
+
+    pub(super) fn cancel_context_budget_snapshot_command(&mut self) -> RuntimeCommandReceipt {
+        self.context_budget_worker.cancel_pending();
+        RuntimeCommandReceipt::Accepted
     }
 }
 

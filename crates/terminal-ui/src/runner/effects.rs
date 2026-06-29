@@ -37,6 +37,8 @@ pub(super) fn apply_effect_if_needed(
     external_io: &mut ExternalIoRuntime,
     effect: Option<AppEffect>,
 ) -> Result<()> {
+    dispatch_context_budget_cancellation_if_needed(model, runtime_coordinator);
+
     let Some(effect) = effect else {
         return Ok(());
     };
@@ -168,6 +170,21 @@ pub(super) fn apply_effect_if_needed(
             run_interrupt_current_turn_effect(model, runtime_coordinator);
             Ok(())
         }
+    }
+}
+
+fn dispatch_context_budget_cancellation_if_needed(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) {
+    if !model.take_context_budget_cancellation_request() {
+        return;
+    }
+
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::CancelContextBudgetSnapshot)
+    {
+        model.show_toast(ToastSeverity::Error, message);
     }
 }
 

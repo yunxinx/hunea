@@ -82,7 +82,7 @@ impl AppRuntimeCoordinator {
             model_refresh: ModelRefreshWorker::default(),
             workspace_tools,
             session_store_worker: SessionStoreWorker::new(),
-            context_budget_worker: ContextBudgetWorker::new(),
+            context_budget_worker: ContextBudgetWorker::new().map_err(|error| error.to_string())?,
             pending_runtime_events: Vec::new(),
         })
     }
@@ -121,6 +121,9 @@ impl AppRuntimeCoordinator {
                 request_id,
                 selection,
             } => self.load_context_budget_snapshot_command(request_id, &selection),
+            RuntimeCommand::CancelContextBudgetSnapshot => {
+                Ok(self.cancel_context_budget_snapshot_command())
+            }
             RuntimeCommand::LoadBranchTree { request_id } => self.load_branch_tree(request_id),
             RuntimeCommand::LoadBranchPreview {
                 request_id,
@@ -146,6 +149,7 @@ impl AppRuntimeCoordinator {
                 self.conversation_worker.reset_after_clear();
                 self.provider_conversation.clear();
                 self.model_refresh.reset_after_clear();
+                self.context_budget_worker.cancel_pending();
                 self.workspace_tools =
                     conversation_workspace_tools(&self.options.managed_search_tools);
                 self.pending_runtime_events.clear();

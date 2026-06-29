@@ -3,7 +3,7 @@
 use ratatui::style::Color;
 use runtime_domain::context_budget::SegmentKind;
 
-use super::state::ContextBudgetCategoryKind;
+use super::summary::ContextBudgetCategoryKind;
 use crate::theme::TerminalPalette;
 
 const CONTEXT_BUDGET_SLOT_COUNT: usize = 6;

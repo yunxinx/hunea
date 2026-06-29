@@ -2,7 +2,8 @@ use super::support::*;
 
 #[test]
 fn context_budget_worker_shutdown_stops_accepting_new_commands() {
-    let mut worker = super::super::context_budget_worker::ContextBudgetWorker::new();
+    let mut worker = super::super::context_budget_worker::ContextBudgetWorker::new()
+        .expect("context budget worker should initialize");
 
     worker
         .shutdown()
@@ -18,7 +19,7 @@ fn context_budget_worker_shutdown_stops_accepting_new_commands() {
                 request_id(77),
                 ProviderKind::OpenAiCompatible,
                 "qwen3".to_string(),
-                vec![ConversationItem::text(Role::User, "hello")],
+                std::sync::Arc::from([ConversationItem::text(Role::User, "hello")]),
                 Vec::new(),
                 runtime_domain::context_budget::ContextTokenLimit::try_from(256_000)
                     .expect("fixture limit should be valid"),
@@ -254,5 +255,121 @@ fn context_budget_projection_failure_keeps_structured_error_kind() {
     assert_eq!(
         error_kind,
         runtime_domain::session::ContextBudgetProjectionErrorKind::Protocol
+    );
+}
+
+#[test]
+fn cancel_context_budget_snapshot_stops_background_tracking_and_drops_stale_events() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        loaded_models: conversation_runtime::models::LoadedModelCatalog {
+            catalog: runtime_domain::model_catalog::ModelCatalog::new(vec![
+                runtime_domain::model_catalog::ModelProvider::new(
+                    "local",
+                    ProviderKind::OpenAiCompatible,
+                    "Local",
+                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    runtime_domain::model_catalog::ModelSource::Configured,
+                    vec![runtime_domain::model_catalog::ModelEntry::new(
+                        "qwen3",
+                        None,
+                        runtime_domain::model_catalog::ModelSource::Configured,
+                    )],
+                ),
+            ]),
+            ..conversation_runtime::models::LoadedModelCatalog::default()
+        },
+        ..AppRuntimeOptions::default()
+    });
+    coordinator
+        .provider_conversation
+        .append_items(vec![ConversationItem::text(
+            Role::User,
+            "context budget ".repeat(250_000),
+        )])
+        .expect("fixture items should append");
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id: request_id(43),
+            selection: ModelSelection::new("local", "qwen3"),
+        })
+        .expect("context budget snapshot command should be accepted");
+    assert!(RuntimeCoordinator::has_background_runtime(&coordinator));
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::CancelContextBudgetSnapshot)
+        .expect("cancel context budget command should be accepted");
+
+    assert!(
+        !RuntimeCoordinator::has_background_runtime(&coordinator),
+        "cancel should clear `/context` background tracking immediately"
+    );
+    wait_for_runtime_idle(&mut coordinator);
+}
+
+#[test]
+fn latest_context_budget_request_supersedes_stale_work() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        loaded_models: conversation_runtime::models::LoadedModelCatalog {
+            catalog: runtime_domain::model_catalog::ModelCatalog::new(vec![
+                runtime_domain::model_catalog::ModelProvider::new(
+                    "local",
+                    ProviderKind::OpenAiCompatible,
+                    "Local",
+                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    runtime_domain::model_catalog::ModelSource::Configured,
+                    vec![runtime_domain::model_catalog::ModelEntry::new(
+                        "qwen3",
+                        None,
+                        runtime_domain::model_catalog::ModelSource::Configured,
+                    )],
+                ),
+            ]),
+            ..conversation_runtime::models::LoadedModelCatalog::default()
+        },
+        ..AppRuntimeOptions::default()
+    });
+    coordinator
+        .provider_conversation
+        .append_items(vec![ConversationItem::text(
+            Role::User,
+            "context budget ".repeat(250_000),
+        )])
+        .expect("fixture items should append");
+
+    let first_request_id = request_id(44);
+    let second_request_id = request_id(45);
+    let selection = ModelSelection::new("local", "qwen3");
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id: first_request_id,
+            selection: selection.clone(),
+        })
+        .expect("first context budget snapshot command should be accepted");
+    coordinator
+        .handle_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id: second_request_id,
+            selection,
+        })
+        .expect("second context budget snapshot command should be accepted");
+
+    let mut loaded_request_ids = Vec::new();
+    for _ in 0..100 {
+        for event in RuntimeCoordinator::drain_runtime_events(&mut coordinator) {
+            if let RuntimeEvent::ContextBudgetSnapshotLoaded { request_id, .. } = event {
+                loaded_request_ids.push(request_id);
+            }
+        }
+        if !RuntimeCoordinator::has_background_runtime(&coordinator) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        loaded_request_ids,
+        vec![second_request_id],
+        "only the latest `/context` request should complete after stale work is superseded"
     );
 }

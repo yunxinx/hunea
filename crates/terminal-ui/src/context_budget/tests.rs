@@ -1,6 +1,6 @@
 use crossterm::event::KeyCode;
 use ratatui::style::Color;
-use runtime_domain::session::ContextWindowUsagePayload;
+use runtime_domain::{context_budget::ContextTokenLimit, session::ContextWindowUsagePayload};
 
 use crate::{
     Model, ModelOptions, StartupBannerOptions,
@@ -20,6 +20,10 @@ fn ready_model() -> Model {
     Model::new_with_options(StartupBannerOptions::default(), ModelOptions::default())
 }
 
+fn limit(value: u32) -> ContextTokenLimit {
+    ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
+}
+
 #[test]
 fn context_command_emits_open_effect() {
     let mut model = ready_model();
@@ -33,11 +37,11 @@ fn context_command_emits_open_effect() {
 
 #[test]
 fn context_overlay_header_shows_documented_absolute_limit() {
-    use crate::context_budget::state::context_usage_summary;
+    use crate::context_budget::summary::context_usage_summary;
     let text = context_usage_summary(
         "local/qwen3",
         ContextWindowUsagePayload {
-            limit: 256_000,
+            limit: limit(256_000),
             used: 1_200,
             percent: 0.5,
         },
@@ -196,7 +200,7 @@ fn context_panel_summary_row_keeps_full_model_usage_text_when_width_allows() {
             segments: context_budget_snapshot().segments,
             total_estimated_tokens: 1_200,
             usage: ContextWindowUsagePayload {
-                limit: 256_000,
+                limit: limit(256_000),
                 used: 1_200,
                 percent: 0.5,
             },
@@ -372,7 +376,7 @@ fn context_budget_snapshot() -> ContextBudgetSnapshotPayload {
         ],
         total_estimated_tokens: 540,
         usage: ContextWindowUsagePayload {
-            limit: 1_280,
+            limit: limit(1_280),
             used: 540,
             percent: 42.2,
         },

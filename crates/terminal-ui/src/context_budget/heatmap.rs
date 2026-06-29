@@ -11,7 +11,7 @@ use super::{
     CONTEXT_BUDGET_HEATMAP_CELL_WIDTH, CONTEXT_BUDGET_HEATMAP_GRID_COLUMNS,
     CONTEXT_BUDGET_HEATMAP_GRID_ROWS,
     segment_colors::{context_budget_color_for_category, context_budget_empty_color},
-    state::{ContextBudgetCategoryKind, aggregated_category_totals},
+    summary::{ContextBudgetCategoryKind, aggregated_category_totals},
 };
 use crate::theme::TerminalPalette;
 
@@ -200,7 +200,7 @@ pub(super) fn occupied_heatmap_cells(
     total_cells: usize,
     segment_count: usize,
 ) -> usize {
-    let limit = snapshot.usage.limit;
+    let limit = snapshot.usage.limit.get();
     let used = snapshot.usage.used;
     if total_cells == 0 || used == 0 {
         return 0;
@@ -261,7 +261,7 @@ fn padded_blank_line(width: usize) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::context_budget::CONTEXT_BUDGET_HEATMAP_WIDTH;
-    use runtime_domain::context_budget::SegmentKind;
+    use runtime_domain::context_budget::{ContextTokenLimit, SegmentKind};
     use runtime_domain::session::{ContextBudgetSegmentPayload, ContextWindowUsagePayload};
 
     use crate::theme::default_palette;
@@ -271,6 +271,10 @@ mod tests {
             kind,
             estimated_tokens: tokens,
         }
+    }
+
+    fn limit(value: u32) -> ContextTokenLimit {
+        ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
     }
 
     #[test]
@@ -329,7 +333,7 @@ mod tests {
             ],
             total_estimated_tokens: 220,
             usage: ContextWindowUsagePayload {
-                limit: 256_000,
+                limit: limit(256_000),
                 used: 220,
                 percent: 0.1,
             },
@@ -362,7 +366,7 @@ mod tests {
             }],
             total_estimated_tokens: 10,
             usage: ContextWindowUsagePayload {
-                limit: 80,
+                limit: limit(80),
                 used: 10,
                 percent: 12.5,
             },
@@ -417,7 +421,7 @@ mod tests {
             }],
             total_estimated_tokens: 10,
             usage: ContextWindowUsagePayload {
-                limit: 80,
+                limit: limit(80),
                 used: 10,
                 percent: 12.5,
             },
@@ -482,7 +486,7 @@ mod tests {
             segments: Vec::new(),
             total_estimated_tokens: 0,
             usage: ContextWindowUsagePayload {
-                limit: 1_000,
+                limit: limit(1_000),
                 used: 421,
                 percent: 42.1,
             },

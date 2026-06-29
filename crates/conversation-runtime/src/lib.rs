@@ -5,7 +5,7 @@ pub mod models;
 
 pub use context_budget::{
     ContextBudgetError, ContextBudgetProbe, build_context_budget_snapshot,
-    context_budget_tool_definitions,
+    build_context_budget_snapshot_with_cancellation, context_budget_tool_definitions,
 };
 pub use conversation::{ConversationEvent, ConversationWorker};
 pub use conversation::{

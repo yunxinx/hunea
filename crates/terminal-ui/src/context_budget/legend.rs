@@ -8,7 +8,7 @@ use super::{
     CONTEXT_BUDGET_LEGEND_SWATCH_GAP, CONTEXT_BUDGET_LEGEND_SWATCH_WIDTH,
     CONTEXT_BUDGET_SECTION_GAP_ROWS,
     segment_colors::context_budget_color_for_category,
-    state::{
+    summary::{
         ContextBudgetCategoryKind, build_legend_entries, context_usage_summary,
         format_compact_tokens, legend_share_total, segment_share_percent,
     },
@@ -76,7 +76,7 @@ fn build_legend_summary_row_line(
 
 fn build_legend_row_line(
     row_width: usize,
-    entry: &super::state::ContextBudgetLegendEntry,
+    entry: &super::summary::ContextBudgetLegendEntry,
     total_tokens: usize,
     palette: TerminalPalette,
 ) -> Line<'static> {
@@ -134,7 +134,7 @@ fn legend_symbol(kind: ContextBudgetCategoryKind) -> &'static str {
 }
 
 fn legend_detail_text(
-    entry: &super::state::ContextBudgetLegendEntry,
+    entry: &super::summary::ContextBudgetLegendEntry,
     total_tokens: usize,
 ) -> String {
     let percent = segment_share_percent(entry.estimated_tokens, total_tokens);
@@ -166,8 +166,12 @@ mod tests {
     use super::*;
     use crate::theme::default_palette;
     use ratatui::buffer::Buffer;
-    use runtime_domain::context_budget::SegmentKind;
+    use runtime_domain::context_budget::{ContextTokenLimit, SegmentKind};
     use runtime_domain::session::ContextBudgetSegmentPayload;
+
+    fn limit(value: u32) -> ContextTokenLimit {
+        ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
+    }
 
     #[test]
     fn legend_keeps_stable_source_bucket_order_for_non_zero_categories() {
@@ -182,7 +186,7 @@ mod tests {
             ],
             total_estimated_tokens: 540,
             usage: runtime_domain::session::ContextWindowUsagePayload {
-                limit: 1_000,
+                limit: limit(1_000),
                 used: 540,
                 percent: 54.0,
             },
@@ -241,7 +245,7 @@ mod tests {
             ],
             total_estimated_tokens: 400,
             usage: runtime_domain::session::ContextWindowUsagePayload {
-                limit: 1_000,
+                limit: limit(1_000),
                 used: 400,
                 percent: 40.0,
             },
@@ -281,7 +285,7 @@ mod tests {
             segments: vec![segment(SegmentKind::AssistantMessage, 400)],
             total_estimated_tokens: 400,
             usage: runtime_domain::session::ContextWindowUsagePayload {
-                limit: 400,
+                limit: limit(400),
                 used: 400,
                 percent: 100.0,
             },
@@ -319,7 +323,7 @@ mod tests {
             segments: vec![segment(SegmentKind::AssistantMessage, 400)],
             total_estimated_tokens: 400,
             usage: runtime_domain::session::ContextWindowUsagePayload {
-                limit: 1_000,
+                limit: limit(1_000),
                 used: 400,
                 percent: 40.0,
             },

@@ -35,6 +35,7 @@ pub enum RuntimeCommand {
         request_id: SessionLoadRequestId,
         selection: crate::model_catalog::ModelSelection,
     },
+    CancelContextBudgetSnapshot,
     LoadBranchTree {
         request_id: SessionLoadRequestId,
     },
@@ -115,6 +116,7 @@ impl RuntimeCommand {
             | Self::LoadEntryTree { .. }
             | Self::LoadCopyPickerTree { .. }
             | Self::LoadContextBudgetSnapshot { .. }
+            | Self::CancelContextBudgetSnapshot
             | Self::LoadBranchTree { .. }
             | Self::LoadBranchPreview { .. }
             | Self::SwitchBranch { .. }

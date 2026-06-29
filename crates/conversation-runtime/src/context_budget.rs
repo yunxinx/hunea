@@ -90,6 +90,31 @@ impl<'a> ContextBudgetProbe<'a> {
 pub fn build_context_budget_snapshot(
     probe: ContextBudgetProbe<'_>,
 ) -> Result<ContextBudgetSnapshot, ContextBudgetError> {
+    build_context_budget_snapshot_with_cancellation(probe, || false)?.ok_or_else(|| {
+        ContextBudgetError::Projection {
+            failure: ContextBudgetProjectionFailure {
+                kind: ContextBudgetProjectionErrorKind::Protocol,
+                status: None,
+                detail: Some("context budget snapshot cancelled unexpectedly".to_string()),
+            },
+            source: provider_protocol::ProviderError::Protocol(
+                "context budget snapshot cancelled unexpectedly".to_string(),
+            ),
+        }
+    })
+}
+
+/// Uses the same provider-specific projection path as the real provider request and allows
+/// cooperative cancellation between the expensive projection phases.
+#[must_use = "building a snapshot can fail and the result must be handled"]
+pub fn build_context_budget_snapshot_with_cancellation(
+    probe: ContextBudgetProbe<'_>,
+    should_cancel: impl Fn() -> bool,
+) -> Result<Option<ContextBudgetSnapshot>, ContextBudgetError> {
+    if should_cancel() {
+        return Ok(None);
+    }
+
     let projection = match probe.provider_kind {
         ProviderKind::OpenAiCompatible | ProviderKind::OpenAi => {
             prompt_request_projection_from_parts(&probe.items, probe.tool_definitions)
@@ -99,6 +124,10 @@ pub fn build_context_budget_snapshot(
             return Err(ContextBudgetError::UnsupportedProvider { provider_kind });
         }
     };
+
+    if should_cancel() {
+        return Ok(None);
+    }
 
     let message_texts = projection
         .serialized_message_texts()
@@ -111,6 +140,9 @@ pub fn build_context_budget_snapshot(
     for (stack_order, (item, projection_text)) in
         probe.items.iter().zip(message_texts.iter()).enumerate()
     {
+        if should_cancel() {
+            return Ok(None);
+        }
         let kind = segment_kind(item.as_ref());
         segments.push(ContextSegment {
             kind,
@@ -120,6 +152,9 @@ pub fn build_context_budget_snapshot(
     }
 
     if let Some(tools_text) = tools_text.as_deref() {
+        if should_cancel() {
+            return Ok(None);
+        }
         segments.push(ContextSegment {
             kind: SegmentKind::ToolDefinitions,
             stack_order: segments.len(),
@@ -134,12 +169,12 @@ pub fn build_context_budget_snapshot(
     let usage: ContextWindowUsage =
         context_window_usage(total_estimated_tokens, probe.context_limit);
 
-    Ok(ContextBudgetSnapshot {
+    Ok(Some(ContextBudgetSnapshot {
         model_id: probe.model_id.to_string(),
         segments,
         total_estimated_tokens,
         usage,
-    })
+    }))
 }
 
 impl ContextBudgetError {

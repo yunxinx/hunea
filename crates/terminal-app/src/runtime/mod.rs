@@ -1,4 +1,5 @@
 mod context_budget_command;
+mod context_budget_worker;
 mod conversation_commands;
 mod event_mapping;
 mod managed_search_authorization;
@@ -28,6 +29,7 @@ use terminal_ui::RuntimeCoordinator;
 use tool_runtime::{ToolExecutorRegistry, builtin::ManagedSearchToolConfig};
 
 use self::{
+    context_budget_worker::ContextBudgetWorker,
     event_mapping::{
         runtime_event_from_conversation_event, should_defer_runtime_event_for_render_barrier,
     },
@@ -56,6 +58,7 @@ pub(crate) struct AppRuntimeCoordinator {
     model_refresh: ModelRefreshWorker,
     workspace_tools: ToolExecutorRegistry,
     session_store_worker: SessionStoreWorker,
+    context_budget_worker: ContextBudgetWorker,
     pending_runtime_events: Vec<RuntimeEvent>,
 }
 
@@ -79,6 +82,7 @@ impl AppRuntimeCoordinator {
             model_refresh: ModelRefreshWorker::default(),
             workspace_tools,
             session_store_worker: SessionStoreWorker::new(),
+            context_budget_worker: ContextBudgetWorker::new(),
             pending_runtime_events: Vec::new(),
         })
     }
@@ -303,6 +307,7 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
         }
 
         let mut events = Vec::new();
+        self.drain_context_budget_events_into(&mut events);
         self.drain_session_store_events_into(&mut events);
         loop {
             let target = self.conversation_worker.current_target().cloned();
@@ -347,6 +352,7 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
         self.conversation_worker.is_running()
             || self.model_refresh.is_running()
             || self.session_store_worker.has_pending_work()
+            || self.context_budget_worker.has_pending_work()
     }
 
     fn dispatch_runtime_command(
@@ -413,6 +419,10 @@ impl AppRuntimeCoordinator {
                 }
             }
         }
+    }
+
+    fn drain_context_budget_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
+        events.extend(self.context_budget_worker.drain_events());
     }
 
     fn reconcile_conversation_updates(&mut self) {

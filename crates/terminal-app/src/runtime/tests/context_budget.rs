@@ -1,6 +1,62 @@
 use super::support::*;
 
 #[test]
+fn context_budget_snapshot_dispatches_to_background_worker() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        loaded_models: conversation_runtime::models::LoadedModelCatalog {
+            catalog: runtime_domain::model_catalog::ModelCatalog::new(vec![
+                runtime_domain::model_catalog::ModelProvider::new(
+                    "local",
+                    ProviderKind::OpenAiCompatible,
+                    "Local",
+                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    runtime_domain::model_catalog::ModelSource::Configured,
+                    vec![runtime_domain::model_catalog::ModelEntry::new(
+                        "qwen3",
+                        None,
+                        runtime_domain::model_catalog::ModelSource::Configured,
+                    )],
+                ),
+            ]),
+            ..conversation_runtime::models::LoadedModelCatalog::default()
+        },
+        ..AppRuntimeOptions::default()
+    });
+    let selection = ModelSelection::new("local", "qwen3");
+    let request_id = request_id(39);
+
+    let receipt = coordinator
+        .handle_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id,
+            selection,
+        })
+        .expect("context budget snapshot command should be accepted");
+
+    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
+    assert!(
+        RuntimeCoordinator::has_background_runtime(&coordinator),
+        "context budget snapshot should be computed through background runtime work"
+    );
+
+    let payload = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::ContextBudgetSnapshotLoaded {
+                request_id: actual_request_id,
+                payload,
+            } if actual_request_id == request_id => Some(payload),
+            _ => None,
+        },
+        "context budget snapshot payload",
+    );
+
+    assert!(
+        payload.total_estimated_tokens > 0,
+        "background snapshot should eventually produce the context payload"
+    );
+}
+
+#[test]
 fn context_budget_snapshot_includes_provider_visible_tool_definitions() {
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         loaded_models: conversation_runtime::models::LoadedModelCatalog {

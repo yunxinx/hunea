@@ -10,12 +10,9 @@ use conversation_runtime::context_budget::{
 };
 use conversation_runtime::{ConversationItem, ToolDefinition};
 use runtime_domain::{
-    context_budget::{ContextBudgetSnapshot, ContextTokenLimit, ContextWindowUsage},
+    context_budget::ContextTokenLimit,
     provider::ProviderKind,
-    session::{
-        ContextBudgetLoadErrorPayload, ContextBudgetSegmentPayload, ContextBudgetSnapshotPayload,
-        ContextWindowUsagePayload, RuntimeEvent, SessionLoadRequestId,
-    },
+    session::{ContextBudgetLoadErrorPayload, RuntimeEvent, SessionLoadRequestId},
 };
 use tool_runtime::ToolExecutorRegistry;
 use tracing::debug;
@@ -161,7 +158,7 @@ fn handle_context_budget_command(command: ContextBudgetWorkerCommand) -> Runtime
     match build_context_budget_snapshot(probe) {
         Ok(snapshot) => RuntimeEvent::ContextBudgetSnapshotLoaded {
             request_id,
-            payload: snapshot_to_payload(snapshot),
+            payload: snapshot.into(),
         },
         Err(error) => RuntimeEvent::ContextBudgetSnapshotLoadFailed {
             request_id,
@@ -174,31 +171,6 @@ pub(super) fn context_budget_tool_definitions_for_worker(
     executor: &ToolExecutorRegistry,
 ) -> Vec<ToolDefinition> {
     context_budget_tool_definitions(executor)
-}
-
-fn snapshot_to_payload(snapshot: ContextBudgetSnapshot) -> ContextBudgetSnapshotPayload {
-    ContextBudgetSnapshotPayload {
-        model_id: snapshot.model_id,
-        total_estimated_tokens: snapshot.total_estimated_tokens,
-        usage: usage_to_payload(snapshot.usage),
-        segments: snapshot
-            .segments
-            .into_iter()
-            .map(|segment| ContextBudgetSegmentPayload {
-                kind: segment.kind,
-                stack_order: segment.stack_order,
-                estimated_tokens: segment.estimated_tokens,
-            })
-            .collect(),
-    }
-}
-
-fn usage_to_payload(usage: ContextWindowUsage) -> ContextWindowUsagePayload {
-    ContextWindowUsagePayload {
-        limit: usage.limit.get(),
-        used: usage.used,
-        percent: usage.percent,
-    }
 }
 
 fn context_budget_load_error_payload(

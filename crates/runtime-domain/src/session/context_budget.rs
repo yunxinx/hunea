@@ -1,4 +1,6 @@
-use crate::context_budget::SegmentKind;
+use crate::context_budget::{
+    ContextBudgetSnapshot, ContextSegment, ContextWindowUsage, SegmentKind,
+};
 use crate::provider::ProviderKind;
 
 /// Context budget snapshot payload for the `/context` overlay.
@@ -26,6 +28,37 @@ pub struct ContextWindowUsagePayload {
     pub percent: f32,
 }
 
+impl From<ContextBudgetSnapshot> for ContextBudgetSnapshotPayload {
+    fn from(snapshot: ContextBudgetSnapshot) -> Self {
+        Self {
+            model_id: snapshot.model_id,
+            segments: snapshot.segments.into_iter().map(Into::into).collect(),
+            total_estimated_tokens: snapshot.total_estimated_tokens,
+            usage: snapshot.usage.into(),
+        }
+    }
+}
+
+impl From<ContextSegment> for ContextBudgetSegmentPayload {
+    fn from(segment: ContextSegment) -> Self {
+        Self {
+            kind: segment.kind,
+            stack_order: segment.stack_order,
+            estimated_tokens: segment.estimated_tokens,
+        }
+    }
+}
+
+impl From<ContextWindowUsage> for ContextWindowUsagePayload {
+    fn from(usage: ContextWindowUsage) -> Self {
+        Self {
+            limit: usage.limit.get(),
+            used: usage.used,
+            percent: usage.percent,
+        }
+    }
+}
+
 /// Stable error category for context budget projection failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextBudgetProjectionErrorKind {
@@ -51,4 +84,87 @@ pub enum ContextBudgetLoadErrorPayload {
         status: Option<u16>,
         detail: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context_budget::{
+        ContextBudgetSnapshot, ContextSegment, ContextTokenLimit, ContextWindowUsage,
+    };
+
+    fn limit(value: u32) -> ContextTokenLimit {
+        ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
+    }
+
+    #[test]
+    fn snapshot_payload_conversion_preserves_all_snapshot_fields() {
+        let payload: ContextBudgetSnapshotPayload = ContextBudgetSnapshot {
+            model_id: "qwen3".to_string(),
+            segments: vec![
+                ContextSegment {
+                    kind: SegmentKind::System,
+                    stack_order: 0,
+                    estimated_tokens: 128,
+                },
+                ContextSegment {
+                    kind: SegmentKind::ToolDefinitions,
+                    stack_order: 1,
+                    estimated_tokens: 64,
+                },
+            ],
+            total_estimated_tokens: 192,
+            usage: ContextWindowUsage {
+                limit: limit(256_000),
+                used: 192,
+                percent: 0.075,
+            },
+        }
+        .into();
+
+        assert_eq!(payload.model_id, "qwen3");
+        assert_eq!(payload.total_estimated_tokens, 192);
+        assert_eq!(
+            payload.segments,
+            vec![
+                ContextBudgetSegmentPayload {
+                    kind: SegmentKind::System,
+                    stack_order: 0,
+                    estimated_tokens: 128,
+                },
+                ContextBudgetSegmentPayload {
+                    kind: SegmentKind::ToolDefinitions,
+                    stack_order: 1,
+                    estimated_tokens: 64,
+                },
+            ]
+        );
+        assert_eq!(
+            payload.usage,
+            ContextWindowUsagePayload {
+                limit: 256_000,
+                used: 192,
+                percent: 0.075,
+            }
+        );
+    }
+
+    #[test]
+    fn usage_payload_conversion_uses_raw_limit_value() {
+        let payload: ContextWindowUsagePayload = ContextWindowUsage {
+            limit: limit(128_000),
+            used: 42_000,
+            percent: 32.8125,
+        }
+        .into();
+
+        assert_eq!(
+            payload,
+            ContextWindowUsagePayload {
+                limit: 128_000,
+                used: 42_000,
+                percent: 32.8125,
+            }
+        );
+    }
 }

@@ -51,6 +51,7 @@ pub struct ContextBudgetProbe<'a> {
 
 impl<'a> ContextBudgetProbe<'a> {
     /// `new` 使用显式 provider 输入构造 context budget 估算请求。
+    #[must_use]
     pub fn new(
         provider_kind: ProviderKind,
         model_id: &'a str,
@@ -68,6 +69,7 @@ impl<'a> ContextBudgetProbe<'a> {
     }
 
     /// `from_prepared_request` 使用已准备好的 turn request 构造估算请求。
+    #[must_use]
     pub fn from_prepared_request(
         request: &'a PreparedConversationRequest,
         tool_definitions: &'a [ToolDefinition],
@@ -84,6 +86,7 @@ impl<'a> ContextBudgetProbe<'a> {
 }
 
 /// Uses the same provider-specific projection path as the real provider request.
+#[must_use = "building a snapshot can fail and the result must be handled"]
 pub fn build_context_budget_snapshot(
     probe: ContextBudgetProbe<'_>,
 ) -> Result<ContextBudgetSnapshot, ContextBudgetError> {

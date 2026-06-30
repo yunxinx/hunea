@@ -1,8 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use runtime_domain::prompt_assembly::{
-    PromptAssemblyLifecycle, PromptAssemblyManagerSnapshot, PromptAssemblySnapshot,
-    PromptPreludeSnapshot, PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin,
-    PromptSourceStatus, ResolvedPromptSource,
+    PromptAssemblyDiscoveredSkill, PromptAssemblyLifecycle, PromptAssemblyManagerSnapshot,
+    PromptAssemblyMoveDirection, PromptAssemblySnapshot, PromptPreludeSnapshot,
+    PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
+    ResolvedPromptSource,
 };
 
 use crate::{
@@ -90,6 +91,13 @@ fn ready_model() -> Model {
                 snapshot: prompt_snapshot(),
                 prelude: PromptPreludeSnapshot::default(),
                 sources: Vec::new(),
+                discovered_skills: vec![PromptAssemblyDiscoveredSkill {
+                    skill_name: "repo-bootstrap".to_string(),
+                    title: "repo-bootstrap".to_string(),
+                    description: "Bootstrap repo".to_string(),
+                    origin: PromptSourceOrigin::Project,
+                    body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
+                }],
                 builtin_core_system_body: "builtin core".to_string(),
                 global_core_system_override: None,
                 project_core_system_override: None,
@@ -165,6 +173,32 @@ fn tab_switches_inactive_family_filter() {
 }
 
 #[test]
+fn skills_tab_uses_discovered_skill_inventory() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    assert_eq!(
+        model
+            .prompt_overlay
+            .as_ref()
+            .map(|state| state.inactive_tab),
+        Some(PromptOverlayInactiveTab::LongLivedSkills)
+    );
+    assert_eq!(
+        model.prompt_overlay_inactive_source_count(PromptOverlayInactiveTab::LongLivedSkills),
+        1
+    );
+    assert_eq!(
+        model.prompt_assembly.discovered_skills[0].skill_name,
+        "repo-bootstrap"
+    );
+}
+
+#[test]
 fn inactive_rows_preserve_disabled_missing_shadowed_grouping() {
     let model = ready_model();
     let filtered = model.prompt_overlay_inactive_sources_for_tab(PromptOverlayInactiveTab::All);
@@ -210,6 +244,7 @@ fn space_opens_prompt_source_preview() {
             kind: PromptSourceKind::CoreSystemPrompt,
             title: "Core system prompt".to_string(),
             origin: Some(PromptSourceOrigin::Builtin),
+            resolved_body_origin: Some(PromptSourceOrigin::Builtin),
             body: Some("# Core\n\nHello".to_string()),
         },
     ];
@@ -242,6 +277,7 @@ fn prompt_runtime_update_replaces_manager_snapshot() {
                 snapshot: next_snapshot,
                 prelude: PromptPreludeSnapshot::default(),
                 sources: Vec::new(),
+                discovered_skills: Vec::new(),
                 builtin_core_system_body: "builtin core".to_string(),
                 global_core_system_override: None,
                 project_core_system_override: Some("project core".to_string()),
@@ -265,9 +301,81 @@ fn delete_selected_extra_prompt_emits_mutation_effect() {
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::DeleteExtraPrompt {
+            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::RemovePromptSource {
                 scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                kind: PromptSourceKind::ExtraPrompt,
                 reference_id: "disabled-extra".to_string(),
+            },
+        })
+    );
+}
+
+#[test]
+fn discovered_skill_activation_emits_project_scoped_mutation() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('i'))),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation:
+                runtime_domain::prompt_assembly::PromptAssemblyMutation::ActivateLongLivedSkill {
+                    scope:
+                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                    skill_name: "repo-bootstrap".to_string(),
+                },
+        })
+    );
+}
+
+#[test]
+fn removing_active_long_lived_skill_emits_generic_remove_mutation() {
+    let mut model = ready_model();
+    model
+        .prompt_assembly
+        .snapshot
+        .active_sources
+        .push(prompt_source(
+            "code-review",
+            "code-review",
+            PromptSourceKind::LongLivedSkill,
+            Some(PromptSourceOrigin::Project),
+            PromptSourceStatus::Active { order: 2 },
+        ));
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::RemovePromptSource {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                kind: PromptSourceKind::LongLivedSkill,
+                reference_id: "code-review".to_string(),
+            },
+        })
+    );
+}
+
+#[test]
+fn moving_active_source_emits_reorder_mutation() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('J'))),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveActiveSource {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                kind: PromptSourceKind::ExtraPrompt,
+                reference_id: "repo-rules".to_string(),
+                direction: PromptAssemblyMoveDirection::Down,
             },
         })
     );

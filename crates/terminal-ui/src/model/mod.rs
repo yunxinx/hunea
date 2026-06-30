@@ -189,6 +189,7 @@ impl Model {
                     snapshot: resolve_prompt_assembly(&PromptAssemblyInput::default()),
                     prelude: PromptPreludeSnapshot::default(),
                     sources: Vec::new(),
+                    discovered_skills: Vec::new(),
                     builtin_core_system_body: String::new(),
                     global_core_system_override: None,
                     project_core_system_override: None,

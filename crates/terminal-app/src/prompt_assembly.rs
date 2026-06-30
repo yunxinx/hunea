@@ -12,10 +12,11 @@ use runtime_domain::prompt_assembly::persistence::{
     load_project_prompt_assembly_state, save_project_prompt_assembly_state,
 };
 use runtime_domain::prompt_assembly::{
-    CoreSystemPromptInput, PromptAssemblyEditorTarget, PromptAssemblyInput,
-    PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource, PromptAssemblyMutation,
-    PromptPreludeSection, PromptPreludeSnapshot, PromptSourceCandidate, PromptSourceKind,
-    PromptSourceOrigin, PromptSourceStatus, resolve_prompt_assembly,
+    CoreSystemPromptInput, PromptAssemblyDiscoveredSkill, PromptAssemblyEditorTarget,
+    PromptAssemblyInput, PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource,
+    PromptAssemblyMoveDirection, PromptAssemblyMutation, PromptPreludeSection,
+    PromptPreludeSnapshot, PromptSourceCandidate, PromptSourceKind, PromptSourceOrigin,
+    PromptSourceStatus, resolve_prompt_assembly,
 };
 use session_store::SessionStore;
 
@@ -36,6 +37,12 @@ struct DiscoveredSkill {
 #[derive(Debug, Clone)]
 struct PromptCandidateBody {
     body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PromptEntryAddress {
+    scope: PromptAssemblyScope,
+    index: usize,
 }
 
 pub(crate) fn load_initial_prompt_assembly(
@@ -117,7 +124,21 @@ fn resolve_prompt_assembly_manager_snapshot(
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
 ) -> PromptAssemblyManagerSnapshot {
-    let discovered_skills = discover_skills(work_dir);
+    resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
+        work_dir,
+        global_state,
+        project_state,
+        None,
+    )
+}
+
+fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
+    work_dir: &Path,
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+    global_skill_root_override: Option<&Path>,
+) -> PromptAssemblyManagerSnapshot {
+    let discovered_skills = discover_skills(work_dir, global_skill_root_override);
     let extra_prompt_bodies = indexed_extra_prompt_bodies(global_state, project_state);
     let skills_by_name = discovered_skills
         .iter()
@@ -153,6 +174,7 @@ fn resolve_prompt_assembly_manager_snapshot(
         kind: PromptSourceKind::CoreSystemPrompt,
         title: "Core system prompt".to_string(),
         origin: Some(resolve_core_system_origin(global_state, project_state)),
+        resolved_body_origin: Some(resolve_core_system_origin(global_state, project_state)),
         body: Some(resolved_core_system_body(global_state, project_state)),
     }];
     sources.extend(materialized_sources_for_state(
@@ -202,6 +224,11 @@ fn resolve_prompt_assembly_manager_snapshot(
         snapshot,
         prelude: PromptPreludeSnapshot { sections },
         sources,
+        discovered_skills: discovered_skill_inventory(
+            &discovered_skills,
+            global_state,
+            project_state,
+        ),
         builtin_core_system_body: BUILTIN_CORE_SYSTEM_PROMPT.to_string(),
         global_core_system_override: global_state.core_system_override.clone(),
         project_core_system_override: project_state.core_system_override.clone(),
@@ -217,6 +244,10 @@ fn apply_mutation_to_scope_states(
     match mutation {
         PromptAssemblyMutation::SaveEditorTarget { target, content } => {
             apply_save_editor_target(work_dir, global_state, project_state, target, content)
+        }
+        PromptAssemblyMutation::ActivateLongLivedSkill { scope, skill_name } => {
+            activate_long_lived_skill(global_state, project_state, scope, &skill_name);
+            Ok(())
         }
         PromptAssemblyMutation::CreateExtraPrompt { scope, content } => {
             let state = scope_state_mut(global_state, project_state, scope);
@@ -253,6 +284,31 @@ fn apply_mutation_to_scope_states(
                 .retain(|prompt| prompt.reference_id != reference_id);
             Ok(())
         }
+        PromptAssemblyMutation::RemovePromptSource {
+            scope,
+            kind,
+            reference_id,
+        } => {
+            remove_prompt_source(
+                scope_state_mut(global_state, project_state, scope),
+                kind,
+                &reference_id,
+            );
+            Ok(())
+        }
+        PromptAssemblyMutation::MoveActiveSource {
+            scope,
+            kind,
+            reference_id,
+            direction,
+        } => move_active_source(
+            global_state,
+            project_state,
+            scope,
+            kind,
+            &reference_id,
+            direction,
+        ),
         PromptAssemblyMutation::RestoreCoreSystemOverride { scope } => {
             scope_state_mut(global_state, project_state, scope).core_system_override = None;
             Ok(())
@@ -311,7 +367,7 @@ fn apply_save_editor_target(
             Ok(())
         }
         PromptAssemblyEditorTarget::SkillFile { skill_name, origin } => {
-            let discovered = discover_skills(work_dir);
+            let discovered = discover_skills(work_dir, None);
             let skill = discovered
                 .iter()
                 .find(|skill| skill.name == skill_name && skill.origin == origin)
@@ -363,6 +419,7 @@ fn materialized_sources_for_state(
             kind: entry.kind,
             title: entry.title.clone(),
             origin,
+            resolved_body_origin: resolved_body_origin_for_entry(entry, skills_by_name),
             body: body_for_entry(entry, state.scope, extra_prompt_bodies, skills_by_name),
         })
         .collect()
@@ -441,6 +498,18 @@ fn body_for_entry(
             .get(&entry.reference_id)
             .map(format_long_lived_skill_body),
         PromptSourceKind::CoreSystemPrompt => None,
+    }
+}
+
+fn resolved_body_origin_for_entry(
+    entry: &PersistedPromptAssemblyEntry,
+    skills_by_name: &HashMap<String, DiscoveredSkill>,
+) -> Option<PromptSourceOrigin> {
+    match entry.kind {
+        PromptSourceKind::LongLivedSkill => skills_by_name
+            .get(&entry.reference_id)
+            .map(|skill| skill.origin),
+        _ => None,
     }
 }
 
@@ -564,7 +633,211 @@ fn next_requested_order(entries: &[PersistedPromptAssemblyEntry]) -> u16 {
         .saturating_add(10)
 }
 
-fn discover_skills(work_dir: &Path) -> Vec<DiscoveredSkill> {
+fn activate_long_lived_skill(
+    global_state: &mut PromptAssemblyScopeState,
+    project_state: &mut PromptAssemblyScopeState,
+    scope: PromptAssemblyScope,
+    skill_name: &str,
+) {
+    let state = scope_state_mut(global_state, project_state, scope);
+    let next_order = next_requested_order(&state.entries);
+    if let Some(entry) = state.entries.iter_mut().find(|entry| {
+        entry.kind == PromptSourceKind::LongLivedSkill && entry.reference_id == skill_name
+    }) {
+        entry.enabled = true;
+        if entry.requested_order.is_none() {
+            entry.requested_order = Some(next_order);
+        }
+        return;
+    }
+
+    state.entries.push(PersistedPromptAssemblyEntry {
+        reference_id: skill_name.to_string(),
+        kind: PromptSourceKind::LongLivedSkill,
+        title: skill_name.to_string(),
+        enabled: true,
+        requested_order: Some(next_order),
+    });
+}
+
+fn remove_prompt_source(
+    state: &mut PromptAssemblyScopeState,
+    kind: PromptSourceKind,
+    reference_id: &str,
+) {
+    state
+        .entries
+        .retain(|entry| !(entry.kind == kind && entry.reference_id == reference_id));
+}
+
+fn move_active_source(
+    global_state: &mut PromptAssemblyScopeState,
+    project_state: &mut PromptAssemblyScopeState,
+    scope: PromptAssemblyScope,
+    kind: PromptSourceKind,
+    reference_id: &str,
+    direction: PromptAssemblyMoveDirection,
+) -> Result<()> {
+    let Some(current) = find_entry_address(global_state, project_state, scope, kind, reference_id)
+    else {
+        return Ok(());
+    };
+    let ordered = ordered_non_core_entry_addresses(global_state, project_state);
+    let Some(position) = ordered.iter().position(|address| *address == current) else {
+        return Ok(());
+    };
+    let neighbor_position = match direction {
+        PromptAssemblyMoveDirection::Up => position.checked_sub(1),
+        PromptAssemblyMoveDirection::Down => (position + 1 < ordered.len()).then_some(position + 1),
+    };
+    let Some(neighbor_position) = neighbor_position else {
+        return Ok(());
+    };
+    let neighbor = ordered[neighbor_position];
+
+    let current_order = entry_requested_order(global_state, project_state, current);
+    let neighbor_order = entry_requested_order(global_state, project_state, neighbor);
+    set_entry_requested_order(global_state, project_state, current, neighbor_order);
+    set_entry_requested_order(global_state, project_state, neighbor, current_order);
+    normalize_requested_orders(global_state, project_state);
+    Ok(())
+}
+
+fn find_entry_address(
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+    scope: PromptAssemblyScope,
+    kind: PromptSourceKind,
+    reference_id: &str,
+) -> Option<PromptEntryAddress> {
+    let state = match scope {
+        PromptAssemblyScope::Global => global_state,
+        PromptAssemblyScope::Project => project_state,
+    };
+    state
+        .entries
+        .iter()
+        .position(|entry| entry.kind == kind && entry.reference_id == reference_id)
+        .map(|index| PromptEntryAddress { scope, index })
+}
+
+fn ordered_non_core_entry_addresses(
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+) -> Vec<PromptEntryAddress> {
+    let mut addresses = Vec::new();
+    addresses.extend(state_entry_addresses(global_state));
+    addresses.extend(state_entry_addresses(project_state));
+    addresses.sort_by(|left, right| {
+        let left_entry = entry_ref(global_state, project_state, *left);
+        let right_entry = entry_ref(global_state, project_state, *right);
+        left_entry
+            .requested_order
+            .unwrap_or(u16::MAX)
+            .cmp(&right_entry.requested_order.unwrap_or(u16::MAX))
+            .then_with(|| left_entry.reference_id.cmp(&right_entry.reference_id))
+            .then_with(|| {
+                left.scope
+                    .as_stored_value()
+                    .cmp(right.scope.as_stored_value())
+            })
+    });
+    addresses
+}
+
+fn state_entry_addresses(state: &PromptAssemblyScopeState) -> Vec<PromptEntryAddress> {
+    state
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, _)| PromptEntryAddress {
+            scope: state.scope,
+            index,
+        })
+        .collect()
+}
+
+fn entry_ref<'a>(
+    global_state: &'a PromptAssemblyScopeState,
+    project_state: &'a PromptAssemblyScopeState,
+    address: PromptEntryAddress,
+) -> &'a PersistedPromptAssemblyEntry {
+    match address.scope {
+        PromptAssemblyScope::Global => &global_state.entries[address.index],
+        PromptAssemblyScope::Project => &project_state.entries[address.index],
+    }
+}
+
+fn entry_mut<'a>(
+    global_state: &'a mut PromptAssemblyScopeState,
+    project_state: &'a mut PromptAssemblyScopeState,
+    address: PromptEntryAddress,
+) -> &'a mut PersistedPromptAssemblyEntry {
+    match address.scope {
+        PromptAssemblyScope::Global => &mut global_state.entries[address.index],
+        PromptAssemblyScope::Project => &mut project_state.entries[address.index],
+    }
+}
+
+fn entry_requested_order(
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+    address: PromptEntryAddress,
+) -> Option<u16> {
+    entry_ref(global_state, project_state, address).requested_order
+}
+
+fn set_entry_requested_order(
+    global_state: &mut PromptAssemblyScopeState,
+    project_state: &mut PromptAssemblyScopeState,
+    address: PromptEntryAddress,
+    requested_order: Option<u16>,
+) {
+    entry_mut(global_state, project_state, address).requested_order = requested_order;
+}
+
+fn normalize_requested_orders(
+    global_state: &mut PromptAssemblyScopeState,
+    project_state: &mut PromptAssemblyScopeState,
+) {
+    let ordered = ordered_non_core_entry_addresses(global_state, project_state);
+    for (index, address) in ordered.into_iter().enumerate() {
+        let normalized = u16::try_from((index + 1) * 10).unwrap_or(u16::MAX);
+        set_entry_requested_order(global_state, project_state, address, Some(normalized));
+    }
+}
+
+fn discovered_skill_inventory(
+    discovered_skills: &[DiscoveredSkill],
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+) -> Vec<PromptAssemblyDiscoveredSkill> {
+    discovered_skills
+        .iter()
+        .filter(|skill| {
+            !has_long_lived_skill_entry(global_state, &skill.name)
+                && !has_long_lived_skill_entry(project_state, &skill.name)
+        })
+        .map(|skill| PromptAssemblyDiscoveredSkill {
+            skill_name: skill.name.clone(),
+            title: skill.name.clone(),
+            description: skill.description.clone(),
+            origin: skill.origin,
+            body: format_long_lived_skill_body(skill),
+        })
+        .collect()
+}
+
+fn has_long_lived_skill_entry(state: &PromptAssemblyScopeState, skill_name: &str) -> bool {
+    state.entries.iter().any(|entry| {
+        entry.kind == PromptSourceKind::LongLivedSkill && entry.reference_id == skill_name
+    })
+}
+
+fn discover_skills(
+    work_dir: &Path,
+    global_skill_root_override: Option<&Path>,
+) -> Vec<DiscoveredSkill> {
     let mut discovered = Vec::new();
     let mut seen_names = HashMap::<String, usize>::new();
 
@@ -577,7 +850,10 @@ fn discover_skills(work_dir: &Path) -> Vec<DiscoveredSkill> {
         );
     }
 
-    if let Some(global_root) = global_skill_root() {
+    if let Some(global_root) = global_skill_root_override
+        .map(Path::to_path_buf)
+        .or_else(global_skill_root)
+    {
         discover_skills_from_root(
             &global_root,
             PromptSourceOrigin::Global,
@@ -980,6 +1256,196 @@ mod tests {
                 .map(|source| source.reference_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["disabled"]
+        );
+    }
+
+    #[test]
+    fn activate_long_lived_skill_persists_reference_and_expands_in_prelude() {
+        let work_dir = temp_dir("activate-skill");
+        let skill_dir = work_dir.join(".agents/skills/repo-bootstrap");
+        fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+        fs::write(
+            skill_dir.join(SKILL_FILE_NAME),
+            "---\nname: repo-bootstrap\ndescription: Bootstrap repo\n---\n# Repo Bootstrap\n\nUse this skill.\n",
+        )
+        .expect("skill file should exist");
+
+        let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+        let snapshot = apply_prompt_assembly_mutation(
+            store.clone(),
+            &work_dir,
+            PromptAssemblyMutation::ActivateLongLivedSkill {
+                scope: PromptAssemblyScope::Project,
+                skill_name: "repo-bootstrap".to_string(),
+            },
+        )
+        .expect("mutation should succeed");
+
+        assert_eq!(
+            snapshot
+                .snapshot
+                .active_sources
+                .iter()
+                .map(|source| source.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["core-system", "repo-bootstrap"]
+        );
+        assert!(
+            !snapshot
+                .discovered_skills
+                .iter()
+                .any(|skill| skill.skill_name == "repo-bootstrap")
+        );
+        assert!(
+            snapshot
+                .prelude
+                .effective_system_prompt()
+                .expect("effective prompt should exist")
+                .contains("<name>repo-bootstrap</name>")
+        );
+
+        let project_state = load_project_prompt_assembly_state(&work_dir)
+            .expect("project prompt assembly state should load");
+        assert_eq!(
+            project_state.entries,
+            vec![PersistedPromptAssemblyEntry {
+                reference_id: "repo-bootstrap".to_string(),
+                kind: PromptSourceKind::LongLivedSkill,
+                title: "repo-bootstrap".to_string(),
+                enabled: true,
+                requested_order: Some(10),
+            }]
+        );
+    }
+
+    #[test]
+    fn active_long_lived_skill_prefers_project_skill_when_names_collide() {
+        let work_dir = temp_dir("skill-precedence");
+        let project_skill_dir = work_dir.join(".agents/skills/repo-bootstrap");
+        fs::create_dir_all(&project_skill_dir).expect("project skill dir should exist");
+        fs::write(
+            project_skill_dir.join(SKILL_FILE_NAME),
+            "---\nname: repo-bootstrap\ndescription: Project bootstrap\n---\n# Project Bootstrap\n\nproject body\n",
+        )
+        .expect("project skill file should exist");
+
+        let home_dir = temp_dir("skill-precedence-home");
+        let global_skill_dir = home_dir.join(".agents/skills/repo-bootstrap");
+        fs::create_dir_all(&global_skill_dir).expect("global skill dir should exist");
+        fs::write(
+            global_skill_dir.join(SKILL_FILE_NAME),
+            "---\nname: repo-bootstrap\ndescription: Global bootstrap\n---\n# Global Bootstrap\n\nglobal body\n",
+        )
+        .expect("global skill file should exist");
+        let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
+            &work_dir,
+            &PromptAssemblyScopeState {
+                scope: PromptAssemblyScope::Global,
+                core_system_override: None,
+                entries: vec![PersistedPromptAssemblyEntry {
+                    reference_id: "repo-bootstrap".to_string(),
+                    kind: PromptSourceKind::LongLivedSkill,
+                    title: "repo-bootstrap".to_string(),
+                    enabled: true,
+                    requested_order: Some(10),
+                }],
+                extra_prompts: Vec::new(),
+            },
+            &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+            Some(&home_dir.join(".agents").join("skills")),
+        );
+
+        let skill_source = snapshot
+            .sources
+            .iter()
+            .find(|source| {
+                source.kind == PromptSourceKind::LongLivedSkill
+                    && source.reference_id == "repo-bootstrap"
+            })
+            .expect("long-lived skill source should exist");
+        assert_eq!(skill_source.origin, Some(PromptSourceOrigin::Global));
+        assert_eq!(
+            skill_source.resolved_body_origin,
+            Some(PromptSourceOrigin::Project)
+        );
+        assert!(
+            skill_source
+                .body
+                .as_deref()
+                .expect("skill body should exist")
+                .contains("project body")
+        );
+    }
+
+    #[test]
+    fn move_active_source_reorders_non_core_entries() {
+        let work_dir = temp_dir("move-order");
+        let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build");
+        runtime
+            .block_on(
+                store.save_global_prompt_assembly_state(&PromptAssemblyScopeState {
+                    scope: PromptAssemblyScope::Global,
+                    core_system_override: None,
+                    entries: vec![PersistedPromptAssemblyEntry {
+                        reference_id: "shared-rules".to_string(),
+                        kind: PromptSourceKind::ExtraPrompt,
+                        title: "shared-rules".to_string(),
+                        enabled: true,
+                        requested_order: Some(10),
+                    }],
+                    extra_prompts: vec![StoredPromptBody {
+                        reference_id: "shared-rules".to_string(),
+                        title: "shared-rules".to_string(),
+                        body: "global rules".to_string(),
+                    }],
+                }),
+            )
+            .expect("global state should save");
+        save_project_prompt_assembly_state(
+            &work_dir,
+            &PromptAssemblyScopeState {
+                scope: PromptAssemblyScope::Project,
+                core_system_override: None,
+                entries: vec![PersistedPromptAssemblyEntry {
+                    reference_id: "repo-rules".to_string(),
+                    kind: PromptSourceKind::ExtraPrompt,
+                    title: "repo-rules".to_string(),
+                    enabled: true,
+                    requested_order: Some(20),
+                }],
+                extra_prompts: vec![StoredPromptBody {
+                    reference_id: "repo-rules".to_string(),
+                    title: "repo-rules".to_string(),
+                    body: "project rules".to_string(),
+                }],
+            },
+        )
+        .expect("project state should save");
+
+        let snapshot = apply_prompt_assembly_mutation(
+            store.clone(),
+            &work_dir,
+            PromptAssemblyMutation::MoveActiveSource {
+                scope: PromptAssemblyScope::Project,
+                kind: PromptSourceKind::ExtraPrompt,
+                reference_id: "repo-rules".to_string(),
+                direction: PromptAssemblyMoveDirection::Up,
+            },
+        )
+        .expect("move should succeed");
+
+        assert_eq!(
+            snapshot
+                .snapshot
+                .active_sources
+                .iter()
+                .map(|source| source.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["core-system", "repo-rules", "shared-rules"]
         );
     }
 }

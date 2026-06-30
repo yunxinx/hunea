@@ -9,7 +9,8 @@ use ratatui::{
 };
 use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
 use runtime_domain::prompt_assembly::{
-    PromptAssemblyEditorTarget, PromptAssemblyLifecycle, PromptAssemblyMutation,
+    PromptAssemblyDiscoveredSkill, PromptAssemblyEditorTarget, PromptAssemblyLifecycle,
+    PromptAssemblyManagerSource, PromptAssemblyMoveDirection, PromptAssemblyMutation,
     PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
     ResolvedPromptSource,
 };
@@ -35,8 +36,8 @@ const PROMPT_OVERLAY_HEADER_INSET: usize = 2;
 const PROMPT_OVERLAY_PANE_TITLE_ROWS: u16 = 1;
 const PROMPT_OVERLAY_RIGHT_TAB_ROWS: u16 = 1;
 const PROMPT_OVERLAY_FOOTER_COMPACT: &str =
-    "  Esc close · Space source · p assembled · e/ctrl+g edit · a/A add extra";
-const PROMPT_OVERLAY_FOOTER_FULL: &str = "  Esc close · ←/→/h/l focus panes · ↑/↓/j/k move · Tab tabs · Space source · p assembled · e/ctrl+g edit · s scope · d delete · r restore";
+    "  Esc close · Space source · p assembled · e/ctrl+g edit · a/A add extra · i/I add skill";
+const PROMPT_OVERLAY_FOOTER_FULL: &str = "  Esc close · ←/→/h/l focus panes · ↑/↓/j/k move · Tab tabs · Space source · p assembled · e/ctrl+g edit · s scope · a/A add extra · i/I add skill · d remove · J/K reorder · r restore";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptOverlayFocus {
@@ -138,6 +139,12 @@ pub(crate) struct PromptOverlayPendingEditor {
 enum PromptOverlayRenderedRow<'a> {
     GroupHeader(PromptSourceInactiveReason),
     Source(&'a ResolvedPromptSource),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PromptOverlaySelection {
+    ResolvedSource(ResolvedPromptSource),
+    DiscoveredSkill(PromptAssemblyDiscoveredSkill),
 }
 
 impl Model {
@@ -247,9 +254,21 @@ impl Model {
                     },
                 })
             }
+            KeyCode::Char('i') if key.modifiers.is_empty() => OverlayInputResult::from_effect(
+                self.activate_selected_discovered_skill(PromptAssemblyScope::Project),
+            ),
+            KeyCode::Char('I') if key.modifiers.is_empty() => OverlayInputResult::from_effect(
+                self.activate_selected_discovered_skill(PromptAssemblyScope::Global),
+            ),
             KeyCode::Char('d') if key.modifiers.is_empty() => {
-                OverlayInputResult::from_effect(self.delete_selected_extra_prompt())
+                OverlayInputResult::from_effect(self.remove_selected_prompt_source())
             }
+            KeyCode::Char('K') if key.modifiers.is_empty() => OverlayInputResult::from_effect(
+                self.move_selected_active_source(PromptAssemblyMoveDirection::Up),
+            ),
+            KeyCode::Char('J') if key.modifiers.is_empty() => OverlayInputResult::from_effect(
+                self.move_selected_active_source(PromptAssemblyMoveDirection::Down),
+            ),
             KeyCode::Char('r') if key.modifiers.is_empty() => {
                 OverlayInputResult::from_effect(self.restore_selected_core_system_override())
             }
@@ -359,10 +378,20 @@ impl Model {
     }
 
     fn open_selected_prompt_overlay_preview(&mut self) {
-        let Some(source) = self.selected_prompt_overlay_manager_source() else {
+        let Some(selection) = self.selected_prompt_overlay_selection() else {
             return;
         };
-        self.open_prompt_overlay_source_preview(source);
+        match selection {
+            PromptOverlaySelection::ResolvedSource(source) => {
+                let Some(manager_source) = self.manager_source_for_resolved_source(&source) else {
+                    return;
+                };
+                self.open_prompt_overlay_source_preview(manager_source);
+            }
+            PromptOverlaySelection::DiscoveredSkill(skill) => {
+                self.open_prompt_overlay_markdown_preview(skill.title.clone(), &skill.body);
+            }
+        }
     }
 
     fn toggle_prompt_overlay_draft_scope(&mut self) {
@@ -402,7 +431,7 @@ impl Model {
             PromptSourceKind::LongLivedSkill => (
                 PromptAssemblyEditorTarget::SkillFile {
                     skill_name: selected.reference_id.clone(),
-                    origin: selected.origin?,
+                    origin: manager_source.resolved_body_origin.or(selected.origin)?,
                 },
                 manager_source.body.unwrap_or_default(),
             ),
@@ -419,14 +448,18 @@ impl Model {
         Some(AppEffect::LaunchExternalEditor(launch))
     }
 
-    fn delete_selected_extra_prompt(&mut self) -> Option<AppEffect> {
+    fn remove_selected_prompt_source(&mut self) -> Option<AppEffect> {
         let selected = self.selected_prompt_overlay_source()?;
-        if selected.kind != PromptSourceKind::ExtraPrompt {
+        if matches!(
+            selected.kind,
+            PromptSourceKind::CoreSystemPrompt | PromptSourceKind::SkillDiscovery
+        ) {
             return None;
         }
         Some(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::DeleteExtraPrompt {
+            mutation: PromptAssemblyMutation::RemovePromptSource {
                 scope: prompt_scope_from_origin(selected.origin?)?,
+                kind: selected.kind,
                 reference_id: selected.reference_id,
             },
         })
@@ -456,24 +489,46 @@ impl Model {
                 .active_sources
                 .get(state.active_selected)
                 .cloned(),
-            PromptOverlayFocus::Inactive => self
-                .prompt_overlay_inactive_sources_for_tab(state.inactive_tab)
-                .get(state.inactive_selected)
-                .cloned(),
+            PromptOverlayFocus::Inactive => match state.inactive_tab {
+                PromptOverlayInactiveTab::LongLivedSkills => None,
+                _ => self
+                    .prompt_overlay_inactive_sources_for_tab(state.inactive_tab)
+                    .get(state.inactive_selected)
+                    .cloned(),
+            },
         }
     }
 
-    fn selected_prompt_overlay_manager_source(
-        &self,
-    ) -> Option<runtime_domain::prompt_assembly::PromptAssemblyManagerSource> {
-        let selected = self.selected_prompt_overlay_source()?;
-        self.manager_source_for_resolved_source(&selected)
+    fn selected_prompt_overlay_selection(&self) -> Option<PromptOverlaySelection> {
+        let state = self.prompt_overlay.as_ref()?;
+        match state.focus {
+            PromptOverlayFocus::Active => self
+                .prompt_assembly
+                .snapshot
+                .active_sources
+                .get(state.active_selected)
+                .cloned()
+                .map(PromptOverlaySelection::ResolvedSource),
+            PromptOverlayFocus::Inactive => match state.inactive_tab {
+                PromptOverlayInactiveTab::LongLivedSkills => self
+                    .prompt_assembly
+                    .discovered_skills
+                    .get(state.inactive_selected)
+                    .cloned()
+                    .map(PromptOverlaySelection::DiscoveredSkill),
+                _ => self
+                    .prompt_overlay_inactive_sources_for_tab(state.inactive_tab)
+                    .get(state.inactive_selected)
+                    .cloned()
+                    .map(PromptOverlaySelection::ResolvedSource),
+            },
+        }
     }
 
     fn manager_source_for_resolved_source(
         &self,
         selected: &ResolvedPromptSource,
-    ) -> Option<runtime_domain::prompt_assembly::PromptAssemblyManagerSource> {
+    ) -> Option<PromptAssemblyManagerSource> {
         self.prompt_assembly
             .sources
             .iter()
@@ -483,6 +538,46 @@ impl Model {
                     && source.origin == selected.origin
             })
             .cloned()
+    }
+
+    fn activate_selected_discovered_skill(
+        &mut self,
+        scope: PromptAssemblyScope,
+    ) -> Option<AppEffect> {
+        let state = self.prompt_overlay.as_ref()?;
+        if state.focus != PromptOverlayFocus::Inactive
+            || state.inactive_tab != PromptOverlayInactiveTab::LongLivedSkills
+        {
+            return None;
+        }
+        let selected = self
+            .prompt_assembly
+            .discovered_skills
+            .get(state.inactive_selected)?;
+        Some(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::ActivateLongLivedSkill {
+                scope,
+                skill_name: selected.skill_name.clone(),
+            },
+        })
+    }
+
+    fn move_selected_active_source(
+        &mut self,
+        direction: PromptAssemblyMoveDirection,
+    ) -> Option<AppEffect> {
+        let selected = self.selected_prompt_overlay_source()?;
+        if selected.kind == PromptSourceKind::CoreSystemPrompt {
+            return None;
+        }
+        Some(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::MoveActiveSource {
+                scope: prompt_scope_from_origin(selected.origin?)?,
+                kind: selected.kind,
+                reference_id: selected.reference_id,
+                direction,
+            },
+        })
     }
 
     fn core_system_editor_body_for_scope(&self, scope: PromptAssemblyScope) -> String {
@@ -561,19 +656,18 @@ impl Model {
             None => return,
         };
         let inactive_reference_id = if matches!(focus, PromptOverlayFocus::Inactive) {
-            let sources = self.prompt_overlay_inactive_sources_for_tab(inactive_tab);
+            let source_count = self.prompt_overlay_inactive_source_count(inactive_tab);
             let index = if first {
                 0
             } else {
-                sources.len().saturating_sub(1)
+                source_count.saturating_sub(1)
             };
-            sources.get(index).map(|source| source.reference_id.clone())
+            self.prompt_overlay_inactive_reference_id_at(inactive_tab, index)
         } else {
             None
         };
         let inactive_count = if matches!(focus, PromptOverlayFocus::Inactive) {
-            self.prompt_overlay_inactive_sources_for_tab(inactive_tab)
-                .len()
+            self.prompt_overlay_inactive_source_count(inactive_tab)
         } else {
             0
         };
@@ -628,27 +722,35 @@ impl Model {
             Some(state) => state.inactive_tab,
             None => return,
         };
-        let sources = self.prompt_overlay_inactive_sources_for_tab(inactive_tab);
+        let source_count = self.prompt_overlay_inactive_source_count(inactive_tab);
 
-        let Some(state) = self.prompt_overlay.as_mut() else {
-            return;
-        };
-        if sources.is_empty() {
+        if source_count == 0 {
+            let Some(state) = self.prompt_overlay.as_mut() else {
+                return;
+            };
             state.inactive_selected = 0;
             state.inactive_scroll = 0;
             state.inactive_selected_reference_id = None;
             return;
         }
 
+        let current_selected = match self.prompt_overlay.as_ref() {
+            Some(state) => state.inactive_selected,
+            None => return,
+        };
         let next = match direction {
-            ListNavigationDirection::Previous => state.inactive_selected.saturating_sub(1),
-            ListNavigationDirection::Next => state
-                .inactive_selected
+            ListNavigationDirection::Previous => current_selected.saturating_sub(1),
+            ListNavigationDirection::Next => current_selected
                 .saturating_add(1)
-                .min(sources.len().saturating_sub(1)),
+                .min(source_count.saturating_sub(1)),
+        };
+        let next_reference_id = self.prompt_overlay_inactive_reference_id_at(inactive_tab, next);
+
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return;
         };
         state.inactive_selected = next;
-        state.inactive_selected_reference_id = Some(sources[next].reference_id.clone());
+        state.inactive_selected_reference_id = next_reference_id;
         self.sync_prompt_overlay_state();
     }
 
@@ -658,46 +760,88 @@ impl Model {
             None => return,
         };
         let inactive_sources = self.prompt_overlay_inactive_sources_for_tab(inactive_tab);
-        let rendered_rows = prompt_overlay_inactive_rendered_rows(&inactive_sources);
-
-        let Some(state) = self.prompt_overlay.as_mut() else {
-            return;
+        let rendered_rows = if inactive_tab == PromptOverlayInactiveTab::LongLivedSkills {
+            Vec::new()
+        } else {
+            prompt_overlay_inactive_rendered_rows(&inactive_sources)
         };
+        let inactive_source_count = self.prompt_overlay_inactive_source_count(inactive_tab);
 
         let active_count = self.prompt_assembly.snapshot.active_sources.len();
-        state.active_selected = state.active_selected.min(active_count.saturating_sub(1));
-        state.active_scroll = clamp_scroll(
-            state.active_scroll,
-            state.active_selected,
+        let (
+            current_active_selected,
+            current_active_scroll,
+            current_inactive_selected,
+            current_inactive_scroll,
+            current_inactive_reference_id,
+        ) = match self.prompt_overlay.as_ref() {
+            Some(state) => (
+                state.active_selected,
+                state.active_scroll,
+                state.inactive_selected,
+                state.inactive_scroll,
+                state.inactive_selected_reference_id.clone(),
+            ),
+            None => return,
+        };
+
+        let next_active_selected = current_active_selected.min(active_count.saturating_sub(1));
+        let next_active_scroll = clamp_scroll(
+            current_active_scroll,
+            next_active_selected,
             active_count,
             prompt_overlay_active_visible_rows(self.height),
         );
 
-        if let Some(reference_id) = state.inactive_selected_reference_id.as_deref()
-            && let Some(index) = inactive_sources
-                .iter()
-                .position(|source| source.reference_id == reference_id)
-        {
-            state.inactive_selected = index;
+        let mut next_inactive_selected = current_inactive_selected;
+        if let Some(reference_id) = current_inactive_reference_id.as_deref() {
+            let matched_index = if inactive_tab == PromptOverlayInactiveTab::LongLivedSkills {
+                self.prompt_assembly
+                    .discovered_skills
+                    .iter()
+                    .position(|skill| skill.skill_name == reference_id)
+            } else {
+                inactive_sources
+                    .iter()
+                    .position(|source| source.reference_id == reference_id)
+            };
+            if let Some(index) = matched_index {
+                next_inactive_selected = index;
+            }
         }
-        state.inactive_selected = state
-            .inactive_selected
-            .min(inactive_sources.len().saturating_sub(1));
-        state.inactive_selected_reference_id = inactive_sources
-            .get(state.inactive_selected)
-            .map(|source| source.reference_id.clone());
+        next_inactive_selected =
+            next_inactive_selected.min(inactive_source_count.saturating_sub(1));
+        let next_inactive_reference_id =
+            self.prompt_overlay_inactive_reference_id_at(inactive_tab, next_inactive_selected);
 
-        let selected_row = prompt_overlay_inactive_selected_row_index(
-            &rendered_rows,
-            state.inactive_selected_reference_id.as_deref(),
-        )
-        .unwrap_or_default();
-        state.inactive_scroll = clamp_scroll(
-            state.inactive_scroll,
+        let selected_row = if inactive_tab == PromptOverlayInactiveTab::LongLivedSkills {
+            next_inactive_selected
+        } else {
+            prompt_overlay_inactive_selected_row_index(
+                &rendered_rows,
+                next_inactive_reference_id.as_deref(),
+            )
+            .unwrap_or_default()
+        };
+        let next_inactive_scroll = clamp_scroll(
+            current_inactive_scroll,
             selected_row,
-            rendered_rows.len(),
+            if inactive_tab == PromptOverlayInactiveTab::LongLivedSkills {
+                inactive_source_count
+            } else {
+                rendered_rows.len()
+            },
             prompt_overlay_inactive_visible_rows(self.height),
         );
+
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return;
+        };
+        state.active_selected = next_active_selected;
+        state.active_scroll = next_active_scroll;
+        state.inactive_selected = next_inactive_selected;
+        state.inactive_selected_reference_id = next_inactive_reference_id;
+        state.inactive_scroll = next_inactive_scroll;
     }
 
     fn prompt_overlay_header_line(
@@ -783,13 +927,10 @@ impl Model {
         ])
         .areas(area);
 
-        let filtered_sources = self.prompt_overlay_inactive_sources_for_tab(state.inactive_tab);
-        let rendered_rows = prompt_overlay_inactive_rendered_rows(&filtered_sources);
-
         frame.render_widget(
             Paragraph::new(self.prompt_overlay_pane_title_line(
                 "Inactive Sources",
-                filtered_sources.len(),
+                self.prompt_overlay_inactive_source_count(state.inactive_tab),
                 state.focus == PromptOverlayFocus::Inactive,
                 usize::from(title_area.width),
             )),
@@ -803,14 +944,27 @@ impl Model {
             tabs_area,
         );
 
-        let lines = prompt_overlay_inactive_lines(
-            &rendered_rows,
-            state.inactive_selected_reference_id.as_deref(),
-            state.inactive_scroll,
-            usize::from(body_area.width),
-            usize::from(body_area.height),
-            self.palette,
-        );
+        let lines = if state.inactive_tab == PromptOverlayInactiveTab::LongLivedSkills {
+            prompt_overlay_discovered_skill_lines(
+                &self.prompt_assembly.discovered_skills,
+                state.inactive_selected_reference_id.as_deref(),
+                state.inactive_scroll,
+                usize::from(body_area.width),
+                usize::from(body_area.height),
+                self.palette,
+            )
+        } else {
+            let filtered_sources = self.prompt_overlay_inactive_sources_for_tab(state.inactive_tab);
+            let rendered_rows = prompt_overlay_inactive_rendered_rows(&filtered_sources);
+            prompt_overlay_inactive_lines(
+                &rendered_rows,
+                state.inactive_selected_reference_id.as_deref(),
+                state.inactive_scroll,
+                usize::from(body_area.width),
+                usize::from(body_area.height),
+                self.palette,
+            )
+        };
         frame.render_widget(PromptOverlayLineListWidget { lines: &lines }, body_area);
     }
 
@@ -893,6 +1047,9 @@ impl Model {
         &self,
         tab: PromptOverlayInactiveTab,
     ) -> Vec<ResolvedPromptSource> {
+        if tab == PromptOverlayInactiveTab::LongLivedSkills {
+            return Vec::new();
+        }
         self.prompt_assembly
             .snapshot
             .inactive_sources
@@ -900,6 +1057,33 @@ impl Model {
             .filter(|source| tab.matches_kind(source.kind))
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn prompt_overlay_inactive_source_count(
+        &self,
+        tab: PromptOverlayInactiveTab,
+    ) -> usize {
+        if tab == PromptOverlayInactiveTab::LongLivedSkills {
+            return self.prompt_assembly.discovered_skills.len();
+        }
+        self.prompt_overlay_inactive_sources_for_tab(tab).len()
+    }
+
+    fn prompt_overlay_inactive_reference_id_at(
+        &self,
+        tab: PromptOverlayInactiveTab,
+        index: usize,
+    ) -> Option<String> {
+        if tab == PromptOverlayInactiveTab::LongLivedSkills {
+            return self
+                .prompt_assembly
+                .discovered_skills
+                .get(index)
+                .map(|skill| skill.skill_name.clone());
+        }
+        self.prompt_overlay_inactive_sources_for_tab(tab)
+            .get(index)
+            .map(|source| source.reference_id.clone())
     }
 }
 
@@ -1029,6 +1213,58 @@ fn prompt_overlay_source_label(source: &ResolvedPromptSource) -> String {
     }
     parts.push(prompt_overlay_kind_label(source.kind).to_string());
     parts.join(" · ")
+}
+
+fn prompt_overlay_discovered_skill_lines(
+    skills: &[PromptAssemblyDiscoveredSkill],
+    selected_reference_id: Option<&str>,
+    scroll: usize,
+    width: usize,
+    body_height: usize,
+    palette: crate::theme::TerminalPalette,
+) -> Vec<Line<'static>> {
+    if body_height == 0 {
+        return Vec::new();
+    }
+    if skills.is_empty() {
+        return vec![Line::styled(
+            truncate_display_width_with_ellipsis("  No discovered skills", width.max(1)),
+            tertiary_text_style(palette),
+        )];
+    }
+
+    skills
+        .iter()
+        .skip(scroll)
+        .take(body_height)
+        .map(|skill| {
+            let selected = selected_reference_id == Some(skill.skill_name.as_str());
+            let item_style = if selected {
+                primary_text_style(palette).bold()
+            } else {
+                secondary_text_style(palette)
+            };
+            let marker_style = if selected {
+                command_accent_text_style(palette)
+            } else {
+                tertiary_text_style(palette)
+            };
+            let marker = if selected { "█" } else { " " };
+            let label = format!(
+                "{} · {} · skill",
+                skill.title,
+                prompt_overlay_origin_label(skill.origin)
+            );
+            Line::from(vec![
+                Span::styled(marker, marker_style),
+                Span::raw(" "),
+                Span::styled(
+                    truncate_display_width_with_ellipsis(&label, width.saturating_sub(2).max(1)),
+                    item_style,
+                ),
+            ])
+        })
+        .collect()
 }
 
 fn prompt_overlay_kind_label(kind: PromptSourceKind) -> &'static str {

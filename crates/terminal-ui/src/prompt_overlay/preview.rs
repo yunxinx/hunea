@@ -126,7 +126,7 @@ impl Model {
         );
     }
 
-    fn open_prompt_overlay_markdown_preview(&mut self, title: String, content: &str) {
+    pub(crate) fn open_prompt_overlay_markdown_preview(&mut self, title: String, content: &str) {
         let mut transcript = Transcript::new(self.palette);
         transcript.append_message_with_style_mode(
             crate::Sender::Assistant,

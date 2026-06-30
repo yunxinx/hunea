@@ -131,7 +131,18 @@ pub struct PromptAssemblyManagerSource {
     pub kind: PromptSourceKind,
     pub title: String,
     pub origin: Option<PromptSourceOrigin>,
+    pub resolved_body_origin: Option<PromptSourceOrigin>,
     pub body: Option<String>,
+}
+
+/// `PromptAssemblyDiscoveredSkill` 表示 `/prompt` 右侧 Skills tab 可展示的已发现 skill。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAssemblyDiscoveredSkill {
+    pub skill_name: String,
+    pub title: String,
+    pub description: String,
+    pub origin: PromptSourceOrigin,
+    pub body: String,
 }
 
 /// `PromptAssemblyManagerSnapshot` 表示 `/prompt` 所需的完整只读快照。
@@ -140,6 +151,7 @@ pub struct PromptAssemblyManagerSnapshot {
     pub snapshot: PromptAssemblySnapshot,
     pub prelude: PromptPreludeSnapshot,
     pub sources: Vec<PromptAssemblyManagerSource>,
+    pub discovered_skills: Vec<PromptAssemblyDiscoveredSkill>,
     pub builtin_core_system_body: String,
     pub global_core_system_override: Option<String>,
     pub project_core_system_override: Option<String>,
@@ -168,9 +180,24 @@ pub enum PromptAssemblyMutation {
         target: PromptAssemblyEditorTarget,
         content: String,
     },
+    ActivateLongLivedSkill {
+        scope: PromptAssemblyScope,
+        skill_name: String,
+    },
     CreateExtraPrompt {
         scope: PromptAssemblyScope,
         content: String,
+    },
+    RemovePromptSource {
+        scope: PromptAssemblyScope,
+        kind: PromptSourceKind,
+        reference_id: String,
+    },
+    MoveActiveSource {
+        scope: PromptAssemblyScope,
+        kind: PromptSourceKind,
+        reference_id: String,
+        direction: PromptAssemblyMoveDirection,
     },
     DeleteExtraPrompt {
         scope: PromptAssemblyScope,
@@ -179,6 +206,13 @@ pub enum PromptAssemblyMutation {
     RestoreCoreSystemOverride {
         scope: PromptAssemblyScope,
     },
+}
+
+/// `PromptAssemblyMoveDirection` 描述 active source 的排序方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptAssemblyMoveDirection {
+    Up,
+    Down,
 }
 
 /// `resolve_prompt_assembly` 解析 next-new-session prompt assembly。

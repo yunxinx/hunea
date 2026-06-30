@@ -28,6 +28,7 @@ pub(super) enum CommandPanelAction {
     Exit,
     OpenResumePicker,
     OpenCopyPicker,
+    OpenPromptOverlay,
     OpenContextBudget,
     OpenMessageHistory,
     OpenEntryRewind,
@@ -411,6 +412,14 @@ impl Model {
                 self.sync_composer_height();
                 Some(AppEffect::OpenCopyPicker)
             }
+            CommandPanelAction::OpenPromptOverlay => {
+                self.composer_mut().clear();
+                self.sync_command_panel_navigation();
+                self.sync_file_picker_state();
+                self.sync_composer_height();
+                self.open_prompt_overlay();
+                None
+            }
             CommandPanelAction::OpenMessageHistory => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
@@ -558,6 +567,12 @@ fn filter_base_command_panel_items(
         aliases: Vec::new(),
         description: "Select model for this session".to_string(),
         action: CommandPanelAction::OpenModelPanel,
+    });
+    items.push(CommandPanelItem {
+        name: "/prompt".to_string(),
+        aliases: Vec::new(),
+        description: "Inspect prompt assembly for the next new session".to_string(),
+        action: CommandPanelAction::OpenPromptOverlay,
     });
     if debug_commands_enabled {
         items.extend(debug::command_panel_items());

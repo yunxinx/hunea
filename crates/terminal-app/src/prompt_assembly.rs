@@ -11,9 +11,9 @@ use runtime_domain::prompt_assembly::persistence::{
     load_project_prompt_assembly_state,
 };
 use runtime_domain::prompt_assembly::{
-    CoreSystemPromptInput, PromptAssemblyInput, PromptPreludeSection, PromptPreludeSnapshot,
-    PromptSourceCandidate, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
-    resolve_prompt_assembly,
+    CoreSystemPromptInput, PromptAssemblyInput, PromptAssemblySnapshot, PromptPreludeSection,
+    PromptPreludeSnapshot, PromptSourceCandidate, PromptSourceKind, PromptSourceOrigin,
+    PromptSourceStatus, resolve_prompt_assembly,
 };
 use session_store::SessionStore;
 
@@ -36,10 +36,16 @@ struct PromptCandidateBody {
     body: String,
 }
 
-pub(crate) fn load_initial_prompt_prelude(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoadedPromptAssembly {
+    pub(crate) snapshot: PromptAssemblySnapshot,
+    pub(crate) prelude: PromptPreludeSnapshot,
+}
+
+pub(crate) fn load_initial_prompt_assembly(
     store: Arc<dyn SessionStore>,
     work_dir: &Path,
-) -> Result<PromptPreludeSnapshot> {
+) -> Result<LoadedPromptAssembly> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -49,18 +55,35 @@ pub(crate) fn load_initial_prompt_prelude(
         .wrap_err("load global prompt assembly state")?;
     let project_state = load_project_prompt_assembly_state(work_dir)
         .wrap_err("load project prompt assembly state")?;
-    Ok(resolve_initial_prompt_prelude(
+    Ok(resolve_initial_prompt_assembly(
         work_dir,
         &global_state,
         &project_state,
     ))
 }
 
+#[cfg(test)]
+pub(crate) fn load_initial_prompt_prelude(
+    store: Arc<dyn SessionStore>,
+    work_dir: &Path,
+) -> Result<PromptPreludeSnapshot> {
+    Ok(load_initial_prompt_assembly(store, work_dir)?.prelude)
+}
+
+#[cfg(test)]
 fn resolve_initial_prompt_prelude(
     work_dir: &Path,
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
 ) -> PromptPreludeSnapshot {
+    resolve_initial_prompt_assembly(work_dir, global_state, project_state).prelude
+}
+
+fn resolve_initial_prompt_assembly(
+    work_dir: &Path,
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+) -> LoadedPromptAssembly {
     let discovered_skills = discover_skills(work_dir);
     let extra_prompt_bodies = indexed_extra_prompt_bodies(global_state, project_state);
     let skills_by_name = discovered_skills
@@ -94,7 +117,7 @@ fn resolve_initial_prompt_prelude(
     });
 
     let mut sections = Vec::new();
-    for source in snapshot.active_sources {
+    for source in &snapshot.active_sources {
         if !matches!(source.status, PromptSourceStatus::Active { .. }) {
             continue;
         }
@@ -117,15 +140,18 @@ fn resolve_initial_prompt_prelude(
         }
 
         sections.push(PromptPreludeSection {
-            reference_id: source.reference_id,
+            reference_id: source.reference_id.clone(),
             kind: source.kind,
-            title: source.title,
+            title: source.title.clone(),
             origin: source.origin,
             body,
         });
     }
 
-    PromptPreludeSnapshot { sections }
+    LoadedPromptAssembly {
+        snapshot,
+        prelude: PromptPreludeSnapshot { sections },
+    }
 }
 
 fn resolved_core_system_body(
@@ -556,6 +582,47 @@ mod tests {
     }
 
     #[test]
+    fn resolve_initial_prompt_assembly_keeps_inactive_sources_for_manager_view() {
+        let work_dir = temp_dir("snapshot");
+        let resolved = resolve_initial_prompt_assembly(
+            &work_dir,
+            &PromptAssemblyScopeState {
+                scope: PromptAssemblyScope::Global,
+                core_system_override: None,
+                entries: vec![
+                    PersistedPromptAssemblyEntry {
+                        reference_id: "disabled".to_string(),
+                        kind: PromptSourceKind::ExtraPrompt,
+                        title: "disabled".to_string(),
+                        enabled: false,
+                        requested_order: Some(10),
+                    },
+                    PersistedPromptAssemblyEntry {
+                        reference_id: "missing".to_string(),
+                        kind: PromptSourceKind::LongLivedSkill,
+                        title: "missing".to_string(),
+                        enabled: true,
+                        requested_order: Some(20),
+                    },
+                ],
+                extra_prompts: Vec::new(),
+            },
+            &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        );
+
+        assert_eq!(resolved.snapshot.active_sources.len(), 1);
+        assert_eq!(
+            resolved
+                .snapshot
+                .inactive_sources
+                .iter()
+                .map(|source| source.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["disabled", "missing"]
+        );
+    }
+
+    #[test]
     fn load_initial_prompt_prelude_reads_global_and_project_state() {
         let work_dir = temp_dir("load");
         let global_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
@@ -598,6 +665,49 @@ mod tests {
         assert_eq!(
             prelude.effective_system_prompt().as_deref(),
             Some("project core\n\nproject rules")
+        );
+    }
+
+    #[test]
+    fn load_initial_prompt_assembly_reads_snapshot_and_prelude() {
+        let work_dir = temp_dir("load-snapshot");
+        let global_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build");
+        runtime
+            .block_on(
+                global_store.save_global_prompt_assembly_state(&PromptAssemblyScopeState {
+                    scope: PromptAssemblyScope::Global,
+                    core_system_override: Some("global core".to_string()),
+                    entries: vec![PersistedPromptAssemblyEntry {
+                        reference_id: "disabled".to_string(),
+                        kind: PromptSourceKind::ExtraPrompt,
+                        title: "disabled".to_string(),
+                        enabled: false,
+                        requested_order: Some(10),
+                    }],
+                    extra_prompts: Vec::new(),
+                }),
+            )
+            .expect("global state should save");
+
+        let loaded =
+            load_initial_prompt_assembly(global_store, &work_dir).expect("snapshot should load");
+
+        assert_eq!(
+            loaded.prelude.effective_system_prompt().as_deref(),
+            Some("global core")
+        );
+        assert_eq!(
+            loaded
+                .snapshot
+                .inactive_sources
+                .iter()
+                .map(|source| source.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["disabled"]
         );
     }
 }

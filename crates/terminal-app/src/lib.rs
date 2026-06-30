@@ -19,7 +19,7 @@ use options_mapping::{
     model_options_from_app_config_and_models, model_options_from_config_and_models,
     runtime_options_from_app_config_and_models,
 };
-use prompt_assembly::load_initial_prompt_prelude;
+use prompt_assembly::load_initial_prompt_assembly;
 use replay::write_terminal_replay_on_exit;
 pub use replay::{
     write_terminal_replay, write_terminal_replay_preserving_ansi,
@@ -73,18 +73,20 @@ pub fn run_with_writer<W: Write>(
 ) -> Result<()> {
     let loaded_models = provider_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
+    let mut model_options =
+        model_options_from_config_and_models(tui_config, &loaded_models, &loaded_phrases);
     let mut runtime_options = AppRuntimeOptions {
         loaded_models: loaded_models.clone(),
         ..AppRuntimeOptions::default()
     };
-    attach_default_session_persistence(&mut runtime_options, &loaded_models)
+    attach_default_session_persistence(&mut runtime_options, &mut model_options, &loaded_models)
         .wrap_err("failed to initialize session persistence")?;
     let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options)
         .map_err(color_eyre::eyre::Report::msg)
         .wrap_err("failed to initialize app runtime coordinator")?;
     let model = terminal_ui::run_with_runtime_coordinator(
         StartupBannerOptions::default(),
-        model_options_from_config_and_models(tui_config, &loaded_models, &loaded_phrases),
+        model_options,
         &mut runtime_coordinator,
     )
     .wrap_err("failed to run tui application")?;
@@ -103,15 +105,17 @@ pub fn run_with_config_writer<W: Write>(
 ) -> Result<()> {
     let loaded_models = provider_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
+    let mut model_options =
+        model_options_from_app_config_and_models(config, &loaded_models, &loaded_phrases);
     let mut runtime_options = runtime_options_from_app_config_and_models(config, &loaded_models);
-    attach_default_session_persistence(&mut runtime_options, &loaded_models)
+    attach_default_session_persistence(&mut runtime_options, &mut model_options, &loaded_models)
         .wrap_err("failed to initialize session persistence")?;
     let mut runtime_coordinator = AppRuntimeCoordinator::new(runtime_options)
         .map_err(color_eyre::eyre::Report::msg)
         .wrap_err("failed to initialize app runtime coordinator")?;
     let model = terminal_ui::run_with_runtime_coordinator(
         StartupBannerOptions::default(),
-        model_options_from_app_config_and_models(config, &loaded_models, &loaded_phrases),
+        model_options,
         &mut runtime_coordinator,
     )
     .wrap_err("failed to run tui application")?;
@@ -124,6 +128,7 @@ pub fn run_with_config_writer<W: Write>(
 
 fn attach_default_session_persistence(
     options: &mut AppRuntimeOptions,
+    model_options: &mut terminal_ui::ModelOptions,
     loaded_models: &provider_models::LoadedModelCatalog,
 ) -> Result<()> {
     let store = open_local_session_store()?;
@@ -144,7 +149,7 @@ fn attach_default_session_persistence(
         git_head,
         cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     });
-    options.initial_prompt_prelude = Some(load_initial_prompt_prelude(
+    let loaded_prompt_assembly = load_initial_prompt_assembly(
         options
             .session_store
             .as_ref()
@@ -156,7 +161,9 @@ fn attach_default_session_persistence(
             .expect("session header was just initialized")
             .work_dir
             .as_path(),
-    )?);
+    )?;
+    model_options.prompt_assembly_snapshot = Some(loaded_prompt_assembly.snapshot.clone());
+    options.initial_prompt_prelude = Some(loaded_prompt_assembly.prelude);
     Ok(())
 }
 

@@ -138,6 +138,7 @@ fn model_options_from_configs(
         requires_model_selection: loaded_models.requires_model_selection,
         status_phrases: loaded_phrases.phrases.clone(),
         status_phrase_order: loaded_phrases.order,
+        prompt_assembly_snapshot: None,
     }
 }
 

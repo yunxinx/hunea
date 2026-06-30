@@ -5,6 +5,7 @@ use crate::{Model, runner::TerminalMouseModePreference};
 pub(crate) enum ModalLayer {
     ToolApprovalFullscreenPreview,
     TranscriptOverlay,
+    PromptOverlay,
     SessionPreview,
     SessionPicker,
     CopyPicker,
@@ -18,6 +19,7 @@ impl ModalLayer {
         matches!(
             self,
             Self::SessionPreview
+                | Self::PromptOverlay
                 | Self::SessionPicker
                 | Self::CopyPicker
                 | Self::EntryTree
@@ -39,6 +41,9 @@ impl Model {
         }
         if self.transcript_overlay_active() {
             return Some(ModalLayer::TranscriptOverlay);
+        }
+        if self.prompt_overlay_active() {
+            return Some(ModalLayer::PromptOverlay);
         }
         if self.session_preview_active() {
             return Some(ModalLayer::SessionPreview);
@@ -96,6 +101,7 @@ impl Model {
             }
             ModalLayer::ToolApprovalFullscreenPreview
             | ModalLayer::TranscriptOverlay
+            | ModalLayer::PromptOverlay
             | ModalLayer::SessionPreview
             | ModalLayer::SessionPicker => {
                 Some(TerminalMouseModePreference::NativeWithAlternateScroll)
@@ -105,6 +111,7 @@ impl Model {
 
     pub(crate) fn close_fullscreen_modal_layers(&mut self) {
         self.close_transcript_overlay();
+        self.close_prompt_overlay();
         self.session_preview = None;
         self.session_picker = None;
         self.copy_picker = None;

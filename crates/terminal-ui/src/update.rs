@@ -289,6 +289,10 @@ impl Model {
                 self.move_session_preview_page(delta_lines.signum());
                 OverlayInputResult::Handled
             }
+            Some(ModalLayer::PromptOverlay) => {
+                self.move_prompt_overlay_selection_by_delta(delta_lines.signum());
+                OverlayInputResult::Handled
+            }
             Some(ModalLayer::SessionPicker) => {
                 self.move_session_picker_selection_by_delta(delta_lines.signum());
                 OverlayInputResult::Handled
@@ -351,6 +355,7 @@ impl Model {
         match layer {
             ModalLayer::ToolApprovalFullscreenPreview => self.handle_tool_approval_panel_key(key),
             ModalLayer::TranscriptOverlay => self.handle_active_transcript_overlay_key(key),
+            ModalLayer::PromptOverlay => self.handle_prompt_overlay_key(key),
             ModalLayer::SessionPreview => self.handle_session_preview_key(key),
             ModalLayer::SessionPicker => self.handle_session_picker_key(key),
             ModalLayer::CopyPicker => self.handle_copy_picker_key(key),

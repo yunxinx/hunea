@@ -236,7 +236,7 @@ impl Model {
         self.composer_mut()
             .reset_text_and_move_to_end(selection.prefill);
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.document_runtime.follow_bottom = true;

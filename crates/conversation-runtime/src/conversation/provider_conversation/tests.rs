@@ -14,7 +14,7 @@ use session_store::{
 use super::{PersistedConversationItem, ProviderConversation, ProviderConversationError};
 use crate::ProviderKind;
 use runtime_domain::session::{
-    ConversationTurnRequest, TranscriptReplayItem, TranscriptReplayRole,
+    ConversationTurnRequest, TranscriptReplayItem, TranscriptReplayRole, TranscriptUserMessage,
 };
 
 #[test]
@@ -298,7 +298,10 @@ fn prepare_turn_with_transcript_keeps_provider_and_transcript_user_messages_sepa
             "<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message",
         ),
     );
-    let transcript_user_message = ConversationItem::text(Role::User, "raw user message");
+    let transcript_user_message = TranscriptUserMessage {
+        content: "raw user message".to_string(),
+        skill_bindings: Vec::new(),
+    };
     let transcript_replay_after_user = vec![TranscriptReplayItem::Message {
         role: TranscriptReplayRole::Assistant,
         content: "synthetic replay".to_string(),
@@ -323,10 +326,7 @@ fn prepare_turn_with_transcript_keeps_provider_and_transcript_user_messages_sepa
         persistence.current_user_message.text_content(),
         "<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message"
     );
-    assert_eq!(
-        persistence.transcript_user_message.text_content(),
-        transcript_user_message.text_content()
-    );
+    assert_eq!(persistence.transcript_user_message, transcript_user_message);
     assert_eq!(
         persistence.transcript_replay_after_user,
         transcript_replay_after_user

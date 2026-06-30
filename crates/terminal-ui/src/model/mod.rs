@@ -33,6 +33,7 @@ use super::{
     model_panel::ModelPanelState,
     render_frame::RenderFrame,
     selection::project_wide_selection_styles,
+    skill_picker::SkillPickerState,
     startup_banner::StartupBannerEntranceState,
     status_line::StatusLineItem,
     status_phrases::StatusPhraseSelector,
@@ -99,8 +100,10 @@ pub struct Model {
     pub(super) command_panel_selected: usize,
     pub(super) command_panel_scroll: usize,
     pub(super) file_picker: Option<FilePickerState>,
+    pub(super) skill_picker: Option<SkillPickerState>,
     pub(super) file_search_cache: FileSearchCache,
     pub(super) dismissed_file_picker_token: Option<String>,
+    pub(super) dismissed_skill_picker_token: Option<String>,
     pub(super) copy_on_mouse_selection_release: bool,
     pub(super) swap_enter_and_send: bool,
     pub(super) ctrl_c_clears_input: bool,
@@ -190,6 +193,7 @@ impl Model {
                     prelude: PromptPreludeSnapshot::default(),
                     sources: Vec::new(),
                     discovered_skills: Vec::new(),
+                    manual_skills: Vec::new(),
                     builtin_core_system_body: String::new(),
                     global_core_system_override: None,
                     project_core_system_override: None,
@@ -239,8 +243,10 @@ impl Model {
             command_panel_selected: 0,
             command_panel_scroll: 0,
             file_picker: None,
+            skill_picker: None,
             file_search_cache: FileSearchCache::default(),
             dismissed_file_picker_token: None,
+            dismissed_skill_picker_token: None,
             copy_on_mouse_selection_release: options.copy_on_mouse_selection_release,
             swap_enter_and_send: options.swap_enter_and_send,
             ctrl_c_clears_input: options.ctrl_c_clears_input,
@@ -401,7 +407,7 @@ impl Model {
         }
         self.sync_tool_approval_preview_mode();
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_composer_height();
     }
 
@@ -470,7 +476,9 @@ impl Model {
         self.command_panel_selected = 0;
         self.command_panel_scroll = 0;
         self.file_picker = None;
+        self.skill_picker = None;
         self.dismissed_file_picker_token = None;
+        self.dismissed_skill_picker_token = None;
         self.selection_runtime = SelectionRuntimeState::default();
         self.pending_composer_cursor_click = PendingComposerCursorClick::default();
         self.pending_reasoning_toggle_click = PendingReasoningToggleClick::default();

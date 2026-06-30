@@ -16,6 +16,11 @@ use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
 use runtime_domain::phrases::StatusPhraseOrder;
+use runtime_domain::prompt_assembly::PromptSourceOrigin;
+use runtime_domain::prompt_assembly::{
+    PromptAssemblyDiscoveredSkill, PromptAssemblyInput, PromptAssemblyManagerSnapshot,
+    PromptPreludeSnapshot, resolve_prompt_assembly,
+};
 use runtime_domain::provider::ProviderKind;
 use std::path::{Path, PathBuf};
 
@@ -546,6 +551,54 @@ fn at_file_picker_opens_and_tab_completes_common_prefix() {
     model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
 
     assert_eq!(model.composer_text(), "@src/");
+}
+
+#[test]
+fn dollar_skill_picker_opens_and_enter_inserts_bound_skill_token() {
+    let mut model = skill_picker_model();
+
+    type_text(&mut model, "$co");
+
+    assert!(model.skill_picker_active());
+    assert!(
+        model
+            .current_skill_picker_render_result()
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("$code-review"))
+    );
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "$code-review ");
+    assert!(!model.skill_picker_active());
+    let source_message = model.composer.source_message();
+    assert_eq!(source_message.skill_bindings().len(), 1);
+    assert_eq!(source_message.skill_bindings()[0].skill_name, "code-review");
+}
+
+#[test]
+fn moving_cursor_back_onto_bound_skill_token_reopens_skill_picker() {
+    let mut model = skill_picker_model();
+
+    type_text(&mut model, "$co");
+    let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    type_text(&mut model, "later");
+    assert!(!model.skill_picker_active());
+
+    for _ in 0.."later ".chars().count() {
+        let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Left)));
+    }
+
+    assert!(model.skill_picker_active());
+    assert!(
+        model
+            .current_skill_picker_render_result()
+            .plain_lines
+            .iter()
+            .any(|line| line.contains("$code-review"))
+    );
 }
 
 #[test]
@@ -2740,6 +2793,36 @@ fn file_picker_model(root: &Path) -> Model {
     let mut model = Model::new_with_style_mode(StartupBannerOptions::default(), StyleMode::Ms);
     model.transcript_mut().clear();
     model.current_dir = root.display().to_string();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    model
+}
+
+fn skill_picker_model() -> Model {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            prompt_assembly: Some(PromptAssemblyManagerSnapshot {
+                snapshot: resolve_prompt_assembly(&PromptAssemblyInput::default()),
+                prelude: PromptPreludeSnapshot::default(),
+                sources: Vec::new(),
+                discovered_skills: Vec::new(),
+                manual_skills: vec![PromptAssemblyDiscoveredSkill {
+                    skill_name: "code-review".to_string(),
+                    title: "code-review".to_string(),
+                    description: "Review code".to_string(),
+                    origin: PromptSourceOrigin::Project,
+                    skill_path: "/tmp/code-review/SKILL.md".to_string(),
+                    body: "# Code Review".to_string(),
+                }],
+                builtin_core_system_body: String::new(),
+                global_core_system_override: None,
+                project_core_system_override: None,
+            }),
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
     model.set_window(40, 8);
     model.set_palette(default_palette(), true);
     model

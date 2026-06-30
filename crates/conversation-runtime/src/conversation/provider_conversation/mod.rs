@@ -5,7 +5,9 @@ use std::sync::Arc;
 use provider_protocol::{ConversationItem, Role};
 use runtime_domain::{
     prompt_assembly::PromptPreludeSnapshot,
-    session::{ConversationTurnRequest, RuntimeTarget, TranscriptReplayItem},
+    session::{
+        ConversationTurnRequest, RuntimeTarget, TranscriptReplayItem, TranscriptUserMessage,
+    },
 };
 use session_store::{
     ConfigSnapshot, ResolvedSessionState, SessionHeader, SessionId, SessionStore, SessionStoreError,
@@ -298,7 +300,7 @@ impl ProviderConversation {
     pub fn prepare_turn_with_transcript(
         &mut self,
         turn: &ConversationTurnRequest,
-        transcript_user_message: Option<ConversationItem>,
+        transcript_user_message: Option<TranscriptUserMessage>,
         transcript_replay_after_user: Vec<TranscriptReplayItem>,
     ) -> Result<PreparedConversationRequest, ProviderConversationError> {
         if turn.message().role() != Some(Role::User) {
@@ -311,7 +313,10 @@ impl ProviderConversation {
         let user_message = turn.message().clone();
         self.pending_user_message = Some(user_message.clone());
         let transcript_user_message =
-            transcript_user_message.unwrap_or_else(|| user_message.clone());
+            transcript_user_message.unwrap_or_else(|| TranscriptUserMessage {
+                content: user_message.text_content(),
+                skill_bindings: Vec::new(),
+            });
         let system_prompt = self.system_prompt.clone();
         let prompt_prelude = self.prompt_prelude.clone();
         let persistence =

@@ -59,7 +59,7 @@ impl Model {
         self.model_panel.search_query.clear();
         self.sync_model_panel_to_selection();
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);

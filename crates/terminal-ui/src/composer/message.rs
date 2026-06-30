@@ -1,29 +1,65 @@
 //! Composer prompt message assembly.
 
+#[cfg(test)]
 use std::path::Path;
+
+use runtime_domain::session::{TranscriptSkillBinding, TranscriptUserMessage};
 
 /// TUI 内部保存的用户输入源消息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ComposerSourceMessage {
-    content: String,
+    message: TranscriptUserMessage,
 }
 
 impl ComposerSourceMessage {
     /// 创建用户输入源消息。
+    #[cfg(test)]
     pub(crate) fn user_text(content: impl Into<String>) -> Self {
         Self {
-            content: content.into(),
+            message: TranscriptUserMessage {
+                content: content.into(),
+                skill_bindings: Vec::new(),
+            },
         }
+    }
+
+    /// 使用显式 skill 绑定创建用户输入源消息。
+    pub(crate) fn user_text_with_skill_bindings(
+        content: impl Into<String>,
+        skill_bindings: Vec<TranscriptSkillBinding>,
+    ) -> Self {
+        Self {
+            message: TranscriptUserMessage {
+                content: content.into(),
+                skill_bindings,
+            },
+        }
+    }
+
+    /// 使用完整 transcript user message 创建源消息。
+    pub(crate) fn from_transcript_user_message(message: TranscriptUserMessage) -> Self {
+        Self { message }
     }
 
     /// 返回原始用户输入文本。
     pub(crate) fn content(&self) -> &str {
-        &self.content
+        &self.message.content
+    }
+
+    /// 返回当前消息里的 skill 绑定。
+    pub(crate) fn skill_bindings(&self) -> &[TranscriptSkillBinding] {
+        &self.message.skill_bindings
     }
 
     /// 消费并返回原始用户输入文本。
+    #[cfg(test)]
     pub(crate) fn into_content(self) -> String {
-        self.content
+        self.message.content
+    }
+
+    /// 消费并返回 transcript-visible 用户消息。
+    pub(crate) fn into_transcript_user_message(self) -> TranscriptUserMessage {
+        self.message
     }
 }
 
@@ -31,6 +67,7 @@ impl ComposerSourceMessage {
 ///
 /// `@path` 是给模型看的路径引用，不在 TUI 层展开文件内容；模型需要内容时应显式调用
 /// `read` 工具，避免把文件快照和用户指令混进同一个 prompt。
+#[cfg(test)]
 pub(crate) fn source_message_from_composer_text(
     text: &str,
     _current_dir: impl AsRef<Path>,

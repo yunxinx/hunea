@@ -281,7 +281,7 @@ impl Model {
         if self.composer.replace_current_at_token(&replacement) {
             self.dismissed_file_picker_token = None;
             self.sync_command_panel_navigation();
-            self.sync_file_picker_state();
+            self.sync_composer_attached_picker_state();
             self.sync_external_editor_helper_after_draft_change(&old_value);
             self.sync_composer_height();
             self.sync_document_viewport_after_composer_interaction(
@@ -296,6 +296,7 @@ impl Model {
 
     pub(crate) fn close_composer_attached_ui(&mut self) {
         self.close_file_picker();
+        self.close_skill_picker();
         self.close_context_budget();
         self.command_panel_selected = 0;
         self.command_panel_scroll = 0;

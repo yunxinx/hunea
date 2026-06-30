@@ -7,6 +7,7 @@ use provider_protocol::{ConversationItem, Role};
 use runtime_domain::session::{
     ConversationEvent, RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityStatus,
     RuntimeToolActivityUpdate, RuntimeToolKind, TranscriptReplayItem, TranscriptReplayRole,
+    TranscriptUserMessage,
 };
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -189,7 +190,9 @@ pub(super) async fn persist_turn_start(
         append_transcript_replay_items(
             persistence,
             session_id,
-            transcript_replay_items_from_context_item(&persistence.transcript_user_message, state),
+            transcript_replay_items_from_transcript_user_message(
+                &persistence.transcript_user_message,
+            ),
         )
         .await?;
         if !persistence.transcript_replay_after_user.is_empty() {
@@ -411,6 +414,25 @@ fn transcript_replay_items_from_context_item(
             }
         }
     }
+}
+
+fn transcript_replay_items_from_transcript_user_message(
+    message: &TranscriptUserMessage,
+) -> Vec<TranscriptReplayItem> {
+    if message.content.trim().is_empty() {
+        return Vec::new();
+    }
+
+    if message.skill_bindings.is_empty() {
+        return vec![TranscriptReplayItem::Message {
+            role: TranscriptReplayRole::User,
+            content: message.content.clone(),
+        }];
+    }
+
+    vec![TranscriptReplayItem::BoundUserMessage {
+        message: message.clone(),
+    }]
 }
 
 fn transcript_role_from_provider_role(role: Role) -> Option<TranscriptReplayRole> {

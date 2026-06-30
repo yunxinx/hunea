@@ -221,14 +221,23 @@ fn manual_skill_mentions_emit_synthetic_skill_usage_events_before_worker_failure
         }),
         ..AppRuntimeOptions::default()
     });
-    let request = ConversationTurnRequest::new(
+    let request = ConversationTurnRequest::new_user_source_message(
         "openai",
         ProviderKind::OpenAi,
         "gpt-4o-mini",
         None,
         None,
         None,
-        ConversationItem::text(Role::User, "Please audit this diff with $code-review"),
+        runtime_domain::session::TranscriptUserMessage {
+            content: "Please audit this diff with $code-review".to_string(),
+            skill_bindings: vec![runtime_domain::session::TranscriptSkillBinding {
+                skill_name: "code-review".to_string(),
+                origin: runtime_domain::prompt_assembly::PromptSourceOrigin::Project,
+                skill_path: skill_dir.join("SKILL.md").display().to_string(),
+                start_char: 28,
+                end_char: 40,
+            }],
+        },
     );
     let target = request.target();
 

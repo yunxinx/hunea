@@ -142,6 +142,7 @@ pub struct PromptAssemblyDiscoveredSkill {
     pub title: String,
     pub description: String,
     pub origin: PromptSourceOrigin,
+    pub skill_path: String,
     pub body: String,
 }
 
@@ -152,6 +153,7 @@ pub struct PromptAssemblyManagerSnapshot {
     pub prelude: PromptPreludeSnapshot,
     pub sources: Vec<PromptAssemblyManagerSource>,
     pub discovered_skills: Vec<PromptAssemblyDiscoveredSkill>,
+    pub manual_skills: Vec<PromptAssemblyDiscoveredSkill>,
     pub builtin_core_system_body: String,
     pub global_core_system_override: Option<String>,
     pub project_core_system_override: Option<String>,

@@ -394,28 +394,28 @@ impl Model {
             CommandPanelAction::OpenResumePicker => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 Some(AppEffect::OpenResumePicker)
             }
             CommandPanelAction::OpenContextBudget => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 Some(AppEffect::OpenContextBudget)
             }
             CommandPanelAction::OpenCopyPicker => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 Some(AppEffect::OpenCopyPicker)
             }
             CommandPanelAction::OpenPromptOverlay => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 self.open_prompt_overlay();
                 None
@@ -423,21 +423,21 @@ impl Model {
             CommandPanelAction::OpenMessageHistory => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 Some(AppEffect::OpenMessageHistory)
             }
             CommandPanelAction::OpenEntryRewind => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 Some(AppEffect::OpenEntryRewind)
             }
             CommandPanelAction::OpenCoarseRewind => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 self.open_coarse_rewind_from_command()
             }

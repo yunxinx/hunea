@@ -4,13 +4,12 @@ use super::{
     ExternalEditorLaunch, Model, Sender,
     composer::{
         ComposerSourceMessage, selection_end_char_for_line_anchor,
-        selection_start_char_for_line_anchor, source_message_from_composer_text,
+        selection_start_char_for_line_anchor,
     },
     document::DocumentAnchorRegion,
     exit_confirmation::EXIT_CONFIRMATION_PROMPT,
     modal_layer::ModalLayer,
     overlay_input_result::OverlayInputResult,
-    path_resolve::resolve_configured_current_dir,
     terminal_text::sanitize_terminal_text,
     theme::{TerminalPalette, palette_from_background, terminal_default_palette},
     toast::ToastSeverity,
@@ -487,6 +486,10 @@ impl Model {
         if !result.is_ignored() {
             return result.into_effect();
         }
+        let result = self.handle_skill_picker_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
+        }
 
         if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.can_open_message_history_picker_via_ctrl_r() {
@@ -535,7 +538,7 @@ impl Model {
             let old_column = self.composer.column();
             let direction = if key.code == KeyCode::PageUp { -1 } else { 1 };
             if self.composer_mut().handle_page_key(direction) {
-                self.sync_file_picker_state();
+                self.sync_composer_attached_picker_state();
                 self.sync_composer_height();
                 self.document_runtime.follow_bottom = self.composer.viewport_offset()
                     == self.composer.bottom_viewport_offset()
@@ -561,14 +564,15 @@ impl Model {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
-        let file_picker_was_active = self.file_picker_active();
-        let file_picker_manual_viewport_state = (file_picker_was_active
+        let composer_picker_was_active = self.file_picker_active() || self.skill_picker_active();
+        let file_picker_manual_viewport_state = (composer_picker_was_active
             && self.document_runtime.manual_scroll)
             .then(|| self.current_document_viewport_state());
         self.handle_composer_editing_key(key);
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
-        let file_picker_closed = file_picker_was_active && !self.file_picker_active();
+        self.sync_composer_attached_picker_state();
+        let file_picker_closed =
+            composer_picker_was_active && !self.file_picker_active() && !self.skill_picker_active();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         if self.composer_text() != old_value
@@ -628,7 +632,7 @@ impl Model {
             self.composer_mut().insert_newline();
         }
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -670,7 +674,7 @@ impl Model {
             .to_string();
         self.apply_blind_recall_text(&apply_text);
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -798,7 +802,7 @@ impl Model {
             self.composer_mut().insert_text(&normalized_text);
         }
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -812,7 +816,7 @@ impl Model {
         let record_effect = crate::message_history_recall::commit_message_history(self, &old_value);
         self.composer_mut().clear_for_edit();
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         self.sync_document_viewport_after_composer_interaction(&old_value, old_line, old_column);
@@ -843,7 +847,7 @@ impl Model {
 
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let style_mode = self.style_mode;
-        let source_message = source_message_from_composer_text(&content, self.prompt_root());
+        let source_message = self.composer.source_message();
         self.transcript_mut()
             .append_message_with_style_mode_and_source(
                 Sender::User,
@@ -855,7 +859,7 @@ impl Model {
         self.sync_transcript_render();
         self.composer_mut().clear();
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_external_editor_helper_after_draft_change(&content);
         self.sync_composer_height();
         self.document_runtime.follow_bottom = true;
@@ -866,10 +870,6 @@ impl Model {
                 request: Box::new(request),
                 record_message_history,
             })
-    }
-
-    fn prompt_root(&self) -> PathBuf {
-        resolve_configured_current_dir(&self.current_dir)
     }
 
     fn handle_resize(&mut self, width: u16, height: u16) {
@@ -889,7 +889,7 @@ impl Model {
         }
         self.sync_external_editor_helper_after_resize(previous_width);
         self.sync_command_panel_navigation();
-        self.sync_file_picker_state();
+        self.sync_composer_attached_picker_state();
         self.sync_composer_height();
         self.sync_document_viewport_after_transcript_refresh(preserved_viewport_state);
         self.restore_transcript_overlay_scroll_anchor(transcript_overlay_anchor);
@@ -912,14 +912,14 @@ impl Model {
             return None;
         };
         let connection = provider.connection();
-        Some(ConversationTurnRequest::new_user_text(
+        Some(ConversationTurnRequest::new_user_source_message(
             selection.provider_id.clone(),
             connection.kind,
             selection.model_id.clone(),
             connection.base_url.clone(),
             connection.api_key.clone(),
             connection.api_key_env.clone(),
-            message.into_content(),
+            message.into_transcript_user_message(),
         ))
     }
 

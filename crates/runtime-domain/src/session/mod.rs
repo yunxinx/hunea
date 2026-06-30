@@ -42,5 +42,6 @@ pub use recovery::{
     SessionBranchSummary, SessionBranchTreeNode, SessionBranchTreePayload, SessionPickerRow,
     SessionPreviewPayload, SessionResumePayload, SessionTreeBranchChoice, SessionTreePayload,
     SessionTreeRow, SessionTreeRowKind, TranscriptReplayItem, TranscriptReplayRole,
+    TranscriptSkillBinding, TranscriptUserMessage,
 };
 pub use target::{ProviderTarget, RuntimeTarget};

@@ -3,7 +3,7 @@ use runtime_domain::{
     session::{
         ConversationTurnRequest, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
         RuntimeToolActivity, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
-        RuntimeToolKind, TranscriptReplayItem,
+        RuntimeToolKind, TranscriptReplayItem, TranscriptUserMessage,
     },
 };
 
@@ -77,9 +77,15 @@ impl AppRuntimeCoordinator {
             return Err("Conversation request is already running".to_string());
         }
 
-        let transcript_user_message = request.message().clone();
-        let manual_skill_assembly =
-            self.manual_skill_message_assembly(request.message_text().as_str())?;
+        let transcript_user_message =
+            request
+                .transcript_user_message()
+                .cloned()
+                .unwrap_or_else(|| TranscriptUserMessage {
+                    content: request.message_text(),
+                    skill_bindings: Vec::new(),
+                });
+        let manual_skill_assembly = self.manual_skill_message_assembly(&transcript_user_message)?;
         let provider_request = if manual_skill_assembly.uses.is_empty() {
             request.clone()
         } else {
@@ -147,7 +153,7 @@ impl AppRuntimeCoordinator {
 
     fn manual_skill_message_assembly(
         &self,
-        user_text: &str,
+        user_message: &TranscriptUserMessage,
     ) -> Result<ManualSkillMessageAssembly, String> {
         let Some(work_dir) = self
             .options
@@ -156,12 +162,13 @@ impl AppRuntimeCoordinator {
             .map(|header| header.work_dir.as_path())
         else {
             return Ok(ManualSkillMessageAssembly {
-                provider_visible_user_text: user_text.to_string(),
+                provider_visible_user_text: user_message.content.clone(),
                 uses: Vec::new(),
             });
         };
         Ok(crate::prompt_assembly::assemble_manual_skill_message(
-            work_dir, user_text,
+            work_dir,
+            user_message,
         ))
     }
 

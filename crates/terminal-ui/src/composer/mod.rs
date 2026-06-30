@@ -10,6 +10,7 @@ mod viewport;
 mod tests;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use runtime_domain::session::TranscriptSkillBinding;
 
 use self::{
     grapheme::{
@@ -24,7 +25,7 @@ use self::{
 use super::{style_mode::StyleMode, theme::TerminalPalette};
 use crate::terminal_text::sanitize_terminal_text;
 
-pub(crate) use self::message::{ComposerSourceMessage, source_message_from_composer_text};
+pub(crate) use self::message::ComposerSourceMessage;
 pub(crate) use self::mouse::{
     cursor_position_for_line_anchor_click, move_cursor_to_logical_position,
     selection_end_char_for_line_anchor, selection_start_char_for_line_anchor,
@@ -49,6 +50,7 @@ const WORD_SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Composer {
     value: String,
+    skill_bindings: Vec<TranscriptSkillBinding>,
     cursor: usize,
     width: u16,
     height: u16,
@@ -65,6 +67,7 @@ pub struct Composer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ComposerSnapshot {
     value: String,
+    skill_bindings: Vec<TranscriptSkillBinding>,
     cursor: usize,
 }
 
@@ -90,6 +93,7 @@ impl Composer {
     pub fn new_with_undo_limit(style_mode: StyleMode, undo_limit: usize) -> Self {
         Self {
             value: String::new(),
+            skill_bindings: Vec::new(),
             cursor: 0,
             width: 1,
             height: 1,
@@ -136,12 +140,14 @@ impl Composer {
     pub fn clear(&mut self) {
         self.has_active_grapheme_undo_group = false;
         if self.value.is_empty() {
+            self.skill_bindings.clear();
             self.set_cursor(0);
             self.viewport_y = 0;
             return;
         }
 
         self.value.clear();
+        self.skill_bindings.clear();
         self.set_cursor(0);
         self.viewport_y = 0;
         self.undo_history.clear();
@@ -152,6 +158,7 @@ impl Composer {
     pub(crate) fn clear_for_edit(&mut self) {
         if self.value.is_empty() {
             self.finish_grapheme_undo_group();
+            self.skill_bindings.clear();
             self.set_cursor(0);
             self.viewport_y = 0;
             return;
@@ -160,6 +167,7 @@ impl Composer {
         self.finish_grapheme_undo_group();
         self.push_undo_snapshot();
         self.value.clear();
+        self.skill_bindings.clear();
         self.set_cursor(0);
         self.viewport_y = 0;
         self.bump_content_revision();
@@ -196,12 +204,16 @@ impl Composer {
             ComposerReplaceUndoMode::Reset => {
                 self.undo_history.clear();
                 self.has_active_grapheme_undo_group = false;
+                self.skill_bindings.clear();
             }
             ComposerReplaceUndoMode::Record => {}
         }
 
         if changed {
             self.value = value;
+            if matches!(undo_mode, ComposerReplaceUndoMode::Record) {
+                self.reconcile_skill_bindings();
+            }
             self.bump_content_revision();
         }
         self.set_cursor(total_chars(&self.value));
@@ -228,6 +240,7 @@ impl Composer {
         self.push_undo_snapshot();
         let byte_index = char_to_byte_index(&self.value, self.cursor);
         self.value.insert_str(byte_index, text);
+        self.reconcile_skill_bindings();
         self.set_cursor(self.cursor + total_chars(text));
         self.bump_content_revision();
         self.sync_viewport_to_cursor();
@@ -258,6 +271,7 @@ impl Composer {
         let byte_start = char_to_byte_index(&self.value, start);
         let byte_end = char_to_byte_index(&self.value, end);
         self.value.replace_range(byte_start..byte_end, replacement);
+        self.reconcile_skill_bindings();
         self.set_cursor(start + total_chars(replacement));
         self.bump_content_revision();
         self.sync_viewport_to_cursor();
@@ -306,20 +320,32 @@ impl Composer {
         self.finish_grapheme_undo_group();
     }
 
-    /// `current_at_token` 返回当前光标所在的 `@` 文件 token，不含前导 `@`。
-    pub(crate) fn current_at_token(&self) -> Option<String> {
-        self.current_prefixed_token('@').map(|token| token.query)
+    /// `source_message` 返回当前草稿对应的 transcript-visible 用户消息。
+    pub(crate) fn source_message(&self) -> ComposerSourceMessage {
+        ComposerSourceMessage::user_text_with_skill_bindings(
+            self.value.clone(),
+            self.skill_bindings.clone(),
+        )
     }
 
-    /// `current_at_token_start_char` 返回当前 `@` token 起点的字符偏移。
-    pub(crate) fn current_at_token_start_char(&self) -> Option<usize> {
-        self.current_prefixed_token('@')
+    /// `current_prefixed_token_value` 返回当前前缀 token，不含 sigil。
+    pub(crate) fn current_prefixed_token_value(&self, prefix: char) -> Option<String> {
+        self.current_prefixed_token(prefix).map(|token| token.query)
+    }
+
+    /// `current_prefixed_token_start_char` 返回当前前缀 token 的起点字符偏移。
+    pub(crate) fn current_prefixed_token_start_char(&self, prefix: char) -> Option<usize> {
+        self.current_prefixed_token(prefix)
             .map(|token| token.start_char)
     }
 
-    /// `replace_current_at_token` 替换当前 `@` token，并把光标移动到替换文本末尾。
-    pub(crate) fn replace_current_at_token(&mut self, replacement: &str) -> bool {
-        let Some(token) = self.current_prefixed_token('@') else {
+    /// `replace_current_prefixed_token` 替换当前前缀 token，并把光标移动到替换文本末尾。
+    pub(crate) fn replace_current_prefixed_token(
+        &mut self,
+        prefix: char,
+        replacement: &str,
+    ) -> bool {
+        let Some(token) = self.current_prefixed_token(prefix) else {
             return false;
         };
 
@@ -335,10 +361,77 @@ impl Composer {
         self.finish_grapheme_undo_group();
         self.push_undo_snapshot();
         self.value.replace_range(byte_start..byte_end, replacement);
+        self.reconcile_skill_bindings();
         self.set_cursor(token.start_char + total_chars(replacement));
         self.bump_content_revision();
         self.sync_viewport_to_cursor();
         true
+    }
+
+    /// `current_at_token` 返回当前光标所在的 `@` 文件 token，不含前导 `@`。
+    pub(crate) fn current_at_token(&self) -> Option<String> {
+        self.current_prefixed_token_value('@')
+    }
+
+    /// `current_at_token_start_char` 返回当前 `@` token 起点的字符偏移。
+    pub(crate) fn current_at_token_start_char(&self) -> Option<usize> {
+        self.current_prefixed_token_start_char('@')
+    }
+
+    /// `replace_current_at_token` 替换当前 `@` token，并把光标移动到替换文本末尾。
+    pub(crate) fn replace_current_at_token(&mut self, replacement: &str) -> bool {
+        self.replace_current_prefixed_token('@', replacement)
+    }
+
+    /// `current_skill_token` 返回当前光标所在的 `$skill` token，不含前导 `$`。
+    pub(crate) fn current_skill_token(&self) -> Option<String> {
+        self.current_prefixed_token_value('$')
+    }
+
+    /// `current_skill_token_start_char` 返回当前 `$skill` token 起点的字符偏移。
+    pub(crate) fn current_skill_token_start_char(&self) -> Option<usize> {
+        self.current_prefixed_token_start_char('$')
+    }
+
+    /// `replace_current_skill_token` 替换当前 `$` token，建立绑定，并把光标移动到替换文本末尾。
+    pub(crate) fn replace_current_skill_token(
+        &mut self,
+        skill_name: &str,
+        skill_path: &str,
+        origin: runtime_domain::prompt_assembly::PromptSourceOrigin,
+    ) -> bool {
+        let Some(token) = self.current_prefixed_token('$') else {
+            return false;
+        };
+        let visible_token = format!("${skill_name}");
+        let replacement = format!("{visible_token} ");
+        if !self.replace_current_prefixed_token('$', &replacement) {
+            return false;
+        }
+
+        self.skill_bindings.retain(|binding| {
+            !(binding.start_char >= token.start_char && binding.end_char <= token.end_char)
+        });
+        self.skill_bindings.push(TranscriptSkillBinding {
+            skill_name: skill_name.to_string(),
+            origin,
+            skill_path: skill_path.to_string(),
+            start_char: token.start_char,
+            end_char: token.start_char + total_chars(&visible_token),
+        });
+        self.skill_bindings
+            .sort_by_key(|binding| binding.start_char);
+        true
+    }
+
+    pub(crate) fn current_skill_binding(&self) -> Option<TranscriptSkillBinding> {
+        let token = self.current_prefixed_token('$')?;
+        self.skill_bindings
+            .iter()
+            .find(|binding| {
+                binding.start_char == token.start_char && binding.end_char == token.end_char
+            })
+            .cloned()
     }
 
     /// `handle_key` 处理输入编辑、导航与分页相关按键。
@@ -547,6 +640,7 @@ impl Composer {
         self.has_active_grapheme_undo_group = false;
         if self.value != value {
             self.value = value;
+            self.skill_bindings.clear();
             self.bump_content_revision();
         }
         self.set_cursor(total_chars(&self.value));
@@ -609,6 +703,7 @@ impl Composer {
     fn insert_char_without_undo(&mut self, character: char) {
         let byte_index = char_to_byte_index(&self.value, self.cursor);
         self.value.insert(byte_index, character);
+        self.reconcile_skill_bindings();
         self.set_cursor(self.cursor + 1);
         self.bump_content_revision();
     }
@@ -949,6 +1044,7 @@ impl Composer {
             query,
             start_char: start,
             end_char: end,
+            visible_text: chars[start..end].iter().collect(),
         })
     }
 
@@ -984,6 +1080,7 @@ impl Composer {
         let byte_start = char_to_byte_index(&self.value, start);
         let byte_end = char_to_byte_index(&self.value, end);
         self.value.drain(byte_start..byte_end);
+        self.reconcile_skill_bindings();
         self.set_cursor(start.min(total_chars(&self.value)));
         self.bump_content_revision();
     }
@@ -991,6 +1088,7 @@ impl Composer {
     fn push_undo_snapshot(&mut self) {
         let snapshot = ComposerSnapshot {
             value: self.value.clone(),
+            skill_bindings: self.skill_bindings.clone(),
             cursor: self.cursor,
         };
         if self.undo_history.last() == Some(&snapshot) {
@@ -1015,7 +1113,10 @@ impl Composer {
 
         if self.value != snapshot.value {
             self.value = snapshot.value;
+            self.skill_bindings = snapshot.skill_bindings;
             self.bump_content_revision();
+        } else {
+            self.skill_bindings = snapshot.skill_bindings;
         }
         self.set_cursor(snapshot.cursor.min(total_chars(&self.value)));
         self.sync_viewport_to_cursor();
@@ -1075,6 +1176,46 @@ impl Composer {
         self.cursor = cursor;
         self.cursor_revision = self.cursor_revision.saturating_add(1);
     }
+
+    pub(crate) fn reconcile_skill_bindings(&mut self) {
+        let tokens = prefixed_tokens_in_text(&self.value, '$');
+        if tokens.is_empty() {
+            self.skill_bindings.clear();
+            return;
+        }
+
+        let mut matched = vec![false; tokens.len()];
+        let mut next_bindings = Vec::new();
+        for binding in &self.skill_bindings {
+            let expected = format!("${}", binding.skill_name);
+            let preferred = tokens
+                .iter()
+                .enumerate()
+                .find(|(index, token)| {
+                    !matched[*index]
+                        && token.start_char == binding.start_char
+                        && token.end_char == binding.end_char
+                        && token.visible_text == expected
+                })
+                .map(|(index, token)| (index, token.clone()))
+                .or_else(|| {
+                    tokens
+                        .iter()
+                        .enumerate()
+                        .find(|(index, token)| !matched[*index] && token.visible_text == expected)
+                        .map(|(index, token)| (index, token.clone()))
+                });
+            let Some((index, token)) = preferred else {
+                continue;
+            };
+            matched[index] = true;
+            let mut binding = binding.clone();
+            binding.start_char = token.start_char;
+            binding.end_char = token.end_char;
+            next_bindings.push(binding);
+        }
+        self.skill_bindings = next_bindings;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1082,6 +1223,7 @@ struct PrefixedToken {
     query: String,
     start_char: usize,
     end_char: usize,
+    visible_text: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1251,6 +1393,36 @@ fn visual_width_for_anchor_prefix(
 
 fn total_chars(value: &str) -> usize {
     value.chars().count()
+}
+
+fn prefixed_tokens_in_text(value: &str, prefix: char) -> Vec<PrefixedToken> {
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+        if index >= chars.len() {
+            break;
+        }
+        let start = index;
+        while index < chars.len() && !chars[index].is_whitespace() {
+            index += 1;
+        }
+        let end = index;
+        if chars.get(start).copied() != Some(prefix) {
+            continue;
+        }
+        let visible_text = chars[start..end].iter().collect::<String>();
+        tokens.push(PrefixedToken {
+            query: chars[start + 1..end].iter().collect(),
+            start_char: start,
+            end_char: end,
+            visible_text,
+        });
+    }
+    tokens
 }
 
 fn prompt_width() -> u16 {

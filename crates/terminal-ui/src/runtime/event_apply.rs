@@ -1,8 +1,9 @@
+use runtime_domain::prompt_assembly::PromptAssemblyDiscoveredSkill;
 use runtime_domain::session::{
     RuntimeEvent, RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeTarget,
     RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityStatus,
     RuntimeToolActivityUpdate, RuntimeToolKind, SessionResumePayload, TranscriptReplayItem,
-    TranscriptReplayRole,
+    TranscriptReplayRole, TranscriptSkillBinding, TranscriptUserMessage,
 };
 
 use super::super::{
@@ -431,6 +432,7 @@ impl Model {
                 &mut transcript,
                 self.style_mode,
                 self.reasoning_display_mode,
+                &self.prompt_assembly.manual_skills,
             );
         }
         for snapshot in terminal_snapshots.iter().cloned() {
@@ -461,6 +463,7 @@ trait TranscriptReplayItemSource {
         transcript: &mut crate::transcript::Transcript,
         style_mode: crate::style_mode::StyleMode,
         reasoning_display_mode: crate::ReasoningDisplayMode,
+        manual_skills: &[PromptAssemblyDiscoveredSkill],
     );
 }
 
@@ -474,8 +477,15 @@ impl TranscriptReplayItemSource for TranscriptReplayItem {
         transcript: &mut crate::transcript::Transcript,
         style_mode: crate::style_mode::StyleMode,
         reasoning_display_mode: crate::ReasoningDisplayMode,
+        manual_skills: &[PromptAssemblyDiscoveredSkill],
     ) {
-        append_transcript_replay_item(transcript, self, style_mode, reasoning_display_mode);
+        append_transcript_replay_item(
+            transcript,
+            self,
+            style_mode,
+            reasoning_display_mode,
+            manual_skills,
+        );
     }
 }
 
@@ -489,12 +499,14 @@ impl TranscriptReplayItemSource for &TranscriptReplayItem {
         transcript: &mut crate::transcript::Transcript,
         style_mode: crate::style_mode::StyleMode,
         reasoning_display_mode: crate::ReasoningDisplayMode,
+        manual_skills: &[PromptAssemblyDiscoveredSkill],
     ) {
         append_transcript_replay_item(
             transcript,
             (*self).clone(),
             style_mode,
             reasoning_display_mode,
+            manual_skills,
         );
     }
 }
@@ -505,6 +517,7 @@ fn transcript_replay_item_terminal_snapshot(
     match item {
         TranscriptReplayItem::TerminalSnapshot { snapshot } => Some(snapshot),
         TranscriptReplayItem::Message { .. }
+        | TranscriptReplayItem::BoundUserMessage { .. }
         | TranscriptReplayItem::Reasoning { .. }
         | TranscriptReplayItem::ToolActivity { .. }
         | TranscriptReplayItem::ToolResult { .. }
@@ -517,6 +530,7 @@ fn append_transcript_replay_item(
     item: TranscriptReplayItem,
     style_mode: crate::style_mode::StyleMode,
     reasoning_display_mode: crate::ReasoningDisplayMode,
+    manual_skills: &[PromptAssemblyDiscoveredSkill],
 ) {
     match item {
         TranscriptReplayItem::Message {
@@ -533,6 +547,15 @@ fn append_transcript_replay_item(
                 crate::Sender::Assistant,
                 content,
                 style_mode,
+            );
+        }
+        TranscriptReplayItem::BoundUserMessage { message } => {
+            let source_message = validated_transcript_user_source_message(message, manual_skills);
+            transcript.append_message_with_style_mode_and_source(
+                crate::Sender::User,
+                source_message.content().to_string(),
+                style_mode,
+                Some(source_message),
             );
         }
         TranscriptReplayItem::Reasoning { content } => {
@@ -566,6 +589,42 @@ fn upsert_replay_terminal_snapshot(
     }
 
     snapshots.push(snapshot);
+}
+
+fn validated_transcript_user_source_message(
+    message: TranscriptUserMessage,
+    manual_skills: &[PromptAssemblyDiscoveredSkill],
+) -> crate::composer::ComposerSourceMessage {
+    let valid_bindings = message
+        .skill_bindings
+        .into_iter()
+        .filter(|binding| {
+            is_visible_binding_range_valid(binding, &message.content)
+                && manual_skills.iter().any(|skill| {
+                    skill.skill_name == binding.skill_name
+                        && skill.origin == binding.origin
+                        && skill.skill_path == binding.skill_path
+                })
+        })
+        .collect();
+    crate::composer::ComposerSourceMessage::from_transcript_user_message(TranscriptUserMessage {
+        content: message.content,
+        skill_bindings: valid_bindings,
+    })
+}
+
+fn is_visible_binding_range_valid(binding: &TranscriptSkillBinding, content: &str) -> bool {
+    let total_chars = content.chars().count();
+    if binding.start_char >= binding.end_char || binding.end_char > total_chars {
+        return false;
+    }
+
+    let visible_text = content
+        .chars()
+        .skip(binding.start_char)
+        .take(binding.end_char - binding.start_char)
+        .collect::<String>();
+    visible_text == format!("${}", binding.skill_name)
 }
 
 fn split_error_description_and_json_body(message: &str) -> (String, Option<String>) {

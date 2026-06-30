@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use provider_protocol::ConversationItem;
-use runtime_domain::session::TranscriptReplayItem;
+use runtime_domain::session::{TranscriptReplayItem, TranscriptUserMessage};
 use session_store::{ConfigSnapshot, SessionHeader, SessionId, SessionStore};
 
 #[derive(Clone)]
@@ -11,7 +11,7 @@ pub(crate) struct PreparedConversationPersistence {
     pub(crate) header_template: SessionHeader,
     pub(crate) config_snapshot: ConfigSnapshot,
     pub(crate) current_user_message: ConversationItem,
-    pub(crate) transcript_user_message: ConversationItem,
+    pub(crate) transcript_user_message: TranscriptUserMessage,
     pub(crate) transcript_replay_after_user: Vec<TranscriptReplayItem>,
 }
 

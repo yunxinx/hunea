@@ -1,4 +1,5 @@
 use crate::model_catalog::ModelSelection;
+use crate::prompt_assembly::PromptSourceOrigin;
 use serde::{Deserialize, Serialize};
 
 use super::activity::{RuntimeTerminalSnapshot, RuntimeToolActivity};
@@ -24,6 +25,9 @@ pub enum TranscriptReplayItem {
         role: TranscriptReplayRole,
         content: String,
     },
+    BoundUserMessage {
+        message: TranscriptUserMessage,
+    },
     Reasoning {
         content: String,
     },
@@ -46,6 +50,9 @@ impl TranscriptReplayItem {
     pub fn content_text(&self) -> &str {
         match self {
             Self::Message { content, .. }
+            | Self::BoundUserMessage {
+                message: TranscriptUserMessage { content, .. },
+            }
             | Self::Reasoning { content }
             | Self::ToolResult { content }
             | Self::System { content } => content,
@@ -58,6 +65,24 @@ impl TranscriptReplayItem {
                 .unwrap_or(snapshot.terminal_id.as_str()),
         }
     }
+}
+
+/// `TranscriptSkillBinding` 表示一次 user transcript 中仍可恢复的 `$skill` 结构化绑定。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptSkillBinding {
+    pub skill_name: String,
+    pub origin: PromptSourceOrigin,
+    pub skill_path: String,
+    pub start_char: usize,
+    pub end_char: usize,
+}
+
+/// `TranscriptUserMessage` 表示 transcript-visible 的用户消息及其可选 skill 绑定。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TranscriptUserMessage {
+    pub content: String,
+    #[serde(default)]
+    pub skill_bindings: Vec<TranscriptSkillBinding>,
 }
 
 /// `TranscriptReplayRole` 是恢复普通消息时可见消息的角色。

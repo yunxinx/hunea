@@ -294,7 +294,16 @@ fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_
         Role::User,
         "<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message",
     );
-    let transcript_user = ConversationItem::text(Role::User, "raw user message");
+    let transcript_user = runtime_domain::session::TranscriptUserMessage {
+        content: "$code-review raw user message".to_string(),
+        skill_bindings: vec![runtime_domain::session::TranscriptSkillBinding {
+            skill_name: "code-review".to_string(),
+            origin: runtime_domain::prompt_assembly::PromptSourceOrigin::Project,
+            skill_path: "/tmp/code-review/SKILL.md".to_string(),
+            start_char: 0,
+            end_char: 12,
+        }],
+    };
     let request = conversation
         .prepare_turn_with_transcript(
             &runtime_domain::session::ConversationTurnRequest::new(
@@ -359,10 +368,11 @@ fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_
     assert!(matches!(
         restored.transcript.as_slice(),
         [
-            TranscriptReplayItem::Message { role, content },
+            TranscriptReplayItem::BoundUserMessage { message },
             TranscriptReplayItem::ToolActivity { activity }
-        ] if role == &runtime_domain::session::TranscriptReplayRole::User
-            && content == "raw user message"
+        ] if message.content == "$code-review raw user message"
+            && message.skill_bindings.len() == 1
+            && message.skill_bindings[0].skill_name == "code-review"
             && activity.activity_id == "manual-skill-1-code-review"
     ));
 }

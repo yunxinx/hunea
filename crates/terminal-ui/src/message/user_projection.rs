@@ -4,9 +4,11 @@ use std::rc::Rc;
 use std::cell::Cell;
 
 use ratatui::text::Line;
+use runtime_domain::session::TranscriptSkillBinding;
 
 use crate::{
     StyleMode,
+    composer::ComposerSourceMessage,
     selection::SelectableLineRange,
     theme::{SurfaceHalf, TerminalPalette},
     transcript::{ItemLineAnchor, LineAnchorKind, PromptVisualLine, wrap_prompt_visual_lines},
@@ -36,6 +38,7 @@ pub(crate) struct UserMessageRenderProjection {
     lines: Rc<Vec<UserMessageProjectedLine>>,
     pub(super) layout: UserMessageRenderLayout,
     pub(super) has_frame: bool,
+    pub(super) skill_bindings: Rc<Vec<TranscriptSkillBinding>>,
     palette: TerminalPalette,
     style_mode: StyleMode,
 }
@@ -96,6 +99,7 @@ impl UserMessageRenderProjection {
                 self.layout,
                 self.palette,
                 self.style_mode,
+                &self.skill_bindings,
             ),
             StyleMode::Cc => render_projected_compact_user_line(
                 line,
@@ -103,10 +107,15 @@ impl UserMessageRenderProjection {
                 self.layout.frame_width.max(1),
                 self.palette,
                 self.style_mode,
+                &self.skill_bindings,
             ),
-            StyleMode::Ms => {
-                render_projected_legacy_user_line(line, is_first, self.palette, self.style_mode)
-            }
+            StyleMode::Ms => render_projected_legacy_user_line(
+                line,
+                is_first,
+                self.palette,
+                self.style_mode,
+                &self.skill_bindings,
+            ),
         })
     }
 
@@ -293,6 +302,7 @@ pub(super) fn render_user_message_projection(
     width: u16,
     palette: TerminalPalette,
     style_mode: StyleMode,
+    source_message: Option<&ComposerSourceMessage>,
 ) -> UserMessageRenderProjection {
     let UserMessageWrapSnapshot {
         lines,
@@ -308,6 +318,11 @@ pub(super) fn render_user_message_projection(
         ),
         layout,
         has_frame,
+        skill_bindings: Rc::new(
+            source_message
+                .map(|message| message.skill_bindings().to_vec())
+                .unwrap_or_default(),
+        ),
         palette,
         style_mode,
     }

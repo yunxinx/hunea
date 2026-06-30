@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use runtime_domain::prompt_assembly::PromptSourceOrigin;
 
 use super::Composer;
 use crate::{StyleMode, theme::default_palette};
@@ -418,6 +419,39 @@ fn replace_current_at_token_keeps_surrounding_text_and_moves_cursor() {
         composer.cursor_position(),
         (0, "open @src/main.rs ".chars().count())
     );
+}
+
+#[test]
+fn skill_binding_survives_edit_outside_bound_token() {
+    let mut composer = test_composer(80, 3, "$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        "/tmp/code-review/SKILL.md",
+        PromptSourceOrigin::Project,
+    ));
+
+    composer.insert_text(" please inspect this");
+
+    let source_message = composer.source_message();
+    assert_eq!(source_message.skill_bindings().len(), 1);
+    assert_eq!(source_message.skill_bindings()[0].skill_name, "code-review");
+}
+
+#[test]
+fn skill_binding_drops_immediately_after_manual_token_edit() {
+    let mut composer = test_composer(80, 3, "$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        "/tmp/code-review/SKILL.md",
+        PromptSourceOrigin::Project,
+    ));
+
+    composer.handle_key(KeyEvent::from(KeyCode::Left));
+    composer.handle_key(KeyEvent::from(KeyCode::Left));
+    composer.handle_key(KeyEvent::from(KeyCode::Char('x')));
+
+    let source_message = composer.source_message();
+    assert!(source_message.skill_bindings().is_empty());
 }
 
 fn test_composer(width: u16, height: u16, value: &str) -> Composer {

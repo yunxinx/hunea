@@ -18,6 +18,7 @@ use runtime_domain::prompt_assembly::{
     PromptPreludeSnapshot, PromptSourceCandidate, PromptSourceInactiveReason, PromptSourceKind,
     PromptSourceOrigin, PromptSourceStatus, resolve_prompt_assembly,
 };
+use runtime_domain::session::TranscriptUserMessage;
 use session_store::SessionStore;
 
 const BUILTIN_CORE_SYSTEM_PROMPT: &str =
@@ -155,20 +156,39 @@ pub(crate) fn check_prompt_assembly_missing_sources_from_states(
 /// `assemble_manual_skill_message` 解析当前用户消息里的 `$skill` 提及并拼装 provider-visible 文本。
 pub(crate) fn assemble_manual_skill_message(
     work_dir: &Path,
-    user_text: &str,
+    user_message: &TranscriptUserMessage,
 ) -> ManualSkillMessageAssembly {
     let discovered_skills = discover_skills(work_dir, None);
-    let skills_by_name = discovered_skills
+    let skills_by_locator = discovered_skills
         .iter()
-        .map(|skill| (skill.name.clone(), skill))
+        .map(|skill| {
+            (
+                (
+                    skill.name.as_str(),
+                    skill.origin,
+                    skill.skill_path.as_path(),
+                ),
+                skill,
+            )
+        })
         .collect::<HashMap<_, _>>();
-    let mut seen_names = std::collections::HashSet::new();
+    let mut seen_bindings = std::collections::HashSet::new();
     let mut uses = Vec::new();
-    for skill_name in extract_manual_skill_mentions(user_text) {
-        if !seen_names.insert(skill_name.clone()) {
+    let mut bindings = user_message.skill_bindings.clone();
+    bindings.sort_by_key(|binding| binding.start_char);
+    for binding in bindings {
+        let binding_key = (
+            binding.skill_name.clone(),
+            binding.origin,
+            binding.skill_path.clone(),
+        );
+        if !seen_bindings.insert(binding_key) {
             continue;
         }
-        let Some(skill) = skills_by_name.get(&skill_name) else {
+        let skill_path = Path::new(binding.skill_path.as_str());
+        let Some(skill) =
+            skills_by_locator.get(&(binding.skill_name.as_str(), binding.origin, skill_path))
+        else {
             continue;
         };
         uses.push(ManualSkillPromptUse {
@@ -180,13 +200,13 @@ pub(crate) fn assemble_manual_skill_message(
     }
 
     let provider_visible_user_text = if uses.is_empty() {
-        user_text.to_string()
+        user_message.content.clone()
     } else {
         let mut sections = uses
             .iter()
             .map(|skill| skill.body.clone())
             .collect::<Vec<_>>();
-        let trimmed_user_text = user_text.trim();
+        let trimmed_user_text = user_message.content.trim();
         if !trimmed_user_text.is_empty() {
             sections.push(trimmed_user_text.to_string());
         }
@@ -326,6 +346,7 @@ fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
             global_state,
             project_state,
         ),
+        manual_skills: manual_skill_inventory(&discovered_skills),
         builtin_core_system_body: BUILTIN_CORE_SYSTEM_PROMPT.to_string(),
         global_core_system_override: global_state.core_system_override.clone(),
         project_core_system_override: project_state.core_system_override.clone(),
@@ -920,6 +941,24 @@ fn discovered_skill_inventory(
             title: skill.name.clone(),
             description: skill.description.clone(),
             origin: skill.origin,
+            skill_path: skill.skill_path.display().to_string(),
+            body: format_long_lived_skill_body(skill),
+        })
+        .collect()
+}
+
+fn manual_skill_inventory(
+    discovered_skills: &[DiscoveredSkill],
+) -> Vec<PromptAssemblyDiscoveredSkill> {
+    discovered_skills
+        .iter()
+        .filter(|skill| !skill.disable_model_invocation)
+        .map(|skill| PromptAssemblyDiscoveredSkill {
+            skill_name: skill.name.clone(),
+            title: skill.name.clone(),
+            description: skill.description.clone(),
+            origin: skill.origin,
+            skill_path: skill.skill_path.display().to_string(),
             body: format_long_lived_skill_body(skill),
         })
         .collect()
@@ -1092,22 +1131,6 @@ fn format_long_lived_skill_body(skill: &DiscoveredSkill) -> String {
         skill.skill_path.display(),
         skill.body.trim()
     )
-}
-
-fn extract_manual_skill_mentions(user_text: &str) -> Vec<String> {
-    user_text
-        .split_whitespace()
-        .filter_map(|token| token.strip_prefix('$'))
-        .filter(|skill_name| {
-            !skill_name.is_empty()
-                && skill_name.chars().all(|character| {
-                    character.is_ascii_lowercase()
-                        || character.is_ascii_digit()
-                        || matches!(character, '-' | ':')
-                })
-        })
-        .map(str::to_string)
-        .collect()
 }
 
 fn escape_xml(value: &str) -> String {
@@ -1625,7 +1648,40 @@ mod tests {
 
         let assembled = assemble_manual_skill_message(
             &work_dir,
-            "Please use $repo-bootstrap before $code-review and repeat $repo-bootstrap",
+            &TranscriptUserMessage {
+                content:
+                    "Please use $repo-bootstrap before $code-review and repeat $repo-bootstrap"
+                        .to_string(),
+                skill_bindings: vec![
+                    runtime_domain::session::TranscriptSkillBinding {
+                        skill_name: "repo-bootstrap".to_string(),
+                        origin: PromptSourceOrigin::Project,
+                        skill_path: repo_bootstrap_dir
+                            .join(SKILL_FILE_NAME)
+                            .display()
+                            .to_string(),
+                        start_char: 11,
+                        end_char: 26,
+                    },
+                    runtime_domain::session::TranscriptSkillBinding {
+                        skill_name: "code-review".to_string(),
+                        origin: PromptSourceOrigin::Project,
+                        skill_path: code_review_dir.join(SKILL_FILE_NAME).display().to_string(),
+                        start_char: 34,
+                        end_char: 46,
+                    },
+                    runtime_domain::session::TranscriptSkillBinding {
+                        skill_name: "repo-bootstrap".to_string(),
+                        origin: PromptSourceOrigin::Project,
+                        skill_path: repo_bootstrap_dir
+                            .join(SKILL_FILE_NAME)
+                            .display()
+                            .to_string(),
+                        start_char: 58,
+                        end_char: 73,
+                    },
+                ],
+            },
         );
 
         assert_eq!(
@@ -1657,6 +1713,32 @@ mod tests {
                     disable_model_invocation: false,
                 }),
             )
+        );
+    }
+
+    #[test]
+    fn assemble_manual_skill_message_ignores_plain_text_tokens_without_bindings() {
+        let work_dir = temp_dir("manual-skill-without-bindings");
+        let code_review_dir = work_dir.join(".agents/skills/code-review");
+        fs::create_dir_all(&code_review_dir).expect("code-review dir should exist");
+        fs::write(
+            code_review_dir.join(SKILL_FILE_NAME),
+            "---\nname: code-review\ndescription: Review code\n---\n# Code Review\n\nReview carefully.\n",
+        )
+        .expect("code-review skill should write");
+
+        let assembled = assemble_manual_skill_message(
+            &work_dir,
+            &TranscriptUserMessage {
+                content: "Please use $code-review".to_string(),
+                skill_bindings: Vec::new(),
+            },
+        );
+
+        assert!(assembled.uses.is_empty());
+        assert_eq!(
+            assembled.provider_visible_user_text,
+            "Please use $code-review"
         );
     }
 }

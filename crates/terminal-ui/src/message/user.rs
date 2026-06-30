@@ -1,8 +1,10 @@
 use ratatui::text::{Line, Span};
+use runtime_domain::session::TranscriptSkillBinding;
 
 pub(super) use crate::display_width::display_width as measure_width;
 use crate::{
     StyleMode,
+    composer::ComposerSourceMessage,
     theme::{
         SurfaceHalf, TerminalPalette, secondary_text_style, surface_emphasis_style,
         surface_half_block_line, surface_text_style,
@@ -17,7 +19,21 @@ pub(super) fn render_user_message_lines(
     width: u16,
     palette: TerminalPalette,
     style_mode: StyleMode,
+    source_message: Option<&ComposerSourceMessage>,
 ) -> Vec<Line<'static>> {
+    if source_message.is_some_and(|message| !message.skill_bindings().is_empty()) {
+        let projection = super::user_projection::render_user_message_projection(
+            content,
+            width,
+            palette,
+            style_mode,
+            source_message,
+        );
+        return (0..projection.line_count())
+            .filter_map(|index| projection.line_at(index))
+            .collect();
+    }
+
     match style_mode.normalized() {
         StyleMode::Cx => render_framed_user_message(content, width, palette, style_mode),
         StyleMode::Cc => render_compact_user_message(content, width, palette, style_mode),
@@ -128,6 +144,7 @@ pub(super) fn render_projected_framed_user_line(
     layout: UserMessageRenderLayout,
     palette: TerminalPalette,
     style_mode: StyleMode,
+    skill_bindings: &[TranscriptSkillBinding],
 ) -> Line<'static> {
     let prefix_style = surface_text_style(palette);
     let mut prefix_glyph_style = secondary_text_style(palette);
@@ -135,25 +152,33 @@ pub(super) fn render_projected_framed_user_line(
         prefix_glyph_style = prefix_glyph_style.bg(surface);
     }
     let content_style = surface_text_style(palette);
+    let skill_style = content_style.fg(palette.command_accent);
     let continuation_prefix = " ".repeat(layout.line_prefix_width);
     let trailing_fill_width = layout
         .frame_width
         .saturating_sub(layout.line_prefix_width + measure_width(&line.text));
     let trailing_fill = " ".repeat(trailing_fill_width);
+    let content_spans = styled_user_content_spans(
+        &line.text,
+        line.visible_start_char,
+        content_style,
+        skill_style,
+        skill_bindings,
+    );
 
     if is_first && layout.shows_prefix {
-        Line::default().spans([
+        let mut spans = vec![
             Span::styled(user_message_prefix_glyph(style_mode), prefix_glyph_style),
             Span::styled(" ", prefix_style),
-            Span::styled(line.text.clone(), content_style),
-            Span::styled(trailing_fill, prefix_style),
-        ])
+        ];
+        spans.extend(content_spans);
+        spans.push(Span::styled(trailing_fill, prefix_style));
+        Line::from(spans)
     } else {
-        Line::default().spans([
-            Span::styled(continuation_prefix, prefix_style),
-            Span::styled(line.text.clone(), content_style),
-            Span::styled(trailing_fill, prefix_style),
-        ])
+        let mut spans = vec![Span::styled(continuation_prefix, prefix_style)];
+        spans.extend(content_spans);
+        spans.push(Span::styled(trailing_fill, prefix_style));
+        Line::from(spans)
     }
 }
 
@@ -203,6 +228,7 @@ pub(super) fn render_projected_compact_user_line(
     width: usize,
     palette: TerminalPalette,
     style_mode: StyleMode,
+    skill_bindings: &[TranscriptSkillBinding],
 ) -> Line<'static> {
     let prefix_style = surface_text_style(palette);
     let mut prefix_glyph_style = secondary_text_style(palette);
@@ -210,24 +236,32 @@ pub(super) fn render_projected_compact_user_line(
         prefix_glyph_style = prefix_glyph_style.bg(surface);
     }
     let content_style = surface_text_style(palette);
+    let skill_style = content_style.fg(palette.command_accent);
     let continuation_prefix = " ".repeat(user_message_inset_width(style_mode));
     let trailing_fill_width =
         width.saturating_sub(user_message_inset_width(style_mode) + measure_width(&line.text));
     let trailing_fill = " ".repeat(trailing_fill_width);
+    let content_spans = styled_user_content_spans(
+        &line.text,
+        line.visible_start_char,
+        content_style,
+        skill_style,
+        skill_bindings,
+    );
 
     if is_first {
-        Line::default().spans([
+        let mut spans = vec![
             Span::styled(user_message_prefix_glyph(style_mode), prefix_glyph_style),
             Span::styled(" ", prefix_style),
-            Span::styled(line.text.clone(), content_style),
-            Span::styled(trailing_fill, prefix_style),
-        ])
+        ];
+        spans.extend(content_spans);
+        spans.push(Span::styled(trailing_fill, prefix_style));
+        Line::from(spans)
     } else {
-        Line::default().spans([
-            Span::styled(continuation_prefix, prefix_style),
-            Span::styled(line.text.clone(), content_style),
-            Span::styled(trailing_fill, prefix_style),
-        ])
+        let mut spans = vec![Span::styled(continuation_prefix, prefix_style)];
+        spans.extend(content_spans);
+        spans.push(Span::styled(trailing_fill, prefix_style));
+        Line::from(spans)
     }
 }
 
@@ -264,22 +298,90 @@ pub(super) fn render_projected_legacy_user_line(
     is_first: bool,
     palette: TerminalPalette,
     style_mode: StyleMode,
+    skill_bindings: &[TranscriptSkillBinding],
 ) -> Line<'static> {
     let prefix_style = surface_text_style(palette);
     let content_style = surface_emphasis_style(palette);
+    let skill_style = content_style.fg(palette.command_accent);
     let continuation_prefix = " ".repeat(user_message_inset_width(style_mode));
+    let content_spans = styled_user_content_spans(
+        &line.text,
+        line.visible_start_char,
+        content_style,
+        skill_style,
+        skill_bindings,
+    );
 
     if is_first {
-        Line::default().spans([
-            Span::styled(user_message_prefix(style_mode), prefix_style),
-            Span::styled(line.text.clone(), content_style),
-        ])
+        let mut spans = vec![Span::styled(user_message_prefix(style_mode), prefix_style)];
+        spans.extend(content_spans);
+        Line::from(spans)
     } else {
-        Line::default().spans([
-            Span::styled(continuation_prefix, prefix_style),
-            Span::styled(line.text.clone(), content_style),
-        ])
+        let mut spans = vec![Span::styled(continuation_prefix, prefix_style)];
+        spans.extend(content_spans);
+        Line::from(spans)
     }
+}
+
+fn styled_user_content_spans(
+    text: &str,
+    visible_start_char: usize,
+    content_style: ratatui::style::Style,
+    skill_style: ratatui::style::Style,
+    skill_bindings: &[TranscriptSkillBinding],
+) -> Vec<Span<'static>> {
+    if text.is_empty() {
+        return vec![Span::styled(String::new(), content_style)];
+    }
+    if skill_bindings.is_empty() {
+        return vec![Span::styled(text.to_string(), content_style)];
+    }
+
+    let line_char_len = text.chars().count();
+    let visible_end_char = visible_start_char + line_char_len;
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+
+    for binding in skill_bindings {
+        let overlap_start = binding.start_char.max(visible_start_char);
+        let overlap_end = binding.end_char.min(visible_end_char);
+        if overlap_start >= overlap_end {
+            continue;
+        }
+
+        let relative_start = overlap_start - visible_start_char;
+        let relative_end = overlap_end - visible_start_char;
+        if cursor < relative_start {
+            spans.push(Span::styled(
+                slice_char_range(text, cursor, relative_start),
+                content_style,
+            ));
+        }
+        spans.push(Span::styled(
+            slice_char_range(text, relative_start, relative_end),
+            skill_style,
+        ));
+        cursor = relative_end;
+    }
+
+    if cursor < line_char_len {
+        spans.push(Span::styled(
+            slice_char_range(text, cursor, line_char_len),
+            content_style,
+        ));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled(text.to_string(), content_style));
+    }
+    spans
+}
+
+fn slice_char_range(text: &str, start: usize, end: usize) -> String {
+    text.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }
 
 pub(super) fn format_user_plain_lines(lines: &[String], style_mode: StyleMode) -> String {

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::{
     RuntimePermissionRequest, RuntimeTarget, RuntimeTerminalSnapshot, RuntimeToolActivity,
-    RuntimeToolActivityUpdate,
+    RuntimeToolActivityUpdate, TranscriptUserMessage,
 };
 
 /// `ConversationRequest` 描述一次完整的对话执行请求。
@@ -63,6 +63,7 @@ pub struct ConversationTurnRequest {
     api_key: Option<ProviderApiKey>,
     api_key_env: Option<String>,
     message: ConversationItem,
+    transcript_user_message: Option<TranscriptUserMessage>,
 }
 
 impl ConversationTurnRequest {
@@ -84,6 +85,7 @@ impl ConversationTurnRequest {
             api_key,
             api_key_env,
             message,
+            transcript_user_message: None,
         }
     }
 
@@ -106,6 +108,29 @@ impl ConversationTurnRequest {
             api_key_env,
             ConversationItem::text(Role::User, text),
         )
+    }
+
+    /// `new_user_source_message` 从 transcript-visible 用户消息创建一次对话轮次提交请求。
+    pub fn new_user_source_message(
+        provider_id: impl Into<String>,
+        provider_kind: ProviderKind,
+        model_id: impl Into<String>,
+        base_url: Option<String>,
+        api_key: Option<ProviderApiKey>,
+        api_key_env: Option<String>,
+        message: TranscriptUserMessage,
+    ) -> Self {
+        let mut request = Self::new_user_text(
+            provider_id,
+            provider_kind,
+            model_id,
+            base_url,
+            api_key,
+            api_key_env,
+            message.content.clone(),
+        );
+        request.transcript_user_message = Some(message);
+        request
     }
 
     /// `target` 返回该 turn 对应的统一 runtime 目标。
@@ -156,6 +181,11 @@ impl ConversationTurnRequest {
     /// `message_text` 返回本轮消息中的可见文本。
     pub fn message_text(&self) -> String {
         self.message.text_content()
+    }
+
+    /// `transcript_user_message` 返回 transcript-visible 用户消息。
+    pub fn transcript_user_message(&self) -> Option<&TranscriptUserMessage> {
+        self.transcript_user_message.as_ref()
     }
 }
 

@@ -3,12 +3,32 @@ use crate::model_family::classify_model_family;
 const APPROX_BYTES_PER_TOKEN: usize = 4;
 const FALLBACK_ENCODING: &str = "o200k_base";
 
-pub fn estimate_text_tokens(model_id: &str, text: &str) -> usize {
-    if text.is_empty() {
-        return 0;
+/// `TokenEncoding` 缓存一次 model 解析得到的 encoding 选择，供重复估算复用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenEncoding {
+    encoding_name: &'static str,
+}
+
+impl TokenEncoding {
+    /// `for_model` 解析 model 对应的 token encoding。
+    pub fn for_model(model_id: &str) -> Self {
+        Self {
+            encoding_name: encoding_name_for_model(model_id),
+        }
     }
 
-    estimate_text_tokens_with_encoding_name(encoding_name_for_model(model_id), text)
+    /// `estimate_text` 使用已解析的 encoding 估算文本 token 数。
+    pub fn estimate_text(self, text: &str) -> usize {
+        if text.is_empty() {
+            return 0;
+        }
+
+        estimate_text_tokens_with_encoding_name(self.encoding_name, text)
+    }
+}
+
+pub fn estimate_text_tokens(model_id: &str, text: &str) -> usize {
+    TokenEncoding::for_model(model_id).estimate_text(text)
 }
 
 fn estimate_text_tokens_with_encoding_name(encoding_name: &str, text: &str) -> usize {
@@ -37,6 +57,23 @@ fn approximate_tokens_from_bytes(bytes: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolved_token_encoding_matches_direct_model_estimation() {
+        let encoding = TokenEncoding::for_model("gpt-4o");
+
+        assert_eq!(
+            encoding.estimate_text("hello world"),
+            estimate_text_tokens("gpt-4o", "hello world")
+        );
+    }
+
+    #[test]
+    fn resolved_token_encoding_keeps_alias_fallbacks() {
+        let encoding = TokenEncoding::for_model("local/qwen3");
+
+        assert!(encoding.estimate_text("你好，hunea") > 0);
+    }
 
     #[test]
     fn estimate_text_tokens_uses_tiktoken_for_known_model() {

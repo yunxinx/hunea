@@ -21,6 +21,7 @@ use crate::{
 };
 
 const CONTEXT_BUDGET_PANEL_VISIBLE_ROWS: usize = 15;
+const CONTEXT_BUDGET_PANEL_INSET_TEXT: &str = "  ";
 
 pub(crate) type ContextBudgetRenderResult = InlinePanelRenderResult;
 
@@ -207,17 +208,30 @@ fn append_blank_lines(lines: &mut Vec<Line<'static>>, count: usize) {
     }
 }
 
-fn panel_inset_text() -> String {
-    " ".repeat(usize::from(CONTEXT_BUDGET_PANEL_INSET_WIDTH))
+fn panel_inset_text() -> &'static str {
+    debug_assert_eq!(
+        CONTEXT_BUDGET_PANEL_INSET_TEXT.len(),
+        usize::from(CONTEXT_BUDGET_PANEL_INSET_WIDTH),
+        "panel inset text must stay aligned with CONTEXT_BUDGET_PANEL_INSET_WIDTH"
+    );
+    CONTEXT_BUDGET_PANEL_INSET_TEXT
 }
 
 #[cfg(test)]
 mod tests {
+    use super::panel_inset_text;
     use crate::context_budget::summary::context_usage_summary;
     use runtime_domain::context_budget::{ContextTokenLimit, ContextWindowUsage};
 
     fn limit(value: u32) -> ContextTokenLimit {
         ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
+    }
+
+    #[test]
+    fn panel_inset_text_is_static_two_space_str() {
+        let inset: &'static str = panel_inset_text();
+
+        assert_eq!(inset, "  ");
     }
 
     #[test]

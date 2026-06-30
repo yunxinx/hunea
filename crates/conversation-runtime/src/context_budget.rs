@@ -11,7 +11,7 @@ use runtime_domain::{
     },
     provider::ProviderKind,
     session::ContextBudgetProjectionErrorKind,
-    token_count::estimate_text_tokens,
+    token_count::TokenEncoding,
 };
 use tool_loop_runtime::provider_tool_definitions_from_registry;
 use tool_runtime::ToolExecutorRegistry;
@@ -139,6 +139,7 @@ fn build_context_budget_snapshot_internal(
     let tools_text = projection
         .serialized_tools_text()
         .map_err(ContextBudgetError::projection)?;
+    let token_encoding = TokenEncoding::for_model(probe.model_id);
 
     let mut segments = Vec::with_capacity(probe.items.len() + usize::from(tools_text.is_some()));
     for (stack_order, (item, projection_text)) in
@@ -151,7 +152,7 @@ fn build_context_budget_snapshot_internal(
         segments.push(ContextSegment {
             kind,
             stack_order,
-            estimated_tokens: estimate_text_tokens(probe.model_id, projection_text),
+            estimated_tokens: token_encoding.estimate_text(projection_text),
         });
     }
 
@@ -162,7 +163,7 @@ fn build_context_budget_snapshot_internal(
         segments.push(ContextSegment {
             kind: SegmentKind::ToolDefinitions,
             stack_order: segments.len(),
-            estimated_tokens: estimate_text_tokens(probe.model_id, tools_text),
+            estimated_tokens: token_encoding.estimate_text(tools_text),
         });
     }
 

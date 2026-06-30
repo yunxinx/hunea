@@ -1,7 +1,9 @@
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
+    mpsc,
 };
+use std::thread::{self, JoinHandle};
 
 use conversation_runtime::context_budget::{
     ContextBudgetProbe, build_context_budget_snapshot_with_cancellation,
@@ -13,22 +15,18 @@ use runtime_domain::{
     provider::ProviderKind,
     session::{ContextBudgetLoadErrorPayload, RuntimeEvent, SessionLoadRequestId},
 };
-use tokio::{runtime::Runtime, task::JoinHandle};
 use tool_runtime::ToolExecutorRegistry;
 
 pub(super) struct ContextBudgetWorker {
-    runtime: Option<Runtime>,
     current_generation: Arc<AtomicU64>,
-    active_task: Option<ContextBudgetTask>,
+    worker_tx: Option<mpsc::Sender<WorkerControl>>,
+    result_rx: mpsc::Receiver<ContextBudgetTaskEnvelope>,
+    worker_thread: Option<JoinHandle<()>>,
+    active_generation: Option<u64>,
     queued_command: Option<ContextBudgetWorkerCommand>,
 }
 
-struct ContextBudgetTask {
-    request_id: SessionLoadRequestId,
-    generation: u64,
-    handle: JoinHandle<ContextBudgetTaskResult>,
-}
-
+#[derive(Debug)]
 struct ContextBudgetWorkerCommand {
     request_id: SessionLoadRequestId,
     generation: u64,
@@ -39,6 +37,22 @@ struct ContextBudgetWorkerCommand {
     context_limit: ContextTokenLimit,
 }
 
+enum WorkerControl {
+    Load(ContextBudgetWorkerCommand),
+    Shutdown,
+}
+
+enum WorkerLoopAction {
+    Run(ContextBudgetWorkerCommand),
+    Shutdown,
+}
+
+struct ContextBudgetTaskEnvelope {
+    request_id: SessionLoadRequestId,
+    generation: u64,
+    result: ContextBudgetTaskResult,
+}
+
 enum ContextBudgetTaskResult {
     Cancelled,
     Loaded(ContextBudgetSnapshot),
@@ -46,7 +60,7 @@ enum ContextBudgetTaskResult {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("start context budget runtime: {detail}")]
+#[error("start context budget worker thread: {detail}")]
 pub(super) struct ContextBudgetWorkerInitError {
     detail: String,
 }
@@ -69,22 +83,29 @@ impl ContextBudgetWorkerLoadError {
 
 impl ContextBudgetWorker {
     pub(super) fn new() -> Result<Self, ContextBudgetWorkerInitError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
+        let current_generation = Arc::new(AtomicU64::new(0));
+        let (worker_tx, worker_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker_generation = Arc::clone(&current_generation);
+        let worker_thread = thread::Builder::new()
+            .name("context-budget-worker".to_string())
+            .spawn(move || worker_loop(worker_rx, result_tx, worker_generation))
             .map_err(|error| ContextBudgetWorkerInitError {
                 detail: error.to_string(),
             })?;
+
         Ok(Self {
-            runtime: Some(runtime),
-            current_generation: Arc::new(AtomicU64::new(0)),
-            active_task: None,
+            current_generation,
+            worker_tx: Some(worker_tx),
+            result_rx,
+            worker_thread: Some(worker_thread),
+            active_generation: None,
             queued_command: None,
         })
     }
 
     pub(super) fn has_pending_work(&self) -> bool {
-        self.active_task.is_some() || self.queued_command.is_some()
+        self.active_generation.is_some() || self.queued_command.is_some()
     }
 
     pub(super) fn load_snapshot(
@@ -96,7 +117,7 @@ impl ContextBudgetWorker {
         tool_definitions: Vec<ToolDefinition>,
         context_limit: ContextTokenLimit,
     ) -> Result<(), ContextBudgetWorkerLoadError> {
-        if self.runtime.is_none() {
+        if self.worker_tx.is_none() {
             return Err(ContextBudgetWorkerLoadError::WorkerStopped);
         }
 
@@ -111,69 +132,62 @@ impl ContextBudgetWorker {
             context_limit,
         };
 
-        if self.active_task.is_some() {
+        if self.active_generation.is_some() {
             self.queued_command = Some(command);
             return Ok(());
         }
 
-        self.spawn_task(command)
+        self.dispatch_command(command)
     }
 
     pub(super) fn cancel_pending(&mut self) {
-        // `/context` 使用 soft cancel：UI 立刻停止追踪旧请求，但已经开始运行的
-        // `spawn_blocking` 任务仍会在后台跑到下一次协作式取消检查或自然结束。
+        // `/context` 使用 soft cancel：UI 立刻停止追踪旧请求，但后台线程仍可能
+        // 执行到下一次协作式取消检查或自然结束；结果会因 generation 不匹配而被丢弃。
         self.bump_generation();
-        self.active_task = None;
+        self.active_generation = None;
         self.queued_command = None;
+        self.drain_result_channel();
     }
 
     pub(super) fn shutdown(&mut self) -> Result<(), String> {
         self.cancel_pending();
-        self.active_task = None;
-        if let Some(runtime) = self.runtime.take() {
-            // `/context` 任务通过 generation 做协作式取消。这里不假装等待
-            // `spawn_blocking` 自然结束；runtime drop 后，已启动任务可能继续在后台
-            // 运行到下一次取消检查或正常完成，但 UI 不再追踪它们的结果。
-            drop(runtime);
+        self.active_generation = None;
+        self.queued_command = None;
+
+        if let Some(worker_tx) = self.worker_tx.take() {
+            let _ = worker_tx.send(WorkerControl::Shutdown);
         }
+
+        if let Some(worker_thread) = self.worker_thread.take() {
+            worker_thread
+                .join()
+                .map_err(|_| "context budget worker thread panicked during shutdown".to_string())?;
+        }
+
+        self.drain_result_channel();
         Ok(())
     }
 
     pub(super) fn drain_events(&mut self) -> Vec<RuntimeEvent> {
         let mut events = Vec::new();
+        self.collect_finished_events(&mut events);
 
-        loop {
-            if self.active_task.is_none() {
-                let Some(command) = self.queued_command.take() else {
-                    break;
-                };
-                let request_id = command.request_id;
-                match self.spawn_task(command) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        events.push(RuntimeEvent::ContextBudgetSnapshotLoadFailed {
-                            request_id,
-                            error: error.into_payload(),
-                        });
-                    }
+        if self.active_generation.is_none()
+            && let Some(command) = self.queued_command.take()
+        {
+            let request_id = command.request_id;
+            match self.dispatch_command(command) {
+                Ok(()) => {}
+                Err(error) => {
+                    events.push(RuntimeEvent::ContextBudgetSnapshotLoadFailed {
+                        request_id,
+                        error: error.into_payload(),
+                    });
                 }
-            }
-
-            let Some(task) = self.active_task.as_ref() else {
-                break;
-            };
-            if !task.handle.is_finished() {
-                break;
-            }
-
-            let Some(task) = self.active_task.take() else {
-                break;
-            };
-            if let Some(event) = self.join_task(task) {
-                events.push(event);
             }
         }
 
+        self.collect_finished_events(&mut events);
         events
     }
 
@@ -186,68 +200,114 @@ impl ContextBudgetWorker {
             .unwrap_or(u64::MAX)
     }
 
-    fn spawn_task(
+    fn dispatch_command(
         &mut self,
         command: ContextBudgetWorkerCommand,
     ) -> Result<(), ContextBudgetWorkerLoadError> {
-        let runtime = self
-            .runtime
+        let worker_tx = self
+            .worker_tx
             .as_ref()
             .ok_or(ContextBudgetWorkerLoadError::WorkerStopped)?;
-        let generation = Arc::clone(&self.current_generation);
-        let request_id = command.request_id;
-        let task_generation = command.generation;
-        let handle = runtime
-            .handle()
-            .spawn_blocking(move || handle_context_budget_command(command, generation));
-        self.active_task = Some(ContextBudgetTask {
-            request_id,
-            generation: task_generation,
-            handle,
-        });
+        worker_tx
+            .send(WorkerControl::Load(command))
+            .map_err(|_| ContextBudgetWorkerLoadError::WorkerStopped)?;
+        self.active_generation = Some(self.current_generation.load(Ordering::Acquire));
         Ok(())
     }
 
-    fn join_task(&mut self, task: ContextBudgetTask) -> Option<RuntimeEvent> {
-        let runtime = self.runtime.as_ref()?;
-        match runtime.block_on(task.handle) {
-            Ok(ContextBudgetTaskResult::Cancelled) => None,
-            Ok(ContextBudgetTaskResult::Loaded(payload)) => {
-                if task.generation != self.current_generation.load(Ordering::Acquire) {
-                    return None;
-                }
+    fn collect_finished_events(&mut self, events: &mut Vec<RuntimeEvent>) {
+        while let Ok(envelope) = self.result_rx.try_recv() {
+            if Some(envelope.generation) == self.active_generation {
+                self.active_generation = None;
+            }
+            if let Some(event) = self.runtime_event_from_envelope(envelope) {
+                events.push(event);
+            }
+        }
+    }
+
+    fn runtime_event_from_envelope(
+        &self,
+        envelope: ContextBudgetTaskEnvelope,
+    ) -> Option<RuntimeEvent> {
+        if envelope.generation != self.current_generation.load(Ordering::Acquire) {
+            return None;
+        }
+
+        match envelope.result {
+            ContextBudgetTaskResult::Cancelled => None,
+            ContextBudgetTaskResult::Loaded(payload) => {
                 Some(RuntimeEvent::ContextBudgetSnapshotLoaded {
-                    request_id: task.request_id,
+                    request_id: envelope.request_id,
                     payload,
                 })
             }
-            Ok(ContextBudgetTaskResult::Failed(error)) => {
-                if task.generation != self.current_generation.load(Ordering::Acquire) {
-                    return None;
-                }
+            ContextBudgetTaskResult::Failed(error) => {
                 Some(RuntimeEvent::ContextBudgetSnapshotLoadFailed {
-                    request_id: task.request_id,
+                    request_id: envelope.request_id,
                     error,
                 })
             }
-            Err(error) => {
-                if task.generation != self.current_generation.load(Ordering::Acquire) {
-                    return None;
-                }
-                Some(RuntimeEvent::ContextBudgetSnapshotLoadFailed {
-                    request_id: task.request_id,
-                    error: ContextBudgetLoadErrorPayload::RuntimeInternal {
-                        detail: Some(format!("context budget task failed: {error}")),
-                    },
-                })
-            }
         }
+    }
+
+    fn drain_result_channel(&mut self) {
+        while self.result_rx.try_recv().is_ok() {}
+    }
+}
+
+fn worker_loop(
+    worker_rx: mpsc::Receiver<WorkerControl>,
+    result_tx: mpsc::Sender<ContextBudgetTaskEnvelope>,
+    current_generation: Arc<AtomicU64>,
+) {
+    while let Ok(control) = worker_rx.recv() {
+        match coalesce_worker_controls(control, worker_rx.try_iter()) {
+            WorkerLoopAction::Run(command) => {
+                let request_id = command.request_id;
+                let generation = command.generation;
+                let result = handle_context_budget_command(command, &current_generation);
+                if result_tx
+                    .send(ContextBudgetTaskEnvelope {
+                        request_id,
+                        generation,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            WorkerLoopAction::Shutdown => break,
+        }
+    }
+}
+
+fn coalesce_worker_controls(
+    first: WorkerControl,
+    rest: impl IntoIterator<Item = WorkerControl>,
+) -> WorkerLoopAction {
+    let mut latest_load = match first {
+        WorkerControl::Load(command) => Some(command),
+        WorkerControl::Shutdown => return WorkerLoopAction::Shutdown,
+    };
+
+    for control in rest {
+        match control {
+            WorkerControl::Load(command) => latest_load = Some(command),
+            WorkerControl::Shutdown => return WorkerLoopAction::Shutdown,
+        }
+    }
+
+    match latest_load {
+        Some(command) => WorkerLoopAction::Run(command),
+        None => WorkerLoopAction::Shutdown,
     }
 }
 
 fn handle_context_budget_command(
     command: ContextBudgetWorkerCommand,
-    current_generation: Arc<AtomicU64>,
+    current_generation: &AtomicU64,
 ) -> ContextBudgetTaskResult {
     let ContextBudgetWorkerCommand {
         request_id: _,
@@ -311,16 +371,57 @@ mod tests {
     };
 
     #[test]
-    fn stale_loaded_task_result_is_dropped_before_runtime_event_dispatch() {
-        let mut worker = ContextBudgetWorker::new().expect("worker should initialize");
-        let runtime = worker
-            .runtime
-            .as_ref()
-            .expect("fresh worker should own a runtime");
+    fn coalesce_worker_controls_keeps_only_the_latest_load() {
+        let first = fixture_command(1, 1);
+        let second = fixture_command(2, 2);
+        let third = fixture_command(3, 3);
 
+        let action = coalesce_worker_controls(
+            WorkerControl::Load(first),
+            [
+                WorkerControl::Load(second),
+                WorkerControl::Load(fixture_command_from(&third)),
+            ],
+        );
+
+        match action {
+            WorkerLoopAction::Run(command) => {
+                assert_eq!(command.request_id, third.request_id);
+                assert_eq!(command.generation, third.generation);
+                assert_eq!(command.model_id, third.model_id);
+            }
+            WorkerLoopAction::Shutdown => panic!("latest load should remain runnable"),
+        }
+    }
+
+    #[test]
+    fn coalesce_worker_controls_prioritizes_shutdown_over_queued_loads() {
+        let first = fixture_command(1, 1);
+
+        let action = coalesce_worker_controls(
+            WorkerControl::Load(first),
+            [
+                WorkerControl::Load(fixture_command(2, 2)),
+                WorkerControl::Shutdown,
+                WorkerControl::Load(fixture_command(3, 3)),
+            ],
+        );
+
+        assert!(
+            matches!(action, WorkerLoopAction::Shutdown),
+            "shutdown should stop the worker loop instead of starting another stale load"
+        );
+    }
+
+    #[test]
+    fn stale_loaded_task_result_is_dropped_before_runtime_event_dispatch() {
+        let worker = ContextBudgetWorker::new().expect("worker should initialize");
         worker.current_generation.store(2, Ordering::Release);
-        let handle = runtime.handle().spawn(async {
-            ContextBudgetTaskResult::Loaded(ContextBudgetSnapshot {
+
+        let event = worker.runtime_event_from_envelope(ContextBudgetTaskEnvelope {
+            request_id: SessionLoadRequestId::new(7),
+            generation: 1,
+            result: ContextBudgetTaskResult::Loaded(ContextBudgetSnapshot {
                 model_id: "stale-model".to_string(),
                 segments: Vec::new(),
                 total_estimated_tokens: 12,
@@ -329,13 +430,7 @@ mod tests {
                         .expect("fixture limit should be valid"),
                     used: 12,
                 },
-            })
-        });
-
-        let event = worker.join_task(ContextBudgetTask {
-            request_id: SessionLoadRequestId::new(7),
-            generation: 1,
-            handle,
+            }),
         });
 
         assert!(
@@ -353,5 +448,33 @@ mod tests {
         assert_eq!(worker.current_generation.load(Ordering::Acquire), 1);
         assert_eq!(worker.bump_generation(), 2);
         assert_eq!(worker.current_generation.load(Ordering::Acquire), 2);
+    }
+
+    fn fixture_command(request_value: u64, generation: u64) -> ContextBudgetWorkerCommand {
+        ContextBudgetWorkerCommand {
+            request_id: SessionLoadRequestId::new(request_value),
+            generation,
+            provider_kind: ProviderKind::OpenAiCompatible,
+            model_id: format!("model-{request_value}"),
+            items: Arc::from([ConversationItem::text(
+                provider_protocol::Role::User,
+                "hello",
+            )]),
+            tool_definitions: Vec::new(),
+            context_limit: ContextTokenLimit::try_from(1_000)
+                .expect("fixture limit should be valid"),
+        }
+    }
+
+    fn fixture_command_from(command: &ContextBudgetWorkerCommand) -> ContextBudgetWorkerCommand {
+        ContextBudgetWorkerCommand {
+            request_id: command.request_id,
+            generation: command.generation,
+            provider_kind: command.provider_kind,
+            model_id: command.model_id.clone(),
+            items: Arc::clone(&command.items),
+            tool_definitions: command.tool_definitions.clone(),
+            context_limit: command.context_limit,
+        }
     }
 }

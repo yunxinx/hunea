@@ -45,7 +45,7 @@ fn kind_color_slot(kind: SegmentKind) -> ContextBudgetColorSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::{default_palette, terminal_default_palette};
+    use crate::theme::{default_palette, palette_from_background, terminal_default_palette};
 
     #[test]
     fn distinct_kinds_map_to_colors_without_panic() {
@@ -89,5 +89,33 @@ mod tests {
             Color::Cyan
         );
         assert_eq!(context_budget_empty_color(&palette), Color::Reset);
+    }
+
+    #[test]
+    fn explicit_dark_palette_uses_bright_segment_colors() {
+        let palette = palette_from_background(true, Some(Color::Rgb(16, 36, 63)));
+
+        assert_eq!(
+            context_budget_color_for_kind(SegmentKind::System, &palette),
+            Color::Rgb(96, 165, 250)
+        );
+        assert_eq!(
+            context_budget_color_for_kind(SegmentKind::AssistantMessage, &palette),
+            Color::Rgb(74, 222, 128)
+        );
+    }
+
+    #[test]
+    fn explicit_light_palette_uses_deep_segment_colors() {
+        let palette = palette_from_background(false, Some(Color::Rgb(240, 240, 240)));
+
+        assert_eq!(
+            context_budget_color_for_kind(SegmentKind::System, &palette),
+            Color::Rgb(29, 78, 216)
+        );
+        assert_eq!(
+            context_budget_color_for_kind(SegmentKind::AssistantMessage, &palette),
+            Color::Rgb(21, 128, 61)
+        );
     }
 }

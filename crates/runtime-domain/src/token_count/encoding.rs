@@ -1,6 +1,6 @@
 use crate::model_family::classify_model_family;
+use crate::token_count::approximate_tokens_from_bytes;
 
-const APPROX_BYTES_PER_TOKEN: usize = 4;
 const FALLBACK_ENCODING: &str = "o200k_base";
 
 /// `TokenEncoding` 缓存一次 model 解析得到的 encoding 选择，供重复估算复用。
@@ -48,10 +48,6 @@ pub(crate) fn encoding_name_for_model(model_id: &str) -> &'static str {
 
 fn alias_encoding_for_model(model_id: &str) -> Option<&'static str> {
     classify_model_family(model_id).preferred_encoding()
-}
-
-fn approximate_tokens_from_bytes(bytes: usize) -> usize {
-    bytes.saturating_add(APPROX_BYTES_PER_TOKEN - 1) / APPROX_BYTES_PER_TOKEN
 }
 
 #[cfg(test)]

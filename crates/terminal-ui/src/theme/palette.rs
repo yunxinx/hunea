@@ -69,6 +69,7 @@ pub struct TerminalPalette {
     pub quote: Color,
     pub table_header: Color,
     pub surface: Option<Color>,
+    pub has_dark_background: bool,
     mode: PaletteMode,
 }
 
@@ -110,6 +111,7 @@ pub fn terminal_default_palette() -> TerminalPalette {
         quote: Color::LightGreen,
         table_header: Color::Cyan,
         surface: None,
+        has_dark_background: true,
         mode: PaletteMode::TerminalDefault,
     }
 }
@@ -118,6 +120,11 @@ impl TerminalPalette {
     /// `uses_terminal_default_colors` 表示当前配色是否依赖终端默认前景/背景色。
     pub fn uses_terminal_default_colors(&self) -> bool {
         matches!(self.mode, PaletteMode::TerminalDefault)
+    }
+
+    /// `has_dark_background` 返回当前 palette 绑定的背景深浅语义。
+    pub fn has_dark_background(&self) -> bool {
+        self.has_dark_background
     }
 }
 
@@ -143,7 +150,7 @@ pub(crate) fn context_budget_slot_color(
         return TERMINAL_DEFAULT_CONTEXT_BUDGET_COLORS[slot_index];
     }
 
-    match (palette_has_dark_background(palette), slot) {
+    match (palette.has_dark_background(), slot) {
         (true, ContextBudgetColorSlot::System) => Color::Rgb(96, 165, 250),
         (true, ContextBudgetColorSlot::User) => Color::Rgb(251, 191, 36),
         (true, ContextBudgetColorSlot::Assistant) => Color::Rgb(74, 222, 128),
@@ -244,6 +251,7 @@ pub fn palette_from_background(
             LIGHT_BACKGROUND_TABLE_HEADER
         },
         surface: Some(surface_color(has_dark_background, background)),
+        has_dark_background,
         mode: PaletteMode::Explicit,
     }
 }
@@ -329,13 +337,6 @@ fn is_dark_background(color: TerminalBackgroundColor) -> bool {
         + (0.0722 * f32::from(color.blue));
 
     luma < 140.0
-}
-
-fn palette_has_dark_background(palette: &TerminalPalette) -> bool {
-    match color_to_rgb(palette.main) {
-        Some(color) => is_dark_background(color),
-        None => true,
-    }
 }
 
 fn rgb_to_color(color: TerminalBackgroundColor) -> Color {

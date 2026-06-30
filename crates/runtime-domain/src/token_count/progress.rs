@@ -1,10 +1,9 @@
 use std::time::{Duration, Instant};
 
-use super::TokenEncoding;
+use super::{TokenEncoding, approximate_tokens_from_bytes};
 
 const TOKEN_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(120);
 const TOKEN_SNAPSHOT_DELTA_THRESHOLD: usize = 12;
-const APPROX_BYTES_PER_TOKEN: usize = 4;
 
 /// `StreamingTokenProgress` 对流式输出做节流 token 估算。
 ///
@@ -69,11 +68,6 @@ impl StreamingTokenProgress {
         self.total_tokens
     }
 }
-
-fn approximate_tokens_from_bytes(bytes: usize) -> usize {
-    bytes.saturating_add(APPROX_BYTES_PER_TOKEN - 1) / APPROX_BYTES_PER_TOKEN
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

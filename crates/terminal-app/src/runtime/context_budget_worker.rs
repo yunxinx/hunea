@@ -299,6 +299,11 @@ fn context_budget_load_error_payload(
                 detail: failure.detail,
             }
         }
+        conversation_runtime::ContextBudgetError::RuntimeInvariant { detail } => {
+            ContextBudgetLoadErrorPayload::RuntimeInternal {
+                detail: Some(detail.to_string()),
+            }
+        }
     }
 }
 
@@ -341,6 +346,22 @@ mod tests {
         assert!(
             event.is_none(),
             "stale loaded task results must not escape as runtime events"
+        );
+    }
+
+    #[test]
+    fn runtime_invariant_errors_map_to_runtime_internal_payload() {
+        let payload = context_budget_load_error_payload(
+            conversation_runtime::ContextBudgetError::RuntimeInvariant {
+                detail: "invariant violated",
+            },
+        );
+
+        assert_eq!(
+            payload,
+            ContextBudgetLoadErrorPayload::RuntimeInternal {
+                detail: Some("invariant violated".to_string()),
+            }
         );
     }
 }

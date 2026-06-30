@@ -27,6 +27,8 @@ pub enum ContextBudgetError {
         #[source]
         source: provider_protocol::ProviderError,
     },
+    #[error("context budget runtime invariant violated: {detail}")]
+    RuntimeInvariant { detail: &'static str },
 }
 
 /// `ContextBudgetProjectionFailure` 提供可序列化、可分类的 projection 失败信息。
@@ -105,8 +107,11 @@ fn build_context_budget_snapshot_without_cancellation(
     probe: ContextBudgetProbe<'_>,
 ) -> Result<ContextBudgetSnapshot, ContextBudgetError> {
     let (projection, token_encoding) = project_probe(&probe)?;
-    let segments = collect_segments(&probe, &projection, &token_encoding, || false)?
-        .expect("non-cancellable context budget path should always produce segments");
+    let Some(segments) = collect_segments(&probe, &projection, &token_encoding, || false)? else {
+        return Err(ContextBudgetError::RuntimeInvariant {
+            detail: "non-cancellable context budget path unexpectedly cancelled segment collection",
+        });
+    };
     Ok(finish_snapshot(probe, segments))
 }
 
@@ -114,10 +119,6 @@ fn build_context_budget_snapshot_internal(
     probe: ContextBudgetProbe<'_>,
     should_cancel: impl Fn() -> bool,
 ) -> Result<Option<ContextBudgetSnapshot>, ContextBudgetError> {
-    if should_cancel() {
-        return Ok(None);
-    }
-
     if should_cancel() {
         return Ok(None);
     }
@@ -473,5 +474,42 @@ mod tests {
                 SegmentKind::UserMessage,
             ]
         );
+    }
+
+    #[test]
+    fn non_cancellable_snapshot_path_matches_cancellable_snapshot_path() {
+        let items = [
+            ConversationItem::text(Role::System, "system rules"),
+            ConversationItem::text(Role::User, "user input"),
+            ConversationItem::text(Role::Assistant, "assistant reply"),
+        ];
+        let tool_definitions = [ProviderToolDefinition::new(
+            "read",
+            "Read a file",
+            json!({"type": "object"}),
+        )];
+        let limit = ContextTokenLimit::try_from(32_000).expect("fixture limit should be valid");
+        let non_cancellable = build_context_budget_snapshot(ContextBudgetProbe::new(
+            ProviderKind::OpenAiCompatible,
+            "gpt-4o",
+            &items,
+            &tool_definitions,
+            limit,
+        ))
+        .expect("non-cancellable snapshot should build");
+        let cancellable = build_context_budget_snapshot_with_cancellation(
+            ContextBudgetProbe::new(
+                ProviderKind::OpenAiCompatible,
+                "gpt-4o",
+                &items,
+                &tool_definitions,
+                limit,
+            ),
+            || false,
+        )
+        .expect("cancellable snapshot should build")
+        .expect("never-cancelled snapshot should be present");
+
+        assert_eq!(non_cancellable, cancellable);
     }
 }

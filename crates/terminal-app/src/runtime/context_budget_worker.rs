@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     fmt,
     sync::{
         Arc,
@@ -287,7 +286,7 @@ fn handle_context_budget_command(
     let probe = ContextBudgetProbe::new(
         provider_kind,
         &model_id,
-        items.iter().map(Cow::Borrowed).collect(),
+        &items,
         &tool_definitions,
         context_limit,
     );

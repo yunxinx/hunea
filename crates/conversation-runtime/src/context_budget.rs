@@ -1,7 +1,5 @@
 //! Context budget helpers for prepared turns.
 
-use std::borrow::Cow;
-
 use openai_compat_provider::prompt_request_projection_from_parts;
 use provider_protocol::{ConversationItem, ToolDefinition};
 use runtime_domain::{
@@ -44,7 +42,7 @@ pub struct ContextBudgetProjectionFailure {
 pub struct ContextBudgetProbe<'a> {
     provider_kind: ProviderKind,
     model_id: &'a str,
-    items: Vec<Cow<'a, ConversationItem>>,
+    items: &'a [ConversationItem],
     tool_definitions: &'a [ToolDefinition],
     context_limit: ContextTokenLimit,
 }
@@ -55,7 +53,7 @@ impl<'a> ContextBudgetProbe<'a> {
     pub fn new(
         provider_kind: ProviderKind,
         model_id: &'a str,
-        items: Vec<Cow<'a, ConversationItem>>,
+        items: &'a [ConversationItem],
         tool_definitions: &'a [ToolDefinition],
         context_limit: ContextTokenLimit,
     ) -> Self {
@@ -78,7 +76,7 @@ impl<'a> ContextBudgetProbe<'a> {
         Self::new(
             request.provider_kind(),
             request.model_id(),
-            request.items().iter().map(Cow::Borrowed).collect(),
+            request.items(),
             tool_definitions,
             context_limit,
         )
@@ -95,10 +93,7 @@ pub fn build_context_budget_snapshot(
         snapshot.is_some(),
         "non-cancellable context budget path must not produce a cancelled snapshot"
     );
-    match snapshot {
-        Some(snapshot) => Ok(snapshot),
-        None => unreachable!("non-cancellable context budget path returned cancellation"),
-    }
+    Ok(snapshot.expect("non-cancellable context budget path returned cancellation"))
 }
 
 /// Uses the same provider-specific projection path as the real provider request and allows
@@ -121,7 +116,7 @@ fn build_context_budget_snapshot_internal(
 
     let projection = match probe.provider_kind {
         ProviderKind::OpenAiCompatible | ProviderKind::OpenAi => {
-            prompt_request_projection_from_parts(&probe.items, probe.tool_definitions)
+            prompt_request_projection_from_parts(probe.items, probe.tool_definitions)
                 .map_err(ContextBudgetError::projection)?
         }
         provider_kind => {
@@ -148,7 +143,7 @@ fn build_context_budget_snapshot_internal(
         if should_cancel() {
             return Ok(None);
         }
-        let kind = segment_kind(item.as_ref());
+        let kind = segment_kind(item);
         segments.push(ContextSegment {
             kind,
             stack_order,
@@ -236,8 +231,6 @@ fn segment_kind(item: &ConversationItem) -> SegmentKind {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
     use super::*;
     use provider_protocol::{
         ContentBlock, ConversationItem, Role, ToolCall, ToolDefinition as ProviderToolDefinition,
@@ -322,7 +315,7 @@ mod tests {
         let snapshot = build_context_budget_snapshot(ContextBudgetProbe::new(
             ProviderKind::OpenAiCompatible,
             "gpt-4o",
-            items.iter().map(Cow::Borrowed).collect(),
+            &items,
             &[ProviderToolDefinition::new(
                 "read",
                 "Read a file",
@@ -351,7 +344,7 @@ mod tests {
         let snapshot = build_context_budget_snapshot(ContextBudgetProbe::new(
             ProviderKind::OpenAiCompatible,
             "gpt-4o",
-            items.iter().map(Cow::Borrowed).collect(),
+            &items,
             &[],
             ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
         ))
@@ -404,7 +397,7 @@ mod tests {
         let error = build_context_budget_snapshot(ContextBudgetProbe::new(
             ProviderKind::Anthropic,
             "claude-sonnet-4-5",
-            items.iter().map(Cow::Borrowed).collect(),
+            &items,
             &[],
             ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
         ))
@@ -429,7 +422,7 @@ mod tests {
         let snapshot = build_context_budget_snapshot(ContextBudgetProbe::new(
             ProviderKind::OpenAiCompatible,
             "gpt-4o",
-            items.iter().map(Cow::Borrowed).collect(),
+            &items,
             &[],
             ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
         ))

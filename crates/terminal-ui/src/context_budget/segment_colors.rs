@@ -75,7 +75,7 @@ fn context_budget_slot_color(slot: usize, palette: &TerminalPalette) -> Color {
         (false, 3) => Color::Rgb(185, 28, 28),
         (false, 4) => Color::Rgb(109, 40, 217),
         (false, 5) => Color::Rgb(8, 145, 178),
-        _ => palette.secondary,
+        _ => unreachable!("context budget slot must stay within 0..{CONTEXT_BUDGET_SLOT_COUNT}"),
     }
 }
 

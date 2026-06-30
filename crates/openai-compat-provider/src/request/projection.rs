@@ -148,8 +148,6 @@ where
                         MessageFragmentProjection::Standalone(json!({
                             "reasoning_content": reasoning_text
                         }));
-                }
-                if let Some((_, reasoning_text)) = reasoning {
                     let projection = assistant_projection(content, Some(reasoning_text))?;
                     if let Some(fragment_value) = projection.fragment_message {
                         message_fragments[index] =

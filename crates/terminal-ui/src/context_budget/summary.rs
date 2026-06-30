@@ -87,17 +87,15 @@ pub(crate) fn context_budget_category_from_segment_kind(
     }
 }
 
-pub(crate) fn free_space_tokens(snapshot: &ContextBudgetSnapshot) -> Option<usize> {
-    Some(
-        usize::try_from(
-            snapshot
-                .usage
-                .limit
-                .get()
-                .saturating_sub(snapshot.usage.used),
-        )
-        .unwrap_or(usize::MAX),
+pub(crate) fn free_space_tokens(snapshot: &ContextBudgetSnapshot) -> usize {
+    usize::try_from(
+        snapshot
+            .usage
+            .limit
+            .get()
+            .saturating_sub(snapshot.usage.used),
     )
+    .unwrap_or(usize::MAX)
 }
 
 pub(crate) fn legend_share_total(snapshot: &ContextBudgetSnapshot) -> usize {
@@ -137,7 +135,8 @@ pub(crate) fn build_legend_entries(
         })
         .collect::<Vec<_>>();
 
-    if let Some(estimated_tokens) = free_space_tokens(snapshot).filter(|tokens| *tokens > 0) {
+    let estimated_tokens = free_space_tokens(snapshot);
+    if estimated_tokens > 0 {
         entries.push(ContextBudgetLegendEntry {
             kind: ContextBudgetCategoryKind::FreeSpace,
             label: context_budget_category_label(ContextBudgetCategoryKind::FreeSpace).to_string(),
@@ -247,7 +246,7 @@ mod tests {
             },
         };
 
-        assert_eq!(free_space_tokens(&snapshot), Some(600));
+        assert_eq!(free_space_tokens(&snapshot), 600);
     }
 
     #[test]

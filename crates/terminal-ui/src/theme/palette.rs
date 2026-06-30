@@ -22,23 +22,11 @@ const DARK_BACKGROUND_SYSTEM_ERROR: Color = Color::Rgb(255, 153, 153);
 const LIGHT_BACKGROUND_SYSTEM_ERROR: Color = Color::Rgb(188, 74, 74);
 const PANEL_ACCENT: Color = Color::Blue;
 const COMMAND_ACCENT: Color = Color::Cyan;
-const TERMINAL_DEFAULT_CONTEXT_BUDGET_COLORS: [Color; 6] = [
-    Color::Blue,
-    Color::Yellow,
-    Color::Green,
-    Color::Red,
-    Color::Magenta,
-    Color::Cyan,
-];
-
 /// `ContextBudgetColorSlot` 定义 context budget 使用的稳定语义槽位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextBudgetColorSlot {
-    System,
-    User,
-    Assistant,
-    ToolResult,
-    Reasoning,
+    SystemPrompt,
+    Messages,
     ToolDefinitions,
 }
 
@@ -138,30 +126,20 @@ pub(crate) fn context_budget_slot_color(
     slot: ContextBudgetColorSlot,
     palette: &TerminalPalette,
 ) -> Color {
-    let slot_index = match slot {
-        ContextBudgetColorSlot::System => 0,
-        ContextBudgetColorSlot::User => 1,
-        ContextBudgetColorSlot::Assistant => 2,
-        ContextBudgetColorSlot::ToolResult => 3,
-        ContextBudgetColorSlot::Reasoning => 4,
-        ContextBudgetColorSlot::ToolDefinitions => 5,
-    };
     if palette.uses_terminal_default_colors() {
-        return TERMINAL_DEFAULT_CONTEXT_BUDGET_COLORS[slot_index];
+        return match slot {
+            ContextBudgetColorSlot::SystemPrompt => Color::Blue,
+            ContextBudgetColorSlot::Messages => Color::Green,
+            ContextBudgetColorSlot::ToolDefinitions => Color::Cyan,
+        };
     }
 
     match (palette.has_dark_background(), slot) {
-        (true, ContextBudgetColorSlot::System) => Color::Rgb(96, 165, 250),
-        (true, ContextBudgetColorSlot::User) => Color::Rgb(251, 191, 36),
-        (true, ContextBudgetColorSlot::Assistant) => Color::Rgb(74, 222, 128),
-        (true, ContextBudgetColorSlot::ToolResult) => Color::Rgb(248, 113, 113),
-        (true, ContextBudgetColorSlot::Reasoning) => Color::Rgb(167, 139, 250),
+        (true, ContextBudgetColorSlot::SystemPrompt) => Color::Rgb(96, 165, 250),
+        (true, ContextBudgetColorSlot::Messages) => Color::Rgb(74, 222, 128),
         (true, ContextBudgetColorSlot::ToolDefinitions) => Color::Rgb(34, 211, 238),
-        (false, ContextBudgetColorSlot::System) => Color::Rgb(29, 78, 216),
-        (false, ContextBudgetColorSlot::User) => Color::Rgb(180, 83, 9),
-        (false, ContextBudgetColorSlot::Assistant) => Color::Rgb(21, 128, 61),
-        (false, ContextBudgetColorSlot::ToolResult) => Color::Rgb(185, 28, 28),
-        (false, ContextBudgetColorSlot::Reasoning) => Color::Rgb(109, 40, 217),
+        (false, ContextBudgetColorSlot::SystemPrompt) => Color::Rgb(29, 78, 216),
+        (false, ContextBudgetColorSlot::Messages) => Color::Rgb(21, 128, 61),
         (false, ContextBudgetColorSlot::ToolDefinitions) => Color::Rgb(8, 145, 178),
     }
 }
@@ -346,9 +324,9 @@ fn rgb_to_color(color: TerminalBackgroundColor) -> Color {
 #[cfg(test)]
 mod tests {
     use super::{
-        TerminalBackgroundColor, default_palette, detect_dark_background_from_colorfgbg,
-        detect_palette_from_sources, is_dark_background, palette_from_background,
-        terminal_default_palette,
+        ContextBudgetColorSlot, TerminalBackgroundColor, context_budget_slot_color,
+        default_palette, detect_dark_background_from_colorfgbg, detect_palette_from_sources,
+        is_dark_background, palette_from_background, terminal_default_palette,
     };
     use ratatui::style::Color;
 
@@ -388,6 +366,55 @@ mod tests {
         let palette = palette_from_background(true, Some(Color::Rgb(32, 64, 96)));
 
         assert_eq!(palette.surface, Some(Color::Rgb(59, 87, 115)));
+    }
+
+    #[test]
+    fn terminal_default_context_budget_slots_use_distinct_ansi_colors() {
+        let palette = terminal_default_palette();
+
+        assert_eq!(
+            context_budget_slot_color(ContextBudgetColorSlot::SystemPrompt, &palette),
+            Color::Blue
+        );
+        assert_eq!(
+            context_budget_slot_color(ContextBudgetColorSlot::Messages, &palette),
+            Color::Green
+        );
+        assert_eq!(
+            context_budget_slot_color(ContextBudgetColorSlot::ToolDefinitions, &palette),
+            Color::Cyan
+        );
+    }
+
+    #[test]
+    fn explicit_background_context_budget_slots_follow_theme_semantics() {
+        let dark_palette = palette_from_background(true, Some(Color::Rgb(16, 36, 63)));
+        let light_palette = palette_from_background(false, Some(Color::Rgb(240, 240, 240)));
+
+        assert_eq!(
+            context_budget_slot_color(ContextBudgetColorSlot::SystemPrompt, &dark_palette),
+            Color::Rgb(96, 165, 250)
+        );
+        assert_eq!(
+            context_budget_slot_color(ContextBudgetColorSlot::Messages, &dark_palette),
+            Color::Rgb(74, 222, 128)
+        );
+        assert_eq!(
+            context_budget_slot_color(ContextBudgetColorSlot::ToolDefinitions, &dark_palette),
+            Color::Rgb(34, 211, 238)
+        );
+        assert_eq!(
+            context_budget_slot_color(ContextBudgetColorSlot::SystemPrompt, &light_palette),
+            Color::Rgb(29, 78, 216)
+        );
+        assert_eq!(
+            context_budget_slot_color(ContextBudgetColorSlot::Messages, &light_palette),
+            Color::Rgb(21, 128, 61)
+        );
+        assert_eq!(
+            context_budget_slot_color(ContextBudgetColorSlot::ToolDefinitions, &light_palette),
+            Color::Rgb(8, 145, 178)
+        );
     }
 
     #[test]

@@ -27,8 +27,6 @@ pub enum ContextBudgetError {
         #[source]
         source: provider_protocol::ProviderError,
     },
-    #[error("context budget runtime invariant violated: {detail}")]
-    RuntimeInvariant { detail: &'static str },
 }
 
 /// `ContextBudgetProjectionFailure` 提供可序列化、可分类的 projection 失败信息。
@@ -85,14 +83,6 @@ impl<'a> ContextBudgetProbe<'a> {
     }
 }
 
-/// Uses the same provider-specific projection path as the real provider request.
-#[must_use = "building a snapshot can fail and the result must be handled"]
-pub fn build_context_budget_snapshot(
-    probe: ContextBudgetProbe<'_>,
-) -> Result<ContextBudgetSnapshot, ContextBudgetError> {
-    build_context_budget_snapshot_without_cancellation(probe)
-}
-
 /// Uses the same provider-specific projection path as the real provider request and allows
 /// cooperative cancellation between the expensive projection phases.
 #[must_use = "building a snapshot can fail and the result must be handled"]
@@ -101,18 +91,6 @@ pub fn build_context_budget_snapshot_with_cancellation(
     should_cancel: impl Fn() -> bool,
 ) -> Result<Option<ContextBudgetSnapshot>, ContextBudgetError> {
     build_context_budget_snapshot_internal(probe, should_cancel)
-}
-
-fn build_context_budget_snapshot_without_cancellation(
-    probe: ContextBudgetProbe<'_>,
-) -> Result<ContextBudgetSnapshot, ContextBudgetError> {
-    let (projection, token_encoding) = project_probe(&probe)?;
-    let Some(segments) = collect_segments(&probe, &projection, &token_encoding, || false)? else {
-        return Err(ContextBudgetError::RuntimeInvariant {
-            detail: "non-cancellable context budget path unexpectedly cancelled segment collection",
-        });
-    };
-    Ok(finish_snapshot(probe, segments))
 }
 
 fn build_context_budget_snapshot_internal(
@@ -305,16 +283,20 @@ mod tests {
             ))
             .expect("turn should prepare");
 
-        let snapshot = build_context_budget_snapshot(ContextBudgetProbe::from_prepared_request(
-            &request,
-            &[ProviderToolDefinition::new(
-                "read",
-                "Read a file",
-                json!({"type": "object"}),
-            )],
-            ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
-        ))
-        .expect("context budget snapshot should build");
+        let snapshot = build_context_budget_snapshot_with_cancellation(
+            ContextBudgetProbe::from_prepared_request(
+                &request,
+                &[ProviderToolDefinition::new(
+                    "read",
+                    "Read a file",
+                    json!({"type": "object"}),
+                )],
+                ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
+            ),
+            || false,
+        )
+        .expect("context budget snapshot should build")
+        .expect("never-cancelled snapshot should be present");
 
         assert_eq!(
             snapshot.segments.iter().map(|s| s.kind).collect::<Vec<_>>(),
@@ -346,18 +328,22 @@ mod tests {
                 false,
             ),
         ];
-        let snapshot = build_context_budget_snapshot(ContextBudgetProbe::new(
-            ProviderKind::OpenAiCompatible,
-            "gpt-4o",
-            &items,
-            &[ProviderToolDefinition::new(
-                "read",
-                "Read a file",
-                json!({"type": "object"}),
-            )],
-            ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
-        ))
-        .expect("context budget snapshot should build");
+        let snapshot = build_context_budget_snapshot_with_cancellation(
+            ContextBudgetProbe::new(
+                ProviderKind::OpenAiCompatible,
+                "gpt-4o",
+                &items,
+                &[ProviderToolDefinition::new(
+                    "read",
+                    "Read a file",
+                    json!({"type": "object"}),
+                )],
+                ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
+            ),
+            || false,
+        )
+        .expect("context budget snapshot should build")
+        .expect("never-cancelled snapshot should be present");
 
         assert!(
             snapshot.segments[0].estimated_tokens > estimate_text_tokens("gpt-4o", "call it"),
@@ -375,14 +361,18 @@ mod tests {
                 uri: None,
             },
         ])];
-        let snapshot = build_context_budget_snapshot(ContextBudgetProbe::new(
-            ProviderKind::OpenAiCompatible,
-            "gpt-4o",
-            &items,
-            &[],
-            ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
-        ))
-        .expect("context budget snapshot should build");
+        let snapshot = build_context_budget_snapshot_with_cancellation(
+            ContextBudgetProbe::new(
+                ProviderKind::OpenAiCompatible,
+                "gpt-4o",
+                &items,
+                &[],
+                ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
+            ),
+            || false,
+        )
+        .expect("context budget snapshot should build")
+        .expect("never-cancelled snapshot should be present");
 
         assert!(
             snapshot.segments[0].estimated_tokens > estimate_text_tokens("gpt-4o", "review "),
@@ -428,13 +418,16 @@ mod tests {
     #[test]
     fn unsupported_provider_kind_returns_explicit_error() {
         let items = [ConversationItem::text(Role::User, "hello")];
-        let error = build_context_budget_snapshot(ContextBudgetProbe::new(
-            ProviderKind::Anthropic,
-            "claude-sonnet-4-5",
-            &items,
-            &[],
-            ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
-        ))
+        let error = build_context_budget_snapshot_with_cancellation(
+            ContextBudgetProbe::new(
+                ProviderKind::Anthropic,
+                "claude-sonnet-4-5",
+                &items,
+                &[],
+                ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
+            ),
+            || false,
+        )
         .expect_err("unsupported provider kinds should be explicit");
 
         assert!(matches!(
@@ -453,14 +446,18 @@ mod tests {
             ConversationItem::text(Role::User, "third"),
         ];
 
-        let snapshot = build_context_budget_snapshot(ContextBudgetProbe::new(
-            ProviderKind::OpenAiCompatible,
-            "gpt-4o",
-            &items,
-            &[],
-            ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
-        ))
-        .expect("context budget snapshot should build for a small probe");
+        let snapshot = build_context_budget_snapshot_with_cancellation(
+            ContextBudgetProbe::new(
+                ProviderKind::OpenAiCompatible,
+                "gpt-4o",
+                &items,
+                &[],
+                ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
+            ),
+            || false,
+        )
+        .expect("context budget snapshot should build for a small probe")
+        .expect("never-cancelled snapshot should be present");
 
         assert_eq!(
             snapshot
@@ -477,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn non_cancellable_snapshot_path_matches_cancellable_snapshot_path() {
+    fn cancellation_closure_false_returns_snapshot() {
         let items = [
             ConversationItem::text(Role::System, "system rules"),
             ConversationItem::text(Role::User, "user input"),
@@ -489,15 +486,7 @@ mod tests {
             json!({"type": "object"}),
         )];
         let limit = ContextTokenLimit::try_from(32_000).expect("fixture limit should be valid");
-        let non_cancellable = build_context_budget_snapshot(ContextBudgetProbe::new(
-            ProviderKind::OpenAiCompatible,
-            "gpt-4o",
-            &items,
-            &tool_definitions,
-            limit,
-        ))
-        .expect("non-cancellable snapshot should build");
-        let cancellable = build_context_budget_snapshot_with_cancellation(
+        let snapshot = build_context_budget_snapshot_with_cancellation(
             ContextBudgetProbe::new(
                 ProviderKind::OpenAiCompatible,
                 "gpt-4o",
@@ -510,6 +499,19 @@ mod tests {
         .expect("cancellable snapshot should build")
         .expect("never-cancelled snapshot should be present");
 
-        assert_eq!(non_cancellable, cancellable);
+        assert_eq!(snapshot.usage.limit, limit);
+        assert_eq!(
+            snapshot
+                .segments
+                .iter()
+                .map(|segment| segment.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                SegmentKind::System,
+                SegmentKind::UserMessage,
+                SegmentKind::AssistantMessage,
+                SegmentKind::ToolDefinitions,
+            ]
+        );
     }
 }

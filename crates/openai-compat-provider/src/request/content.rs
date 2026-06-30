@@ -68,9 +68,7 @@ pub(super) fn assistant_projection(
         )
     });
 
-    let mut full_message = Map::new();
-    full_message.insert("role".to_string(), Value::String("assistant".to_string()));
-    full_message.insert("content".to_string(), content_value.clone());
+    let mut full_message = assistant_message_map(content_value.clone(), tool_calls_value.as_ref());
     if let Some(reasoning) = reasoning
         && has_tool_calls
     {
@@ -79,18 +77,12 @@ pub(super) fn assistant_projection(
             Value::String(reasoning.to_string()),
         );
     }
-    if let Some(tool_calls) = tool_calls_value.as_ref() {
-        full_message.insert("tool_calls".to_string(), tool_calls.clone());
-    }
 
     let fragment_message = if reasoning.is_some() && has_tool_calls {
-        let mut fragment_message = Map::new();
-        fragment_message.insert("role".to_string(), Value::String("assistant".to_string()));
-        fragment_message.insert("content".to_string(), content_value);
-        if let Some(tool_calls) = tool_calls_value {
-            fragment_message.insert("tool_calls".to_string(), tool_calls);
-        }
-        Some(Value::Object(fragment_message))
+        Some(Value::Object(assistant_message_map(
+            content_value,
+            tool_calls_value.as_ref(),
+        )))
     } else {
         None
     };
@@ -110,6 +102,16 @@ pub(super) fn openai_tool_from_definition(definition: &ToolDefinition) -> Value 
             "parameters": definition.input_schema,
         }
     })
+}
+
+fn assistant_message_map(content: Value, tool_calls: Option<&Value>) -> Map<String, Value> {
+    let mut message = Map::new();
+    message.insert("role".to_string(), Value::String("assistant".to_string()));
+    message.insert("content".to_string(), content);
+    if let Some(tool_calls) = tool_calls {
+        message.insert("tool_calls".to_string(), tool_calls.clone());
+    }
+    message
 }
 
 fn user_content_from_blocks(blocks: &[ContentBlock]) -> Result<Value, ProviderError> {

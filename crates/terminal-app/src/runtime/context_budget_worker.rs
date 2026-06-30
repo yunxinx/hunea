@@ -19,7 +19,6 @@ use tool_runtime::ToolExecutorRegistry;
 pub(super) struct ContextBudgetWorker {
     runtime: Option<Runtime>,
     current_generation: Arc<AtomicU64>,
-    next_generation: u64,
     active_task: Option<ContextBudgetTask>,
     queued_command: Option<ContextBudgetWorkerCommand>,
 }
@@ -79,7 +78,6 @@ impl ContextBudgetWorker {
         Ok(Self {
             runtime: Some(runtime),
             current_generation: Arc::new(AtomicU64::new(0)),
-            next_generation: 0,
             active_task: None,
             queued_command: None,
         })
@@ -180,10 +178,12 @@ impl ContextBudgetWorker {
     }
 
     fn bump_generation(&mut self) -> u64 {
-        self.next_generation = self.next_generation.saturating_add(1);
         self.current_generation
-            .store(self.next_generation, Ordering::Release);
-        self.next_generation
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
+                Some(generation.saturating_add(1))
+            })
+            .map(|previous_generation| previous_generation.saturating_add(1))
+            .unwrap_or(u64::MAX)
     }
 
     fn spawn_task(
@@ -299,11 +299,6 @@ fn context_budget_load_error_payload(
                 detail: failure.detail,
             }
         }
-        conversation_runtime::ContextBudgetError::RuntimeInvariant { detail } => {
-            ContextBudgetLoadErrorPayload::RuntimeInternal {
-                detail: Some(detail.to_string()),
-            }
-        }
     }
 }
 
@@ -350,18 +345,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_invariant_errors_map_to_runtime_internal_payload() {
-        let payload = context_budget_load_error_payload(
-            conversation_runtime::ContextBudgetError::RuntimeInvariant {
-                detail: "invariant violated",
-            },
-        );
+    fn bump_generation_advances_current_generation_without_shadow_state() {
+        let mut worker = ContextBudgetWorker::new().expect("worker should initialize");
 
-        assert_eq!(
-            payload,
-            ContextBudgetLoadErrorPayload::RuntimeInternal {
-                detail: Some("invariant violated".to_string()),
-            }
-        );
+        assert_eq!(worker.current_generation.load(Ordering::Acquire), 0);
+        assert_eq!(worker.bump_generation(), 1);
+        assert_eq!(worker.current_generation.load(Ordering::Acquire), 1);
+        assert_eq!(worker.bump_generation(), 2);
+        assert_eq!(worker.current_generation.load(Ordering::Acquire), 2);
     }
 }

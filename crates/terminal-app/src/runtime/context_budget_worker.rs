@@ -14,7 +14,7 @@ use conversation_runtime::context_budget::{
 };
 use conversation_runtime::{ConversationItem, ToolDefinition};
 use runtime_domain::{
-    context_budget::ContextTokenLimit,
+    context_budget::{ContextBudgetSnapshot, ContextTokenLimit},
     provider::ProviderKind,
     session::{ContextBudgetLoadErrorPayload, RuntimeEvent, SessionLoadRequestId},
 };
@@ -49,7 +49,7 @@ struct ContextBudgetWorkerCommand {
 
 enum ContextBudgetTaskResult {
     Cancelled,
-    Loaded(runtime_domain::session::ContextBudgetSnapshotPayload),
+    Loaded(ContextBudgetSnapshot),
     Failed(ContextBudgetLoadErrorPayload),
 }
 
@@ -293,7 +293,7 @@ fn handle_context_budget_command(
     );
 
     match build_context_budget_snapshot_with_cancellation(probe, is_cancelled) {
-        Ok(Some(snapshot)) => ContextBudgetTaskResult::Loaded(snapshot.into()),
+        Ok(Some(snapshot)) => ContextBudgetTaskResult::Loaded(snapshot),
         Ok(None) => ContextBudgetTaskResult::Cancelled,
         Err(error) => ContextBudgetTaskResult::Failed(context_budget_load_error_payload(error)),
     }
@@ -325,7 +325,10 @@ fn context_budget_load_error_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtime_domain::session::SessionLoadRequestId;
+    use runtime_domain::{
+        context_budget::{ContextBudgetSnapshot, ContextTokenLimit, ContextWindowUsage},
+        session::SessionLoadRequestId,
+    };
 
     #[test]
     fn stale_loaded_task_result_is_dropped_before_runtime_event_dispatch() {
@@ -337,11 +340,11 @@ mod tests {
 
         worker.current_generation.store(2, Ordering::Release);
         let handle = runtime.handle().spawn(async {
-            ContextBudgetTaskResult::Loaded(runtime_domain::session::ContextBudgetSnapshotPayload {
+            ContextBudgetTaskResult::Loaded(ContextBudgetSnapshot {
                 model_id: "stale-model".to_string(),
                 segments: Vec::new(),
                 total_estimated_tokens: 12,
-                usage: runtime_domain::session::ContextWindowUsagePayload {
+                usage: ContextWindowUsage {
                     limit: ContextTokenLimit::try_from(1_000)
                         .expect("fixture limit should be valid"),
                     used: 12,

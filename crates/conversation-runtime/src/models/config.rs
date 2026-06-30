@@ -350,11 +350,8 @@ fn validate_positive_context_window(
             value,
         });
     }
-    ContextTokenLimit::try_from(value as u32).map_err(|_| ModelsConfigError::InvalidContextWindow {
-        path: path.to_path_buf(),
-        field: field.to_string(),
-        value,
-    })
+    Ok(ContextTokenLimit::new(value as u32)
+        .expect("context_window value is validated to fit in non-zero u32"))
 }
 
 fn catalog_from_config(

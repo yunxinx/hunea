@@ -3,9 +3,9 @@ use super::{
     RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics, RuntimeTarget,
     RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
     SessionBranchTreePayload, SessionLoadRequestId, SessionPickerRow, SessionPreviewPayload,
-    SessionResumePayload, SessionTreePayload,
-    context_budget::{ContextBudgetLoadErrorPayload, ContextBudgetSnapshotPayload},
+    SessionResumePayload, SessionTreePayload, context_budget::ContextBudgetLoadErrorPayload,
 };
+use crate::context_budget::ContextBudgetSnapshot;
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
 #[derive(Debug, Clone, PartialEq)]
@@ -97,7 +97,7 @@ pub enum RuntimeEvent {
     },
     ContextBudgetSnapshotLoaded {
         request_id: SessionLoadRequestId,
-        payload: ContextBudgetSnapshotPayload,
+        payload: ContextBudgetSnapshot,
     },
     ContextBudgetSnapshotLoadFailed {
         request_id: SessionLoadRequestId,

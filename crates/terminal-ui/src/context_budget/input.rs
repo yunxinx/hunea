@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent};
+use runtime_domain::context_budget::ContextBudgetSnapshot;
 use runtime_domain::session::{ContextBudgetLoadErrorPayload, SessionLoadRequestId};
 
 use super::ContextBudgetState;
@@ -36,7 +37,7 @@ impl Model {
     pub(crate) fn apply_context_budget_snapshot(
         &mut self,
         request_id: SessionLoadRequestId,
-        payload: runtime_domain::session::ContextBudgetSnapshotPayload,
+        payload: ContextBudgetSnapshot,
     ) {
         let Some(mut state) = self.context_budget.take() else {
             return;

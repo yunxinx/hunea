@@ -152,11 +152,11 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                 self.runtime_events
                     .push(RuntimeEvent::ContextBudgetSnapshotLoaded {
                         request_id,
-                        payload: runtime_domain::session::ContextBudgetSnapshotPayload {
+                        payload: runtime_domain::context_budget::ContextBudgetSnapshot {
                             model_id: "qwen3".to_string(),
                             segments: vec![],
                             total_estimated_tokens: 0,
-                            usage: runtime_domain::session::ContextWindowUsagePayload {
+                            usage: runtime_domain::context_budget::ContextWindowUsage {
                                 limit: context_limit(256_000),
                                 used: 0,
                                 percent: 0.0,

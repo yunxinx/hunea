@@ -5,7 +5,7 @@ use ratatui::{
     style::Style,
     text::{Line, Span},
 };
-use runtime_domain::session::ContextBudgetSnapshotPayload;
+use runtime_domain::context_budget::ContextBudgetSnapshot;
 
 use super::{
     CONTEXT_BUDGET_HEATMAP_CELL_WIDTH, CONTEXT_BUDGET_HEATMAP_GRID_COLUMNS,
@@ -39,14 +39,10 @@ pub(crate) fn allocate_heatmap_cells(
         return vec![0; segments.len()];
     }
     let total_tokens: usize = segments.iter().map(|s| s.estimated_tokens).sum();
-    if total_tokens == 0 {
-        let base = total_cells / segments.len();
-        let mut counts = vec![base; segments.len()];
-        for i in 0..(total_cells - base * segments.len()) {
-            counts[i % segments.len()] += 1;
-        }
-        return counts;
-    }
+    debug_assert!(
+        total_tokens > 0,
+        "allocate_heatmap_cells expects at least one non-zero category"
+    );
 
     let non_zero_indices: Vec<usize> = segments
         .iter()
@@ -97,7 +93,7 @@ pub(crate) fn allocate_heatmap_cells(
 
 pub(super) fn build_context_budget_heatmap_lines(
     area: Rect,
-    snapshot: &ContextBudgetSnapshotPayload,
+    snapshot: &ContextBudgetSnapshot,
     palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
     if area.width == 0 || area.height == 0 {
@@ -196,7 +192,7 @@ fn heatmap_grid_rows(height: u16) -> usize {
 }
 
 pub(super) fn occupied_heatmap_cells(
-    snapshot: &ContextBudgetSnapshotPayload,
+    snapshot: &ContextBudgetSnapshot,
     total_cells: usize,
     segment_count: usize,
 ) -> usize {
@@ -211,7 +207,7 @@ pub(super) fn occupied_heatmap_cells(
 }
 
 pub(super) fn aggregated_categories_for_heatmap(
-    snapshot: &ContextBudgetSnapshotPayload,
+    snapshot: &ContextBudgetSnapshot,
 ) -> Vec<HeatmapCategory> {
     aggregated_category_totals(snapshot)
         .into_iter()
@@ -261,8 +257,9 @@ fn padded_blank_line(width: usize) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::context_budget::CONTEXT_BUDGET_HEATMAP_WIDTH;
-    use runtime_domain::context_budget::{ContextTokenLimit, SegmentKind};
-    use runtime_domain::session::{ContextBudgetSegmentPayload, ContextWindowUsagePayload};
+    use runtime_domain::context_budget::{
+        ContextBudgetSnapshot, ContextSegment, ContextTokenLimit, ContextWindowUsage, SegmentKind,
+    };
 
     use crate::theme::default_palette;
 
@@ -307,32 +304,32 @@ mod tests {
 
     #[test]
     fn heatmap_aggregates_into_context_budget_source_buckets() {
-        let snapshot = ContextBudgetSnapshotPayload {
+        let snapshot = ContextBudgetSnapshot {
             model_id: "local/qwen3".to_string(),
             segments: vec![
-                ContextBudgetSegmentPayload {
+                ContextSegment {
                     kind: SegmentKind::AssistantMessage,
                     stack_order: 0,
                     estimated_tokens: 100,
                 },
-                ContextBudgetSegmentPayload {
+                ContextSegment {
                     kind: SegmentKind::UserMessage,
                     stack_order: 1,
                     estimated_tokens: 40,
                 },
-                ContextBudgetSegmentPayload {
+                ContextSegment {
                     kind: SegmentKind::AssistantMessage,
                     stack_order: 2,
                     estimated_tokens: 60,
                 },
-                ContextBudgetSegmentPayload {
+                ContextSegment {
                     kind: SegmentKind::System,
                     stack_order: 3,
                     estimated_tokens: 20,
                 },
             ],
             total_estimated_tokens: 220,
-            usage: ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(256_000),
                 used: 220,
                 percent: 0.1,
@@ -358,15 +355,15 @@ mod tests {
 
     #[test]
     fn render_keeps_empty_capacity_cells_visible() {
-        let snapshot = ContextBudgetSnapshotPayload {
+        let snapshot = ContextBudgetSnapshot {
             model_id: "local/qwen3".to_string(),
-            segments: vec![ContextBudgetSegmentPayload {
+            segments: vec![ContextSegment {
                 kind: SegmentKind::System,
                 stack_order: 0,
                 estimated_tokens: 10,
             }],
             total_estimated_tokens: 10,
-            usage: ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(80),
                 used: 10,
                 percent: 12.5,
@@ -414,15 +411,15 @@ mod tests {
 
     #[test]
     fn build_heatmap_lines_fill_requested_area_width() {
-        let snapshot = ContextBudgetSnapshotPayload {
+        let snapshot = ContextBudgetSnapshot {
             model_id: "local/qwen3".to_string(),
-            segments: vec![ContextBudgetSegmentPayload {
+            segments: vec![ContextSegment {
                 kind: SegmentKind::System,
                 stack_order: 0,
                 estimated_tokens: 10,
             }],
             total_estimated_tokens: 10,
-            usage: ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(80),
                 used: 10,
                 percent: 12.5,
@@ -484,11 +481,11 @@ mod tests {
 
     #[test]
     fn occupied_heatmap_cells_rounds_usage_against_fixed_hundred_cell_grid() {
-        let snapshot = ContextBudgetSnapshotPayload {
+        let snapshot = ContextBudgetSnapshot {
             model_id: "local/qwen3".to_string(),
             segments: Vec::new(),
             total_estimated_tokens: 0,
-            usage: ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 421,
                 percent: 42.1,

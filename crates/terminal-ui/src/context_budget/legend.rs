@@ -2,7 +2,7 @@ use ratatui::{
     style::Style,
     text::{Line, Span},
 };
-use runtime_domain::session::ContextBudgetSnapshotPayload;
+use runtime_domain::context_budget::ContextBudgetSnapshot;
 
 use super::{
     CONTEXT_BUDGET_LEGEND_SWATCH_GAP, CONTEXT_BUDGET_LEGEND_SWATCH_WIDTH,
@@ -25,7 +25,7 @@ const LEGEND_BODY_START_ROW: usize = 1 + CONTEXT_BUDGET_SECTION_GAP_ROWS;
 
 pub(super) fn build_context_budget_legend_lines(
     area: ratatui::layout::Rect,
-    snapshot: &ContextBudgetSnapshotPayload,
+    snapshot: &ContextBudgetSnapshot,
     palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
     if area.width == 0 || area.height == 0 {
@@ -66,7 +66,7 @@ pub(super) fn build_context_budget_legend_lines(
 
 fn build_legend_summary_row_line(
     row_width: usize,
-    snapshot: &ContextBudgetSnapshotPayload,
+    snapshot: &ContextBudgetSnapshot,
     palette: TerminalPalette,
 ) -> Line<'static> {
     let text = context_usage_summary(&snapshot.model_id, snapshot.usage);
@@ -166,8 +166,9 @@ mod tests {
     use super::*;
     use crate::theme::default_palette;
     use ratatui::buffer::Buffer;
-    use runtime_domain::context_budget::{ContextTokenLimit, SegmentKind};
-    use runtime_domain::session::ContextBudgetSegmentPayload;
+    use runtime_domain::context_budget::{
+        ContextBudgetSnapshot, ContextSegment, ContextTokenLimit, ContextWindowUsage, SegmentKind,
+    };
 
     fn limit(value: u32) -> ContextTokenLimit {
         ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
@@ -176,7 +177,7 @@ mod tests {
     #[test]
     fn legend_keeps_stable_source_bucket_order_for_non_zero_categories() {
         let area = ratatui::layout::Rect::new(0, 0, 48, 5);
-        let snapshot = ContextBudgetSnapshotPayload {
+        let snapshot = ContextBudgetSnapshot {
             model_id: "model".to_string(),
             segments: vec![
                 segment(SegmentKind::AssistantMessage, 200),
@@ -185,7 +186,7 @@ mod tests {
                 segment(SegmentKind::Reasoning, 60),
             ],
             total_estimated_tokens: 540,
-            usage: runtime_domain::session::ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 540,
                 percent: 54.0,
@@ -237,7 +238,7 @@ mod tests {
     #[test]
     fn legend_uses_natural_token_and_percent_copy() {
         let area = ratatui::layout::Rect::new(0, 0, 48, 5);
-        let snapshot = ContextBudgetSnapshotPayload {
+        let snapshot = ContextBudgetSnapshot {
             model_id: "model".to_string(),
             segments: vec![
                 segment(SegmentKind::UserMessage, 120),
@@ -245,7 +246,7 @@ mod tests {
                 segment(SegmentKind::UserMessage, 80),
             ],
             total_estimated_tokens: 400,
-            usage: runtime_domain::session::ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 400,
                 percent: 40.0,
@@ -282,11 +283,11 @@ mod tests {
     #[test]
     fn legend_hides_zero_token_categories() {
         let area = ratatui::layout::Rect::new(0, 0, 48, 5);
-        let snapshot = ContextBudgetSnapshotPayload {
+        let snapshot = ContextBudgetSnapshot {
             model_id: "model".to_string(),
             segments: vec![segment(SegmentKind::AssistantMessage, 400)],
             total_estimated_tokens: 400,
-            usage: runtime_domain::session::ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(400),
                 used: 400,
                 percent: 100.0,
@@ -321,11 +322,11 @@ mod tests {
 
     #[test]
     fn build_legend_lines_fill_requested_area_width() {
-        let snapshot = ContextBudgetSnapshotPayload {
+        let snapshot = ContextBudgetSnapshot {
             model_id: "model".to_string(),
             segments: vec![segment(SegmentKind::AssistantMessage, 400)],
             total_estimated_tokens: 400,
-            usage: runtime_domain::session::ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 400,
                 percent: 40.0,
@@ -349,8 +350,8 @@ mod tests {
             .collect::<String>()
     }
 
-    fn segment(kind: SegmentKind, estimated_tokens: usize) -> ContextBudgetSegmentPayload {
-        ContextBudgetSegmentPayload {
+    fn segment(kind: SegmentKind, estimated_tokens: usize) -> ContextSegment {
+        ContextSegment {
             kind,
             stack_order: 0,
             estimated_tokens,

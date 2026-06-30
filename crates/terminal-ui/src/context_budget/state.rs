@@ -1,6 +1,6 @@
+use runtime_domain::context_budget::ContextBudgetSnapshot;
 use runtime_domain::session::{
-    ContextBudgetLoadErrorPayload, ContextBudgetProjectionErrorKind, ContextBudgetSnapshotPayload,
-    SessionLoadRequestId,
+    ContextBudgetLoadErrorPayload, ContextBudgetProjectionErrorKind, SessionLoadRequestId,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -9,7 +9,7 @@ pub(crate) struct ContextBudgetState {
     pub(crate) loading: bool,
     pub(crate) pending_request_id: Option<SessionLoadRequestId>,
     pub(crate) error: Option<ContextBudgetLoadErrorPayload>,
-    pub(crate) snapshot: Option<ContextBudgetSnapshotPayload>,
+    pub(crate) snapshot: Option<ContextBudgetSnapshot>,
 }
 
 impl Default for ContextBudgetState {
@@ -25,7 +25,7 @@ impl Default for ContextBudgetState {
 }
 
 impl ContextBudgetState {
-    pub(crate) fn apply_snapshot(&mut self, payload: ContextBudgetSnapshotPayload) {
+    pub(crate) fn apply_snapshot(&mut self, payload: ContextBudgetSnapshot) {
         self.revision = self.revision.saturating_add(1);
         self.loading = false;
         self.pending_request_id = None;

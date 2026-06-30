@@ -3,6 +3,7 @@ use ratatui::{
     style::Modifier,
     text::{Line, Span},
 };
+use runtime_domain::context_budget::ContextBudgetSnapshot;
 
 use super::{
     CONTEXT_BUDGET_PANEL_INSET_WIDTH, CONTEXT_BUDGET_SECTION_GAP_ROWS,
@@ -137,7 +138,7 @@ fn context_budget_body_lines(
 
 fn context_budget_snapshot_body_lines(
     area: Rect,
-    snapshot: &runtime_domain::session::ContextBudgetSnapshotPayload,
+    snapshot: &ContextBudgetSnapshot,
     palette: TerminalPalette,
 ) -> Vec<Line<'static>> {
     let Some(layout) = context_budget_body_layout(area) else {
@@ -213,7 +214,7 @@ fn panel_inset_text() -> String {
 #[cfg(test)]
 mod tests {
     use crate::context_budget::summary::context_usage_summary;
-    use runtime_domain::{context_budget::ContextTokenLimit, session::ContextWindowUsagePayload};
+    use runtime_domain::context_budget::{ContextTokenLimit, ContextWindowUsage};
 
     fn limit(value: u32) -> ContextTokenLimit {
         ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
@@ -223,7 +224,7 @@ mod tests {
     fn usage_summary_absolute_shows_documented_display_limit() {
         let text = context_usage_summary(
             "qwen3",
-            ContextWindowUsagePayload {
+            ContextWindowUsage {
                 limit: limit(256_000),
                 used: 42_000,
                 percent: 16.4,
@@ -237,7 +238,7 @@ mod tests {
     fn usage_summary_absolute_shows_limit_without_percent() {
         let text = context_usage_summary(
             "gpt-4o",
-            ContextWindowUsagePayload {
+            ContextWindowUsage {
                 limit: limit(128_000),
                 used: 32_000,
                 percent: 25.0,

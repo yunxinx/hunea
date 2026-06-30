@@ -1,5 +1,4 @@
-use runtime_domain::context_budget::SegmentKind;
-use runtime_domain::session::{ContextBudgetSnapshotPayload, ContextWindowUsagePayload};
+use runtime_domain::context_budget::{ContextBudgetSnapshot, ContextWindowUsage, SegmentKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextBudgetCategoryKind {
@@ -43,7 +42,7 @@ fn format_compact_percent(percent: f32) -> String {
 }
 
 /// `context_usage_summary` 返回右侧图示首行使用的模型与上下文摘要。
-pub(crate) fn context_usage_summary(model_id: &str, usage: ContextWindowUsagePayload) -> String {
+pub(crate) fn context_usage_summary(model_id: &str, usage: ContextWindowUsage) -> String {
     let used = format_compact_tokens(usage.used as usize);
     let percent = format_compact_percent(usage.percent);
     if usage.is_saturated {
@@ -99,7 +98,7 @@ pub(crate) fn context_budget_category_from_segment_kind(
     }
 }
 
-pub(crate) fn free_space_tokens(snapshot: &ContextBudgetSnapshotPayload) -> Option<usize> {
+pub(crate) fn free_space_tokens(snapshot: &ContextBudgetSnapshot) -> Option<usize> {
     Some(
         usize::try_from(
             snapshot
@@ -112,12 +111,12 @@ pub(crate) fn free_space_tokens(snapshot: &ContextBudgetSnapshotPayload) -> Opti
     )
 }
 
-pub(crate) fn legend_share_total(snapshot: &ContextBudgetSnapshotPayload) -> usize {
+pub(crate) fn legend_share_total(snapshot: &ContextBudgetSnapshot) -> usize {
     usize::try_from(snapshot.usage.limit.get()).unwrap_or(usize::MAX)
 }
 
 pub(crate) fn aggregated_category_totals(
-    snapshot: &ContextBudgetSnapshotPayload,
+    snapshot: &ContextBudgetSnapshot,
 ) -> [(ContextBudgetCategoryKind, usize); 3] {
     let mut totals = [0usize; 3];
 
@@ -137,7 +136,7 @@ pub(crate) fn aggregated_category_totals(
 }
 
 pub(crate) fn build_legend_entries(
-    snapshot: &ContextBudgetSnapshotPayload,
+    snapshot: &ContextBudgetSnapshot,
 ) -> Vec<ContextBudgetLegendEntry> {
     let mut entries = aggregated_category_totals(snapshot)
         .into_iter()
@@ -164,8 +163,9 @@ pub(crate) fn build_legend_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtime_domain::context_budget::{ContextTokenLimit, SegmentKind};
-    use runtime_domain::session::ContextBudgetSegmentPayload;
+    use runtime_domain::context_budget::{
+        ContextBudgetSnapshot, ContextSegment, ContextTokenLimit, ContextWindowUsage, SegmentKind,
+    };
 
     fn limit(value: u32) -> ContextTokenLimit {
         ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn build_legend_entries_merges_duplicate_segment_kinds() {
-        let snapshot = ContextBudgetSnapshotPayload {
+        let snapshot = ContextBudgetSnapshot {
             model_id: "model".to_string(),
             segments: vec![
                 segment(SegmentKind::UserMessage, 0, 120),
@@ -182,7 +182,7 @@ mod tests {
                 segment(SegmentKind::Reasoning, 3, 40),
             ],
             total_estimated_tokens: 440,
-            usage: ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 440,
                 percent: 44.0,
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn aggregated_category_totals_group_messages_under_one_category() {
-        let snapshot = ContextBudgetSnapshotPayload {
+        let snapshot = ContextBudgetSnapshot {
             model_id: "model".to_string(),
             segments: vec![
                 segment(SegmentKind::System, 0, 100),
@@ -211,7 +211,7 @@ mod tests {
                 segment(SegmentKind::ToolDefinitions, 4, 20),
             ],
             total_estimated_tokens: 360,
-            usage: ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 360,
                 percent: 36.0,
@@ -228,11 +228,11 @@ mod tests {
 
     #[test]
     fn legend_share_total_uses_context_limit_when_available() {
-        let snapshot = ContextBudgetSnapshotPayload {
+        let snapshot = ContextBudgetSnapshot {
             model_id: "model".to_string(),
             segments: Vec::new(),
             total_estimated_tokens: 400,
-            usage: ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 400,
                 percent: 40.0,
@@ -245,11 +245,11 @@ mod tests {
 
     #[test]
     fn free_space_tokens_uses_remaining_context_capacity() {
-        let snapshot = ContextBudgetSnapshotPayload {
+        let snapshot = ContextBudgetSnapshot {
             model_id: "model".to_string(),
             segments: Vec::new(),
             total_estimated_tokens: 400,
-            usage: ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 400,
                 percent: 40.0,
@@ -270,7 +270,7 @@ mod tests {
     fn context_usage_summary_omits_total_percent() {
         let text = context_usage_summary(
             "gpt-4o",
-            ContextWindowUsagePayload {
+            ContextWindowUsage {
                 limit: limit(128_000),
                 used: 32_000,
                 percent: 25.0,
@@ -285,7 +285,7 @@ mod tests {
     fn context_usage_summary_keeps_fractional_percent_when_needed() {
         let text = context_usage_summary(
             "deepseek-v4-flash",
-            ContextWindowUsagePayload {
+            ContextWindowUsage {
                 limit: limit(256_000),
                 used: 1_200,
                 percent: 0.5,
@@ -300,7 +300,7 @@ mod tests {
     fn context_usage_summary_uses_documented_absolute_limit() {
         let text = context_usage_summary(
             "local/qwen3",
-            ContextWindowUsagePayload {
+            ContextWindowUsage {
                 limit: limit(256_000),
                 used: 1_200,
                 percent: 0.5,
@@ -315,7 +315,7 @@ mod tests {
     fn context_usage_summary_marks_saturated_usage_as_lower_bound() {
         let text = context_usage_summary(
             "local/qwen3",
-            ContextWindowUsagePayload {
+            ContextWindowUsage {
                 limit: limit(256_000),
                 used: u32::MAX,
                 percent: 1_677_721.5,
@@ -353,12 +353,8 @@ mod tests {
         );
     }
 
-    fn segment(
-        kind: SegmentKind,
-        stack_order: usize,
-        estimated_tokens: usize,
-    ) -> ContextBudgetSegmentPayload {
-        ContextBudgetSegmentPayload {
+    fn segment(kind: SegmentKind, stack_order: usize, estimated_tokens: usize) -> ContextSegment {
+        ContextSegment {
             kind,
             stack_order,
             estimated_tokens,

@@ -1,6 +1,8 @@
 use crossterm::event::KeyCode;
 use ratatui::style::Color;
-use runtime_domain::{context_budget::ContextTokenLimit, session::ContextWindowUsagePayload};
+use runtime_domain::context_budget::{
+    ContextBudgetSnapshot, ContextSegment, ContextTokenLimit, ContextWindowUsage, SegmentKind,
+};
 
 use crate::{
     Model, ModelOptions, StartupBannerOptions,
@@ -10,10 +12,6 @@ use crate::{
     theme::default_palette,
     update::AppEffect,
     update::AppEvent,
-};
-use runtime_domain::{
-    context_budget::SegmentKind,
-    session::{ContextBudgetSegmentPayload, ContextBudgetSnapshotPayload},
 };
 
 fn ready_model() -> Model {
@@ -40,7 +38,7 @@ fn context_overlay_header_shows_documented_absolute_limit() {
     use crate::context_budget::summary::context_usage_summary;
     let text = context_usage_summary(
         "local/qwen3",
-        ContextWindowUsagePayload {
+        ContextWindowUsage {
             limit: limit(256_000),
             used: 1_200,
             percent: 0.5,
@@ -196,11 +194,11 @@ fn context_panel_summary_row_keeps_full_model_usage_text_when_width_allows() {
     let request_id = model.open_context_budget_loading();
     model.apply_context_budget_snapshot(
         request_id,
-        ContextBudgetSnapshotPayload {
+        ContextBudgetSnapshot {
             model_id: "deepseek-v4-flash".to_string(),
             segments: context_budget_snapshot().segments,
             total_estimated_tokens: 1_200,
-            usage: ContextWindowUsagePayload {
+            usage: ContextWindowUsage {
                 limit: limit(256_000),
                 used: 1_200,
                 percent: 0.5,
@@ -257,7 +255,7 @@ fn stale_context_budget_snapshot_is_ignored_after_panel_reopens_loading() {
     model.apply_runtime_event(
         runtime_domain::session::RuntimeEvent::ContextBudgetSnapshotLoaded {
             request_id: stale_request_id,
-            payload: ContextBudgetSnapshotPayload {
+            payload: ContextBudgetSnapshot {
                 model_id: "stale-model".to_string(),
                 ..context_budget_snapshot()
             },
@@ -277,7 +275,7 @@ fn stale_context_budget_snapshot_is_ignored_after_panel_reopens_loading() {
     model.apply_runtime_event(
         runtime_domain::session::RuntimeEvent::ContextBudgetSnapshotLoaded {
             request_id: current_request_id,
-            payload: ContextBudgetSnapshotPayload {
+            payload: ContextBudgetSnapshot {
                 model_id: "current-model".to_string(),
                 ..context_budget_snapshot()
             },
@@ -365,8 +363,8 @@ fn context_budget_unsupported_provider_error_uses_actionable_copy() {
     );
 }
 
-fn context_budget_snapshot() -> ContextBudgetSnapshotPayload {
-    ContextBudgetSnapshotPayload {
+fn context_budget_snapshot() -> ContextBudgetSnapshot {
+    ContextBudgetSnapshot {
         model_id: "local/qwen3".to_string(),
         segments: vec![
             segment(SegmentKind::System, 0, 140),
@@ -377,7 +375,7 @@ fn context_budget_snapshot() -> ContextBudgetSnapshotPayload {
             segment(SegmentKind::ToolDefinitions, 5, 12),
         ],
         total_estimated_tokens: 540,
-        usage: ContextWindowUsagePayload {
+        usage: ContextWindowUsage {
             limit: limit(1_280),
             used: 540,
             percent: 42.2,
@@ -386,12 +384,8 @@ fn context_budget_snapshot() -> ContextBudgetSnapshotPayload {
     }
 }
 
-fn segment(
-    kind: SegmentKind,
-    stack_order: usize,
-    estimated_tokens: usize,
-) -> ContextBudgetSegmentPayload {
-    ContextBudgetSegmentPayload {
+fn segment(kind: SegmentKind, stack_order: usize, estimated_tokens: usize) -> ContextSegment {
+    ContextSegment {
         kind,
         stack_order,
         estimated_tokens,

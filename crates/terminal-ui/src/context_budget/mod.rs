@@ -1,5 +1,7 @@
 //! Context budget view (`/context`) inline panel.
 
+use ratatui::text::Line;
+
 mod heatmap;
 mod input;
 mod layout;
@@ -19,6 +21,14 @@ pub(super) const CONTEXT_BUDGET_HEATMAP_GRID_COLUMNS: usize = 10;
 pub(super) const CONTEXT_BUDGET_HEATMAP_GRID_ROWS: usize = 10;
 pub(super) const CONTEXT_BUDGET_LEGEND_SWATCH_WIDTH: usize = 1;
 pub(super) const CONTEXT_BUDGET_LEGEND_SWATCH_GAP: usize = 1;
+
+pub(super) fn blank_line(width: usize) -> Line<'static> {
+    if width == 0 {
+        Line::raw("")
+    } else {
+        Line::raw(" ".repeat(width))
+    }
+}
 
 pub(crate) use render::ContextBudgetRenderResult;
 pub(crate) use state::ContextBudgetState;

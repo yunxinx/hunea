@@ -88,12 +88,10 @@ impl<'a> ContextBudgetProbe<'a> {
 pub fn build_context_budget_snapshot(
     probe: ContextBudgetProbe<'_>,
 ) -> Result<ContextBudgetSnapshot, ContextBudgetError> {
-    let snapshot = build_context_budget_snapshot_internal(probe, || false)?;
-    debug_assert!(
-        snapshot.is_some(),
-        "non-cancellable context budget path must not produce a cancelled snapshot"
-    );
-    Ok(snapshot.expect("non-cancellable context budget path returned cancellation"))
+    match build_context_budget_snapshot_internal(probe, || false)? {
+        Some(snapshot) => Ok(snapshot),
+        None => unreachable!("non-cancellable context budget path returned cancellation"),
+    }
 }
 
 /// Uses the same provider-specific projection path as the real provider request and allows
@@ -137,16 +135,13 @@ fn build_context_budget_snapshot_internal(
     let token_encoding = TokenEncoding::for_model(probe.model_id);
 
     let mut segments = Vec::with_capacity(probe.items.len() + usize::from(tools_text.is_some()));
-    for (stack_order, (item, projection_text)) in
-        probe.items.iter().zip(message_texts.iter()).enumerate()
-    {
+    for (item, projection_text) in probe.items.iter().zip(message_texts.iter()) {
         if should_cancel() {
             return Ok(None);
         }
         let kind = segment_kind(item);
         segments.push(ContextSegment {
             kind,
-            stack_order,
             estimated_tokens: token_encoding.estimate_text(projection_text),
         });
     }
@@ -157,7 +152,6 @@ fn build_context_budget_snapshot_internal(
         }
         segments.push(ContextSegment {
             kind: SegmentKind::ToolDefinitions,
-            stack_order: segments.len(),
             estimated_tokens: token_encoding.estimate_text(tools_text),
         });
     }
@@ -412,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn stack_order_matches_provider_item_index_for_small_probe() {
+    fn snapshot_segments_keep_provider_item_order_for_small_probe() {
         let items = [
             ConversationItem::text(Role::User, "first"),
             ConversationItem::text(Role::Assistant, "second"),
@@ -432,9 +426,13 @@ mod tests {
             snapshot
                 .segments
                 .iter()
-                .map(|segment| segment.stack_order)
+                .map(|segment| segment.kind)
                 .collect::<Vec<_>>(),
-            vec![0, 1, 2]
+            vec![
+                SegmentKind::UserMessage,
+                SegmentKind::AssistantMessage,
+                SegmentKind::UserMessage,
+            ]
         );
     }
 }

@@ -22,6 +22,25 @@ const DARK_BACKGROUND_SYSTEM_ERROR: Color = Color::Rgb(255, 153, 153);
 const LIGHT_BACKGROUND_SYSTEM_ERROR: Color = Color::Rgb(188, 74, 74);
 const PANEL_ACCENT: Color = Color::Blue;
 const COMMAND_ACCENT: Color = Color::Cyan;
+const TERMINAL_DEFAULT_CONTEXT_BUDGET_COLORS: [Color; 6] = [
+    Color::Blue,
+    Color::Yellow,
+    Color::Green,
+    Color::Red,
+    Color::Magenta,
+    Color::Cyan,
+];
+
+/// `ContextBudgetColorSlot` 定义 context budget 使用的稳定语义槽位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextBudgetColorSlot {
+    System,
+    User,
+    Assistant,
+    ToolResult,
+    Reasoning,
+    ToolDefinitions,
+}
 
 /// `PaletteDetection` 描述一次可确认的终端背景探测结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +118,44 @@ impl TerminalPalette {
     /// `uses_terminal_default_colors` 表示当前配色是否依赖终端默认前景/背景色。
     pub fn uses_terminal_default_colors(&self) -> bool {
         matches!(self.mode, PaletteMode::TerminalDefault)
+    }
+}
+
+/// `context_budget_empty_color` 返回 context budget 空白容量的语义颜色。
+pub(crate) fn context_budget_empty_color(palette: &TerminalPalette) -> Color {
+    palette.tertiary
+}
+
+/// `context_budget_slot_color` 返回指定 context budget 语义槽位的颜色。
+pub(crate) fn context_budget_slot_color(
+    slot: ContextBudgetColorSlot,
+    palette: &TerminalPalette,
+) -> Color {
+    let slot_index = match slot {
+        ContextBudgetColorSlot::System => 0,
+        ContextBudgetColorSlot::User => 1,
+        ContextBudgetColorSlot::Assistant => 2,
+        ContextBudgetColorSlot::ToolResult => 3,
+        ContextBudgetColorSlot::Reasoning => 4,
+        ContextBudgetColorSlot::ToolDefinitions => 5,
+    };
+    if palette.uses_terminal_default_colors() {
+        return TERMINAL_DEFAULT_CONTEXT_BUDGET_COLORS[slot_index];
+    }
+
+    match (palette_has_dark_background(palette), slot) {
+        (true, ContextBudgetColorSlot::System) => Color::Rgb(96, 165, 250),
+        (true, ContextBudgetColorSlot::User) => Color::Rgb(251, 191, 36),
+        (true, ContextBudgetColorSlot::Assistant) => Color::Rgb(74, 222, 128),
+        (true, ContextBudgetColorSlot::ToolResult) => Color::Rgb(248, 113, 113),
+        (true, ContextBudgetColorSlot::Reasoning) => Color::Rgb(167, 139, 250),
+        (true, ContextBudgetColorSlot::ToolDefinitions) => Color::Rgb(34, 211, 238),
+        (false, ContextBudgetColorSlot::System) => Color::Rgb(29, 78, 216),
+        (false, ContextBudgetColorSlot::User) => Color::Rgb(180, 83, 9),
+        (false, ContextBudgetColorSlot::Assistant) => Color::Rgb(21, 128, 61),
+        (false, ContextBudgetColorSlot::ToolResult) => Color::Rgb(185, 28, 28),
+        (false, ContextBudgetColorSlot::Reasoning) => Color::Rgb(109, 40, 217),
+        (false, ContextBudgetColorSlot::ToolDefinitions) => Color::Rgb(8, 145, 178),
     }
 }
 
@@ -272,6 +329,13 @@ fn is_dark_background(color: TerminalBackgroundColor) -> bool {
         + (0.0722 * f32::from(color.blue));
 
     luma < 140.0
+}
+
+fn palette_has_dark_background(palette: &TerminalPalette) -> bool {
+    match color_to_rgb(palette.main) {
+        Some(color) => is_dark_background(color),
+        None => true,
+    }
 }
 
 fn rgb_to_color(color: TerminalBackgroundColor) -> Color {

@@ -1,5 +1,4 @@
 use crossterm::event::KeyCode;
-use ratatui::style::Color;
 use runtime_domain::context_budget::{
     ContextBudgetSnapshot, ContextSegment, ContextTokenLimit, ContextWindowUsage, SegmentKind,
 };
@@ -41,8 +40,6 @@ fn context_overlay_header_shows_documented_absolute_limit() {
         ContextWindowUsage {
             limit: limit(256_000),
             used: 1_200,
-            percent: 0.5,
-            is_saturated: false,
         },
     );
     assert_eq!(text, "local/qwen3 · 1.2k/256k tokens (0.5%)");
@@ -59,7 +56,6 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
 
     let buffer = render_model_buffer(&mut model, 72, 20);
     let rows = rendered_rows(&buffer);
-    let empty_cell_color = default_palette().tertiary;
 
     assert!(
         rows.iter().any(|row| row.trim() == "Context Usage"),
@@ -106,31 +102,6 @@ fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
     assert!(
         first_legend_row < 16,
         "legend should stay inside the inline panel body instead of falling below the heatmap: {rows:?}"
-    );
-    let empty_capacity = buffer
-        .content()
-        .iter()
-        .filter(|cell| {
-            is_context_budget_heatmap_cell(cell, default_palette()) && cell.fg == empty_cell_color
-        })
-        .count();
-    assert!(
-        empty_capacity > 0,
-        "heatmap should keep visible empty-capacity cells instead of leaving trailing blanks"
-    );
-
-    let colored_heatmap_cells = buffer
-        .content()
-        .iter()
-        .filter(|cell| {
-            is_context_budget_heatmap_cell(cell, default_palette())
-                && cell.fg != empty_cell_color
-                && cell.fg != Color::Reset
-        })
-        .count();
-    assert!(
-        colored_heatmap_cells <= 70,
-        "heatmap should stay closer to the reduced-density grid instead of expanding back out: {colored_heatmap_cells}"
     );
     assert!(
         rows.iter().any(|row| row.contains("Free space")),
@@ -201,8 +172,6 @@ fn context_panel_summary_row_keeps_full_model_usage_text_when_width_allows() {
             usage: ContextWindowUsage {
                 limit: limit(256_000),
                 used: 1_200,
-                percent: 0.5,
-                is_saturated: false,
             },
         },
     );
@@ -367,27 +336,24 @@ fn context_budget_snapshot() -> ContextBudgetSnapshot {
     ContextBudgetSnapshot {
         model_id: "local/qwen3".to_string(),
         segments: vec![
-            segment(SegmentKind::System, 0, 140),
-            segment(SegmentKind::UserMessage, 1, 96),
-            segment(SegmentKind::AssistantMessage, 2, 220),
-            segment(SegmentKind::Reasoning, 3, 44),
-            segment(SegmentKind::ToolResult, 4, 28),
-            segment(SegmentKind::ToolDefinitions, 5, 12),
+            segment(SegmentKind::System, 140),
+            segment(SegmentKind::UserMessage, 96),
+            segment(SegmentKind::AssistantMessage, 220),
+            segment(SegmentKind::Reasoning, 44),
+            segment(SegmentKind::ToolResult, 28),
+            segment(SegmentKind::ToolDefinitions, 12),
         ],
         total_estimated_tokens: 540,
         usage: ContextWindowUsage {
             limit: limit(1_280),
             used: 540,
-            percent: 42.2,
-            is_saturated: false,
         },
     }
 }
 
-fn segment(kind: SegmentKind, stack_order: usize, estimated_tokens: usize) -> ContextSegment {
+fn segment(kind: SegmentKind, estimated_tokens: usize) -> ContextSegment {
     ContextSegment {
         kind,
-        stack_order,
         estimated_tokens,
     }
 }

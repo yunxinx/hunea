@@ -6,7 +6,7 @@ use runtime_domain::context_budget::ContextBudgetSnapshot;
 
 use super::{
     CONTEXT_BUDGET_LEGEND_SWATCH_GAP, CONTEXT_BUDGET_LEGEND_SWATCH_WIDTH,
-    CONTEXT_BUDGET_SECTION_GAP_ROWS,
+    CONTEXT_BUDGET_SECTION_GAP_ROWS, blank_line,
     segment_colors::context_budget_color_for_category,
     summary::{
         ContextBudgetCategoryKind, build_legend_entries, context_usage_summary,
@@ -39,12 +39,12 @@ pub(super) fn build_context_budget_legend_lines(
     lines.push(build_legend_summary_row_line(row_width, snapshot, palette));
     if row_count <= LEGEND_BODY_START_ROW {
         while lines.len() < row_count {
-            lines.push(padded_blank_line(row_width));
+            lines.push(blank_line(row_width));
         }
         return lines;
     }
     for _ in 0..CONTEXT_BUDGET_SECTION_GAP_ROWS {
-        lines.push(padded_blank_line(row_width));
+        lines.push(blank_line(row_width));
     }
     let entries = build_legend_entries(snapshot);
     let total_tokens = legend_share_total(snapshot);
@@ -60,7 +60,7 @@ pub(super) fn build_context_budget_legend_lines(
         ));
     }
     while lines.len() < row_count {
-        lines.push(padded_blank_line(row_width));
+        lines.push(blank_line(row_width));
     }
     lines
 }
@@ -155,14 +155,6 @@ fn padded_styled_line(text: String, width: usize, style: Style) -> Line<'static>
     Line::from(spans)
 }
 
-fn padded_blank_line(width: usize) -> Line<'static> {
-    if width == 0 {
-        Line::raw("")
-    } else {
-        Line::raw(" ".repeat(width))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,8 +183,6 @@ mod tests {
             usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 540,
-                percent: 54.0,
-                is_saturated: false,
             },
         };
         let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 48, 5));
@@ -251,8 +241,6 @@ mod tests {
             usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 400,
-                percent: 40.0,
-                is_saturated: false,
             },
         };
         let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 48, 5));
@@ -292,8 +280,6 @@ mod tests {
             usage: ContextWindowUsage {
                 limit: limit(400),
                 used: 400,
-                percent: 100.0,
-                is_saturated: false,
             },
         };
         let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 48, 5));
@@ -331,8 +317,6 @@ mod tests {
             usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 400,
-                percent: 40.0,
-                is_saturated: false,
             },
         };
 
@@ -355,7 +339,6 @@ mod tests {
     fn segment(kind: SegmentKind, estimated_tokens: usize) -> ContextSegment {
         ContextSegment {
             kind,
-            stack_order: 0,
             estimated_tokens,
         }
     }

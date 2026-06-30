@@ -6,7 +6,7 @@ use ratatui::{
 use runtime_domain::context_budget::ContextBudgetSnapshot;
 
 use super::{
-    CONTEXT_BUDGET_PANEL_INSET_WIDTH, CONTEXT_BUDGET_SECTION_GAP_ROWS,
+    CONTEXT_BUDGET_PANEL_INSET_WIDTH, CONTEXT_BUDGET_SECTION_GAP_ROWS, blank_line,
     heatmap::build_context_budget_heatmap_lines, layout::context_budget_body_layout,
     legend::build_context_budget_legend_lines, state::context_budget_error_message,
 };
@@ -194,14 +194,6 @@ fn pad_body_lines(mut lines: Vec<Line<'static>>, body_height: usize) -> Vec<Line
     lines
 }
 
-fn blank_line(width: usize) -> Line<'static> {
-    if width == 0 {
-        Line::raw("")
-    } else {
-        Line::raw(" ".repeat(width))
-    }
-}
-
 fn append_blank_lines(lines: &mut Vec<Line<'static>>, count: usize) {
     for _ in 0..count {
         lines.push(Line::raw(""));
@@ -241,8 +233,6 @@ mod tests {
             ContextWindowUsage {
                 limit: limit(256_000),
                 used: 42_000,
-                percent: 16.4,
-                is_saturated: false,
             },
         );
         assert_eq!(text, "qwen3 · 42k/256k tokens (16.4%)");
@@ -255,8 +245,6 @@ mod tests {
             ContextWindowUsage {
                 limit: limit(128_000),
                 used: 32_000,
-                percent: 25.0,
-                is_saturated: false,
             },
         );
         assert!(text.contains("128k"));

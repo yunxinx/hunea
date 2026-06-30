@@ -13,6 +13,7 @@ session-store.workspace = true
 tool-runtime.workspace = true
 terminal-ui.workspace = true
 tokio.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 crossterm.workspace = true

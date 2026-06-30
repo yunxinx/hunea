@@ -31,7 +31,6 @@ impl SegmentKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextSegment {
     pub kind: SegmentKind,
-    pub stack_order: usize,
     pub estimated_tokens: usize,
 }
 
@@ -81,19 +80,15 @@ impl fmt::Display for ContextTokenLimitError {
 impl std::error::Error for ContextTokenLimitError {}
 
 /// Absolute usage summary for one context window.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextWindowUsage {
     pub limit: ContextTokenLimit,
-    /// `used` 是 UI 展示用绝对 token 数；当 `is_saturated` 为 true 时表示下界。
+    /// `used` 是 UI 展示用绝对 token 数。
     pub used: u32,
-    /// `percent` 是 UI 展示用比例；当 `is_saturated` 为 true 时表示下界。
-    pub percent: f32,
-    /// `is_saturated` 表示真实 token 总量超出展示字段可精确表达的上限。
-    pub is_saturated: bool,
 }
 
 /// Estimated token breakdown for one prepared turn.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextBudgetSnapshot {
     pub model_id: String,
     pub segments: Vec<ContextSegment>,
@@ -115,13 +110,9 @@ pub fn context_window_usage(
     total_estimated_tokens: usize,
     context_limit: ContextTokenLimit,
 ) -> ContextWindowUsage {
-    let is_saturated = total_estimated_tokens > usize::try_from(u32::MAX).unwrap_or(usize::MAX);
-    let used = u32::try_from(total_estimated_tokens).unwrap_or(u32::MAX);
     ContextWindowUsage {
         limit: context_limit,
-        used,
-        percent: (used as f32 / context_limit.get() as f32) * 100.0,
-        is_saturated,
+        used: u32::try_from(total_estimated_tokens).unwrap_or(u32::MAX),
     }
 }
 
@@ -146,8 +137,6 @@ mod tests {
 
         assert_eq!(usage.limit.get(), 256_000);
         assert_eq!(usage.used, 12_345);
-        assert!(!usage.is_saturated);
-        assert!((usage.percent - (usage.used as f32 / 256_000.0 * 100.0)).abs() < 0.01);
     }
 
     #[test]
@@ -159,19 +148,16 @@ mod tests {
 
         assert_eq!(usage.limit.get(), 128_000);
         assert_eq!(usage.used, 32_000);
-        assert!(!usage.is_saturated);
-        assert!((usage.percent - (usage.used as f32 / 128_000.0 * 100.0)).abs() < 0.01);
     }
 
     #[test]
-    fn context_window_usage_marks_saturated_display_when_total_exceeds_u32_max() {
+    fn context_window_usage_clamps_display_value_when_total_exceeds_u32_max() {
         let usage = context_window_usage(
             usize::try_from(u32::MAX).expect("u32::MAX should fit in usize") + 1,
             ContextTokenLimit::try_from(256_000).expect("fixture limit should be valid"),
         );
 
         assert_eq!(usage.used, u32::MAX);
-        assert!(usage.is_saturated);
     }
 
     #[test]

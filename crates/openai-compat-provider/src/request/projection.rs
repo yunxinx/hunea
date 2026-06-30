@@ -1,5 +1,3 @@
-use std::borrow::Borrow;
-
 use provider_protocol::{ConversationItem, PromptRequest, ProviderError, Role, ToolDefinition};
 use serde_json::{Value, json};
 
@@ -69,13 +67,10 @@ pub fn prompt_request_projection(
 }
 
 /// `prompt_request_projection_from_parts` 允许调用方直接用借用切片投影消息与工具定义。
-pub fn prompt_request_projection_from_parts<Item>(
-    items: &[Item],
+pub fn prompt_request_projection_from_parts(
+    items: &[ConversationItem],
     tools: &[ToolDefinition],
-) -> Result<PromptRequestProjection, ProviderError>
-where
-    Item: Borrow<ConversationItem>,
-{
+) -> Result<PromptRequestProjection, ProviderError> {
     let (message_values, message_fragments) = project_items_to_messages_and_fragments(items)?;
     Ok(PromptRequestProjection {
         message_values,
@@ -84,12 +79,9 @@ where
     })
 }
 
-fn project_items_to_messages_and_fragments<Item>(
-    items: &[Item],
-) -> Result<(Vec<Value>, Vec<MessageFragmentProjection>), ProviderError>
-where
-    Item: Borrow<ConversationItem>,
-{
+fn project_items_to_messages_and_fragments(
+    items: &[ConversationItem],
+) -> Result<(Vec<Value>, Vec<MessageFragmentProjection>), ProviderError> {
     validate_openai_projection_items(items)?;
 
     let mut messages = Vec::new();
@@ -98,7 +90,7 @@ where
     let mut pending_tool_results: Vec<(usize, &ConversationItem)> = Vec::new();
 
     for (index, item) in items.iter().enumerate() {
-        match item.borrow() {
+        match item {
             ConversationItem::Message {
                 role: Role::System,
                 content,
@@ -162,7 +154,7 @@ where
                 }
             }
             ConversationItem::ToolResult { .. } => {
-                pending_tool_results.push((index, item.borrow()));
+                pending_tool_results.push((index, item));
             }
             ConversationItem::Reasoning { content, .. } => {
                 flush_tool_results(

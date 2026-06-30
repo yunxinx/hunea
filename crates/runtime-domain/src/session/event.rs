@@ -8,7 +8,7 @@ use super::{
 use crate::context_budget::ContextBudgetSnapshot;
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
     Started {
         target: RuntimeTarget,

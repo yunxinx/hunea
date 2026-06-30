@@ -3221,6 +3221,7 @@ dependencies = [
  "serde_json",
  "session-store",
  "terminal-ui",
+ "thiserror 2.0.18",
  "tokio",
  "tool-runtime",
 ]

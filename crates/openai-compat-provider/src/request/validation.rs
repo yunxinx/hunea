@@ -1,16 +1,14 @@
-use std::{borrow::Borrow, collections::BTreeSet};
+use std::collections::BTreeSet;
 
 use provider_protocol::{ContentBlock, ConversationItem, ProviderError, Role};
 
-pub(super) fn validate_openai_projection_items<Item>(items: &[Item]) -> Result<(), ProviderError>
-where
-    Item: Borrow<ConversationItem>,
-{
+pub(super) fn validate_openai_projection_items(
+    items: &[ConversationItem],
+) -> Result<(), ProviderError> {
     let mut pending_tool_call_ids = BTreeSet::new();
     let mut seen_tool_call_ids = BTreeSet::new();
 
     for (index, item) in items.iter().enumerate() {
-        let item = item.borrow();
         item.validate().map_err(|source| {
             ProviderError::Protocol(format!("invalid conversation item {index}: {source}"))
         })?;

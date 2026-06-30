@@ -37,16 +37,14 @@ pub(crate) fn format_percent(percent: f32) -> String {
     format!("{whole}.{fraction}%")
 }
 
+pub(crate) fn context_usage_percent(usage: ContextWindowUsage) -> f32 {
+    (usage.used as f32 / usage.limit.get() as f32) * 100.0
+}
+
 /// `context_usage_summary` 返回右侧图示首行使用的模型与上下文摘要。
 pub(crate) fn context_usage_summary(model_id: &str, usage: ContextWindowUsage) -> String {
     let used = format_compact_tokens(usage.used as usize);
-    let percent = format_percent(usage.percent);
-    if usage.is_saturated {
-        return format!(
-            "{model_id} · {used}+/{} tokens ({percent}+)",
-            format_compact_tokens(usage.limit.get() as usize),
-        );
-    }
+    let percent = format_percent(context_usage_percent(usage));
 
     format!(
         "{model_id} · {}/{} tokens ({})",
@@ -165,17 +163,15 @@ mod tests {
         let snapshot = ContextBudgetSnapshot {
             model_id: "model".to_string(),
             segments: vec![
-                segment(SegmentKind::UserMessage, 0, 120),
-                segment(SegmentKind::AssistantMessage, 1, 200),
-                segment(SegmentKind::UserMessage, 2, 80),
-                segment(SegmentKind::Reasoning, 3, 40),
+                segment(SegmentKind::UserMessage, 120),
+                segment(SegmentKind::AssistantMessage, 200),
+                segment(SegmentKind::UserMessage, 80),
+                segment(SegmentKind::Reasoning, 40),
             ],
             total_estimated_tokens: 440,
             usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 440,
-                percent: 44.0,
-                is_saturated: false,
             },
         };
 
@@ -193,18 +189,16 @@ mod tests {
         let snapshot = ContextBudgetSnapshot {
             model_id: "model".to_string(),
             segments: vec![
-                segment(SegmentKind::System, 0, 100),
-                segment(SegmentKind::AssistantMessage, 1, 120),
-                segment(SegmentKind::UserMessage, 2, 80),
-                segment(SegmentKind::ToolResult, 3, 40),
-                segment(SegmentKind::ToolDefinitions, 4, 20),
+                segment(SegmentKind::System, 100),
+                segment(SegmentKind::AssistantMessage, 120),
+                segment(SegmentKind::UserMessage, 80),
+                segment(SegmentKind::ToolResult, 40),
+                segment(SegmentKind::ToolDefinitions, 20),
             ],
             total_estimated_tokens: 360,
             usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 360,
-                percent: 36.0,
-                is_saturated: false,
             },
         };
 
@@ -224,8 +218,6 @@ mod tests {
             usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 400,
-                percent: 40.0,
-                is_saturated: false,
             },
         };
 
@@ -241,8 +233,6 @@ mod tests {
             usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 400,
-                percent: 40.0,
-                is_saturated: false,
             },
         };
 
@@ -262,8 +252,6 @@ mod tests {
             ContextWindowUsage {
                 limit: limit(128_000),
                 used: 32_000,
-                percent: 25.0,
-                is_saturated: false,
             },
         );
 
@@ -277,8 +265,6 @@ mod tests {
             ContextWindowUsage {
                 limit: limit(256_000),
                 used: 1_200,
-                percent: 0.5,
-                is_saturated: false,
             },
         );
 
@@ -292,8 +278,6 @@ mod tests {
             ContextWindowUsage {
                 limit: limit(256_000),
                 used: 1_200,
-                percent: 0.5,
-                is_saturated: false,
             },
         );
 
@@ -301,18 +285,16 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_summary_marks_saturated_usage_as_lower_bound() {
+    fn context_usage_summary_clamps_displayed_used_tokens_at_u32_max() {
         let text = context_usage_summary(
             "local/qwen3",
             ContextWindowUsage {
                 limit: limit(256_000),
                 used: u32::MAX,
-                percent: 1_677_721.5,
-                is_saturated: true,
             },
         );
 
-        assert_eq!(text, "local/qwen3 · 4294967.3k+/256k tokens (1677721.5%+)");
+        assert_eq!(text, "local/qwen3 · 4294967.3k/256k tokens (1677721.6%)");
     }
 
     #[test]
@@ -348,10 +330,9 @@ mod tests {
         );
     }
 
-    fn segment(kind: SegmentKind, stack_order: usize, estimated_tokens: usize) -> ContextSegment {
+    fn segment(kind: SegmentKind, estimated_tokens: usize) -> ContextSegment {
         ContextSegment {
             kind,
-            stack_order,
             estimated_tokens,
         }
     }

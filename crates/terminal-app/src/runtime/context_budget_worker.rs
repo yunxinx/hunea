@@ -1,5 +1,4 @@
 use std::{
-    fmt,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -52,21 +51,15 @@ enum ContextBudgetTaskResult {
     Failed(ContextBudgetLoadErrorPayload),
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("start context budget runtime: {detail}")]
 pub(super) struct ContextBudgetWorkerInitError {
     detail: String,
 }
 
-impl fmt::Display for ContextBudgetWorkerInitError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "start context budget runtime: {}", self.detail)
-    }
-}
-
-impl std::error::Error for ContextBudgetWorkerInitError {}
-
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(super) enum ContextBudgetWorkerLoadError {
+    #[error("context budget worker stopped")]
     WorkerStopped,
 }
 
@@ -79,16 +72,6 @@ impl ContextBudgetWorkerLoadError {
         }
     }
 }
-
-impl fmt::Display for ContextBudgetWorkerLoadError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::WorkerStopped => f.write_str("context budget worker stopped"),
-        }
-    }
-}
-
-impl std::error::Error for ContextBudgetWorkerLoadError {}
 
 impl ContextBudgetWorker {
     pub(super) fn new() -> Result<Self, ContextBudgetWorkerInitError> {
@@ -347,8 +330,6 @@ mod tests {
                     limit: ContextTokenLimit::try_from(1_000)
                         .expect("fixture limit should be valid"),
                     used: 12,
-                    percent: 1.2,
-                    is_saturated: false,
                 },
             })
         });

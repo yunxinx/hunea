@@ -9,11 +9,11 @@ use runtime_domain::context_budget::ContextBudgetSnapshot;
 
 use super::{
     CONTEXT_BUDGET_HEATMAP_CELL_WIDTH, CONTEXT_BUDGET_HEATMAP_GRID_COLUMNS,
-    CONTEXT_BUDGET_HEATMAP_GRID_ROWS,
-    segment_colors::{context_budget_color_for_category, context_budget_empty_color},
+    CONTEXT_BUDGET_HEATMAP_GRID_ROWS, blank_line,
+    segment_colors::context_budget_color_for_category,
     summary::{ContextBudgetCategoryKind, aggregated_category_totals},
 };
-use crate::theme::TerminalPalette;
+use crate::theme::{TerminalPalette, context_budget_empty_color};
 
 const HEATMAP_FULL_SYMBOL: &str = "◼";
 const HEATMAP_EMPTY_SYMBOL: &str = "⛶";
@@ -177,7 +177,7 @@ fn build_heatmap_fill_kinds(
 
 fn blank_heatmap_lines(area: Rect) -> Vec<Line<'static>> {
     (0..area.height)
-        .map(|_| padded_blank_line(usize::from(area.width)))
+        .map(|_| blank_line(usize::from(area.width)))
         .collect()
 }
 
@@ -245,14 +245,6 @@ fn heatmap_symbol(fill: HeatmapCellFill) -> &'static str {
     }
 }
 
-fn padded_blank_line(width: usize) -> Line<'static> {
-    if width == 0 {
-        Line::raw("")
-    } else {
-        Line::raw(" ".repeat(width))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,22 +301,18 @@ mod tests {
             segments: vec![
                 ContextSegment {
                     kind: SegmentKind::AssistantMessage,
-                    stack_order: 0,
                     estimated_tokens: 100,
                 },
                 ContextSegment {
                     kind: SegmentKind::UserMessage,
-                    stack_order: 1,
                     estimated_tokens: 40,
                 },
                 ContextSegment {
                     kind: SegmentKind::AssistantMessage,
-                    stack_order: 2,
                     estimated_tokens: 60,
                 },
                 ContextSegment {
                     kind: SegmentKind::System,
-                    stack_order: 3,
                     estimated_tokens: 20,
                 },
             ],
@@ -332,8 +320,6 @@ mod tests {
             usage: ContextWindowUsage {
                 limit: limit(256_000),
                 used: 220,
-                percent: 0.1,
-                is_saturated: false,
             },
         };
 
@@ -359,15 +345,12 @@ mod tests {
             model_id: "local/qwen3".to_string(),
             segments: vec![ContextSegment {
                 kind: SegmentKind::System,
-                stack_order: 0,
                 estimated_tokens: 10,
             }],
             total_estimated_tokens: 10,
             usage: ContextWindowUsage {
                 limit: limit(80),
                 used: 10,
-                percent: 12.5,
-                is_saturated: false,
             },
         };
         let mut buffer = Buffer::empty(Rect::new(
@@ -415,15 +398,12 @@ mod tests {
             model_id: "local/qwen3".to_string(),
             segments: vec![ContextSegment {
                 kind: SegmentKind::System,
-                stack_order: 0,
                 estimated_tokens: 10,
             }],
             total_estimated_tokens: 10,
             usage: ContextWindowUsage {
                 limit: limit(80),
                 used: 10,
-                percent: 12.5,
-                is_saturated: false,
             },
         };
 
@@ -488,8 +468,6 @@ mod tests {
             usage: ContextWindowUsage {
                 limit: limit(1_000),
                 used: 421,
-                percent: 42.1,
-                is_saturated: false,
             },
         };
 

@@ -160,6 +160,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                                 limit: context_limit(256_000),
                                 used: 0,
                                 percent: 0.0,
+                                is_saturated: false,
                             },
                         },
                     });

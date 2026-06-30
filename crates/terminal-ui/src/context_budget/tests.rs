@@ -44,6 +44,7 @@ fn context_overlay_header_shows_documented_absolute_limit() {
             limit: limit(256_000),
             used: 1_200,
             percent: 0.5,
+            is_saturated: false,
         },
     );
     assert_eq!(text, "local/qwen3 · 1.2k/256k tokens (0.5%)");
@@ -203,6 +204,7 @@ fn context_panel_summary_row_keeps_full_model_usage_text_when_width_allows() {
                 limit: limit(256_000),
                 used: 1_200,
                 percent: 0.5,
+                is_saturated: false,
             },
         },
     );
@@ -379,6 +381,7 @@ fn context_budget_snapshot() -> ContextBudgetSnapshotPayload {
             limit: limit(1_280),
             used: 540,
             percent: 42.2,
+            is_saturated: false,
         },
     }
 }

@@ -44,11 +44,20 @@ fn format_compact_percent(percent: f32) -> String {
 
 /// `context_usage_summary` 返回右侧图示首行使用的模型与上下文摘要。
 pub(crate) fn context_usage_summary(model_id: &str, usage: ContextWindowUsagePayload) -> String {
+    let used = format_compact_tokens(usage.used as usize);
+    let percent = format_compact_percent(usage.percent);
+    if usage.is_saturated {
+        return format!(
+            "{model_id} · {used}+/{} tokens ({percent}+)",
+            format_compact_tokens(usage.limit.get() as usize),
+        );
+    }
+
     format!(
         "{model_id} · {}/{} tokens ({})",
-        format_compact_tokens(usage.used as usize),
+        used,
         format_compact_tokens(usage.limit.get() as usize),
-        format_compact_percent(usage.percent),
+        percent,
     )
 }
 
@@ -177,6 +186,7 @@ mod tests {
                 limit: limit(1_000),
                 used: 440,
                 percent: 44.0,
+                is_saturated: false,
             },
         };
 
@@ -205,6 +215,7 @@ mod tests {
                 limit: limit(1_000),
                 used: 360,
                 percent: 36.0,
+                is_saturated: false,
             },
         };
 
@@ -225,6 +236,7 @@ mod tests {
                 limit: limit(1_000),
                 used: 400,
                 percent: 40.0,
+                is_saturated: false,
             },
         };
 
@@ -241,6 +253,7 @@ mod tests {
                 limit: limit(1_000),
                 used: 400,
                 percent: 40.0,
+                is_saturated: false,
             },
         };
 
@@ -261,6 +274,7 @@ mod tests {
                 limit: limit(128_000),
                 used: 32_000,
                 percent: 25.0,
+                is_saturated: false,
             },
         );
 
@@ -275,6 +289,7 @@ mod tests {
                 limit: limit(256_000),
                 used: 1_200,
                 percent: 0.5,
+                is_saturated: false,
             },
         );
 
@@ -289,10 +304,26 @@ mod tests {
                 limit: limit(256_000),
                 used: 1_200,
                 percent: 0.5,
+                is_saturated: false,
             },
         );
 
         assert_eq!(text, "local/qwen3 · 1.2k/256k tokens (0.5%)");
+    }
+
+    #[test]
+    fn context_usage_summary_marks_saturated_usage_as_lower_bound() {
+        let text = context_usage_summary(
+            "local/qwen3",
+            ContextWindowUsagePayload {
+                limit: limit(256_000),
+                used: u32::MAX,
+                percent: 1_677_721.5,
+                is_saturated: true,
+            },
+        );
+
+        assert_eq!(text, "local/qwen3 · 4294967.3k+/256k tokens (1677721.5%+)");
     }
 
     #[test]

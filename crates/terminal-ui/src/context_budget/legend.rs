@@ -189,6 +189,7 @@ mod tests {
                 limit: limit(1_000),
                 used: 540,
                 percent: 54.0,
+                is_saturated: false,
             },
         };
         let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 48, 5));
@@ -248,6 +249,7 @@ mod tests {
                 limit: limit(1_000),
                 used: 400,
                 percent: 40.0,
+                is_saturated: false,
             },
         };
         let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 48, 5));
@@ -288,6 +290,7 @@ mod tests {
                 limit: limit(400),
                 used: 400,
                 percent: 100.0,
+                is_saturated: false,
             },
         };
         let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 48, 5));
@@ -326,6 +329,7 @@ mod tests {
                 limit: limit(1_000),
                 used: 400,
                 percent: 40.0,
+                is_saturated: false,
             },
         };
 

@@ -26,6 +26,7 @@ pub struct ContextWindowUsagePayload {
     pub limit: ContextTokenLimit,
     pub used: u32,
     pub percent: f32,
+    pub is_saturated: bool,
 }
 
 impl From<ContextBudgetSnapshot> for ContextBudgetSnapshotPayload {
@@ -55,6 +56,7 @@ impl From<ContextWindowUsage> for ContextWindowUsagePayload {
             limit: usage.limit,
             used: usage.used,
             percent: usage.percent,
+            is_saturated: usage.is_saturated,
         }
     }
 }
@@ -118,6 +120,7 @@ mod tests {
                 limit: limit(256_000),
                 used: 192,
                 percent: 0.075,
+                is_saturated: false,
             },
         }
         .into();
@@ -145,6 +148,7 @@ mod tests {
                 limit: limit(256_000),
                 used: 192,
                 percent: 0.075,
+                is_saturated: false,
             }
         );
     }
@@ -155,6 +159,7 @@ mod tests {
             limit: limit(128_000),
             used: 42_000,
             percent: 32.8125,
+            is_saturated: true,
         }
         .into();
 
@@ -164,6 +169,7 @@ mod tests {
                 limit: limit(128_000),
                 used: 42_000,
                 percent: 32.8125,
+                is_saturated: true,
             }
         );
     }

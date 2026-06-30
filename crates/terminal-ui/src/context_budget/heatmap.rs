@@ -336,6 +336,7 @@ mod tests {
                 limit: limit(256_000),
                 used: 220,
                 percent: 0.1,
+                is_saturated: false,
             },
         };
 
@@ -369,6 +370,7 @@ mod tests {
                 limit: limit(80),
                 used: 10,
                 percent: 12.5,
+                is_saturated: false,
             },
         };
         let mut buffer = Buffer::empty(Rect::new(
@@ -424,6 +426,7 @@ mod tests {
                 limit: limit(80),
                 used: 10,
                 percent: 12.5,
+                is_saturated: false,
             },
         };
 
@@ -489,6 +492,7 @@ mod tests {
                 limit: limit(1_000),
                 used: 421,
                 percent: 42.1,
+                is_saturated: false,
             },
         };
 

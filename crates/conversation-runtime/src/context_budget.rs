@@ -90,24 +90,28 @@ impl<'a> ContextBudgetProbe<'a> {
 pub fn build_context_budget_snapshot(
     probe: ContextBudgetProbe<'_>,
 ) -> Result<ContextBudgetSnapshot, ContextBudgetError> {
-    build_context_budget_snapshot_with_cancellation(probe, || false)?.ok_or_else(|| {
-        ContextBudgetError::Projection {
-            failure: ContextBudgetProjectionFailure {
-                kind: ContextBudgetProjectionErrorKind::Protocol,
-                status: None,
-                detail: Some("context budget snapshot cancelled unexpectedly".to_string()),
-            },
-            source: provider_protocol::ProviderError::Protocol(
-                "context budget snapshot cancelled unexpectedly".to_string(),
-            ),
-        }
-    })
+    let snapshot = build_context_budget_snapshot_internal(probe, || false)?;
+    debug_assert!(
+        snapshot.is_some(),
+        "non-cancellable context budget path must not produce a cancelled snapshot"
+    );
+    match snapshot {
+        Some(snapshot) => Ok(snapshot),
+        None => unreachable!("non-cancellable context budget path returned cancellation"),
+    }
 }
 
 /// Uses the same provider-specific projection path as the real provider request and allows
 /// cooperative cancellation between the expensive projection phases.
 #[must_use = "building a snapshot can fail and the result must be handled"]
 pub fn build_context_budget_snapshot_with_cancellation(
+    probe: ContextBudgetProbe<'_>,
+    should_cancel: impl Fn() -> bool,
+) -> Result<Option<ContextBudgetSnapshot>, ContextBudgetError> {
+    build_context_budget_snapshot_internal(probe, should_cancel)
+}
+
+fn build_context_budget_snapshot_internal(
     probe: ContextBudgetProbe<'_>,
     should_cancel: impl Fn() -> bool,
 ) -> Result<Option<ContextBudgetSnapshot>, ContextBudgetError> {
@@ -168,6 +172,10 @@ pub fn build_context_budget_snapshot_with_cancellation(
         .sum();
     let usage: ContextWindowUsage =
         context_window_usage(total_estimated_tokens, probe.context_limit);
+
+    if should_cancel() {
+        return Ok(None);
+    }
 
     Ok(Some(ContextBudgetSnapshot {
         model_id: probe.model_id.to_string(),

@@ -227,6 +227,7 @@ mod tests {
                 limit: limit(256_000),
                 used: 42_000,
                 percent: 16.4,
+                is_saturated: false,
             },
         );
         assert_eq!(text, "qwen3 · 42k/256k tokens (16.4%)");
@@ -240,6 +241,7 @@ mod tests {
                 limit: limit(128_000),
                 used: 32_000,
                 percent: 25.0,
+                is_saturated: false,
             },
         );
         assert!(text.contains("128k"));

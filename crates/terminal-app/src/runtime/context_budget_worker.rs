@@ -49,7 +49,8 @@ struct ContextBudgetWorkerCommand {
 
 enum ContextBudgetTaskResult {
     Cancelled,
-    Event(Box<RuntimeEvent>),
+    Loaded(runtime_domain::session::ContextBudgetSnapshotPayload),
+    Failed(ContextBudgetLoadErrorPayload),
 }
 
 #[derive(Debug)]
@@ -144,6 +145,8 @@ impl ContextBudgetWorker {
     }
 
     pub(super) fn cancel_pending(&mut self) {
+        // `/context` 使用 soft cancel：UI 立刻停止追踪旧请求，但已经开始运行的
+        // `spawn_blocking` 任务仍会在后台跑到下一次协作式取消检查或自然结束。
         self.bump_generation();
         self.active_task = None;
         self.queued_command = None;
@@ -229,7 +232,24 @@ impl ContextBudgetWorker {
         let runtime = self.runtime.as_ref()?;
         match runtime.block_on(task.handle) {
             Ok(ContextBudgetTaskResult::Cancelled) => None,
-            Ok(ContextBudgetTaskResult::Event(event)) => Some(*event),
+            Ok(ContextBudgetTaskResult::Loaded(payload)) => {
+                if task.generation != self.current_generation.load(Ordering::Acquire) {
+                    return None;
+                }
+                Some(RuntimeEvent::ContextBudgetSnapshotLoaded {
+                    request_id: task.request_id,
+                    payload,
+                })
+            }
+            Ok(ContextBudgetTaskResult::Failed(error)) => {
+                if task.generation != self.current_generation.load(Ordering::Acquire) {
+                    return None;
+                }
+                Some(RuntimeEvent::ContextBudgetSnapshotLoadFailed {
+                    request_id: task.request_id,
+                    error,
+                })
+            }
             Err(error) => {
                 if task.generation != self.current_generation.load(Ordering::Acquire) {
                     return None;
@@ -250,7 +270,7 @@ fn handle_context_budget_command(
     current_generation: Arc<AtomicU64>,
 ) -> ContextBudgetTaskResult {
     let ContextBudgetWorkerCommand {
-        request_id,
+        request_id: _,
         generation,
         provider_kind,
         model_id,
@@ -273,19 +293,9 @@ fn handle_context_budget_command(
     );
 
     match build_context_budget_snapshot_with_cancellation(probe, is_cancelled) {
-        Ok(Some(snapshot)) => {
-            ContextBudgetTaskResult::Event(Box::new(RuntimeEvent::ContextBudgetSnapshotLoaded {
-                request_id,
-                payload: snapshot.into(),
-            }))
-        }
+        Ok(Some(snapshot)) => ContextBudgetTaskResult::Loaded(snapshot.into()),
         Ok(None) => ContextBudgetTaskResult::Cancelled,
-        Err(error) => ContextBudgetTaskResult::Event(Box::new(
-            RuntimeEvent::ContextBudgetSnapshotLoadFailed {
-                request_id,
-                error: context_budget_load_error_payload(error),
-            },
-        )),
+        Err(error) => ContextBudgetTaskResult::Failed(context_budget_load_error_payload(error)),
     }
 }
 
@@ -309,5 +319,47 @@ fn context_budget_load_error_payload(
                 detail: failure.detail,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtime_domain::session::SessionLoadRequestId;
+
+    #[test]
+    fn stale_loaded_task_result_is_dropped_before_runtime_event_dispatch() {
+        let mut worker = ContextBudgetWorker::new().expect("worker should initialize");
+        let runtime = worker
+            .runtime
+            .as_ref()
+            .expect("fresh worker should own a runtime");
+
+        worker.current_generation.store(2, Ordering::Release);
+        let handle = runtime.handle().spawn(async {
+            ContextBudgetTaskResult::Loaded(runtime_domain::session::ContextBudgetSnapshotPayload {
+                model_id: "stale-model".to_string(),
+                segments: Vec::new(),
+                total_estimated_tokens: 12,
+                usage: runtime_domain::session::ContextWindowUsagePayload {
+                    limit: ContextTokenLimit::try_from(1_000)
+                        .expect("fixture limit should be valid"),
+                    used: 12,
+                    percent: 1.2,
+                    is_saturated: false,
+                },
+            })
+        });
+
+        let event = worker.join_task(ContextBudgetTask {
+            request_id: SessionLoadRequestId::new(7),
+            generation: 1,
+            handle,
+        });
+
+        assert!(
+            event.is_none(),
+            "stale loaded task results must not escape as runtime events"
+        );
     }
 }

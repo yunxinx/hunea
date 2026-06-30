@@ -4,6 +4,9 @@ use std::{
 };
 
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
+use runtime_domain::prompt_assembly::{
+    PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
+};
 use session_store::{
     InMemorySessionStore, SessionHeader, SessionId, SessionStore, SessionStoreError,
 };
@@ -76,6 +79,47 @@ fn prepare_turn_prepends_system_prompt_without_persisting_it_in_history() {
     assert_eq!(request.items()[0].role(), Some(Role::System));
     assert_eq!(request.items()[0].text_content(), "You are helpful");
     assert!(session.is_history_empty());
+}
+
+#[test]
+fn prepare_turn_uses_prompt_prelude_effective_system_prompt() {
+    let mut session = ProviderConversation::new();
+    session.set_prompt_prelude(Some(PromptPreludeSnapshot {
+        sections: vec![
+            PromptPreludeSection {
+                reference_id: "core-system".to_string(),
+                kind: PromptSourceKind::CoreSystemPrompt,
+                title: "Core system prompt".to_string(),
+                origin: Some(PromptSourceOrigin::Builtin),
+                body: "core guidance".to_string(),
+            },
+            PromptPreludeSection {
+                reference_id: "repo-rules".to_string(),
+                kind: PromptSourceKind::ExtraPrompt,
+                title: "repo-rules".to_string(),
+                origin: Some(PromptSourceOrigin::Project),
+                body: "project rules".to_string(),
+            },
+        ],
+    }));
+
+    let request = session
+        .prepare_turn(&ConversationTurnRequest::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "qwen3",
+            Some("http://127.0.0.1:1234/v1".to_string()),
+            None,
+            None,
+            ConversationItem::text(Role::User, "hello"),
+        ))
+        .expect("turn should prepare");
+
+    assert_eq!(request.items()[0].role(), Some(Role::System));
+    assert_eq!(
+        request.items()[0].text_content(),
+        "core guidance\n\nproject rules"
+    );
 }
 
 #[test]
@@ -320,6 +364,7 @@ fn persisted_conversation_restores_latest_system_prompt_snapshot() {
             provider_id: "local".to_string(),
             model: "qwen3".to_string(),
             system_prompt: Some("keep it sharp".to_string()),
+            prompt_prelude: None,
         },
     ))
     .expect("config snapshot should persist");
@@ -336,6 +381,59 @@ fn persisted_conversation_restores_latest_system_prompt_snapshot() {
     .expect("persisted conversation should load config");
 
     assert_eq!(session.system_prompt(), Some("keep it sharp"));
+}
+
+#[test]
+fn persisted_conversation_restores_prompt_prelude_snapshot() {
+    let work_dir = tempdir_path("restored-prelude");
+    let store = Arc::new(InMemorySessionStore::new());
+    let session_id = block_on_session(store.create_session(sample_header(&work_dir, "qwen3")))
+        .expect("session should be created");
+    let prompt_prelude = PromptPreludeSnapshot {
+        sections: vec![
+            PromptPreludeSection {
+                reference_id: "core-system".to_string(),
+                kind: PromptSourceKind::CoreSystemPrompt,
+                title: "Core system prompt".to_string(),
+                origin: Some(PromptSourceOrigin::Builtin),
+                body: "builtin core".to_string(),
+            },
+            PromptPreludeSection {
+                reference_id: "skill-discovery".to_string(),
+                kind: PromptSourceKind::SkillDiscovery,
+                title: "Skill discovery source".to_string(),
+                origin: Some(PromptSourceOrigin::Project),
+                body: "<available_skills></available_skills>".to_string(),
+            },
+        ],
+    };
+    block_on_session(store.append_config_change(
+        &session_id,
+        session_store::ConfigSnapshot {
+            provider_id: "local".to_string(),
+            model: "qwen3".to_string(),
+            system_prompt: Some("stale fallback".to_string()),
+            prompt_prelude: Some(prompt_prelude.clone()),
+        },
+    ))
+    .expect("config snapshot should persist");
+
+    let restored_state =
+        block_on_session(store.load_session(&session_id, None)).expect("session state should load");
+    let store_trait: Arc<dyn SessionStore> = store;
+    let session = ProviderConversation::with_resolved_session_store(
+        store_trait,
+        sample_header(&work_dir, "qwen3"),
+        Some(session_id),
+        &restored_state,
+    )
+    .expect("persisted conversation should load config");
+
+    assert_eq!(session.prompt_prelude(), Some(&prompt_prelude));
+    assert_eq!(
+        session.system_prompt(),
+        Some("builtin core\n\n<available_skills></available_skills>")
+    );
 }
 
 #[test]

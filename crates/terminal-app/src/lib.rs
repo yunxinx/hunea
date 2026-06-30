@@ -11,6 +11,7 @@ use session_store::{LocalSessionStore, SessionHeader, SessionId, SessionStore};
 use terminal_ui::{self, StartupBannerOptions};
 
 mod options_mapping;
+mod prompt_assembly;
 mod replay;
 mod runtime;
 
@@ -18,6 +19,7 @@ use options_mapping::{
     model_options_from_app_config_and_models, model_options_from_config_and_models,
     runtime_options_from_app_config_and_models,
 };
+use prompt_assembly::load_initial_prompt_prelude;
 use replay::write_terminal_replay_on_exit;
 pub use replay::{
     write_terminal_replay, write_terminal_replay_preserving_ansi,
@@ -142,6 +144,19 @@ fn attach_default_session_persistence(
         git_head,
         cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     });
+    options.initial_prompt_prelude = Some(load_initial_prompt_prelude(
+        options
+            .session_store
+            .as_ref()
+            .cloned()
+            .expect("session store was just initialized"),
+        options
+            .session_header_template
+            .as_ref()
+            .expect("session header was just initialized")
+            .work_dir
+            .as_path(),
+    )?);
     Ok(())
 }
 

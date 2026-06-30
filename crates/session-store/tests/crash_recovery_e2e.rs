@@ -155,6 +155,7 @@ async fn local_store_rebuilds_sqlite_index_from_jsonl_after_index_deletion() {
                     provider_id: "local".to_string(),
                     model: "gpt-4.1-mini".to_string(),
                     system_prompt: Some("brief".to_string()),
+                    prompt_prelude: None,
                 },
             )
             .await

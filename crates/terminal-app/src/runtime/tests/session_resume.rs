@@ -1,4 +1,7 @@
 use super::support::*;
+use runtime_domain::prompt_assembly::{
+    PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
+};
 
 #[test]
 fn resume_session_emits_transcript_and_restored_model() {
@@ -56,6 +59,7 @@ fn resume_session_emits_transcript_and_restored_model() {
                         provider_id: "local".to_string(),
                         model: "qwen3".to_string(),
                         system_prompt: Some("historical prompt".to_string()),
+                        prompt_prelude: None,
                     },
                 )
                 .await?;
@@ -235,6 +239,109 @@ fn resume_session_payload_does_not_reconstruct_transcript_from_provider_history(
 
     let payload = wait_for_session_resumed(&mut coordinator);
     assert!(payload.transcript.is_empty());
+    cleanup(&work_dir);
+}
+
+#[test]
+fn reset_after_resume_restores_fresh_prompt_prelude_for_next_new_session() {
+    let work_dir = temp_test_dir("reset-after-resume-prelude-work");
+    let store = Arc::new(InMemorySessionStore::new());
+    let store_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("session store runtime should start");
+    let header = SessionHeader {
+        session_id: SessionId::new(),
+        work_dir: work_dir.clone(),
+        session_name: None,
+        initial_model: "qwen3".to_string(),
+        git_head: None,
+        cli_version: None,
+    };
+    let session_id = store_runtime
+        .block_on(async {
+            let session_id = store.create_session(header.clone()).await?;
+            store
+                .append_config_change(
+                    &session_id,
+                    ConfigSnapshot {
+                        provider_id: "local".to_string(),
+                        model: "qwen3".to_string(),
+                        system_prompt: Some("historical prompt".to_string()),
+                        prompt_prelude: Some(PromptPreludeSnapshot {
+                            sections: vec![PromptPreludeSection {
+                                reference_id: "core-system".to_string(),
+                                kind: PromptSourceKind::CoreSystemPrompt,
+                                title: "Core system prompt".to_string(),
+                                origin: Some(PromptSourceOrigin::Project),
+                                body: "historical prompt".to_string(),
+                            }],
+                        }),
+                    },
+                )
+                .await?;
+            Ok::<SessionId, session_store::SessionStoreError>(session_id)
+        })
+        .expect("session fixture should persist");
+    let fresh_prelude = PromptPreludeSnapshot {
+        sections: vec![
+            PromptPreludeSection {
+                reference_id: "core-system".to_string(),
+                kind: PromptSourceKind::CoreSystemPrompt,
+                title: "Core system prompt".to_string(),
+                origin: Some(PromptSourceOrigin::Builtin),
+                body: "fresh core".to_string(),
+            },
+            PromptPreludeSection {
+                reference_id: "repo-rules".to_string(),
+                kind: PromptSourceKind::ExtraPrompt,
+                title: "repo-rules".to_string(),
+                origin: Some(PromptSourceOrigin::Project),
+                body: "fresh project rules".to_string(),
+            },
+        ],
+    };
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(header),
+        initial_prompt_prelude: Some(fresh_prelude),
+        ..AppRuntimeOptions::default()
+    });
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::ResumeSession {
+            session_id: session_id.to_string(),
+        })
+        .expect("resume session should succeed");
+    wait_for_session_resumed(&mut coordinator);
+
+    assert_eq!(
+        coordinator.provider_conversation.system_prompt(),
+        Some("historical prompt")
+    );
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::Reset)
+        .expect("reset should succeed");
+
+    let request = coordinator
+        .provider_conversation
+        .prepare_turn(&ConversationTurnRequest::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "qwen3",
+            Some("http://127.0.0.1:1234/v1".to_string()),
+            None,
+            None,
+            ConversationItem::text(Role::User, "new session"),
+        ))
+        .expect("fresh new session turn should prepare");
+
+    assert_eq!(request.items()[0].role(), Some(Role::System));
+    assert_eq!(
+        request.items()[0].text_content(),
+        "fresh core\n\nfresh project rules"
+    );
     cleanup(&work_dir);
 }
 

@@ -5,7 +5,9 @@ use std::{
 };
 
 use provider_protocol::{ConversationItem, ConversationItemValidationError};
-use runtime_domain::{paths::hunea_config_dir, session::TranscriptReplayItem};
+use runtime_domain::{
+    paths::hunea_config_dir, prompt_assembly::PromptPreludeSnapshot, session::TranscriptReplayItem,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::{Uuid, Version};
@@ -183,6 +185,8 @@ pub struct ConfigSnapshot {
     pub provider_id: String,
     pub model: String,
     pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_prelude: Option<PromptPreludeSnapshot>,
 }
 
 /// session 列表与恢复所需的元数据快照。
@@ -528,6 +532,7 @@ mod tests {
                 provider_id: "local".to_string(),
                 model: "gpt-4.1-mini".to_string(),
                 system_prompt: Some("be terse".to_string()),
+                prompt_prelude: None,
             }),
             SessionEntryKind::TranscriptReplay(TranscriptReplayItem::ToolActivity {
                 activity: sample_tool_activity("call-1", "first"),

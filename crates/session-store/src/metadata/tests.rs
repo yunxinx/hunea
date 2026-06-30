@@ -207,6 +207,7 @@ async fn backfill_from_jsonl_derives_session_metadata() {
                     provider_id: "local".to_string(),
                     model: "gpt-4.1-mini".to_string(),
                     system_prompt: None,
+                    prompt_prelude: None,
                 }),
             },
             SessionEntry {

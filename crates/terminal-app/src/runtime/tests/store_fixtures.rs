@@ -9,7 +9,10 @@ use std::{
 };
 
 use provider_protocol::ConversationItem;
-use runtime_domain::session::{MessageHistoryEntry, MessageHistoryRow, TranscriptReplayItem};
+use runtime_domain::{
+    prompt_assembly::persistence::PromptAssemblyScopeState,
+    session::{MessageHistoryEntry, MessageHistoryRow, TranscriptReplayItem},
+};
 use session_store::{
     ConfigSnapshot, InMemorySessionStore, ProjectDir, ResolvedSessionState, SessionHeader,
     SessionId, SessionListOptions, SessionMeta, SessionStore, SessionStoreError,
@@ -241,6 +244,21 @@ impl SessionStore for FailingSessionStore {
     {
         self.inner.load_message_history_all()
     }
+
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.save_global_prompt_assembly_state(state)
+    }
+
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    > {
+        self.inner.load_global_prompt_assembly_state()
+    }
 }
 
 impl SessionStore for DelayedListSessionStore {
@@ -418,6 +436,21 @@ impl SessionStore for DelayedListSessionStore {
     {
         self.inner.load_message_history_all()
     }
+
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.save_global_prompt_assembly_state(state)
+    }
+
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    > {
+        self.inner.load_global_prompt_assembly_state()
+    }
 }
 
 impl LoadCountingSessionStore {
@@ -591,6 +624,21 @@ impl SessionStore for LoadCountingSessionStore {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<MessageHistoryRow>, SessionStoreError>> + Send + 'a>>
     {
         self.inner.load_message_history_all()
+    }
+
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.save_global_prompt_assembly_state(state)
+    }
+
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    > {
+        self.inner.load_global_prompt_assembly_state()
     }
 }
 
@@ -776,5 +824,20 @@ impl SessionStore for CommittedLoadFailsAfterSetLeafStore {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<MessageHistoryRow>, SessionStoreError>> + Send + 'a>>
     {
         self.inner.load_message_history_all()
+    }
+
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        self.inner.save_global_prompt_assembly_state(state)
+    }
+
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    > {
+        self.inner.load_global_prompt_assembly_state()
     }
 }

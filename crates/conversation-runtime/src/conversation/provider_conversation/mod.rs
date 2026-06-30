@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use provider_protocol::{ConversationItem, Role};
-use runtime_domain::session::{ConversationTurnRequest, RuntimeTarget};
+use runtime_domain::{
+    prompt_assembly::PromptPreludeSnapshot,
+    session::{ConversationTurnRequest, RuntimeTarget},
+};
 use session_store::{
     ConfigSnapshot, ResolvedSessionState, SessionHeader, SessionId, SessionStore, SessionStoreError,
 };
@@ -128,6 +131,7 @@ impl PreparedConversationRequest {
 #[derive(Default)]
 pub struct ProviderConversation {
     system_prompt: Option<String>,
+    prompt_prelude: Option<PromptPreludeSnapshot>,
     persisted_history: Vec<PersistedConversationItem>,
     pending_user_message: Option<ConversationItem>,
     persistence: Option<ProviderConversationPersistence>,
@@ -186,11 +190,11 @@ impl ProviderConversation {
             .collect::<Vec<_>>();
 
         Self {
-            system_prompt: restored_state
+            system_prompt: restored_effective_system_prompt(restored_state),
+            prompt_prelude: restored_state
                 .latest_config
-                .clone()
-                .and_then(|config| config.system_prompt)
-                .and_then(normalize_system_prompt),
+                .as_ref()
+                .and_then(|config| config.prompt_prelude.clone()),
             persisted_history,
             pending_user_message: None,
             persistence: Some(ProviderConversationPersistence {
@@ -203,6 +207,8 @@ impl ProviderConversation {
 
     /// `clear` 清空当前会话。
     pub fn clear(&mut self) {
+        self.system_prompt = None;
+        self.prompt_prelude = None;
         self.persisted_history.clear();
         self.pending_user_message = None;
         if let Some(persistence) = self.persistence.as_mut() {
@@ -213,12 +219,28 @@ impl ProviderConversation {
     /// `set_system_prompt` 设置会话级 system prompt。
     pub fn set_system_prompt(&mut self, prompt: Option<String>) {
         self.system_prompt = prompt.and_then(normalize_system_prompt);
+        self.prompt_prelude = None;
     }
 
     /// `system_prompt` 返回当前生效的 system prompt。
     #[must_use]
     pub fn system_prompt(&self) -> Option<&str> {
         self.system_prompt.as_deref()
+    }
+
+    /// `set_prompt_prelude` 设置当前 session 的已解析 prompt prelude。
+    pub fn set_prompt_prelude(&mut self, prompt_prelude: Option<PromptPreludeSnapshot>) {
+        self.system_prompt = prompt_prelude
+            .as_ref()
+            .and_then(PromptPreludeSnapshot::effective_system_prompt)
+            .and_then(normalize_system_prompt);
+        self.prompt_prelude = prompt_prelude;
+    }
+
+    /// `prompt_prelude` 返回当前 session 绑定的 prompt prelude 快照。
+    #[must_use]
+    pub fn prompt_prelude(&self) -> Option<&PromptPreludeSnapshot> {
+        self.prompt_prelude.as_ref()
     }
 
     /// `context_budget_probe_items` 返回 `/context` 估算使用的只读会话快照。
@@ -278,6 +300,7 @@ impl ProviderConversation {
         let user_message = turn.message().clone();
         self.pending_user_message = Some(user_message.clone());
         let system_prompt = self.system_prompt.clone();
+        let prompt_prelude = self.prompt_prelude.clone();
         let persistence =
             self.persistence
                 .as_ref()
@@ -289,6 +312,7 @@ impl ProviderConversation {
                         provider_id: turn.provider_id().to_string(),
                         model: turn.model_id().to_string(),
                         system_prompt,
+                        prompt_prelude,
                     },
                     current_user_message: user_message.clone(),
                 });
@@ -304,6 +328,16 @@ impl ProviderConversation {
 fn normalize_system_prompt(prompt: String) -> Option<String> {
     let prompt = prompt.trim().to_string();
     (!prompt.is_empty()).then_some(prompt)
+}
+
+fn restored_effective_system_prompt(restored_state: &ResolvedSessionState) -> Option<String> {
+    let config = restored_state.latest_config.as_ref()?;
+    config
+        .prompt_prelude
+        .as_ref()
+        .and_then(PromptPreludeSnapshot::effective_system_prompt)
+        .or_else(|| config.system_prompt.clone())
+        .and_then(normalize_system_prompt)
 }
 
 #[cfg(test)]

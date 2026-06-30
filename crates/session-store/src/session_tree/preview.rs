@@ -344,6 +344,7 @@ mod tests {
                 provider_id: "local".to_string(),
                 model: "qwen3".to_string(),
                 system_prompt: None,
+                prompt_prelude: None,
             }),
         };
 

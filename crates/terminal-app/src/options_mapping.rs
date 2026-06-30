@@ -85,6 +85,7 @@ pub(crate) fn runtime_options_from_app_config_and_models(
         managed_search_authorization_config_path: appconfig::user_config_file_path(),
         session_store: None,
         session_header_template: None,
+        initial_prompt_prelude: None,
     }
 }
 

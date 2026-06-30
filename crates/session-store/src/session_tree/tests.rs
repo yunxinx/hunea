@@ -420,6 +420,7 @@ fn session_tree_snapshot_projects_only_logical_rows_without_replay_duplicates() 
                 provider_id: "local".to_string(),
                 model: "qwen3".to_string(),
                 system_prompt: None,
+                prompt_prelude: None,
             }),
         },
         SessionEntry {
@@ -1578,6 +1579,7 @@ fn nested_config_rewind_chain_entries() -> Vec<SessionEntry> {
         provider_id: "opencode".to_string(),
         model: "gpt-4.1".to_string(),
         system_prompt: None,
+        prompt_prelude: None,
     };
 
     // 复刻真实 session：rewind 时新建的 ConfigChange 总是挂到上一次 ConfigChange，
@@ -1830,6 +1832,7 @@ fn entries_with_non_history_metadata() -> Vec<SessionEntry> {
             provider_id: "local".to_string(),
             model: "gpt-4.1-mini".to_string(),
             system_prompt: Some("be terse".to_string()),
+            prompt_prelude: None,
         }),
     });
     entries.push(SessionEntry {
@@ -1926,6 +1929,7 @@ fn entries_with_non_item_compaction_target() -> Vec<SessionEntry> {
                 provider_id: "local".to_string(),
                 model: "gpt-4.1-mini".to_string(),
                 system_prompt: Some("be terse".to_string()),
+                prompt_prelude: None,
             }),
         },
         SessionEntry {

@@ -93,6 +93,36 @@ pub struct PromptAssemblySnapshot {
     pub inactive_sources: Vec<ResolvedPromptSource>,
 }
 
+/// `PromptPreludeSection` 表示落入单个 session 的稳定 prompt prelude section。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptPreludeSection {
+    pub reference_id: String,
+    pub kind: PromptSourceKind,
+    pub title: String,
+    pub origin: Option<PromptSourceOrigin>,
+    pub body: String,
+}
+
+/// `PromptPreludeSnapshot` 表示某个 session 启动时已经解析完成的 prompt prelude。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PromptPreludeSnapshot {
+    pub sections: Vec<PromptPreludeSection>,
+}
+
+impl PromptPreludeSnapshot {
+    /// `effective_system_prompt` 返回 provider 实际看到的拼装结果。
+    #[must_use]
+    pub fn effective_system_prompt(&self) -> Option<String> {
+        let sections = self
+            .sections
+            .iter()
+            .map(|section| section.body.trim())
+            .filter(|body| !body.is_empty())
+            .collect::<Vec<_>>();
+        (!sections.is_empty()).then(|| sections.join("\n\n"))
+    }
+}
+
 /// `resolve_prompt_assembly` 解析 next-new-session prompt assembly。
 #[must_use]
 pub fn resolve_prompt_assembly(input: &PromptAssemblyInput) -> PromptAssemblySnapshot {

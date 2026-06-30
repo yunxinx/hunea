@@ -14,6 +14,7 @@ use conversation_runtime::{
 };
 use runtime_domain::{
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
+    prompt_assembly::PromptPreludeSnapshot,
     request_policy::RuntimeRequestPolicy,
     session::{
         ConversationEvent, RuntimeCommand, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
@@ -48,6 +49,7 @@ pub(crate) struct AppRuntimeOptions {
     pub(crate) managed_search_authorization_config_path: Option<PathBuf>,
     pub(crate) session_store: Option<Arc<dyn SessionStore>>,
     pub(crate) session_header_template: Option<SessionHeader>,
+    pub(crate) initial_prompt_prelude: Option<PromptPreludeSnapshot>,
 }
 
 /// `AppRuntimeCoordinator` 负责把 TUI runtime command 连接到对话运行时。
@@ -65,16 +67,7 @@ pub(crate) struct AppRuntimeCoordinator {
 impl AppRuntimeCoordinator {
     pub(crate) fn new(options: AppRuntimeOptions) -> Result<Self, String> {
         let workspace_tools = conversation_workspace_tools(&options.managed_search_tools);
-        let provider_conversation = match (
-            options.session_store.clone(),
-            options.session_header_template.clone(),
-        ) {
-            (Some(store), Some(header_template)) => {
-                ProviderConversation::with_session_store(store, header_template)
-                    .map_err(|error| error.to_string())?
-            }
-            _ => ProviderConversation::default(),
-        };
+        let provider_conversation = fresh_provider_conversation(&options)?;
         Ok(Self {
             options,
             conversation_worker: ConversationWorker::default(),
@@ -147,7 +140,7 @@ impl AppRuntimeCoordinator {
             } => self.record_message_history(entry_id, text, limit),
             RuntimeCommand::Reset => {
                 self.conversation_worker.reset_after_clear();
-                self.provider_conversation.clear();
+                self.provider_conversation = fresh_provider_conversation(&self.options)?;
                 self.model_refresh.reset_after_clear();
                 self.context_budget_worker.cancel_pending();
                 self.workspace_tools =
@@ -461,6 +454,23 @@ impl AppRuntimeCoordinator {
             target,
         )
     }
+}
+
+fn fresh_provider_conversation(
+    options: &AppRuntimeOptions,
+) -> Result<ProviderConversation, String> {
+    let mut provider_conversation = match (
+        options.session_store.clone(),
+        options.session_header_template.clone(),
+    ) {
+        (Some(store), Some(header_template)) => {
+            ProviderConversation::with_session_store(store, header_template)
+                .map_err(|error| error.to_string())?
+        }
+        _ => ProviderConversation::default(),
+    };
+    provider_conversation.set_prompt_prelude(options.initial_prompt_prelude.clone());
+    Ok(provider_conversation)
 }
 
 fn ensure_conversation_target(

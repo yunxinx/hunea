@@ -87,6 +87,32 @@ fn runtime_start_events_use_toasts_not_status_notice() {
 }
 
 #[test]
+fn prompt_missing_source_check_uses_single_aggregated_toast() {
+    let mut model = Model::new(StartupBannerOptions::default());
+
+    model.apply_runtime_event(RuntimeEvent::PromptAssemblyMissingSourcesChecked {
+        missing_count: 2,
+    });
+
+    assert_eq!(model.current_status_notice_text(), "");
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("2 prompt sources are missing; open /prompt to repair them")
+    );
+}
+
+#[test]
+fn prompt_missing_source_check_skips_toast_when_nothing_is_missing() {
+    let mut model = Model::new(StartupBannerOptions::default());
+
+    model.apply_runtime_event(RuntimeEvent::PromptAssemblyMissingSourcesChecked {
+        missing_count: 0,
+    });
+
+    assert_eq!(model.active_toast_text_for_test(), None);
+}
+
+#[test]
 fn session_resumed_trusts_historical_model_selection_without_catalog_check() {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),

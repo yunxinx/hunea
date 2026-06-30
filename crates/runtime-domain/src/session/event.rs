@@ -130,6 +130,9 @@ pub enum RuntimeEvent {
     MessageHistoryStartupCacheLoadFailed {
         message: String,
     },
+    PromptAssemblyMissingSourcesChecked {
+        missing_count: usize,
+    },
     MessageHistoryPickerRowsLoaded {
         request_id: SessionLoadRequestId,
         rows: Vec<MessageHistoryRow>,
@@ -204,6 +207,7 @@ impl RuntimeEvent {
             | Self::SessionBranchSwitchFailed { .. }
             | Self::MessageHistoryStartupCacheLoaded { .. }
             | Self::MessageHistoryStartupCacheLoadFailed { .. }
+            | Self::PromptAssemblyMissingSourcesChecked { .. }
             | Self::MessageHistoryPickerRowsLoaded { .. }
             | Self::MessageHistoryPickerRowsLoadFailed { .. }
             | Self::MessageHistoryRecorded { .. }

@@ -131,6 +131,9 @@ impl AppRuntimeCoordinator {
             RuntimeCommand::LoadMessageHistoryStartupCache => {
                 self.load_message_history_startup_cache()
             }
+            RuntimeCommand::CheckPromptAssemblyMissingSources => {
+                self.check_prompt_assembly_missing_sources()
+            }
             RuntimeCommand::LoadMessageHistoryPickerRows { request_id } => {
                 self.load_message_history_picker_rows(request_id)
             }

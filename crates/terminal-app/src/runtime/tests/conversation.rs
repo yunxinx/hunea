@@ -129,3 +129,64 @@ fn conversation_failure_before_provider_request_rolls_back_pending_user() {
         .prepare_turn(&next_request)
         .expect("failed preflight turn should not leave stale pending state");
 }
+
+#[test]
+fn startup_prompt_missing_source_check_emits_aggregated_runtime_event() {
+    let root = temp_test_dir("prompt-missing-check");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build");
+    runtime
+        .block_on(store.save_global_prompt_assembly_state(
+            &runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+                core_system_override: None,
+                entries: vec![
+                    runtime_domain::prompt_assembly::persistence::PersistedPromptAssemblyEntry {
+                        reference_id: "missing-skill".to_string(),
+                        kind: runtime_domain::prompt_assembly::PromptSourceKind::LongLivedSkill,
+                        title: "missing-skill".to_string(),
+                        enabled: true,
+                        requested_order: Some(10),
+                    },
+                ],
+                extra_prompts: Vec::new(),
+            },
+        ))
+        .expect("global prompt state should save");
+
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::CheckPromptAssemblyMissingSources)
+        .expect("startup prompt check should be accepted");
+
+    let missing_count = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyMissingSourcesChecked { missing_count } => {
+                Some(missing_count)
+            }
+            _ => None,
+        },
+        "prompt missing check result",
+    );
+
+    assert_eq!(missing_count, 1);
+    cleanup(&root);
+}

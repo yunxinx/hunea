@@ -91,6 +91,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                 command,
                 RuntimeCommand::RecordMessageHistory { .. }
                     | RuntimeCommand::LoadMessageHistoryStartupCache
+                    | RuntimeCommand::CheckPromptAssemblyMissingSources
             ) {
                 self.next_runtime_error = Some(message);
             } else {
@@ -146,6 +147,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             | RuntimeCommand::SwitchBranch { .. }
             | RuntimeCommand::SelectEntryRewind { .. }
             | RuntimeCommand::LoadMessageHistoryStartupCache
+            | RuntimeCommand::CheckPromptAssemblyMissingSources
             | RuntimeCommand::LoadMessageHistoryPickerRows { .. }
             | RuntimeCommand::RecordMessageHistory { .. }
             | RuntimeCommand::MutatePromptAssembly { .. } => Ok(RuntimeCommandReceipt::Accepted),

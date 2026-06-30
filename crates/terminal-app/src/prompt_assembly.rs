@@ -15,8 +15,8 @@ use runtime_domain::prompt_assembly::{
     CoreSystemPromptInput, PromptAssemblyDiscoveredSkill, PromptAssemblyEditorTarget,
     PromptAssemblyInput, PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource,
     PromptAssemblyMoveDirection, PromptAssemblyMutation, PromptPreludeSection,
-    PromptPreludeSnapshot, PromptSourceCandidate, PromptSourceKind, PromptSourceOrigin,
-    PromptSourceStatus, resolve_prompt_assembly,
+    PromptPreludeSnapshot, PromptSourceCandidate, PromptSourceInactiveReason, PromptSourceKind,
+    PromptSourceOrigin, PromptSourceStatus, resolve_prompt_assembly,
 };
 use session_store::SessionStore;
 
@@ -43,6 +43,31 @@ struct PromptCandidateBody {
 struct PromptEntryAddress {
     scope: PromptAssemblyScope,
     index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PromptAssemblyMissingSourcesCheck {
+    pub(crate) missing_count: usize,
+}
+
+impl PromptAssemblyMissingSourcesCheck {
+    fn from_manager(manager: &PromptAssemblyManagerSnapshot) -> Self {
+        Self {
+            missing_count: manager
+                .snapshot
+                .inactive_sources
+                .iter()
+                .filter(|source| {
+                    matches!(
+                        source.status,
+                        PromptSourceStatus::Inactive {
+                            reason: PromptSourceInactiveReason::Missing
+                        }
+                    )
+                })
+                .count(),
+        }
+    }
 }
 
 pub(crate) fn load_initial_prompt_assembly(
@@ -100,6 +125,15 @@ pub(crate) fn apply_prompt_assembly_mutation(
         &global_state,
         &project_state,
     ))
+}
+
+pub(crate) fn check_prompt_assembly_missing_sources_from_states(
+    work_dir: &Path,
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+) -> PromptAssemblyMissingSourcesCheck {
+    let manager = resolve_prompt_assembly_manager_snapshot(work_dir, global_state, project_state);
+    PromptAssemblyMissingSourcesCheck::from_manager(&manager)
 }
 
 #[cfg(test)]
@@ -1447,5 +1481,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["core-system", "repo-rules", "shared-rules"]
         );
+    }
+
+    #[test]
+    fn missing_source_check_counts_missing_entries_without_blocking_snapshot_resolution() {
+        let manager = resolve_prompt_assembly_manager_snapshot(
+            &temp_dir("missing-check"),
+            &PromptAssemblyScopeState {
+                scope: PromptAssemblyScope::Global,
+                core_system_override: None,
+                entries: vec![
+                    PersistedPromptAssemblyEntry {
+                        reference_id: "missing-skill".to_string(),
+                        kind: PromptSourceKind::LongLivedSkill,
+                        title: "missing-skill".to_string(),
+                        enabled: true,
+                        requested_order: Some(10),
+                    },
+                    PersistedPromptAssemblyEntry {
+                        reference_id: "disabled-extra".to_string(),
+                        kind: PromptSourceKind::ExtraPrompt,
+                        title: "disabled-extra".to_string(),
+                        enabled: false,
+                        requested_order: Some(20),
+                    },
+                ],
+                extra_prompts: Vec::new(),
+            },
+            &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        );
+
+        let check = PromptAssemblyMissingSourcesCheck::from_manager(&manager);
+
+        assert_eq!(check.missing_count, 1);
+        assert!(manager.snapshot.inactive_sources.iter().any(|source| {
+            source.reference_id == "missing-skill"
+                && matches!(
+                    source.status,
+                    PromptSourceStatus::Inactive {
+                        reason:
+                            runtime_domain::prompt_assembly::PromptSourceInactiveReason::Missing
+                    }
+                )
+        }));
     }
 }

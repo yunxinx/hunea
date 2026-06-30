@@ -201,6 +201,18 @@ impl RuntimeEventApply for Model {
             RuntimeEvent::MessageHistoryStartupCacheLoadFailed { message } => {
                 self.show_toast(ToastSeverity::Error, message);
             }
+            RuntimeEvent::PromptAssemblyMissingSourcesChecked { missing_count } => {
+                if missing_count > 0 {
+                    let label = if missing_count == 1 {
+                        "1 prompt source is missing; open /prompt to repair it".to_string()
+                    } else {
+                        format!(
+                            "{missing_count} prompt sources are missing; open /prompt to repair them"
+                        )
+                    };
+                    self.show_toast(ToastSeverity::Error, label);
+                }
+            }
             RuntimeEvent::MessageHistoryPickerRowsLoaded { request_id, rows } => {
                 if self.message_history_picker_load_request_matches(request_id) {
                     self.apply_message_history_picker_rows(request_id, rows);

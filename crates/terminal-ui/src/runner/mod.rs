@@ -158,6 +158,11 @@ pub fn run_with_runtime_coordinator(
     {
         model.show_toast(crate::toast::ToastSeverity::Error, message);
     }
+    if let Err(message) = runtime_coordinator
+        .dispatch_runtime_command(RuntimeCommand::CheckPromptAssemblyMissingSources)
+    {
+        model.show_toast(crate::toast::ToastSeverity::Error, message);
+    }
 
     let startup_deadline = Instant::now() + STARTUP_PROBE_TIMEOUT;
     let mut render_needed = true;

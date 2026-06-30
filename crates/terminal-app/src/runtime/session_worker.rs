@@ -109,6 +109,10 @@ enum SessionStoreCommand {
     LoadMessageHistoryStartupCache {
         store: Arc<dyn SessionStore>,
     },
+    CheckPromptAssemblyMissingSources {
+        store: Arc<dyn SessionStore>,
+        work_dir: std::path::PathBuf,
+    },
     LoadMessageHistoryPickerRows {
         store: Arc<dyn SessionStore>,
         request_id: SessionLoadRequestId,
@@ -337,6 +341,17 @@ impl SessionStoreWorker {
     ) -> Result<(), String> {
         self.send_command(
             SessionStoreCommand::LoadMessageHistoryStartupCache { store },
+            false,
+        )
+    }
+
+    pub(super) fn check_prompt_assembly_missing_sources(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        work_dir: std::path::PathBuf,
+    ) -> Result<(), String> {
+        self.send_command(
+            SessionStoreCommand::CheckPromptAssemblyMissingSources { store, work_dir },
             false,
         )
     }
@@ -682,6 +697,37 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                     },
                 ),
             }
+        }
+        SessionStoreCommand::CheckPromptAssemblyMissingSources { store, work_dir } => {
+            let global_state = match store.load_global_prompt_assembly_state().await {
+                Ok(state) => state,
+                Err(_) => {
+                    return SessionStoreWorkerEvent::runtime(
+                        RuntimeEvent::PromptAssemblyMissingSourcesChecked { missing_count: 0 },
+                    );
+                }
+            };
+            let project_state =
+                match runtime_domain::prompt_assembly::persistence::load_project_prompt_assembly_state(
+                    &work_dir,
+                ) {
+                    Ok(state) => state,
+                    Err(_) => {
+                        return SessionStoreWorkerEvent::runtime(
+                            RuntimeEvent::PromptAssemblyMissingSourcesChecked {
+                                missing_count: 0,
+                            },
+                        );
+                    }
+                };
+            let check = crate::prompt_assembly::check_prompt_assembly_missing_sources_from_states(
+                &work_dir,
+                &global_state,
+                &project_state,
+            );
+            SessionStoreWorkerEvent::runtime(RuntimeEvent::PromptAssemblyMissingSourcesChecked {
+                missing_count: check.missing_count,
+            })
         }
         SessionStoreCommand::LoadMessageHistoryPickerRows { store, request_id } => {
             match store.load_message_history_all().await {

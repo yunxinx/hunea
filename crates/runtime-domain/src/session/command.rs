@@ -52,6 +52,7 @@ pub enum RuntimeCommand {
         entry_id: String,
     },
     LoadMessageHistoryStartupCache,
+    CheckPromptAssemblyMissingSources,
     LoadMessageHistoryPickerRows {
         request_id: SessionLoadRequestId,
     },
@@ -126,6 +127,7 @@ impl RuntimeCommand {
             | Self::SwitchBranch { .. }
             | Self::SelectEntryRewind { .. }
             | Self::LoadMessageHistoryStartupCache
+            | Self::CheckPromptAssemblyMissingSources
             | Self::LoadMessageHistoryPickerRows { .. }
             | Self::RecordMessageHistory { .. }
             | Self::MutatePromptAssembly { .. }

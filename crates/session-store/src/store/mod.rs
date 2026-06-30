@@ -6,6 +6,7 @@ use std::{
 };
 
 use provider_protocol::ConversationItem;
+use runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState;
 use runtime_domain::session::{
     MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN, MessageHistoryEntry, MessageHistoryRow,
     TranscriptReplayItem,
@@ -155,6 +156,19 @@ pub trait SessionStore: Send + Sync {
     fn load_message_history_all<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<MessageHistoryRow>, SessionStoreError>> + Send + 'a>>;
+
+    #[must_use]
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
+
+    #[must_use]
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    >;
 
     /// 启动盲回溯缓存（固定 25 条，oldest-first）。
     fn load_message_history_startup_cache<'a>(

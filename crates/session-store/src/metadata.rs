@@ -125,6 +125,31 @@ impl MetadataIndex {
             .await
     }
 
+    pub(crate) async fn save_global_prompt_assembly_state(
+        &self,
+        state: &runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState,
+    ) -> Result<(), SessionStoreError> {
+        let index_path = (*self.index_path).clone();
+        let state = state.clone();
+        spawn_index_task(move || {
+            crate::prompt_assembly::save_global_prompt_assembly_state(&index_path, &state)
+        })
+        .await
+    }
+
+    pub(crate) async fn load_global_prompt_assembly_state(
+        &self,
+    ) -> Result<
+        runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState,
+        SessionStoreError,
+    > {
+        let index_path = (*self.index_path).clone();
+        spawn_index_task(move || {
+            crate::prompt_assembly::load_global_prompt_assembly_state(&index_path)
+        })
+        .await
+    }
+
     async fn run_blocking<T>(
         &self,
         operation: impl FnOnce(PathBuf, PathBuf) -> Result<T, SessionStoreError> + Send + 'static,
@@ -241,6 +266,29 @@ fn initialize_database_schema(conn: &Connection) -> Result<(), SessionStoreError
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts INTEGER NOT NULL,
             text TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_entries (
+            scope TEXT NOT NULL,
+            reference_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            requested_order INTEGER,
+            PRIMARY KEY (scope, reference_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_extra_prompts (
+            scope TEXT NOT NULL,
+            reference_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            PRIMARY KEY (scope, reference_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_core_overrides (
+            scope TEXT PRIMARY KEY,
+            body TEXT NOT NULL
         );
         ",
     )

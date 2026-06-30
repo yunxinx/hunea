@@ -5,6 +5,7 @@ pub mod model_context_limit;
 mod model_family;
 pub mod paths;
 pub mod phrases;
+pub mod prompt_assembly;
 pub mod provider;
 pub mod request_policy;
 pub mod session;

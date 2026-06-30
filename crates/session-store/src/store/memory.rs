@@ -1,6 +1,7 @@
 use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin};
 
 use provider_protocol::ConversationItem;
+use runtime_domain::prompt_assembly::persistence::{PromptAssemblyScope, PromptAssemblyScopeState};
 use runtime_domain::session::{
     MessageHistoryEntry, MessageHistoryRow, TranscriptReplayItem, append_message_history_entry,
     should_record_message_history_text,
@@ -27,6 +28,7 @@ use super::{
 pub struct InMemorySessionStore {
     sessions: RwLock<HashMap<SessionId, InMemorySession>>,
     message_history: RwLock<InMemoryMessageHistoryState>,
+    global_prompt_assembly: RwLock<PromptAssemblyScopeState>,
 }
 
 struct InMemorySession {
@@ -54,6 +56,9 @@ impl InMemorySessionStore {
         Self {
             sessions: RwLock::new(HashMap::new()),
             message_history: RwLock::new(InMemoryMessageHistoryState::default()),
+            global_prompt_assembly: RwLock::new(PromptAssemblyScopeState::empty(
+                PromptAssemblyScope::Global,
+            )),
         }
     }
 
@@ -464,6 +469,33 @@ impl SessionStore for InMemorySessionStore {
                 })
                 .collect())
         })
+    }
+
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move {
+            if state.scope != PromptAssemblyScope::Global {
+                return Err(SessionStoreError::ConfigurationError {
+                    message: format!(
+                        "global prompt assembly persistence only accepts global scope, got {}",
+                        state.scope.as_stored_value()
+                    ),
+                });
+            }
+
+            *self.global_prompt_assembly.write().await = state.clone();
+            Ok(())
+        })
+    }
+
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    > {
+        Box::pin(async move { Ok(self.global_prompt_assembly.read().await.clone()) })
     }
 }
 

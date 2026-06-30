@@ -1,6 +1,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use provider_protocol::ConversationItem;
+use runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState;
 use runtime_domain::session::TranscriptReplayItem;
 
 use crate::{
@@ -347,5 +348,20 @@ impl SessionStore for LocalSessionStore {
         >,
     > {
         Box::pin(async move { self.index.load_message_history_all().await })
+    }
+
+    fn save_global_prompt_assembly_state<'a>(
+        &'a self,
+        state: &'a PromptAssemblyScopeState,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        Box::pin(async move { self.index.save_global_prompt_assembly_state(state).await })
+    }
+
+    fn load_global_prompt_assembly_state<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
+    > {
+        Box::pin(async move { self.index.load_global_prompt_assembly_state().await })
     }
 }

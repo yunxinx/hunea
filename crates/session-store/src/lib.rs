@@ -14,6 +14,7 @@ pub(crate) mod jsonl;
 pub(crate) mod message_history;
 pub(crate) mod meta_derive;
 pub(crate) mod metadata;
+pub(crate) mod prompt_assembly;
 pub(crate) mod recorder;
 mod store;
 pub(crate) mod util;

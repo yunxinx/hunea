@@ -5,6 +5,11 @@ use crate::model_catalog::{ModelCatalog, ModelSelection};
 use crate::model_family::classify_model_family;
 
 const DEFAULT_CONTEXT_LIMIT_TOKENS: u32 = 256_000;
+const DEFAULT_CONTEXT_LIMIT: ContextTokenLimit =
+    match ContextTokenLimit::new(DEFAULT_CONTEXT_LIMIT_TOKENS) {
+        Some(limit) => limit,
+        None => panic!("default context limit must stay non-zero"),
+    };
 
 /// `ModelContextLimits` 保存从 `models.toml` 合并后的 context limit 配置。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -67,10 +72,7 @@ fn built_in_context_limit(model_id: &str) -> ContextTokenLimit {
     classify_model_family(model_id)
         .built_in_context_limit()
         .and_then(ContextTokenLimit::new)
-        .unwrap_or_else(|| {
-            ContextTokenLimit::new(DEFAULT_CONTEXT_LIMIT_TOKENS)
-                .expect("default context limit must stay non-zero")
-        })
+        .unwrap_or(DEFAULT_CONTEXT_LIMIT)
 }
 
 #[cfg(test)]

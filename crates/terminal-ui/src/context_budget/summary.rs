@@ -30,21 +30,17 @@ pub(crate) fn format_compact_tokens(tokens: usize) -> String {
     }
 }
 
-fn format_compact_percent(percent: f32) -> String {
+pub(crate) fn format_percent(percent: f32) -> String {
     let tenths = (percent * 10.0).round() as i32;
     let whole = tenths / 10;
     let fraction = tenths % 10;
-    if fraction == 0 {
-        format!("{whole}%")
-    } else {
-        format!("{whole}.{fraction}%")
-    }
+    format!("{whole}.{fraction}%")
 }
 
 /// `context_usage_summary` 返回右侧图示首行使用的模型与上下文摘要。
 pub(crate) fn context_usage_summary(model_id: &str, usage: ContextWindowUsage) -> String {
     let used = format_compact_tokens(usage.used as usize);
-    let percent = format_compact_percent(usage.percent);
+    let percent = format_percent(usage.percent);
     if usage.is_saturated {
         return format!(
             "{model_id} · {used}+/{} tokens ({percent}+)",
@@ -58,13 +54,6 @@ pub(crate) fn context_usage_summary(model_id: &str, usage: ContextWindowUsage) -
         format_compact_tokens(usage.limit.get() as usize),
         percent,
     )
-}
-
-pub(crate) fn segment_share_percent(segment_tokens: usize, total_tokens: usize) -> f32 {
-    if total_tokens == 0 {
-        return 0.0;
-    }
-    (segment_tokens as f32 / total_tokens as f32) * 100.0
 }
 
 pub(crate) fn context_budget_category_display_rank(kind: ContextBudgetCategoryKind) -> usize {
@@ -165,6 +154,7 @@ mod tests {
     use super::*;
     use runtime_domain::context_budget::{
         ContextBudgetSnapshot, ContextSegment, ContextTokenLimit, ContextWindowUsage, SegmentKind,
+        share_of_total_percent,
     };
 
     fn limit(value: u32) -> ContextTokenLimit {
@@ -261,13 +251,13 @@ mod tests {
     }
 
     #[test]
-    fn segment_share_percent_uses_provided_total() {
-        let percent = segment_share_percent(200, 500);
+    fn share_of_total_percent_uses_provided_total() {
+        let percent = share_of_total_percent(200, 500);
         assert!((percent - 40.0).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn context_usage_summary_omits_total_percent() {
+    fn context_usage_summary_uses_fixed_single_decimal_percent() {
         let text = context_usage_summary(
             "gpt-4o",
             ContextWindowUsage {
@@ -278,7 +268,7 @@ mod tests {
             },
         );
 
-        assert_eq!(text, "gpt-4o · 32k/128k tokens (25%)");
+        assert_eq!(text, "gpt-4o · 32k/128k tokens (25.0%)");
     }
 
     #[test]
@@ -331,6 +321,12 @@ mod tests {
         assert_eq!(format_compact_tokens(999), "999");
         assert_eq!(format_compact_tokens(1_000), "1k");
         assert_eq!(format_compact_tokens(1_700), "1.7k");
+    }
+
+    #[test]
+    fn format_percent_keeps_fixed_single_decimal_precision() {
+        assert_eq!(format_percent(25.0), "25.0%");
+        assert_eq!(format_percent(0.5), "0.5%");
     }
 
     #[test]

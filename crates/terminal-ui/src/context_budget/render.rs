@@ -248,6 +248,6 @@ mod tests {
         assert!(text.contains("128k"));
         assert!(text.contains("gpt-4o"));
         assert!(text.contains("tokens"));
-        assert!(text.contains("(25%)"));
+        assert!(text.contains("(25.0%)"));
     }
 }

@@ -35,16 +35,6 @@ pub struct ContextSegment {
     pub estimated_tokens: usize,
 }
 
-impl ContextSegment {
-    /// Share of total segment tokens in `[0, 100]` when total > 0.
-    pub fn share_of_segments_percent(total_tokens: usize, segment_tokens: usize) -> f32 {
-        if total_tokens == 0 {
-            return 0.0;
-        }
-        (segment_tokens as f32 / total_tokens as f32) * 100.0
-    }
-}
-
 /// `ContextTokenLimit` 表示一个严格大于 0 的 context token 上限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextTokenLimit(NonZeroU32);
@@ -111,6 +101,15 @@ pub struct ContextBudgetSnapshot {
     pub usage: ContextWindowUsage,
 }
 
+/// `share_of_total_percent` 计算部分相对总量的百分比。
+pub fn share_of_total_percent(part: usize, total: usize) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+
+    (part as f32 / total as f32) * 100.0
+}
+
 /// `context_window_usage` 根据总 token 数与展示上限构造绝对用量摘要。
 pub fn context_window_usage(
     total_estimated_tokens: usize,
@@ -173,5 +172,15 @@ mod tests {
 
         assert_eq!(usage.used, u32::MAX);
         assert!(usage.is_saturated);
+    }
+
+    #[test]
+    fn share_of_total_percent_uses_zero_guard() {
+        assert_eq!(share_of_total_percent(10, 0), 0.0);
+    }
+
+    #[test]
+    fn share_of_total_percent_returns_expected_ratio() {
+        assert!((share_of_total_percent(200, 500) - 40.0).abs() < f32::EPSILON);
     }
 }

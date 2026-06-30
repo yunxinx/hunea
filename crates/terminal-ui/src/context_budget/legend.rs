@@ -10,7 +10,7 @@ use super::{
     segment_colors::context_budget_color_for_category,
     summary::{
         ContextBudgetCategoryKind, build_legend_entries, context_usage_summary,
-        format_compact_tokens, legend_share_total, segment_share_percent,
+        format_compact_tokens, format_percent, legend_share_total,
     },
 };
 use crate::{
@@ -18,6 +18,7 @@ use crate::{
     status_line::truncate_display_width_with_ellipsis,
     theme::{TerminalPalette, primary_text_style, tertiary_text_style},
 };
+use runtime_domain::context_budget::share_of_total_percent;
 
 const LEGEND_SWATCH_SYMBOL: &str = "◼";
 const LEGEND_FREE_SYMBOL: &str = "⛶";
@@ -137,10 +138,11 @@ fn legend_detail_text(
     entry: &super::summary::ContextBudgetLegendEntry,
     total_tokens: usize,
 ) -> String {
-    let percent = segment_share_percent(entry.estimated_tokens, total_tokens);
+    let percent = share_of_total_percent(entry.estimated_tokens, total_tokens);
     format!(
-        "{} tokens ({percent:.1}%)",
-        format_compact_tokens(entry.estimated_tokens)
+        "{} tokens ({})",
+        format_compact_tokens(entry.estimated_tokens),
+        format_percent(percent),
     )
 }
 

@@ -88,10 +88,7 @@ impl<'a> ContextBudgetProbe<'a> {
 pub fn build_context_budget_snapshot(
     probe: ContextBudgetProbe<'_>,
 ) -> Result<ContextBudgetSnapshot, ContextBudgetError> {
-    match build_context_budget_snapshot_internal(probe, || false)? {
-        Some(snapshot) => Ok(snapshot),
-        None => unreachable!("non-cancellable context budget path returned cancellation"),
-    }
+    build_context_budget_snapshot_without_cancellation(probe)
 }
 
 /// Uses the same provider-specific projection path as the real provider request and allows
@@ -104,6 +101,15 @@ pub fn build_context_budget_snapshot_with_cancellation(
     build_context_budget_snapshot_internal(probe, should_cancel)
 }
 
+fn build_context_budget_snapshot_without_cancellation(
+    probe: ContextBudgetProbe<'_>,
+) -> Result<ContextBudgetSnapshot, ContextBudgetError> {
+    let (projection, token_encoding) = project_probe(&probe)?;
+    let segments = collect_segments(&probe, &projection, &token_encoding, || false)?
+        .expect("non-cancellable context budget path should always produce segments");
+    Ok(finish_snapshot(probe, segments))
+}
+
 fn build_context_budget_snapshot_internal(
     probe: ContextBudgetProbe<'_>,
     should_cancel: impl Fn() -> bool,
@@ -112,6 +118,32 @@ fn build_context_budget_snapshot_internal(
         return Ok(None);
     }
 
+    if should_cancel() {
+        return Ok(None);
+    }
+
+    let (projection, token_encoding) = project_probe(&probe)?;
+    if should_cancel() {
+        return Ok(None);
+    }
+
+    let Some(segments) = collect_segments(&probe, &projection, &token_encoding, &should_cancel)?
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(finish_snapshot(probe, segments)))
+}
+
+fn project_probe(
+    probe: &ContextBudgetProbe<'_>,
+) -> Result<
+    (
+        openai_compat_provider::PromptRequestProjection,
+        TokenEncoding,
+    ),
+    ContextBudgetError,
+> {
     let projection = match probe.provider_kind {
         ProviderKind::OpenAiCompatible | ProviderKind::OpenAi => {
             prompt_request_projection_from_parts(probe.items, probe.tool_definitions)
@@ -121,18 +153,22 @@ fn build_context_budget_snapshot_internal(
             return Err(ContextBudgetError::UnsupportedProvider { provider_kind });
         }
     };
+    let token_encoding = TokenEncoding::for_model(probe.model_id);
+    Ok((projection, token_encoding))
+}
 
-    if should_cancel() {
-        return Ok(None);
-    }
-
+fn collect_segments(
+    probe: &ContextBudgetProbe<'_>,
+    projection: &openai_compat_provider::PromptRequestProjection,
+    token_encoding: &TokenEncoding,
+    should_cancel: impl Fn() -> bool,
+) -> Result<Option<Vec<ContextSegment>>, ContextBudgetError> {
     let message_texts = projection
         .serialized_message_texts()
         .map_err(ContextBudgetError::projection)?;
     let tools_text = projection
         .serialized_tools_text()
         .map_err(ContextBudgetError::projection)?;
-    let token_encoding = TokenEncoding::for_model(probe.model_id);
 
     let mut segments = Vec::with_capacity(probe.items.len() + usize::from(tools_text.is_some()));
     for (item, projection_text) in probe.items.iter().zip(message_texts.iter()) {
@@ -156,6 +192,13 @@ fn build_context_budget_snapshot_internal(
         });
     }
 
+    Ok(Some(segments))
+}
+
+fn finish_snapshot(
+    probe: ContextBudgetProbe<'_>,
+    segments: Vec<ContextSegment>,
+) -> ContextBudgetSnapshot {
     let total_estimated_tokens = segments
         .iter()
         .map(|segment| segment.estimated_tokens)
@@ -163,16 +206,12 @@ fn build_context_budget_snapshot_internal(
     let usage: ContextWindowUsage =
         context_window_usage(total_estimated_tokens, probe.context_limit);
 
-    if should_cancel() {
-        return Ok(None);
-    }
-
-    Ok(Some(ContextBudgetSnapshot {
+    ContextBudgetSnapshot {
         model_id: probe.model_id.to_string(),
         segments,
         total_estimated_tokens,
         usage,
-    }))
+    }
 }
 
 impl ContextBudgetError {

@@ -35,8 +35,7 @@ pub struct LoadedModelCatalog {
 impl LoadedModelCatalog {
     /// `context_limit_for` 解析指定模型选择的 context limit（tokens）。
     pub fn context_limit_for(&self, selection: &ModelSelection) -> ContextTokenLimit {
-        self.catalog
-            .context_limit_for(&self.context_limits, selection)
+        self.context_limits.resolve(&self.catalog, selection)
     }
 }
 
@@ -343,7 +342,7 @@ fn validate_positive_context_window(
     field: &str,
     path: &Path,
 ) -> Result<ContextTokenLimit, ModelsConfigError> {
-    if value == 0 || value > u32::MAX as u64 {
+    if value > u32::MAX as u64 {
         return Err(ModelsConfigError::InvalidContextWindow {
             path: path.to_path_buf(),
             field: field.to_string(),

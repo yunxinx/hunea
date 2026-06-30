@@ -1,9 +1,6 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
 };
 
 use conversation_runtime::context_budget::{
@@ -18,8 +15,6 @@ use runtime_domain::{
 };
 use tokio::{runtime::Runtime, task::JoinHandle};
 use tool_runtime::ToolExecutorRegistry;
-
-const CONTEXT_BUDGET_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(10);
 
 pub(super) struct ContextBudgetWorker {
     runtime: Option<Runtime>,
@@ -138,7 +133,10 @@ impl ContextBudgetWorker {
         self.cancel_pending();
         self.active_task = None;
         if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_timeout(CONTEXT_BUDGET_RUNTIME_SHUTDOWN_TIMEOUT);
+            // `/context` 任务通过 generation 做协作式取消。这里不假装等待
+            // `spawn_blocking` 自然结束；runtime drop 后，已启动任务可能继续在后台
+            // 运行到下一次取消检查或正常完成，但 UI 不再追踪它们的结果。
+            drop(runtime);
         }
         Ok(())
     }

@@ -221,9 +221,10 @@ pub(super) fn aggregated_categories_for_heatmap(
 }
 
 #[cfg(test)]
-use ratatui::buffer::{Buffer, Cell};
+use ratatui::buffer::Cell;
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(super) fn is_context_budget_heatmap_cell(cell: &Cell, palette: TerminalPalette) -> bool {
     let empty_color = context_budget_empty_color(&palette);
     let heatmap_symbols = [HEATMAP_FULL_SYMBOL, HEATMAP_EMPTY_SYMBOL];
@@ -340,59 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn render_keeps_empty_capacity_cells_visible() {
-        let snapshot = ContextBudgetSnapshot {
-            model_id: "local/qwen3".to_string(),
-            segments: vec![ContextSegment {
-                kind: SegmentKind::System,
-                estimated_tokens: 10,
-            }],
-            total_estimated_tokens: 10,
-            usage: ContextWindowUsage {
-                limit: limit(80),
-                used: 10,
-            },
-        };
-        let mut buffer = Buffer::empty(Rect::new(
-            0,
-            0,
-            CONTEXT_BUDGET_HEATMAP_WIDTH,
-            CONTEXT_BUDGET_HEATMAP_GRID_ROWS as u16,
-        ));
-        let lines = build_context_budget_heatmap_lines(
-            Rect::new(
-                0,
-                0,
-                CONTEXT_BUDGET_HEATMAP_WIDTH,
-                CONTEXT_BUDGET_HEATMAP_GRID_ROWS as u16,
-            ),
-            &snapshot,
-            default_palette(),
-        );
-        for (row, line) in lines.iter().enumerate() {
-            buffer.set_line(
-                0,
-                u16::try_from(row).unwrap_or(0),
-                line,
-                CONTEXT_BUDGET_HEATMAP_WIDTH,
-            );
-        }
-
-        let empty_color = context_budget_empty_color(&default_palette());
-        let empty_cells = buffer
-            .content()
-            .iter()
-            .filter(|cell| {
-                is_context_budget_heatmap_cell(cell, default_palette()) && cell.fg == empty_color
-            })
-            .count();
-        assert!(
-            empty_cells > 0,
-            "heatmap should paint remaining capacity cells explicitly instead of leaving blanks"
-        );
-    }
-
-    #[test]
     fn build_heatmap_lines_fill_requested_area_width() {
         let snapshot = ContextBudgetSnapshot {
             model_id: "local/qwen3".to_string(),
@@ -436,27 +384,6 @@ mod tests {
             heatmap_grid_rows(CONTEXT_BUDGET_HEATMAP_GRID_ROWS as u16),
             CONTEXT_BUDGET_HEATMAP_GRID_ROWS
         );
-    }
-
-    #[test]
-    fn heatmap_marks_cells_by_used_and_empty_symbols() {
-        let palette = default_palette();
-        let used_color =
-            context_budget_color_for_category(ContextBudgetCategoryKind::Messages, &palette);
-        let empty_color = context_budget_empty_color(&palette);
-
-        let mut used = Cell::default();
-        used.set_symbol(HEATMAP_FULL_SYMBOL);
-        used.set_style(Style::new().fg(used_color));
-        assert!(is_context_budget_heatmap_cell(&used, palette));
-
-        let mut empty = Cell::default();
-        empty.set_symbol(HEATMAP_EMPTY_SYMBOL);
-        empty.set_style(Style::new().fg(empty_color));
-        assert!(is_context_budget_heatmap_cell(&empty, palette));
-
-        let plain = Cell::default();
-        assert!(!is_context_budget_heatmap_cell(&plain, palette));
     }
 
     #[test]

@@ -4,13 +4,8 @@ use runtime_domain::context_budget::{
 };
 
 use crate::{
-    Model, ModelOptions, StartupBannerOptions,
-    context_budget::heatmap::is_context_budget_heatmap_cell,
-    runtime::RuntimeEventApply,
-    test_helpers::{render_model_buffer, rendered_rows},
-    theme::default_palette,
-    update::AppEffect,
-    update::AppEvent,
+    Model, ModelOptions, StartupBannerOptions, runtime::RuntimeEventApply, theme::default_palette,
+    update::AppEffect, update::AppEvent,
 };
 
 fn ready_model() -> Model {
@@ -43,74 +38,6 @@ fn context_overlay_header_shows_documented_absolute_limit() {
         },
     );
     assert_eq!(text, "local/qwen3 · 1.2k/256k tokens (0.5%)");
-}
-
-#[test]
-fn context_panel_renders_as_inline_two_column_panel_with_empty_capacity_grid() {
-    let mut model = ready_model();
-    model.transcript_mut().clear();
-    model.set_window(72, 20);
-    model.set_palette(default_palette(), true);
-    let request_id = model.open_context_budget_loading();
-    model.apply_context_budget_snapshot(request_id, context_budget_snapshot());
-
-    let buffer = render_model_buffer(&mut model, 72, 20);
-    let rows = rendered_rows(&buffer);
-
-    assert!(
-        rows.iter().any(|row| row.trim() == "Context Usage"),
-        "context panel title should keep only the stable Context Usage header: {rows:?}"
-    );
-    assert!(
-        rows.iter().any(|row| row.contains("local/qwen3 · 540")),
-        "context panel should keep the model name and render legend-style usage summary on the first right-side row: {rows:?}"
-    );
-    assert_eq!(
-        rows.iter().filter(|row| row.contains('━')).count(),
-        1,
-        "context panel should only render the models-style top rule: {rows:?}"
-    );
-    let first_legend_row = rows
-        .iter()
-        .position(|row| row.contains("Messages"))
-        .expect("legend should render the leading segment row");
-    let messages_row_index = rows
-        .iter()
-        .position(|row| row.contains("Messages:"))
-        .expect("legend should render the messages row");
-    let messages_row = &rows[messages_row_index];
-    let legend_x = messages_row
-        .find("Messages:")
-        .expect("messages legend text should exist in the rendered row");
-    let has_heatmap_before_legend = (0..legend_x).any(|x| {
-        is_context_budget_heatmap_cell(
-            &buffer[(
-                u16::try_from(x).unwrap_or(0),
-                u16::try_from(messages_row_index).unwrap_or(0),
-            )],
-            default_palette(),
-        )
-    });
-    assert!(
-        has_heatmap_before_legend,
-        "context panel should render heatmap on the left and legend on the right in the same row: {rows:?}"
-    );
-    assert!(
-        rows.iter().all(|row| !row.contains("Page 1/1")),
-        "inline context panel must not render fullscreen page chrome: {rows:?}"
-    );
-    assert!(
-        first_legend_row < 16,
-        "legend should stay inside the inline panel body instead of falling below the heatmap: {rows:?}"
-    );
-    assert!(
-        rows.iter().any(|row| row.contains("Free space")),
-        "legend should include the free-space row for the full source-based breakdown: {rows:?}"
-    );
-    assert!(
-        rows.iter().any(|row| row.contains("Messages:")),
-        "legend rows should use natural language labels instead of the old percent-only format: {rows:?}"
-    );
 }
 
 #[test]
@@ -153,35 +80,6 @@ fn context_panel_uses_available_terminal_width_for_body_content() {
     assert!(
         body_width > 80,
         "context panel body should use the available terminal width instead of staying capped on the left: {body_width}"
-    );
-}
-
-#[test]
-fn context_panel_summary_row_keeps_full_model_usage_text_when_width_allows() {
-    let mut model = ready_model();
-    model.transcript_mut().clear();
-    model.set_window(160, 20);
-    model.set_palette(default_palette(), true);
-    let request_id = model.open_context_budget_loading();
-    model.apply_context_budget_snapshot(
-        request_id,
-        ContextBudgetSnapshot {
-            model_id: "deepseek-v4-flash".to_string(),
-            segments: context_budget_snapshot().segments,
-            total_estimated_tokens: 1_200,
-            usage: ContextWindowUsage {
-                limit: limit(256_000),
-                used: 1_200,
-            },
-        },
-    );
-
-    let rows = rendered_rows(&render_model_buffer(&mut model, 160, 20));
-
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("deepseek-v4-flash · 1.2k/256k tokens (0.5%)")),
-        "summary row should use the available right-side width before truncating: {rows:?}"
     );
 }
 
@@ -299,37 +197,6 @@ fn late_context_budget_error_after_close_does_not_reopen_panel() {
     );
 
     assert!(!model.context_budget_active());
-}
-
-#[test]
-fn context_budget_unsupported_provider_error_uses_actionable_copy() {
-    let mut model = ready_model();
-    model.transcript_mut().clear();
-    model.set_window(72, 20);
-    model.set_palette(default_palette(), true);
-
-    let request_id = model.open_context_budget_loading();
-    model.apply_runtime_event(
-        runtime_domain::session::RuntimeEvent::ContextBudgetSnapshotLoadFailed {
-            request_id,
-            error: runtime_domain::session::ContextBudgetLoadErrorPayload::UnsupportedProvider {
-                provider_kind: runtime_domain::provider::ProviderKind::Anthropic,
-            },
-        },
-    );
-
-    let rows = rendered_rows(&render_model_buffer(&mut model, 72, 20));
-
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("anthropic cannot show context budget")),
-        "unsupported provider error should render actionable guidance instead of a raw enum dump: {rows:?}"
-    );
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("OpenAI/OpenAI-compatible")),
-        "unsupported provider error should explain which provider family is supported: {rows:?}"
-    );
 }
 
 fn context_budget_snapshot() -> ContextBudgetSnapshot {

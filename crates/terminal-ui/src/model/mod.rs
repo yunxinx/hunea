@@ -12,7 +12,10 @@ pub(super) use runtime_domain::session::{RuntimeToolActivity, RuntimeToolActivit
 use runtime_domain::{
     envinfo,
     model_catalog::{ModelCatalog, ModelSelection},
-    prompt_assembly::{PromptAssemblyInput, PromptAssemblySnapshot, resolve_prompt_assembly},
+    prompt_assembly::{
+        PromptAssemblyInput, PromptAssemblyManagerSnapshot, PromptPreludeSnapshot,
+        resolve_prompt_assembly,
+    },
     session::{RuntimeTerminalSnapshot, SessionLoadRequestId},
 };
 
@@ -81,7 +84,7 @@ pub struct Model {
     pub(super) copy_picker: Option<CopyPickerState>,
     pub(super) message_history_picker:
         Option<crate::message_history_picker::MessageHistoryPickerState>,
-    pub(super) prompt_assembly_snapshot: PromptAssemblySnapshot,
+    pub(super) prompt_assembly: PromptAssemblyManagerSnapshot,
     pub(super) prompt_overlay: Option<crate::prompt_overlay::PromptOverlayState>,
     pub(super) next_session_load_request_id: u64,
     pub(super) message_revisit: MessageRevisitState,
@@ -179,9 +182,17 @@ impl Model {
         ));
         let git_branch = resolve_initial_git_branch(&status_line_items, &status_line_2_items);
         let current_dir = resolve_initial_current_dir(&status_line_items, &status_line_2_items);
-        let prompt_assembly_snapshot = options
-            .prompt_assembly_snapshot
-            .unwrap_or_else(|| resolve_prompt_assembly(&PromptAssemblyInput::default()));
+        let prompt_assembly =
+            options
+                .prompt_assembly
+                .unwrap_or_else(|| PromptAssemblyManagerSnapshot {
+                    snapshot: resolve_prompt_assembly(&PromptAssemblyInput::default()),
+                    prelude: PromptPreludeSnapshot::default(),
+                    sources: Vec::new(),
+                    builtin_core_system_body: String::new(),
+                    global_core_system_override: None,
+                    project_core_system_override: None,
+                });
 
         Self {
             startup_banner_options,
@@ -206,7 +217,7 @@ impl Model {
             pending_context_budget_cancellation: false,
             copy_picker: None,
             message_history_picker: None,
-            prompt_assembly_snapshot,
+            prompt_assembly,
             prompt_overlay: None,
             next_session_load_request_id: 1,
             message_revisit: MessageRevisitState::default(),

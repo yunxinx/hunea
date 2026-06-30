@@ -87,6 +87,14 @@ pub(super) fn apply_effect_if_needed(
             run_open_message_history_picker_effect(model, runtime_coordinator);
             Ok(())
         }
+        AppEffect::MutatePromptAssembly { mutation } => {
+            run_simple_runtime_command_effect(
+                model,
+                runtime_coordinator,
+                RuntimeCommand::MutatePromptAssembly { mutation },
+            );
+            Ok(())
+        }
         AppEffect::OpenSessionPreview { session_id } => {
             run_simple_runtime_command_effect(
                 model,

@@ -3,17 +3,19 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use color_eyre::eyre::{Result, WrapErr};
 use runtime_domain::prompt_assembly::persistence::{
     PersistedPromptAssemblyEntry, PromptAssemblyScope, PromptAssemblyScopeState, StoredPromptBody,
-    load_project_prompt_assembly_state,
+    load_project_prompt_assembly_state, save_project_prompt_assembly_state,
 };
 use runtime_domain::prompt_assembly::{
-    CoreSystemPromptInput, PromptAssemblyInput, PromptAssemblySnapshot, PromptPreludeSection,
-    PromptPreludeSnapshot, PromptSourceCandidate, PromptSourceKind, PromptSourceOrigin,
-    PromptSourceStatus, resolve_prompt_assembly,
+    CoreSystemPromptInput, PromptAssemblyEditorTarget, PromptAssemblyInput,
+    PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource, PromptAssemblyMutation,
+    PromptPreludeSection, PromptPreludeSnapshot, PromptSourceCandidate, PromptSourceKind,
+    PromptSourceOrigin, PromptSourceStatus, resolve_prompt_assembly,
 };
 use session_store::SessionStore;
 
@@ -36,16 +38,17 @@ struct PromptCandidateBody {
     body: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LoadedPromptAssembly {
-    pub(crate) snapshot: PromptAssemblySnapshot,
-    pub(crate) prelude: PromptPreludeSnapshot,
-}
-
 pub(crate) fn load_initial_prompt_assembly(
     store: Arc<dyn SessionStore>,
     work_dir: &Path,
-) -> Result<LoadedPromptAssembly> {
+) -> Result<PromptAssemblyManagerSnapshot> {
+    load_prompt_assembly_manager_snapshot(store, work_dir)
+}
+
+pub(crate) fn load_prompt_assembly_manager_snapshot(
+    store: Arc<dyn SessionStore>,
+    work_dir: &Path,
+) -> Result<PromptAssemblyManagerSnapshot> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -55,7 +58,37 @@ pub(crate) fn load_initial_prompt_assembly(
         .wrap_err("load global prompt assembly state")?;
     let project_state = load_project_prompt_assembly_state(work_dir)
         .wrap_err("load project prompt assembly state")?;
-    Ok(resolve_initial_prompt_assembly(
+    Ok(resolve_prompt_assembly_manager_snapshot(
+        work_dir,
+        &global_state,
+        &project_state,
+    ))
+}
+
+pub(crate) fn apply_prompt_assembly_mutation(
+    store: Arc<dyn SessionStore>,
+    work_dir: &Path,
+    mutation: PromptAssemblyMutation,
+) -> Result<PromptAssemblyManagerSnapshot> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .wrap_err("start prompt assembly runtime")?;
+    let mut global_state = runtime
+        .block_on(store.load_global_prompt_assembly_state())
+        .wrap_err("load global prompt assembly state")?;
+    let mut project_state = load_project_prompt_assembly_state(work_dir)
+        .wrap_err("load project prompt assembly state")?;
+
+    apply_mutation_to_scope_states(work_dir, &mut global_state, &mut project_state, mutation)?;
+
+    runtime
+        .block_on(store.save_global_prompt_assembly_state(&global_state))
+        .wrap_err("save global prompt assembly state")?;
+    save_project_prompt_assembly_state(work_dir, &project_state)
+        .wrap_err("save project prompt assembly state")?;
+
+    Ok(resolve_prompt_assembly_manager_snapshot(
         work_dir,
         &global_state,
         &project_state,
@@ -76,14 +109,14 @@ fn resolve_initial_prompt_prelude(
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
 ) -> PromptPreludeSnapshot {
-    resolve_initial_prompt_assembly(work_dir, global_state, project_state).prelude
+    resolve_prompt_assembly_manager_snapshot(work_dir, global_state, project_state).prelude
 }
 
-fn resolve_initial_prompt_assembly(
+fn resolve_prompt_assembly_manager_snapshot(
     work_dir: &Path,
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
-) -> LoadedPromptAssembly {
+) -> PromptAssemblyManagerSnapshot {
     let discovered_skills = discover_skills(work_dir);
     let extra_prompt_bodies = indexed_extra_prompt_bodies(global_state, project_state);
     let skills_by_name = discovered_skills
@@ -115,6 +148,23 @@ fn resolve_initial_prompt_assembly(
         },
         candidates,
     });
+    let mut sources = vec![PromptAssemblyManagerSource {
+        reference_id: "core-system".to_string(),
+        kind: PromptSourceKind::CoreSystemPrompt,
+        title: "Core system prompt".to_string(),
+        origin: Some(resolve_core_system_origin(global_state, project_state)),
+        body: Some(resolved_core_system_body(global_state, project_state)),
+    }];
+    sources.extend(materialized_sources_for_state(
+        global_state,
+        &extra_prompt_bodies,
+        &skills_by_name,
+    ));
+    sources.extend(materialized_sources_for_state(
+        project_state,
+        &extra_prompt_bodies,
+        &skills_by_name,
+    ));
 
     let mut sections = Vec::new();
     for source in &snapshot.active_sources {
@@ -148,9 +198,128 @@ fn resolve_initial_prompt_assembly(
         });
     }
 
-    LoadedPromptAssembly {
+    PromptAssemblyManagerSnapshot {
         snapshot,
         prelude: PromptPreludeSnapshot { sections },
+        sources,
+        builtin_core_system_body: BUILTIN_CORE_SYSTEM_PROMPT.to_string(),
+        global_core_system_override: global_state.core_system_override.clone(),
+        project_core_system_override: project_state.core_system_override.clone(),
+    }
+}
+
+fn apply_mutation_to_scope_states(
+    work_dir: &Path,
+    global_state: &mut PromptAssemblyScopeState,
+    project_state: &mut PromptAssemblyScopeState,
+    mutation: PromptAssemblyMutation,
+) -> Result<()> {
+    match mutation {
+        PromptAssemblyMutation::SaveEditorTarget { target, content } => {
+            apply_save_editor_target(work_dir, global_state, project_state, target, content)
+        }
+        PromptAssemblyMutation::CreateExtraPrompt { scope, content } => {
+            let state = scope_state_mut(global_state, project_state, scope);
+            let title = derive_extra_prompt_title(&content, "New prompt");
+            let reference_id = generate_extra_prompt_reference_id(&title);
+            let requested_order = next_requested_order(&state.entries);
+            state.entries.push(PersistedPromptAssemblyEntry {
+                reference_id: reference_id.clone(),
+                kind: PromptSourceKind::ExtraPrompt,
+                title: title.clone(),
+                enabled: true,
+                requested_order: Some(requested_order),
+            });
+            state
+                .extra_prompts
+                .retain(|prompt| prompt.reference_id != reference_id);
+            state.extra_prompts.push(StoredPromptBody {
+                reference_id,
+                title,
+                body: content,
+            });
+            Ok(())
+        }
+        PromptAssemblyMutation::DeleteExtraPrompt {
+            scope,
+            reference_id,
+        } => {
+            let state = scope_state_mut(global_state, project_state, scope);
+            state.entries.retain(|entry| {
+                !(entry.kind == PromptSourceKind::ExtraPrompt && entry.reference_id == reference_id)
+            });
+            state
+                .extra_prompts
+                .retain(|prompt| prompt.reference_id != reference_id);
+            Ok(())
+        }
+        PromptAssemblyMutation::RestoreCoreSystemOverride { scope } => {
+            scope_state_mut(global_state, project_state, scope).core_system_override = None;
+            Ok(())
+        }
+    }
+}
+
+fn apply_save_editor_target(
+    work_dir: &Path,
+    global_state: &mut PromptAssemblyScopeState,
+    project_state: &mut PromptAssemblyScopeState,
+    target: PromptAssemblyEditorTarget,
+    content: String,
+) -> Result<()> {
+    match target {
+        PromptAssemblyEditorTarget::CoreSystemOverride { scope } => {
+            let trimmed = content.trim();
+            scope_state_mut(global_state, project_state, scope).core_system_override =
+                (!trimmed.is_empty()).then_some(content);
+            Ok(())
+        }
+        PromptAssemblyEditorTarget::ExtraPrompt {
+            scope,
+            reference_id,
+        } => {
+            let state = scope_state_mut(global_state, project_state, scope);
+            let title = derive_extra_prompt_title(&content, &reference_id);
+            if let Some(entry) = state.entries.iter_mut().find(|entry| {
+                entry.kind == PromptSourceKind::ExtraPrompt && entry.reference_id == reference_id
+            }) {
+                entry.title = title.clone();
+            } else {
+                state.entries.push(PersistedPromptAssemblyEntry {
+                    reference_id: reference_id.clone(),
+                    kind: PromptSourceKind::ExtraPrompt,
+                    title: title.clone(),
+                    enabled: true,
+                    requested_order: Some(next_requested_order(&state.entries)),
+                });
+            }
+
+            if let Some(prompt) = state
+                .extra_prompts
+                .iter_mut()
+                .find(|prompt| prompt.reference_id == reference_id)
+            {
+                prompt.title = title;
+                prompt.body = content;
+            } else {
+                state.extra_prompts.push(StoredPromptBody {
+                    reference_id,
+                    title,
+                    body: content,
+                });
+            }
+            Ok(())
+        }
+        PromptAssemblyEditorTarget::SkillFile { skill_name, origin } => {
+            let discovered = discover_skills(work_dir);
+            let skill = discovered
+                .iter()
+                .find(|skill| skill.name == skill_name && skill.origin == origin)
+                .ok_or_else(|| color_eyre::eyre::eyre!("skill file `{skill_name}` is missing"))?;
+            fs::write(&skill.skill_path, content)
+                .wrap_err_with(|| format!("write skill file {}", skill.skill_path.display()))?;
+            Ok(())
+        }
     }
 }
 
@@ -165,6 +334,38 @@ fn resolved_core_system_body(
         .unwrap_or(BUILTIN_CORE_SYSTEM_PROMPT)
         .trim()
         .to_string()
+}
+
+fn resolve_core_system_origin(
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+) -> PromptSourceOrigin {
+    if project_state.core_system_override.is_some() {
+        PromptSourceOrigin::Project
+    } else if global_state.core_system_override.is_some() {
+        PromptSourceOrigin::Global
+    } else {
+        PromptSourceOrigin::Builtin
+    }
+}
+
+fn materialized_sources_for_state(
+    state: &PromptAssemblyScopeState,
+    extra_prompt_bodies: &HashMap<String, String>,
+    skills_by_name: &HashMap<String, DiscoveredSkill>,
+) -> Vec<PromptAssemblyManagerSource> {
+    let origin = Some(scope_origin(state.scope));
+    state
+        .entries
+        .iter()
+        .map(|entry| PromptAssemblyManagerSource {
+            reference_id: entry.reference_id.clone(),
+            kind: entry.kind,
+            title: entry.title.clone(),
+            origin,
+            body: body_for_entry(entry, state.scope, extra_prompt_bodies, skills_by_name),
+        })
+        .collect()
 }
 
 fn extend_candidates(
@@ -290,6 +491,77 @@ fn scope_origin(scope: PromptAssemblyScope) -> PromptSourceOrigin {
         PromptAssemblyScope::Global => PromptSourceOrigin::Global,
         PromptAssemblyScope::Project => PromptSourceOrigin::Project,
     }
+}
+
+fn scope_state_mut<'a>(
+    global_state: &'a mut PromptAssemblyScopeState,
+    project_state: &'a mut PromptAssemblyScopeState,
+    scope: PromptAssemblyScope,
+) -> &'a mut PromptAssemblyScopeState {
+    match scope {
+        PromptAssemblyScope::Global => global_state,
+        PromptAssemblyScope::Project => project_state,
+    }
+}
+
+fn derive_extra_prompt_title(body: &str, fallback: &str) -> String {
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix('#') {
+            let title = heading.trim_start_matches('#').trim();
+            if !title.is_empty() {
+                return truncate_title(title);
+            }
+        }
+        return truncate_title(trimmed);
+    }
+    truncate_title(fallback)
+}
+
+fn truncate_title(title: &str) -> String {
+    const TITLE_LIMIT: usize = 80;
+    let mut result = String::new();
+    for character in title.chars().take(TITLE_LIMIT) {
+        result.push(character);
+    }
+    result
+}
+
+fn generate_extra_prompt_reference_id(title: &str) -> String {
+    let slug = title
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|character| match character {
+            'a'..='z' | '0'..='9' => character,
+            _ => '-',
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let slug = if slug.is_empty() {
+        "prompt"
+    } else {
+        slug.as_str()
+    };
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("{slug}-{stamp}")
+}
+
+fn next_requested_order(entries: &[PersistedPromptAssemblyEntry]) -> u16 {
+    entries
+        .iter()
+        .filter_map(|entry| entry.requested_order)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(10)
 }
 
 fn discover_skills(work_dir: &Path) -> Vec<DiscoveredSkill> {
@@ -584,7 +856,7 @@ mod tests {
     #[test]
     fn resolve_initial_prompt_assembly_keeps_inactive_sources_for_manager_view() {
         let work_dir = temp_dir("snapshot");
-        let resolved = resolve_initial_prompt_assembly(
+        let resolved = resolve_prompt_assembly_manager_snapshot(
             &work_dir,
             &PromptAssemblyScopeState {
                 scope: PromptAssemblyScope::Global,

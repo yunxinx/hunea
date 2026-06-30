@@ -1,3 +1,5 @@
+mod preview;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -5,13 +7,15 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, Paragraph, Widget},
 };
+use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
 use runtime_domain::prompt_assembly::{
-    PromptAssemblyLifecycle, PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin,
-    PromptSourceStatus, ResolvedPromptSource,
+    PromptAssemblyEditorTarget, PromptAssemblyLifecycle, PromptAssemblyMutation,
+    PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
+    ResolvedPromptSource,
 };
 
 use crate::{
-    Model,
+    AppEffect, Model,
     fullscreen_list_chrome::fullscreen_list_chrome_rects,
     list_selection::ListNavigationDirection,
     overlay_input_result::OverlayInputResult,
@@ -31,9 +35,8 @@ const PROMPT_OVERLAY_HEADER_INSET: usize = 2;
 const PROMPT_OVERLAY_PANE_TITLE_ROWS: u16 = 1;
 const PROMPT_OVERLAY_RIGHT_TAB_ROWS: u16 = 1;
 const PROMPT_OVERLAY_FOOTER_COMPACT: &str =
-    "  Esc close · ←→ pane · ↑↓ move · Tab tabs · PgUp/PgDn page";
-const PROMPT_OVERLAY_FOOTER_FULL: &str =
-    "  Esc close · ←/→/h/l focus panes · ↑/↓/j/k move · Tab switch inactive tabs · PgUp/PgDn page";
+    "  Esc close · Space source · p assembled · e/ctrl+g edit · a/A add extra";
+const PROMPT_OVERLAY_FOOTER_FULL: &str = "  Esc close · ←/→/h/l focus panes · ↑/↓/j/k move · Tab tabs · Space source · p assembled · e/ctrl+g edit · s scope · d delete · r restore";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptOverlayFocus {
@@ -103,6 +106,9 @@ pub(crate) struct PromptOverlayState {
     pub(crate) inactive_selected: usize,
     pub(crate) inactive_scroll: usize,
     pub(crate) inactive_selected_reference_id: Option<String>,
+    pub(crate) preview: Option<preview::PromptOverlayPreviewState>,
+    pub(crate) draft_scope: PromptAssemblyScope,
+    pub(crate) pending_editor: Option<PromptOverlayPendingEditor>,
 }
 
 impl Default for PromptOverlayState {
@@ -115,8 +121,17 @@ impl Default for PromptOverlayState {
             inactive_selected: 0,
             inactive_scroll: 0,
             inactive_selected_reference_id: None,
+            preview: None,
+            draft_scope: PromptAssemblyScope::Project,
+            pending_editor: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PromptOverlayPendingEditor {
+    pub(crate) target: PromptAssemblyEditorTarget,
+    pub(crate) original_draft: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -151,6 +166,9 @@ impl Model {
     pub(crate) fn handle_prompt_overlay_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if !self.prompt_overlay_active() {
             return OverlayInputResult::Ignored;
+        }
+        if self.prompt_overlay_preview_active() {
+            return self.handle_prompt_overlay_preview_key(key);
         }
 
         match key.code {
@@ -198,22 +216,68 @@ impl Model {
                 self.jump_prompt_overlay_selection_to_edge(false);
                 OverlayInputResult::Handled
             }
+            KeyCode::Char(' ') if key.modifiers.is_empty() => {
+                self.open_selected_prompt_overlay_preview();
+                OverlayInputResult::Handled
+            }
+            KeyCode::Char('p') if key.modifiers.is_empty() => {
+                self.open_prompt_overlay_assembled_preview();
+                OverlayInputResult::Handled
+            }
+            KeyCode::Char('s') if key.modifiers.is_empty() => {
+                self.toggle_prompt_overlay_draft_scope();
+                OverlayInputResult::Handled
+            }
+            KeyCode::Char('e') if key.modifiers.is_empty() => {
+                OverlayInputResult::from_effect(self.open_prompt_overlay_editor_for_selection())
+            }
+            KeyCode::Char('a') if key.modifiers.is_empty() => {
+                OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+                    mutation: PromptAssemblyMutation::CreateExtraPrompt {
+                        scope: PromptAssemblyScope::Project,
+                        content: "# New prompt\n".to_string(),
+                    },
+                })
+            }
+            KeyCode::Char('A') if key.modifiers.is_empty() => {
+                OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+                    mutation: PromptAssemblyMutation::CreateExtraPrompt {
+                        scope: PromptAssemblyScope::Global,
+                        content: "# New prompt\n".to_string(),
+                    },
+                })
+            }
+            KeyCode::Char('d') if key.modifiers.is_empty() => {
+                OverlayInputResult::from_effect(self.delete_selected_extra_prompt())
+            }
+            KeyCode::Char('r') if key.modifiers.is_empty() => {
+                OverlayInputResult::from_effect(self.restore_selected_core_system_override())
+            }
             _ => OverlayInputResult::Handled,
         }
     }
 
-    pub(crate) fn render_prompt_overlay(&self, frame: &mut RenderFrame<'_>, area: Rect) {
+    pub(crate) fn render_prompt_overlay(&mut self, frame: &mut RenderFrame<'_>, area: Rect) {
         let Some(state) = self.prompt_overlay.as_ref() else {
             return;
         };
+        if state.preview.is_some() {
+            self.render_prompt_overlay_preview(frame, area);
+            return;
+        }
 
         frame.render_widget(Clear, area);
         let Some(chrome) = fullscreen_list_chrome_rects(area) else {
             return;
         };
+        let scope = self
+            .prompt_overlay
+            .as_ref()
+            .map(|state| state.draft_scope)
+            .unwrap_or(PromptAssemblyScope::Project);
 
         frame.render_widget(
-            Paragraph::new(self.prompt_overlay_header_line(usize::from(area.width))),
+            Paragraph::new(self.prompt_overlay_header_line(usize::from(area.width), scope)),
             chrome.header,
         );
         frame.render_widget(
@@ -253,6 +317,188 @@ impl Model {
             )),
             chrome.footer,
         );
+    }
+
+    pub(crate) fn apply_prompt_overlay_external_editor_finished(
+        &mut self,
+        draft_path: &std::path::Path,
+        original_draft: &str,
+        failed: bool,
+    ) -> Option<AppEffect> {
+        let target = self
+            .prompt_overlay
+            .as_ref()
+            .and_then(|state| state.pending_editor.as_ref())
+            .map(|pending| pending.target.clone())?;
+        let state = self.prompt_overlay.as_mut()?;
+        state.pending_editor = None;
+
+        if failed {
+            let _ = std::fs::remove_file(draft_path);
+            self.show_toast(crate::toast::ToastSeverity::Error, "External editor failed");
+            return None;
+        }
+        let content = match std::fs::read_to_string(draft_path) {
+            Ok(content) => content,
+            Err(_) => {
+                let _ = std::fs::remove_file(draft_path);
+                self.show_toast(
+                    crate::toast::ToastSeverity::Error,
+                    "Failed to read external editor draft",
+                );
+                return None;
+            }
+        };
+        let _ = std::fs::remove_file(draft_path);
+        if content == original_draft {
+            return None;
+        }
+        Some(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::SaveEditorTarget { target, content },
+        })
+    }
+
+    fn open_selected_prompt_overlay_preview(&mut self) {
+        let Some(source) = self.selected_prompt_overlay_manager_source() else {
+            return;
+        };
+        self.open_prompt_overlay_source_preview(source);
+    }
+
+    fn toggle_prompt_overlay_draft_scope(&mut self) {
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return;
+        };
+        state.draft_scope = match state.draft_scope {
+            PromptAssemblyScope::Global => PromptAssemblyScope::Project,
+            PromptAssemblyScope::Project => PromptAssemblyScope::Global,
+        };
+    }
+
+    pub(crate) fn open_prompt_overlay_editor_for_selection(&mut self) -> Option<AppEffect> {
+        let selected = self.selected_prompt_overlay_source()?;
+        let scope = self
+            .prompt_overlay
+            .as_ref()
+            .map(|state| state.draft_scope)
+            .unwrap_or(PromptAssemblyScope::Project);
+        let manager_source = self.manager_source_for_resolved_source(&selected)?;
+
+        let (target, initial_content) = match selected.kind {
+            PromptSourceKind::CoreSystemPrompt => (
+                PromptAssemblyEditorTarget::CoreSystemOverride { scope },
+                self.core_system_editor_body_for_scope(scope),
+            ),
+            PromptSourceKind::ExtraPrompt => {
+                let origin = selected.origin?;
+                (
+                    PromptAssemblyEditorTarget::ExtraPrompt {
+                        scope: prompt_scope_from_origin(origin)?,
+                        reference_id: selected.reference_id.clone(),
+                    },
+                    manager_source.body.unwrap_or_default(),
+                )
+            }
+            PromptSourceKind::LongLivedSkill => (
+                PromptAssemblyEditorTarget::SkillFile {
+                    skill_name: selected.reference_id.clone(),
+                    origin: selected.origin?,
+                },
+                manager_source.body.unwrap_or_default(),
+            ),
+            PromptSourceKind::SkillDiscovery => return None,
+        };
+
+        let launch = self.prepare_external_editor_launch_for_content(&initial_content)?;
+        if let Some(state) = self.prompt_overlay.as_mut() {
+            state.pending_editor = Some(PromptOverlayPendingEditor {
+                target,
+                original_draft: initial_content,
+            });
+        }
+        Some(AppEffect::LaunchExternalEditor(launch))
+    }
+
+    fn delete_selected_extra_prompt(&mut self) -> Option<AppEffect> {
+        let selected = self.selected_prompt_overlay_source()?;
+        if selected.kind != PromptSourceKind::ExtraPrompt {
+            return None;
+        }
+        Some(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::DeleteExtraPrompt {
+                scope: prompt_scope_from_origin(selected.origin?)?,
+                reference_id: selected.reference_id,
+            },
+        })
+    }
+
+    fn restore_selected_core_system_override(&mut self) -> Option<AppEffect> {
+        let selected = self.selected_prompt_overlay_source()?;
+        if selected.kind != PromptSourceKind::CoreSystemPrompt {
+            return None;
+        }
+        let scope = self
+            .prompt_overlay
+            .as_ref()
+            .map(|state| state.draft_scope)
+            .unwrap_or(PromptAssemblyScope::Project);
+        Some(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::RestoreCoreSystemOverride { scope },
+        })
+    }
+
+    fn selected_prompt_overlay_source(&self) -> Option<ResolvedPromptSource> {
+        let state = self.prompt_overlay.as_ref()?;
+        match state.focus {
+            PromptOverlayFocus::Active => self
+                .prompt_assembly
+                .snapshot
+                .active_sources
+                .get(state.active_selected)
+                .cloned(),
+            PromptOverlayFocus::Inactive => self
+                .prompt_overlay_inactive_sources_for_tab(state.inactive_tab)
+                .get(state.inactive_selected)
+                .cloned(),
+        }
+    }
+
+    fn selected_prompt_overlay_manager_source(
+        &self,
+    ) -> Option<runtime_domain::prompt_assembly::PromptAssemblyManagerSource> {
+        let selected = self.selected_prompt_overlay_source()?;
+        self.manager_source_for_resolved_source(&selected)
+    }
+
+    fn manager_source_for_resolved_source(
+        &self,
+        selected: &ResolvedPromptSource,
+    ) -> Option<runtime_domain::prompt_assembly::PromptAssemblyManagerSource> {
+        self.prompt_assembly
+            .sources
+            .iter()
+            .find(|source| {
+                source.reference_id == selected.reference_id
+                    && source.kind == selected.kind
+                    && source.origin == selected.origin
+            })
+            .cloned()
+    }
+
+    fn core_system_editor_body_for_scope(&self, scope: PromptAssemblyScope) -> String {
+        match scope {
+            PromptAssemblyScope::Global => self
+                .prompt_assembly
+                .global_core_system_override
+                .clone()
+                .unwrap_or_else(|| self.prompt_assembly.builtin_core_system_body.clone()),
+            PromptAssemblyScope::Project => self
+                .prompt_assembly
+                .project_core_system_override
+                .clone()
+                .or_else(|| self.prompt_assembly.global_core_system_override.clone())
+                .unwrap_or_else(|| self.prompt_assembly.builtin_core_system_body.clone()),
+        }
     }
 
     pub(crate) fn move_prompt_overlay_selection_by_delta(&mut self, delta: isize) {
@@ -339,7 +585,8 @@ impl Model {
         match focus {
             PromptOverlayFocus::Active => {
                 let last_index = self
-                    .prompt_assembly_snapshot
+                    .prompt_assembly
+                    .snapshot
                     .active_sources
                     .len()
                     .saturating_sub(1);
@@ -358,7 +605,7 @@ impl Model {
         let Some(state) = self.prompt_overlay.as_mut() else {
             return;
         };
-        let count = self.prompt_assembly_snapshot.active_sources.len();
+        let count = self.prompt_assembly.snapshot.active_sources.len();
         if count == 0 {
             state.active_selected = 0;
             state.active_scroll = 0;
@@ -405,7 +652,7 @@ impl Model {
         self.sync_prompt_overlay_state();
     }
 
-    fn sync_prompt_overlay_state(&mut self) {
+    pub(crate) fn sync_prompt_overlay_state(&mut self) {
         let inactive_tab = match self.prompt_overlay.as_ref() {
             Some(state) => state.inactive_tab,
             None => return,
@@ -417,7 +664,7 @@ impl Model {
             return;
         };
 
-        let active_count = self.prompt_assembly_snapshot.active_sources.len();
+        let active_count = self.prompt_assembly.snapshot.active_sources.len();
         state.active_selected = state.active_selected.min(active_count.saturating_sub(1));
         state.active_scroll = clamp_scroll(
             state.active_scroll,
@@ -453,14 +700,22 @@ impl Model {
         );
     }
 
-    fn prompt_overlay_header_line(&self, width: usize) -> Line<'static> {
-        let lifecycle = match self.prompt_assembly_snapshot.lifecycle {
+    fn prompt_overlay_header_line(
+        &self,
+        width: usize,
+        scope: PromptAssemblyScope,
+    ) -> Line<'static> {
+        let lifecycle = match self.prompt_assembly.snapshot.lifecycle {
             PromptAssemblyLifecycle::NextNewSession => "Next New Session",
         };
         let title = format!(
-            "Prompt Assembly · {lifecycle} · {} active · {} inactive",
-            self.prompt_assembly_snapshot.active_sources.len(),
-            self.prompt_assembly_snapshot.inactive_sources.len()
+            "Prompt Assembly · {lifecycle} · scope={} · {} active · {} inactive",
+            match scope {
+                PromptAssemblyScope::Global => "global",
+                PromptAssemblyScope::Project => "project",
+            },
+            self.prompt_assembly.snapshot.active_sources.len(),
+            self.prompt_assembly.snapshot.inactive_sources.len()
         );
 
         Line::from(vec![
@@ -493,14 +748,14 @@ impl Model {
         frame.render_widget(
             Paragraph::new(self.prompt_overlay_pane_title_line(
                 "Active Sources",
-                self.prompt_assembly_snapshot.active_sources.len(),
+                self.prompt_assembly.snapshot.active_sources.len(),
                 state.focus == PromptOverlayFocus::Active,
                 usize::from(title_area.width),
             )),
             title_area,
         );
 
-        let sources = self.prompt_assembly_snapshot.active_sources.as_slice();
+        let sources = self.prompt_assembly.snapshot.active_sources.as_slice();
         let lines = prompt_overlay_active_lines(
             sources,
             state.active_selected,
@@ -621,7 +876,7 @@ impl Model {
             PromptOverlayFocus::Active => page_label(
                 "Active",
                 state.active_selected,
-                self.prompt_assembly_snapshot.active_sources.len(),
+                self.prompt_assembly.snapshot.active_sources.len(),
                 prompt_overlay_active_visible_rows(height),
             ),
             PromptOverlayFocus::Inactive => page_label(
@@ -638,7 +893,8 @@ impl Model {
         &self,
         tab: PromptOverlayInactiveTab,
     ) -> Vec<ResolvedPromptSource> {
-        self.prompt_assembly_snapshot
+        self.prompt_assembly
+            .snapshot
             .inactive_sources
             .iter()
             .filter(|source| tab.matches_kind(source.kind))
@@ -893,5 +1149,13 @@ fn prompt_overlay_footer_hint(width: u16) -> &'static str {
         PROMPT_OVERLAY_FOOTER_COMPACT
     } else {
         PROMPT_OVERLAY_FOOTER_FULL
+    }
+}
+
+fn prompt_scope_from_origin(origin: PromptSourceOrigin) -> Option<PromptAssemblyScope> {
+    match origin {
+        PromptSourceOrigin::Builtin => None,
+        PromptSourceOrigin::Global => Some(PromptAssemblyScope::Global),
+        PromptSourceOrigin::Project => Some(PromptAssemblyScope::Project),
     }
 }

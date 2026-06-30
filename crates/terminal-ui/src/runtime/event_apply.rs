@@ -224,6 +224,10 @@ impl RuntimeEventApply for Model {
                     format!("Message history not saved: {message}"),
                 );
             }
+            RuntimeEvent::PromptAssemblyUpdated { manager } => {
+                self.prompt_assembly = manager;
+                self.sync_prompt_overlay_state();
+            }
             RuntimeEvent::SessionResumed { payload } => {
                 self.apply_session_resume_payload(payload);
             }

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub mod persistence;
+use persistence::PromptAssemblyScope;
 
 /// `PromptAssemblyLifecycle` 表示 prompt assembly 生效的生命周期边界。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +122,63 @@ impl PromptPreludeSnapshot {
             .collect::<Vec<_>>();
         (!sections.is_empty()).then(|| sections.join("\n\n"))
     }
+}
+
+/// `PromptAssemblyManagerSource` 是 `/prompt` 管理器使用的可预览 source 物化视图。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAssemblyManagerSource {
+    pub reference_id: String,
+    pub kind: PromptSourceKind,
+    pub title: String,
+    pub origin: Option<PromptSourceOrigin>,
+    pub body: Option<String>,
+}
+
+/// `PromptAssemblyManagerSnapshot` 表示 `/prompt` 所需的完整只读快照。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAssemblyManagerSnapshot {
+    pub snapshot: PromptAssemblySnapshot,
+    pub prelude: PromptPreludeSnapshot,
+    pub sources: Vec<PromptAssemblyManagerSource>,
+    pub builtin_core_system_body: String,
+    pub global_core_system_override: Option<String>,
+    pub project_core_system_override: Option<String>,
+}
+
+/// `PromptAssemblyEditorTarget` 标识一次外部编辑器保存要落到哪里。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptAssemblyEditorTarget {
+    CoreSystemOverride {
+        scope: PromptAssemblyScope,
+    },
+    ExtraPrompt {
+        scope: PromptAssemblyScope,
+        reference_id: String,
+    },
+    SkillFile {
+        skill_name: String,
+        origin: PromptSourceOrigin,
+    },
+}
+
+/// `PromptAssemblyMutation` 描述 `/prompt` 发起的一次持久化变更。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptAssemblyMutation {
+    SaveEditorTarget {
+        target: PromptAssemblyEditorTarget,
+        content: String,
+    },
+    CreateExtraPrompt {
+        scope: PromptAssemblyScope,
+        content: String,
+    },
+    DeleteExtraPrompt {
+        scope: PromptAssemblyScope,
+        reference_id: String,
+    },
+    RestoreCoreSystemOverride {
+        scope: PromptAssemblyScope,
+    },
 }
 
 /// `resolve_prompt_assembly` 解析 next-new-session prompt assembly。

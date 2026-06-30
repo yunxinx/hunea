@@ -20,6 +20,14 @@ pub struct ExternalEditorLaunch {
 
 impl Model {
     pub(crate) fn prepare_external_editor_launch(&mut self) -> Option<ExternalEditorLaunch> {
+        let original_draft = self.composer_text().to_string();
+        self.prepare_external_editor_launch_for_content(&original_draft)
+    }
+
+    pub(crate) fn prepare_external_editor_launch_for_content(
+        &mut self,
+        original_draft: &str,
+    ) -> Option<ExternalEditorLaunch> {
         let editor = match envinfo::resolve_external_editor(&self.external_editor) {
             Ok(editor) => editor,
             Err(error) => {
@@ -31,7 +39,7 @@ impl Model {
             }
         };
 
-        let original_draft = self.composer_text().to_string();
+        let original_draft = original_draft.to_string();
         let draft_path = match write_external_editor_draft(&original_draft) {
             Ok(path) => path,
             Err(_) => {

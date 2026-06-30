@@ -147,7 +147,8 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             | RuntimeCommand::SelectEntryRewind { .. }
             | RuntimeCommand::LoadMessageHistoryStartupCache
             | RuntimeCommand::LoadMessageHistoryPickerRows { .. }
-            | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
+            | RuntimeCommand::RecordMessageHistory { .. }
+            | RuntimeCommand::MutatePromptAssembly { .. } => Ok(RuntimeCommandReceipt::Accepted),
             RuntimeCommand::LoadContextBudgetSnapshot { request_id, .. } => {
                 self.runtime_events
                     .push(RuntimeEvent::ContextBudgetSnapshotLoaded {

@@ -1,12 +1,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use runtime_domain::prompt_assembly::{
-    PromptAssemblyLifecycle, PromptAssemblySnapshot, PromptSourceInactiveReason, PromptSourceKind,
-    PromptSourceOrigin, PromptSourceStatus, ResolvedPromptSource,
+    PromptAssemblyLifecycle, PromptAssemblyManagerSnapshot, PromptAssemblySnapshot,
+    PromptPreludeSnapshot, PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin,
+    PromptSourceStatus, ResolvedPromptSource,
 };
 
 use crate::{
-    AppEvent, Model, ModelOptions, StartupBannerOptions,
+    AppEffect, AppEvent, Model, ModelOptions, StartupBannerOptions,
     modal_layer::ModalLayer,
+    runtime::RuntimeEventApply,
     test_helpers::{render_model_buffer, rendered_rows},
     theme::default_palette,
 };
@@ -84,7 +86,14 @@ fn ready_model() -> Model {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
         ModelOptions {
-            prompt_assembly_snapshot: Some(prompt_snapshot()),
+            prompt_assembly: Some(PromptAssemblyManagerSnapshot {
+                snapshot: prompt_snapshot(),
+                prelude: PromptPreludeSnapshot::default(),
+                sources: Vec::new(),
+                builtin_core_system_body: "builtin core".to_string(),
+                global_core_system_override: None,
+                project_core_system_override: None,
+            }),
             ..ModelOptions::default()
         },
     );
@@ -190,4 +199,76 @@ fn render_shows_active_and_inactive_panes() {
     assert!(rows.contains("Inactive Sources"));
     assert!(rows.contains("Disabled"));
     assert!(rows.contains("[All]"));
+}
+
+#[test]
+fn space_opens_prompt_source_preview() {
+    let mut model = ready_model();
+    model.prompt_assembly.sources = vec![
+        runtime_domain::prompt_assembly::PromptAssemblyManagerSource {
+            reference_id: "core-system".to_string(),
+            kind: PromptSourceKind::CoreSystemPrompt,
+            title: "Core system prompt".to_string(),
+            origin: Some(PromptSourceOrigin::Builtin),
+            body: Some("# Core\n\nHello".to_string()),
+        },
+    ];
+    model.open_prompt_overlay();
+
+    let result = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char(' ')));
+
+    assert_eq!(result, super::OverlayInputResult::Handled);
+    assert!(model.prompt_overlay_preview_active());
+}
+
+#[test]
+fn prompt_runtime_update_replaces_manager_snapshot() {
+    let mut model = ready_model();
+    let next_snapshot = PromptAssemblySnapshot {
+        lifecycle: PromptAssemblyLifecycle::NextNewSession,
+        active_sources: vec![prompt_source(
+            "core-system",
+            "Core system prompt",
+            PromptSourceKind::CoreSystemPrompt,
+            Some(PromptSourceOrigin::Project),
+            PromptSourceStatus::Active { order: 0 },
+        )],
+        inactive_sources: Vec::new(),
+    };
+
+    model.apply_runtime_event(
+        runtime_domain::session::RuntimeEvent::PromptAssemblyUpdated {
+            manager: PromptAssemblyManagerSnapshot {
+                snapshot: next_snapshot,
+                prelude: PromptPreludeSnapshot::default(),
+                sources: Vec::new(),
+                builtin_core_system_body: "builtin core".to_string(),
+                global_core_system_override: None,
+                project_core_system_override: Some("project core".to_string()),
+            },
+        },
+    );
+
+    assert_eq!(
+        model.prompt_assembly.snapshot.active_sources[0].origin,
+        Some(PromptSourceOrigin::Project)
+    );
+}
+
+#[test]
+fn delete_selected_extra_prompt_emits_mutation_effect() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d')));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::DeleteExtraPrompt {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                reference_id: "disabled-extra".to_string(),
+            },
+        })
+    );
 }

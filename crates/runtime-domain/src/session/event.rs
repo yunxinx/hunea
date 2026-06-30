@@ -6,6 +6,7 @@ use super::{
     SessionResumePayload, SessionTreePayload, context_budget::ContextBudgetLoadErrorPayload,
 };
 use crate::context_budget::ContextBudgetSnapshot;
+use crate::prompt_assembly::PromptAssemblyManagerSnapshot;
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +145,9 @@ pub enum RuntimeEvent {
         entry_id: MessageHistoryEntryId,
         message: String,
     },
+    PromptAssemblyUpdated {
+        manager: PromptAssemblyManagerSnapshot,
+    },
     MessageFinished {
         target: Option<RuntimeTarget>,
         response: ConversationResponse,
@@ -204,6 +208,7 @@ impl RuntimeEvent {
             | Self::MessageHistoryPickerRowsLoadFailed { .. }
             | Self::MessageHistoryRecorded { .. }
             | Self::MessageHistoryRecordFailed { .. }
+            | Self::PromptAssemblyUpdated { .. }
             | Self::ContextBudgetSnapshotLoaded { .. }
             | Self::ContextBudgetSnapshotLoadFailed { .. } => None,
         }

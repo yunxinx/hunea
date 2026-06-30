@@ -162,8 +162,8 @@ fn attach_default_session_persistence(
             .work_dir
             .as_path(),
     )?;
-    model_options.prompt_assembly_snapshot = Some(loaded_prompt_assembly.snapshot.clone());
-    options.initial_prompt_prelude = Some(loaded_prompt_assembly.prelude);
+    model_options.prompt_assembly = Some(loaded_prompt_assembly.clone());
+    options.initial_prompt_prelude = Some(loaded_prompt_assembly.prelude.clone());
     Ok(())
 }
 

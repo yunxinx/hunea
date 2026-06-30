@@ -3,6 +3,7 @@ mod context_budget_worker;
 mod conversation_commands;
 mod event_mapping;
 mod managed_search_authorization;
+mod prompt_assembly_commands;
 mod session_commands;
 mod session_tree_load;
 mod session_worker;
@@ -138,6 +139,9 @@ impl AppRuntimeCoordinator {
                 text,
                 limit,
             } => self.record_message_history(entry_id, text, limit),
+            RuntimeCommand::MutatePromptAssembly { mutation } => {
+                self.mutate_prompt_assembly(mutation)
+            }
             RuntimeCommand::Reset => {
                 self.conversation_worker.reset_after_clear();
                 self.provider_conversation = fresh_provider_conversation(&self.options)?;

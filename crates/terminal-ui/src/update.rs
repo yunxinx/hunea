@@ -35,6 +35,9 @@ pub enum AppEffect {
     OpenCopyPicker,
     OpenContextBudget,
     OpenMessageHistory,
+    MutatePromptAssembly {
+        mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
+    },
     ResetRuntimeSession,
     RespondRuntimePermission {
         target: RuntimeTarget,
@@ -254,10 +257,12 @@ impl Model {
                 draft_path,
                 original_draft,
                 failed,
-            } => {
-                self.apply_external_editor_finished(&draft_path, &original_draft, failed);
-                None
-            }
+            } => self
+                .apply_prompt_overlay_external_editor_finished(&draft_path, &original_draft, failed)
+                .or_else(|| {
+                    self.apply_external_editor_finished(&draft_path, &original_draft, failed);
+                    None
+                }),
             AppEvent::SelectionAutoScrollTick { token } => {
                 self.handle_selection_auto_scroll_tick(token);
                 None
@@ -465,6 +470,9 @@ impl Model {
         }
 
         if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.prompt_overlay_active() {
+                return self.open_prompt_overlay_editor_for_selection();
+            }
             return self
                 .maybe_prepare_external_editor_launch()
                 .map(AppEffect::LaunchExternalEditor);

@@ -34,6 +34,22 @@ struct DiscoveredSkill {
     disable_model_invocation: bool,
 }
 
+/// `ManualSkillPromptUse` 表示一次 `$skill` 当前轮注入解析后的 skill 使用项。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManualSkillPromptUse {
+    pub(crate) skill_name: String,
+    pub(crate) origin: PromptSourceOrigin,
+    pub(crate) skill_path: PathBuf,
+    pub(crate) body: String,
+}
+
+/// `ManualSkillMessageAssembly` 表示手动 skill 注入后的 provider-visible 用户消息。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManualSkillMessageAssembly {
+    pub(crate) provider_visible_user_text: String,
+    pub(crate) uses: Vec<ManualSkillPromptUse>,
+}
+
 #[derive(Debug, Clone)]
 struct PromptCandidateBody {
     body: String,
@@ -134,6 +150,53 @@ pub(crate) fn check_prompt_assembly_missing_sources_from_states(
 ) -> PromptAssemblyMissingSourcesCheck {
     let manager = resolve_prompt_assembly_manager_snapshot(work_dir, global_state, project_state);
     PromptAssemblyMissingSourcesCheck::from_manager(&manager)
+}
+
+/// `assemble_manual_skill_message` 解析当前用户消息里的 `$skill` 提及并拼装 provider-visible 文本。
+pub(crate) fn assemble_manual_skill_message(
+    work_dir: &Path,
+    user_text: &str,
+) -> ManualSkillMessageAssembly {
+    let discovered_skills = discover_skills(work_dir, None);
+    let skills_by_name = discovered_skills
+        .iter()
+        .map(|skill| (skill.name.clone(), skill))
+        .collect::<HashMap<_, _>>();
+    let mut seen_names = std::collections::HashSet::new();
+    let mut uses = Vec::new();
+    for skill_name in extract_manual_skill_mentions(user_text) {
+        if !seen_names.insert(skill_name.clone()) {
+            continue;
+        }
+        let Some(skill) = skills_by_name.get(&skill_name) else {
+            continue;
+        };
+        uses.push(ManualSkillPromptUse {
+            skill_name: skill.name.clone(),
+            origin: skill.origin,
+            skill_path: skill.skill_path.clone(),
+            body: format_long_lived_skill_body(skill),
+        });
+    }
+
+    let provider_visible_user_text = if uses.is_empty() {
+        user_text.to_string()
+    } else {
+        let mut sections = uses
+            .iter()
+            .map(|skill| skill.body.clone())
+            .collect::<Vec<_>>();
+        let trimmed_user_text = user_text.trim();
+        if !trimmed_user_text.is_empty() {
+            sections.push(trimmed_user_text.to_string());
+        }
+        sections.join("\n\n")
+    };
+
+    ManualSkillMessageAssembly {
+        provider_visible_user_text,
+        uses,
+    }
 }
 
 #[cfg(test)]
@@ -1031,6 +1094,22 @@ fn format_long_lived_skill_body(skill: &DiscoveredSkill) -> String {
     )
 }
 
+fn extract_manual_skill_mentions(user_text: &str) -> Vec<String> {
+    user_text
+        .split_whitespace()
+        .filter_map(|token| token.strip_prefix('$'))
+        .filter(|skill_name| {
+            !skill_name.is_empty()
+                && skill_name.chars().all(|character| {
+                    character.is_ascii_lowercase()
+                        || character.is_ascii_digit()
+                        || matches!(character, '-' | ':')
+                })
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 fn escape_xml(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -1524,5 +1603,60 @@ mod tests {
                     }
                 )
         }));
+    }
+
+    #[test]
+    fn assemble_manual_skill_message_expands_unique_mentions_in_first_use_order() {
+        let work_dir = temp_dir("manual-skill-assembly");
+        let repo_bootstrap_dir = work_dir.join(".agents/skills/repo-bootstrap");
+        fs::create_dir_all(&repo_bootstrap_dir).expect("repo-bootstrap dir should exist");
+        fs::write(
+            repo_bootstrap_dir.join(SKILL_FILE_NAME),
+            "---\nname: repo-bootstrap\ndescription: Bootstrap repo\n---\n# Repo Bootstrap\n\nBootstrap steps.\n",
+        )
+        .expect("repo-bootstrap skill should write");
+        let code_review_dir = work_dir.join(".agents/skills/code-review");
+        fs::create_dir_all(&code_review_dir).expect("code-review dir should exist");
+        fs::write(
+            code_review_dir.join(SKILL_FILE_NAME),
+            "---\nname: code-review\ndescription: Review code\n---\n# Code Review\n\nReview carefully.\n",
+        )
+        .expect("code-review skill should write");
+
+        let assembled = assemble_manual_skill_message(
+            &work_dir,
+            "Please use $repo-bootstrap before $code-review and repeat $repo-bootstrap",
+        );
+
+        assert_eq!(
+            assembled
+                .uses
+                .iter()
+                .map(|skill| skill.skill_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["repo-bootstrap", "code-review"]
+        );
+        assert_eq!(
+            assembled.provider_visible_user_text,
+            format!(
+                "{}\n\n{}\n\nPlease use $repo-bootstrap before $code-review and repeat $repo-bootstrap",
+                format_long_lived_skill_body(&DiscoveredSkill {
+                    name: "repo-bootstrap".to_string(),
+                    description: "Bootstrap repo".to_string(),
+                    skill_path: repo_bootstrap_dir.join(SKILL_FILE_NAME),
+                    body: "# Repo Bootstrap\n\nBootstrap steps.".to_string(),
+                    origin: PromptSourceOrigin::Project,
+                    disable_model_invocation: false,
+                }),
+                format_long_lived_skill_body(&DiscoveredSkill {
+                    name: "code-review".to_string(),
+                    description: "Review code".to_string(),
+                    skill_path: code_review_dir.join(SKILL_FILE_NAME),
+                    body: "# Code Review\n\nReview carefully.".to_string(),
+                    origin: PromptSourceOrigin::Project,
+                    disable_model_invocation: false,
+                }),
+            )
+        );
     }
 }

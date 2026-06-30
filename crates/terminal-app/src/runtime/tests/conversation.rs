@@ -190,3 +190,72 @@ fn startup_prompt_missing_source_check_emits_aggregated_runtime_event() {
     assert_eq!(missing_count, 1);
     cleanup(&root);
 }
+
+#[test]
+fn manual_skill_mentions_emit_synthetic_skill_usage_events_before_worker_failure() {
+    let root = temp_test_dir("manual-skill-events");
+    let work_dir = root.join("repo");
+    let skill_dir = work_dir.join(".agents/skills/code-review");
+    fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: code-review\ndescription: Review code\n---\n# Code Review\n\nReview carefully.\n",
+    )
+    .expect("skill file should exist");
+
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
+            0,
+            Vec::new(),
+            1,
+        ),
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "gpt-4o-mini".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+    let request = ConversationTurnRequest::new(
+        "openai",
+        ProviderKind::OpenAi,
+        "gpt-4o-mini",
+        None,
+        None,
+        None,
+        ConversationItem::text(Role::User, "Please audit this diff with $code-review"),
+    );
+    let target = request.target();
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::SubmitConversationTurn { target, request })
+        .expect("conversation should start");
+
+    let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    assert!(matches!(
+        events.as_slice(),
+        [RuntimeEvent::ToolActivityStarted { activity, .. }]
+            if activity.title.ends_with(".agents/skills/code-review/SKILL.md")
+                && activity.raw_input.as_ref().and_then(|raw| raw.string_field(&["hunea_skill_name"]))
+                    == Some("code-review".to_string())
+    ));
+
+    let failure = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::Failed { message, .. } => Some(message),
+            _ => None,
+        },
+        "worker failure after synthetic skill usage event",
+    );
+    assert!(
+        failure.contains("requires API key"),
+        "worker should still fail through the normal runtime path: {failure}"
+    );
+    cleanup(&root);
+}

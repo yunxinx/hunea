@@ -15,9 +15,10 @@ use runtime_domain::session::{
 use super::{
     TOOL_EXPLORATION_BRANCH_PREFIX, TOOL_EXPLORATION_CHILD_PREFIX,
     activity::{
-        is_list_dir_tool_call, is_runtime_read_tool_activity, list_dir_tool_call_title_chunks,
-        runtime_read_tool_activity_title_chunks, runtime_tool_activity_display_title,
-        specific_search_tool_activity_parts, style_for_color,
+        ToolActivityGroupFamily, is_list_dir_tool_call, is_runtime_read_tool_activity,
+        list_dir_tool_call_title_chunks, runtime_read_tool_activity_title_chunks,
+        runtime_skill_usage_descriptor, runtime_tool_activity_display_title,
+        specific_search_tool_activity_parts, style_for_color, tool_activity_group_family,
     },
 };
 
@@ -55,8 +56,7 @@ impl ExplorationDisplayLine {
 }
 
 pub(super) fn is_groupable_exploration_tool_call(call: &RuntimeToolActivity) -> bool {
-    call.status != RuntimeToolActivityStatus::Failed
-        && exploration_display_line_for_call(call).is_some()
+    call.status != RuntimeToolActivityStatus::Failed && tool_activity_group_family(call).is_some()
 }
 
 pub(super) fn standalone_exploration_tool_call(
@@ -79,6 +79,17 @@ pub(super) fn exploration_display_lines(
 }
 
 fn exploration_display_line_for_call(call: &RuntimeToolActivity) -> Option<ExplorationDisplayLine> {
+    if let Some(skill_usage) = runtime_skill_usage_descriptor(call) {
+        return Some(ExplorationDisplayLine {
+            action: "Read",
+            chunks: vec![HighlightChunk {
+                text: skill_usage.display_name,
+                style: Style::new(),
+            }],
+            coalesce: ExplorationDisplayCoalesce::TargetList,
+        });
+    }
+
     if is_runtime_read_tool_activity(call) {
         return Some(ExplorationDisplayLine {
             action: "Read",
@@ -115,6 +126,17 @@ fn exploration_display_line_for_call(call: &RuntimeToolActivity) -> Option<Explo
     }
 
     None
+}
+
+pub(super) fn exploration_group_family(
+    calls: &[RuntimeToolActivity],
+) -> Option<ToolActivityGroupFamily> {
+    let first = calls.first()?;
+    let family = tool_activity_group_family(first)?;
+    calls
+        .iter()
+        .all(|call| tool_activity_group_family(call) == Some(family))
+        .then_some(family)
 }
 
 fn title_detail_chunks(

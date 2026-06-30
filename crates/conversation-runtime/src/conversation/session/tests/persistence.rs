@@ -278,3 +278,91 @@ fn persistence_helpers_store_rich_tool_replay_without_duplicate_tool_result() {
         }
     );
 }
+
+#[test]
+fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_in_replay() {
+    let root = tempdir_path("worker-transcript-projection");
+    let work_dir = root.join("workspace");
+    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+    let store =
+        Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
+    let store_trait: Arc<dyn SessionStore> = store.clone();
+    let mut conversation =
+        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    let provider_user = ConversationItem::text(
+        Role::User,
+        "<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message",
+    );
+    let transcript_user = ConversationItem::text(Role::User, "raw user message");
+    let request = conversation
+        .prepare_turn_with_transcript(
+            &runtime_domain::session::ConversationTurnRequest::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "qwen3",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                None,
+                None,
+                provider_user.clone(),
+            ),
+            Some(transcript_user),
+            vec![TranscriptReplayItem::ToolActivity {
+                activity: RuntimeToolActivity {
+                    activity_id: "manual-skill-1-code-review".to_string(),
+                    title: "Read /tmp/code-review/SKILL.md".to_string(),
+                    kind: RuntimeToolKind::Read,
+                    status: RuntimeToolActivityStatus::Completed,
+                    content: Vec::new(),
+                    locations: Vec::new(),
+                    raw_input: Some(RuntimeToolActivityRawValue::from(serde_json::json!({
+                        "path": "/tmp/code-review/SKILL.md",
+                        "hunea_skill_name": "code-review",
+                    }))),
+                    raw_output: None,
+                },
+            }],
+        )
+        .expect("turn should prepare");
+    let (sender, _receiver) = mpsc::channel();
+    let persistence = request.persistence_cloned();
+    let cancellation = CancellationToken::new();
+    let mut state = SessionPersistenceState::default();
+
+    run_persistence(persist_turn_start(
+        persistence.as_ref(),
+        &sender,
+        &cancellation,
+        &mut state,
+    ))
+    .expect("turn start should persist");
+
+    let meta = run_store(store.list_sessions(
+        &ProjectDir::from_work_dir(&work_dir),
+        SessionListOptions::default(),
+    ))
+    .expect("session meta should list")
+    .into_iter()
+    .next()
+    .expect("session should exist");
+    let restored =
+        run_store(store.load_session(&meta.session_id, None)).expect("session should load");
+
+    assert_eq!(
+        restored
+            .items
+            .iter()
+            .map(|item| item.item.clone())
+            .collect::<Vec<_>>(),
+        vec![provider_user]
+    );
+    assert!(matches!(
+        restored.transcript.as_slice(),
+        [
+            TranscriptReplayItem::Message { role, content },
+            TranscriptReplayItem::ToolActivity { activity }
+        ] if role == &runtime_domain::session::TranscriptReplayRole::User
+            && content == "raw user message"
+            && activity.activity_id == "manual-skill-1-code-review"
+    ));
+}

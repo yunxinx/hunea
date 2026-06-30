@@ -13,7 +13,9 @@ use session_store::{
 
 use super::{PersistedConversationItem, ProviderConversation, ProviderConversationError};
 use crate::ProviderKind;
-use runtime_domain::session::ConversationTurnRequest;
+use runtime_domain::session::{
+    ConversationTurnRequest, TranscriptReplayItem, TranscriptReplayRole,
+};
 
 #[test]
 fn prepare_turn_uses_session_history_and_current_user_message() {
@@ -275,6 +277,60 @@ fn commit_turn_items_keeps_tool_items_for_future_turns() {
             ..
         }
     ));
+}
+
+#[test]
+fn prepare_turn_with_transcript_keeps_provider_and_transcript_user_messages_separate() {
+    let work_dir = PathBuf::from("/tmp/hunea-provider-conversation");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut conversation =
+        ProviderConversation::with_session_store(store, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    let turn = ConversationTurnRequest::new(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "qwen3",
+        Some("http://127.0.0.1:1234/v1".to_string()),
+        None,
+        None,
+        ConversationItem::text(
+            Role::User,
+            "<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message",
+        ),
+    );
+    let transcript_user_message = ConversationItem::text(Role::User, "raw user message");
+    let transcript_replay_after_user = vec![TranscriptReplayItem::Message {
+        role: TranscriptReplayRole::Assistant,
+        content: "synthetic replay".to_string(),
+    }];
+
+    let request = conversation
+        .prepare_turn_with_transcript(
+            &turn,
+            Some(transcript_user_message.clone()),
+            transcript_replay_after_user.clone(),
+        )
+        .expect("turn should prepare");
+    let persistence = request
+        .persistence_cloned()
+        .expect("persistence should be attached");
+
+    assert_eq!(
+        request.items().last().map(ConversationItem::text_content),
+        Some("<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message".to_string())
+    );
+    assert_eq!(
+        persistence.current_user_message.text_content(),
+        "<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message"
+    );
+    assert_eq!(
+        persistence.transcript_user_message.text_content(),
+        transcript_user_message.text_content()
+    );
+    assert_eq!(
+        persistence.transcript_replay_after_user,
+        transcript_replay_after_user
+    );
 }
 
 #[test]

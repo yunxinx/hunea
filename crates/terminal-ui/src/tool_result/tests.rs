@@ -1659,6 +1659,63 @@ fn single_exploration_tool_call_renders_as_standalone_row() {
 }
 
 #[test]
+fn single_skill_usage_renders_as_standalone_use_skill_row() {
+    let rendered_plain = ToolResultItem::from_exploration_tool_activity(
+        completed_skill_usage_call("code-review", false),
+        ToolActivityRenderMode::Compact,
+    )
+    .expect("skill usage should be an exploration-group activity")
+    .render_lines(80, default_palette())
+    .iter()
+    .map(line_to_plain_text)
+    .collect::<Vec<_>>();
+
+    assert_eq!(rendered_plain, vec!["● Use code-review Skill".to_string()]);
+}
+
+#[test]
+fn grouped_skill_usage_renders_use_skills_header_and_global_suffix() {
+    let mut item = ToolResultItem::from_exploration_tool_activity(
+        completed_skill_usage_call("repo-bootstrap", false),
+        ToolActivityRenderMode::Compact,
+    )
+    .expect("skill usage should be groupable");
+    assert!(
+        item.append_exploration_tool_activity(completed_skill_usage_call("code-review", false,))
+    );
+    assert!(item.append_exploration_tool_activity(completed_skill_usage_call("lint", true,)));
+    assert!(item.mark_exploration_complete());
+
+    let rendered_plain = item
+        .render_lines(120, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec![
+            "● Use Skills".to_string(),
+            "  └ Read repo-bootstrap, code-review, lint(global)".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn skill_usage_group_does_not_merge_with_regular_exploration_group() {
+    let mut item = ToolResultItem::from_exploration_tool_activity(
+        completed_skill_usage_call("code-review", false),
+        ToolActivityRenderMode::Compact,
+    )
+    .expect("skill usage should be groupable");
+
+    assert!(
+        !item.append_exploration_tool_activity(completed_read_call("Cargo.toml")),
+        "skill usage should remain separate from regular exploration groups"
+    );
+}
+
+#[test]
 fn grouped_grep_and_find_keep_specific_actions_and_show_workspace_path() {
     let mut item = ToolResultItem::from_exploration_tool_activity(
         completed_grep_call("workspace_relative_path", None),
@@ -1938,6 +1995,34 @@ fn completed_read_call(path: &str) -> RuntimeToolActivity {
             line: None,
         }],
         raw_input: Some(serde_json::json!({ "path": path }).into()),
+        raw_output: Some("content".into()),
+    }
+}
+
+fn completed_skill_usage_call(skill_name: &str, is_global: bool) -> RuntimeToolActivity {
+    let skill_root = if is_global {
+        format!("/tmp/home/.agents/skills/{skill_name}")
+    } else {
+        format!("/tmp/repo/.agents/skills/{skill_name}")
+    };
+    RuntimeToolActivity {
+        activity_id: format!("call-skill-{skill_name}"),
+        title: format!("Read {skill_root}/SKILL.md"),
+        kind: RuntimeToolKind::Read,
+        status: RuntimeToolActivityStatus::Completed,
+        content: vec![RuntimeToolActivityContent::Text("content".to_string())],
+        locations: vec![RuntimeToolActivityLocation {
+            path: format!("{skill_root}/SKILL.md"),
+            line: None,
+        }],
+        raw_input: Some(
+            serde_json::json!({
+                "path": format!("{skill_root}/SKILL.md"),
+                "hunea_skill_name": skill_name,
+                "hunea_skill_origin": if is_global { "global" } else { "project" },
+            })
+            .into(),
+        ),
         raw_output: Some("content".into()),
     }
 }

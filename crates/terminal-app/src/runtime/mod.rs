@@ -63,6 +63,7 @@ pub(crate) struct AppRuntimeCoordinator {
     session_store_worker: SessionStoreWorker,
     context_budget_worker: ContextBudgetWorker,
     pending_runtime_events: Vec<RuntimeEvent>,
+    manual_skill_activity_sequence: usize,
 }
 
 impl AppRuntimeCoordinator {
@@ -78,6 +79,7 @@ impl AppRuntimeCoordinator {
             session_store_worker: SessionStoreWorker::new(),
             context_budget_worker: ContextBudgetWorker::new().map_err(|error| error.to_string())?,
             pending_runtime_events: Vec::new(),
+            manual_skill_activity_sequence: 0,
         })
     }
 
@@ -153,6 +155,7 @@ impl AppRuntimeCoordinator {
                 self.workspace_tools =
                     conversation_workspace_tools(&self.options.managed_search_tools);
                 self.pending_runtime_events.clear();
+                self.manual_skill_activity_sequence = 0;
                 Ok(RuntimeCommandReceipt::Accepted)
             }
         }

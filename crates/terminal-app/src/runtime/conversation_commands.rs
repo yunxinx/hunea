@@ -1,6 +1,14 @@
-use runtime_domain::session::{ConversationTurnRequest, RuntimeCommandReceipt, RuntimeTarget};
+use runtime_domain::{
+    prompt_assembly::PromptSourceOrigin,
+    session::{
+        ConversationTurnRequest, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
+        RuntimeToolActivity, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
+        RuntimeToolKind, TranscriptReplayItem,
+    },
+};
 
 use super::{AppRuntimeCoordinator, ensure_conversation_target};
+use crate::prompt_assembly::{ManualSkillMessageAssembly, ManualSkillPromptUse};
 
 impl AppRuntimeCoordinator {
     pub(super) fn truncate_conversation(
@@ -69,11 +77,34 @@ impl AppRuntimeCoordinator {
             return Err("Conversation request is already running".to_string());
         }
 
+        let transcript_user_message = request.message().clone();
+        let manual_skill_assembly =
+            self.manual_skill_message_assembly(request.message_text().as_str())?;
+        let provider_request = if manual_skill_assembly.uses.is_empty() {
+            request.clone()
+        } else {
+            ConversationTurnRequest::new_user_text(
+                request.provider_id(),
+                request.provider_kind(),
+                request.model_id(),
+                request.base_url().map(str::to_string),
+                request.api_key().cloned(),
+                request.api_key_env().map(str::to_string),
+                manual_skill_assembly.provider_visible_user_text.clone(),
+            )
+        };
+        let manual_skill_activities = self.manual_skill_activities(&manual_skill_assembly.uses);
         let activity_label = request.model_id().to_string();
         let prepared_request = self
             .provider_conversation
-            .prepare_turn(&request)
+            .prepare_turn_with_transcript(
+                &provider_request,
+                Some(transcript_user_message),
+                self.manual_skill_replay_items(&manual_skill_activities),
+            )
             .map_err(|error| error.to_string())?;
+        self.pending_runtime_events
+            .extend(self.manual_skill_runtime_events(target.clone(), &manual_skill_activities));
         self.conversation_worker.start(
             prepared_request,
             self.workspace_tools.clone(),
@@ -112,5 +143,93 @@ impl AppRuntimeCoordinator {
         } else {
             Ok(RuntimeCommandReceipt::Accepted)
         }
+    }
+
+    fn manual_skill_message_assembly(
+        &self,
+        user_text: &str,
+    ) -> Result<ManualSkillMessageAssembly, String> {
+        let Some(work_dir) = self
+            .options
+            .session_header_template
+            .as_ref()
+            .map(|header| header.work_dir.as_path())
+        else {
+            return Ok(ManualSkillMessageAssembly {
+                provider_visible_user_text: user_text.to_string(),
+                uses: Vec::new(),
+            });
+        };
+        Ok(crate::prompt_assembly::assemble_manual_skill_message(
+            work_dir, user_text,
+        ))
+    }
+
+    fn manual_skill_activities(
+        &mut self,
+        uses: &[ManualSkillPromptUse],
+    ) -> Vec<RuntimeToolActivity> {
+        uses.iter()
+            .map(|skill_use| self.synthetic_manual_skill_activity(skill_use))
+            .collect()
+    }
+
+    fn manual_skill_runtime_events(
+        &self,
+        target: RuntimeTarget,
+        activities: &[RuntimeToolActivity],
+    ) -> Vec<RuntimeEvent> {
+        activities
+            .iter()
+            .cloned()
+            .map(|activity| RuntimeEvent::ToolActivityStarted {
+                target: target.clone(),
+                activity,
+            })
+            .collect()
+    }
+
+    fn manual_skill_replay_items(
+        &self,
+        activities: &[RuntimeToolActivity],
+    ) -> Vec<TranscriptReplayItem> {
+        activities
+            .iter()
+            .map(|skill_use| TranscriptReplayItem::ToolActivity {
+                activity: skill_use.clone(),
+            })
+            .collect()
+    }
+
+    fn synthetic_manual_skill_activity(
+        &mut self,
+        skill_use: &ManualSkillPromptUse,
+    ) -> RuntimeToolActivity {
+        self.manual_skill_activity_sequence = self.manual_skill_activity_sequence.saturating_add(1);
+        RuntimeToolActivity {
+            activity_id: format!(
+                "manual-skill-{}-{}",
+                self.manual_skill_activity_sequence, skill_use.skill_name
+            ),
+            title: format!("Read {}", skill_use.skill_path.display()),
+            kind: RuntimeToolKind::Read,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(RuntimeToolActivityRawValue::from(serde_json::json!({
+                "path": skill_use.skill_path.display().to_string(),
+                "hunea_skill_name": skill_use.skill_name,
+                "hunea_skill_origin": manual_skill_origin_label(skill_use.origin),
+            }))),
+            raw_output: None,
+        }
+    }
+}
+
+fn manual_skill_origin_label(origin: PromptSourceOrigin) -> &'static str {
+    match origin {
+        PromptSourceOrigin::Builtin => "builtin",
+        PromptSourceOrigin::Global => "global",
+        PromptSourceOrigin::Project => "project",
     }
 }

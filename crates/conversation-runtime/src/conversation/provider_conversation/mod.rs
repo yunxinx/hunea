@@ -5,7 +5,7 @@ use std::sync::Arc;
 use provider_protocol::{ConversationItem, Role};
 use runtime_domain::{
     prompt_assembly::PromptPreludeSnapshot,
-    session::{ConversationTurnRequest, RuntimeTarget},
+    session::{ConversationTurnRequest, RuntimeTarget, TranscriptReplayItem},
 };
 use session_store::{
     ConfigSnapshot, ResolvedSessionState, SessionHeader, SessionId, SessionStore, SessionStoreError,
@@ -290,6 +290,17 @@ impl ProviderConversation {
         &mut self,
         turn: &ConversationTurnRequest,
     ) -> Result<PreparedConversationRequest, ProviderConversationError> {
+        self.prepare_turn_with_transcript(turn, None, Vec::new())
+    }
+
+    /// `prepare_turn_with_transcript` 允许调用方为当前 turn 指定单独的 transcript 展示消息。
+    #[must_use = "prepared turn requests must be submitted or explicitly discarded"]
+    pub fn prepare_turn_with_transcript(
+        &mut self,
+        turn: &ConversationTurnRequest,
+        transcript_user_message: Option<ConversationItem>,
+        transcript_replay_after_user: Vec<TranscriptReplayItem>,
+    ) -> Result<PreparedConversationRequest, ProviderConversationError> {
         if turn.message().role() != Some(Role::User) {
             return Err(ProviderConversationError::NonUserTurnMessage);
         }
@@ -299,6 +310,8 @@ impl ProviderConversation {
 
         let user_message = turn.message().clone();
         self.pending_user_message = Some(user_message.clone());
+        let transcript_user_message =
+            transcript_user_message.unwrap_or_else(|| user_message.clone());
         let system_prompt = self.system_prompt.clone();
         let prompt_prelude = self.prompt_prelude.clone();
         let persistence =
@@ -315,6 +328,8 @@ impl ProviderConversation {
                         prompt_prelude,
                     },
                     current_user_message: user_message.clone(),
+                    transcript_user_message,
+                    transcript_replay_after_user,
                 });
 
         Ok(PreparedConversationRequest::from_turn(

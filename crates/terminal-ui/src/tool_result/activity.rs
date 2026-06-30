@@ -78,6 +78,17 @@ enum RuntimeDiffChangeKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ToolActivityGroupFamily {
+    Exploration,
+    SkillUsage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RuntimeSkillUsageDescriptor {
+    pub(super) display_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReadToolLineRange {
     start_line: usize,
     end_line: usize,
@@ -902,6 +913,9 @@ pub(super) fn runtime_tool_activity_display_title(call: &RuntimeToolActivity) ->
 pub(super) fn runtime_read_tool_activity_title_chunks(
     call: &RuntimeToolActivity,
 ) -> Vec<HighlightChunk> {
+    if let Some(skill_usage) = runtime_skill_usage_descriptor(call) {
+        return runtime_skill_usage_title_chunks(&skill_usage.display_name);
+    }
     let title_style = Style::new().add_modifier(Modifier::BOLD);
     let Some(target) = runtime_read_tool_activity_target(call) else {
         return vec![HighlightChunk {
@@ -917,6 +931,20 @@ pub(super) fn runtime_read_tool_activity_title_chunks(
         },
         HighlightChunk {
             text: format!(" {target}"),
+            style: Style::new(),
+        },
+    ]
+}
+
+pub(super) fn runtime_skill_usage_title_chunks(display_name: &str) -> Vec<HighlightChunk> {
+    let title_style = Style::new().add_modifier(Modifier::BOLD);
+    vec![
+        HighlightChunk {
+            text: "Use".to_string(),
+            style: title_style,
+        },
+        HighlightChunk {
+            text: format!(" {display_name} Skill"),
             style: Style::new(),
         },
     ]
@@ -1083,6 +1111,21 @@ pub(super) fn is_runtime_read_tool_activity(call: &RuntimeToolActivity) -> bool 
         || runtime_read_tool_activity_title_target(&call.title).is_some()
 }
 
+pub(super) fn tool_activity_group_family(
+    call: &RuntimeToolActivity,
+) -> Option<ToolActivityGroupFamily> {
+    if runtime_skill_usage_descriptor(call).is_some() {
+        return Some(ToolActivityGroupFamily::SkillUsage);
+    }
+    if is_runtime_read_tool_activity(call)
+        || is_list_dir_tool_call(call)
+        || call.kind == RuntimeToolKind::Search
+    {
+        return Some(ToolActivityGroupFamily::Exploration);
+    }
+    None
+}
+
 fn read_tool_target_with_line_range(
     mut target: String,
     line_range: Option<ReadToolLineRange>,
@@ -1133,6 +1176,85 @@ fn should_collapse_list_dir_tool_call(call: &RuntimeToolActivity) -> bool {
 fn should_collapse_specific_search_tool_activity(call: &RuntimeToolActivity) -> bool {
     specific_search_tool_activity_parts(call).is_some()
         && call.status != RuntimeToolActivityStatus::Failed
+}
+
+pub(super) fn runtime_skill_usage_descriptor(
+    call: &RuntimeToolActivity,
+) -> Option<RuntimeSkillUsageDescriptor> {
+    let name_from_metadata = call
+        .raw_input
+        .as_ref()
+        .and_then(|raw_input| raw_input.string_field(&["hunea_skill_name"]));
+    let origin_from_metadata = call
+        .raw_input
+        .as_ref()
+        .and_then(|raw_input| raw_input.string_field(&["hunea_skill_origin"]));
+    if let Some(skill_name) = name_from_metadata {
+        return Some(RuntimeSkillUsageDescriptor {
+            display_name: format_skill_usage_display_name(
+                &skill_name,
+                origin_from_metadata.as_deref(),
+            ),
+        });
+    }
+
+    let raw_path = runtime_read_tool_activity_raw_path(call)?;
+    skill_usage_descriptor_from_path(&raw_path)
+}
+
+fn runtime_read_tool_activity_raw_path(call: &RuntimeToolActivity) -> Option<String> {
+    if call.kind == RuntimeToolKind::Read
+        && let [location] = call.locations.as_slice()
+        && !location.path.trim().is_empty()
+    {
+        return Some(location.path.trim().to_string());
+    }
+
+    call.raw_input
+        .as_ref()
+        .and_then(|raw_input| raw_input.string_field(&["path"]))
+        .or_else(|| runtime_read_tool_activity_title_target(&call.title))
+}
+
+fn skill_usage_descriptor_from_path(path: &str) -> Option<RuntimeSkillUsageDescriptor> {
+    let resolved_path = resolve_skill_usage_path(path);
+    let file_name = resolved_path.file_name()?.to_str()?;
+    if file_name != "SKILL.md" {
+        return None;
+    }
+    let skill_name = resolved_path.parent()?.file_name()?.to_str()?;
+    let origin = infer_skill_usage_origin(&resolved_path);
+    Some(RuntimeSkillUsageDescriptor {
+        display_name: format_skill_usage_display_name(skill_name, origin),
+    })
+}
+
+fn resolve_skill_usage_path(path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else if let Ok(cwd) = env::current_dir() {
+        cwd.join(path)
+    } else {
+        path
+    }
+}
+
+fn infer_skill_usage_origin(path: &Path) -> Option<&'static str> {
+    let home_dir = env::var_os("HOME").map(PathBuf::from)?;
+    let global_root = home_dir.join(".agents").join("skills");
+    if path.starts_with(&global_root) {
+        return Some("global");
+    }
+    None
+}
+
+fn format_skill_usage_display_name(skill_name: &str, origin: Option<&str>) -> String {
+    if origin == Some("global") {
+        format!("{skill_name}(global)")
+    } else {
+        skill_name.to_string()
+    }
 }
 
 fn list_dir_tool_call_target(call: &RuntimeToolActivity) -> String {

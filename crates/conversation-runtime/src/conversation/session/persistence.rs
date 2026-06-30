@@ -189,9 +189,17 @@ pub(super) async fn persist_turn_start(
         append_transcript_replay_items(
             persistence,
             session_id,
-            transcript_replay_items_from_context_item(&persistence.current_user_message, state),
+            transcript_replay_items_from_context_item(&persistence.transcript_user_message, state),
         )
         .await?;
+        if !persistence.transcript_replay_after_user.is_empty() {
+            append_transcript_replay_items(
+                persistence,
+                session_id,
+                persistence.transcript_replay_after_user.clone(),
+            )
+            .await?;
+        }
     }
 
     state.has_persisted_turn_start = true;

@@ -28,6 +28,7 @@ pub(super) enum CommandPanelAction {
     Exit,
     OpenResumePicker,
     OpenCopyPicker,
+    OpenContextBudget,
     OpenMessageHistory,
     OpenEntryRewind,
     OpenCoarseRewind,
@@ -396,6 +397,13 @@ impl Model {
                 self.sync_composer_height();
                 Some(AppEffect::OpenResumePicker)
             }
+            CommandPanelAction::OpenContextBudget => {
+                self.composer_mut().clear();
+                self.sync_command_panel_navigation();
+                self.sync_file_picker_state();
+                self.sync_composer_height();
+                Some(AppEffect::OpenContextBudget)
+            }
             CommandPanelAction::OpenCopyPicker => {
                 self.composer_mut().clear();
                 self.sync_command_panel_navigation();
@@ -510,6 +518,12 @@ fn filter_base_command_panel_items(
         aliases: Vec::new(),
         description: "Resume a previous session".to_string(),
         action: CommandPanelAction::OpenResumePicker,
+    });
+    items.push(CommandPanelItem {
+        name: "/context".to_string(),
+        aliases: Vec::new(),
+        description: "Inspect context budget for the next turn".to_string(),
+        action: CommandPanelAction::OpenContextBudget,
     });
     items.push(CommandPanelItem {
         name: "/copy".to_string(),

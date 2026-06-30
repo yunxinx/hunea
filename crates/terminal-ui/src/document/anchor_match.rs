@@ -125,7 +125,8 @@ fn score_document_anchor_match(
         }
         DocumentAnchorRegion::CommandPanel
         | DocumentAnchorRegion::ToolApprovalPanel
-        | DocumentAnchorRegion::ModelPanel => {
+        | DocumentAnchorRegion::ModelPanel
+        | DocumentAnchorRegion::ContextBudgetPanel => {
             (candidate.gap_index == target.gap_index).then_some(0)
         }
         DocumentAnchorRegion::Transcript => {

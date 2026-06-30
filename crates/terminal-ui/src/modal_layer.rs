@@ -62,6 +62,7 @@ impl Model {
     pub(crate) fn blocks_composer_input(&self) -> bool {
         self.top_modal_layer().is_some()
             || self.model_panel_active()
+            || self.context_budget_active()
             || self.tool_approval_panel_active()
     }
 
@@ -247,6 +248,17 @@ mod tests {
         let mut model = Model::new(StartupBannerOptions::default());
 
         model.open_model_panel();
+
+        assert_eq!(model.top_modal_layer(), None);
+        assert!(model.blocks_composer_input());
+        assert!(!model.modal_blocks_pointer_passthrough());
+    }
+
+    #[test]
+    fn context_budget_blocks_composer_without_becoming_fullscreen_modal() {
+        let mut model = Model::new(StartupBannerOptions::default());
+
+        model.open_context_budget_loading();
 
         assert_eq!(model.top_modal_layer(), None);
         assert!(model.blocks_composer_input());

@@ -3,8 +3,9 @@ use super::{
     RuntimeIdentity, RuntimePermissionRequest, RuntimeRequestMetrics, RuntimeTarget,
     RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityUpdate,
     SessionBranchTreePayload, SessionLoadRequestId, SessionPickerRow, SessionPreviewPayload,
-    SessionResumePayload, SessionTreePayload,
+    SessionResumePayload, SessionTreePayload, context_budget::ContextBudgetLoadErrorPayload,
 };
+use crate::context_budget::ContextBudgetSnapshot;
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +94,14 @@ pub enum RuntimeEvent {
     CopyPickerTreeLoadFailed {
         request_id: SessionLoadRequestId,
         message: String,
+    },
+    ContextBudgetSnapshotLoaded {
+        request_id: SessionLoadRequestId,
+        payload: ContextBudgetSnapshot,
+    },
+    ContextBudgetSnapshotLoadFailed {
+        request_id: SessionLoadRequestId,
+        error: ContextBudgetLoadErrorPayload,
     },
     SessionBranchTreeLoaded {
         request_id: SessionLoadRequestId,
@@ -194,7 +203,9 @@ impl RuntimeEvent {
             | Self::MessageHistoryPickerRowsLoaded { .. }
             | Self::MessageHistoryPickerRowsLoadFailed { .. }
             | Self::MessageHistoryRecorded { .. }
-            | Self::MessageHistoryRecordFailed { .. } => None,
+            | Self::MessageHistoryRecordFailed { .. }
+            | Self::ContextBudgetSnapshotLoaded { .. }
+            | Self::ContextBudgetSnapshotLoadFailed { .. } => None,
         }
     }
 }

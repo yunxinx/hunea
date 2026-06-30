@@ -53,6 +53,7 @@ impl Model {
         let old_column = self.composer.column();
 
         self.composer.reset_text_and_move_to_end(String::new());
+        self.close_context_budget();
         self.close_tool_approval_panel();
         self.model_panel.is_open = true;
         self.model_panel.search_query.clear();

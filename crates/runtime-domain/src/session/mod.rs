@@ -1,6 +1,7 @@
 mod activity;
 mod capability;
 mod command;
+pub mod context_budget;
 mod conversation;
 mod event;
 mod identity;
@@ -18,6 +19,7 @@ pub use activity::{
 };
 pub use capability::RuntimeCapability;
 pub use command::{RuntimeCommand, RuntimeCommandReceipt};
+pub use context_budget::{ContextBudgetLoadErrorPayload, ContextBudgetProjectionErrorKind};
 pub use conversation::{
     ConversationEvent, ConversationRequest, ConversationResponse, ConversationTurnRequest,
     ManagedSearchTool, ProviderRequest, ProviderRequestMetrics,

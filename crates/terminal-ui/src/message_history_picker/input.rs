@@ -276,6 +276,7 @@ impl Model {
     pub(crate) fn can_open_message_history_picker_via_ctrl_r(&self) -> bool {
         self.top_modal_layer().is_none()
             && !self.model_panel_active()
+            && !self.context_budget_active()
             && !self.tool_approval_panel_active()
             && !self.command_panel_active()
             && !self.file_picker_active()

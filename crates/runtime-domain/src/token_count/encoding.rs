@@ -1,13 +1,34 @@
-const APPROX_BYTES_PER_TOKEN: usize = 4;
-const FALLBACK_ENCODING: &str = "o200k_base";
-const LEGACY_GPT_ENCODING: &str = "cl100k_base";
+use crate::model_family::classify_model_family;
+use crate::token_count::approximate_tokens_from_bytes;
 
-pub(crate) fn estimate_text_tokens(model_id: &str, text: &str) -> usize {
-    if text.is_empty() {
-        return 0;
+const FALLBACK_ENCODING: &str = "o200k_base";
+
+/// `TokenEncoding` 缓存一次 model 解析得到的 encoding 选择，供重复估算复用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenEncoding {
+    encoding_name: &'static str,
+}
+
+impl TokenEncoding {
+    /// `for_model` 解析 model 对应的 token encoding。
+    pub fn for_model(model_id: &str) -> Self {
+        Self {
+            encoding_name: encoding_name_for_model(model_id),
+        }
     }
 
-    estimate_text_tokens_with_encoding_name(encoding_name_for_model(model_id), text)
+    /// `estimate_text` 使用已解析的 encoding 估算文本 token 数。
+    pub fn estimate_text(self, text: &str) -> usize {
+        if text.is_empty() {
+            return 0;
+        }
+
+        estimate_text_tokens_with_encoding_name(self.encoding_name, text)
+    }
+}
+
+pub fn estimate_text_tokens(model_id: &str, text: &str) -> usize {
+    TokenEncoding::for_model(model_id).estimate_text(text)
 }
 
 fn estimate_text_tokens_with_encoding_name(encoding_name: &str, text: &str) -> usize {
@@ -26,46 +47,29 @@ pub(crate) fn encoding_name_for_model(model_id: &str) -> &'static str {
 }
 
 fn alias_encoding_for_model(model_id: &str) -> Option<&'static str> {
-    let lower = model_id.to_ascii_lowercase();
-    if lower.contains("qwen") {
-        return Some("qwen2");
-    }
-    if lower.contains("deepseek") {
-        return Some("deepseek_v3");
-    }
-    if lower.contains("llama") {
-        return Some("llama3");
-    }
-    if lower.contains("mistral") || lower.contains("mixtral") || lower.contains("codestral") {
-        return Some("mistral_v3");
-    }
-    if lower.contains("gpt-3.5") || contains_legacy_gpt4_alias(&lower) {
-        return Some(LEGACY_GPT_ENCODING);
-    }
-    if lower.contains("gpt")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4")
-    {
-        return Some(FALLBACK_ENCODING);
-    }
-    None
-}
-
-fn contains_legacy_gpt4_alias(model_id: &str) -> bool {
-    model_id.contains("gpt-4")
-        && !model_id.contains("gpt-4.1")
-        && !model_id.contains("gpt-4o")
-        && !model_id.contains("gpt-4.5")
-}
-
-fn approximate_tokens_from_bytes(bytes: usize) -> usize {
-    bytes.saturating_add(APPROX_BYTES_PER_TOKEN - 1) / APPROX_BYTES_PER_TOKEN
+    classify_model_family(model_id).preferred_encoding()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolved_token_encoding_matches_direct_model_estimation() {
+        let encoding = TokenEncoding::for_model("gpt-4o");
+
+        assert_eq!(
+            encoding.estimate_text("hello world"),
+            estimate_text_tokens("gpt-4o", "hello world")
+        );
+    }
+
+    #[test]
+    fn resolved_token_encoding_keeps_alias_fallbacks() {
+        let encoding = TokenEncoding::for_model("local/qwen3");
+
+        assert!(encoding.estimate_text("你好，hunea") > 0);
+    }
 
     #[test]
     fn estimate_text_tokens_uses_tiktoken_for_known_model() {

@@ -1255,25 +1255,12 @@ fn runtime_tool_activity_diff_background(
 fn runtime_tool_activity_diff_tint(palette: TerminalPalette, is_insert: bool) -> Option<Color> {
     let _surface = palette.surface?;
 
-    let has_dark_background = palette_main_is_light_text(palette);
-    Some(match (has_dark_background, is_insert) {
+    Some(match (palette.has_dark_background(), is_insert) {
         (true, true) => Color::Rgb(38, 58, 44),
         (true, false) => Color::Rgb(64, 44, 44),
         (false, true) => Color::Rgb(228, 242, 230),
         (false, false) => Color::Rgb(247, 229, 229),
     })
-}
-
-fn palette_main_is_light_text(palette: TerminalPalette) -> bool {
-    match palette.main {
-        Color::Rgb(red, green, blue) => {
-            let luminance =
-                0.299 * f32::from(red) + 0.587 * f32::from(green) + 0.114 * f32::from(blue);
-            luminance > 128.0
-        }
-        Color::Reset => true,
-        _ => true,
-    }
 }
 
 fn runtime_tool_kind_label(kind: RuntimeToolKind) -> &'static str {

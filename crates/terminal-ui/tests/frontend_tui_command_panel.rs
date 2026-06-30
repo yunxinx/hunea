@@ -71,7 +71,7 @@ fn command_panel_tab_completes_alias_to_exit() {
 #[test]
 fn command_panel_tab_completes_new_alias_to_clear() {
     let mut model = ready_model(48, 12, ModelOptions::default());
-    type_text(&mut model, "/ne");
+    type_text(&mut model, "/new");
 
     model.update(AppEvent::Key(KeyCode::Tab.into()));
 
@@ -136,6 +136,10 @@ fn command_panel_shows_resume_and_tree_by_default() {
     assert!(
         rows.iter().any(|row| row.contains("/copy")),
         "default slash menu should expose /copy: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("/context")),
+        "default slash menu should expose /context: {rows:?}"
     );
     assert!(
         rows.iter().any(|row| row.contains("/tree")),

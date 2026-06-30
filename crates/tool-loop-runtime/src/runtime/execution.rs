@@ -320,7 +320,7 @@ pub(super) struct ToolCallExecutionContext<'a> {
     pub(super) state: &'a mut RuntimeTurnState,
 }
 
-pub(super) fn ai_tool_definitions_from_registry(registry: &ToolRegistry) -> Vec<AiToolDefinition> {
+pub fn provider_tool_definitions_from_registry(registry: &ToolRegistry) -> Vec<AiToolDefinition> {
     registry
         .definitions()
         .map(|definition| {

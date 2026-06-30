@@ -10,5 +10,6 @@ pub use activity::{
 };
 pub use error::ToolLoopError;
 pub use runtime::{
-    ToolLoopCompletion, ToolLoopOptions, ToolLoopProgress, ToolLoopResponse, run_tool_loop,
+    ToolLoopCompletion, ToolLoopOptions, ToolLoopProgress, ToolLoopResponse,
+    provider_tool_definitions_from_registry, run_tool_loop,
 };

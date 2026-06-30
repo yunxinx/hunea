@@ -22,6 +22,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::style::Color;
+use runtime_domain::context_budget::ContextTokenLimit;
 use runtime_domain::model_catalog::ProviderSyncRequest;
 use runtime_domain::provider::ProviderKind;
 use runtime_domain::request_policy::RuntimeRequestPolicy;
@@ -65,6 +66,10 @@ fn ready_model() -> Model {
     model
 }
 
+fn context_limit(value: u32) -> ContextTokenLimit {
+    ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
+}
+
 impl RuntimeCoordinator for TestRuntimeCoordinator {
     fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
         std::mem::take(&mut self.runtime_events)
@@ -97,6 +102,10 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
                 self.runtime_events.clear();
                 self.conversation_running = false;
                 self.reset_count += 1;
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
+            RuntimeCommand::CancelContextBudgetSnapshot => {
+                self.runtime_events.clear();
                 Ok(RuntimeCommandReceipt::Accepted)
             }
             RuntimeCommand::TruncateConversation {
@@ -139,6 +148,22 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
             | RuntimeCommand::LoadMessageHistoryStartupCache
             | RuntimeCommand::LoadMessageHistoryPickerRows { .. }
             | RuntimeCommand::RecordMessageHistory { .. } => Ok(RuntimeCommandReceipt::Accepted),
+            RuntimeCommand::LoadContextBudgetSnapshot { request_id, .. } => {
+                self.runtime_events
+                    .push(RuntimeEvent::ContextBudgetSnapshotLoaded {
+                        request_id,
+                        payload: runtime_domain::context_budget::ContextBudgetSnapshot {
+                            model_id: "qwen3".to_string(),
+                            segments: vec![],
+                            total_estimated_tokens: 0,
+                            usage: runtime_domain::context_budget::ContextWindowUsage {
+                                limit: context_limit(256_000),
+                                used: 0,
+                            },
+                        },
+                    });
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
         }
     }
 
@@ -181,6 +206,82 @@ fn open_copy_picker_effect_dispatches_copy_picker_tree_load() {
     assert_eq!(
         runtime_coordinator.last_command,
         Some(RuntimeCommand::LoadCopyPickerTree { request_id })
+    );
+}
+
+#[test]
+fn unrelated_runtime_commands_do_not_inject_context_budget_events() {
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+
+    runtime_coordinator
+        .dispatch_runtime_command(RuntimeCommand::ListSessions)
+        .expect("list sessions should be accepted");
+
+    assert!(
+        runtime_coordinator.runtime_events.is_empty(),
+        "non-context commands should not enqueue fake context budget events"
+    );
+}
+
+#[test]
+fn open_context_budget_effect_dispatches_snapshot_load_with_request_id() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.selected_model = Some(runtime_domain::model_catalog::ModelSelection::new(
+        "local", "qwen3",
+    ));
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+
+    super::effects::run_open_context_budget_effect(&mut model, &mut runtime_coordinator);
+
+    let request_id = model
+        .context_budget_pending_request_id_for_test()
+        .expect("context budget should keep a pending request id");
+    assert_eq!(
+        runtime_coordinator.last_command,
+        Some(RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id,
+            selection: runtime_domain::model_catalog::ModelSelection::new("local", "qwen3"),
+        })
+    );
+}
+
+#[test]
+fn open_context_budget_effect_dispatch_failure_uses_runtime_internal_error() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.selected_model = Some(runtime_domain::model_catalog::ModelSelection::new(
+        "local", "qwen3",
+    ));
+    let mut runtime_coordinator = TestRuntimeCoordinator {
+        next_runtime_error: Some("runtime unavailable".to_string()),
+        ..TestRuntimeCoordinator::default()
+    };
+
+    super::effects::run_open_context_budget_effect(&mut model, &mut runtime_coordinator);
+
+    let state = model
+        .context_budget
+        .as_ref()
+        .expect("context budget state should stay available");
+    assert!(matches!(
+        state.error,
+        Some(runtime_domain::session::ContextBudgetLoadErrorPayload::RuntimeInternal {
+            detail: Some(ref detail),
+        }) if detail == "runtime unavailable"
+    ));
+}
+
+#[test]
+fn closing_context_budget_dispatches_runtime_cancellation_housekeeping() {
+    let mut model = Model::new(StartupBannerOptions::default());
+    model.open_context_budget_loading();
+    let effect = model.update(AppEvent::Key(KeyCode::Esc.into()));
+    let mut runtime_coordinator = TestRuntimeCoordinator::default();
+
+    apply_effect_if_needed_for_test(&mut model, &mut runtime_coordinator, effect);
+
+    assert_eq!(
+        runtime_coordinator.last_command,
+        Some(RuntimeCommand::CancelContextBudgetSnapshot)
     );
 }
 
@@ -2082,6 +2183,12 @@ fn apply_effect_if_needed_for_test(
     runtime_coordinator: &mut TestRuntimeCoordinator,
     effect: Option<AppEffect>,
 ) {
+    if model.take_context_budget_cancellation_request() {
+        runtime_coordinator
+            .dispatch_runtime_command(RuntimeCommand::CancelContextBudgetSnapshot)
+            .expect("context budget cancel should be accepted in tests");
+    }
+
     match effect {
         Some(AppEffect::RecordMessageHistory { entry_id, text }) => {
             dispatch_record_message_history(model, runtime_coordinator, entry_id, text);

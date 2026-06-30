@@ -33,6 +33,7 @@ pub enum AppEffect {
     LaunchExternalEditor(ExternalEditorLaunch),
     CopySelection(String),
     OpenCopyPicker,
+    OpenContextBudget,
     OpenMessageHistory,
     ResetRuntimeSession,
     RespondRuntimePermission {
@@ -381,6 +382,9 @@ impl Model {
     fn handle_current_modal_or_panel_key(&mut self, key: KeyEvent) -> OverlayInputResult {
         if self.tool_approval_panel_active() {
             return self.handle_tool_approval_panel_key(key);
+        }
+        if self.context_budget_active() {
+            return self.handle_context_budget_key(key);
         }
         self.handle_top_modal_layer_key(key)
     }

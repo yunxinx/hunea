@@ -37,6 +37,8 @@ pub(super) fn apply_effect_if_needed(
     external_io: &mut ExternalIoRuntime,
     effect: Option<AppEffect>,
 ) -> Result<()> {
+    dispatch_context_budget_cancellation_if_needed(model, runtime_coordinator);
+
     let Some(effect) = effect else {
         return Ok(());
     };
@@ -75,6 +77,10 @@ pub(super) fn apply_effect_if_needed(
         }
         AppEffect::OpenCopyPicker => {
             run_open_copy_picker_effect(model, runtime_coordinator);
+            Ok(())
+        }
+        AppEffect::OpenContextBudget => {
+            run_open_context_budget_effect(model, runtime_coordinator);
             Ok(())
         }
         AppEffect::OpenMessageHistory => {
@@ -167,6 +173,21 @@ pub(super) fn apply_effect_if_needed(
     }
 }
 
+fn dispatch_context_budget_cancellation_if_needed(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) {
+    if !model.take_context_budget_cancellation_request() {
+        return;
+    }
+
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::CancelContextBudgetSnapshot)
+    {
+        model.show_toast(ToastSeverity::Error, message);
+    }
+}
+
 pub(super) fn run_switch_branch_effect(
     model: &mut Model,
     runtime_coordinator: &mut impl RuntimeCoordinator,
@@ -191,6 +212,33 @@ pub(super) fn run_open_copy_picker_effect(
         .dispatch_runtime_command(RuntimeCommand::LoadCopyPickerTree { request_id })
     {
         model.show_copy_picker_error(&message);
+    }
+}
+
+pub(super) fn run_open_context_budget_effect(
+    model: &mut Model,
+    runtime_coordinator: &mut impl RuntimeCoordinator,
+) {
+    let Some(selection) = model.selected_model.clone() else {
+        model.show_toast(
+            crate::toast::ToastSeverity::Error,
+            "Select a model before opening context budget",
+        );
+        return;
+    };
+    let request_id = model.open_context_budget_loading();
+    if let Err(message) =
+        runtime_coordinator.dispatch_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id,
+            selection,
+        })
+    {
+        model.show_context_budget_error(
+            request_id,
+            runtime_domain::session::ContextBudgetLoadErrorPayload::RuntimeInternal {
+                detail: Some(message),
+            },
+        );
     }
 }
 

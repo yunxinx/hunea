@@ -1,0 +1,200 @@
+use std::collections::BTreeMap;
+
+use crate::context_budget::ContextTokenLimit;
+use crate::model_catalog::{ModelCatalog, ModelSelection};
+use crate::model_family::classify_model_family;
+
+const DEFAULT_CONTEXT_LIMIT_TOKENS: u32 = 256_000;
+const DEFAULT_CONTEXT_LIMIT: ContextTokenLimit =
+    match ContextTokenLimit::new(DEFAULT_CONTEXT_LIMIT_TOKENS) {
+        Some(limit) => limit,
+        None => panic!("default context limit must stay non-zero"),
+    };
+
+/// `ModelContextLimits` 保存从 `models.toml` 合并后的 context limit 配置。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModelContextLimits {
+    defaults: Option<ContextTokenLimit>,
+    by_provider_model: BTreeMap<(String, String), ContextTokenLimit>,
+}
+
+impl ModelContextLimits {
+    /// `new` 创建空的 limit 配置。
+    pub fn new(
+        defaults: Option<ContextTokenLimit>,
+        by_provider_model: BTreeMap<(String, String), ContextTokenLimit>,
+    ) -> Self {
+        Self {
+            defaults,
+            by_provider_model,
+        }
+    }
+
+    /// `resolve` 按 provider/model profile → 唯一 model_id profile → defaults → built-in 解析 context limit。
+    ///
+    /// `/context` 面板始终需要一个可展示的上限。
+    /// 当没有显式配置时，built-in fallback 会继续返回稳定默认值 `256_000`，
+    /// 避免把“未配置”误渲染成“无上限”或相对模式。
+    pub fn resolve(&self, catalog: &ModelCatalog, selection: &ModelSelection) -> ContextTokenLimit {
+        let key = (selection.provider_id.clone(), selection.model_id.clone());
+        if let Some(limit) = self.by_provider_model.get(&key) {
+            return *limit;
+        }
+
+        if catalog.selection_has_unique_model_id(selection)
+            && let Some(limit) = self.model_id_only_profile_limit(selection.model_id.as_str())
+        {
+            return limit;
+        }
+
+        if let Some(limit) = self.defaults {
+            return limit;
+        }
+
+        built_in_context_limit(selection.model_id.as_str())
+    }
+
+    fn model_id_only_profile_limit(&self, model_id: &str) -> Option<ContextTokenLimit> {
+        let mut matches = self
+            .by_provider_model
+            .iter()
+            .filter(|((_, id), _)| id == model_id)
+            .map(|(_, limit)| *limit);
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+}
+
+fn built_in_context_limit(model_id: &str) -> ContextTokenLimit {
+    classify_model_family(model_id)
+        .built_in_context_limit()
+        .and_then(ContextTokenLimit::new)
+        .unwrap_or(DEFAULT_CONTEXT_LIMIT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSource};
+    use crate::provider::ProviderKind;
+
+    fn limit(value: u32) -> ContextTokenLimit {
+        ContextTokenLimit::try_from(value).expect("fixture limit should be valid")
+    }
+
+    fn catalog_with_local_qwen() -> ModelCatalog {
+        ModelCatalog::new(vec![ModelProvider::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "Local",
+            Some("http://127.0.0.1:1234/v1".to_string()),
+            ModelSource::Configured,
+            vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+        )])
+    }
+
+    fn catalog_with_ambiguous_qwen() -> ModelCatalog {
+        ModelCatalog::new(vec![
+            ModelProvider::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            ),
+            ModelProvider::new(
+                "remote",
+                ProviderKind::OpenAiCompatible,
+                "Remote",
+                Some("https://example.test/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new("qwen3", None, ModelSource::Configured)],
+            ),
+        ])
+    }
+
+    #[test]
+    fn resolve_uses_provider_model_profile_first() {
+        let mut profiles = BTreeMap::new();
+        profiles.insert(("local".to_string(), "qwen3".to_string()), limit(32_768));
+        let limits = ModelContextLimits::new(Some(limit(128_000)), profiles);
+        let selection = ModelSelection::new("local", "qwen3");
+
+        assert_eq!(
+            limits.resolve(&catalog_with_local_qwen(), &selection).get(),
+            32_768
+        );
+    }
+
+    #[test]
+    fn resolve_falls_back_to_defaults() {
+        let limits = ModelContextLimits::new(Some(limit(64_000)), BTreeMap::new());
+        let selection = ModelSelection::new("local", "unknown-model");
+
+        assert_eq!(
+            limits.resolve(&catalog_with_local_qwen(), &selection).get(),
+            64_000
+        );
+    }
+
+    #[test]
+    fn resolve_uses_builtin_when_no_config() {
+        let limits = ModelContextLimits::default();
+        let selection = ModelSelection::new("openai", "gpt-4o");
+
+        assert_eq!(
+            limits.resolve(&ModelCatalog::default(), &selection).get(),
+            128_000
+        );
+    }
+
+    #[test]
+    fn resolve_uses_default_fallback_for_unknown_model() {
+        let limits = ModelContextLimits::default();
+        let selection = ModelSelection::new("local", "totally-custom");
+
+        assert_eq!(
+            limits.resolve(&catalog_with_local_qwen(), &selection),
+            limit(DEFAULT_CONTEXT_LIMIT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_match_embedded_openai_family_substrings() {
+        let limits = ModelContextLimits::default();
+        let selection = ModelSelection::new("local", "my-gpt-4o-wrapper");
+
+        assert_eq!(
+            limits.resolve(&catalog_with_local_qwen(), &selection),
+            limit(DEFAULT_CONTEXT_LIMIT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_match_embedded_claude_family_substrings() {
+        let limits = ModelContextLimits::default();
+        let selection = ModelSelection::new("local", "prefix-claude-sonnet-4-custom");
+
+        assert_eq!(
+            limits.resolve(&catalog_with_local_qwen(), &selection),
+            limit(DEFAULT_CONTEXT_LIMIT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_reuse_other_provider_profile_when_model_id_is_ambiguous() {
+        let mut profiles = BTreeMap::new();
+        profiles.insert(("local".to_string(), "qwen3".to_string()), limit(32_768));
+        let limits = ModelContextLimits::new(None, profiles);
+        let selection = ModelSelection::new("remote", "qwen3");
+
+        assert_eq!(
+            limits.resolve(&catalog_with_ambiguous_qwen(), &selection),
+            limit(DEFAULT_CONTEXT_LIMIT_TOKENS)
+        );
+    }
+}

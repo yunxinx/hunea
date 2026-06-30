@@ -9,6 +9,7 @@ pub mod benchmark;
 
 mod command_panel;
 mod composer;
+mod context_budget;
 mod copy_picker;
 mod debug;
 mod display_width;

@@ -1,17 +1,16 @@
 use std::time::{Duration, Instant};
 
-use super::estimate_text_tokens;
+use super::{TokenEncoding, approximate_tokens_from_bytes};
 
 const TOKEN_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(120);
 const TOKEN_SNAPSHOT_DELTA_THRESHOLD: usize = 12;
-const APPROX_BYTES_PER_TOKEN: usize = 4;
 
 /// `StreamingTokenProgress` 对流式输出做节流 token 估算。
 ///
 /// 这里的计数只用于 TUI 反馈，不作为计费或上下文裁剪依据。
 #[derive(Debug, Clone)]
 pub struct StreamingTokenProgress {
-    model_id: String,
+    encoding: TokenEncoding,
     pending_text: String,
     total_tokens: usize,
     last_snapshot_at: Instant,
@@ -21,7 +20,7 @@ pub struct StreamingTokenProgress {
 impl StreamingTokenProgress {
     pub fn new(model_id: impl Into<String>) -> Self {
         Self {
-            model_id: model_id.into(),
+            encoding: TokenEncoding::for_model(&model_id.into()),
             pending_text: String::new(),
             total_tokens: 0,
             last_snapshot_at: Instant::now(),
@@ -57,7 +56,7 @@ impl StreamingTokenProgress {
 
         self.total_tokens = self
             .total_tokens
-            .saturating_add(estimate_text_tokens(&self.model_id, &self.pending_text));
+            .saturating_add(self.encoding.estimate_text(&self.pending_text));
         self.pending_text.clear();
         self.last_snapshot_at = now;
         self.has_snapshot = true;
@@ -69,11 +68,6 @@ impl StreamingTokenProgress {
         self.total_tokens
     }
 }
-
-fn approximate_tokens_from_bytes(bytes: usize) -> usize {
-    bytes.saturating_add(APPROX_BYTES_PER_TOKEN - 1) / APPROX_BYTES_PER_TOKEN
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

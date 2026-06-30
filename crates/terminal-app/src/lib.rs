@@ -72,7 +72,7 @@ pub fn run_with_writer<W: Write>(
     let loaded_models = provider_models::load().wrap_err("failed to load model config")?;
     let loaded_phrases = phrases::load().wrap_err("failed to load phrase config")?;
     let mut runtime_options = AppRuntimeOptions {
-        model_config_path: loaded_models.source_path.clone(),
+        loaded_models: loaded_models.clone(),
         ..AppRuntimeOptions::default()
     };
     attach_default_session_persistence(&mut runtime_options, &loaded_models)

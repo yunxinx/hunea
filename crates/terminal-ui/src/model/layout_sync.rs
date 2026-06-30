@@ -21,16 +21,19 @@ impl Model {
         let status_line_2 = self.current_status_line_2_render_result();
         let command_panel = self.current_inline_command_panel_render_result();
         let model_panel = self.current_inline_model_panel_render_result();
+        let context_budget = self.current_inline_context_budget_render_result();
         let tool_approval_panel = self.current_inline_tool_approval_panel_render_result();
         if status_line.has_content
             || status_line_2.has_content
             || command_panel.has_content
             || model_panel.has_content
+            || context_budget.has_content
             || tool_approval_panel.has_content
         {
             if self.document_runtime.follow_bottom && !self.document_runtime.manual_scroll {
                 let panel_rows = command_panel.lines.len()
                     + model_panel.lines.len()
+                    + context_budget.lines.len()
                     + tool_approval_panel.lines.len();
                 let visible_height = self.bottom_follow_composer_content_line_count(
                     &status_line,

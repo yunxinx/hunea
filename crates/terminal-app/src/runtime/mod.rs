@@ -1,3 +1,5 @@
+mod context_budget_command;
+mod context_budget_worker;
 mod conversation_commands;
 mod event_mapping;
 mod managed_search_authorization;
@@ -27,6 +29,7 @@ use terminal_ui::RuntimeCoordinator;
 use tool_runtime::{ToolExecutorRegistry, builtin::ManagedSearchToolConfig};
 
 use self::{
+    context_budget_worker::ContextBudgetWorker,
     event_mapping::{
         runtime_event_from_conversation_event, should_defer_runtime_event_for_render_barrier,
     },
@@ -39,7 +42,7 @@ use self::{
 /// `AppRuntimeOptions` 保存 app 层对话运行时所需的配置。
 #[derive(Clone, Default)]
 pub(crate) struct AppRuntimeOptions {
-    pub(crate) model_config_path: Option<PathBuf>,
+    pub(crate) loaded_models: provider_models::LoadedModelCatalog,
     pub(crate) runtime_request_policy: RuntimeRequestPolicy,
     pub(crate) managed_search_tools: ManagedSearchToolConfig,
     pub(crate) managed_search_authorization_config_path: Option<PathBuf>,
@@ -55,6 +58,7 @@ pub(crate) struct AppRuntimeCoordinator {
     model_refresh: ModelRefreshWorker,
     workspace_tools: ToolExecutorRegistry,
     session_store_worker: SessionStoreWorker,
+    context_budget_worker: ContextBudgetWorker,
     pending_runtime_events: Vec<RuntimeEvent>,
 }
 
@@ -78,6 +82,7 @@ impl AppRuntimeCoordinator {
             model_refresh: ModelRefreshWorker::default(),
             workspace_tools,
             session_store_worker: SessionStoreWorker::new(),
+            context_budget_worker: ContextBudgetWorker::new().map_err(|error| error.to_string())?,
             pending_runtime_events: Vec::new(),
         })
     }
@@ -112,6 +117,13 @@ impl AppRuntimeCoordinator {
             RuntimeCommand::LoadCopyPickerTree { request_id } => {
                 self.load_copy_picker_tree(request_id)
             }
+            RuntimeCommand::LoadContextBudgetSnapshot {
+                request_id,
+                selection,
+            } => self.load_context_budget_snapshot_command(request_id, &selection),
+            RuntimeCommand::CancelContextBudgetSnapshot => {
+                Ok(self.cancel_context_budget_snapshot_command())
+            }
             RuntimeCommand::LoadBranchTree { request_id } => self.load_branch_tree(request_id),
             RuntimeCommand::LoadBranchPreview {
                 request_id,
@@ -137,6 +149,7 @@ impl AppRuntimeCoordinator {
                 self.conversation_worker.reset_after_clear();
                 self.provider_conversation.clear();
                 self.model_refresh.reset_after_clear();
+                self.context_budget_worker.cancel_pending();
                 self.workspace_tools =
                     conversation_workspace_tools(&self.options.managed_search_tools);
                 self.pending_runtime_events.clear();
@@ -172,6 +185,7 @@ impl AppRuntimeCoordinator {
 
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
         self.conversation_worker.reset_after_clear();
+        self.context_budget_worker.shutdown()?;
         if let Some(store) = self.options.session_store.as_ref() {
             self.session_store_worker.flush_all(store.clone())?;
         }
@@ -298,6 +312,7 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
         }
 
         let mut events = Vec::new();
+        self.drain_context_budget_events_into(&mut events);
         self.drain_session_store_events_into(&mut events);
         loop {
             let target = self.conversation_worker.current_target().cloned();
@@ -342,6 +357,7 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
         self.conversation_worker.is_running()
             || self.model_refresh.is_running()
             || self.session_store_worker.has_pending_work()
+            || self.context_budget_worker.has_pending_work()
     }
 
     fn dispatch_runtime_command(
@@ -352,9 +368,12 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
     }
 
     fn persist_selected_model(&mut self, selection: &ModelSelection) -> Result<(), String> {
-        provider_models::write_default_model(self.options.model_config_path.as_deref(), selection)
-            .map(|_| ())
-            .map_err(|error| format!("Failed to save default model: {error}"))
+        provider_models::write_default_model(
+            self.options.loaded_models.source_path.as_deref(),
+            selection,
+        )
+        .map(|_| ())
+        .map_err(|error| format!("Failed to save default model: {error}"))
     }
 
     fn refresh_model_provider(&mut self, request: ProviderSyncRequest) -> Result<(), String> {
@@ -405,6 +424,10 @@ impl AppRuntimeCoordinator {
                 }
             }
         }
+    }
+
+    fn drain_context_budget_events_into(&mut self, events: &mut Vec<RuntimeEvent>) {
+        events.extend(self.context_budget_worker.drain_events());
     }
 
     fn reconcile_conversation_updates(&mut self) {

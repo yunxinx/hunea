@@ -144,6 +144,12 @@ impl Model {
             model_panel_model_index: self.model_panel.model_index,
             model_panel_scroll: self.model_panel.scroll,
             model_panel_revision: self.model_panel.revision,
+            context_budget_active: self.context_budget_active(),
+            context_budget_revision: self
+                .context_budget
+                .as_ref()
+                .map(|state| state.revision)
+                .unwrap_or_default(),
             selected_model: self
                 .selected_model
                 .as_ref()

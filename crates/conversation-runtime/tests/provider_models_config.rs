@@ -250,6 +250,258 @@ models = ["qwen3"]
     );
 }
 
+#[test]
+fn models_config_resolves_default_context_window() {
+    let working_dir = temp_test_dir("default-context-window");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+default = "local/qwen3"
+
+[defaults]
+context_window = 128000
+
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+models = ["qwen3"]
+"#,
+    )
+    .expect("models config should be written");
+
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
+    let selection = ModelSelection::new("local", "qwen3");
+
+    assert_eq!(loaded.context_limit_for(&selection).get(), 128_000);
+}
+
+#[test]
+fn models_config_resolves_per_provider_model_profile() {
+    let working_dir = temp_test_dir("provider-model-profile");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+default = "local/qwen3"
+
+[defaults]
+context_window = 128000
+
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+models = ["qwen3"]
+
+[providers.local.model_profiles.qwen3]
+context_window = 32768
+"#,
+    )
+    .expect("models config should be written");
+
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
+    let selection = ModelSelection::new("local", "qwen3");
+
+    assert_eq!(loaded.context_limit_for(&selection).get(), 32_768);
+}
+
+#[test]
+fn models_config_project_overlay_overrides_user_defaults_context_window() {
+    let user_dir = temp_test_dir("user-config-dir");
+    let working_dir = temp_test_dir("project-overlay-context");
+    fs::write(
+        user_dir.join("models.toml"),
+        r#"
+[defaults]
+context_window = 64000
+
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+models = ["qwen3"]
+"#,
+    )
+    .expect("user models config should be written");
+    fs::create_dir_all(working_dir.join(".hunea")).expect("project config dir");
+    fs::write(
+        working_dir.join(".hunea").join("models.toml"),
+        r#"
+[defaults]
+context_window = 200000
+"#,
+    )
+    .expect("project models config should be written");
+
+    let loaded = load_from_paths(Some(&working_dir), Some(&user_dir))
+        .expect("merged models config should load");
+    let selection = ModelSelection::new("local", "qwen3");
+
+    assert_eq!(loaded.context_limit_for(&selection).get(), 200_000);
+}
+
+#[test]
+fn models_config_rejects_invalid_context_window() {
+    let working_dir = temp_test_dir("invalid-context-window");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+[defaults]
+context_window = 0
+
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+"#,
+    )
+    .expect("models config should be written");
+
+    let error = load_from_paths(Some(&working_dir), None)
+        .expect_err("zero context_window should fail validation");
+    let message = error.to_string();
+    assert!(
+        message.contains("invalid") && message.contains("context_window"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn models_config_invalid_context_window_reports_the_real_source_file() {
+    let user_dir = temp_test_dir("invalid-context-window-user-source");
+    let working_dir = temp_test_dir("invalid-context-window-project-overlay");
+    fs::write(
+        user_dir.join("models.toml"),
+        r#"
+[defaults]
+context_window = 0
+"#,
+    )
+    .expect("user models config should be written");
+    fs::create_dir_all(working_dir.join(".hunea")).expect("project config dir");
+    fs::write(
+        working_dir.join(".hunea").join("models.toml"),
+        r#"
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+models = ["qwen3"]
+"#,
+    )
+    .expect("project models config should be written");
+
+    let error = load_from_paths(Some(&working_dir), Some(&user_dir))
+        .expect_err("invalid user config should keep its original source path");
+    let message = error.to_string();
+    let user_path = user_dir.join("models.toml");
+
+    assert!(
+        message.contains(&user_path.display().to_string()),
+        "invalid context_window should report the user config path, got: {message}"
+    );
+}
+
+#[test]
+fn models_config_resolution_prefers_profile_over_defaults_and_builtin() {
+    let working_dir = temp_test_dir("resolution-order");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+[defaults]
+context_window = 64000
+
+[providers.openai]
+enabled = true
+kind = "openai"
+models = ["gpt-4o"]
+
+[providers.openai.model_profiles."gpt-4o"]
+context_window = 100000
+"#,
+    )
+    .expect("models config should be written");
+
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
+    let selection = ModelSelection::new("openai", "gpt-4o");
+
+    assert_eq!(loaded.context_limit_for(&selection).get(), 100_000);
+}
+
+#[test]
+fn models_config_unknown_model_without_defaults_uses_default_fallback() {
+    let working_dir = temp_test_dir("unknown-no-defaults");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+models = ["custom-local-7b"]
+"#,
+    )
+    .expect("models config should be written");
+
+    let loaded = load_from_paths(Some(&working_dir), None).expect("models config should load");
+    let selection = ModelSelection::new("local", "custom-local-7b");
+
+    assert_eq!(loaded.context_limit_for(&selection).get(), 256_000);
+}
+
+#[test]
+fn models_config_rejects_unknown_provider_field() {
+    let working_dir = temp_test_dir("deny-unknown-provider");
+    fs::write(
+        working_dir.join("models.toml"),
+        r#"
+[providers.local]
+enabled = true
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:1234/v1"
+unexpected_field = true
+"#,
+    )
+    .expect("models config should be written");
+
+    load_from_paths(Some(&working_dir), None).expect_err("unknown provider keys should fail");
+}
+
+#[test]
+fn models_config_invalid_provider_kind_reports_the_real_source_file() {
+    let user_dir = temp_test_dir("invalid-provider-kind-user-source");
+    let working_dir = temp_test_dir("invalid-provider-kind-project-overlay");
+    fs::write(
+        user_dir.join("models.toml"),
+        r#"
+[providers.remote]
+enabled = true
+kind = "definitely_not_real"
+base_url = "http://127.0.0.1:1234/v1"
+"#,
+    )
+    .expect("user models config should be written");
+    fs::create_dir_all(working_dir.join(".hunea")).expect("project config dir");
+    fs::write(
+        working_dir.join(".hunea").join("models.toml"),
+        r#"
+[defaults]
+context_window = 128000
+"#,
+    )
+    .expect("project models config should be written");
+
+    let error = load_from_paths(Some(&working_dir), Some(&user_dir))
+        .expect_err("invalid provider kind should keep its original source path");
+    let message = error.to_string();
+    let user_path = user_dir.join("models.toml");
+
+    assert!(
+        message.contains(&user_path.display().to_string()),
+        "invalid provider kind should report the user config path, got: {message}"
+    );
+}
+
 fn temp_test_dir(name: &str) -> std::path::PathBuf {
     let unique = format!(
         "{}-{}",

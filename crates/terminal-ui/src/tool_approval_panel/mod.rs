@@ -108,6 +108,7 @@ impl Model {
     ) {
         self.close_fullscreen_modal_layers();
         self.pause_stream_activity();
+        self.close_context_budget();
         self.close_model_panel();
         self.tool_approval_panel = ToolApprovalPanelState {
             is_open: true,

@@ -142,6 +142,19 @@ impl RuntimeEventApply for Model {
                     self.show_copy_picker_error(&message);
                 }
             }
+            RuntimeEvent::ContextBudgetSnapshotLoaded {
+                request_id,
+                payload,
+            } => {
+                if self.context_budget_load_request_matches(request_id) {
+                    self.apply_context_budget_snapshot(request_id, payload);
+                }
+            }
+            RuntimeEvent::ContextBudgetSnapshotLoadFailed { request_id, error } => {
+                if self.context_budget_load_request_matches(request_id) {
+                    self.show_context_budget_error(request_id, error);
+                }
+            }
             RuntimeEvent::SessionBranchTreeLoaded {
                 request_id,
                 payload,

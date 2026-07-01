@@ -131,8 +131,6 @@ pub(crate) fn render_document(
     let mut fill_style = Style::default();
     let mut frame_fill_width = 0;
     let frame_decoration = frame_decoration_lines(frame_mode, palette, frame_width);
-    let highlighted_text_style = text_style.fg(palette.command_accent);
-
     if matches!(frame_mode, FrameDecorationMode::Surface) && palette.surface.is_some() {
         frame_fill_width = frame_width;
         fill_style = surface_text_style(palette);
@@ -140,6 +138,7 @@ pub(crate) fn render_document(
         text_style = apply_optional_background(text_style, palette);
         placeholder_style = apply_optional_background(placeholder_style, palette);
     }
+    let highlighted_text_style = text_style.fg(palette.command_accent);
 
     if composer.value().is_empty() {
         let placeholder_line = first_placeholder_visual_line(

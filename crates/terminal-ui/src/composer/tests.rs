@@ -477,6 +477,40 @@ fn bound_skill_token_renders_with_command_accent_before_submit() {
     assert_ne!(skill_span.style.fg, Some(Color::Reset));
 }
 
+#[test]
+fn bound_skill_token_keeps_same_background_as_live_cx_input() {
+    let mut composer = Composer::new(StyleMode::Cx);
+    composer.set_width(82);
+    composer.set_height(3);
+    composer.set_text_for_test("$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        "/tmp/code-review/SKILL.md",
+        PromptSourceOrigin::Project,
+    ));
+
+    let palette = default_palette();
+    let document = composer.render_document(palette);
+    let skill_span = document
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "$code-review")
+        .expect("bound skill token should render as a distinct span");
+    let plain_text_span = document
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == " ")
+        .expect("composer should render trailing plain text/fill span");
+
+    assert_eq!(skill_span.style.fg, Some(palette.command_accent));
+    assert_eq!(
+        skill_span.style.bg, plain_text_span.style.bg,
+        "bound skill token should only change foreground color, not carve out a different background"
+    );
+}
+
 fn test_composer(width: u16, height: u16, value: &str) -> Composer {
     let mut composer = Composer::new(StyleMode::Ms);
     // 测试里的 width 表达可编辑内容加 prompt 的旧视觉宽度；真实 frame 还要包含右侧留白。

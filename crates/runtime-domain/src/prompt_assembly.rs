@@ -135,6 +135,27 @@ pub struct PromptAssemblyManagerSource {
     pub body: Option<String>,
 }
 
+/// `PromptAssemblyManagedSource` 表示 `/prompt` 左侧管理列表的一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAssemblyManagedSource {
+    pub reference_id: String,
+    pub kind: PromptSourceKind,
+    pub title: String,
+    pub origin: Option<PromptSourceOrigin>,
+    pub enabled: bool,
+    pub order: usize,
+}
+
+/// `PromptAssemblyExtraPromptCandidate` 表示 `/prompt` 右侧 Extra tab 的候选 prompt。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAssemblyExtraPromptCandidate {
+    pub reference_id: String,
+    pub title: String,
+    pub origin: PromptSourceOrigin,
+    pub body: String,
+    pub selected: bool,
+}
+
 /// `PromptAssemblyDiscoveredSkill` 表示 `/prompt` 右侧 Skills tab 可展示的已发现 skill。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptAssemblyDiscoveredSkill {
@@ -144,6 +165,8 @@ pub struct PromptAssemblyDiscoveredSkill {
     pub origin: PromptSourceOrigin,
     pub skill_path: String,
     pub body: String,
+    pub selected: bool,
+    pub selected_order: Option<usize>,
 }
 
 /// `PromptAssemblyManagerSnapshot` 表示 `/prompt` 所需的完整只读快照。
@@ -151,7 +174,9 @@ pub struct PromptAssemblyDiscoveredSkill {
 pub struct PromptAssemblyManagerSnapshot {
     pub snapshot: PromptAssemblySnapshot,
     pub prelude: PromptPreludeSnapshot,
+    pub managed_sources: Vec<PromptAssemblyManagedSource>,
     pub sources: Vec<PromptAssemblyManagerSource>,
+    pub extra_prompt_candidates: Vec<PromptAssemblyExtraPromptCandidate>,
     pub discovered_skills: Vec<PromptAssemblyDiscoveredSkill>,
     pub manual_skills: Vec<PromptAssemblyDiscoveredSkill>,
     pub builtin_core_system_body: String,
@@ -163,6 +188,9 @@ pub struct PromptAssemblyManagerSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptAssemblyEditorTarget {
     CoreSystemOverride {
+        scope: PromptAssemblyScope,
+    },
+    SkillDiscovery {
         scope: PromptAssemblyScope,
     },
     ExtraPrompt {
@@ -181,6 +209,27 @@ pub enum PromptAssemblyMutation {
     SaveEditorTarget {
         target: PromptAssemblyEditorTarget,
         content: String,
+    },
+    SetExtraPromptSelected {
+        scope: PromptAssemblyScope,
+        reference_id: String,
+        selected: bool,
+    },
+    SetPromptSourceEnabled {
+        scope: PromptAssemblyScope,
+        kind: PromptSourceKind,
+        reference_id: String,
+        enabled: bool,
+    },
+    SetDiscoveredSkillSelected {
+        scope: PromptAssemblyScope,
+        skill_name: String,
+        selected: bool,
+    },
+    MoveDiscoveredSkill {
+        scope: PromptAssemblyScope,
+        skill_name: String,
+        direction: PromptAssemblyMoveDirection,
     },
     ActivateLongLivedSkill {
         scope: PromptAssemblyScope,

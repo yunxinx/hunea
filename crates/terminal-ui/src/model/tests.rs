@@ -2985,6 +2985,8 @@ fn skill_picker_model() -> Model {
                 origin: PromptSourceOrigin::Project,
                 skill_path: "/tmp/code-review/SKILL.md".to_string(),
                 body: "# Code Review".to_string(),
+                selected: false,
+                selected_order: None,
             },
             PromptAssemblyDiscoveredSkill {
                 skill_name: "brainstorming".to_string(),
@@ -2994,6 +2996,8 @@ fn skill_picker_model() -> Model {
                 origin: PromptSourceOrigin::Builtin,
                 skill_path: "/tmp/brainstorming/SKILL.md".to_string(),
                 body: "# Brainstorming".to_string(),
+                selected: false,
+                selected_order: None,
             },
         ],
         8,
@@ -3009,6 +3013,8 @@ fn overflowing_skill_picker_model() -> Model {
             origin: PromptSourceOrigin::Project,
             skill_path: format!("/tmp/skill-{index:02}/SKILL.md"),
             body: format!("# Skill {index:02}"),
+            selected: false,
+            selected_order: None,
         })
         .collect();
     skill_picker_model_with_manual_skills(skills, 5)
@@ -3025,7 +3031,9 @@ fn skill_picker_model_with_manual_skills(
             prompt_assembly: Some(PromptAssemblyManagerSnapshot {
                 snapshot: resolve_prompt_assembly(&PromptAssemblyInput::default()),
                 prelude: PromptPreludeSnapshot::default(),
+                managed_sources: Vec::new(),
                 sources: Vec::new(),
+                extra_prompt_candidates: Vec::new(),
                 discovered_skills: Vec::new(),
                 manual_skills,
                 builtin_core_system_body: String::new(),

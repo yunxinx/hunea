@@ -154,6 +154,8 @@ fn startup_prompt_missing_source_check_emits_aggregated_runtime_event() {
                         requested_order: Some(10),
                     },
                 ],
+                skill_discovery_override: None,
+                skill_discovery_skills: Vec::new(),
                 extra_prompts: Vec::new(),
             },
         ))

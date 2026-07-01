@@ -5,6 +5,7 @@ use runtime_domain::prompt_assembly::PromptAssemblyManagerSource;
 use crate::{
     Model,
     markdown_display::markdown_display_content,
+    message::assistant_message_content_width,
     overlay_input_result::OverlayInputResult,
     render_frame::RenderFrame,
     transcript::Transcript,
@@ -128,6 +129,9 @@ impl Model {
 
     pub(crate) fn open_prompt_overlay_markdown_preview(&mut self, title: String, content: &str) {
         let mut transcript = Transcript::new(self.palette);
+        transcript.set_width(
+            u16::try_from(assistant_message_content_width(self.width)).unwrap_or(u16::MAX),
+        );
         transcript.append_message_with_style_mode(
             crate::Sender::Assistant,
             markdown_display_content(content),

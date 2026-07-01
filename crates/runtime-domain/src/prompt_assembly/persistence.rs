@@ -11,6 +11,7 @@ use super::PromptSourceKind;
 pub const PROJECT_PROMPT_ASSEMBLY_FILE_NAME: &str = "prompt-assembly.toml";
 pub const PROJECT_PROMPTS_DIR_NAME: &str = "prompts";
 pub const PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME: &str = "__core-system__.md";
+pub const PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME: &str = "__skill-discovery__.md";
 const PROJECT_PROMPT_ASSEMBLY_VERSION: u32 = 1;
 
 /// `PromptAssemblyScope` 表示 prompt assembly 配置的生效范围。
@@ -51,6 +52,14 @@ pub struct PersistedPromptAssemblyEntry {
     pub requested_order: Option<u16>,
 }
 
+/// `PersistedSkillDiscoverySkillEntry` 表示 skill discovery 里单个 skill 的选中与顺序。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedSkillDiscoverySkillEntry {
+    pub skill_name: String,
+    pub enabled: bool,
+    pub requested_order: Option<u16>,
+}
+
 /// `StoredPromptBody` 表示持久化的 prompt 文本实体。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredPromptBody {
@@ -64,7 +73,9 @@ pub struct StoredPromptBody {
 pub struct PromptAssemblyScopeState {
     pub scope: PromptAssemblyScope,
     pub core_system_override: Option<String>,
+    pub skill_discovery_override: Option<String>,
     pub entries: Vec<PersistedPromptAssemblyEntry>,
+    pub skill_discovery_skills: Vec<PersistedSkillDiscoverySkillEntry>,
     pub extra_prompts: Vec<StoredPromptBody>,
 }
 
@@ -75,7 +86,9 @@ impl PromptAssemblyScopeState {
         Self {
             scope,
             core_system_override: None,
+            skill_discovery_override: None,
             entries: Vec::new(),
+            skill_discovery_skills: Vec::new(),
             extra_prompts: Vec::new(),
         }
     }
@@ -188,6 +201,8 @@ struct ProjectPromptAssemblyFile {
     version: u32,
     #[serde(default)]
     entries: Vec<PersistedPromptAssemblyEntry>,
+    #[serde(default)]
+    skill_discovery_skills: Vec<PersistedSkillDiscoverySkillEntry>,
 }
 
 /// `project_prompt_assembly_path` 返回项目级 prompt assembly TOML 路径。
@@ -214,8 +229,11 @@ pub fn load_project_prompt_assembly_state(
 
     let mut state = PromptAssemblyScopeState::empty(PromptAssemblyScope::Project);
     state.entries = sort_entries(config.entries);
+    state.skill_discovery_skills = sort_skill_discovery_skills(config.skill_discovery_skills);
     state.core_system_override =
         read_optional_text_file(&prompts_dir.join(PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME))?;
+    state.skill_discovery_override =
+        read_optional_text_file(&prompts_dir.join(PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME))?;
     state.extra_prompts = state
         .entries
         .iter()
@@ -281,11 +299,22 @@ pub fn save_project_prompt_assembly_state(
         None => remove_file_if_exists(&core_override_path)?,
     }
 
+    let skill_discovery_override_path =
+        prompts_dir.join(PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME);
+    match state.skill_discovery_override.as_deref() {
+        Some(body) => {
+            write_text_file(&skill_discovery_override_path, body)?;
+            desired_files.insert(PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME.to_string());
+        }
+        None => remove_file_if_exists(&skill_discovery_override_path)?,
+    }
+
     prune_stale_prompt_files(&prompts_dir, &desired_files)?;
 
     let config = ProjectPromptAssemblyFile {
         version: PROJECT_PROMPT_ASSEMBLY_VERSION,
         entries: sort_entries(state.entries.clone()),
+        skill_discovery_skills: sort_skill_discovery_skills(state.skill_discovery_skills.clone()),
     };
     let encoded =
         toml::to_string_pretty(&config).map_err(|source| ProjectPromptAssemblyError::Encode {
@@ -306,6 +335,7 @@ fn read_project_prompt_assembly_file(
             return Ok(ProjectPromptAssemblyFile {
                 version: PROJECT_PROMPT_ASSEMBLY_VERSION,
                 entries: Vec::new(),
+                skill_discovery_skills: Vec::new(),
             });
         }
         Err(source) => {
@@ -449,6 +479,18 @@ fn sort_entries(
     entries
 }
 
+fn sort_skill_discovery_skills(
+    mut entries: Vec<PersistedSkillDiscoverySkillEntry>,
+) -> Vec<PersistedSkillDiscoverySkillEntry> {
+    entries.sort_by(|left, right| {
+        left.requested_order
+            .unwrap_or(u16::MAX)
+            .cmp(&right.requested_order.unwrap_or(u16::MAX))
+            .then_with(|| left.skill_name.cmp(&right.skill_name))
+    });
+    entries
+}
+
 /// `extra_prompt_bodies_by_reference` 把 extra prompt bodies 投影成按 reference_id 索引的映射。
 #[must_use]
 pub fn extra_prompt_bodies_by_reference(
@@ -483,6 +525,7 @@ mod tests {
         PromptAssemblyScopeState {
             scope: PromptAssemblyScope::Project,
             core_system_override: Some("project core override".to_string()),
+            skill_discovery_override: None,
             entries: vec![
                 PersistedPromptAssemblyEntry {
                     reference_id: "skill-discovery".to_string(),
@@ -506,6 +549,7 @@ mod tests {
                     requested_order: Some(30),
                 },
             ],
+            skill_discovery_skills: Vec::new(),
             extra_prompts: vec![StoredPromptBody {
                 reference_id: "repo-review-rules".to_string(),
                 title: "repo-review-rules".to_string(),
@@ -536,6 +580,7 @@ mod tests {
         let cleared_state = PromptAssemblyScopeState {
             scope: PromptAssemblyScope::Project,
             core_system_override: None,
+            skill_discovery_override: None,
             entries: vec![PersistedPromptAssemblyEntry {
                 reference_id: "skill-discovery".to_string(),
                 kind: PromptSourceKind::SkillDiscovery,
@@ -543,6 +588,7 @@ mod tests {
                 enabled: true,
                 requested_order: Some(10),
             }],
+            skill_discovery_skills: Vec::new(),
             extra_prompts: Vec::new(),
         };
         save_project_prompt_assembly_state(&work_dir, &cleared_state)
@@ -567,6 +613,7 @@ mod tests {
         let state = PromptAssemblyScopeState {
             scope: PromptAssemblyScope::Project,
             core_system_override: None,
+            skill_discovery_override: None,
             entries: vec![PersistedPromptAssemblyEntry {
                 reference_id: "missing-prompt".to_string(),
                 kind: PromptSourceKind::ExtraPrompt,
@@ -574,6 +621,7 @@ mod tests {
                 enabled: true,
                 requested_order: Some(10),
             }],
+            skill_discovery_skills: Vec::new(),
             extra_prompts: Vec::new(),
         };
 

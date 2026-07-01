@@ -191,7 +191,9 @@ impl Model {
                 .unwrap_or_else(|| PromptAssemblyManagerSnapshot {
                     snapshot: resolve_prompt_assembly(&PromptAssemblyInput::default()),
                     prelude: PromptPreludeSnapshot::default(),
+                    managed_sources: Vec::new(),
                     sources: Vec::new(),
+                    extra_prompt_candidates: Vec::new(),
                     discovered_skills: Vec::new(),
                     manual_skills: Vec::new(),
                     builtin_core_system_body: String::new(),

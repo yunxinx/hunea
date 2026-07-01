@@ -8,15 +8,17 @@ use std::{
 
 use color_eyre::eyre::{Result, WrapErr};
 use runtime_domain::prompt_assembly::persistence::{
-    PersistedPromptAssemblyEntry, PromptAssemblyScope, PromptAssemblyScopeState, StoredPromptBody,
-    load_project_prompt_assembly_state, save_project_prompt_assembly_state,
+    PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PromptAssemblyScope,
+    PromptAssemblyScopeState, StoredPromptBody, load_project_prompt_assembly_state,
+    save_project_prompt_assembly_state,
 };
 use runtime_domain::prompt_assembly::{
     CoreSystemPromptInput, PromptAssemblyDiscoveredSkill, PromptAssemblyEditorTarget,
-    PromptAssemblyInput, PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource,
-    PromptAssemblyMoveDirection, PromptAssemblyMutation, PromptPreludeSection,
-    PromptPreludeSnapshot, PromptSourceCandidate, PromptSourceInactiveReason, PromptSourceKind,
-    PromptSourceOrigin, PromptSourceStatus, resolve_prompt_assembly,
+    PromptAssemblyExtraPromptCandidate, PromptAssemblyInput, PromptAssemblyManagedSource,
+    PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
+    PromptAssemblyMutation, PromptPreludeSection, PromptPreludeSnapshot, PromptSourceCandidate,
+    PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
+    resolve_prompt_assembly,
 };
 use runtime_domain::session::TranscriptUserMessage;
 use session_store::SessionStore;
@@ -24,6 +26,8 @@ use session_store::SessionStore;
 const BUILTIN_CORE_SYSTEM_PROMPT: &str =
     "You are Hunea, a terminal-based AI assistant. Be direct, precise, and action-oriented.";
 const SKILL_FILE_NAME: &str = "SKILL.md";
+const SKILL_DISCOVERY_GENERATED_START: &str = "<!-- hunea:skill-discovery generated:start -->";
+const SKILL_DISCOVERY_GENERATED_END: &str = "<!-- hunea:skill-discovery generated:end -->";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DiscoveredSkill {
@@ -54,6 +58,14 @@ pub(crate) struct ManualSkillMessageAssembly {
 #[derive(Debug, Clone)]
 struct PromptCandidateBody {
     body: String,
+}
+
+struct PromptAssemblyResolutionContext<'a> {
+    extra_prompt_bodies: &'a HashMap<String, String>,
+    skills_by_name: &'a HashMap<String, DiscoveredSkill>,
+    skill_discovery_skill_state: &'a [PersistedSkillDiscoverySkillEntry],
+    global_state: &'a PromptAssemblyScopeState,
+    project_state: &'a PromptAssemblyScopeState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,12 +267,30 @@ fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
     project_state: &PromptAssemblyScopeState,
     global_skill_root_override: Option<&Path>,
 ) -> PromptAssemblyManagerSnapshot {
+    let mut effective_global_state = global_state.clone();
+    let mut effective_project_state = project_state.clone();
+    ensure_default_skill_discovery_source(
+        &mut effective_global_state,
+        &mut effective_project_state,
+    );
+    let global_state = &effective_global_state;
+    let project_state = &effective_project_state;
+
     let discovered_skills = discover_skills(work_dir, global_skill_root_override);
     let extra_prompt_bodies = indexed_extra_prompt_bodies(global_state, project_state);
+    let skill_discovery_skill_state =
+        merged_skill_discovery_skill_state(global_state, project_state, &discovered_skills);
     let skills_by_name = discovered_skills
         .iter()
         .map(|skill| (skill.name.clone(), skill.clone()))
         .collect::<HashMap<_, _>>();
+    let resolution_context = PromptAssemblyResolutionContext {
+        extra_prompt_bodies: &extra_prompt_bodies,
+        skills_by_name: &skills_by_name,
+        skill_discovery_skill_state: &skill_discovery_skill_state,
+        global_state,
+        project_state,
+    };
 
     let mut candidate_bodies = HashMap::new();
     let mut candidates = Vec::new();
@@ -268,15 +298,13 @@ fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         &mut candidates,
         &mut candidate_bodies,
         global_state,
-        &extra_prompt_bodies,
-        &skills_by_name,
+        &resolution_context,
     );
     extend_candidates(
         &mut candidates,
         &mut candidate_bodies,
         project_state,
-        &extra_prompt_bodies,
-        &skills_by_name,
+        &resolution_context,
     );
 
     let snapshot = resolve_prompt_assembly(&PromptAssemblyInput {
@@ -296,13 +324,11 @@ fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
     }];
     sources.extend(materialized_sources_for_state(
         global_state,
-        &extra_prompt_bodies,
-        &skills_by_name,
+        &resolution_context,
     ));
     sources.extend(materialized_sources_for_state(
         project_state,
-        &extra_prompt_bodies,
-        &skills_by_name,
+        &resolution_context,
     ));
 
     let mut sections = Vec::new();
@@ -340,11 +366,18 @@ fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
     PromptAssemblyManagerSnapshot {
         snapshot,
         prelude: PromptPreludeSnapshot { sections },
+        managed_sources: managed_sources(global_state, project_state),
         sources,
+        extra_prompt_candidates: extra_prompt_candidates(
+            global_state,
+            project_state,
+            &extra_prompt_bodies,
+        ),
         discovered_skills: discovered_skill_inventory(
             &discovered_skills,
             global_state,
             project_state,
+            &skill_discovery_skill_state,
         ),
         manual_skills: manual_skill_inventory(&discovered_skills),
         builtin_core_system_body: BUILTIN_CORE_SYSTEM_PROMPT.to_string(),
@@ -363,6 +396,49 @@ fn apply_mutation_to_scope_states(
         PromptAssemblyMutation::SaveEditorTarget { target, content } => {
             apply_save_editor_target(work_dir, global_state, project_state, target, content)
         }
+        PromptAssemblyMutation::SetExtraPromptSelected {
+            scope,
+            reference_id,
+            selected,
+        } => {
+            set_extra_prompt_selected(global_state, project_state, scope, &reference_id, selected);
+            Ok(())
+        }
+        PromptAssemblyMutation::SetPromptSourceEnabled {
+            scope,
+            kind,
+            reference_id,
+            enabled,
+        } => {
+            set_prompt_source_enabled(
+                scope_state_mut(global_state, project_state, scope),
+                kind,
+                &reference_id,
+                enabled,
+            );
+            Ok(())
+        }
+        PromptAssemblyMutation::SetDiscoveredSkillSelected {
+            scope,
+            skill_name,
+            selected,
+        } => {
+            set_discovered_skill_selected(
+                scope_state_mut(global_state, project_state, scope),
+                &skill_name,
+                selected,
+            );
+            Ok(())
+        }
+        PromptAssemblyMutation::MoveDiscoveredSkill {
+            scope,
+            skill_name,
+            direction,
+        } => move_discovered_skill(
+            scope_state_mut(global_state, project_state, scope),
+            &skill_name,
+            direction,
+        ),
         PromptAssemblyMutation::ActivateLongLivedSkill { scope, skill_name } => {
             activate_long_lived_skill(global_state, project_state, scope, &skill_name);
             Ok(())
@@ -448,6 +524,12 @@ fn apply_save_editor_target(
                 (!trimmed.is_empty()).then_some(content);
             Ok(())
         }
+        PromptAssemblyEditorTarget::SkillDiscovery { scope } => {
+            let state = scope_state_mut(global_state, project_state, scope);
+            state.skill_discovery_override = Some(content);
+            ensure_skill_discovery_entry_exists(state);
+            Ok(())
+        }
         PromptAssemblyEditorTarget::ExtraPrompt {
             scope,
             reference_id,
@@ -525,8 +607,7 @@ fn resolve_core_system_origin(
 
 fn materialized_sources_for_state(
     state: &PromptAssemblyScopeState,
-    extra_prompt_bodies: &HashMap<String, String>,
-    skills_by_name: &HashMap<String, DiscoveredSkill>,
+    context: &PromptAssemblyResolutionContext<'_>,
 ) -> Vec<PromptAssemblyManagerSource> {
     let origin = Some(scope_origin(state.scope));
     state
@@ -537,8 +618,8 @@ fn materialized_sources_for_state(
             kind: entry.kind,
             title: entry.title.clone(),
             origin,
-            resolved_body_origin: resolved_body_origin_for_entry(entry, skills_by_name),
-            body: body_for_entry(entry, state.scope, extra_prompt_bodies, skills_by_name),
+            resolved_body_origin: resolved_body_origin_for_entry(entry, context.skills_by_name),
+            body: body_for_entry(entry, state.scope, context),
         })
         .collect()
 }
@@ -547,8 +628,7 @@ fn extend_candidates(
     candidates: &mut Vec<PromptSourceCandidate>,
     candidate_bodies: &mut HashMap<String, PromptCandidateBody>,
     state: &PromptAssemblyScopeState,
-    extra_prompt_bodies: &HashMap<String, String>,
-    skills_by_name: &HashMap<String, DiscoveredSkill>,
+    context: &PromptAssemblyResolutionContext<'_>,
 ) {
     let origin = Some(scope_origin(state.scope));
     for entry in &state.entries {
@@ -563,13 +643,12 @@ fn extend_candidates(
             resolvable: resolvable_for_entry(
                 entry,
                 state.scope,
-                extra_prompt_bodies,
-                skills_by_name,
+                context.extra_prompt_bodies,
+                context.skills_by_name,
             ),
             requested_order: entry.requested_order,
         };
-        if let Some(body) = body_for_entry(entry, state.scope, extra_prompt_bodies, skills_by_name)
-        {
+        if let Some(body) = body_for_entry(entry, state.scope, context) {
             candidate_bodies.insert(
                 candidate_body_key(origin, entry.kind, &reference_id),
                 PromptCandidateBody { body },
@@ -598,21 +677,22 @@ fn resolvable_for_entry(
 fn body_for_entry(
     entry: &PersistedPromptAssemblyEntry,
     scope: PromptAssemblyScope,
-    extra_prompt_bodies: &HashMap<String, String>,
-    skills_by_name: &HashMap<String, DiscoveredSkill>,
+    context: &PromptAssemblyResolutionContext<'_>,
 ) -> Option<String> {
     match entry.kind {
-        PromptSourceKind::ExtraPrompt => extra_prompt_bodies
+        PromptSourceKind::ExtraPrompt => context
+            .extra_prompt_bodies
             .get(&scope_reference_key(scope, &entry.reference_id))
             .cloned(),
-        PromptSourceKind::SkillDiscovery => Some(format_skill_discovery_body(
-            skills_by_name
-                .values()
-                .filter(|skill| !skill.disable_model_invocation)
-                .cloned()
-                .collect(),
+        PromptSourceKind::SkillDiscovery => Some(resolve_skill_discovery_body(
+            scope,
+            context.skill_discovery_skill_state,
+            context.skills_by_name,
+            context.global_state,
+            context.project_state,
         )),
-        PromptSourceKind::LongLivedSkill => skills_by_name
+        PromptSourceKind::LongLivedSkill => context
+            .skills_by_name
             .get(&entry.reference_id)
             .map(format_long_lived_skill_body),
         PromptSourceKind::CoreSystemPrompt => None,
@@ -778,6 +858,185 @@ fn activate_long_lived_skill(
     });
 }
 
+fn ensure_skill_discovery_entry_exists(state: &mut PromptAssemblyScopeState) {
+    if state
+        .entries
+        .iter()
+        .any(|entry| entry.kind == PromptSourceKind::SkillDiscovery)
+    {
+        return;
+    }
+    state.entries.push(PersistedPromptAssemblyEntry {
+        reference_id: "skill-discovery".to_string(),
+        kind: PromptSourceKind::SkillDiscovery,
+        title: "Skill discovery".to_string(),
+        enabled: true,
+        requested_order: Some(default_skill_discovery_requested_order(&state.entries)),
+    });
+}
+
+fn ensure_default_skill_discovery_source(
+    global_state: &mut PromptAssemblyScopeState,
+    project_state: &mut PromptAssemblyScopeState,
+) {
+    if global_state
+        .entries
+        .iter()
+        .chain(project_state.entries.iter())
+        .any(|entry| entry.kind == PromptSourceKind::SkillDiscovery)
+    {
+        return;
+    }
+
+    let target = if scope_state_has_prompt_content(project_state)
+        || !scope_state_has_prompt_content(global_state)
+    {
+        project_state
+    } else {
+        global_state
+    };
+    ensure_skill_discovery_entry_exists(target);
+}
+
+fn scope_state_has_prompt_content(state: &PromptAssemblyScopeState) -> bool {
+    state.core_system_override.is_some()
+        || state.skill_discovery_override.is_some()
+        || !state.entries.is_empty()
+        || !state.skill_discovery_skills.is_empty()
+        || !state.extra_prompts.is_empty()
+}
+
+fn default_skill_discovery_requested_order(entries: &[PersistedPromptAssemblyEntry]) -> u16 {
+    let Some(min_order) = entries
+        .iter()
+        .filter_map(|entry| entry.requested_order)
+        .min()
+    else {
+        return 10;
+    };
+    if min_order > 5 { min_order - 5 } else { 1 }
+}
+
+fn set_prompt_source_enabled(
+    state: &mut PromptAssemblyScopeState,
+    kind: PromptSourceKind,
+    reference_id: &str,
+    enabled: bool,
+) {
+    if let Some(entry) = state
+        .entries
+        .iter_mut()
+        .find(|entry| entry.kind == kind && entry.reference_id == reference_id)
+    {
+        entry.enabled = enabled;
+    }
+}
+
+fn set_extra_prompt_selected(
+    global_state: &mut PromptAssemblyScopeState,
+    project_state: &mut PromptAssemblyScopeState,
+    scope: PromptAssemblyScope,
+    reference_id: &str,
+    selected: bool,
+) {
+    let state = scope_state_mut(global_state, project_state, scope);
+    let Some(prompt) = state
+        .extra_prompts
+        .iter()
+        .find(|prompt| prompt.reference_id == reference_id)
+        .cloned()
+    else {
+        return;
+    };
+
+    if selected {
+        if state.entries.iter().any(|entry| {
+            entry.kind == PromptSourceKind::ExtraPrompt && entry.reference_id == reference_id
+        }) {
+            return;
+        }
+        state.entries.push(PersistedPromptAssemblyEntry {
+            reference_id: prompt.reference_id,
+            kind: PromptSourceKind::ExtraPrompt,
+            title: prompt.title,
+            enabled: true,
+            requested_order: Some(next_requested_order(&state.entries)),
+        });
+        return;
+    }
+
+    state.entries.retain(|entry| {
+        !(entry.kind == PromptSourceKind::ExtraPrompt && entry.reference_id == reference_id)
+    });
+}
+
+fn set_discovered_skill_selected(
+    state: &mut PromptAssemblyScopeState,
+    skill_name: &str,
+    selected: bool,
+) {
+    let next_order = next_skill_discovery_requested_order(&state.skill_discovery_skills);
+    if let Some(entry) = state
+        .skill_discovery_skills
+        .iter_mut()
+        .find(|entry| entry.skill_name == skill_name)
+    {
+        entry.enabled = selected;
+        if selected && entry.requested_order.is_none() {
+            entry.requested_order = Some(next_order);
+        }
+        return;
+    }
+
+    state
+        .skill_discovery_skills
+        .push(PersistedSkillDiscoverySkillEntry {
+            skill_name: skill_name.to_string(),
+            enabled: selected,
+            requested_order: Some(next_order),
+        });
+}
+
+fn move_discovered_skill(
+    state: &mut PromptAssemblyScopeState,
+    skill_name: &str,
+    direction: PromptAssemblyMoveDirection,
+) -> Result<()> {
+    let Some(position) = state
+        .skill_discovery_skills
+        .iter()
+        .position(|entry| entry.skill_name == skill_name)
+    else {
+        return Ok(());
+    };
+    let Some(neighbor) = (match direction {
+        PromptAssemblyMoveDirection::Up => position.checked_sub(1),
+        PromptAssemblyMoveDirection::Down => {
+            (position + 1 < state.skill_discovery_skills.len()).then_some(position + 1)
+        }
+    }) else {
+        return Ok(());
+    };
+    state.skill_discovery_skills.swap(position, neighbor);
+    normalize_skill_discovery_requested_orders(state);
+    Ok(())
+}
+
+fn next_skill_discovery_requested_order(entries: &[PersistedSkillDiscoverySkillEntry]) -> u16 {
+    entries
+        .iter()
+        .filter_map(|entry| entry.requested_order)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+fn normalize_skill_discovery_requested_orders(state: &mut PromptAssemblyScopeState) {
+    for (index, entry) in state.skill_discovery_skills.iter_mut().enumerate() {
+        entry.requested_order = Some(u16::try_from(index + 1).unwrap_or(u16::MAX));
+    }
+}
+
 fn remove_prompt_source(
     state: &mut PromptAssemblyScopeState,
     kind: PromptSourceKind,
@@ -925,17 +1184,207 @@ fn normalize_requested_orders(
     }
 }
 
-fn discovered_skill_inventory(
-    discovered_skills: &[DiscoveredSkill],
+fn managed_sources(
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
+) -> Vec<PromptAssemblyManagedSource> {
+    let mut sources = vec![PromptAssemblyManagedSource {
+        reference_id: "core-system".to_string(),
+        kind: PromptSourceKind::CoreSystemPrompt,
+        title: "Core system prompt".to_string(),
+        origin: Some(resolve_core_system_origin(global_state, project_state)),
+        enabled: true,
+        order: 1,
+    }];
+
+    let mut entries = global_state
+        .entries
+        .iter()
+        .map(|entry| (PromptAssemblyScope::Global, entry))
+        .chain(
+            project_state
+                .entries
+                .iter()
+                .map(|entry| (PromptAssemblyScope::Project, entry)),
+        )
+        .collect::<Vec<_>>();
+    entries.sort_by(|(left_scope, left), (right_scope, right)| {
+        left.requested_order
+            .unwrap_or(u16::MAX)
+            .cmp(&right.requested_order.unwrap_or(u16::MAX))
+            .then_with(|| left.reference_id.cmp(&right.reference_id))
+            .then_with(|| {
+                left_scope
+                    .as_stored_value()
+                    .cmp(right_scope.as_stored_value())
+            })
+    });
+
+    for (index, (scope, entry)) in entries.into_iter().enumerate() {
+        sources.push(PromptAssemblyManagedSource {
+            reference_id: entry.reference_id.clone(),
+            kind: entry.kind,
+            title: entry.title.clone(),
+            origin: Some(scope_origin(scope)),
+            enabled: entry.enabled,
+            order: index + 2,
+        });
+    }
+
+    sources
+}
+
+fn extra_prompt_candidates(
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+    extra_prompt_bodies: &HashMap<String, String>,
+) -> Vec<PromptAssemblyExtraPromptCandidate> {
+    let mut candidates = Vec::new();
+    push_extra_prompt_candidates(&mut candidates, global_state, extra_prompt_bodies);
+    push_extra_prompt_candidates(&mut candidates, project_state, extra_prompt_bodies);
+    candidates.sort_by(|left, right| {
+        left.title
+            .cmp(&right.title)
+            .then_with(|| left.reference_id.cmp(&right.reference_id))
+    });
+    candidates
+}
+
+fn push_extra_prompt_candidates(
+    candidates: &mut Vec<PromptAssemblyExtraPromptCandidate>,
+    state: &PromptAssemblyScopeState,
+    extra_prompt_bodies: &HashMap<String, String>,
+) {
+    let selected_ids = state
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == PromptSourceKind::ExtraPrompt)
+        .map(|entry| entry.reference_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    for prompt in &state.extra_prompts {
+        let body = extra_prompt_bodies
+            .get(&scope_reference_key(state.scope, &prompt.reference_id))
+            .cloned()
+            .unwrap_or_else(|| prompt.body.trim().to_string());
+        candidates.push(PromptAssemblyExtraPromptCandidate {
+            reference_id: prompt.reference_id.clone(),
+            title: prompt.title.clone(),
+            origin: scope_origin(state.scope),
+            body,
+            selected: selected_ids.contains(prompt.reference_id.as_str()),
+        });
+    }
+}
+
+fn merged_skill_discovery_skill_state(
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+    discovered_skills: &[DiscoveredSkill],
+) -> Vec<PersistedSkillDiscoverySkillEntry> {
+    let mut state_by_name = HashMap::<String, PersistedSkillDiscoverySkillEntry>::new();
+    for entry in &global_state.skill_discovery_skills {
+        state_by_name.insert(entry.skill_name.clone(), entry.clone());
+    }
+    for entry in &project_state.skill_discovery_skills {
+        state_by_name.insert(entry.skill_name.clone(), entry.clone());
+    }
+
+    let mut state = discovered_skills
+        .iter()
+        .filter(|skill| !skill.disable_model_invocation)
+        .enumerate()
+        .map(|(index, skill)| {
+            state_by_name
+                .get(&skill.name)
+                .cloned()
+                .unwrap_or(PersistedSkillDiscoverySkillEntry {
+                    skill_name: skill.name.clone(),
+                    enabled: true,
+                    requested_order: Some(u16::try_from(index + 1).unwrap_or(u16::MAX)),
+                })
+        })
+        .collect::<Vec<_>>();
+    state.sort_by(|left, right| {
+        left.requested_order
+            .unwrap_or(u16::MAX)
+            .cmp(&right.requested_order.unwrap_or(u16::MAX))
+            .then_with(|| left.skill_name.cmp(&right.skill_name))
+    });
+    state
+}
+
+fn resolve_skill_discovery_body(
+    scope: PromptAssemblyScope,
+    skill_state: &[PersistedSkillDiscoverySkillEntry],
+    skills_by_name: &HashMap<String, DiscoveredSkill>,
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+) -> String {
+    let generated_body = render_skill_discovery_generated_body(skill_state, skills_by_name);
+    let override_body = match scope {
+        PromptAssemblyScope::Global => global_state.skill_discovery_override.as_deref(),
+        PromptAssemblyScope::Project => project_state
+            .skill_discovery_override
+            .as_deref()
+            .or(global_state.skill_discovery_override.as_deref()),
+    };
+    match override_body {
+        Some(override_body) => rebuild_skill_discovery_override(override_body, &generated_body),
+        None => generated_body,
+    }
+}
+
+fn render_skill_discovery_generated_body(
+    skill_state: &[PersistedSkillDiscoverySkillEntry],
+    skills_by_name: &HashMap<String, DiscoveredSkill>,
+) -> String {
+    let skills = skill_state
+        .iter()
+        .filter(|entry| entry.enabled)
+        .filter_map(|entry| skills_by_name.get(&entry.skill_name).cloned())
+        .collect::<Vec<_>>();
+    format_skill_discovery_body(skills)
+}
+
+fn rebuild_skill_discovery_override(existing: &str, generated_body: &str) -> String {
+    if let Some((_, suffix)) = parse_skill_discovery_override(existing) {
+        let mut sections = vec![
+            SKILL_DISCOVERY_GENERATED_START.to_string(),
+            generated_body.to_string(),
+            SKILL_DISCOVERY_GENERATED_END.to_string(),
+        ];
+        if !suffix.is_empty() {
+            sections.push(suffix.to_string());
+        }
+        return sections.join("\n");
+    }
+    existing.to_string()
+}
+
+fn parse_skill_discovery_override(content: &str) -> Option<(&str, &str)> {
+    let (_, after_start) = content.split_once(SKILL_DISCOVERY_GENERATED_START)?;
+    let (_, after_end) = after_start.split_once(SKILL_DISCOVERY_GENERATED_END)?;
+    Some((after_start, after_end.trim_start_matches('\n')))
+}
+
+fn discovered_skill_inventory(
+    discovered_skills: &[DiscoveredSkill],
+    _global_state: &PromptAssemblyScopeState,
+    _project_state: &PromptAssemblyScopeState,
+    skill_state: &[PersistedSkillDiscoverySkillEntry],
 ) -> Vec<PromptAssemblyDiscoveredSkill> {
+    let state_by_name = skill_state
+        .iter()
+        .map(|entry| (entry.skill_name.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let selected_order_by_name = skill_state
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.skill_name.as_str(), index + 1))
+        .collect::<HashMap<_, _>>();
     discovered_skills
         .iter()
-        .filter(|skill| {
-            !has_long_lived_skill_entry(global_state, &skill.name)
-                && !has_long_lived_skill_entry(project_state, &skill.name)
-        })
+        .filter(|skill| !skill.disable_model_invocation)
         .map(|skill| PromptAssemblyDiscoveredSkill {
             skill_name: skill.name.clone(),
             title: skill.name.clone(),
@@ -943,6 +1392,11 @@ fn discovered_skill_inventory(
             origin: skill.origin,
             skill_path: skill.skill_path.display().to_string(),
             body: format_long_lived_skill_body(skill),
+            selected: state_by_name
+                .get(skill.name.as_str())
+                .map(|entry| entry.enabled)
+                .unwrap_or(true),
+            selected_order: selected_order_by_name.get(skill.name.as_str()).copied(),
         })
         .collect()
 }
@@ -960,14 +1414,10 @@ fn manual_skill_inventory(
             origin: skill.origin,
             skill_path: skill.skill_path.display().to_string(),
             body: format_long_lived_skill_body(skill),
+            selected: false,
+            selected_order: None,
         })
         .collect()
-}
-
-fn has_long_lived_skill_entry(state: &PromptAssemblyScopeState, skill_name: &str) -> bool {
-    state.entries.iter().any(|entry| {
-        entry.kind == PromptSourceKind::LongLivedSkill && entry.reference_id == skill_name
-    })
 }
 
 fn discover_skills(
@@ -1230,6 +1680,8 @@ mod tests {
                     requested_order: Some(30),
                 },
             ],
+            skill_discovery_override: None,
+            skill_discovery_skills: Vec::new(),
             extra_prompts: Vec::new(),
         };
         let project_state = PromptAssemblyScopeState {
@@ -1242,6 +1694,8 @@ mod tests {
                 enabled: true,
                 requested_order: Some(10),
             }],
+            skill_discovery_override: None,
+            skill_discovery_skills: Vec::new(),
             extra_prompts: vec![StoredPromptBody {
                 reference_id: "repo-rules".to_string(),
                 title: "repo-rules".to_string(),
@@ -1289,12 +1743,23 @@ mod tests {
                         requested_order: Some(20),
                     },
                 ],
+                skill_discovery_override: None,
+                skill_discovery_skills: Vec::new(),
                 extra_prompts: Vec::new(),
             },
             &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
         );
 
-        assert_eq!(resolved.snapshot.active_sources.len(), 1);
+        assert_eq!(resolved.snapshot.active_sources.len(), 2);
+        assert_eq!(
+            resolved
+                .snapshot
+                .active_sources
+                .iter()
+                .map(|source| source.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["core-system", "skill-discovery"]
+        );
         assert_eq!(
             resolved
                 .snapshot
@@ -1303,6 +1768,225 @@ mod tests {
                 .map(|source| source.reference_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["disabled", "missing"]
+        );
+    }
+
+    #[test]
+    fn resolve_manager_snapshot_injects_default_skill_discovery_source_with_generated_body() {
+        let work_dir = temp_dir("default-skill-discovery");
+        let project_skill_dir = work_dir.join(".agents/skills/repo-bootstrap");
+        fs::create_dir_all(&project_skill_dir).expect("skill dir should exist");
+        fs::write(
+            project_skill_dir.join(SKILL_FILE_NAME),
+            "---\nname: repo-bootstrap\ndescription: Bootstrap repo\ndisable-model-invocation: false\n---\n# Repo Bootstrap\n\nUse this skill.\n",
+        )
+        .expect("skill file should exist");
+
+        let resolved = resolve_prompt_assembly_manager_snapshot(
+            &work_dir,
+            &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
+            &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        );
+
+        let managed_skill_discovery = resolved
+            .managed_sources
+            .iter()
+            .find(|source| source.kind == PromptSourceKind::SkillDiscovery)
+            .expect("default skill discovery source should exist");
+        assert_eq!(managed_skill_discovery.reference_id, "skill-discovery");
+
+        let materialized_skill_discovery = resolved
+            .sources
+            .iter()
+            .find(|source| {
+                source.kind == PromptSourceKind::SkillDiscovery
+                    && source.reference_id == "skill-discovery"
+            })
+            .expect("materialized skill discovery source should exist");
+        assert!(
+            materialized_skill_discovery
+                .body
+                .as_deref()
+                .expect("skill discovery body should exist")
+                .contains("<available_skills>")
+        );
+        assert!(
+            materialized_skill_discovery
+                .body
+                .as_deref()
+                .expect("skill discovery body should exist")
+                .contains("<name>repo-bootstrap</name>")
+        );
+    }
+
+    #[test]
+    fn save_skill_discovery_override_rebuilds_generated_block_and_preserves_appended_suffix() {
+        let work_dir = temp_dir("skill-discovery-override");
+        let skill_dir = work_dir.join(".agents/skills/repo-bootstrap");
+        fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+        fs::write(
+            skill_dir.join(SKILL_FILE_NAME),
+            "---\nname: repo-bootstrap\ndescription: Bootstrap repo\n---\n# Repo Bootstrap\n",
+        )
+        .expect("skill file should exist");
+
+        let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+        let original = format!(
+            "{SKILL_DISCOVERY_GENERATED_START}\nold generated\n{SKILL_DISCOVERY_GENERATED_END}\n\n## Notes\nkeep this suffix"
+        );
+        apply_prompt_assembly_mutation(
+            store.clone(),
+            &work_dir,
+            PromptAssemblyMutation::SaveEditorTarget {
+                target: PromptAssemblyEditorTarget::SkillDiscovery {
+                    scope: PromptAssemblyScope::Project,
+                },
+                content: original,
+            },
+        )
+        .expect("save should succeed");
+
+        let loaded = load_initial_prompt_assembly(store, &work_dir).expect("snapshot should load");
+        let skill_discovery = loaded
+            .sources
+            .iter()
+            .find(|source| source.kind == PromptSourceKind::SkillDiscovery)
+            .and_then(|source| source.body.as_deref())
+            .expect("skill discovery body should exist");
+
+        assert!(skill_discovery.contains(SKILL_DISCOVERY_GENERATED_START));
+        assert!(skill_discovery.contains(SKILL_DISCOVERY_GENERATED_END));
+        assert!(skill_discovery.contains("<available_skills>"));
+        assert!(skill_discovery.contains("## Notes\nkeep this suffix"));
+    }
+
+    #[test]
+    fn manager_snapshot_skill_inventory_uses_dense_selected_order() {
+        let work_dir = temp_dir("skill-order-dense");
+        let repo_bootstrap_dir = work_dir.join(".agents/skills/repo-bootstrap");
+        fs::create_dir_all(&repo_bootstrap_dir).expect("repo-bootstrap dir should exist");
+        fs::write(
+            repo_bootstrap_dir.join(SKILL_FILE_NAME),
+            "---\nname: repo-bootstrap\ndescription: Bootstrap repo\n---\n# Repo Bootstrap\n",
+        )
+        .expect("repo-bootstrap skill should write");
+        let code_review_dir = work_dir.join(".agents/skills/code-review");
+        fs::create_dir_all(&code_review_dir).expect("code-review dir should exist");
+        fs::write(
+            code_review_dir.join(SKILL_FILE_NAME),
+            "---\nname: code-review\ndescription: Review code\n---\n# Code Review\n",
+        )
+        .expect("code-review skill should write");
+        let global_skill_root = temp_dir("skill-order-dense-global");
+
+        let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
+            &work_dir,
+            &PromptAssemblyScopeState {
+                scope: PromptAssemblyScope::Global,
+                core_system_override: None,
+                entries: Vec::new(),
+                skill_discovery_override: None,
+                skill_discovery_skills: vec![
+                    PersistedSkillDiscoverySkillEntry {
+                        skill_name: "repo-bootstrap".to_string(),
+                        enabled: true,
+                        requested_order: Some(10),
+                    },
+                    PersistedSkillDiscoverySkillEntry {
+                        skill_name: "code-review".to_string(),
+                        enabled: true,
+                        requested_order: Some(20),
+                    },
+                ],
+                extra_prompts: Vec::new(),
+            },
+            &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+            Some(global_skill_root.as_path()),
+        );
+
+        let mut selected_orders = snapshot
+            .discovered_skills
+            .iter()
+            .map(|skill| (skill.skill_name.clone(), skill.selected_order))
+            .collect::<Vec<_>>();
+        selected_orders.sort_by(|left, right| left.0.cmp(&right.0));
+
+        assert_eq!(
+            selected_orders,
+            vec![
+                ("code-review".to_string(), Some(2)),
+                ("repo-bootstrap".to_string(), Some(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn moving_discovered_skill_normalizes_requested_order_to_dense_sequence() {
+        let mut state = PromptAssemblyScopeState {
+            scope: PromptAssemblyScope::Project,
+            core_system_override: None,
+            entries: Vec::new(),
+            skill_discovery_override: None,
+            skill_discovery_skills: vec![
+                PersistedSkillDiscoverySkillEntry {
+                    skill_name: "repo-bootstrap".to_string(),
+                    enabled: true,
+                    requested_order: Some(10),
+                },
+                PersistedSkillDiscoverySkillEntry {
+                    skill_name: "code-review".to_string(),
+                    enabled: true,
+                    requested_order: Some(20),
+                },
+            ],
+            extra_prompts: Vec::new(),
+        };
+
+        move_discovered_skill(&mut state, "code-review", PromptAssemblyMoveDirection::Up)
+            .expect("move should succeed");
+
+        assert_eq!(
+            state
+                .skill_discovery_skills
+                .iter()
+                .map(|entry| (entry.skill_name.as_str(), entry.requested_order))
+                .collect::<Vec<_>>(),
+            vec![("code-review", Some(1)), ("repo-bootstrap", Some(2)),]
+        );
+    }
+
+    #[test]
+    fn selecting_discovered_skill_persists_requested_order_from_one() {
+        let work_dir = temp_dir("select-skill-order");
+        let repo_bootstrap_dir = work_dir.join(".agents/skills/repo-bootstrap");
+        fs::create_dir_all(&repo_bootstrap_dir).expect("repo-bootstrap dir should exist");
+        fs::write(
+            repo_bootstrap_dir.join(SKILL_FILE_NAME),
+            "---\nname: repo-bootstrap\ndescription: Bootstrap repo\n---\n# Repo Bootstrap\n",
+        )
+        .expect("repo-bootstrap skill should write");
+
+        let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+        apply_prompt_assembly_mutation(
+            store,
+            &work_dir,
+            PromptAssemblyMutation::SetDiscoveredSkillSelected {
+                scope: PromptAssemblyScope::Project,
+                skill_name: "repo-bootstrap".to_string(),
+                selected: true,
+            },
+        )
+        .expect("selection should succeed");
+
+        let project_state = load_project_prompt_assembly_state(&work_dir)
+            .expect("project prompt assembly state should load");
+        assert_eq!(
+            project_state.skill_discovery_skills,
+            vec![PersistedSkillDiscoverySkillEntry {
+                skill_name: "repo-bootstrap".to_string(),
+                enabled: true,
+                requested_order: Some(1),
+            }]
         );
     }
 
@@ -1320,6 +2004,8 @@ mod tests {
                 enabled: true,
                 requested_order: Some(10),
             }],
+            skill_discovery_override: None,
+            skill_discovery_skills: Vec::new(),
             extra_prompts: vec![StoredPromptBody {
                 reference_id: "repo-rules".to_string(),
                 title: "repo-rules".to_string(),
@@ -1338,6 +2024,8 @@ mod tests {
                     scope: PromptAssemblyScope::Global,
                     core_system_override: Some("global core".to_string()),
                     entries: Vec::new(),
+                    skill_discovery_override: None,
+                    skill_discovery_skills: Vec::new(),
                     extra_prompts: Vec::new(),
                 }),
             )
@@ -1346,10 +2034,12 @@ mod tests {
         let prelude =
             load_initial_prompt_prelude(global_store, &work_dir).expect("prelude should load");
 
-        assert_eq!(
-            prelude.effective_system_prompt().as_deref(),
-            Some("project core\n\nproject rules")
-        );
+        let effective = prelude
+            .effective_system_prompt()
+            .expect("effective prompt should exist");
+        assert!(effective.starts_with("project core\n\n"));
+        assert!(effective.contains("<available_skills>"));
+        assert!(effective.ends_with("project rules"));
     }
 
     #[test]
@@ -1372,6 +2062,8 @@ mod tests {
                         enabled: false,
                         requested_order: Some(10),
                     }],
+                    skill_discovery_override: None,
+                    skill_discovery_skills: Vec::new(),
                     extra_prompts: Vec::new(),
                 }),
             )
@@ -1380,10 +2072,12 @@ mod tests {
         let loaded =
             load_initial_prompt_assembly(global_store, &work_dir).expect("snapshot should load");
 
-        assert_eq!(
-            loaded.prelude.effective_system_prompt().as_deref(),
-            Some("global core")
-        );
+        let effective = loaded
+            .prelude
+            .effective_system_prompt()
+            .expect("effective prompt should exist");
+        assert!(effective.starts_with("global core\n\n"));
+        assert!(effective.contains("<available_skills>"));
         assert_eq!(
             loaded
                 .snapshot
@@ -1424,13 +2118,13 @@ mod tests {
                 .iter()
                 .map(|source| source.reference_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["core-system", "repo-bootstrap"]
+            vec!["core-system", "skill-discovery", "repo-bootstrap"]
         );
         assert!(
-            !snapshot
+            snapshot
                 .discovered_skills
                 .iter()
-                .any(|skill| skill.skill_name == "repo-bootstrap")
+                .any(|skill| skill.skill_name == "repo-bootstrap" && skill.selected)
         );
         assert!(
             snapshot
@@ -1485,6 +2179,8 @@ mod tests {
                     enabled: true,
                     requested_order: Some(10),
                 }],
+                skill_discovery_override: None,
+                skill_discovery_skills: Vec::new(),
                 extra_prompts: Vec::new(),
             },
             &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
@@ -1533,6 +2229,8 @@ mod tests {
                         enabled: true,
                         requested_order: Some(10),
                     }],
+                    skill_discovery_override: None,
+                    skill_discovery_skills: Vec::new(),
                     extra_prompts: vec![StoredPromptBody {
                         reference_id: "shared-rules".to_string(),
                         title: "shared-rules".to_string(),
@@ -1553,6 +2251,8 @@ mod tests {
                     enabled: true,
                     requested_order: Some(20),
                 }],
+                skill_discovery_override: None,
+                skill_discovery_skills: Vec::new(),
                 extra_prompts: vec![StoredPromptBody {
                     reference_id: "repo-rules".to_string(),
                     title: "repo-rules".to_string(),
@@ -1581,7 +2281,12 @@ mod tests {
                 .iter()
                 .map(|source| source.reference_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["core-system", "repo-rules", "shared-rules"]
+            vec![
+                "core-system",
+                "skill-discovery",
+                "repo-rules",
+                "shared-rules"
+            ]
         );
     }
 
@@ -1608,6 +2313,8 @@ mod tests {
                         requested_order: Some(20),
                     },
                 ],
+                skill_discovery_override: None,
+                skill_discovery_skills: Vec::new(),
                 extra_prompts: Vec::new(),
             },
             &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),

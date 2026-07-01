@@ -307,7 +307,9 @@ fn model_with_manual_skill(skill_name: &str) -> Model {
             prompt_assembly: Some(PromptAssemblyManagerSnapshot {
                 snapshot: resolve_prompt_assembly(&PromptAssemblyInput::default()),
                 prelude: PromptPreludeSnapshot::default(),
+                managed_sources: Vec::new(),
                 sources: Vec::new(),
+                extra_prompt_candidates: Vec::new(),
                 discovered_skills: Vec::new(),
                 manual_skills: vec![PromptAssemblyDiscoveredSkill {
                     skill_name: skill_name.to_string(),
@@ -316,6 +318,8 @@ fn model_with_manual_skill(skill_name: &str) -> Model {
                     origin: PromptSourceOrigin::Project,
                     skill_path: format!("/tmp/{skill_name}/SKILL.md"),
                     body: "# Manual Skill".to_string(),
+                    selected: false,
+                    selected_order: None,
                 }],
                 builtin_core_system_body: String::new(),
                 global_core_system_override: None,

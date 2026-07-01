@@ -290,6 +290,19 @@ fn initialize_database_schema(conn: &Connection) -> Result<(), SessionStoreError
             scope TEXT PRIMARY KEY,
             body TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_skill_discovery_overrides (
+            scope TEXT PRIMARY KEY,
+            body TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_skill_discovery_skills (
+            scope TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            requested_order INTEGER,
+            PRIMARY KEY (scope, skill_name)
+        );
         ",
     )
     .map_err(sqlite_error)

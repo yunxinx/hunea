@@ -5,8 +5,8 @@ use std::path::Path;
 use runtime_domain::prompt_assembly::{
     PromptSourceKind,
     persistence::{
-        PersistedPromptAssemblyEntry, PromptAssemblyScope, PromptAssemblyScopeState,
-        StoredPromptBody,
+        PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PromptAssemblyScope,
+        PromptAssemblyScopeState, StoredPromptBody,
     },
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
@@ -47,6 +47,18 @@ pub(crate) fn save_global_prompt_assembly_state(
         transaction
             .execute(
                 "DELETE FROM prompt_assembly_core_overrides WHERE scope = ?1",
+                params![scope],
+            )
+            .map_err(sqlite_err)?;
+        transaction
+            .execute(
+                "DELETE FROM prompt_assembly_skill_discovery_overrides WHERE scope = ?1",
+                params![scope],
+            )
+            .map_err(sqlite_err)?;
+        transaction
+            .execute(
+                "DELETE FROM prompt_assembly_skill_discovery_skills WHERE scope = ?1",
                 params![scope],
             )
             .map_err(sqlite_err)?;
@@ -93,6 +105,34 @@ pub(crate) fn save_global_prompt_assembly_state(
                 .execute(
                     "INSERT INTO prompt_assembly_core_overrides (scope, body) VALUES (?1, ?2)",
                     params![scope, body],
+                )
+                .map_err(sqlite_err)?;
+        }
+
+        if let Some(body) = state.skill_discovery_override.as_deref() {
+            transaction
+                .execute(
+                    "INSERT INTO prompt_assembly_skill_discovery_overrides (scope, body) VALUES (?1, ?2)",
+                    params![scope, body],
+                )
+                .map_err(sqlite_err)?;
+        }
+
+        for skill in sort_skill_discovery_skills(state.skill_discovery_skills.clone()) {
+            transaction
+                .execute(
+                    "INSERT INTO prompt_assembly_skill_discovery_skills (
+                        scope,
+                        skill_name,
+                        enabled,
+                        requested_order
+                    ) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        scope,
+                        skill.skill_name,
+                        skill.enabled,
+                        skill.requested_order.map(i64::from),
+                    ],
                 )
                 .map_err(sqlite_err)?;
         }
@@ -176,10 +216,58 @@ pub(crate) fn load_global_prompt_assembly_state(
             .optional()
             .map_err(sqlite_err)?;
 
+        let skill_discovery_override = conn
+            .query_row(
+                "SELECT body FROM prompt_assembly_skill_discovery_overrides WHERE scope = ?1",
+                params![scope],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_err)?;
+
+        let mut discovery_skills_statement = conn
+            .prepare(
+                "SELECT skill_name, enabled, requested_order
+                 FROM prompt_assembly_skill_discovery_skills
+                 WHERE scope = ?1
+                 ORDER BY
+                    CASE WHEN requested_order IS NULL THEN 1 ELSE 0 END,
+                    requested_order ASC,
+                    skill_name ASC",
+            )
+            .map_err(sqlite_err)?;
+        let skill_discovery_skills = discovery_skills_statement
+            .query_map(params![scope], |row| {
+                let requested_order = row
+                    .get::<_, Option<i64>>(2)?
+                    .map(|value| {
+                        u16::try_from(value).map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Integer,
+                                Box::new(std::io::Error::other(
+                                    "requested_order exceeds u16 range",
+                                )),
+                            )
+                        })
+                    })
+                    .transpose()?;
+                Ok(PersistedSkillDiscoverySkillEntry {
+                    skill_name: row.get(0)?,
+                    enabled: row.get(1)?,
+                    requested_order,
+                })
+            })
+            .map_err(sqlite_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_err)?;
+
         Ok(PromptAssemblyScopeState {
             scope: PromptAssemblyScope::Global,
             core_system_override,
+            skill_discovery_override,
             entries,
+            skill_discovery_skills,
             extra_prompts,
         })
     })
@@ -226,6 +314,18 @@ fn sort_entries(
     entries
 }
 
+fn sort_skill_discovery_skills(
+    mut entries: Vec<PersistedSkillDiscoverySkillEntry>,
+) -> Vec<PersistedSkillDiscoverySkillEntry> {
+    entries.sort_by(|left, right| {
+        left.requested_order
+            .unwrap_or(u16::MAX)
+            .cmp(&right.requested_order.unwrap_or(u16::MAX))
+            .then_with(|| left.skill_name.cmp(&right.skill_name))
+    });
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use runtime_domain::prompt_assembly::{
@@ -240,6 +340,7 @@ mod tests {
         PromptAssemblyScopeState {
             scope: PromptAssemblyScope::Global,
             core_system_override: Some("global core override".to_string()),
+            skill_discovery_override: None,
             entries: vec![
                 PersistedPromptAssemblyEntry {
                     reference_id: "skill-discovery".to_string(),
@@ -256,6 +357,7 @@ mod tests {
                     requested_order: Some(10),
                 },
             ],
+            skill_discovery_skills: Vec::new(),
             extra_prompts: vec![StoredPromptBody {
                 reference_id: "shared-rules".to_string(),
                 title: "shared-rules".to_string(),
@@ -303,6 +405,7 @@ mod tests {
             runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState {
                 scope: PromptAssemblyScope::Project,
                 core_system_override: Some("project core override".to_string()),
+                skill_discovery_override: None,
                 entries: vec![PersistedPromptAssemblyEntry {
                     reference_id: "shared-rules".to_string(),
                     kind: PromptSourceKind::ExtraPrompt,
@@ -310,6 +413,7 @@ mod tests {
                     enabled: true,
                     requested_order: Some(10),
                 }],
+                skill_discovery_skills: Vec::new(),
                 extra_prompts: vec![StoredPromptBody {
                     reference_id: "shared-rules".to_string(),
                     title: "shared-rules".to_string(),

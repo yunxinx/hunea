@@ -26,6 +26,7 @@ const COMMAND_ACCENT: Color = Color::Cyan;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextBudgetColorSlot {
     SystemPrompt,
+    SkillDiscovery,
     Messages,
     ToolDefinitions,
 }
@@ -129,6 +130,7 @@ pub(crate) fn context_budget_slot_color(
     if palette.uses_terminal_default_colors() {
         return match slot {
             ContextBudgetColorSlot::SystemPrompt => Color::Blue,
+            ContextBudgetColorSlot::SkillDiscovery => Color::Yellow,
             ContextBudgetColorSlot::Messages => Color::Green,
             ContextBudgetColorSlot::ToolDefinitions => Color::Cyan,
         };
@@ -136,9 +138,11 @@ pub(crate) fn context_budget_slot_color(
 
     match (palette.has_dark_background(), slot) {
         (true, ContextBudgetColorSlot::SystemPrompt) => Color::Rgb(96, 165, 250),
+        (true, ContextBudgetColorSlot::SkillDiscovery) => Color::Rgb(251, 191, 36),
         (true, ContextBudgetColorSlot::Messages) => Color::Rgb(74, 222, 128),
         (true, ContextBudgetColorSlot::ToolDefinitions) => Color::Rgb(34, 211, 238),
         (false, ContextBudgetColorSlot::SystemPrompt) => Color::Rgb(29, 78, 216),
+        (false, ContextBudgetColorSlot::SkillDiscovery) => Color::Rgb(180, 83, 9),
         (false, ContextBudgetColorSlot::Messages) => Color::Rgb(21, 128, 61),
         (false, ContextBudgetColorSlot::ToolDefinitions) => Color::Rgb(8, 145, 178),
     }
@@ -377,6 +381,10 @@ mod tests {
             Color::Blue
         );
         assert_eq!(
+            context_budget_slot_color(ContextBudgetColorSlot::SkillDiscovery, &palette),
+            Color::Yellow
+        );
+        assert_eq!(
             context_budget_slot_color(ContextBudgetColorSlot::Messages, &palette),
             Color::Green
         );
@@ -396,6 +404,10 @@ mod tests {
             Color::Rgb(96, 165, 250)
         );
         assert_eq!(
+            context_budget_slot_color(ContextBudgetColorSlot::SkillDiscovery, &dark_palette),
+            Color::Rgb(251, 191, 36)
+        );
+        assert_eq!(
             context_budget_slot_color(ContextBudgetColorSlot::Messages, &dark_palette),
             Color::Rgb(74, 222, 128)
         );
@@ -406,6 +418,10 @@ mod tests {
         assert_eq!(
             context_budget_slot_color(ContextBudgetColorSlot::SystemPrompt, &light_palette),
             Color::Rgb(29, 78, 216)
+        );
+        assert_eq!(
+            context_budget_slot_color(ContextBudgetColorSlot::SkillDiscovery, &light_palette),
+            Color::Rgb(180, 83, 9)
         );
         assert_eq!(
             context_budget_slot_color(ContextBudgetColorSlot::Messages, &light_palette),

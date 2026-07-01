@@ -3,6 +3,7 @@ use runtime_domain::context_budget::{ContextBudgetSnapshot, ContextWindowUsage, 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextBudgetCategoryKind {
     SystemPrompt,
+    SkillDiscovery,
     ToolDefinitions,
     Messages,
     FreeSpace,
@@ -57,15 +58,17 @@ pub(crate) fn context_usage_summary(model_id: &str, usage: ContextWindowUsage) -
 pub(crate) fn context_budget_category_display_rank(kind: ContextBudgetCategoryKind) -> usize {
     match kind {
         ContextBudgetCategoryKind::SystemPrompt => 0,
-        ContextBudgetCategoryKind::ToolDefinitions => 1,
-        ContextBudgetCategoryKind::Messages => 2,
-        ContextBudgetCategoryKind::FreeSpace => 3,
+        ContextBudgetCategoryKind::SkillDiscovery => 1,
+        ContextBudgetCategoryKind::ToolDefinitions => 2,
+        ContextBudgetCategoryKind::Messages => 3,
+        ContextBudgetCategoryKind::FreeSpace => 4,
     }
 }
 
 pub(crate) fn context_budget_category_label(kind: ContextBudgetCategoryKind) -> &'static str {
     match kind {
         ContextBudgetCategoryKind::SystemPrompt => "System prompt",
+        ContextBudgetCategoryKind::SkillDiscovery => "Skill discovery",
         ContextBudgetCategoryKind::ToolDefinitions => "Tool definitions",
         ContextBudgetCategoryKind::Messages => "Messages",
         ContextBudgetCategoryKind::FreeSpace => "Free space",
@@ -77,6 +80,7 @@ pub(crate) fn context_budget_category_from_segment_kind(
 ) -> ContextBudgetCategoryKind {
     match kind {
         SegmentKind::System => ContextBudgetCategoryKind::SystemPrompt,
+        SegmentKind::SkillDiscovery => ContextBudgetCategoryKind::SkillDiscovery,
         SegmentKind::ToolDefinitions => ContextBudgetCategoryKind::ToolDefinitions,
         SegmentKind::UserMessage
         | SegmentKind::AssistantMessage
@@ -102,8 +106,8 @@ pub(crate) fn legend_share_total(snapshot: &ContextBudgetSnapshot) -> usize {
 
 pub(crate) fn aggregated_category_totals(
     snapshot: &ContextBudgetSnapshot,
-) -> [(ContextBudgetCategoryKind, usize); 3] {
-    let mut totals = [0usize; 3];
+) -> [(ContextBudgetCategoryKind, usize); 4] {
+    let mut totals = [0usize; 4];
 
     for segment in &snapshot.segments {
         let category = context_budget_category_from_segment_kind(segment.kind);
@@ -115,8 +119,9 @@ pub(crate) fn aggregated_category_totals(
 
     [
         (ContextBudgetCategoryKind::SystemPrompt, totals[0]),
-        (ContextBudgetCategoryKind::ToolDefinitions, totals[1]),
-        (ContextBudgetCategoryKind::Messages, totals[2]),
+        (ContextBudgetCategoryKind::SkillDiscovery, totals[1]),
+        (ContextBudgetCategoryKind::ToolDefinitions, totals[2]),
+        (ContextBudgetCategoryKind::Messages, totals[3]),
     ]
 }
 
@@ -190,23 +195,25 @@ mod tests {
             model_id: "model".to_string(),
             segments: vec![
                 segment(SegmentKind::System, 100),
+                segment(SegmentKind::SkillDiscovery, 30),
                 segment(SegmentKind::AssistantMessage, 120),
                 segment(SegmentKind::UserMessage, 80),
                 segment(SegmentKind::ToolResult, 40),
                 segment(SegmentKind::ToolDefinitions, 20),
             ],
-            total_estimated_tokens: 360,
+            total_estimated_tokens: 390,
             usage: ContextWindowUsage {
                 limit: limit(1_000),
-                used: 360,
+                used: 390,
             },
         };
 
         let totals = aggregated_category_totals(&snapshot);
 
         assert_eq!(totals[0], (ContextBudgetCategoryKind::SystemPrompt, 100));
-        assert_eq!(totals[1], (ContextBudgetCategoryKind::ToolDefinitions, 20));
-        assert_eq!(totals[2], (ContextBudgetCategoryKind::Messages, 240));
+        assert_eq!(totals[1], (ContextBudgetCategoryKind::SkillDiscovery, 30));
+        assert_eq!(totals[2], (ContextBudgetCategoryKind::ToolDefinitions, 20));
+        assert_eq!(totals[3], (ContextBudgetCategoryKind::Messages, 240));
     }
 
     #[test]
@@ -315,6 +322,10 @@ mod tests {
         assert_eq!(
             context_budget_category_label(ContextBudgetCategoryKind::SystemPrompt),
             "System prompt"
+        );
+        assert_eq!(
+            context_budget_category_label(ContextBudgetCategoryKind::SkillDiscovery),
+            "Skill discovery"
         );
         assert_eq!(
             context_budget_category_label(ContextBudgetCategoryKind::ToolDefinitions),

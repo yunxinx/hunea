@@ -230,6 +230,7 @@ pub(super) fn is_context_budget_heatmap_cell(cell: &Cell, palette: TerminalPalet
     let heatmap_symbols = [HEATMAP_FULL_SYMBOL, HEATMAP_EMPTY_SYMBOL];
     let heatmap_colors = [
         ContextBudgetCategoryKind::SystemPrompt,
+        ContextBudgetCategoryKind::SkillDiscovery,
         ContextBudgetCategoryKind::ToolDefinitions,
         ContextBudgetCategoryKind::Messages,
     ]
@@ -316,11 +317,15 @@ mod tests {
                     kind: SegmentKind::System,
                     estimated_tokens: 20,
                 },
+                ContextSegment {
+                    kind: SegmentKind::SkillDiscovery,
+                    estimated_tokens: 30,
+                },
             ],
-            total_estimated_tokens: 220,
+            total_estimated_tokens: 250,
             usage: ContextWindowUsage {
                 limit: limit(256_000),
-                used: 220,
+                used: 250,
             },
         };
 
@@ -333,11 +338,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ContextBudgetCategoryKind::SystemPrompt,
+                ContextBudgetCategoryKind::SkillDiscovery,
                 ContextBudgetCategoryKind::Messages,
             ]
         );
         assert_eq!(segments[0].estimated_tokens, 20);
-        assert_eq!(segments[1].estimated_tokens, 200);
+        assert_eq!(segments[1].estimated_tokens, 30);
+        assert_eq!(segments[2].estimated_tokens, 200);
     }
 
     #[test]

@@ -129,6 +129,7 @@ fn legend_symbol(kind: ContextBudgetCategoryKind) -> &'static str {
     match kind {
         ContextBudgetCategoryKind::FreeSpace => LEGEND_FREE_SYMBOL,
         ContextBudgetCategoryKind::SystemPrompt
+        | ContextBudgetCategoryKind::SkillDiscovery
         | ContextBudgetCategoryKind::ToolDefinitions
         | ContextBudgetCategoryKind::Messages => LEGEND_SWATCH_SYMBOL,
     }

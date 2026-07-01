@@ -47,6 +47,7 @@ pub struct PreparedConversationRequest {
     api_key: Option<ProviderApiKey>,
     api_key_env: Option<String>,
     items: Vec<ConversationItem>,
+    prompt_prelude: Option<PromptPreludeSnapshot>,
     persistence: Option<PreparedConversationPersistence>,
 }
 
@@ -60,6 +61,7 @@ impl std::fmt::Debug for PreparedConversationRequest {
             .field("api_key", &self.api_key)
             .field("api_key_env", &self.api_key_env)
             .field("items", &self.items)
+            .field("has_prompt_prelude", &self.prompt_prelude.is_some())
             .field("has_persistence", &self.persistence.is_some())
             .finish()
     }
@@ -70,6 +72,7 @@ impl PreparedConversationRequest {
     pub(crate) fn from_turn(
         turn: &ConversationTurnRequest,
         items: Vec<ConversationItem>,
+        prompt_prelude: Option<PromptPreludeSnapshot>,
         persistence: Option<PreparedConversationPersistence>,
     ) -> Self {
         Self {
@@ -80,6 +83,7 @@ impl PreparedConversationRequest {
             api_key: turn.api_key().cloned(),
             api_key_env: turn.api_key_env().map(str::to_string),
             items,
+            prompt_prelude,
             persistence,
         }
     }
@@ -122,6 +126,11 @@ impl PreparedConversationRequest {
     /// `items` 返回 provider-visible 完整对话项。
     pub fn items(&self) -> &[ConversationItem] {
         &self.items
+    }
+
+    /// `prompt_prelude` 返回本次请求绑定的 prompt prelude 快照。
+    pub fn prompt_prelude(&self) -> Option<&PromptPreludeSnapshot> {
+        self.prompt_prelude.as_ref()
     }
 
     pub(crate) fn persistence_cloned(&self) -> Option<PreparedConversationPersistence> {
@@ -340,6 +349,7 @@ impl ProviderConversation {
         Ok(PreparedConversationRequest::from_turn(
             turn,
             self.provider_items_with_pending_user(&user_message),
+            self.prompt_prelude.clone(),
             persistence,
         ))
     }

@@ -6,6 +6,7 @@ use std::{fmt, num::NonZeroU32};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SegmentKind {
     System,
+    SkillDiscovery,
     UserMessage,
     AssistantMessage,
     ToolResult,
@@ -18,6 +19,7 @@ impl SegmentKind {
     pub const fn default_label(self) -> &'static str {
         match self {
             Self::System => "system",
+            Self::SkillDiscovery => "skill_discovery",
             Self::UserMessage => "user",
             Self::AssistantMessage => "assistant",
             Self::ToolResult => "tool_result",

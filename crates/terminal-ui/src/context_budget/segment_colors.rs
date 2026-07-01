@@ -15,6 +15,9 @@ pub(crate) fn context_budget_color_for_category(
         ContextBudgetCategoryKind::SystemPrompt => {
             context_budget_slot_color(ContextBudgetColorSlot::SystemPrompt, palette)
         }
+        ContextBudgetCategoryKind::SkillDiscovery => {
+            context_budget_slot_color(ContextBudgetColorSlot::SkillDiscovery, palette)
+        }
         ContextBudgetCategoryKind::ToolDefinitions => {
             context_budget_slot_color(ContextBudgetColorSlot::ToolDefinitions, palette)
         }
@@ -35,6 +38,7 @@ mod tests {
         let palette = default_palette();
         for kind in [
             ContextBudgetCategoryKind::SystemPrompt,
+            ContextBudgetCategoryKind::SkillDiscovery,
             ContextBudgetCategoryKind::Messages,
             ContextBudgetCategoryKind::ToolDefinitions,
             ContextBudgetCategoryKind::FreeSpace,
@@ -56,6 +60,10 @@ mod tests {
             Color::Green
         );
         assert_eq!(
+            context_budget_color_for_category(ContextBudgetCategoryKind::SkillDiscovery, &palette),
+            Color::Yellow
+        );
+        assert_eq!(
             context_budget_color_for_category(ContextBudgetCategoryKind::ToolDefinitions, &palette),
             Color::Cyan
         );
@@ -71,6 +79,10 @@ mod tests {
             Color::Rgb(96, 165, 250)
         );
         assert_eq!(
+            context_budget_color_for_category(ContextBudgetCategoryKind::SkillDiscovery, &palette),
+            Color::Rgb(251, 191, 36)
+        );
+        assert_eq!(
             context_budget_color_for_category(ContextBudgetCategoryKind::Messages, &palette),
             Color::Rgb(74, 222, 128)
         );
@@ -83,6 +95,10 @@ mod tests {
         assert_eq!(
             context_budget_color_for_category(ContextBudgetCategoryKind::SystemPrompt, &palette),
             Color::Rgb(29, 78, 216)
+        );
+        assert_eq!(
+            context_budget_color_for_category(ContextBudgetCategoryKind::SkillDiscovery, &palette),
+            Color::Rgb(180, 83, 9)
         );
         assert_eq!(
             context_budget_color_for_category(ContextBudgetCategoryKind::Messages, &palette),

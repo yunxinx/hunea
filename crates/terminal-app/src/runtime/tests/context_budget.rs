@@ -16,13 +16,18 @@ fn context_budget_worker_shutdown_stops_accepting_new_commands() {
     assert!(
         worker
             .load_snapshot(
-                request_id(77),
-                ProviderKind::OpenAiCompatible,
-                "qwen3".to_string(),
-                std::sync::Arc::from([ConversationItem::text(Role::User, "hello")]),
-                Vec::new(),
-                runtime_domain::context_budget::ContextTokenLimit::try_from(256_000)
+                super::super::context_budget_worker::ContextBudgetSnapshotRequest {
+                    request_id: request_id(77),
+                    provider_kind: ProviderKind::OpenAiCompatible,
+                    model_id: "qwen3".to_string(),
+                    items: std::sync::Arc::from([ConversationItem::text(Role::User, "hello")]),
+                    prompt_prelude: None,
+                    tool_definitions: Vec::new(),
+                    context_limit: runtime_domain::context_budget::ContextTokenLimit::try_from(
+                        256_000,
+                    )
                     .expect("fixture limit should be valid"),
+                }
             )
             .is_err(),
         "shutdown worker should reject new work instead of recreating an implicit thread"
@@ -135,6 +140,93 @@ fn context_budget_snapshot_includes_provider_visible_tool_definitions() {
                 && segment.estimated_tokens > 0
         }),
         "context budget snapshot should include non-empty provider-visible tool definitions"
+    );
+}
+
+#[test]
+fn context_budget_snapshot_separates_skill_discovery_from_system_prompt() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        loaded_models: conversation_runtime::models::LoadedModelCatalog {
+            catalog: runtime_domain::model_catalog::ModelCatalog::new(vec![
+                runtime_domain::model_catalog::ModelProvider::new(
+                    "local",
+                    ProviderKind::OpenAiCompatible,
+                    "Local",
+                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    runtime_domain::model_catalog::ModelSource::Configured,
+                    vec![runtime_domain::model_catalog::ModelEntry::new(
+                        "qwen3",
+                        None,
+                        runtime_domain::model_catalog::ModelSource::Configured,
+                    )],
+                ),
+            ]),
+            ..conversation_runtime::models::LoadedModelCatalog::default()
+        },
+        initial_prompt_prelude: Some(runtime_domain::prompt_assembly::PromptPreludeSnapshot {
+            sections: vec![
+                runtime_domain::prompt_assembly::PromptPreludeSection {
+                    reference_id: "core-system".to_string(),
+                    kind: runtime_domain::prompt_assembly::PromptSourceKind::CoreSystemPrompt,
+                    title: "Core system prompt".to_string(),
+                    origin: Some(runtime_domain::prompt_assembly::PromptSourceOrigin::Builtin),
+                    body: "keep responses direct".to_string(),
+                },
+                runtime_domain::prompt_assembly::PromptPreludeSection {
+                    reference_id: "skill-discovery".to_string(),
+                    kind: runtime_domain::prompt_assembly::PromptSourceKind::SkillDiscovery,
+                    title: "Skill discovery".to_string(),
+                    origin: Some(runtime_domain::prompt_assembly::PromptSourceOrigin::Project),
+                    body: "<available_skills>code-review</available_skills>".to_string(),
+                },
+            ],
+        }),
+        ..AppRuntimeOptions::default()
+    });
+    let request_id = request_id(401);
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id,
+            selection: ModelSelection::new("local", "qwen3"),
+        })
+        .expect("context budget snapshot command should be accepted");
+
+    let payload = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::ContextBudgetSnapshotLoaded {
+                request_id: actual_request_id,
+                payload,
+            } if actual_request_id == request_id => Some(payload),
+            _ => None,
+        },
+        "context budget snapshot payload",
+    );
+    let non_tool_segments = payload
+        .segments
+        .iter()
+        .filter(|segment| {
+            segment.kind != runtime_domain::context_budget::SegmentKind::ToolDefinitions
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        non_tool_segments
+            .iter()
+            .map(|segment| segment.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            runtime_domain::context_budget::SegmentKind::System,
+            runtime_domain::context_budget::SegmentKind::SkillDiscovery,
+        ],
+        "prompt prelude should keep core system prompt and skill discovery as separate `/context` segments"
+    );
+    assert!(
+        non_tool_segments
+            .iter()
+            .all(|segment| segment.estimated_tokens > 0),
+        "both prompt prelude segments should keep non-zero token estimates"
     );
 }
 

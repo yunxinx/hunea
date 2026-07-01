@@ -8,7 +8,10 @@ use runtime_domain::{
 };
 
 use super::{
-    AppRuntimeCoordinator, context_budget_worker::context_budget_tool_definitions_for_worker,
+    AppRuntimeCoordinator,
+    context_budget_worker::{
+        ContextBudgetSnapshotRequest, context_budget_tool_definitions_for_worker,
+    },
 };
 
 impl AppRuntimeCoordinator {
@@ -28,14 +31,18 @@ impl AppRuntimeCoordinator {
         };
         let items = self.provider_conversation.context_budget_probe_items();
         let tool_definitions = context_budget_tool_definitions_for_worker(&self.workspace_tools);
-        if let Err(error) = self.context_budget_worker.load_snapshot(
-            request_id,
-            provider.connection().kind,
-            selection.model_id.clone(),
-            items,
-            tool_definitions,
-            self.options.loaded_models.context_limit_for(selection),
-        ) {
+        if let Err(error) = self
+            .context_budget_worker
+            .load_snapshot(ContextBudgetSnapshotRequest {
+                request_id,
+                provider_kind: provider.connection().kind,
+                model_id: selection.model_id.clone(),
+                items,
+                prompt_prelude: self.provider_conversation.prompt_prelude().cloned(),
+                tool_definitions,
+                context_limit: self.options.loaded_models.context_limit_for(selection),
+            })
+        {
             self.pending_runtime_events
                 .push(RuntimeEvent::ContextBudgetSnapshotLoadFailed {
                     request_id,

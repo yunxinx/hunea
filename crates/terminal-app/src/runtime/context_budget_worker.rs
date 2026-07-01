@@ -12,6 +12,7 @@ use conversation_runtime::context_budget::{
 use conversation_runtime::{ConversationItem, ToolDefinition};
 use runtime_domain::{
     context_budget::{ContextBudgetSnapshot, ContextTokenLimit},
+    prompt_assembly::PromptPreludeSnapshot,
     provider::ProviderKind,
     session::{ContextBudgetLoadErrorPayload, RuntimeEvent, SessionLoadRequestId},
 };
@@ -27,12 +28,24 @@ pub(super) struct ContextBudgetWorker {
 }
 
 #[derive(Debug)]
+pub(super) struct ContextBudgetSnapshotRequest {
+    pub(super) request_id: SessionLoadRequestId,
+    pub(super) provider_kind: ProviderKind,
+    pub(super) model_id: String,
+    pub(super) items: Arc<[ConversationItem]>,
+    pub(super) prompt_prelude: Option<PromptPreludeSnapshot>,
+    pub(super) tool_definitions: Vec<ToolDefinition>,
+    pub(super) context_limit: ContextTokenLimit,
+}
+
+#[derive(Debug)]
 struct ContextBudgetWorkerCommand {
     request_id: SessionLoadRequestId,
     generation: u64,
     provider_kind: ProviderKind,
     model_id: String,
     items: Arc<[ConversationItem]>,
+    prompt_prelude: Option<PromptPreludeSnapshot>,
     tool_definitions: Vec<ToolDefinition>,
     context_limit: ContextTokenLimit,
 }
@@ -110,24 +123,29 @@ impl ContextBudgetWorker {
 
     pub(super) fn load_snapshot(
         &mut self,
-        request_id: SessionLoadRequestId,
-        provider_kind: ProviderKind,
-        model_id: String,
-        items: Arc<[ConversationItem]>,
-        tool_definitions: Vec<ToolDefinition>,
-        context_limit: ContextTokenLimit,
+        request: ContextBudgetSnapshotRequest,
     ) -> Result<(), ContextBudgetWorkerLoadError> {
         if self.worker_tx.is_none() {
             return Err(ContextBudgetWorkerLoadError::WorkerStopped);
         }
 
         let generation = self.bump_generation();
+        let ContextBudgetSnapshotRequest {
+            request_id,
+            provider_kind,
+            model_id,
+            items,
+            prompt_prelude,
+            tool_definitions,
+            context_limit,
+        } = request;
         let command = ContextBudgetWorkerCommand {
             request_id,
             generation,
             provider_kind,
             model_id,
             items,
+            prompt_prelude,
             tool_definitions,
             context_limit,
         };
@@ -315,6 +333,7 @@ fn handle_context_budget_command(
         provider_kind,
         model_id,
         items,
+        prompt_prelude,
         tool_definitions,
         context_limit,
     } = command;
@@ -330,7 +349,8 @@ fn handle_context_budget_command(
         &items,
         &tool_definitions,
         context_limit,
-    );
+    )
+    .with_prompt_prelude(prompt_prelude.as_ref());
 
     match build_context_budget_snapshot_with_cancellation(probe, is_cancelled) {
         Ok(Some(snapshot)) => ContextBudgetTaskResult::Loaded(snapshot),
@@ -460,6 +480,7 @@ mod tests {
                 provider_protocol::Role::User,
                 "hello",
             )]),
+            prompt_prelude: None,
             tool_definitions: Vec::new(),
             context_limit: ContextTokenLimit::try_from(1_000)
                 .expect("fixture limit should be valid"),
@@ -473,6 +494,7 @@ mod tests {
             provider_kind: command.provider_kind,
             model_id: command.model_id.clone(),
             items: Arc::clone(&command.items),
+            prompt_prelude: command.prompt_prelude.clone(),
             tool_definitions: command.tool_definitions.clone(),
             context_limit: command.context_limit,
         }

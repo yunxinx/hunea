@@ -7,6 +7,7 @@ use ratatui::{
     style::Style,
     text::{Line, Span},
 };
+use runtime_domain::session::TranscriptSkillBinding;
 
 use super::{
     Composer,
@@ -69,6 +70,8 @@ struct StyledVisualRenderOptions<'a> {
     prompt_width: usize,
     prompt_style: ratatui::style::Style,
     text_style: ratatui::style::Style,
+    highlighted_text_style: ratatui::style::Style,
+    skill_bindings: &'a [TranscriptSkillBinding],
     content_width: usize,
     frame_fill_width: usize,
     fill_style: Style,
@@ -128,6 +131,7 @@ pub(crate) fn render_document(
     let mut fill_style = Style::default();
     let mut frame_fill_width = 0;
     let frame_decoration = frame_decoration_lines(frame_mode, palette, frame_width);
+    let highlighted_text_style = text_style.fg(palette.command_accent);
 
     if matches!(frame_mode, FrameDecorationMode::Surface) && palette.surface.is_some() {
         frame_fill_width = frame_width;
@@ -162,6 +166,8 @@ pub(crate) fn render_document(
                 prompt_width,
                 prompt_style,
                 text_style: placeholder_style,
+                highlighted_text_style: placeholder_style,
+                skill_bindings: &[],
                 content_width: composer.content_width(),
                 frame_fill_width,
                 fill_style,
@@ -224,6 +230,8 @@ pub(crate) fn render_document(
                 prompt_width,
                 prompt_style,
                 text_style,
+                highlighted_text_style,
+                skill_bindings: &composer.skill_bindings,
                 content_width: composer.content_width(),
                 frame_fill_width,
                 fill_style,
@@ -326,12 +334,78 @@ fn render_visual_lines(
             let fill_width = options
                 .frame_fill_width
                 .saturating_sub(options.prompt_width + measure_width(&line_text));
-            Line::default().spans([
-                Span::styled(line_prefix, options.prompt_style),
-                Span::styled(line_text, options.text_style),
-                Span::styled(" ".repeat(fill_width), options.fill_style),
-            ])
+            let mut spans = vec![Span::styled(line_prefix, options.prompt_style)];
+            spans.extend(styled_composer_content_spans(
+                &line_text,
+                line.visible_start_char,
+                options.text_style,
+                options.highlighted_text_style,
+                options.skill_bindings,
+            ));
+            spans.push(Span::styled(" ".repeat(fill_width), options.fill_style));
+            Line::from(spans)
         })
+        .collect()
+}
+
+fn styled_composer_content_spans(
+    text: &str,
+    visible_start_char: usize,
+    text_style: Style,
+    highlighted_text_style: Style,
+    skill_bindings: &[TranscriptSkillBinding],
+) -> Vec<Span<'static>> {
+    if text.is_empty() {
+        return vec![Span::styled(String::new(), text_style)];
+    }
+    if skill_bindings.is_empty() {
+        return vec![Span::styled(text.to_string(), text_style)];
+    }
+
+    let visible_end_char = visible_start_char + text.chars().count();
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+
+    for binding in skill_bindings {
+        let overlap_start = binding.start_char.max(visible_start_char);
+        let overlap_end = binding.end_char.min(visible_end_char);
+        if overlap_start >= overlap_end {
+            continue;
+        }
+
+        let relative_start = overlap_start - visible_start_char;
+        let relative_end = overlap_end - visible_start_char;
+        if cursor < relative_start {
+            spans.push(Span::styled(
+                slice_char_range(text, cursor, relative_start),
+                text_style,
+            ));
+        }
+        spans.push(Span::styled(
+            slice_char_range(text, relative_start, relative_end),
+            highlighted_text_style,
+        ));
+        cursor = relative_end;
+    }
+
+    let line_char_len = text.chars().count();
+    if cursor < line_char_len {
+        spans.push(Span::styled(
+            slice_char_range(text, cursor, line_char_len),
+            text_style,
+        ));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled(text.to_string(), text_style));
+    }
+    spans
+}
+
+fn slice_char_range(text: &str, start: usize, end: usize) -> String {
+    text.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
         .collect()
 }
 

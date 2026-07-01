@@ -9,10 +9,15 @@ use super::{
     overlay_input_result::OverlayInputResult,
     selection::{SelectableLineRange, selectable_range_for_plain_line},
     status_line::truncate_display_width_with_ellipsis,
-    theme::{command_accent_text_style, secondary_text_style, tertiary_text_style},
+    theme::{
+        command_accent_text_style, primary_text_style, secondary_text_style, tertiary_text_style,
+    },
 };
 
 const SKILL_PICKER_INSET_WIDTH: usize = 2;
+const SKILL_PICKER_NAME_COLUMN_MAX_WIDTH: usize = 28;
+const SKILL_PICKER_COLUMN_GAP: usize = 2;
+const SKILL_PICKER_DESCRIPTION_MIN_WIDTH: usize = 12;
 
 /// `SkillPickerState` 保存 `$skill` 选择器的当前查询、结果和导航位置。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -162,6 +167,10 @@ impl Model {
         let mut lines = Vec::with_capacity(visible_rows);
         let mut plain_lines = Vec::with_capacity(visible_rows);
         let mut selectable = Vec::with_capacity(visible_rows);
+        let name_column_width = skill_picker_name_column_width(
+            &state.items,
+            width.saturating_sub(SKILL_PICKER_INSET_WIDTH),
+        );
 
         if state.items.is_empty() {
             let plain_line = pad_display_width_right("  No skills", width);
@@ -184,7 +193,8 @@ impl Model {
             };
 
             let selected = index == state.selected;
-            let (line, plain_line) = self.render_skill_picker_line(item, selected, width);
+            let (line, plain_line) =
+                self.render_skill_picker_line(item, selected, width, name_column_width);
             selectable.push(skill_picker_selectable_range(&plain_line, width));
             lines.push(line);
             plain_lines.push(plain_line);
@@ -198,27 +208,58 @@ impl Model {
         item: &PromptAssemblyDiscoveredSkill,
         selected: bool,
         width: usize,
+        name_column_width: usize,
     ) -> (Line<'static>, String) {
         let inset = SKILL_PICKER_INSET_WIDTH.min(width);
         let content_width = width.saturating_sub(inset);
-        let label = format!("${} - {}", item.skill_name, item.description);
-        let content = truncate_display_width_with_ellipsis(&label, content_width);
-        let mut plain_line = format!("{}{}", " ".repeat(inset), content);
-        plain_line.push_str(&" ".repeat(width.saturating_sub(display_width(&plain_line))));
-        let style = if selected {
+        let name_style = if selected {
             command_accent_text_style(self.palette).bold()
         } else {
             secondary_text_style(self.palette)
         };
+        let description_style = if selected {
+            primary_text_style(self.palette)
+        } else {
+            tertiary_text_style(self.palette)
+        };
 
-        (
-            Line::from(vec![
-                Span::raw(" ".repeat(inset)),
-                Span::styled(content, style),
-                Span::raw(" ".repeat(width.saturating_sub(display_width(plain_line.trim_end())))),
-            ]),
-            plain_line,
-        )
+        let display_name = skill_picker_display_name(item);
+        let name_width = if item.description.trim().is_empty() {
+            content_width
+        } else {
+            name_column_width.min(content_width).max(1)
+        };
+        let name = truncate_display_width_with_ellipsis(display_name, name_width);
+
+        let mut spans = vec![
+            Span::raw(" ".repeat(inset)),
+            Span::styled(name.clone(), name_style),
+        ];
+        let mut plain_line = format!("{}{}", " ".repeat(inset), name);
+
+        if !item.description.trim().is_empty() {
+            let reserved_name_width = name_width;
+            let rendered_name_width = display_width(&name);
+            let gap_width = reserved_name_width
+                .saturating_sub(rendered_name_width)
+                .saturating_add(SKILL_PICKER_COLUMN_GAP);
+            let remaining_width = content_width.saturating_sub(rendered_name_width + gap_width);
+            if remaining_width > 0 {
+                let description =
+                    truncate_display_width_with_ellipsis(item.description.trim(), remaining_width);
+                spans.push(Span::raw(" ".repeat(gap_width)));
+                spans.push(Span::styled(description.clone(), description_style));
+                plain_line.push_str(&" ".repeat(gap_width));
+                plain_line.push_str(&description);
+            }
+        }
+
+        plain_line.push_str(&" ".repeat(width.saturating_sub(display_width(&plain_line))));
+
+        spans.push(Span::raw(" ".repeat(
+            width.saturating_sub(display_width(plain_line.trim_end())),
+        )));
+        (Line::from(spans), plain_line)
     }
 
     fn move_skill_picker_selection(&mut self, delta: isize) {
@@ -347,10 +388,14 @@ fn filter_manual_skill_items(
     let mut fuzzy_matches = Vec::new();
     for skill in skills {
         let skill_name = skill.skill_name.to_ascii_lowercase();
+        let title = skill_picker_display_name(skill).to_ascii_lowercase();
         let description = skill.description.to_ascii_lowercase();
-        if skill_name.starts_with(&trimmed_query) {
+        if skill_name.starts_with(&trimmed_query) || title.starts_with(&trimmed_query) {
             prefix_matches.push(skill.clone());
-        } else if skill_name.contains(&trimmed_query) || description.contains(&trimmed_query) {
+        } else if skill_name.contains(&trimmed_query)
+            || title.contains(&trimmed_query)
+            || description.contains(&trimmed_query)
+        {
             fuzzy_matches.push(skill.clone());
         }
     }
@@ -390,6 +435,43 @@ fn skill_picker_selectable_range(plain_line: &str, width: usize) -> SelectableLi
     }
 
     SelectableLineRange::new(SKILL_PICKER_INSET_WIDTH, end_column)
+}
+
+fn skill_picker_display_name(item: &PromptAssemblyDiscoveredSkill) -> &str {
+    let trimmed_title = item.title.trim();
+    if trimmed_title.is_empty() {
+        item.skill_name.as_str()
+    } else {
+        trimmed_title
+    }
+}
+
+fn skill_picker_name_column_width(
+    items: &[PromptAssemblyDiscoveredSkill],
+    content_width: usize,
+) -> usize {
+    if items.is_empty() || content_width == 0 {
+        return 0;
+    }
+
+    let max_name_width = items
+        .iter()
+        .map(skill_picker_display_name)
+        .map(display_width)
+        .max()
+        .unwrap_or(0)
+        .min(SKILL_PICKER_NAME_COLUMN_MAX_WIDTH);
+
+    if content_width <= SKILL_PICKER_DESCRIPTION_MIN_WIDTH {
+        return content_width;
+    }
+
+    max_name_width
+        .min(
+            content_width
+                .saturating_sub(SKILL_PICKER_COLUMN_GAP + SKILL_PICKER_DESCRIPTION_MIN_WIDTH),
+        )
+        .max(1)
 }
 
 fn pad_display_width_right(text: &str, width: usize) -> String {

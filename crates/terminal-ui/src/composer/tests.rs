@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Color;
 use runtime_domain::prompt_assembly::PromptSourceOrigin;
 
 use super::Composer;
@@ -452,6 +453,28 @@ fn skill_binding_drops_immediately_after_manual_token_edit() {
 
     let source_message = composer.source_message();
     assert!(source_message.skill_bindings().is_empty());
+}
+
+#[test]
+fn bound_skill_token_renders_with_command_accent_before_submit() {
+    let mut composer = test_composer(80, 3, "$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        "/tmp/code-review/SKILL.md",
+        PromptSourceOrigin::Project,
+    ));
+
+    let palette = default_palette();
+    let document = composer.render_document(palette);
+    let skill_span = document
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "$code-review")
+        .expect("bound skill token should render as a distinct span");
+
+    assert_eq!(skill_span.style.fg, Some(palette.command_accent));
+    assert_ne!(skill_span.style.fg, Some(Color::Reset));
 }
 
 fn test_composer(width: u16, height: u16, value: &str) -> Composer {

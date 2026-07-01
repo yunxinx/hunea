@@ -565,7 +565,7 @@ fn dollar_skill_picker_opens_and_enter_inserts_bound_skill_token() {
             .current_skill_picker_render_result()
             .plain_lines
             .iter()
-            .any(|line| line.contains("$code-review"))
+            .any(|line| line.contains("Code Review"))
     );
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
@@ -597,8 +597,25 @@ fn moving_cursor_back_onto_bound_skill_token_reopens_skill_picker() {
             .current_skill_picker_render_result()
             .plain_lines
             .iter()
-            .any(|line| line.contains("$code-review"))
+            .any(|line| line.contains("Code Review"))
     );
+}
+
+#[test]
+fn skill_picker_renders_title_and_description_in_separate_columns() {
+    let mut model = skill_picker_model();
+
+    type_text(&mut model, "$co");
+
+    let lines = model.current_skill_picker_render_result().plain_lines;
+    let skill_line = lines
+        .iter()
+        .find(|line| line.contains("Code Review"))
+        .expect("skill picker should render matching row");
+
+    assert!(skill_line.contains("Review code"));
+    assert!(!skill_line.contains("[Skill]"));
+    assert!(!skill_line.contains("$code-review - Review code"));
 }
 
 #[test]
@@ -2809,7 +2826,7 @@ fn skill_picker_model() -> Model {
                 discovered_skills: Vec::new(),
                 manual_skills: vec![PromptAssemblyDiscoveredSkill {
                     skill_name: "code-review".to_string(),
-                    title: "code-review".to_string(),
+                    title: "Code Review".to_string(),
                     description: "Review code".to_string(),
                     origin: PromptSourceOrigin::Project,
                     skill_path: "/tmp/code-review/SKILL.md".to_string(),

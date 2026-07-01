@@ -685,6 +685,28 @@ fn skill_picker_highlights_matched_description_text() {
 }
 
 #[test]
+fn skill_picker_popup_scrollbar_thumb_reaches_bottom_on_last_page() {
+    let mut model = overflowing_skill_picker_model();
+
+    type_text(&mut model, "$");
+    for _ in 0..9 {
+        let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    }
+
+    let rows = rendered_rows_for_model(&mut model, 40, 8);
+    let last_visible_skill_row = rows
+        .iter()
+        .rposition(|row| row.contains("Skill "))
+        .expect("skill picker should render visible skill rows");
+
+    assert_eq!(
+        rendered_segment(&rows[last_visible_skill_row], 39, 1),
+        "█",
+        "skill picker scrollbar thumb should reach the bottom row on the last page: {rows:?}"
+    );
+}
+
+#[test]
 fn fullscreen_modal_closes_composer_file_picker_state() {
     let root = TempFileTree::new("fullscreen-closes-file-picker");
     root.write_file("src/lib.rs");
@@ -846,6 +868,43 @@ fn file_picker_popup_renders_vertical_scrollbar_for_overflowing_results() {
             .iter()
             .any(|row| row.contains('↑') || row.contains('↓')),
         "file picker scrollbar should not render begin/end arrow symbols: {rows:?}"
+    );
+}
+
+#[test]
+fn file_picker_popup_scrollbar_thumb_reaches_bottom_on_last_page() {
+    let root = TempFileTree::new("popup-scrollbar-last-page");
+    for index in 0..10 {
+        root.write_file(&format!("src/file_{index:02}.rs"));
+    }
+
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            style_mode: StyleMode::Ms,
+            file_picker_popup_height: 5,
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.current_dir = root.path().display().to_string();
+    model.set_window(40, 10);
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@s");
+    for _ in 0..9 {
+        let _ = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    }
+
+    let rows = rendered_rows_for_model(&mut model, 40, 10);
+    let last_visible_file_row = rows
+        .iter()
+        .rposition(|row| row.contains("src/file_"))
+        .expect("file picker should render visible file rows");
+
+    assert_eq!(
+        rendered_segment(&rows[last_visible_file_row], 39, 1),
+        "█",
+        "file picker scrollbar thumb should reach the bottom row on the last page: {rows:?}"
     );
 }
 
@@ -2917,34 +2976,58 @@ fn file_picker_model(root: &Path) -> Model {
 }
 
 fn skill_picker_model() -> Model {
+    skill_picker_model_with_manual_skills(
+        vec![
+            PromptAssemblyDiscoveredSkill {
+                skill_name: "code-review".to_string(),
+                title: "Code Review".to_string(),
+                description: "Review code and inspect regressions".to_string(),
+                origin: PromptSourceOrigin::Project,
+                skill_path: "/tmp/code-review/SKILL.md".to_string(),
+                body: "# Code Review".to_string(),
+            },
+            PromptAssemblyDiscoveredSkill {
+                skill_name: "brainstorming".to_string(),
+                title: "Brainstorming".to_string(),
+                description: "Explore intent, requirements, and design before implementation"
+                    .to_string(),
+                origin: PromptSourceOrigin::Builtin,
+                skill_path: "/tmp/brainstorming/SKILL.md".to_string(),
+                body: "# Brainstorming".to_string(),
+            },
+        ],
+        8,
+    )
+}
+
+fn overflowing_skill_picker_model() -> Model {
+    let skills = (0..10)
+        .map(|index| PromptAssemblyDiscoveredSkill {
+            skill_name: format!("skill-{index:02}"),
+            title: format!("Skill {index:02}"),
+            description: format!("Skill description {index:02}"),
+            origin: PromptSourceOrigin::Project,
+            skill_path: format!("/tmp/skill-{index:02}/SKILL.md"),
+            body: format!("# Skill {index:02}"),
+        })
+        .collect();
+    skill_picker_model_with_manual_skills(skills, 5)
+}
+
+fn skill_picker_model_with_manual_skills(
+    manual_skills: Vec<PromptAssemblyDiscoveredSkill>,
+    file_picker_popup_height: u16,
+) -> Model {
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
         ModelOptions {
+            file_picker_popup_height,
             prompt_assembly: Some(PromptAssemblyManagerSnapshot {
                 snapshot: resolve_prompt_assembly(&PromptAssemblyInput::default()),
                 prelude: PromptPreludeSnapshot::default(),
                 sources: Vec::new(),
                 discovered_skills: Vec::new(),
-                manual_skills: vec![
-                    PromptAssemblyDiscoveredSkill {
-                        skill_name: "code-review".to_string(),
-                        title: "Code Review".to_string(),
-                        description: "Review code and inspect regressions".to_string(),
-                        origin: PromptSourceOrigin::Project,
-                        skill_path: "/tmp/code-review/SKILL.md".to_string(),
-                        body: "# Code Review".to_string(),
-                    },
-                    PromptAssemblyDiscoveredSkill {
-                        skill_name: "brainstorming".to_string(),
-                        title: "Brainstorming".to_string(),
-                        description:
-                            "Explore intent, requirements, and design before implementation"
-                                .to_string(),
-                        origin: PromptSourceOrigin::Builtin,
-                        skill_path: "/tmp/brainstorming/SKILL.md".to_string(),
-                        body: "# Brainstorming".to_string(),
-                    },
-                ],
+                manual_skills,
                 builtin_core_system_body: String::new(),
                 global_core_system_override: None,
                 project_core_system_override: None,

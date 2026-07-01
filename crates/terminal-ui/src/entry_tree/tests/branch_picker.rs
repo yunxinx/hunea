@@ -778,6 +778,50 @@ fn entry_tree_branch_picker_renders_file_picker_style_scrollbar_when_overflowing
 }
 
 #[test]
+fn entry_tree_branch_picker_scrollbar_thumb_reaches_bottom_on_last_page() {
+    let mut model = ready_model_with_options(ModelOptions {
+        branch_picker_list_rows: 3,
+        ..ModelOptions::default()
+    });
+    model.open_entry_tree_loading();
+    model.apply_entry_tree_payload(SessionTreePayload {
+        rows: vec![tree_row_with_branch_choices(
+            "user-a",
+            SessionTreeRowKind::User,
+            "root question",
+            (0..8)
+                .map(|index| {
+                    branch_choice(
+                        &format!("assistant-{index}"),
+                        &format!("assistant-{index}"),
+                        &format!("branch answer {index}"),
+                        index == 7,
+                    )
+                })
+                .collect(),
+        )],
+        current_row_id: Some("user-a".to_string()),
+    });
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Tab)));
+    for _ in 0..7 {
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Down)));
+    }
+
+    let buffer = render_model_buffer(&mut model, 72, 12);
+    let body_top = ENTRY_TREE_HEADER_HEIGHT + ENTRY_TREE_HEADER_RULE_HEIGHT;
+    let picker_top = body_top + 1;
+    let picker_bottom = picker_top + 6;
+    let scrollbar_column = 71;
+
+    assert_eq!(
+        buffer[(scrollbar_column, picker_bottom - 1)].symbol(),
+        "█",
+        "branch picker scrollbar thumb should reach the bottom row on the last page"
+    );
+}
+
+#[test]
 fn entry_tree_branch_picker_popup_height_uses_three_chrome_rows_plus_configured_list() {
     let mut model = ready_model_with_options(ModelOptions {
         branch_picker_list_rows: 3,

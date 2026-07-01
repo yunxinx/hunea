@@ -1,15 +1,15 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
     text::Line,
-    widgets::{Clear, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget},
+    widgets::{Clear, Widget},
 };
 
 use super::{
     Model,
     display_width::display_width,
     document::{DocumentLayout, DocumentViewport},
+    picker_scrollbar::PickerScrollbar,
     theme::{secondary_text_style, tertiary_text_style},
 };
 
@@ -25,7 +25,7 @@ impl FloatingLayer {
         anchor: FloatingAnchor,
         size: FloatingSize,
         lines: Vec<Line<'static>>,
-        scrollbar: Option<FloatingScrollbar>,
+        scrollbar: Option<PickerScrollbar>,
     ) {
         if lines.is_empty() {
             return;
@@ -86,7 +86,7 @@ impl FloatingSize {
 struct FloatingSurface {
     placement: FloatingPlacement,
     lines: Vec<Line<'static>>,
-    scrollbar: Option<FloatingScrollbar>,
+    scrollbar: Option<PickerScrollbar>,
 }
 
 impl FloatingSurface {
@@ -111,51 +111,6 @@ impl FloatingSurface {
         if let Some(scrollbar) = self.scrollbar {
             scrollbar.render(surface_area, buf);
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct FloatingScrollbar {
-    content_length: usize,
-    viewport_content_length: usize,
-    position: usize,
-    thumb_style: Style,
-    track_style: Style,
-}
-
-impl FloatingScrollbar {
-    const fn new(
-        content_length: usize,
-        viewport_content_length: usize,
-        position: usize,
-        thumb_style: Style,
-        track_style: Style,
-    ) -> Self {
-        Self {
-            content_length,
-            viewport_content_length,
-            position,
-            thumb_style,
-            track_style,
-        }
-    }
-
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        if self.content_length <= self.viewport_content_length || area.width == 0 {
-            return;
-        }
-
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(None)
-            .end_symbol(None)
-            .track_symbol(Some("┃"))
-            .thumb_symbol("█")
-            .thumb_style(self.thumb_style)
-            .track_style(self.track_style);
-        let mut state = ScrollbarState::new(self.content_length)
-            .position(self.position)
-            .viewport_content_length(self.viewport_content_length);
-        scrollbar.render(area, buf, &mut state);
     }
 }
 
@@ -230,7 +185,7 @@ impl Model {
         {
             let scrollbar = self.file_picker.as_ref().and_then(|state| {
                 let visible_rows = self.file_picker_list_visible_rows();
-                (state.items.len() > visible_rows).then_some(FloatingScrollbar::new(
+                (state.items.len() > visible_rows).then_some(PickerScrollbar::new(
                     state.items.len(),
                     visible_rows,
                     state.scroll,
@@ -251,7 +206,7 @@ impl Model {
         {
             let scrollbar = self.skill_picker.as_ref().and_then(|state| {
                 let visible_rows = self.file_picker_list_visible_rows();
-                (state.items.len() > visible_rows).then_some(FloatingScrollbar::new(
+                (state.items.len() > visible_rows).then_some(PickerScrollbar::new(
                     state.items.len(),
                     visible_rows,
                     state.scroll,

@@ -36,6 +36,7 @@ mod model;
 mod model_panel;
 mod overlay_input_result;
 mod path_resolve;
+mod picker_scrollbar;
 mod prompt_overlay;
 mod relative_age;
 mod render_frame;

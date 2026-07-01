@@ -1,27 +1,29 @@
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::layout::Rect;
+use ratatui::{
+    layout::Rect,
+    style::Modifier,
+    text::{Line, Span},
+    widgets::{Clear, Paragraph},
+};
 use runtime_domain::prompt_assembly::PromptAssemblyManagerSource;
 
 use crate::{
     Model,
-    markdown_display::markdown_display_content,
-    message::assistant_message_content_width,
     overlay_input_result::OverlayInputResult,
     render_frame::RenderFrame,
-    transcript::Transcript,
-    transcript_overlay::{
-        TranscriptOverlayProgressStyle, TranscriptOverlayRenderOptions, TranscriptOverlayState,
-        render_transcript_overlay_view,
-    },
+    styled_text::render_line_with_full_width_background,
+    theme::{build_page_rule, muted_text_style, primary_text_style, tertiary_text_style},
+    transcript::wrap_plain_text,
 };
 
 const FOOTER_HINT: &str = "  Esc/Space back · ↑/←/h previous page · ↓/→/l next page";
+const PROMPT_OVERLAY_PREVIEW_HORIZONTAL_PADDING: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PromptOverlayPreviewState {
     pub(crate) title: String,
-    pub(crate) transcript: Transcript,
-    pub(crate) overlay: TranscriptOverlayState,
+    pub(crate) content: String,
+    pub(crate) scroll_offset: usize,
 }
 
 impl Model {
@@ -38,7 +40,7 @@ impl Model {
     ) {
         let title = source.title.clone();
         let content = source.body.unwrap_or_default();
-        self.open_prompt_overlay_markdown_preview(title, &content);
+        self.open_prompt_overlay_plain_text_preview(title, &content);
     }
 
     pub(crate) fn open_prompt_overlay_assembled_preview(&mut self) {
@@ -47,7 +49,7 @@ impl Model {
             .prelude
             .effective_system_prompt()
             .unwrap_or_default();
-        self.open_prompt_overlay_markdown_preview("Assembled prompt".to_string(), &content);
+        self.open_prompt_overlay_plain_text_preview("Assembled prompt".to_string(), &content);
     }
 
     pub(crate) fn close_prompt_overlay_preview(&mut self) {
@@ -87,31 +89,94 @@ impl Model {
         frame: &mut RenderFrame<'_>,
         area: Rect,
     ) {
-        let palette = self.palette;
-        let content_height = usize::from(area.height.saturating_sub(2).max(1));
-        let Some(preview) = self
+        let Some(preview_scroll_offset) = self
             .prompt_overlay
-            .as_mut()
-            .and_then(|state| state.preview.as_mut())
+            .as_ref()
+            .and_then(|state| state.preview.as_ref())
+            .map(|preview| preview.scroll_offset)
         else {
             return;
         };
-        render_transcript_overlay_view(
-            frame,
-            area,
-            &mut preview.transcript,
-            &mut preview.overlay,
-            TranscriptOverlayRenderOptions {
-                palette,
+        let Some(wrapped_lines) = self.prompt_overlay_preview_wrapped_lines() else {
+            return;
+        };
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        frame.render_widget(Clear, area);
+        let palette = self.palette;
+        let content_height = usize::from(area.height.saturating_sub(2).max(1));
+        let text_style = primary_text_style(palette);
+        let max_offset = wrapped_lines.len().saturating_sub(content_height.max(1));
+        let scroll_offset = preview_scroll_offset.min(max_offset);
+        let (page_number, page_count) =
+            crate::transcript_overlay::render::transcript_overlay_page_progress(
+                wrapped_lines.len(),
                 content_height,
-                footer_hint: FOOTER_HINT,
-                progress_style: TranscriptOverlayProgressStyle::Page,
-            },
+                scroll_offset,
+            );
+
+        let content_bottom = area
+            .y
+            .saturating_add(u16::try_from(content_height).unwrap_or(u16::MAX));
+        let mut row = area.y;
+        for line in wrapped_lines
+            .iter()
+            .skip(scroll_offset)
+            .take(content_height)
+        {
+            if row >= content_bottom {
+                break;
+            }
+            render_line_with_full_width_background(
+                &Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(line.as_str(), text_style),
+                ]),
+                Rect::new(area.x, row, area.width, 1),
+                frame.buffer_mut(),
+            );
+            row = row.saturating_add(1);
+        }
+
+        let fill_style = muted_text_style(palette);
+        while row < content_bottom {
+            frame.render_widget(
+                Paragraph::new(Line::styled("~", fill_style)),
+                Rect::new(area.x, row, area.width, 1),
+            );
+            row = row.saturating_add(1);
+        }
+
+        if area.height >= 2 {
+            let rule_y = area.y + area.height - 2;
+            frame.render_widget(
+                Paragraph::new(build_page_rule(
+                    area.width,
+                    page_number,
+                    page_count,
+                    palette,
+                )),
+                Rect::new(area.x, rule_y, area.width, 1),
+            );
+        }
+
+        let footer_y = area.y + area.height - 1;
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                FOOTER_HINT,
+                tertiary_text_style(palette).add_modifier(Modifier::ITALIC),
+            )),
+            Rect::new(area.x, footer_y, area.width, 1),
         );
     }
 
     pub(crate) fn move_prompt_overlay_preview_page(&mut self, direction: isize) {
-        let content_height = self.transcript_overlay_content_height();
+        let page_size = self.prompt_overlay_preview_content_height();
+        let line_count = self
+            .prompt_overlay_preview_wrapped_lines()
+            .map_or(0, |lines| lines.len());
         let Some(preview) = self
             .prompt_overlay
             .as_mut()
@@ -119,32 +184,68 @@ impl Model {
         else {
             return;
         };
-        preview.overlay.scroll_offset = crate::transcript::preview_page_offset(
-            &mut preview.transcript,
-            content_height,
-            preview.overlay.scroll_offset,
-            direction,
-        );
+        let max_offset = line_count.saturating_sub(page_size);
+        let delta = direction.signum() * isize::try_from(page_size).unwrap_or(0);
+        let next = isize::try_from(preview.scroll_offset)
+            .unwrap_or(0)
+            .saturating_add(delta);
+        let max_offset_i = isize::try_from(max_offset).unwrap_or(0);
+        preview.scroll_offset = usize::try_from(next.clamp(0, max_offset_i)).unwrap_or(0);
     }
 
-    pub(crate) fn open_prompt_overlay_markdown_preview(&mut self, title: String, content: &str) {
-        let mut transcript = Transcript::new(self.palette);
-        transcript.set_width(
-            u16::try_from(assistant_message_content_width(self.width)).unwrap_or(u16::MAX),
-        );
-        transcript.append_message_with_style_mode(
-            crate::Sender::Assistant,
-            markdown_display_content(content),
-            self.style_mode,
-        );
-
+    pub(crate) fn open_prompt_overlay_plain_text_preview(&mut self, title: String, content: &str) {
         let Some(state) = self.prompt_overlay.as_mut() else {
             return;
         };
         state.preview = Some(PromptOverlayPreviewState {
             title,
-            transcript,
-            overlay: TranscriptOverlayState::new(),
+            content: content.to_string(),
+            scroll_offset: 0,
         });
     }
+
+    pub(crate) fn sync_prompt_overlay_preview_width(&mut self, width: u16) {
+        let line_count = self
+            .prompt_overlay
+            .as_ref()
+            .and_then(|state| state.preview.as_ref())
+            .map(|preview| {
+                wrap_plain_text(
+                    &preview.content,
+                    prompt_overlay_preview_wrap_width(width),
+                    0,
+                )
+                .len()
+            })
+            .unwrap_or(0);
+        let page_size = self.prompt_overlay_preview_content_height();
+        let Some(preview) = self
+            .prompt_overlay
+            .as_mut()
+            .and_then(|state| state.preview.as_mut())
+        else {
+            return;
+        };
+        let max_offset = line_count.saturating_sub(page_size);
+        preview.scroll_offset = preview.scroll_offset.min(max_offset);
+    }
+
+    pub(crate) fn prompt_overlay_preview_content_height(&self) -> usize {
+        usize::from(self.height.saturating_sub(2).max(1))
+    }
+
+    pub(crate) fn prompt_overlay_preview_wrapped_lines(&self) -> Option<Vec<String>> {
+        let preview = self.prompt_overlay.as_ref()?.preview.as_ref()?;
+        Some(wrap_plain_text(
+            &preview.content,
+            prompt_overlay_preview_wrap_width(self.width),
+            0,
+        ))
+    }
+}
+
+fn prompt_overlay_preview_wrap_width(window_width: u16) -> usize {
+    usize::from(window_width)
+        .saturating_sub(PROMPT_OVERLAY_PREVIEW_HORIZONTAL_PADDING * 2)
+        .max(1)
 }

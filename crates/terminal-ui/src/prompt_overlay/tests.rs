@@ -574,6 +574,98 @@ fn space_opens_prompt_source_preview() {
 }
 
 #[test]
+fn prompt_preview_renders_markdown_source_as_plain_text() {
+    let mut model = ready_model();
+    model.prompt_assembly.sources = vec![
+        runtime_domain::prompt_assembly::PromptAssemblyManagerSource {
+            reference_id: "core-system".to_string(),
+            kind: PromptSourceKind::CoreSystemPrompt,
+            title: "Core system prompt".to_string(),
+            origin: Some(PromptSourceOrigin::Builtin),
+            resolved_body_origin: Some(PromptSourceOrigin::Builtin),
+            body: Some("# Core Heading\n\n- keep marker\n\n`cargo test`\n".to_string()),
+        },
+    ];
+    model.open_prompt_overlay();
+
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char(' ')));
+    let rows = rendered_rows(&render_model_buffer(&mut model, 80, 12));
+
+    assert!(
+        rows.iter().any(|row| row.contains("# Core Heading")),
+        "plain preview should keep heading marker literal: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("- keep marker")),
+        "plain preview should keep list marker literal: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("`cargo test`")),
+        "plain preview should keep inline code markers literal: {rows:?}"
+    );
+}
+
+#[test]
+fn prompt_preview_rewraps_after_resize() {
+    let mut model = ready_model();
+    model.prompt_assembly.sources = vec![
+        runtime_domain::prompt_assembly::PromptAssemblyManagerSource {
+            reference_id: "core-system".to_string(),
+            kind: PromptSourceKind::CoreSystemPrompt,
+            title: "Core system prompt".to_string(),
+            origin: Some(PromptSourceOrigin::Builtin),
+            resolved_body_origin: Some(PromptSourceOrigin::Builtin),
+            body: Some(
+                "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu".to_string(),
+            ),
+        },
+    ];
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char(' ')));
+    assert!(model.prompt_overlay_preview_active());
+
+    let wide_line_count = model
+        .prompt_overlay_preview_wrapped_lines()
+        .map(|lines| lines.len())
+        .expect("preview should expose wrapped lines");
+
+    model.update(AppEvent::Resized {
+        width: 18,
+        height: 16,
+    });
+
+    let narrow_line_count = model
+        .prompt_overlay_preview_wrapped_lines()
+        .map(|lines| lines.len())
+        .expect("preview should stay open after resize");
+    assert!(
+        narrow_line_count > wide_line_count,
+        "prompt preview should rewrap after resize: wide={wide_line_count}, narrow={narrow_line_count}"
+    );
+}
+
+#[test]
+fn prompt_preview_word_wraps_indented_skill_lines() {
+    let mut model = ready_model();
+    model.set_window(24, 12);
+    model.open_prompt_overlay();
+    model.open_prompt_overlay_plain_text_preview(
+        "repo-bootstrap".to_string(),
+        "<skill>\n    hello world from skill body\n</skill>",
+    );
+    let rows = rendered_rows(&render_model_buffer(&mut model, 24, 12));
+
+    assert!(
+        rows.iter().any(|row| row.contains("    hello")),
+        "indented skill line should keep word wrapping instead of hard character splits: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("world from")),
+        "wrapped continuation should preserve words: {rows:?}"
+    );
+}
+
+#[test]
 fn prompt_runtime_update_replaces_manager_snapshot() {
     let mut model = ready_model();
     let next_snapshot = PromptAssemblySnapshot {

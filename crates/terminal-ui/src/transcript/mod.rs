@@ -56,7 +56,7 @@ pub(crate) use render_state::{
     new_render_result_with_append_start,
 };
 pub(crate) use wrap::{
-    DEFAULT_RENDER_WIDTH, display_tab_width, wrap_assistant_text, wrap_prompt_text,
+    DEFAULT_RENDER_WIDTH, display_tab_width, wrap_assistant_text, wrap_plain_text, wrap_prompt_text,
 };
 pub(crate) use wrap::{WrapSegmentKind, should_start_new_wrap_segment, wrap_segment_kind};
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::{Model, overlay_input_result::OverlayInputResult, transcript::wrap_prompt_text};
+use crate::{Model, overlay_input_result::OverlayInputResult, transcript::wrap_plain_text};
 
 use super::state::MessageHistoryPickerPreviewState;
 
@@ -47,7 +47,7 @@ impl Model {
             .message_history_picker
             .as_ref()
             .and_then(|state| state.row(row_index))
-            .map(|row| wrap_prompt_text(&row.text, wrap_width, 0).len())
+            .map(|row| wrap_plain_text(&row.text, wrap_width, 0).len())
             .unwrap_or(0);
         let page_size = self.message_history_picker_preview_content_height();
         let Some(preview) = self
@@ -128,7 +128,7 @@ impl Model {
         let preview = state.preview.as_ref()?;
         let row = state.row(preview.row_index)?;
         let wrap_width = message_history_preview_wrap_width(self.width);
-        Some(wrap_prompt_text(&row.text, wrap_width, 0))
+        Some(wrap_plain_text(&row.text, wrap_width, 0))
     }
 }
 

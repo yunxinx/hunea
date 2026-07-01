@@ -403,10 +403,10 @@ impl Model {
                 self.open_prompt_overlay_source_preview(manager_source);
             }
             PromptOverlaySelection::ExtraPromptCandidate(candidate) => {
-                self.open_prompt_overlay_markdown_preview(candidate.title, &candidate.body);
+                self.open_prompt_overlay_plain_text_preview(candidate.title, &candidate.body);
             }
             PromptOverlaySelection::DiscoveredSkill(skill) => {
-                self.open_prompt_overlay_markdown_preview(skill.title.clone(), &skill.body);
+                self.open_prompt_overlay_plain_text_preview(skill.title.clone(), &skill.body);
             }
         }
     }

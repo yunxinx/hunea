@@ -403,6 +403,7 @@ impl Model {
         self.sync_copy_picker_preview_width(width);
         self.sync_entry_tree_preview_width(width);
         self.sync_message_history_picker_preview_width(width);
+        self.sync_prompt_overlay_preview_width(width);
         self.composer.set_width(width);
         if width_changed {
             self.sync_transcript_render();

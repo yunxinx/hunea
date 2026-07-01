@@ -9,6 +9,7 @@ use super::{
     AppEffect, EscRewindMode, Model, debug,
     display_width::display_width,
     overlay_input_result::OverlayInputResult,
+    search_highlight::{highlighted_subsequence_spans, search_match_style},
     selection::SelectableLineRange,
     status_line::{
         status_line_gap_before, status_line_pair_height, truncate_display_width_with_ellipsis,
@@ -287,6 +288,7 @@ impl Model {
             if let Some(item) = state.items.get(index) {
                 let (line, plain_line, line_selectable) = self.render_command_panel_line(
                     item,
+                    &state.query,
                     index == state.selected,
                     width,
                     command_column_width,
@@ -308,6 +310,7 @@ impl Model {
     fn render_command_panel_line(
         &self,
         item: &CommandPanelItem,
+        query: &str,
         selected: bool,
         width: usize,
         command_column_width: usize,
@@ -346,20 +349,25 @@ impl Model {
         } else {
             secondary_text_style(self.palette)
         };
+        let highlighted_name_style = search_match_style(name_style, self.palette.surface);
         let description_style = if selected {
             primary_text_style(self.palette)
         } else {
             secondary_text_style(self.palette)
         };
+        let mut spans = vec![Span::raw(" ".repeat(inset_width))];
+        spans.extend(highlighted_subsequence_spans(
+            &command_text,
+            query,
+            name_style,
+            highlighted_name_style,
+        ));
+        spans.push(Span::raw(gap_text));
+        spans.push(Span::styled(description_text, description_style));
+        spans.push(Span::raw(" ".repeat(padding)));
 
         (
-            Line::from(vec![
-                Span::raw(" ".repeat(inset_width)),
-                Span::styled(command_text.clone(), name_style),
-                Span::raw(gap_text),
-                Span::styled(description_text, description_style),
-                Span::raw(" ".repeat(padding)),
-            ]),
+            Line::from(spans),
             plain_line.clone(),
             command_panel_selectable_range(&plain_line, width),
         )

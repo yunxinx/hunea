@@ -7,6 +7,7 @@ use super::{
     display_width::display_width,
     inline_panel::InlinePanelRenderResult,
     overlay_input_result::OverlayInputResult,
+    search_highlight::{highlighted_substring_spans, search_match_style},
     selection::{SelectableLineRange, selectable_range_for_plain_line},
     status_line::truncate_display_width_with_ellipsis,
     theme::{
@@ -228,9 +229,9 @@ impl Model {
         } else {
             tertiary_text_style(self.palette)
         };
-        let highlighted_name_style = skill_picker_match_style(name_style, self.palette.surface);
+        let highlighted_name_style = search_match_style(name_style, self.palette.surface);
         let highlighted_description_style =
-            skill_picker_match_style(description_style, self.palette.surface);
+            search_match_style(description_style, self.palette.surface);
 
         let display_name = skill_picker_display_name(item);
         let name_width = if item.description.trim().is_empty() {
@@ -241,7 +242,7 @@ impl Model {
         let name = truncate_display_width_with_ellipsis(display_name, name_width);
 
         let mut spans = vec![Span::raw(" ".repeat(inset))];
-        spans.extend(highlighted_query_spans(
+        spans.extend(highlighted_substring_spans(
             &name,
             query,
             name_style,
@@ -260,7 +261,7 @@ impl Model {
                 let description =
                     truncate_display_width_with_ellipsis(item.description.trim(), remaining_width);
                 spans.push(Span::raw(" ".repeat(gap_width)));
-                spans.extend(highlighted_query_spans(
+                spans.extend(highlighted_substring_spans(
                     &description,
                     query,
                     description_style,
@@ -452,83 +453,6 @@ fn skill_picker_selectable_range(plain_line: &str, width: usize) -> SelectableLi
     }
 
     SelectableLineRange::new(SKILL_PICKER_INSET_WIDTH, end_column)
-}
-
-fn highlighted_query_spans(
-    text: &str,
-    query: &str,
-    base_style: ratatui::style::Style,
-    highlighted_style: ratatui::style::Style,
-) -> Vec<Span<'static>> {
-    let trimmed_query = query.trim();
-    if trimmed_query.is_empty() {
-        return vec![Span::styled(text.to_string(), base_style)];
-    }
-
-    let Some((match_start, match_end)) = find_case_insensitive_substring(text, trimmed_query)
-    else {
-        return vec![Span::styled(text.to_string(), base_style)];
-    };
-
-    let mut spans = Vec::new();
-    if match_start > 0 {
-        spans.push(Span::styled(
-            slice_char_range(text, 0, match_start),
-            base_style,
-        ));
-    }
-    spans.push(Span::styled(
-        slice_char_range(text, match_start, match_end),
-        highlighted_style,
-    ));
-    let text_char_len = text.chars().count();
-    if match_end < text_char_len {
-        spans.push(Span::styled(
-            slice_char_range(text, match_end, text_char_len),
-            base_style,
-        ));
-    }
-    spans
-}
-
-fn skill_picker_match_style(
-    base_style: ratatui::style::Style,
-    surface: Option<ratatui::style::Color>,
-) -> ratatui::style::Style {
-    match surface {
-        Some(surface) => base_style.bg(surface),
-        None => base_style.reversed(),
-    }
-}
-
-fn find_case_insensitive_substring(text: &str, query: &str) -> Option<(usize, usize)> {
-    let text_chars = text.chars().collect::<Vec<_>>();
-    let query_chars = query.chars().collect::<Vec<_>>();
-    if query_chars.is_empty() || query_chars.len() > text_chars.len() {
-        return None;
-    }
-
-    let lowered_query = query_chars
-        .iter()
-        .flat_map(|ch| ch.to_lowercase())
-        .collect::<String>();
-    for start in 0..=text_chars.len() - query_chars.len() {
-        let candidate = text_chars[start..start + query_chars.len()]
-            .iter()
-            .flat_map(|ch| ch.to_lowercase())
-            .collect::<String>();
-        if candidate == lowered_query {
-            return Some((start, start + query_chars.len()));
-        }
-    }
-    None
-}
-
-fn slice_char_range(text: &str, start: usize, end: usize) -> String {
-    text.chars()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .collect()
 }
 
 fn skill_picker_display_name(item: &PromptAssemblyDiscoveredSkill) -> &str {

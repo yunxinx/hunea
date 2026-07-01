@@ -10,6 +10,7 @@ use super::{
     inline_panel::InlinePanelRenderResult,
     overlay_input_result::OverlayInputResult,
     path_resolve::{resolve_configured_current_dir, resolve_path_token},
+    search_highlight::{highlighted_substring_or_subsequence_spans, search_match_style},
     selection::{SelectableLineRange, selectable_range_for_plain_line},
     status_line::truncate_display_width_with_ellipsis,
     theme::{command_accent_text_style, secondary_text_style, tertiary_text_style},
@@ -213,15 +214,20 @@ impl Model {
         } else {
             secondary_text_style(self.palette)
         };
+        let highlighted_style = search_match_style(style, self.palette.surface);
+        let display_query = file_picker_display_query(query);
+        let mut spans = vec![Span::raw(" ".repeat(inset))];
+        spans.extend(highlighted_substring_or_subsequence_spans(
+            &path,
+            display_query,
+            style,
+            highlighted_style,
+        ));
+        spans.push(Span::raw(" ".repeat(
+            width.saturating_sub(display_width(plain_line.trim_end())),
+        )));
 
-        (
-            Line::from(vec![
-                Span::raw(" ".repeat(inset)),
-                Span::styled(path, style),
-                Span::raw(" ".repeat(width.saturating_sub(display_width(plain_line.trim_end())))),
-            ]),
-            plain_line,
-        )
+        (Line::from(spans), plain_line)
     }
 
     fn move_file_picker_selection(&mut self, delta: isize) {
@@ -367,6 +373,12 @@ fn pad_display_width_right(text: &str, width: usize) -> String {
 fn file_picker_display_path(path: &str, query: &str) -> String {
     let prefix = completed_directory_prefix(query);
     path.strip_prefix(prefix).unwrap_or(path).to_string()
+}
+
+fn file_picker_display_query(query: &str) -> &str {
+    query
+        .strip_prefix(completed_directory_prefix(query))
+        .unwrap_or(query)
 }
 
 fn completed_directory_prefix(query: &str) -> &str {

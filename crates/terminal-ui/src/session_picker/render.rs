@@ -10,6 +10,7 @@ use crate::{
     Model,
     fullscreen_list_chrome::fullscreen_list_chrome_rects,
     render_frame::RenderFrame,
+    search_highlight::{highlighted_substring_spans, search_match_style},
     status_line::truncate_display_width_with_ellipsis,
     styled_text::render_line_with_full_width_background,
     theme::{
@@ -151,6 +152,7 @@ impl Model {
                     width,
                     is_selected,
                     state.opened_at_ms,
+                    state.search_query(),
                 ));
                 lines.push(Line::raw(""));
             }
@@ -166,6 +168,7 @@ impl Model {
         width: usize,
         is_selected: bool,
         opened_at_ms: i64,
+        search_query: &str,
     ) -> Vec<Line<'static>> {
         let marker_width = SESSION_PICKER_PROMPT_MARKER_WIDTH;
         let text_width = width.saturating_sub(marker_width);
@@ -184,35 +187,53 @@ impl Model {
         } else {
             secondary_text_style(self.palette)
         };
+        let title = truncate_display_width_with_ellipsis(title, text_width);
+        let assistant = truncate_display_width_with_ellipsis(assistant, text_width);
+        let meta = truncate_display_width_with_ellipsis(
+            &session_picker_meta_text(row, opened_at_ms),
+            text_width,
+        );
+        let highlighted_title_style = search_match_style(title_style, self.palette.surface);
+        let assistant_style = secondary_text_style(self.palette);
+        let highlighted_assistant_style = search_match_style(assistant_style, self.palette.surface);
+        let meta_style = tertiary_text_style(self.palette);
+        let highlighted_meta_style = search_match_style(meta_style, self.palette.surface);
+
+        let mut title_spans = vec![
+            session_picker_prompt_block_span(is_selected, self.palette),
+            Span::raw(" "),
+        ];
+        title_spans.extend(highlighted_substring_spans(
+            &title,
+            search_query,
+            title_style,
+            highlighted_title_style,
+        ));
+        let mut assistant_spans = vec![
+            session_picker_prompt_block_span(is_selected, self.palette),
+            Span::raw(" "),
+        ];
+        assistant_spans.extend(highlighted_substring_spans(
+            &assistant,
+            search_query,
+            assistant_style,
+            highlighted_assistant_style,
+        ));
+        let mut meta_spans = vec![
+            session_picker_prompt_block_span(is_selected, self.palette),
+            Span::raw(" "),
+        ];
+        meta_spans.extend(highlighted_substring_spans(
+            &meta,
+            search_query,
+            meta_style,
+            highlighted_meta_style,
+        ));
 
         vec![
-            Line::from(vec![
-                session_picker_prompt_block_span(is_selected, self.palette),
-                Span::raw(" "),
-                Span::styled(
-                    truncate_display_width_with_ellipsis(title, text_width),
-                    title_style,
-                ),
-            ]),
-            Line::from(vec![
-                session_picker_prompt_block_span(is_selected, self.palette),
-                Span::raw(" "),
-                Span::styled(
-                    truncate_display_width_with_ellipsis(assistant, text_width),
-                    secondary_text_style(self.palette),
-                ),
-            ]),
-            Line::from(vec![
-                session_picker_prompt_block_span(is_selected, self.palette),
-                Span::raw(" "),
-                Span::styled(
-                    truncate_display_width_with_ellipsis(
-                        &session_picker_meta_text(row, opened_at_ms),
-                        text_width,
-                    ),
-                    tertiary_text_style(self.palette),
-                ),
-            ]),
+            Line::from(title_spans),
+            Line::from(assistant_spans),
+            Line::from(meta_spans),
         ]
     }
 }

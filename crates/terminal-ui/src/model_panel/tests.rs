@@ -1,8 +1,9 @@
 use super::*;
 use crate::{
-    ModelOptions, StartupBannerOptions, text_search::CaseInsensitiveQuery,
+    ModelOptions, StartupBannerOptions, text_search::CaseInsensitiveQuery, theme::default_palette,
     tool_approval_panel::ToolApprovalSource,
 };
+use ratatui::style::Modifier;
 use runtime_domain::model_catalog::{ModelCatalog, ModelProvider, ModelSource};
 use runtime_domain::provider::ProviderKind;
 
@@ -169,6 +170,56 @@ fn model_entry_search_keeps_unicode_case_insensitive_matching() {
 
     let istanbul = CaseInsensitiveQuery::new("i\u{307}stanbul");
     assert!(model_entry_matches_search(&entry, &istanbul));
+}
+
+#[test]
+fn model_panel_highlights_matched_description_text() {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            model_catalog: ModelCatalog::new(vec![ModelProvider::new(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "Local",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                ModelSource::Configured,
+                vec![ModelEntry::new(
+                    "qwen3",
+                    Some("General Chat Model".to_string()),
+                    ModelSource::Configured,
+                )],
+            )]),
+            ..ModelOptions::default()
+        },
+    );
+    model.set_palette(default_palette(), true);
+    model.set_window(80, 20);
+    model.open_model_panel();
+    for character in "chat".chars() {
+        model.push_model_panel_search_character(character);
+    }
+
+    let rendered = model.current_inline_model_panel_render_result();
+    let line_index = rendered
+        .plain_lines
+        .iter()
+        .position(|line| line.contains("General Chat Model"))
+        .expect("matching model description row should render");
+    let highlighted_span = rendered.lines[line_index]
+        .spans
+        .iter()
+        .find(|span| span.content.eq_ignore_ascii_case("chat"))
+        .expect("matched model description span should render separately");
+
+    assert!(
+        highlighted_span.style.bg == default_palette().surface
+            || highlighted_span
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED),
+        "matched model description should use background-like highlight: {:?}",
+        highlighted_span.style
+    );
 }
 
 fn model_with_single_provider() -> Model {

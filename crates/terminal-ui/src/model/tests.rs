@@ -739,6 +739,41 @@ fn file_picker_render_shifts_to_the_completed_directory_prefix() {
 }
 
 #[test]
+fn file_picker_highlights_matched_path_fragment() {
+    let root = TempFileTree::new("file-picker-highlight");
+    root.write_file("src/lib.rs");
+    root.write_file("src/main.rs");
+
+    let mut model = file_picker_model(root.path());
+    model.set_palette(default_palette(), true);
+    type_text(&mut model, "@src/li");
+
+    let rendered = model.current_file_picker_render_result();
+    let file_line_index = rendered
+        .plain_lines
+        .iter()
+        .position(|line| line.contains("lib.rs"))
+        .expect("matching file row should render");
+    let file_line = &rendered.lines[file_line_index];
+
+    let highlighted_span = file_line
+        .spans
+        .iter()
+        .find(|span| span.content == "li")
+        .expect("matched path fragment should render separately");
+
+    assert!(
+        highlighted_span.style.bg == default_palette().surface
+            || highlighted_span
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED),
+        "matched path fragment should use background-like highlight: {:?}",
+        highlighted_span.style
+    );
+}
+
+#[test]
 fn file_picker_popup_uses_configured_height_and_full_width() {
     let root = TempFileTree::new("configured-popup-height");
     root.write_file("src/lib.rs");

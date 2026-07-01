@@ -41,6 +41,7 @@ mod relative_age;
 mod render_frame;
 mod runner;
 mod runtime;
+mod search_highlight;
 mod selection;
 mod sender;
 mod session_picker;

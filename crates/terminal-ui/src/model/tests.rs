@@ -12,6 +12,7 @@ use crate::{
     toast::ToastSeverity,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Modifier;
 use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
@@ -605,7 +606,7 @@ fn moving_cursor_back_onto_bound_skill_token_reopens_skill_picker() {
 fn skill_picker_renders_title_and_description_in_separate_columns() {
     let mut model = skill_picker_model();
 
-    type_text(&mut model, "$co");
+    type_text(&mut model, "$");
 
     let lines = model.current_skill_picker_render_result().plain_lines;
     let skill_line = lines
@@ -616,6 +617,71 @@ fn skill_picker_renders_title_and_description_in_separate_columns() {
     assert!(skill_line.contains("Review code"));
     assert!(!skill_line.contains("[Skill]"));
     assert!(!skill_line.contains("$code-review - Review code"));
+}
+
+#[test]
+fn skill_picker_keeps_description_column_aligned_across_rows() {
+    let mut model = skill_picker_model();
+
+    type_text(&mut model, "$");
+
+    let lines = model.current_skill_picker_render_result().plain_lines;
+    let code_review_line = lines
+        .iter()
+        .find(|line| line.contains("Code Review"))
+        .expect("code review row should render");
+    let brainstorming_line = lines
+        .iter()
+        .find(|line| line.contains("Brainstorming"))
+        .expect("brainstorming row should render");
+
+    let code_review_description_column = code_review_line
+        .find("Review code")
+        .expect("code review description should render");
+    let brainstorming_description_column = brainstorming_line
+        .find("Explore intent")
+        .expect("brainstorming description should render");
+
+    assert_eq!(
+        code_review_description_column, brainstorming_description_column,
+        "description column should start at the same visual position across rows"
+    );
+}
+
+#[test]
+fn skill_picker_highlights_matched_description_text() {
+    let mut model = skill_picker_model();
+    model.set_window(80, 8);
+    model.set_palette(default_palette(), true);
+
+    type_text(&mut model, "$inspect");
+
+    let rendered = model.current_skill_picker_render_result();
+    let skill_line = rendered
+        .lines
+        .iter()
+        .find(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("inspect") || span.content.contains("Inspect"))
+        })
+        .expect("matching skill line should render");
+
+    let highlighted_span = skill_line
+        .spans
+        .iter()
+        .find(|span| span.content.to_ascii_lowercase().contains("inspect"))
+        .expect("matched description span should render separately");
+
+    assert!(
+        highlighted_span.style.bg == default_palette().surface
+            || highlighted_span
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED),
+        "matched description text should use background-like highlight: {:?}",
+        highlighted_span.style
+    );
 }
 
 #[test]
@@ -2824,14 +2890,26 @@ fn skill_picker_model() -> Model {
                 prelude: PromptPreludeSnapshot::default(),
                 sources: Vec::new(),
                 discovered_skills: Vec::new(),
-                manual_skills: vec![PromptAssemblyDiscoveredSkill {
-                    skill_name: "code-review".to_string(),
-                    title: "Code Review".to_string(),
-                    description: "Review code".to_string(),
-                    origin: PromptSourceOrigin::Project,
-                    skill_path: "/tmp/code-review/SKILL.md".to_string(),
-                    body: "# Code Review".to_string(),
-                }],
+                manual_skills: vec![
+                    PromptAssemblyDiscoveredSkill {
+                        skill_name: "code-review".to_string(),
+                        title: "Code Review".to_string(),
+                        description: "Review code and inspect regressions".to_string(),
+                        origin: PromptSourceOrigin::Project,
+                        skill_path: "/tmp/code-review/SKILL.md".to_string(),
+                        body: "# Code Review".to_string(),
+                    },
+                    PromptAssemblyDiscoveredSkill {
+                        skill_name: "brainstorming".to_string(),
+                        title: "Brainstorming".to_string(),
+                        description:
+                            "Explore intent, requirements, and design before implementation"
+                                .to_string(),
+                        origin: PromptSourceOrigin::Builtin,
+                        skill_path: "/tmp/brainstorming/SKILL.md".to_string(),
+                        body: "# Brainstorming".to_string(),
+                    },
+                ],
                 builtin_core_system_body: String::new(),
                 global_core_system_override: None,
                 project_core_system_override: None,

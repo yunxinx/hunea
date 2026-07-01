@@ -318,6 +318,7 @@ fn model_with_manual_skill(skill_name: &str) -> Model {
                     origin: PromptSourceOrigin::Project,
                     skill_path: format!("/tmp/{skill_name}/SKILL.md"),
                     body: "# Manual Skill".to_string(),
+                    can_select_for_discovery: false,
                     selected: false,
                     selected_order: None,
                 }],

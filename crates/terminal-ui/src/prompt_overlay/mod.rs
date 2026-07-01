@@ -60,31 +60,31 @@ pub(crate) enum PromptOverlayFocus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptOverlayInactiveTab {
-    ExtraPrompts,
     LongLivedSkills,
+    ExtraPrompts,
 }
 
 impl PromptOverlayInactiveTab {
-    const ALL: [Self; 2] = [Self::ExtraPrompts, Self::LongLivedSkills];
+    const ALL: [Self; 2] = [Self::LongLivedSkills, Self::ExtraPrompts];
 
     fn next(self) -> Self {
         match self {
-            Self::ExtraPrompts => Self::LongLivedSkills,
             Self::LongLivedSkills => Self::ExtraPrompts,
+            Self::ExtraPrompts => Self::LongLivedSkills,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            Self::ExtraPrompts => Self::LongLivedSkills,
             Self::LongLivedSkills => Self::ExtraPrompts,
+            Self::ExtraPrompts => Self::LongLivedSkills,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::ExtraPrompts => "Extra",
             Self::LongLivedSkills => "Skill",
+            Self::ExtraPrompts => "Custom",
         }
     }
 }
@@ -109,7 +109,7 @@ impl Default for PromptOverlayState {
             focus: PromptOverlayFocus::Active,
             active_selected: 0,
             active_scroll: 0,
-            inactive_tab: PromptOverlayInactiveTab::ExtraPrompts,
+            inactive_tab: PromptOverlayInactiveTab::LongLivedSkills,
             inactive_selected: 0,
             inactive_scroll: 0,
             inactive_selected_reference_id: None,
@@ -310,9 +310,9 @@ impl Model {
         );
 
         let [left_pane, gutter, right_pane] = Layout::horizontal([
-            Constraint::Fill(1),
+            Constraint::Percentage(50),
             Constraint::Length(1),
-            Constraint::Fill(1),
+            Constraint::Percentage(50),
         ])
         .areas(chrome.body);
 
@@ -403,12 +403,24 @@ impl Model {
                 self.open_prompt_overlay_source_preview(manager_source);
             }
             PromptOverlaySelection::ExtraPromptCandidate(candidate) => {
-                self.open_prompt_overlay_plain_text_preview(candidate.title, &candidate.body);
+                self.open_prompt_overlay_plain_text_preview(candidate.title, &candidate.body, None);
             }
             PromptOverlaySelection::DiscoveredSkill(skill) => {
-                self.open_prompt_overlay_plain_text_preview(skill.title.clone(), &skill.body);
+                self.open_prompt_overlay_skill_preview(skill);
             }
         }
+    }
+
+    fn open_prompt_overlay_skill_preview(&mut self, skill: PromptAssemblyDiscoveredSkill) {
+        let preview_notice = (!skill.can_select_for_discovery).then(|| {
+            "Manual-only skill: `disable-model-invocation: true` keeps this skill out of skill discovery."
+                .to_string()
+        });
+        self.open_prompt_overlay_plain_text_preview(
+            skill.title.clone(),
+            &skill.body,
+            preview_notice,
+        );
     }
 
     fn toggle_prompt_overlay_draft_scope(&mut self) {
@@ -577,6 +589,9 @@ impl Model {
             .prompt_assembly
             .discovered_skills
             .get(state.inactive_selected)?;
+        if !selected.can_select_for_discovery {
+            return None;
+        }
         Some(AppEffect::MutatePromptAssembly {
             mutation: PromptAssemblyMutation::SetDiscoveredSkillSelected {
                 scope,
@@ -1283,11 +1298,16 @@ fn prompt_overlay_discovered_skill_lines(
         )];
     }
 
+    let mut discovery_display_num = 0usize;
     skills
         .iter()
-        .skip(scroll)
-        .take(body_height)
         .map(|skill| {
+            let display_num = if skill.can_select_for_discovery {
+                discovery_display_num += 1;
+                Some(discovery_display_num)
+            } else {
+                None
+            };
             let selected = selected_reference_id == Some(skill.skill_name.as_str());
             let content_width = width.saturating_sub(PROMPT_OVERLAY_ROW_PREFIX_WIDTH).max(1);
             let item_style = if selected {
@@ -1301,7 +1321,7 @@ fn prompt_overlay_discovered_skill_lines(
                 tertiary_text_style(palette)
             };
             let marker = if selected && focused { "█" } else { " " };
-            let label = prompt_overlay_skill_row_text(skill, content_width);
+            let label = prompt_overlay_skill_row_text(skill, display_num, content_width);
             prompt_overlay_list_line(
                 marker,
                 marker_style,
@@ -1309,6 +1329,8 @@ fn prompt_overlay_discovered_skill_lines(
                 item_style,
             )
         })
+        .skip(scroll)
+        .take(body_height)
         .collect()
 }
 
@@ -1467,21 +1489,18 @@ fn prompt_overlay_extra_row_text(
     format!("{left_pad}{name}{gap}{scope}{trailing}")
 }
 
-fn prompt_overlay_skill_row_text(skill: &PromptAssemblyDiscoveredSkill, width: usize) -> String {
+fn prompt_overlay_skill_row_text(
+    skill: &PromptAssemblyDiscoveredSkill,
+    display_num: Option<usize>,
+    width: usize,
+) -> String {
     let name_width = prompt_overlay_right_skill_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
     let ord = left_pad_display_width(
-        &skill
-            .selected_order
-            .map(|order| order.to_string())
-            .unwrap_or_else(|| "-".to_string()),
+        &prompt_overlay_skill_num_label(skill, display_num),
         PROMPT_OVERLAY_RIGHT_SKILL_ORD_WIDTH,
     );
-    let name = format!(
-        "{:<width$}",
-        truncate_display_width_with_ellipsis(&skill.title, name_width),
-        width = name_width
-    );
+    let name = prompt_overlay_skill_name_cell(skill, name_width);
     let scope = format!(
         "{:<width$}",
         prompt_overlay_origin_label(skill.origin),
@@ -1490,6 +1509,38 @@ fn prompt_overlay_skill_row_text(skill: &PromptAssemblyDiscoveredSkill, width: u
     let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
     let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
     format!("{left_pad}{ord}{gap}{name}{gap}{scope}{trailing}")
+}
+
+fn prompt_overlay_skill_num_label(
+    skill: &PromptAssemblyDiscoveredSkill,
+    display_num: Option<usize>,
+) -> String {
+    if !skill.can_select_for_discovery {
+        return "M".to_string();
+    }
+    display_num
+        .map(|order| order.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn prompt_overlay_skill_name_cell(skill: &PromptAssemblyDiscoveredSkill, width: usize) -> String {
+    if skill.can_select_for_discovery {
+        return format!(
+            "{:<width$}",
+            truncate_display_width_with_ellipsis(&skill.title, width),
+            width = width
+        );
+    }
+
+    let suffix = "(manual)";
+    let reserved_suffix_width = suffix.len() + 1;
+    if width <= reserved_suffix_width {
+        return truncate_display_width_with_ellipsis(suffix, width);
+    }
+
+    let title_width = width.saturating_sub(reserved_suffix_width);
+    let title = truncate_display_width_with_ellipsis(&skill.title, title_width);
+    format!("{title:<title_width$} {suffix}")
 }
 
 fn prompt_overlay_left_source_width(width: usize) -> usize {

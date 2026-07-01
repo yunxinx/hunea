@@ -12,7 +12,10 @@ use crate::{
     overlay_input_result::OverlayInputResult,
     render_frame::RenderFrame,
     styled_text::render_line_with_full_width_background,
-    theme::{build_page_rule, muted_text_style, primary_text_style, tertiary_text_style},
+    theme::{
+        approval_rejected_text_style, build_page_rule, muted_text_style, primary_text_style,
+        tertiary_text_style,
+    },
     transcript::wrap_plain_text,
 };
 
@@ -23,6 +26,7 @@ const PROMPT_OVERLAY_PREVIEW_HORIZONTAL_PADDING: usize = 2;
 pub(crate) struct PromptOverlayPreviewState {
     pub(crate) title: String,
     pub(crate) content: String,
+    pub(crate) notice: Option<String>,
     pub(crate) scroll_offset: usize,
 }
 
@@ -40,7 +44,7 @@ impl Model {
     ) {
         let title = source.title.clone();
         let content = source.body.unwrap_or_default();
-        self.open_prompt_overlay_plain_text_preview(title, &content);
+        self.open_prompt_overlay_plain_text_preview(title, &content, None);
     }
 
     pub(crate) fn open_prompt_overlay_assembled_preview(&mut self) {
@@ -49,7 +53,7 @@ impl Model {
             .prelude
             .effective_system_prompt()
             .unwrap_or_default();
-        self.open_prompt_overlay_plain_text_preview("Assembled prompt".to_string(), &content);
+        self.open_prompt_overlay_plain_text_preview("Assembled prompt".to_string(), &content, None);
     }
 
     pub(crate) fn close_prompt_overlay_preview(&mut self) {
@@ -100,6 +104,11 @@ impl Model {
         let Some(wrapped_lines) = self.prompt_overlay_preview_wrapped_lines() else {
             return;
         };
+        let preview_notice = self
+            .prompt_overlay
+            .as_ref()
+            .and_then(|state| state.preview.as_ref())
+            .and_then(|preview| preview.notice.clone());
         if area.width == 0 || area.height == 0 {
             return;
         }
@@ -108,6 +117,7 @@ impl Model {
         let palette = self.palette;
         let content_height = usize::from(area.height.saturating_sub(2).max(1));
         let text_style = primary_text_style(palette);
+        let notice_style = approval_rejected_text_style(palette);
         let max_offset = wrapped_lines.len().saturating_sub(content_height.max(1));
         let scroll_offset = preview_scroll_offset.min(max_offset);
         let (page_number, page_count) =
@@ -121,6 +131,22 @@ impl Model {
             .y
             .saturating_add(u16::try_from(content_height).unwrap_or(u16::MAX));
         let mut row = area.y;
+        if let Some(notice) = preview_notice {
+            render_line_with_full_width_background(
+                &Line::from(vec![Span::raw("  "), Span::styled(notice, notice_style)]),
+                Rect::new(area.x, row, area.width, 1),
+                frame.buffer_mut(),
+            );
+            row = row.saturating_add(1);
+            if row < content_bottom {
+                render_line_with_full_width_background(
+                    &Line::from(vec![Span::raw("  ")]),
+                    Rect::new(area.x, row, area.width, 1),
+                    frame.buffer_mut(),
+                );
+                row = row.saturating_add(1);
+            }
+        }
         for line in wrapped_lines
             .iter()
             .skip(scroll_offset)
@@ -193,13 +219,19 @@ impl Model {
         preview.scroll_offset = usize::try_from(next.clamp(0, max_offset_i)).unwrap_or(0);
     }
 
-    pub(crate) fn open_prompt_overlay_plain_text_preview(&mut self, title: String, content: &str) {
+    pub(crate) fn open_prompt_overlay_plain_text_preview(
+        &mut self,
+        title: String,
+        content: &str,
+        notice: Option<String>,
+    ) {
         let Some(state) = self.prompt_overlay.as_mut() else {
             return;
         };
         state.preview = Some(PromptOverlayPreviewState {
             title,
             content: content.to_string(),
+            notice,
             scroll_offset: 0,
         });
     }
@@ -210,12 +242,10 @@ impl Model {
             .as_ref()
             .and_then(|state| state.preview.as_ref())
             .map(|preview| {
-                wrap_plain_text(
-                    &preview.content,
+                prompt_overlay_preview_total_line_count(
+                    preview,
                     prompt_overlay_preview_wrap_width(width),
-                    0,
                 )
-                .len()
             })
             .unwrap_or(0);
         let page_size = self.prompt_overlay_preview_content_height();
@@ -248,4 +278,16 @@ fn prompt_overlay_preview_wrap_width(window_width: u16) -> usize {
     usize::from(window_width)
         .saturating_sub(PROMPT_OVERLAY_PREVIEW_HORIZONTAL_PADDING * 2)
         .max(1)
+}
+
+fn prompt_overlay_preview_total_line_count(
+    preview: &PromptOverlayPreviewState,
+    wrap_width: usize,
+) -> usize {
+    let body_lines = wrap_plain_text(&preview.content, wrap_width, 0).len();
+    if preview.notice.is_some() {
+        body_lines.saturating_add(2)
+    } else {
+        body_lines
+    }
 }

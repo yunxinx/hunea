@@ -165,6 +165,7 @@ pub struct PromptAssemblyDiscoveredSkill {
     pub origin: PromptSourceOrigin,
     pub skill_path: String,
     pub body: String,
+    pub can_select_for_discovery: bool,
     pub selected: bool,
     pub selected_order: Option<usize>,
 }

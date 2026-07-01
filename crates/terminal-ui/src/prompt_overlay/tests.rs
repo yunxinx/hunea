@@ -148,6 +148,7 @@ fn ready_model() -> Model {
                         origin: PromptSourceOrigin::Project,
                         skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
                         body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
+                        can_select_for_discovery: true,
                         selected: true,
                         selected_order: Some(1),
                     },
@@ -158,6 +159,7 @@ fn ready_model() -> Model {
                         origin: PromptSourceOrigin::Global,
                         skill_path: "/tmp/code-review/SKILL.md".to_string(),
                         body: "# Code Review\n\nUse this skill.".to_string(),
+                        can_select_for_discovery: true,
                         selected: true,
                         selected_order: Some(2),
                     },
@@ -169,6 +171,7 @@ fn ready_model() -> Model {
                     origin: PromptSourceOrigin::Project,
                     skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
                     body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
+                    can_select_for_discovery: true,
                     selected: false,
                     selected_order: None,
                 }],
@@ -216,6 +219,14 @@ fn tab_only_switches_tabs_when_right_pane_is_focused() {
     let mut model = ready_model();
     model.open_prompt_overlay();
 
+    assert_eq!(
+        model
+            .prompt_overlay
+            .as_ref()
+            .map(|state| state.inactive_tab),
+        Some(PromptOverlayInactiveTab::LongLivedSkills)
+    );
+
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
     let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
     assert_eq!(
@@ -223,7 +234,7 @@ fn tab_only_switches_tabs_when_right_pane_is_focused() {
             .prompt_overlay
             .as_ref()
             .map(|state| state.inactive_tab),
-        Some(PromptOverlayInactiveTab::LongLivedSkills)
+        Some(PromptOverlayInactiveTab::ExtraPrompts)
     );
 
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Active);
@@ -233,7 +244,7 @@ fn tab_only_switches_tabs_when_right_pane_is_focused() {
             .prompt_overlay
             .as_ref()
             .map(|state| state.inactive_tab),
-        Some(PromptOverlayInactiveTab::LongLivedSkills)
+        Some(PromptOverlayInactiveTab::ExtraPrompts)
     );
 }
 
@@ -242,8 +253,6 @@ fn skills_tab_uses_discovered_skill_inventory() {
     let mut model = ready_model();
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
-
-    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
 
     assert_eq!(
         model
@@ -284,8 +293,8 @@ fn render_uses_single_header_row_with_right_aligned_tabs_and_table_headers() {
 
     assert!(rows.contains("Prompt Assembly · scope=project"));
     assert!(!rows.contains("Next New Session"));
-    assert!(rows.contains("[Extra]"));
-    assert!(rows.contains("Skill"));
+    assert!(rows.contains("[Skill]"));
+    assert!(rows.contains("Custom"));
     assert!(rows.contains("Sel"));
     assert!(rows.contains("Ord"));
     assert!(rows.contains("Source"));
@@ -301,6 +310,8 @@ fn render_uses_fixed_width_table_columns_with_balanced_split() {
     let mut model = ready_model();
     model.set_window(120, 16);
     model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 120, 16));
     let left_header = rows
@@ -331,10 +342,15 @@ fn render_uses_fixed_width_table_columns_with_balanced_split() {
         !right_header_pane.contains("Sel"),
         "right pane should not render a Sel column: {right_header:?}"
     );
-    let width_delta = left_header_pane.len().abs_diff(right_header_pane.len());
+    let divider_column = right_header
+        .chars()
+        .position(|character| character == '│')
+        .expect("prompt overlay should render pane divider");
+    let total_columns = right_header.chars().count();
+    let right_pane_width = total_columns.saturating_sub(divider_column + 1);
     assert!(
-        width_delta <= 1,
-        "pane widths should stay balanced at 5:5: left={left_header_pane:?}, right={right_header_pane:?}"
+        right_pane_width.abs_diff(divider_column) <= 1,
+        "left and right panes should stay balanced: left={left_header_pane:?}, right={right_header_pane:?}"
     );
 
     let left_header_ord = left_header.find("Ord").expect("Ord col should exist");
@@ -364,12 +380,180 @@ fn render_uses_fixed_width_table_columns_with_balanced_split() {
 }
 
 #[test]
+fn skill_num_column_uses_visible_discovery_order_after_sorting() {
+    let mut model = ready_model();
+    model.set_window(120, 20);
+    model.prompt_assembly.discovered_skills = vec![
+        PromptAssemblyDiscoveredSkill {
+            skill_name: "caveman".to_string(),
+            title: "caveman".to_string(),
+            description: "Be brief".to_string(),
+            origin: PromptSourceOrigin::Project,
+            skill_path: "/tmp/caveman/SKILL.md".to_string(),
+            body: "# caveman".to_string(),
+            can_select_for_discovery: true,
+            selected: true,
+            selected_order: Some(21),
+        },
+        PromptAssemblyDiscoveredSkill {
+            skill_name: "codebase-design".to_string(),
+            title: "codebase-design".to_string(),
+            description: "Design modules".to_string(),
+            origin: PromptSourceOrigin::Project,
+            skill_path: "/tmp/codebase-design/SKILL.md".to_string(),
+            body: "# codebase-design".to_string(),
+            can_select_for_discovery: true,
+            selected: false,
+            selected_order: Some(8),
+        },
+        PromptAssemblyDiscoveredSkill {
+            skill_name: "ask-matt".to_string(),
+            title: "ask-matt".to_string(),
+            description: "Ask which skill fits".to_string(),
+            origin: PromptSourceOrigin::Project,
+            skill_path: "/tmp/ask-matt/SKILL.md".to_string(),
+            body: "# ask-matt".to_string(),
+            can_select_for_discovery: false,
+            selected: false,
+            selected_order: None,
+        },
+    ];
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 120, 20)).join("\n");
+    assert!(rows.contains("  1  caveman"));
+    assert!(rows.contains("  2  codebase-design"));
+    assert!(rows.contains("  M  ask-matt"));
+    assert!(!rows.contains(" 21  caveman"));
+    assert!(!rows.contains("  8  codebase-design"));
+}
+
+#[test]
+fn manual_only_skill_stays_visible_with_manual_marker() {
+    let mut model = ready_model();
+    model
+        .prompt_assembly
+        .discovered_skills
+        .push(PromptAssemblyDiscoveredSkill {
+            skill_name: "ask-matt".to_string(),
+            title: "ask-matt".to_string(),
+            description: "Ask which skill fits".to_string(),
+            origin: PromptSourceOrigin::Project,
+            skill_path: "/tmp/ask-matt/SKILL.md".to_string(),
+            body: "# Ask Matt".to_string(),
+            can_select_for_discovery: false,
+            selected: false,
+            selected_order: None,
+        });
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 120, 16)).join("\n");
+    assert!(rows.contains("ask-matt"));
+    assert!(rows.contains("(manual)"));
+}
+
+#[test]
+fn manual_only_skill_does_not_emit_selection_mutation() {
+    let mut model = ready_model();
+    model.prompt_assembly.discovered_skills = vec![PromptAssemblyDiscoveredSkill {
+        skill_name: "ask-matt".to_string(),
+        title: "ask-matt".to_string(),
+        description: "Ask which skill fits".to_string(),
+        origin: PromptSourceOrigin::Project,
+        skill_path: "/tmp/ask-matt/SKILL.md".to_string(),
+        body: "# Ask Matt".to_string(),
+        can_select_for_discovery: false,
+        selected: false,
+        selected_order: None,
+    }];
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('i'))),
+        super::OverlayInputResult::Handled
+    );
+}
+
+#[test]
+fn manual_only_skills_sort_after_discovery_eligible_skills() {
+    let mut model = ready_model();
+    model.prompt_assembly.discovered_skills = vec![
+        PromptAssemblyDiscoveredSkill {
+            skill_name: "aaa-discovery".to_string(),
+            title: "aaa-discovery".to_string(),
+            description: "discovery".to_string(),
+            origin: PromptSourceOrigin::Project,
+            skill_path: "/tmp/aaa-discovery/SKILL.md".to_string(),
+            body: "# aaa-discovery".to_string(),
+            can_select_for_discovery: true,
+            selected: true,
+            selected_order: Some(1),
+        },
+        PromptAssemblyDiscoveredSkill {
+            skill_name: "zzz-manual".to_string(),
+            title: "zzz-manual".to_string(),
+            description: "manual".to_string(),
+            origin: PromptSourceOrigin::Project,
+            skill_path: "/tmp/zzz-manual/SKILL.md".to_string(),
+            body: "# zzz-manual".to_string(),
+            can_select_for_discovery: false,
+            selected: false,
+            selected_order: None,
+        },
+    ];
+
+    assert_eq!(
+        model.prompt_assembly.discovered_skills[0].skill_name,
+        "aaa-discovery"
+    );
+    assert_eq!(
+        model.prompt_assembly.discovered_skills[1].skill_name,
+        "zzz-manual"
+    );
+}
+
+#[test]
+fn manual_only_skill_preview_shows_notice_above_body() {
+    let mut model = ready_model();
+    model.prompt_assembly.discovered_skills = vec![PromptAssemblyDiscoveredSkill {
+        skill_name: "ask-matt".to_string(),
+        title: "ask-matt".to_string(),
+        description: "Ask which skill fits".to_string(),
+        origin: PromptSourceOrigin::Project,
+        skill_path: "/tmp/ask-matt/SKILL.md".to_string(),
+        body: "# Ask Matt".to_string(),
+        can_select_for_discovery: false,
+        selected: false,
+        selected_order: None,
+    }];
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char(' ')));
+    let rows = rendered_rows(&render_model_buffer(&mut model, 100, 12));
+
+    let notice_index = rows
+        .iter()
+        .position(|row| row.contains("Manual-only skill:"))
+        .expect("manual preview notice should render");
+    let body_index = rows
+        .iter()
+        .position(|row| row.contains("# Ask Matt"))
+        .expect("manual preview body should render");
+    assert_eq!(body_index, notice_index + 2);
+}
+
+#[test]
 fn skills_tab_uses_num_column_label_instead_of_ord() {
     let mut model = ready_model();
     model.set_window(120, 16);
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
-    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 120, 16));
     let right_header = rows
@@ -391,6 +575,8 @@ fn empty_extra_candidates_state_aligns_with_name_column() {
     model.set_window(120, 16);
     model.prompt_assembly.extra_prompt_candidates.clear();
     model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 120, 16));
     let right_header = rows
@@ -424,7 +610,6 @@ fn empty_skills_state_aligns_with_num_column() {
     model.prompt_assembly.discovered_skills.clear();
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
-    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 120, 16));
     let right_header = rows
@@ -461,14 +646,14 @@ fn selected_header_tab_uses_surface_background_and_trailing_padding() {
         .into_iter()
         .next()
         .expect("header row should render");
-    let extra_byte_index = header_row
-        .find("[Extra]")
-        .expect("selected extra tab should render");
-    let extra_index = header_row[..extra_byte_index].chars().count();
-    let trailing_index = extra_index + "[Extra] Skill".chars().count();
+    let skill_byte_index = header_row
+        .find("[Skill]")
+        .expect("selected skill tab should render");
+    let skill_index = header_row[..skill_byte_index].chars().count();
+    let trailing_index = skill_index + "[Skill] Custom".chars().count();
 
     assert_eq!(
-        buffer[(u16::try_from(extra_index).expect("tab index should fit"), 0)].bg,
+        buffer[(u16::try_from(skill_index).expect("tab index should fit"), 0)].bg,
         default_palette()
             .surface
             .expect("default palette should expose a surface background"),
@@ -534,6 +719,7 @@ fn active_focus_only_shows_selection_marker_in_focused_pane() {
     assert!(active_rows.contains("█"));
 
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
     let inactive_rows = rendered_rows(&render_model_buffer(&mut model, 120, 16));
     let left_row = inactive_rows
         .iter()
@@ -652,6 +838,7 @@ fn prompt_preview_word_wraps_indented_skill_lines() {
     model.open_prompt_overlay_plain_text_preview(
         "repo-bootstrap".to_string(),
         "<skill>\n    hello world from skill body\n</skill>",
+        None,
     );
     let rows = rendered_rows(&render_model_buffer(&mut model, 24, 12));
 
@@ -720,7 +907,6 @@ fn discovered_skill_activation_emits_project_scoped_mutation() {
     let mut model = ready_model();
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
-    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('i'))),

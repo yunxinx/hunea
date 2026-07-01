@@ -21,6 +21,7 @@ use runtime_domain::prompt_assembly::{
     resolve_prompt_assembly,
 };
 use runtime_domain::session::TranscriptUserMessage;
+use serde::Deserialize;
 use session_store::SessionStore;
 
 const BUILTIN_CORE_SYSTEM_PROMPT: &str =
@@ -36,6 +37,24 @@ struct DiscoveredSkill {
     skill_path: PathBuf,
     body: String,
     origin: PromptSourceOrigin,
+    disable_model_invocation: bool,
+}
+
+impl DiscoveredSkill {
+    fn can_select_for_discovery(&self) -> bool {
+        !self.disable_model_invocation
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+struct SkillFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
+    #[serde(
+        default,
+        alias = "disable_model_invocation",
+        rename = "disable-model-invocation"
+    )]
     disable_model_invocation: bool,
 }
 
@@ -1291,7 +1310,7 @@ fn merged_skill_discovery_skill_state(
 
     let mut state = discovered_skills
         .iter()
-        .filter(|skill| !skill.disable_model_invocation)
+        .filter(|skill| skill.can_select_for_discovery())
         .enumerate()
         .map(|(index, skill)| {
             state_by_name
@@ -1382,9 +1401,8 @@ fn discovered_skill_inventory(
         .enumerate()
         .map(|(index, entry)| (entry.skill_name.as_str(), index + 1))
         .collect::<HashMap<_, _>>();
-    discovered_skills
+    let inventory = discovered_skills
         .iter()
-        .filter(|skill| !skill.disable_model_invocation)
         .map(|skill| PromptAssemblyDiscoveredSkill {
             skill_name: skill.name.clone(),
             title: skill.name.clone(),
@@ -1392,13 +1410,29 @@ fn discovered_skill_inventory(
             origin: skill.origin,
             skill_path: skill.skill_path.display().to_string(),
             body: format_long_lived_skill_body(skill),
+            can_select_for_discovery: skill.can_select_for_discovery(),
             selected: state_by_name
                 .get(skill.name.as_str())
                 .map(|entry| entry.enabled)
-                .unwrap_or(true),
+                .unwrap_or(skill.can_select_for_discovery()),
             selected_order: selected_order_by_name.get(skill.name.as_str()).copied(),
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let (mut discovery_eligible, mut manual_only): (Vec<_>, Vec<_>) = inventory
+        .into_iter()
+        .partition(|skill| skill.can_select_for_discovery);
+    discovery_eligible.sort_by(|left, right| {
+        left.title
+            .cmp(&right.title)
+            .then_with(|| left.skill_name.cmp(&right.skill_name))
+    });
+    manual_only.sort_by(|left, right| {
+        left.title
+            .cmp(&right.title)
+            .then_with(|| left.skill_name.cmp(&right.skill_name))
+    });
+    discovery_eligible.extend(manual_only);
+    discovery_eligible
 }
 
 fn manual_skill_inventory(
@@ -1406,7 +1440,6 @@ fn manual_skill_inventory(
 ) -> Vec<PromptAssemblyDiscoveredSkill> {
     discovered_skills
         .iter()
-        .filter(|skill| !skill.disable_model_invocation)
         .map(|skill| PromptAssemblyDiscoveredSkill {
             skill_name: skill.name.clone(),
             title: skill.name.clone(),
@@ -1414,6 +1447,7 @@ fn manual_skill_inventory(
             origin: skill.origin,
             skill_path: skill.skill_path.display().to_string(),
             body: format_long_lived_skill_body(skill),
+            can_select_for_discovery: skill.can_select_for_discovery(),
             selected: false,
             selected_order: None,
         })
@@ -1506,16 +1540,9 @@ fn discover_skill_dir(
 fn parse_skill_file(skill_path: &Path, origin: PromptSourceOrigin) -> Option<DiscoveredSkill> {
     let content = fs::read_to_string(skill_path).ok()?;
     let (frontmatter, body) = split_frontmatter(&content)?;
-    let name = frontmatter
-        .get("name")
-        .map(String::as_str)?
-        .trim()
-        .to_string();
-    let description = frontmatter
-        .get("description")
-        .map(String::as_str)?
-        .trim()
-        .to_string();
+    let frontmatter: SkillFrontmatter = serde_yaml::from_str(frontmatter.as_str()).ok()?;
+    let name = frontmatter.name?.trim().to_string();
+    let description = frontmatter.description?.trim().to_string();
     if name.is_empty() || description.is_empty() {
         return None;
     }
@@ -1526,21 +1553,15 @@ fn parse_skill_file(skill_path: &Path, origin: PromptSourceOrigin) -> Option<Dis
         skill_path: skill_path.to_path_buf(),
         body: body.trim().to_string(),
         origin,
-        disable_model_invocation: frontmatter
-            .get("disable-model-invocation")
-            .is_some_and(|value| value.trim() == "true"),
+        disable_model_invocation: frontmatter.disable_model_invocation,
     })
 }
 
-fn split_frontmatter(content: &str) -> Option<(HashMap<String, String>, &str)> {
-    let trimmed = content.strip_prefix("---\n")?;
+fn split_frontmatter(content: &str) -> Option<(String, String)> {
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.strip_prefix("---\n")?;
     let (frontmatter, body) = trimmed.split_once("\n---\n")?;
-    let mut parsed = HashMap::new();
-    for line in frontmatter.lines() {
-        let (key, value) = line.split_once(':')?;
-        parsed.insert(key.trim().to_string(), value.trim().to_string());
-    }
-    Some((parsed, body))
+    Some((frontmatter.to_string(), body.to_string()))
 }
 
 fn format_skill_discovery_body(skills: Vec<DiscoveredSkill>) -> String {
@@ -1816,6 +1837,91 @@ mod tests {
                 .as_deref()
                 .expect("skill discovery body should exist")
                 .contains("<name>repo-bootstrap</name>")
+        );
+    }
+
+    #[test]
+    fn discover_skills_parses_multiline_yaml_frontmatter() {
+        let work_dir = temp_dir("multiline-frontmatter");
+        let skill_dir = work_dir.join(".agents/skills/caveman");
+        fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+        fs::write(
+            skill_dir.join(SKILL_FILE_NAME),
+            "---\nname: caveman\ndescription: >\n  Ultra-compressed communication mode.\n  Cuts token usage without losing technical accuracy.\n---\n# Caveman\n",
+        )
+        .expect("skill file should exist");
+
+        let discovered = discover_skills(&work_dir, None);
+        let skill = discovered
+            .iter()
+            .find(|skill| skill.name == "caveman")
+            .expect("multiline frontmatter skill should be discovered");
+
+        assert_eq!(
+            skill.description,
+            "Ultra-compressed communication mode. Cuts token usage without losing technical accuracy."
+        );
+    }
+
+    #[test]
+    fn discovered_skill_inventory_keeps_manual_only_skills_visible() {
+        let work_dir = temp_dir("manual-only-skill-visible");
+        let manual_skill_dir = work_dir.join(".agents/skills/zzz-manual");
+        fs::create_dir_all(&manual_skill_dir).expect("skill dir should exist");
+        fs::write(
+            manual_skill_dir.join(SKILL_FILE_NAME),
+            "---\nname: zzz-manual\ndescription: Ask which skill fits.\ndisable-model-invocation: true\n---\n# Ask Matt\n",
+        )
+        .expect("skill file should exist");
+        let discovery_skill_dir = work_dir.join(".agents/skills/aaa-discovery");
+        fs::create_dir_all(&discovery_skill_dir).expect("skill dir should exist");
+        fs::write(
+            discovery_skill_dir.join(SKILL_FILE_NAME),
+            "---\nname: aaa-discovery\ndescription: Discovery skill.\n---\n# Discovery\n",
+        )
+        .expect("skill file should exist");
+
+        let snapshot = resolve_prompt_assembly_manager_snapshot(
+            &work_dir,
+            &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
+            &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        );
+
+        let skill = snapshot
+            .discovered_skills
+            .iter()
+            .find(|skill| skill.skill_name == "zzz-manual")
+            .expect("manual-only skill should remain visible in discovered inventory");
+        assert!(!skill.can_select_for_discovery);
+        assert!(!skill.selected);
+        assert_eq!(skill.selected_order, None);
+        let manual_index = snapshot
+            .discovered_skills
+            .iter()
+            .position(|skill| skill.skill_name == "zzz-manual")
+            .expect("manual-only skill should stay in inventory");
+        assert!(
+            snapshot.discovered_skills[..manual_index]
+                .windows(2)
+                .all(|pair| pair[0].title <= pair[1].title),
+            "discovery-eligible ordering should stay intact before manual-only suffix"
+        );
+        assert!(
+            snapshot.discovered_skills[..manual_index]
+                .iter()
+                .all(|skill| skill.can_select_for_discovery),
+            "manual-only skills should sort after discovery-eligible skills"
+        );
+
+        let generated = snapshot
+            .sources
+            .iter()
+            .find(|source| source.kind == PromptSourceKind::SkillDiscovery)
+            .and_then(|source| source.body.as_deref())
+            .expect("skill discovery body should exist");
+        assert!(
+            !generated.contains("<name>zzz-manual</name>"),
+            "manual-only skill should stay out of skill discovery prompt body"
         );
     }
 

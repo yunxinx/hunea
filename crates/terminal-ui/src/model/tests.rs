@@ -2985,6 +2985,7 @@ fn skill_picker_model() -> Model {
                 origin: PromptSourceOrigin::Project,
                 skill_path: "/tmp/code-review/SKILL.md".to_string(),
                 body: "# Code Review".to_string(),
+                can_select_for_discovery: true,
                 selected: false,
                 selected_order: None,
             },
@@ -2996,6 +2997,7 @@ fn skill_picker_model() -> Model {
                 origin: PromptSourceOrigin::Builtin,
                 skill_path: "/tmp/brainstorming/SKILL.md".to_string(),
                 body: "# Brainstorming".to_string(),
+                can_select_for_discovery: true,
                 selected: false,
                 selected_order: None,
             },
@@ -3013,6 +3015,7 @@ fn overflowing_skill_picker_model() -> Model {
             origin: PromptSourceOrigin::Project,
             skill_path: format!("/tmp/skill-{index:02}/SKILL.md"),
             body: format!("# Skill {index:02}"),
+            can_select_for_discovery: true,
             selected: false,
             selected_order: None,
         })

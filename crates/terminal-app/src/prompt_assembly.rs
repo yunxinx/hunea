@@ -948,6 +948,18 @@ fn set_prompt_source_enabled(
         .find(|entry| entry.kind == kind && entry.reference_id == reference_id)
     {
         entry.enabled = enabled;
+        return;
+    }
+
+    if kind == PromptSourceKind::SkillDiscovery && reference_id == "skill-discovery" {
+        ensure_skill_discovery_entry_exists(state);
+        if let Some(entry) = state
+            .entries
+            .iter_mut()
+            .find(|entry| entry.kind == kind && entry.reference_id == reference_id)
+        {
+            entry.enabled = enabled;
+        }
     }
 }
 
@@ -2093,6 +2105,35 @@ mod tests {
                 enabled: true,
                 requested_order: Some(1),
             }]
+        );
+    }
+
+    #[test]
+    fn disabling_skill_discovery_materializes_disabled_entry_in_selected_scope() {
+        let work_dir = temp_dir("disable-skill-discovery");
+        let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+
+        apply_prompt_assembly_mutation(
+            store,
+            &work_dir,
+            PromptAssemblyMutation::SetPromptSourceEnabled {
+                scope: PromptAssemblyScope::Project,
+                kind: PromptSourceKind::SkillDiscovery,
+                reference_id: "skill-discovery".to_string(),
+                enabled: false,
+            },
+        )
+        .expect("disable should succeed");
+
+        let project_state = load_project_prompt_assembly_state(&work_dir)
+            .expect("project prompt assembly state should load");
+        assert!(
+            project_state.entries.iter().any(|entry| {
+                entry.kind == PromptSourceKind::SkillDiscovery
+                    && entry.reference_id == "skill-discovery"
+                    && !entry.enabled
+            }),
+            "skill discovery entry should be materialized as disabled"
         );
     }
 

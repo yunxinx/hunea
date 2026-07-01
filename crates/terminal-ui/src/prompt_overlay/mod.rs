@@ -35,7 +35,6 @@ use crate::{
 mod tests;
 
 const PROMPT_OVERLAY_HEADER_INSET: usize = 2;
-const PROMPT_OVERLAY_FOOTER_FULL_BASE: &str = "  Esc close · ←/→/h/l focus panes · ↑/↓/j/k move · Space source · p assembled · e/ctrl+g edit · s scope · a/A add extra · i/I add skill · d remove · x disable · J/K reorder";
 const PROMPT_OVERLAY_FOOTER_TABS_SUFFIX: &str = " · Tab tabs";
 const PROMPT_OVERLAY_FOOTER_RESTORE_SUFFIX: &str = " · r restore";
 const SKILL_DISCOVERY_GENERATED_START: &str = "<!-- hunea:skill-discovery generated:start -->";
@@ -131,6 +130,15 @@ enum PromptOverlaySelection {
     ManagedSource(PromptAssemblyManagedSource),
     ExtraPromptCandidate(PromptAssemblyExtraPromptCandidate),
     DiscoveredSkill(PromptAssemblyDiscoveredSkill),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PromptOverlayActionAvailability {
+    can_edit: bool,
+    can_add_custom: bool,
+    can_remove: bool,
+    can_toggle_selection: bool,
+    can_reorder_active: bool,
 }
 
 impl Model {
@@ -236,28 +244,15 @@ impl Model {
             KeyCode::Char('e') if key.modifiers.is_empty() => {
                 OverlayInputResult::from_effect(self.open_prompt_overlay_editor_for_selection())
             }
-            KeyCode::Char('a') if key.modifiers.is_empty() => {
-                OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-                    mutation: PromptAssemblyMutation::CreateExtraPrompt {
-                        scope: PromptAssemblyScope::Project,
-                        content: "# New prompt\n".to_string(),
-                    },
-                })
-            }
-            KeyCode::Char('A') if key.modifiers.is_empty() => {
-                OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-                    mutation: PromptAssemblyMutation::CreateExtraPrompt {
-                        scope: PromptAssemblyScope::Global,
-                        content: "# New prompt\n".to_string(),
-                    },
-                })
-            }
-            KeyCode::Char('i') if key.modifiers.is_empty() => OverlayInputResult::from_effect(
-                self.activate_selected_discovered_skill(PromptAssemblyScope::Project),
+            KeyCode::Char('a') if key.modifiers.is_empty() => OverlayInputResult::from_effect(
+                self.create_extra_prompt_from_overlay(PromptAssemblyScope::Project),
             ),
-            KeyCode::Char('I') if key.modifiers.is_empty() => OverlayInputResult::from_effect(
-                self.activate_selected_discovered_skill(PromptAssemblyScope::Global),
+            KeyCode::Char('A') if key.modifiers.is_empty() => OverlayInputResult::from_effect(
+                self.create_extra_prompt_from_overlay(PromptAssemblyScope::Global),
             ),
+            KeyCode::Char('i') | KeyCode::Char('I') if key.modifiers.is_empty() => {
+                OverlayInputResult::Handled
+            }
             KeyCode::Char('d') if key.modifiers.is_empty() => {
                 OverlayInputResult::from_effect(self.remove_selected_prompt_source())
             }
@@ -434,40 +429,53 @@ impl Model {
     }
 
     pub(crate) fn open_prompt_overlay_editor_for_selection(&mut self) -> Option<AppEffect> {
-        let selected = self.selected_prompt_overlay_source()?;
         let scope = self
             .prompt_overlay
             .as_ref()
             .map(|state| state.draft_scope)
             .unwrap_or(PromptAssemblyScope::Project);
-        let manager_source = self.manager_source_for_resolved_source(&selected)?;
-
-        let (target, initial_content) = match selected.kind {
-            PromptSourceKind::CoreSystemPrompt => (
-                PromptAssemblyEditorTarget::CoreSystemOverride { scope },
-                self.core_system_editor_body_for_scope(scope),
-            ),
-            PromptSourceKind::SkillDiscovery => (
-                PromptAssemblyEditorTarget::SkillDiscovery { scope },
-                self.skill_discovery_editor_body_for_scope(scope),
-            ),
-            PromptSourceKind::ExtraPrompt => {
-                let origin = selected.origin?;
-                (
-                    PromptAssemblyEditorTarget::ExtraPrompt {
-                        scope: prompt_scope_from_origin(origin)?,
-                        reference_id: selected.reference_id.clone(),
+        let (target, initial_content) = match self.selected_prompt_overlay_selection()? {
+            PromptOverlaySelection::ManagedSource(source) => {
+                let selected = ResolvedPromptSource {
+                    reference_id: source.reference_id.clone(),
+                    kind: source.kind,
+                    title: source.title.clone(),
+                    origin: source.origin,
+                    status: PromptSourceStatus::Active {
+                        order: source.order,
                     },
-                    manager_source.body.unwrap_or_default(),
-                )
+                };
+                let manager_source = self.manager_source_for_resolved_source(&selected)?;
+                match selected.kind {
+                    PromptSourceKind::CoreSystemPrompt => (
+                        PromptAssemblyEditorTarget::CoreSystemOverride { scope },
+                        self.core_system_editor_body_for_scope(scope),
+                    ),
+                    PromptSourceKind::SkillDiscovery => (
+                        PromptAssemblyEditorTarget::SkillDiscovery { scope },
+                        self.skill_discovery_editor_body_for_scope(scope),
+                    ),
+                    PromptSourceKind::ExtraPrompt => {
+                        let origin = selected.origin?;
+                        (
+                            PromptAssemblyEditorTarget::ExtraPrompt {
+                                scope: prompt_scope_from_origin(origin)?,
+                                reference_id: selected.reference_id.clone(),
+                            },
+                            manager_source.body.unwrap_or_default(),
+                        )
+                    }
+                    PromptSourceKind::LongLivedSkill => return None,
+                }
             }
-            PromptSourceKind::LongLivedSkill => (
-                PromptAssemblyEditorTarget::SkillFile {
-                    skill_name: selected.reference_id.clone(),
-                    origin: manager_source.resolved_body_origin.or(selected.origin)?,
+            PromptOverlaySelection::ExtraPromptCandidate(candidate) => (
+                PromptAssemblyEditorTarget::ExtraPrompt {
+                    scope: prompt_scope_from_origin(candidate.origin)?,
+                    reference_id: candidate.reference_id.clone(),
                 },
-                manager_source.body.unwrap_or_default(),
+                candidate.body,
             ),
+            PromptOverlaySelection::DiscoveredSkill(_) => return None,
         };
 
         let launch = self.prepare_external_editor_launch_for_content(&initial_content)?;
@@ -481,17 +489,29 @@ impl Model {
     }
 
     fn remove_selected_prompt_source(&mut self) -> Option<AppEffect> {
-        let selected = self.selected_prompt_overlay_managed_source()?;
-        if selected.kind == PromptSourceKind::CoreSystemPrompt {
-            return None;
+        match self.selected_prompt_overlay_selection()? {
+            PromptOverlaySelection::ManagedSource(selected) => {
+                if selected.kind == PromptSourceKind::CoreSystemPrompt {
+                    return None;
+                }
+                Some(AppEffect::MutatePromptAssembly {
+                    mutation: PromptAssemblyMutation::RemovePromptSource {
+                        scope: prompt_scope_from_origin(selected.origin?)?,
+                        kind: selected.kind,
+                        reference_id: selected.reference_id,
+                    },
+                })
+            }
+            PromptOverlaySelection::ExtraPromptCandidate(candidate) => {
+                Some(AppEffect::MutatePromptAssembly {
+                    mutation: PromptAssemblyMutation::DeleteExtraPrompt {
+                        scope: prompt_scope_from_origin(candidate.origin)?,
+                        reference_id: candidate.reference_id,
+                    },
+                })
+            }
+            PromptOverlaySelection::DiscoveredSkill(_) => None,
         }
-        Some(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::RemovePromptSource {
-                scope: prompt_scope_from_origin(selected.origin?)?,
-                kind: selected.kind,
-                reference_id: selected.reference_id,
-            },
-        })
     }
 
     fn restore_selected_core_system_override(&mut self) -> Option<AppEffect> {
@@ -575,32 +595,6 @@ impl Model {
             .cloned()
     }
 
-    fn activate_selected_discovered_skill(
-        &mut self,
-        scope: PromptAssemblyScope,
-    ) -> Option<AppEffect> {
-        let state = self.prompt_overlay.as_ref()?;
-        if state.focus != PromptOverlayFocus::Inactive
-            || state.inactive_tab != PromptOverlayInactiveTab::LongLivedSkills
-        {
-            return None;
-        }
-        let selected = self
-            .prompt_assembly
-            .discovered_skills
-            .get(state.inactive_selected)?;
-        if !selected.can_select_for_discovery {
-            return None;
-        }
-        Some(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::SetDiscoveredSkillSelected {
-                scope,
-                skill_name: selected.skill_name.clone(),
-                selected: !selected.selected,
-            },
-        })
-    }
-
     fn move_selected_active_source(
         &mut self,
         direction: PromptAssemblyMoveDirection,
@@ -620,18 +614,108 @@ impl Model {
     }
 
     fn toggle_selected_prompt_source_enabled(&mut self) -> Option<AppEffect> {
-        let selected = self.selected_prompt_overlay_managed_source()?;
-        if selected.kind == PromptSourceKind::CoreSystemPrompt {
+        if let Some(selected) = self.selected_prompt_overlay_managed_source() {
+            if selected.kind == PromptSourceKind::CoreSystemPrompt {
+                return None;
+            }
+            let scope = if selected.kind == PromptSourceKind::SkillDiscovery {
+                self.prompt_overlay
+                    .as_ref()
+                    .map(|state| state.draft_scope)
+                    .unwrap_or(PromptAssemblyScope::Project)
+            } else {
+                prompt_scope_from_origin(selected.origin?)?
+            };
+            return Some(AppEffect::MutatePromptAssembly {
+                mutation: PromptAssemblyMutation::SetPromptSourceEnabled {
+                    scope,
+                    kind: selected.kind,
+                    reference_id: selected.reference_id,
+                    enabled: !selected.enabled,
+                },
+            });
+        }
+
+        match self.selected_prompt_overlay_selection()? {
+            PromptOverlaySelection::ManagedSource(_) => None,
+            PromptOverlaySelection::ExtraPromptCandidate(candidate) => {
+                Some(AppEffect::MutatePromptAssembly {
+                    mutation: PromptAssemblyMutation::SetExtraPromptSelected {
+                        scope: prompt_scope_from_origin(candidate.origin)?,
+                        reference_id: candidate.reference_id,
+                        selected: !candidate.selected,
+                    },
+                })
+            }
+            PromptOverlaySelection::DiscoveredSkill(skill) => {
+                if !skill.can_select_for_discovery {
+                    return None;
+                }
+                Some(AppEffect::MutatePromptAssembly {
+                    mutation: PromptAssemblyMutation::SetDiscoveredSkillSelected {
+                        scope: prompt_scope_from_origin(skill.origin)?,
+                        skill_name: skill.skill_name,
+                        selected: !skill.selected,
+                    },
+                })
+            }
+        }
+    }
+
+    fn create_extra_prompt_from_overlay(&self, scope: PromptAssemblyScope) -> Option<AppEffect> {
+        let state = self.prompt_overlay.as_ref()?;
+        if state.focus != PromptOverlayFocus::Inactive
+            || state.inactive_tab != PromptOverlayInactiveTab::ExtraPrompts
+        {
             return None;
         }
         Some(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::SetPromptSourceEnabled {
-                scope: prompt_scope_from_origin(selected.origin?)?,
-                kind: selected.kind,
-                reference_id: selected.reference_id,
-                enabled: !selected.enabled,
+            mutation: PromptAssemblyMutation::CreateExtraPrompt {
+                scope,
+                content: "# New prompt\n".to_string(),
             },
         })
+    }
+
+    fn prompt_overlay_action_availability(&self) -> PromptOverlayActionAvailability {
+        match self.selected_prompt_overlay_selection() {
+            Some(PromptOverlaySelection::ManagedSource(source)) => {
+                let can_remove = !matches!(
+                    source.kind,
+                    PromptSourceKind::CoreSystemPrompt | PromptSourceKind::SkillDiscovery
+                );
+                PromptOverlayActionAvailability {
+                    can_edit: source.kind != PromptSourceKind::LongLivedSkill,
+                    can_add_custom: false,
+                    can_remove,
+                    can_toggle_selection: true,
+                    can_reorder_active: source.kind != PromptSourceKind::CoreSystemPrompt,
+                }
+            }
+            Some(PromptOverlaySelection::ExtraPromptCandidate(_)) => {
+                PromptOverlayActionAvailability {
+                    can_edit: true,
+                    can_add_custom: true,
+                    can_remove: true,
+                    can_toggle_selection: true,
+                    can_reorder_active: false,
+                }
+            }
+            Some(PromptOverlaySelection::DiscoveredSkill(_)) => PromptOverlayActionAvailability {
+                can_edit: false,
+                can_add_custom: false,
+                can_remove: false,
+                can_toggle_selection: true,
+                can_reorder_active: false,
+            },
+            None => PromptOverlayActionAvailability {
+                can_edit: false,
+                can_add_custom: false,
+                can_remove: false,
+                can_toggle_selection: false,
+                can_reorder_active: false,
+            },
+        }
     }
 
     fn core_system_editor_body_for_scope(&self, scope: PromptAssemblyScope) -> String {
@@ -950,11 +1034,37 @@ impl Model {
     }
 
     fn prompt_overlay_footer_hint(&self, width: u16) -> String {
-        let mut text = if width < 120 {
-            "  Esc close · Space preview · e edit · d remove · x disable".to_string()
+        let actions = self.prompt_overlay_action_availability();
+        let mut parts = if width < 120 {
+            vec!["Esc close", "Space preview"]
         } else {
-            PROMPT_OVERLAY_FOOTER_FULL_BASE.to_string()
+            vec![
+                "Esc close",
+                "←/→/h/l focus panes",
+                "↑/↓/j/k move",
+                "Space source",
+                "p assembled",
+            ]
         };
+        if actions.can_edit {
+            parts.push("e/ctrl+g edit");
+        }
+        if width >= 120 {
+            parts.push("s scope");
+        }
+        if actions.can_add_custom {
+            parts.push("a/A add custom");
+        }
+        if actions.can_remove {
+            parts.push("d remove");
+        }
+        if actions.can_toggle_selection {
+            parts.push("x disable");
+        }
+        if actions.can_reorder_active && width >= 120 {
+            parts.push("J/K reorder");
+        }
+        let mut text = format!("  {}", parts.join(" · "));
         let focus_right = self
             .prompt_overlay
             .as_ref()
@@ -1403,6 +1513,7 @@ fn prompt_overlay_active_header_text(width: usize) -> String {
 fn prompt_overlay_extra_header_text(width: usize) -> String {
     let name_width = prompt_overlay_right_extra_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
+    let sel = prompt_overlay_center_text("Sel", PROMPT_OVERLAY_LEFT_SEL_WIDTH);
     let name = format!(
         "{:<width$}",
         truncate_display_width_with_ellipsis("Name", name_width),
@@ -1415,12 +1526,13 @@ fn prompt_overlay_extra_header_text(width: usize) -> String {
     );
     let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
     let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
-    format!("{left_pad}{name}{gap}{scope}{trailing}")
+    format!("{left_pad}{sel}{gap}{name}{gap}{scope}{trailing}")
 }
 
 fn prompt_overlay_skill_header_text(width: usize) -> String {
     let name_width = prompt_overlay_right_skill_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
+    let sel = prompt_overlay_center_text("Sel", PROMPT_OVERLAY_LEFT_SEL_WIDTH);
     let ord = left_pad_display_width("Num", PROMPT_OVERLAY_RIGHT_SKILL_ORD_WIDTH);
     let name = format!(
         "{:<width$}",
@@ -1434,7 +1546,7 @@ fn prompt_overlay_skill_header_text(width: usize) -> String {
     );
     let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
     let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
-    format!("{left_pad}{ord}{gap}{name}{gap}{scope}{trailing}")
+    format!("{left_pad}{sel}{gap}{ord}{gap}{name}{gap}{scope}{trailing}")
 }
 
 fn prompt_overlay_active_row_text(source: &PromptAssemblyManagedSource, width: usize) -> String {
@@ -1474,6 +1586,10 @@ fn prompt_overlay_extra_row_text(
 ) -> String {
     let name_width = prompt_overlay_right_extra_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
+    let sel = prompt_overlay_center_text(
+        if source.selected { "●" } else { "○" },
+        PROMPT_OVERLAY_LEFT_SEL_WIDTH,
+    );
     let name = format!(
         "{:<width$}",
         truncate_display_width_with_ellipsis(&source.title, name_width),
@@ -1486,7 +1602,7 @@ fn prompt_overlay_extra_row_text(
     );
     let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
     let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
-    format!("{left_pad}{name}{gap}{scope}{trailing}")
+    format!("{left_pad}{sel}{gap}{name}{gap}{scope}{trailing}")
 }
 
 fn prompt_overlay_skill_row_text(
@@ -1496,6 +1612,16 @@ fn prompt_overlay_skill_row_text(
 ) -> String {
     let name_width = prompt_overlay_right_skill_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
+    let sel = prompt_overlay_center_text(
+        if !skill.can_select_for_discovery {
+            "-"
+        } else if skill.selected {
+            "●"
+        } else {
+            "○"
+        },
+        PROMPT_OVERLAY_LEFT_SEL_WIDTH,
+    );
     let ord = left_pad_display_width(
         &prompt_overlay_skill_num_label(skill, display_num),
         PROMPT_OVERLAY_RIGHT_SKILL_ORD_WIDTH,
@@ -1508,7 +1634,7 @@ fn prompt_overlay_skill_row_text(
     );
     let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
     let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
-    format!("{left_pad}{ord}{gap}{name}{gap}{scope}{trailing}")
+    format!("{left_pad}{sel}{gap}{ord}{gap}{name}{gap}{scope}{trailing}")
 }
 
 fn prompt_overlay_skill_num_label(
@@ -1558,19 +1684,21 @@ fn prompt_overlay_left_source_width(width: usize) -> usize {
 fn prompt_overlay_right_extra_name_width(width: usize) -> usize {
     width
         .saturating_sub(PROMPT_OVERLAY_OUTER_PADDING)
+        .saturating_sub(PROMPT_OVERLAY_LEFT_SEL_WIDTH)
         .saturating_sub(PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH)
         .saturating_sub(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING)
-        .saturating_sub(PROMPT_OVERLAY_COLUMN_GAP)
+        .saturating_sub(PROMPT_OVERLAY_COLUMN_GAP * 2)
         .max(12)
 }
 
 fn prompt_overlay_right_skill_name_width(width: usize) -> usize {
     width
         .saturating_sub(PROMPT_OVERLAY_OUTER_PADDING)
+        .saturating_sub(PROMPT_OVERLAY_LEFT_SEL_WIDTH)
         .saturating_sub(PROMPT_OVERLAY_RIGHT_SKILL_ORD_WIDTH)
         .saturating_sub(PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH)
         .saturating_sub(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING)
-        .saturating_sub(PROMPT_OVERLAY_COLUMN_GAP * 2)
+        .saturating_sub(PROMPT_OVERLAY_COLUMN_GAP * 3)
         .max(12)
 }
 
@@ -1592,9 +1720,10 @@ fn prompt_overlay_empty_inactive_line(
     palette: crate::theme::TerminalPalette,
 ) -> Line<'static> {
     let content_width = width.saturating_sub(PROMPT_OVERLAY_ROW_PREFIX_WIDTH).max(1);
+    let right_prefix = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
     let content = format!(
         "{}{}",
-        " ".repeat(PROMPT_OVERLAY_OUTER_PADDING),
+        right_prefix,
         truncate_display_width_with_ellipsis(
             message,
             content_width

@@ -339,8 +339,8 @@ fn render_uses_fixed_width_table_columns_with_balanced_split() {
         .try_into()
         .expect("prompt overlay should render two panes");
     assert!(
-        !right_header_pane.contains("Sel"),
-        "right pane should not render a Sel column: {right_header:?}"
+        right_header_pane.contains("Sel"),
+        "skills pane should render a Sel column: {right_header:?}"
     );
     let divider_column = right_header
         .chars()
@@ -454,6 +454,12 @@ fn manual_only_skill_stays_visible_with_manual_marker() {
     let rows = rendered_rows(&render_model_buffer(&mut model, 120, 16)).join("\n");
     assert!(rows.contains("ask-matt"));
     assert!(rows.contains("(manual)"));
+    let manual_row = rows
+        .lines()
+        .find(|row| row.contains("ask-matt") && row.contains("(manual)"))
+        .expect("manual skill row should render");
+    assert!(manual_row.contains('-'));
+    assert!(manual_row.contains('M'));
 }
 
 #[test]
@@ -570,7 +576,7 @@ fn skills_tab_uses_num_column_label_instead_of_ord() {
 }
 
 #[test]
-fn empty_extra_candidates_state_aligns_with_name_column() {
+fn empty_extra_candidates_state_aligns_with_sel_column() {
     let mut model = ready_model();
     model.set_window(120, 16);
     model.prompt_assembly.extra_prompt_candidates.clear();
@@ -597,14 +603,14 @@ fn empty_extra_candidates_state_aligns_with_name_column() {
         .expect("right pane should exist");
 
     assert_eq!(
-        right_header_pane.find("Name"),
+        right_header_pane.find("Sel"),
         right_empty_pane.find("No candidates"),
-        "empty state should align with Name column: header={right_header_pane:?}, row={right_empty_pane:?}"
+        "empty state should align with Sel column: header={right_header_pane:?}, row={right_empty_pane:?}"
     );
 }
 
 #[test]
-fn empty_skills_state_aligns_with_num_column() {
+fn empty_skills_state_aligns_with_sel_column() {
     let mut model = ready_model();
     model.set_window(120, 16);
     model.prompt_assembly.discovered_skills.clear();
@@ -630,9 +636,9 @@ fn empty_skills_state_aligns_with_num_column() {
         .expect("right pane should exist");
 
     assert_eq!(
-        right_header_pane.find("Num"),
+        right_header_pane.find("Sel"),
         right_empty_pane.find("No discovered skills"),
-        "empty state should align with Num column: header={right_header_pane:?}, row={right_empty_pane:?}"
+        "empty state should align with Sel column: header={right_header_pane:?}, row={right_empty_pane:?}"
     );
 }
 
@@ -895,30 +901,28 @@ fn delete_selected_extra_prompt_emits_mutation_effect() {
     let mut model = ready_model();
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
-        super::OverlayInputResult::Handled
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::DeleteExtraPrompt {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+                reference_id: "global-extra".to_string(),
+            },
+        })
     );
 }
 
 #[test]
-fn discovered_skill_activation_emits_project_scoped_mutation() {
+fn d_does_not_remove_discovered_skill() {
     let mut model = ready_model();
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
 
     assert_eq!(
-        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('i'))),
-        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::SetDiscoveredSkillSelected {
-                    scope:
-                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
-                    skill_name: "repo-bootstrap".to_string(),
-                    selected: false,
-                },
-        })
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
+        super::OverlayInputResult::Handled
     );
 }
 
@@ -996,6 +1000,25 @@ fn x_on_active_non_core_source_emits_disable_mutation() {
 }
 
 #[test]
+fn x_on_active_skill_discovery_emits_disable_mutation() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::SetPromptSourceEnabled {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                kind: PromptSourceKind::SkillDiscovery,
+                reference_id: "skill-discovery".to_string(),
+                enabled: false,
+            },
+        })
+    );
+}
+
+#[test]
 fn x_does_not_disable_core_system_prompt() {
     let mut model = ready_model();
     model.open_prompt_overlay();
@@ -1004,4 +1027,120 @@ fn x_does_not_disable_core_system_prompt() {
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
         super::OverlayInputResult::Handled
     );
+}
+
+#[test]
+fn x_on_discovered_skill_emits_selection_toggle_mutation() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation:
+                runtime_domain::prompt_assembly::PromptAssemblyMutation::SetDiscoveredSkillSelected {
+                    scope:
+                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                    skill_name: "repo-bootstrap".to_string(),
+                    selected: false,
+                },
+        })
+    );
+}
+
+#[test]
+fn e_does_not_edit_discovered_skill() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('e'))),
+        super::OverlayInputResult::Handled
+    );
+}
+
+#[test]
+fn a_and_i_do_not_act_from_skills_tab() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('a'))),
+        super::OverlayInputResult::Handled
+    );
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('i'))),
+        super::OverlayInputResult::Handled
+    );
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('I'))),
+        super::OverlayInputResult::Handled
+    );
+}
+
+#[test]
+fn footer_hides_custom_and_skill_actions_on_left_pane() {
+    let mut model = ready_model();
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+
+    assert!(!rows.contains("a/A add custom"));
+    assert!(!rows.contains("i/I add skill"));
+    assert!(rows.contains("d remove"));
+    assert!(rows.contains("x disable"));
+    assert!(rows.contains("J/K reorder"));
+}
+
+#[test]
+fn footer_hides_remove_for_active_skill_discovery() {
+    let mut model = ready_model();
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+
+    assert!(!rows.contains("d remove"));
+    assert!(rows.contains("x disable"));
+}
+
+#[test]
+fn footer_shows_custom_actions_only_on_custom_tab() {
+    let mut model = ready_model();
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+
+    assert!(rows.contains("a/A add custom"));
+    assert!(!rows.contains("a/A add extra"));
+    assert!(!rows.contains("i/I add skill"));
+    assert!(rows.contains("d remove"));
+    assert!(!rows.contains("J/K reorder"));
+}
+
+#[test]
+fn footer_hides_custom_edit_and_remove_actions_on_skills_tab() {
+    let mut model = ready_model();
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+
+    assert!(!rows.contains("a/A add custom"));
+    assert!(!rows.contains("i/I add skill"));
+    assert!(!rows.contains("d remove"));
+    assert!(!rows.contains("e/ctrl+g edit"));
+    assert!(rows.contains("x disable"));
+    assert!(!rows.contains("J/K reorder"));
 }

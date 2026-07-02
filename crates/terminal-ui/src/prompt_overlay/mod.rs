@@ -12,7 +12,8 @@ use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyEditorTarget, PromptAssemblyExtraPromptCandidate,
     PromptAssemblyManagedSource, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
     PromptAssemblyMutation, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
-    ResolvedPromptSource, natural_sort_text_cmp, next_default_extra_prompt_title,
+    ResolvedPromptSource, default_extra_prompt_body, natural_sort_text_cmp,
+    next_default_extra_prompt_title,
 };
 
 use crate::{
@@ -64,7 +65,14 @@ pub(crate) enum PromptOverlayInactiveTab {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PromptOverlayDialog {
-    CreateExtraPromptScope { selected_scope: PromptAssemblyScope },
+    CreateExtraPromptScope {
+        selected_scope: PromptAssemblyScope,
+    },
+    ConfirmDeleteExtraPrompt {
+        scope: PromptAssemblyScope,
+        reference_id: String,
+        title: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,6 +569,11 @@ impl Model {
             PromptOverlayDialog::CreateExtraPromptScope { selected_scope } => {
                 self.create_extra_prompt_from_overlay(selected_scope)
             }
+            PromptOverlayDialog::ConfirmDeleteExtraPrompt {
+                scope,
+                reference_id,
+                ..
+            } => Some(self.delete_extra_prompt_effect(scope, reference_id)),
         }
     }
 
@@ -737,12 +750,13 @@ impl Model {
                 })
             }
             PromptOverlaySelection::ExtraPromptCandidate(candidate) => {
-                Some(AppEffect::MutatePromptAssembly {
-                    mutation: PromptAssemblyMutation::DeleteExtraPrompt {
-                        scope: prompt_scope_from_origin(candidate.origin)?,
-                        reference_id: candidate.reference_id,
-                    },
-                })
+                let scope = prompt_scope_from_origin(candidate.origin)?;
+                self.open_delete_extra_prompt_confirmation(
+                    scope,
+                    candidate.reference_id,
+                    candidate.title,
+                );
+                None
             }
             PromptOverlaySelection::ResolvedSource(selected) => {
                 if selected.kind == PromptSourceKind::CoreSystemPrompt {
@@ -1227,7 +1241,36 @@ impl Model {
                         .map(|candidate| candidate.title.as_str()),
                 ),
         );
-        format!("# {title}\n")
+        default_extra_prompt_body(&title)
+    }
+
+    fn open_delete_extra_prompt_confirmation(
+        &mut self,
+        scope: PromptAssemblyScope,
+        reference_id: String,
+        title: String,
+    ) {
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return;
+        };
+        state.dialog = Some(PromptOverlayDialog::ConfirmDeleteExtraPrompt {
+            scope,
+            reference_id,
+            title,
+        });
+    }
+
+    fn delete_extra_prompt_effect(
+        &self,
+        scope: PromptAssemblyScope,
+        reference_id: String,
+    ) -> AppEffect {
+        AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::DeleteExtraPrompt {
+                scope,
+                reference_id,
+            },
+        }
     }
 
     fn prompt_overlay_action_availability(&self) -> PromptOverlayActionAvailability {
@@ -2022,6 +2065,23 @@ impl Model {
                     tertiary_text_style(self.palette),
                 ),
             ],
+            PromptOverlayDialog::ConfirmDeleteExtraPrompt { title, .. } => vec![
+                Line::styled(
+                    "Delete custom prompt",
+                    primary_text_style(self.palette).bold(),
+                ),
+                Line::raw(""),
+                Line::from(vec![
+                    Span::raw("Delete "),
+                    Span::styled(title.clone(), command_accent_text_style(self.palette)),
+                    Span::raw(" permanently?"),
+                ]),
+                Line::raw(""),
+                Line::styled(
+                    "Enter confirm · Esc cancel",
+                    tertiary_text_style(self.palette),
+                ),
+            ],
         };
 
         let block = panel_block(self.palette);
@@ -2077,6 +2137,9 @@ impl Model {
                 } else if column >= global_start && column < global_end {
                     *selected_scope = PromptAssemblyScope::Global;
                 }
+                OverlayInputResult::Handled
+            }
+            Some(PromptOverlayDialog::ConfirmDeleteExtraPrompt { .. }) => {
                 OverlayInputResult::Handled
             }
             None => OverlayInputResult::Handled,

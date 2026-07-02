@@ -3,6 +3,7 @@ mod support;
 mod branch_tree;
 mod context_budget;
 mod conversation;
+mod prompt_assembly;
 mod rewind;
 mod session_list;
 mod session_resume;

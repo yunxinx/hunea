@@ -34,6 +34,7 @@ pub enum AppEffect {
     OpenCopyPicker,
     OpenContextBudget,
     OpenMessageHistory,
+    ReloadPromptAssembly,
     MutatePromptAssembly {
         mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
     },

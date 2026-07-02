@@ -301,6 +301,12 @@ pub fn next_default_extra_prompt_title<'a>(titles: impl IntoIterator<Item = &'a 
     format!("{DEFAULT_TITLE_PREFIX} {next_index}")
 }
 
+/// `default_extra_prompt_body` 返回新建 extra prompt 的默认正文模板。
+#[must_use]
+pub fn default_extra_prompt_body(title: &str) -> String {
+    format!("# {title}\n")
+}
+
 fn truncate_extra_prompt_title(title: &str) -> String {
     const TITLE_LIMIT: usize = 80;
     let mut result = String::new();

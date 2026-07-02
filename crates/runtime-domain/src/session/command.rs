@@ -56,6 +56,7 @@ pub enum RuntimeCommand {
     LoadMessageHistoryPickerRows {
         request_id: SessionLoadRequestId,
     },
+    ReloadPromptAssembly,
     RecordMessageHistory {
         entry_id: MessageHistoryEntryId,
         text: String,
@@ -129,6 +130,7 @@ impl RuntimeCommand {
             | Self::LoadMessageHistoryStartupCache
             | Self::CheckPromptAssemblyMissingSources
             | Self::LoadMessageHistoryPickerRows { .. }
+            | Self::ReloadPromptAssembly
             | Self::RecordMessageHistory { .. }
             | Self::MutatePromptAssembly { .. }
             | Self::Reset => None,

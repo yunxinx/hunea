@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, MouseButton};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
+    style::Color,
     style::Modifier,
 };
 use runtime_domain::prompt_assembly::{
@@ -225,6 +226,26 @@ fn find_buffer_text_position(buffer: &Buffer, needle: &str) -> Option<(u16, u16)
     find_text_position(&rendered_rows(buffer), needle)
 }
 
+fn assert_text_cells_use_color_at(
+    buffer: &Buffer,
+    text: &str,
+    row: u16,
+    column: u16,
+    expected: Color,
+) {
+    for (offset, character) in text.chars().enumerate() {
+        let cell = &buffer[(
+            column + u16::try_from(offset).expect("text offset should fit in u16"),
+            row,
+        )];
+        assert_eq!(
+            cell.fg, expected,
+            "expected `{character}` in `{text}` to use {expected:?}, got {:?}",
+            cell.fg
+        );
+    }
+}
+
 fn temp_test_file(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "hunea-prompt-overlay-{prefix}-{}-{}.md",
@@ -259,14 +280,14 @@ fn command_panel_lists_prompt_command() {
 }
 
 #[test]
-fn prompt_command_opens_fullscreen_overlay_and_blocks_composer_input() {
+fn prompt_command_opens_overlay_and_requests_reload() {
     let mut model = ready_model();
     model.composer_mut().set_text_for_test("/prompt");
     model.sync_command_panel_navigation();
 
     let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
 
-    assert_eq!(effect, None);
+    assert_eq!(effect, Some(AppEffect::ReloadPromptAssembly));
     assert_eq!(model.top_modal_layer(), Some(ModalLayer::PromptOverlay));
     assert!(model.blocks_composer_input());
     assert_eq!(model.composer_text(), "");
@@ -1690,7 +1711,7 @@ fn active_selection_follows_reordered_source_after_runtime_update() {
 }
 
 #[test]
-fn delete_selected_extra_prompt_emits_mutation_effect() {
+fn deleting_modified_extra_prompt_opens_confirmation_dialog_first() {
     let mut model = ready_model();
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
@@ -1698,6 +1719,55 @@ fn delete_selected_extra_prompt_emits_mutation_effect() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
+        super::OverlayInputResult::Handled
+    );
+
+    let buffer = render_model_buffer(&mut model, 100, 16);
+    let rows = rendered_rows(&buffer);
+    let joined = rows.join("\n");
+    let message_row_index = rows
+        .iter()
+        .position(|row| row.contains("Delete global-extra permanently?"))
+        .expect("delete confirmation message should render");
+    let footer_row_index = rows
+        .iter()
+        .position(|row| row.contains("Enter confirm") && row.contains("Esc cancel"))
+        .expect("delete confirmation footer should render");
+    let message_row = &rows[message_row_index];
+    let title_byte_index = message_row
+        .find("global-extra")
+        .expect("delete confirmation should render prompt title");
+    let title_column = u16::try_from(message_row[..title_byte_index].chars().count())
+        .expect("title column should fit in u16");
+    let title_row = u16::try_from(message_row_index).expect("title row should fit in u16");
+
+    assert_text_cells_use_color_at(
+        &buffer,
+        "global-extra",
+        title_row,
+        title_column,
+        default_palette().command_accent,
+    );
+    assert!(
+        footer_row_index >= message_row_index + 2,
+        "delete confirmation should keep a blank line before the footer: rows={rows:?}"
+    );
+    assert!(joined.contains("Delete custom prompt"));
+    assert!(joined.contains("global-extra"));
+    assert!(joined.contains("Enter confirm"));
+    assert!(joined.contains("Esc cancel"));
+}
+
+#[test]
+fn deleting_modified_extra_prompt_confirms_on_enter() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d')));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Enter)),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
             mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::DeleteExtraPrompt {
                 scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
@@ -1705,6 +1775,46 @@ fn delete_selected_extra_prompt_emits_mutation_effect() {
             },
         })
     );
+}
+
+#[test]
+fn deleting_modified_extra_prompt_can_cancel_confirmation() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d')));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Esc)),
+        super::OverlayInputResult::Handled
+    );
+    assert_eq!(
+        model
+            .prompt_overlay
+            .as_ref()
+            .and_then(|state| state.dialog.as_ref()),
+        None
+    );
+}
+
+#[test]
+fn deleting_default_template_extra_prompt_also_opens_confirmation_dialog() {
+    let mut model = ready_model();
+    model.prompt_assembly.extra_prompt_candidates[0].title = "new-prompt-1".to_string();
+    model.prompt_assembly.extra_prompt_candidates[0].body = "# New prompt 1\n".to_string();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
+        super::OverlayInputResult::Handled
+    );
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 100, 16)).join("\n");
+    assert!(rows.contains("Delete custom prompt"));
+    assert!(rows.contains("Enter confirm"));
 }
 
 #[test]

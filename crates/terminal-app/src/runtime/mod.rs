@@ -139,6 +139,7 @@ impl AppRuntimeCoordinator {
             RuntimeCommand::LoadMessageHistoryPickerRows { request_id } => {
                 self.load_message_history_picker_rows(request_id)
             }
+            RuntimeCommand::ReloadPromptAssembly => self.reload_prompt_assembly(),
             RuntimeCommand::RecordMessageHistory {
                 entry_id,
                 text,

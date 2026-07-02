@@ -88,6 +88,14 @@ pub(super) fn apply_effect_if_needed(
             run_open_message_history_picker_effect(model, runtime_coordinator);
             Ok(())
         }
+        AppEffect::ReloadPromptAssembly => {
+            run_simple_runtime_command_effect(
+                model,
+                runtime_coordinator,
+                RuntimeCommand::ReloadPromptAssembly,
+            );
+            Ok(())
+        }
         AppEffect::MutatePromptAssembly { mutation } => {
             run_simple_runtime_command_effect(
                 model,
@@ -348,5 +356,49 @@ pub(super) fn run_interrupt_current_turn_effect(
         Ok(RuntimeCommandReceipt::Interrupted { .. }) => {}
         Ok(_) => {}
         Err(message) => model.show_toast(ToastSeverity::Error, message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use runtime_domain::session::{RuntimeCommandReceipt, RuntimeEvent};
+
+    use super::{RuntimeCommand, RuntimeCoordinator, run_simple_runtime_command_effect};
+    use crate::{Model, StartupBannerOptions};
+
+    #[derive(Default)]
+    struct TestRuntimeCoordinator {
+        last_command: Option<RuntimeCommand>,
+    }
+
+    impl RuntimeCoordinator for TestRuntimeCoordinator {
+        fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
+            Vec::new()
+        }
+
+        fn dispatch_runtime_command(
+            &mut self,
+            command: RuntimeCommand,
+        ) -> Result<RuntimeCommandReceipt, String> {
+            self.last_command = Some(command);
+            Ok(RuntimeCommandReceipt::Accepted)
+        }
+    }
+
+    #[test]
+    fn reload_prompt_assembly_effect_dispatches_runtime_command() {
+        let mut model = Model::new(StartupBannerOptions::default());
+        let mut runtime_coordinator = TestRuntimeCoordinator::default();
+
+        run_simple_runtime_command_effect(
+            &mut model,
+            &mut runtime_coordinator,
+            RuntimeCommand::ReloadPromptAssembly,
+        );
+
+        assert_eq!(
+            runtime_coordinator.last_command,
+            Some(RuntimeCommand::ReloadPromptAssembly)
+        );
     }
 }

@@ -60,6 +60,34 @@ impl Model {
         })
     }
 
+    pub(crate) fn prepare_external_editor_launch_for_path(
+        &mut self,
+        draft_path: PathBuf,
+        original_draft: &str,
+    ) -> Option<ExternalEditorLaunch> {
+        let editor = match envinfo::resolve_external_editor(&self.external_editor) {
+            Ok(editor) => editor,
+            Err(error) => {
+                self.show_toast(
+                    ToastSeverity::Error,
+                    external_editor_unavailable_text(&error),
+                );
+                return None;
+            }
+        };
+
+        self.clear_status_notice();
+
+        let mut command = vec![editor.command.to_string_lossy().into_owned()];
+        command.extend(editor.args);
+
+        Some(ExternalEditorLaunch {
+            command: external_editor_command_with_draft(&command, &draft_path),
+            draft_path,
+            original_draft: original_draft.to_string(),
+        })
+    }
+
     pub(crate) fn apply_external_editor_finished(
         &mut self,
         draft_path: &Path,

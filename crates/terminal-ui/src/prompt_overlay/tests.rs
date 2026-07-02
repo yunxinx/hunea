@@ -9,10 +9,10 @@ use ratatui::{
 };
 use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate, PromptAssemblyLifecycle,
-    PromptAssemblyManagedSource, PromptAssemblyManagerSnapshot, PromptAssemblyMoveDirection,
-    PromptAssemblyMutation, PromptAssemblySnapshot, PromptPreludeSnapshot,
-    PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
-    ResolvedPromptSource,
+    PromptAssemblyManagedSource, PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource,
+    PromptAssemblyMoveDirection, PromptAssemblyMutation, PromptAssemblySnapshot,
+    PromptPreludeSnapshot, PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin,
+    PromptSourceStatus, ResolvedPromptSource,
 };
 
 use crate::{
@@ -188,6 +188,26 @@ fn ready_model() -> Model {
                 global_core_system_override: None,
                 project_core_system_override: None,
             }),
+            ..ModelOptions::default()
+        },
+    );
+    model.set_window(90, 16);
+    model.set_palette(default_palette(), true);
+    model
+}
+
+fn ready_model_with_external_editor() -> Model {
+    let prompt_assembly = ready_model().prompt_assembly.clone();
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            prompt_assembly: Some(prompt_assembly),
+            external_editor: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cat \"$1\" >/dev/null".to_string(),
+            ],
+            external_editor_hint: "sh".to_string(),
             ..ModelOptions::default()
         },
     );
@@ -1181,8 +1201,14 @@ fn type_column_uses_full_words_and_fits_discovery_label() {
         .find(|row| row.contains("Skill discovery") && row.contains("discovery"))
         .expect("skill discovery row should render");
 
+    let discovery_index = skill_discovery_row
+        .find("discovery")
+        .expect("type label should render");
+    let builtin_index = skill_discovery_row
+        .find("builtin")
+        .expect("scope label should render");
     assert!(
-        skill_discovery_row.contains("discovery  builtin"),
+        discovery_index < builtin_index,
         "Type column should render the full discovery label before scope: {skill_discovery_row:?}"
     );
 }
@@ -1384,6 +1410,7 @@ fn space_opens_prompt_source_preview() {
             title: "Core system prompt".to_string(),
             origin: Some(PromptSourceOrigin::Builtin),
             resolved_body_origin: Some(PromptSourceOrigin::Builtin),
+            backing_file_path: None,
             body: Some("# Core\n\nHello".to_string()),
         },
     ];
@@ -1423,6 +1450,7 @@ fn prompt_preview_renders_markdown_source_as_plain_text() {
             title: "Core system prompt".to_string(),
             origin: Some(PromptSourceOrigin::Builtin),
             resolved_body_origin: Some(PromptSourceOrigin::Builtin),
+            backing_file_path: None,
             body: Some("# Core Heading\n\n- keep marker\n\n`cargo test`\n".to_string()),
         },
     ];
@@ -1455,6 +1483,7 @@ fn prompt_preview_rewraps_after_resize() {
             title: "Core system prompt".to_string(),
             origin: Some(PromptSourceOrigin::Builtin),
             resolved_body_origin: Some(PromptSourceOrigin::Builtin),
+            backing_file_path: None,
             body: Some(
                 "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu".to_string(),
             ),
@@ -2016,6 +2045,7 @@ fn unchanged_prompt_overlay_external_editor_exit_does_not_fall_through_to_compos
             reference_id: "repo-rules".to_string(),
         },
         original_draft: "# Repo rules\n".to_string(),
+        cleanup_path_after_finish: true,
     });
     let draft_path = temp_test_file("overlay-editor-unchanged");
     fs::write(&draft_path, "# Repo rules\n").expect("draft file should exist");
@@ -2051,6 +2081,7 @@ fn changed_prompt_overlay_external_editor_exit_returns_save_mutation() {
             reference_id: "repo-rules".to_string(),
         },
         original_draft: "# Repo rules\n".to_string(),
+        cleanup_path_after_finish: true,
     });
     let draft_path = temp_test_file("overlay-editor-changed");
     fs::write(&draft_path, "# Repo rules\nUse cargo nextest run.\n")
@@ -2125,6 +2156,140 @@ fn footer_hides_remove_for_active_skill_discovery() {
 
     assert!(!rows.contains("d remove"));
     assert!(rows.contains("x disable"));
+}
+
+#[test]
+fn footer_hides_remove_for_active_instruction_file() {
+    let mut model = ready_model();
+    model.prompt_assembly.snapshot.active_sources.insert(
+        1,
+        prompt_source(
+            "instructions:project:.",
+            "AGENTS.md",
+            PromptSourceKind::InstructionsFile,
+            Some(PromptSourceOrigin::Project),
+            PromptSourceStatus::Active { order: 1 },
+        ),
+    );
+    model.prompt_assembly.managed_sources.insert(
+        1,
+        PromptAssemblyManagedSource {
+            reference_id: "instructions:project:.".to_string(),
+            kind: PromptSourceKind::InstructionsFile,
+            title: "AGENTS.md".to_string(),
+            origin: Some(PromptSourceOrigin::Project),
+            enabled: true,
+            order: 2,
+        },
+    );
+    model
+        .prompt_assembly
+        .sources
+        .push(PromptAssemblyManagerSource {
+            reference_id: "instructions:project:.".to_string(),
+            kind: PromptSourceKind::InstructionsFile,
+            title: "AGENTS.md".to_string(),
+            origin: Some(PromptSourceOrigin::Project),
+            resolved_body_origin: Some(PromptSourceOrigin::Project),
+            backing_file_path: Some("/tmp/repo/AGENTS.md".into()),
+            body: Some("project instructions".to_string()),
+        });
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+
+    assert!(!rows.contains("d remove"));
+    assert!(rows.contains("x disable"));
+    assert!(rows.contains("e/ctrl+g edit"));
+}
+
+#[test]
+fn d_does_not_remove_active_instruction_file() {
+    let mut model = ready_model();
+    model.prompt_assembly.snapshot.active_sources.insert(
+        1,
+        prompt_source(
+            "instructions:project:.",
+            "AGENTS.md",
+            PromptSourceKind::InstructionsFile,
+            Some(PromptSourceOrigin::Project),
+            PromptSourceStatus::Active { order: 1 },
+        ),
+    );
+    model.prompt_assembly.managed_sources.insert(
+        1,
+        PromptAssemblyManagedSource {
+            reference_id: "instructions:project:.".to_string(),
+            kind: PromptSourceKind::InstructionsFile,
+            title: "AGENTS.md".to_string(),
+            origin: Some(PromptSourceOrigin::Project),
+            enabled: true,
+            order: 2,
+        },
+    );
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
+        super::OverlayInputResult::Handled
+    );
+}
+
+#[test]
+fn e_on_instruction_file_opens_real_file_in_external_editor() {
+    let mut model = ready_model_with_external_editor();
+    let instruction_path = temp_test_file("overlay-instructions-real-file");
+    fs::write(&instruction_path, "project instructions\n").expect("instruction file should exist");
+    model.prompt_assembly.snapshot.active_sources.insert(
+        1,
+        prompt_source(
+            "instructions:project:.",
+            "AGENTS.md",
+            PromptSourceKind::InstructionsFile,
+            Some(PromptSourceOrigin::Project),
+            PromptSourceStatus::Active { order: 1 },
+        ),
+    );
+    model.prompt_assembly.managed_sources.insert(
+        1,
+        PromptAssemblyManagedSource {
+            reference_id: "instructions:project:.".to_string(),
+            kind: PromptSourceKind::InstructionsFile,
+            title: "AGENTS.md".to_string(),
+            origin: Some(PromptSourceOrigin::Project),
+            enabled: true,
+            order: 2,
+        },
+    );
+    model
+        .prompt_assembly
+        .sources
+        .push(PromptAssemblyManagerSource {
+            reference_id: "instructions:project:.".to_string(),
+            kind: PromptSourceKind::InstructionsFile,
+            title: "AGENTS.md".to_string(),
+            origin: Some(PromptSourceOrigin::Project),
+            resolved_body_origin: Some(PromptSourceOrigin::Project),
+            backing_file_path: Some(instruction_path.clone()),
+            body: Some("project instructions\n".to_string()),
+        });
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    let super::OverlayInputResult::Effect(AppEffect::LaunchExternalEditor(effect)) =
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('e')))
+    else {
+        panic!("editing an instruction file should launch the external editor");
+    };
+
+    assert_eq!(effect.draft_path, instruction_path);
+    assert_eq!(
+        effect.command.last().map(String::as_str),
+        Some(effect.draft_path.to_string_lossy().as_ref())
+    );
 }
 
 #[test]

@@ -46,7 +46,7 @@ const PROMPT_OVERLAY_COLUMN_GAP: usize = 2;
 const PROMPT_OVERLAY_OUTER_PADDING: usize = 2;
 const PROMPT_OVERLAY_LEFT_SEL_WIDTH: usize = 3;
 const PROMPT_OVERLAY_LEFT_ORD_WIDTH: usize = 3;
-const PROMPT_OVERLAY_LEFT_KIND_WIDTH: usize = "discovery".len();
+const PROMPT_OVERLAY_LEFT_KIND_WIDTH: usize = "instructions".len();
 const PROMPT_OVERLAY_LEFT_SCOPE_WIDTH: usize = 7;
 const PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH: usize = 7;
 const PROMPT_OVERLAY_SCOPE_TRAILING_PADDING: usize = 2;
@@ -193,6 +193,7 @@ impl Default for PromptOverlayState {
 pub(crate) struct PromptOverlayPendingEditor {
     pub(crate) target: PromptAssemblyEditorTarget,
     pub(crate) original_draft: String,
+    pub(crate) cleanup_path_after_finish: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,14 +434,18 @@ impl Model {
         state.pending_editor = None;
 
         if failed {
-            let _ = std::fs::remove_file(draft_path);
+            if pending_editor.cleanup_path_after_finish {
+                let _ = std::fs::remove_file(draft_path);
+            }
             self.show_toast(crate::toast::ToastSeverity::Error, "External editor failed");
             return Some(None);
         }
         let content = match std::fs::read_to_string(draft_path) {
             Ok(content) => content,
             Err(_) => {
-                let _ = std::fs::remove_file(draft_path);
+                if pending_editor.cleanup_path_after_finish {
+                    let _ = std::fs::remove_file(draft_path);
+                }
                 self.show_toast(
                     crate::toast::ToastSeverity::Error,
                     "Failed to read external editor draft",
@@ -448,7 +453,9 @@ impl Model {
                 return Some(None);
             }
         };
-        let _ = std::fs::remove_file(draft_path);
+        if pending_editor.cleanup_path_after_finish {
+            let _ = std::fs::remove_file(draft_path);
+        }
         let normalized_content = normalize_prompt_overlay_external_editor_draft(&content);
         if normalized_content == pending_editor.original_draft {
             return Some(None);
@@ -683,6 +690,24 @@ impl Model {
                         PromptAssemblyEditorTarget::CoreSystemOverride { scope },
                         self.core_system_editor_body_for_scope(scope),
                     ),
+                    PromptSourceKind::InstructionsFile => {
+                        let backing_file_path = manager_source.backing_file_path?;
+                        let initial_content = manager_source.body.unwrap_or_default();
+                        let launch = self.prepare_external_editor_launch_for_path(
+                            backing_file_path.clone(),
+                            &initial_content,
+                        )?;
+                        if let Some(state) = self.prompt_overlay.as_mut() {
+                            state.pending_editor = Some(PromptOverlayPendingEditor {
+                                target: PromptAssemblyEditorTarget::InstructionsFile {
+                                    path: backing_file_path,
+                                },
+                                original_draft: initial_content,
+                                cleanup_path_after_finish: false,
+                            });
+                        }
+                        return Some(AppEffect::LaunchExternalEditor(launch));
+                    }
                     PromptSourceKind::SkillDiscovery => (
                         PromptAssemblyEditorTarget::SkillDiscovery { scope },
                         self.skill_discovery_editor_body_for_scope(scope),
@@ -718,6 +743,7 @@ impl Model {
                         manager_source.body.unwrap_or_default(),
                     ),
                     PromptSourceKind::CoreSystemPrompt
+                    | PromptSourceKind::InstructionsFile
                     | PromptSourceKind::SkillDiscovery
                     | PromptSourceKind::LongLivedSkill => return None,
                 }
@@ -730,6 +756,7 @@ impl Model {
             state.pending_editor = Some(PromptOverlayPendingEditor {
                 target,
                 original_draft: initial_content,
+                cleanup_path_after_finish: true,
             });
         }
         Some(AppEffect::LaunchExternalEditor(launch))
@@ -738,7 +765,10 @@ impl Model {
     fn remove_selected_prompt_source(&mut self) -> Option<AppEffect> {
         match self.selected_prompt_overlay_selection()? {
             PromptOverlaySelection::ManagedSource(selected) => {
-                if selected.kind == PromptSourceKind::CoreSystemPrompt {
+                if matches!(
+                    selected.kind,
+                    PromptSourceKind::CoreSystemPrompt | PromptSourceKind::InstructionsFile
+                ) {
                     return None;
                 }
                 Some(AppEffect::MutatePromptAssembly {
@@ -759,7 +789,10 @@ impl Model {
                 None
             }
             PromptOverlaySelection::ResolvedSource(selected) => {
-                if selected.kind == PromptSourceKind::CoreSystemPrompt {
+                if matches!(
+                    selected.kind,
+                    PromptSourceKind::CoreSystemPrompt | PromptSourceKind::InstructionsFile
+                ) {
                     return None;
                 }
                 Some(AppEffect::MutatePromptAssembly {
@@ -1283,7 +1316,7 @@ impl Model {
                 PromptOverlayActionAvailability {
                     can_edit: source.kind != PromptSourceKind::LongLivedSkill,
                     can_add_custom: false,
-                    can_remove,
+                    can_remove: can_remove && source.kind != PromptSourceKind::InstructionsFile,
                     can_toggle_selection: true,
                     can_reorder_active: source.kind != PromptSourceKind::CoreSystemPrompt,
                 }
@@ -1296,7 +1329,7 @@ impl Model {
                 PromptOverlayActionAvailability {
                     can_edit: source.kind == PromptSourceKind::ExtraPrompt,
                     can_add_custom: false,
-                    can_remove,
+                    can_remove: can_remove && source.kind != PromptSourceKind::InstructionsFile,
                     can_toggle_selection: source.kind != PromptSourceKind::CoreSystemPrompt,
                     can_reorder_active: false,
                 }
@@ -2579,6 +2612,7 @@ fn prompt_overlay_origin_label(origin: PromptSourceOrigin) -> &'static str {
 fn prompt_overlay_kind_label(kind: PromptSourceKind) -> &'static str {
     match kind {
         PromptSourceKind::CoreSystemPrompt => "system",
+        PromptSourceKind::InstructionsFile => "instructions",
         PromptSourceKind::ExtraPrompt => "custom",
         PromptSourceKind::SkillDiscovery => "discovery",
         PromptSourceKind::LongLivedSkill => "skill",

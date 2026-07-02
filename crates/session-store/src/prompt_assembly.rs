@@ -276,6 +276,7 @@ pub(crate) fn load_global_prompt_assembly_state(
 fn prompt_source_kind_value(kind: PromptSourceKind) -> &'static str {
     match kind {
         PromptSourceKind::CoreSystemPrompt => "core_system_prompt",
+        PromptSourceKind::InstructionsFile => "instructions_file",
         PromptSourceKind::ExtraPrompt => "extra_prompt",
         PromptSourceKind::SkillDiscovery => "skill_discovery",
         PromptSourceKind::LongLivedSkill => "long_lived_skill",
@@ -285,6 +286,7 @@ fn prompt_source_kind_value(kind: PromptSourceKind) -> &'static str {
 fn parse_prompt_source_kind(value: &str) -> Result<PromptSourceKind, rusqlite::Error> {
     match value {
         "core_system_prompt" => Ok(PromptSourceKind::CoreSystemPrompt),
+        "instructions_file" => Ok(PromptSourceKind::InstructionsFile),
         "extra_prompt" => Ok(PromptSourceKind::ExtraPrompt),
         "skill_discovery" => Ok(PromptSourceKind::SkillDiscovery),
         "long_lived_skill" => Ok(PromptSourceKind::LongLivedSkill),

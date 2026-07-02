@@ -1,5 +1,5 @@
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::{cmp::Ordering, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +19,7 @@ pub enum PromptAssemblyLifecycle {
 #[serde(rename_all = "snake_case")]
 pub enum PromptSourceKind {
     CoreSystemPrompt,
+    InstructionsFile,
     ExtraPrompt,
     SkillDiscovery,
     /// 长期注入型 skill，和当前消息里的 `$skill` 临时注入不同。
@@ -132,6 +133,7 @@ pub struct PromptAssemblyManagerSource {
     pub title: String,
     pub origin: Option<PromptSourceOrigin>,
     pub resolved_body_origin: Option<PromptSourceOrigin>,
+    pub backing_file_path: Option<PathBuf>,
     pub body: Option<String>,
 }
 
@@ -193,6 +195,9 @@ pub enum PromptAssemblyEditorTarget {
     },
     SkillDiscovery {
         scope: PromptAssemblyScope,
+    },
+    InstructionsFile {
+        path: PathBuf,
     },
     ExtraPrompt {
         scope: PromptAssemblyScope,

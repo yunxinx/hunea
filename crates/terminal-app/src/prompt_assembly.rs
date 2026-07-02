@@ -6,6 +6,7 @@ use std::{
 };
 
 use color_eyre::eyre::{Result, WrapErr};
+use runtime_domain::paths::hunea_config_dir;
 use runtime_domain::prompt_assembly::persistence::{
     PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PromptAssemblyScope,
     PromptAssemblyScopeState, StoredPromptBody, load_project_prompt_assembly_state,
@@ -25,6 +26,8 @@ use session_store::SessionStore;
 
 const BUILTIN_CORE_SYSTEM_PROMPT: &str =
     "You are Hunea, a terminal-based AI assistant. Be direct, precise, and action-oriented.";
+const GLOBAL_INSTRUCTIONS_FILE_NAME: &str = "AGENTS.md";
+const PROJECT_INSTRUCTIONS_FILE_NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const SKILL_DISCOVERY_GENERATED_START: &str = "<!-- hunea:skill-discovery generated:start -->";
 const SKILL_DISCOVERY_GENERATED_END: &str = "<!-- hunea:skill-discovery generated:end -->";
@@ -78,9 +81,19 @@ struct PromptCandidateBody {
     body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscoveredInstructionsFile {
+    reference_id: String,
+    title: String,
+    path: PathBuf,
+    body: String,
+    origin: PromptSourceOrigin,
+}
+
 struct PromptAssemblyResolutionContext<'a> {
     extra_prompt_bodies: &'a HashMap<String, String>,
     skills_by_name: &'a HashMap<String, DiscoveredSkill>,
+    instructions_by_reference_id: &'a HashMap<String, DiscoveredInstructionsFile>,
     skill_discovery_skill_state: &'a [PersistedSkillDiscoverySkillEntry],
     global_state: &'a PromptAssemblyScopeState,
     project_state: &'a PromptAssemblyScopeState,
@@ -258,12 +271,21 @@ pub(crate) fn load_initial_prompt_prelude(
 }
 
 #[cfg(test)]
-fn resolve_initial_prompt_prelude(
+fn resolve_initial_prompt_prelude_with_overrides(
     work_dir: &Path,
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
+    global_skill_root_override: Option<&Path>,
+    global_instructions_path_override: Option<&Path>,
 ) -> PromptPreludeSnapshot {
-    resolve_prompt_assembly_manager_snapshot(work_dir, global_state, project_state).prelude
+    resolve_prompt_assembly_manager_snapshot_with_overrides(
+        work_dir,
+        global_state,
+        project_state,
+        global_skill_root_override,
+        global_instructions_path_override,
+    )
+    .prelude
 }
 
 fn resolve_prompt_assembly_manager_snapshot(
@@ -271,19 +293,37 @@ fn resolve_prompt_assembly_manager_snapshot(
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
 ) -> PromptAssemblyManagerSnapshot {
-    resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
+    resolve_prompt_assembly_manager_snapshot_with_overrides(
         work_dir,
         global_state,
         project_state,
         None,
+        None,
     )
 }
 
+#[cfg(test)]
 fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
     work_dir: &Path,
     global_state: &PromptAssemblyScopeState,
     project_state: &PromptAssemblyScopeState,
     global_skill_root_override: Option<&Path>,
+) -> PromptAssemblyManagerSnapshot {
+    resolve_prompt_assembly_manager_snapshot_with_overrides(
+        work_dir,
+        global_state,
+        project_state,
+        global_skill_root_override,
+        None,
+    )
+}
+
+fn resolve_prompt_assembly_manager_snapshot_with_overrides(
+    work_dir: &Path,
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
+    global_skill_root_override: Option<&Path>,
+    global_instructions_path_override: Option<&Path>,
 ) -> PromptAssemblyManagerSnapshot {
     let mut effective_global_state = global_state.clone();
     let mut effective_project_state = project_state.clone();
@@ -291,12 +331,22 @@ fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         &mut effective_global_state,
         &mut effective_project_state,
     );
+    let discovered_skills = discover_skills(work_dir, global_skill_root_override);
+    let discovered_instruction_files =
+        discover_instruction_files(work_dir, global_instructions_path_override);
+    ensure_discovered_instruction_entries(
+        &mut effective_global_state,
+        &mut effective_project_state,
+        &discovered_instruction_files,
+    );
     let global_state = &effective_global_state;
     let project_state = &effective_project_state;
-
-    let discovered_skills = discover_skills(work_dir, global_skill_root_override);
     let effective_discovered_skills = effective_discovered_skills(&discovered_skills);
     let extra_prompt_bodies = indexed_extra_prompt_bodies(global_state, project_state);
+    let instructions_by_reference_id = discovered_instruction_files
+        .iter()
+        .map(|file| (file.reference_id.clone(), file.clone()))
+        .collect::<HashMap<_, _>>();
     let skill_discovery_skill_state = merged_skill_discovery_skill_state(
         global_state,
         project_state,
@@ -309,6 +359,7 @@ fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
     let resolution_context = PromptAssemblyResolutionContext {
         extra_prompt_bodies: &extra_prompt_bodies,
         skills_by_name: &skills_by_name,
+        instructions_by_reference_id: &instructions_by_reference_id,
         skill_discovery_skill_state: &skill_discovery_skill_state,
         global_state,
         project_state,
@@ -342,6 +393,7 @@ fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
         title: "Core system prompt".to_string(),
         origin: Some(resolve_core_system_origin(global_state, project_state)),
         resolved_body_origin: Some(resolve_core_system_origin(global_state, project_state)),
+        backing_file_path: None,
         body: Some(resolved_core_system_body(global_state, project_state)),
     }];
     sources.extend(materialized_sources_for_state(
@@ -552,6 +604,11 @@ fn apply_save_editor_target(
             ensure_skill_discovery_entry_exists(state);
             Ok(())
         }
+        PromptAssemblyEditorTarget::InstructionsFile { path } => {
+            fs::write(&path, content)
+                .wrap_err_with(|| format!("write instructions file {}", path.display()))?;
+            Ok(())
+        }
         PromptAssemblyEditorTarget::ExtraPrompt {
             scope,
             reference_id,
@@ -640,7 +697,15 @@ fn materialized_sources_for_state(
             kind: entry.kind,
             title: entry.title.clone(),
             origin,
-            resolved_body_origin: resolved_body_origin_for_entry(entry, context.skills_by_name),
+            resolved_body_origin: resolved_body_origin_for_entry(
+                entry,
+                context.skills_by_name,
+                context.instructions_by_reference_id,
+            ),
+            backing_file_path: backing_file_path_for_entry(
+                entry,
+                context.instructions_by_reference_id,
+            ),
             body: body_for_entry(entry, state.scope, context),
         })
         .collect()
@@ -660,13 +725,14 @@ fn extend_candidates(
             kind: entry.kind,
             title: entry.title.clone(),
             origin,
-            collision_key: Some(reference_id.clone()),
+            collision_key: collision_key_for_entry(entry),
             enabled: entry.enabled,
             resolvable: resolvable_for_entry(
                 entry,
                 state.scope,
                 context.extra_prompt_bodies,
                 context.skills_by_name,
+                context.instructions_by_reference_id,
             ),
             requested_order: entry.requested_order,
         };
@@ -685,10 +751,14 @@ fn resolvable_for_entry(
     scope: PromptAssemblyScope,
     extra_prompt_bodies: &HashMap<String, String>,
     skills_by_name: &HashMap<String, DiscoveredSkill>,
+    instructions_by_reference_id: &HashMap<String, DiscoveredInstructionsFile>,
 ) -> bool {
     match entry.kind {
         PromptSourceKind::ExtraPrompt => {
             extra_prompt_bodies.contains_key(&scope_reference_key(scope, &entry.reference_id))
+        }
+        PromptSourceKind::InstructionsFile => {
+            instructions_by_reference_id.contains_key(&entry.reference_id)
         }
         PromptSourceKind::SkillDiscovery => true,
         PromptSourceKind::LongLivedSkill => skills_by_name.contains_key(&entry.reference_id),
@@ -702,6 +772,10 @@ fn body_for_entry(
     context: &PromptAssemblyResolutionContext<'_>,
 ) -> Option<String> {
     match entry.kind {
+        PromptSourceKind::InstructionsFile => context
+            .instructions_by_reference_id
+            .get(&entry.reference_id)
+            .map(|file| file.body.clone()),
         PromptSourceKind::ExtraPrompt => context
             .extra_prompt_bodies
             .get(&scope_reference_key(scope, &entry.reference_id))
@@ -724,12 +798,37 @@ fn body_for_entry(
 fn resolved_body_origin_for_entry(
     entry: &PersistedPromptAssemblyEntry,
     skills_by_name: &HashMap<String, DiscoveredSkill>,
+    instructions_by_reference_id: &HashMap<String, DiscoveredInstructionsFile>,
 ) -> Option<PromptSourceOrigin> {
     match entry.kind {
+        PromptSourceKind::InstructionsFile => instructions_by_reference_id
+            .get(&entry.reference_id)
+            .map(|file| file.origin),
         PromptSourceKind::LongLivedSkill => skills_by_name
             .get(&entry.reference_id)
             .map(|skill| skill.origin),
         _ => None,
+    }
+}
+
+fn backing_file_path_for_entry(
+    entry: &PersistedPromptAssemblyEntry,
+    instructions_by_reference_id: &HashMap<String, DiscoveredInstructionsFile>,
+) -> Option<PathBuf> {
+    (entry.kind == PromptSourceKind::InstructionsFile).then(|| {
+        instructions_by_reference_id
+            .get(&entry.reference_id)
+            .map(|file| file.path.clone())
+    })?
+}
+
+fn collision_key_for_entry(entry: &PersistedPromptAssemblyEntry) -> Option<String> {
+    match entry.kind {
+        PromptSourceKind::InstructionsFile | PromptSourceKind::SkillDiscovery => None,
+        PromptSourceKind::ExtraPrompt | PromptSourceKind::LongLivedSkill => {
+            Some(entry.reference_id.clone())
+        }
+        PromptSourceKind::CoreSystemPrompt => None,
     }
 }
 
@@ -1077,6 +1176,9 @@ fn remove_prompt_source(
     kind: PromptSourceKind,
     reference_id: &str,
 ) {
+    if kind == PromptSourceKind::InstructionsFile {
+        return;
+    }
     state
         .entries
         .retain(|entry| !(entry.kind == kind && entry.reference_id == reference_id));
@@ -1522,6 +1624,198 @@ fn manual_skill_inventory(
         .collect()
 }
 
+fn discover_instruction_files(
+    work_dir: &Path,
+    global_instructions_path_override: Option<&Path>,
+) -> Vec<DiscoveredInstructionsFile> {
+    let mut discovered = Vec::new();
+
+    if let Some(global_file) = global_instructions_path_override
+        .map(Path::to_path_buf)
+        .or_else(global_instructions_file_path)
+        .filter(|path| path.is_file())
+        && let Some(file) = load_instructions_file(
+            "instructions:global",
+            "Global AGENTS.md".to_string(),
+            &global_file,
+            PromptSourceOrigin::Global,
+        )
+    {
+        discovered.push(file);
+    }
+
+    let project_root = git_root(work_dir);
+    let search_dirs = match project_root.as_deref() {
+        Some(root) => project_instruction_search_dirs(root, work_dir),
+        None => vec![work_dir.to_path_buf()],
+    };
+
+    for directory in search_dirs {
+        let Some(path) = first_instruction_file_in_dir(&directory) else {
+            continue;
+        };
+        let reference_id = project_instruction_reference_id(project_root.as_deref(), &directory);
+        let title = project_instruction_title(project_root.as_deref(), &path);
+        if let Some(file) =
+            load_instructions_file(&reference_id, title, &path, PromptSourceOrigin::Project)
+        {
+            discovered.push(file);
+        }
+    }
+
+    discovered
+}
+
+fn load_instructions_file(
+    reference_id: &str,
+    title: String,
+    path: &Path,
+    origin: PromptSourceOrigin,
+) -> Option<DiscoveredInstructionsFile> {
+    let body = fs::read_to_string(path).ok()?;
+    let body = body.trim().to_string();
+    if body.is_empty() {
+        return None;
+    }
+
+    Some(DiscoveredInstructionsFile {
+        reference_id: reference_id.to_string(),
+        title,
+        path: path.to_path_buf(),
+        body,
+        origin,
+    })
+}
+
+fn global_instructions_file_path() -> Option<PathBuf> {
+    hunea_config_dir().map(|dir| dir.join(GLOBAL_INSTRUCTIONS_FILE_NAME))
+}
+
+fn project_instruction_search_dirs(project_root: &Path, work_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut cursor = Some(work_dir);
+    while let Some(dir) = cursor {
+        dirs.push(dir.to_path_buf());
+        if dir == project_root {
+            break;
+        }
+        cursor = dir.parent();
+    }
+    dirs.reverse();
+    dirs
+}
+
+fn first_instruction_file_in_dir(dir: &Path) -> Option<PathBuf> {
+    PROJECT_INSTRUCTIONS_FILE_NAMES
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.is_file())
+}
+
+fn project_instruction_reference_id(project_root: Option<&Path>, directory: &Path) -> String {
+    let relative = project_root
+        .and_then(|root| directory.strip_prefix(root).ok())
+        .map(path_component_key)
+        .unwrap_or_else(|| ".".to_string());
+    format!("instructions:project:{relative}")
+}
+
+fn project_instruction_title(project_root: Option<&Path>, path: &Path) -> String {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(GLOBAL_INSTRUCTIONS_FILE_NAME);
+    let Some(parent) = path.parent() else {
+        return file_name.to_string();
+    };
+    let relative_directory = project_root
+        .and_then(|root| parent.strip_prefix(root).ok())
+        .map(path_component_key)
+        .unwrap_or_else(|| ".".to_string());
+    if relative_directory == "." {
+        file_name.to_string()
+    } else {
+        format!("{relative_directory}/{file_name}")
+    }
+}
+
+fn path_component_key(path: &Path) -> String {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        ".".to_string()
+    } else {
+        components.join("/")
+    }
+}
+
+fn ensure_discovered_instruction_entries(
+    global_state: &mut PromptAssemblyScopeState,
+    project_state: &mut PromptAssemblyScopeState,
+    discovered_instruction_files: &[DiscoveredInstructionsFile],
+) {
+    let mut global_files = discovered_instruction_files
+        .iter()
+        .filter(|file| file.origin == PromptSourceOrigin::Global)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut project_files = discovered_instruction_files
+        .iter()
+        .filter(|file| file.origin == PromptSourceOrigin::Project)
+        .cloned()
+        .collect::<Vec<_>>();
+    global_files.sort_by(|left, right| left.reference_id.cmp(&right.reference_id));
+    project_files.sort_by(|left, right| left.reference_id.cmp(&right.reference_id));
+
+    ensure_scope_instruction_entries(global_state, &global_files, 1);
+    ensure_scope_instruction_entries(
+        project_state,
+        &project_files,
+        u16::try_from(global_files.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(1),
+    );
+}
+
+fn ensure_scope_instruction_entries(
+    state: &mut PromptAssemblyScopeState,
+    discovered_instruction_files: &[DiscoveredInstructionsFile],
+    starting_order: u16,
+) {
+    let mut next_instruction_order = state
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == PromptSourceKind::InstructionsFile)
+        .filter_map(|entry| entry.requested_order)
+        .max()
+        .map(|order| order.saturating_add(1))
+        .unwrap_or(starting_order);
+
+    for file in discovered_instruction_files {
+        if let Some(entry) = state.entries.iter_mut().find(|entry| {
+            entry.kind == PromptSourceKind::InstructionsFile
+                && entry.reference_id == file.reference_id
+        }) {
+            entry.title = file.title.clone();
+            continue;
+        }
+
+        state.entries.push(PersistedPromptAssemblyEntry {
+            reference_id: file.reference_id.clone(),
+            kind: PromptSourceKind::InstructionsFile,
+            title: file.title.clone(),
+            enabled: true,
+            requested_order: Some(next_instruction_order),
+        });
+        next_instruction_order = next_instruction_order.saturating_add(1);
+    }
+}
+
 fn discover_skills(
     work_dir: &Path,
     global_skill_root_override: Option<&Path>,
@@ -1744,6 +2038,7 @@ mod tests {
     fn resolve_initial_prompt_prelude_orders_core_extra_discovery_and_long_lived_skill() {
         let work_dir = temp_dir("resolve");
         let project_skill_dir = work_dir.join(".agents/skills/repo-bootstrap");
+        let missing_global_instructions_path = work_dir.join("missing-global-AGENTS.md");
         fs::create_dir_all(&project_skill_dir).expect("skill dir should exist");
         fs::write(
             project_skill_dir.join(SKILL_FILE_NAME),
@@ -1793,7 +2088,13 @@ mod tests {
             }],
         };
 
-        let prelude = resolve_initial_prompt_prelude(&work_dir, &global_state, &project_state);
+        let prelude = resolve_initial_prompt_prelude_with_overrides(
+            &work_dir,
+            &global_state,
+            &project_state,
+            None,
+            Some(&missing_global_instructions_path),
+        );
 
         assert_eq!(prelude.sections.len(), 4);
         assert_eq!(prelude.sections[0].kind, PromptSourceKind::CoreSystemPrompt);
@@ -1807,6 +2108,107 @@ mod tests {
         assert!(effective.contains("<available_skills>"));
         assert!(effective.contains("<name>repo-bootstrap</name>"));
         assert!(effective.contains("<skill>\n<name>repo-bootstrap</name>"));
+    }
+
+    #[test]
+    fn resolve_initial_prompt_prelude_places_instruction_files_between_core_and_extra_and_stops_at_git_root()
+     {
+        let global_instructions_dir = temp_dir("instructions-global");
+        let global_instructions_path = global_instructions_dir.join("AGENTS.md");
+        fs::write(&global_instructions_path, "global instructions\n")
+            .expect("global instructions should write");
+
+        let outside_root = temp_dir("instructions-outside-root");
+        fs::write(outside_root.join("AGENTS.md"), "outside instructions\n")
+            .expect("outside instructions should write");
+
+        let project_root = outside_root.join("repo");
+        let nested_dir = project_root.join("workspace").join("crate");
+        fs::create_dir_all(&nested_dir).expect("nested dir should exist");
+        fs::write(project_root.join(".git"), "gitdir: mock\n").expect("git marker should write");
+        fs::write(project_root.join("AGENTS.md"), "root instructions\n")
+            .expect("root instructions should write");
+        fs::write(
+            project_root.join("workspace").join("CLAUDE.md"),
+            "workspace claude\n",
+        )
+        .expect("workspace claude should write");
+        fs::write(nested_dir.join("AGENTS.md"), "crate agents\n")
+            .expect("crate AGENTS should write");
+        fs::write(nested_dir.join("CLAUDE.md"), "crate claude\n")
+            .expect("crate CLAUDE should write");
+
+        let prelude = resolve_initial_prompt_prelude_with_overrides(
+            &nested_dir,
+            &PromptAssemblyScopeState {
+                scope: PromptAssemblyScope::Global,
+                core_system_override: Some("global core".to_string()),
+                entries: vec![PersistedPromptAssemblyEntry {
+                    reference_id: "skill-discovery".to_string(),
+                    kind: PromptSourceKind::SkillDiscovery,
+                    title: "Skill discovery source".to_string(),
+                    enabled: true,
+                    requested_order: Some(20),
+                }],
+                skill_discovery_override: None,
+                skill_discovery_skills: Vec::new(),
+                extra_prompts: Vec::new(),
+            },
+            &PromptAssemblyScopeState {
+                scope: PromptAssemblyScope::Project,
+                core_system_override: None,
+                entries: vec![PersistedPromptAssemblyEntry {
+                    reference_id: "repo-rules".to_string(),
+                    kind: PromptSourceKind::ExtraPrompt,
+                    title: "repo-rules".to_string(),
+                    enabled: true,
+                    requested_order: Some(10),
+                }],
+                skill_discovery_override: None,
+                skill_discovery_skills: Vec::new(),
+                extra_prompts: vec![StoredPromptBody {
+                    reference_id: "repo-rules".to_string(),
+                    title: "repo-rules".to_string(),
+                    body: "project rules".to_string(),
+                }],
+            },
+            None,
+            Some(&global_instructions_path),
+        );
+
+        assert_eq!(
+            prelude
+                .sections
+                .iter()
+                .map(|section| section.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                PromptSourceKind::CoreSystemPrompt,
+                PromptSourceKind::InstructionsFile,
+                PromptSourceKind::InstructionsFile,
+                PromptSourceKind::InstructionsFile,
+                PromptSourceKind::InstructionsFile,
+                PromptSourceKind::ExtraPrompt,
+                PromptSourceKind::SkillDiscovery,
+            ]
+        );
+        let effective = prelude
+            .effective_system_prompt()
+            .expect("effective prompt should exist");
+        assert!(
+            effective.starts_with(
+                "global core\n\nglobal instructions\n\nroot instructions\n\nworkspace claude\n\ncrate agents\n\nproject rules\n\n"
+            ),
+            "instruction files should appear between core and extra prompts: {effective}"
+        );
+        assert!(
+            !effective.contains("outside instructions"),
+            "project discovery should stop at git root: {effective}"
+        );
+        assert!(
+            !effective.contains("crate claude"),
+            "AGENTS.md should win over CLAUDE.md in the same directory: {effective}"
+        );
     }
 
     #[test]

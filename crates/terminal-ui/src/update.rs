@@ -257,8 +257,8 @@ impl Model {
                 original_draft,
                 failed,
             } => self
-                .apply_prompt_overlay_external_editor_finished(&draft_path, &original_draft, failed)
-                .or_else(|| {
+                .apply_prompt_overlay_external_editor_finished(&draft_path, failed)
+                .unwrap_or_else(|| {
                     self.apply_external_editor_finished(&draft_path, &original_draft, failed);
                     None
                 }),

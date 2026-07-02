@@ -12,7 +12,7 @@ use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyEditorTarget, PromptAssemblyExtraPromptCandidate,
     PromptAssemblyManagedSource, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
     PromptAssemblyMutation, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
-    ResolvedPromptSource,
+    ResolvedPromptSource, natural_sort_text_cmp, next_default_extra_prompt_title,
 };
 
 use crate::{
@@ -45,7 +45,7 @@ const PROMPT_OVERLAY_COLUMN_GAP: usize = 2;
 const PROMPT_OVERLAY_OUTER_PADDING: usize = 2;
 const PROMPT_OVERLAY_LEFT_SEL_WIDTH: usize = 3;
 const PROMPT_OVERLAY_LEFT_ORD_WIDTH: usize = 3;
-const PROMPT_OVERLAY_LEFT_KIND_WIDTH: usize = 4;
+const PROMPT_OVERLAY_LEFT_KIND_WIDTH: usize = "discovery".len();
 const PROMPT_OVERLAY_LEFT_SCOPE_WIDTH: usize = 7;
 const PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH: usize = 7;
 const PROMPT_OVERLAY_SCOPE_TRAILING_PADDING: usize = 2;
@@ -149,6 +149,7 @@ pub(crate) struct PromptOverlayState {
     pub(crate) focus: PromptOverlayFocus,
     pub(crate) active_selected: usize,
     pub(crate) active_scroll: usize,
+    pub(crate) active_selected_row_id: Option<String>,
     pub(crate) inactive_tab: PromptOverlayInactiveTab,
     pub(crate) inactive_selected: usize,
     pub(crate) inactive_scroll: usize,
@@ -166,6 +167,7 @@ impl Default for PromptOverlayState {
             focus: PromptOverlayFocus::Active,
             active_selected: 0,
             active_scroll: 0,
+            active_selected_row_id: None,
             inactive_tab: PromptOverlayInactiveTab::LongLivedSkills,
             inactive_selected: 0,
             inactive_scroll: 0,
@@ -334,12 +336,16 @@ impl Model {
             KeyCode::Char('x') if key.modifiers.is_empty() => {
                 OverlayInputResult::from_effect(self.toggle_selected_prompt_source_enabled())
             }
-            KeyCode::Char('K') if key.modifiers.is_empty() => OverlayInputResult::from_effect(
-                self.move_selected_active_source(PromptAssemblyMoveDirection::Up),
-            ),
-            KeyCode::Char('J') if key.modifiers.is_empty() => OverlayInputResult::from_effect(
-                self.move_selected_active_source(PromptAssemblyMoveDirection::Down),
-            ),
+            KeyCode::Char('K') if allows_shift_only_modifier(key.modifiers) => {
+                OverlayInputResult::from_effect(
+                    self.move_selected_active_source(PromptAssemblyMoveDirection::Up),
+                )
+            }
+            KeyCode::Char('J') if allows_shift_only_modifier(key.modifiers) => {
+                OverlayInputResult::from_effect(
+                    self.move_selected_active_source(PromptAssemblyMoveDirection::Down),
+                )
+            }
             KeyCode::Char('r') if key.modifiers.is_empty() => {
                 OverlayInputResult::from_effect(self.restore_selected_core_system_override())
             }
@@ -408,21 +414,20 @@ impl Model {
     pub(crate) fn apply_prompt_overlay_external_editor_finished(
         &mut self,
         draft_path: &std::path::Path,
-        original_draft: &str,
         failed: bool,
-    ) -> Option<AppEffect> {
-        let target = self
+    ) -> Option<Option<AppEffect>> {
+        let pending_editor = self
             .prompt_overlay
             .as_ref()
             .and_then(|state| state.pending_editor.as_ref())
-            .map(|pending| pending.target.clone())?;
+            .cloned()?;
         let state = self.prompt_overlay.as_mut()?;
         state.pending_editor = None;
 
         if failed {
             let _ = std::fs::remove_file(draft_path);
             self.show_toast(crate::toast::ToastSeverity::Error, "External editor failed");
-            return None;
+            return Some(None);
         }
         let content = match std::fs::read_to_string(draft_path) {
             Ok(content) => content,
@@ -432,16 +437,20 @@ impl Model {
                     crate::toast::ToastSeverity::Error,
                     "Failed to read external editor draft",
                 );
-                return None;
+                return Some(None);
             }
         };
         let _ = std::fs::remove_file(draft_path);
-        if content == original_draft {
-            return None;
+        let normalized_content = normalize_prompt_overlay_external_editor_draft(&content);
+        if normalized_content == pending_editor.original_draft {
+            return Some(None);
         }
-        Some(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::SaveEditorTarget { target, content },
-        })
+        Some(Some(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::SaveEditorTarget {
+                target: pending_editor.target,
+                content: normalized_content,
+            },
+        }))
     }
 
     fn open_selected_prompt_overlay_preview(&mut self) {
@@ -938,9 +947,7 @@ impl Model {
         groups.sort_by(|left, right| {
             let left_winner = prompt_overlay_extra_candidate_winner(left);
             let right_winner = prompt_overlay_extra_candidate_winner(right);
-            left_winner
-                .title
-                .cmp(&right_winner.title)
+            natural_sort_text_cmp(&left_winner.title, &right_winner.title)
                 .then_with(|| left_winner.reference_id.cmp(&right_winner.reference_id))
         });
 
@@ -997,8 +1004,10 @@ impl Model {
             let right_winner = prompt_overlay_discovered_skill_winner(right);
             (!left_winner.can_select_for_discovery)
                 .cmp(&!right_winner.can_select_for_discovery)
-                .then_with(|| left_winner.title.cmp(&right_winner.title))
-                .then_with(|| left_winner.skill_name.cmp(&right_winner.skill_name))
+                .then_with(|| natural_sort_text_cmp(&left_winner.title, &right_winner.title))
+                .then_with(|| {
+                    natural_sort_text_cmp(&left_winner.skill_name, &right_winner.skill_name)
+                })
         });
 
         let mut rows = Vec::new();
@@ -1188,12 +1197,37 @@ impl Model {
         {
             return None;
         }
+        let content = self.default_extra_prompt_body_for_scope(scope);
         Some(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::CreateExtraPrompt {
-                scope,
-                content: "# New prompt\n".to_string(),
-            },
+            mutation: PromptAssemblyMutation::CreateExtraPrompt { scope, content },
         })
+    }
+
+    fn default_extra_prompt_body_for_scope(&self, scope: PromptAssemblyScope) -> String {
+        let title = next_default_extra_prompt_title(
+            self.prompt_assembly
+                .managed_sources
+                .iter()
+                .filter(|source| {
+                    source.kind == PromptSourceKind::ExtraPrompt
+                        && source
+                            .origin
+                            .and_then(prompt_scope_from_origin)
+                            .is_some_and(|origin_scope| origin_scope == scope)
+                })
+                .map(|source| source.title.as_str())
+                .chain(
+                    self.prompt_assembly
+                        .extra_prompt_candidates
+                        .iter()
+                        .filter(|candidate| {
+                            prompt_scope_from_origin(candidate.origin)
+                                .is_some_and(|origin_scope| origin_scope == scope)
+                        })
+                        .map(|candidate| candidate.title.as_str()),
+                ),
+        );
+        format!("# {title}\n")
     }
 
     fn prompt_overlay_action_availability(&self) -> PromptOverlayActionAvailability {
@@ -1428,7 +1462,19 @@ impl Model {
             Some(state) => (state.focus, state.inactive_tab),
             None => return,
         };
-        let active_count = self.prompt_overlay_left_rows().len();
+        let active_rows = self.prompt_overlay_left_rows();
+        let active_count = active_rows.len();
+        let active_row_id = if matches!(focus, PromptOverlayFocus::Active) {
+            active_rows
+                .get(if first {
+                    0
+                } else {
+                    active_count.saturating_sub(1)
+                })
+                .map(prompt_overlay_left_row_id)
+        } else {
+            None
+        };
         let inactive_reference_id = if matches!(focus, PromptOverlayFocus::Inactive) {
             let rows = self.prompt_overlay_inactive_rows(inactive_tab);
             let source_count = rows.len();
@@ -1455,6 +1501,7 @@ impl Model {
             PromptOverlayFocus::Active => {
                 let last_index = active_count.saturating_sub(1);
                 state.active_selected = if first { 0 } else { last_index };
+                state.active_selected_row_id = active_row_id;
             }
             PromptOverlayFocus::Inactive => {
                 let last_index = inactive_count.saturating_sub(1);
@@ -1466,13 +1513,15 @@ impl Model {
     }
 
     fn move_prompt_overlay_active_selection(&mut self, direction: ListNavigationDirection) {
-        let count = self.prompt_overlay_left_rows().len();
+        let rows = self.prompt_overlay_left_rows();
+        let count = rows.len();
         let Some(state) = self.prompt_overlay.as_mut() else {
             return;
         };
         if count == 0 {
             state.active_selected = 0;
             state.active_scroll = 0;
+            state.active_selected_row_id = None;
             return;
         }
 
@@ -1484,11 +1533,13 @@ impl Model {
                 .min(count.saturating_sub(1)),
         };
         state.active_selected = next;
+        state.active_selected_row_id = rows.get(next).map(prompt_overlay_left_row_id);
         self.sync_prompt_overlay_state();
     }
 
     fn select_prompt_overlay_active_row(&mut self, visible_offset: usize) {
-        let total = self.prompt_overlay_left_rows().len();
+        let rows = self.prompt_overlay_left_rows();
+        let total = rows.len();
         let current_scroll = self
             .prompt_overlay
             .as_ref()
@@ -1501,9 +1552,12 @@ impl Model {
         if total == 0 {
             state.active_selected = 0;
             state.active_scroll = 0;
+            state.active_selected_row_id = None;
             return;
         }
-        state.active_selected = selected.min(total.saturating_sub(1));
+        let next_selected = selected.min(total.saturating_sub(1));
+        state.active_selected = next_selected;
+        state.active_selected_row_id = rows.get(next_selected).map(prompt_overlay_left_row_id);
         self.sync_prompt_overlay_state();
     }
 
@@ -1592,6 +1646,7 @@ impl Model {
         let (
             current_active_selected,
             current_active_scroll,
+            current_active_selected_row_id,
             current_inactive_selected,
             current_inactive_scroll,
             current_inactive_reference_id,
@@ -1599,6 +1654,7 @@ impl Model {
             Some(state) => (
                 state.active_selected,
                 state.active_scroll,
+                state.active_selected_row_id.clone(),
                 state.inactive_selected,
                 state.inactive_scroll,
                 state.inactive_selected_row_id.clone(),
@@ -1606,7 +1662,19 @@ impl Model {
             None => return,
         };
 
-        let next_active_selected = current_active_selected.min(active_count.saturating_sub(1));
+        let active_rows = self.prompt_overlay_left_rows();
+        let mut next_active_selected = current_active_selected;
+        if let Some(row_id) = current_active_selected_row_id.as_deref()
+            && let Some(index) = active_rows
+                .iter()
+                .position(|row| prompt_overlay_left_row_id(row) == row_id)
+        {
+            next_active_selected = index;
+        }
+        next_active_selected = next_active_selected.min(active_count.saturating_sub(1));
+        let next_active_selected_row_id = active_rows
+            .get(next_active_selected)
+            .map(prompt_overlay_left_row_id);
         let next_active_scroll = clamp_scroll(
             current_active_scroll,
             next_active_selected,
@@ -1643,6 +1711,7 @@ impl Model {
         };
         state.active_selected = next_active_selected;
         state.active_scroll = next_active_scroll;
+        state.active_selected_row_id = next_active_selected_row_id;
         state.inactive_selected = next_inactive_selected;
         state.inactive_selected_row_id = next_inactive_reference_id;
         state.inactive_scroll = next_inactive_scroll;
@@ -2127,6 +2196,23 @@ fn prompt_overlay_inactive_row_id(row: &PromptOverlayInactiveRow) -> String {
     }
 }
 
+fn prompt_overlay_left_row_id(row: &PromptOverlayLeftRow) -> String {
+    match row {
+        PromptOverlayLeftRow::ManagedSource { source, .. } => format!(
+            "managed:{}:{}:{}",
+            prompt_overlay_kind_label(source.kind),
+            source.reference_id,
+            source.origin.map_or("none", prompt_overlay_origin_label),
+        ),
+        PromptOverlayLeftRow::ShadowedDetail { source } => format!(
+            "shadowed:{}:{}:{}",
+            prompt_overlay_kind_label(source.kind),
+            source.reference_id,
+            source.origin.map_or("none", prompt_overlay_origin_label),
+        ),
+    }
+}
+
 fn prompt_overlay_partition_extra_candidates(
     mut candidates: Vec<PromptAssemblyExtraPromptCandidate>,
 ) -> (
@@ -2427,12 +2513,12 @@ fn prompt_overlay_origin_label(origin: PromptSourceOrigin) -> &'static str {
     }
 }
 
-fn prompt_overlay_kind_short_label(kind: PromptSourceKind) -> &'static str {
+fn prompt_overlay_kind_label(kind: PromptSourceKind) -> &'static str {
     match kind {
-        PromptSourceKind::CoreSystemPrompt => "sys",
-        PromptSourceKind::ExtraPrompt => "ext",
-        PromptSourceKind::SkillDiscovery => "disc",
-        PromptSourceKind::LongLivedSkill => "sk",
+        PromptSourceKind::CoreSystemPrompt => "system",
+        PromptSourceKind::ExtraPrompt => "custom",
+        PromptSourceKind::SkillDiscovery => "discovery",
+        PromptSourceKind::LongLivedSkill => "skill",
     }
 }
 
@@ -2516,7 +2602,7 @@ fn prompt_overlay_active_row_text(
     );
     let kind = format!(
         "{:<width$}",
-        prompt_overlay_kind_short_label(source.kind),
+        prompt_overlay_kind_label(source.kind),
         width = PROMPT_OVERLAY_LEFT_KIND_WIDTH
     );
     let scope = format!(
@@ -2550,7 +2636,7 @@ fn prompt_overlay_shadowed_detail_row_text(source: &ResolvedPromptSource, width:
     );
     let kind = format!(
         "{:<width$}",
-        prompt_overlay_kind_short_label(source.kind),
+        prompt_overlay_kind_label(source.kind),
         width = PROMPT_OVERLAY_LEFT_KIND_WIDTH
     );
     let scope = format!(
@@ -2867,4 +2953,12 @@ fn prompt_scope_from_origin(origin: PromptSourceOrigin) -> Option<PromptAssembly
         PromptSourceOrigin::Global => Some(PromptAssemblyScope::Global),
         PromptSourceOrigin::Project => Some(PromptAssemblyScope::Project),
     }
+}
+
+fn allows_shift_only_modifier(modifiers: KeyModifiers) -> bool {
+    modifiers.is_empty() || modifiers == KeyModifiers::SHIFT
+}
+
+fn normalize_prompt_overlay_external_editor_draft(content: &str) -> String {
+    content.replace("\r\n", "\n").replace('\r', "\n")
 }

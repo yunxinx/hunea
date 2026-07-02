@@ -1,3 +1,5 @@
+use std::{fs, path::PathBuf};
+
 use crossterm::event::{KeyCode, KeyEvent, MouseButton};
 use ratatui::{
     buffer::Buffer,
@@ -221,6 +223,17 @@ fn find_text_position(rows: &[String], needle: &str) -> Option<(u16, u16)> {
 
 fn find_buffer_text_position(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
     find_text_position(&rendered_rows(buffer), needle)
+}
+
+fn temp_test_file(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "hunea-prompt-overlay-{prefix}-{}-{}.md",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos()
+    ))
 }
 
 fn click_left(model: &mut Model, column: u16, row: u16) {
@@ -708,7 +721,40 @@ fn scope_picker_confirms_selected_scope_for_custom_creation() {
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
             mutation: PromptAssemblyMutation::CreateExtraPrompt {
                 scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
-                content: "# New prompt\n".to_string(),
+                content: "# New prompt 1\n".to_string(),
+            },
+        })
+    );
+}
+
+#[test]
+fn create_extra_prompt_uses_next_numbered_default_title() {
+    let mut model = ready_model();
+    model
+        .prompt_assembly
+        .extra_prompt_candidates
+        .push(PromptAssemblyExtraPromptCandidate {
+            reference_id: "new-prompt-1".to_string(),
+            title: "New prompt 1".to_string(),
+            origin: PromptSourceOrigin::Project,
+            body: "# New prompt 1\n".to_string(),
+            selected: false,
+        });
+
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('a'))),
+        super::OverlayInputResult::Handled
+    );
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Enter)),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::CreateExtraPrompt {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                content: "# New prompt 2\n".to_string(),
             },
         })
     );
@@ -729,7 +775,7 @@ fn render_uses_fixed_width_table_columns_with_balanced_split() {
         .expect("left header should render");
     let left_row = rows
         .iter()
-        .find(|row| row.contains("builtin") && row.contains("sys"))
+        .find(|row| row.contains("builtin") && row.contains("system"))
         .unwrap_or_else(|| panic!("left row should render: {rows:?}"))
         .replace('█', " ");
     let right_header = rows
@@ -1103,6 +1149,24 @@ fn selected_header_tab_uses_surface_background_and_trailing_padding() {
 }
 
 #[test]
+fn type_column_uses_full_words_and_fits_discovery_label() {
+    let mut model = ready_model();
+    model.set_window(120, 16);
+    model.open_prompt_overlay();
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 120, 16));
+    let skill_discovery_row = rows
+        .iter()
+        .find(|row| row.contains("Skill discovery") && row.contains("discovery"))
+        .expect("skill discovery row should render");
+
+    assert!(
+        skill_discovery_row.contains("discovery  builtin"),
+        "Type column should render the full discovery label before scope: {skill_discovery_row:?}"
+    );
+}
+
+#[test]
 fn left_sel_column_starts_two_cells_after_focus_marker() {
     let mut model = ready_model();
     model.set_window(120, 16);
@@ -1118,7 +1182,7 @@ fn left_sel_column_starts_two_cells_after_focus_marker() {
         .expect("left pane should render");
     let active_row = active_rows
         .iter()
-        .find(|row| row.contains("builtin") && row.contains("sys"))
+        .find(|row| row.contains("builtin") && row.contains("system"))
         .expect("active row should render")
         .split('│')
         .next()
@@ -1149,7 +1213,7 @@ fn active_focus_only_shows_selection_marker_in_focused_pane() {
     let inactive_rows = rendered_rows(&render_model_buffer(&mut model, 120, 16));
     let left_row = inactive_rows
         .iter()
-        .find(|row| row.contains("builtin") && row.contains("sys"))
+        .find(|row| row.contains("builtin") && row.contains("system"))
         .expect("left row should render");
     let right_row = inactive_rows
         .iter()
@@ -1311,6 +1375,24 @@ fn space_opens_prompt_source_preview() {
 }
 
 #[test]
+fn p_toggles_assembled_preview_open_and_closed() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('p'))),
+        super::OverlayInputResult::Handled
+    );
+    assert!(model.prompt_overlay_preview_active());
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('p'))),
+        super::OverlayInputResult::Handled
+    );
+    assert!(!model.prompt_overlay_preview_active());
+}
+
+#[test]
 fn prompt_preview_renders_markdown_source_as_plain_text() {
     let mut model = ready_model();
     model.prompt_assembly.sources = vec![
@@ -1442,6 +1524,172 @@ fn prompt_runtime_update_replaces_manager_snapshot() {
 }
 
 #[test]
+fn custom_prompt_rows_sort_titles_naturally() {
+    let mut model = ready_model();
+    model.prompt_assembly.extra_prompt_candidates = vec![
+        PromptAssemblyExtraPromptCandidate {
+            reference_id: "new-prompt-10".to_string(),
+            title: "New prompt 10".to_string(),
+            origin: PromptSourceOrigin::Project,
+            body: "# New prompt 10\n".to_string(),
+            selected: false,
+        },
+        PromptAssemblyExtraPromptCandidate {
+            reference_id: "new-prompt-2".to_string(),
+            title: "New prompt 2".to_string(),
+            origin: PromptSourceOrigin::Project,
+            body: "# New prompt 2\n".to_string(),
+            selected: false,
+        },
+        PromptAssemblyExtraPromptCandidate {
+            reference_id: "new-prompt-1".to_string(),
+            title: "New prompt 1".to_string(),
+            origin: PromptSourceOrigin::Project,
+            body: "# New prompt 1\n".to_string(),
+            selected: false,
+        },
+    ];
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 120, 16)).join("\n");
+    let first = rows
+        .find("New prompt 1")
+        .expect("first prompt should render");
+    let second = rows
+        .find("New prompt 2")
+        .expect("second prompt should render");
+    let tenth = rows
+        .find("New prompt 10")
+        .expect("tenth prompt should render");
+
+    assert!(
+        first < second && second < tenth,
+        "custom prompts should sort naturally: {rows}"
+    );
+}
+
+#[test]
+fn active_selection_follows_reordered_source_after_runtime_update() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+    assert_eq!(
+        model
+            .selected_prompt_overlay_managed_source()
+            .as_ref()
+            .map(|source| source.reference_id.as_str()),
+        Some("repo-rules")
+    );
+
+    model.apply_runtime_event(
+        runtime_domain::session::RuntimeEvent::PromptAssemblyUpdated {
+            manager: PromptAssemblyManagerSnapshot {
+                snapshot: prompt_snapshot(),
+                prelude: PromptPreludeSnapshot::default(),
+                managed_sources: vec![
+                    PromptAssemblyManagedSource {
+                        reference_id: "core-system".to_string(),
+                        kind: PromptSourceKind::CoreSystemPrompt,
+                        title: "Core system prompt".to_string(),
+                        origin: Some(PromptSourceOrigin::Builtin),
+                        enabled: true,
+                        order: 1,
+                    },
+                    PromptAssemblyManagedSource {
+                        reference_id: "skill-discovery".to_string(),
+                        kind: PromptSourceKind::SkillDiscovery,
+                        title: "Skill discovery".to_string(),
+                        origin: Some(PromptSourceOrigin::Builtin),
+                        enabled: true,
+                        order: 2,
+                    },
+                    PromptAssemblyManagedSource {
+                        reference_id: "safety-policy".to_string(),
+                        kind: PromptSourceKind::ExtraPrompt,
+                        title: "safety-policy".to_string(),
+                        origin: Some(PromptSourceOrigin::Global),
+                        enabled: false,
+                        order: 3,
+                    },
+                    PromptAssemblyManagedSource {
+                        reference_id: "repo-rules".to_string(),
+                        kind: PromptSourceKind::ExtraPrompt,
+                        title: "repo-rules".to_string(),
+                        origin: Some(PromptSourceOrigin::Project),
+                        enabled: true,
+                        order: 4,
+                    },
+                ],
+                sources: Vec::new(),
+                extra_prompt_candidates: vec![PromptAssemblyExtraPromptCandidate {
+                    reference_id: "global-extra".to_string(),
+                    title: "global-extra".to_string(),
+                    origin: PromptSourceOrigin::Global,
+                    body: "# Global Extra\n".to_string(),
+                    selected: false,
+                }],
+                discovered_skills: vec![
+                    PromptAssemblyDiscoveredSkill {
+                        skill_name: "repo-bootstrap".to_string(),
+                        title: "repo-bootstrap".to_string(),
+                        description: "Bootstrap repo".to_string(),
+                        origin: PromptSourceOrigin::Project,
+                        skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
+                        body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
+                        can_select_for_discovery: true,
+                        selected: true,
+                        selected_order: Some(1),
+                    },
+                    PromptAssemblyDiscoveredSkill {
+                        skill_name: "code-review".to_string(),
+                        title: "code-review".to_string(),
+                        description: "Review code".to_string(),
+                        origin: PromptSourceOrigin::Global,
+                        skill_path: "/tmp/code-review/SKILL.md".to_string(),
+                        body: "# Code Review\n\nUse this skill.".to_string(),
+                        can_select_for_discovery: true,
+                        selected: true,
+                        selected_order: Some(2),
+                    },
+                ],
+                manual_skills: vec![PromptAssemblyDiscoveredSkill {
+                    skill_name: "repo-bootstrap".to_string(),
+                    title: "repo-bootstrap".to_string(),
+                    description: "Bootstrap repo".to_string(),
+                    origin: PromptSourceOrigin::Project,
+                    skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
+                    body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
+                    can_select_for_discovery: true,
+                    selected: false,
+                    selected_order: None,
+                }],
+                builtin_core_system_body: "builtin core".to_string(),
+                global_core_system_override: None,
+                project_core_system_override: None,
+            },
+        },
+    );
+
+    assert_eq!(
+        model
+            .selected_prompt_overlay_managed_source()
+            .as_ref()
+            .map(|source| source.reference_id.as_str()),
+        Some("repo-rules")
+    );
+    assert_eq!(
+        model
+            .prompt_overlay
+            .as_ref()
+            .map(|state| state.active_selected),
+        Some(3)
+    );
+}
+
+#[test]
 fn delete_selected_extra_prompt_emits_mutation_effect() {
     let mut model = ready_model();
     model.open_prompt_overlay();
@@ -1500,6 +1748,44 @@ fn moving_active_source_emits_reorder_mutation() {
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('J'))),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveActiveSource {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                kind: PromptSourceKind::ExtraPrompt,
+                reference_id: "repo-rules".to_string(),
+                direction: PromptAssemblyMoveDirection::Down,
+            },
+        })
+    );
+}
+
+#[test]
+fn shifted_j_and_k_reorder_active_source() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(
+            KeyCode::Char('K'),
+            crossterm::event::KeyModifiers::SHIFT,
+        )),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveActiveSource {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                kind: PromptSourceKind::ExtraPrompt,
+                reference_id: "repo-rules".to_string(),
+                direction: PromptAssemblyMoveDirection::Up,
+            },
+        })
+    );
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(
+            KeyCode::Char('J'),
+            crossterm::event::KeyModifiers::SHIFT,
+        )),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
             mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveActiveSource {
                 scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
@@ -1603,6 +1889,81 @@ fn e_does_not_edit_discovered_skill() {
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('e'))),
         super::OverlayInputResult::Handled
+    );
+}
+
+#[test]
+fn unchanged_prompt_overlay_external_editor_exit_does_not_fall_through_to_composer() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model
+        .prompt_overlay
+        .as_mut()
+        .expect("overlay should open")
+        .pending_editor = Some(super::PromptOverlayPendingEditor {
+        target: runtime_domain::prompt_assembly::PromptAssemblyEditorTarget::ExtraPrompt {
+            scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+            reference_id: "repo-rules".to_string(),
+        },
+        original_draft: "# Repo rules\n".to_string(),
+    });
+    let draft_path = temp_test_file("overlay-editor-unchanged");
+    fs::write(&draft_path, "# Repo rules\n").expect("draft file should exist");
+
+    let effect = model.update(AppEvent::ExternalEditorFinished {
+        draft_path: draft_path.clone(),
+        original_draft: "# Repo rules\n".to_string(),
+        failed: false,
+    });
+
+    assert_eq!(effect, None);
+    assert_eq!(model.active_toast_text_for_test(), None);
+    assert_eq!(
+        model
+            .prompt_overlay
+            .as_ref()
+            .and_then(|state| state.pending_editor.as_ref()),
+        None
+    );
+}
+
+#[test]
+fn changed_prompt_overlay_external_editor_exit_returns_save_mutation() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model
+        .prompt_overlay
+        .as_mut()
+        .expect("overlay should open")
+        .pending_editor = Some(super::PromptOverlayPendingEditor {
+        target: runtime_domain::prompt_assembly::PromptAssemblyEditorTarget::ExtraPrompt {
+            scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+            reference_id: "repo-rules".to_string(),
+        },
+        original_draft: "# Repo rules\n".to_string(),
+    });
+    let draft_path = temp_test_file("overlay-editor-changed");
+    fs::write(&draft_path, "# Repo rules\nUse cargo nextest run.\n")
+        .expect("draft file should exist");
+
+    let effect = model.update(AppEvent::ExternalEditorFinished {
+        draft_path,
+        original_draft: "# Repo rules\n".to_string(),
+        failed: false,
+    });
+
+    assert_eq!(
+        effect,
+        Some(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::SaveEditorTarget {
+                target: runtime_domain::prompt_assembly::PromptAssemblyEditorTarget::ExtraPrompt {
+                    scope:
+                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                    reference_id: "repo-rules".to_string(),
+                },
+                content: "# Repo rules\nUse cargo nextest run.\n".to_string(),
+            },
+        })
     );
 }
 

@@ -45,7 +45,8 @@ pub(super) fn apply_effect_if_needed(
 
     match effect {
         AppEffect::LaunchExternalEditor(launch) => {
-            run_external_editor_effect(terminal, model, launch)
+            let follow_up = run_external_editor_effect(terminal, model, launch)?;
+            apply_effect_if_needed(terminal, model, runtime_coordinator, external_io, follow_up)
         }
         AppEffect::CopySelection(text) => run_copy_selection_effect(model, external_io, text),
         AppEffect::ResetRuntimeSession => {

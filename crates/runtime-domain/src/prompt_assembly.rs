@@ -267,6 +267,62 @@ pub enum PromptAssemblyMoveDirection {
     Down,
 }
 
+/// `derive_extra_prompt_title` 从 prompt body 提取列表展示标题。
+#[must_use]
+pub fn derive_extra_prompt_title(body: &str, fallback: &str) -> String {
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix('#') {
+            let title = heading.trim_start_matches('#').trim();
+            if !title.is_empty() {
+                return truncate_extra_prompt_title(title);
+            }
+        }
+        return truncate_extra_prompt_title(trimmed);
+    }
+    truncate_extra_prompt_title(fallback)
+}
+
+/// `next_default_extra_prompt_title` 为默认新建 prompt 生成递增标题。
+#[must_use]
+pub fn next_default_extra_prompt_title<'a>(titles: impl IntoIterator<Item = &'a str>) -> String {
+    const DEFAULT_TITLE_PREFIX: &str = "New prompt";
+
+    let next_index = titles
+        .into_iter()
+        .filter_map(default_extra_prompt_title_index)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+
+    format!("{DEFAULT_TITLE_PREFIX} {next_index}")
+}
+
+fn truncate_extra_prompt_title(title: &str) -> String {
+    const TITLE_LIMIT: usize = 80;
+    let mut result = String::new();
+    for character in title.chars().take(TITLE_LIMIT) {
+        result.push(character);
+    }
+    result
+}
+
+fn default_extra_prompt_title_index(title: &str) -> Option<usize> {
+    const DEFAULT_TITLE_PREFIX: &str = "New prompt";
+
+    if title == DEFAULT_TITLE_PREFIX {
+        return Some(1);
+    }
+
+    let suffix = title
+        .strip_prefix(DEFAULT_TITLE_PREFIX)?
+        .strip_prefix(' ')?;
+    suffix.parse::<usize>().ok().filter(|index| *index > 0)
+}
+
 /// `resolve_prompt_assembly` 解析 next-new-session prompt assembly。
 #[must_use]
 pub fn resolve_prompt_assembly(input: &PromptAssemblyInput) -> PromptAssemblySnapshot {
@@ -392,6 +448,7 @@ fn active_candidate_order(left: &PromptSourceCandidate, right: &PromptSourceCand
     let right_order = right.requested_order.unwrap_or(u16::MAX);
     left_order
         .cmp(&right_order)
+        .then_with(|| natural_sort_text_cmp(&left.title, &right.title))
         .then_with(|| left.reference_id.cmp(&right.reference_id))
 }
 
@@ -414,11 +471,13 @@ fn inactive_source_order(left: &ResolvedPromptSource, right: &ResolvedPromptSour
     };
     left_rank
         .cmp(&right_rank)
-        .then_with(|| natural_title_cmp(&left.title, &right.title))
+        .then_with(|| natural_sort_text_cmp(&left.title, &right.title))
         .then_with(|| left.reference_id.cmp(&right.reference_id))
 }
 
-fn natural_title_cmp(left: &str, right: &str) -> Ordering {
+/// `natural_sort_text_cmp` 以更贴近人类直觉的方式比较文本中的数字片段。
+#[must_use]
+pub fn natural_sort_text_cmp(left: &str, right: &str) -> Ordering {
     let mut left_chars = left.chars().peekable();
     let mut right_chars = right.chars().peekable();
 
@@ -871,6 +930,43 @@ mod tests {
                 "missing",
                 "skill-shadow-global",
             ]
+        );
+    }
+
+    #[test]
+    fn active_sources_with_equal_requested_order_use_natural_title_order() {
+        let snapshot = resolve_prompt_assembly(&PromptAssemblyInput {
+            core_system: CoreSystemPromptInput::default(),
+            candidates: vec![
+                extra_prompt(
+                    "new-prompt-10",
+                    "New prompt 10",
+                    PromptSourceOrigin::Project,
+                    Some(10),
+                ),
+                extra_prompt(
+                    "new-prompt-2",
+                    "New prompt 2",
+                    PromptSourceOrigin::Project,
+                    Some(10),
+                ),
+                extra_prompt(
+                    "new-prompt-1",
+                    "New prompt 1",
+                    PromptSourceOrigin::Project,
+                    Some(10),
+                ),
+            ],
+        });
+
+        assert_eq!(
+            snapshot
+                .active_sources
+                .iter()
+                .skip(1)
+                .map(|source| source.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new-prompt-1", "new-prompt-2", "new-prompt-10"]
         );
     }
 }

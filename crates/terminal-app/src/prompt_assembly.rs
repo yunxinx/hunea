@@ -3,7 +3,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use color_eyre::eyre::{Result, WrapErr};
@@ -18,7 +17,7 @@ use runtime_domain::prompt_assembly::{
     PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
     PromptAssemblyMutation, PromptPreludeSection, PromptPreludeSnapshot, PromptSourceCandidate,
     PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
-    resolve_prompt_assembly,
+    derive_extra_prompt_title, natural_sort_text_cmp, resolve_prompt_assembly,
 };
 use runtime_domain::session::TranscriptUserMessage;
 use serde::Deserialize;
@@ -469,7 +468,7 @@ fn apply_mutation_to_scope_states(
         PromptAssemblyMutation::CreateExtraPrompt { scope, content } => {
             let state = scope_state_mut(global_state, project_state, scope);
             let title = derive_extra_prompt_title(&content, "New prompt");
-            let reference_id = generate_extra_prompt_reference_id(&title);
+            let reference_id = generate_unique_extra_prompt_reference_id(state, &title);
             let requested_order = next_requested_order(&state.entries);
             state.entries.push(PersistedPromptAssemblyEntry {
                 reference_id: reference_id.clone(),
@@ -794,33 +793,7 @@ fn scope_state_mut<'a>(
     }
 }
 
-fn derive_extra_prompt_title(body: &str, fallback: &str) -> String {
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(heading) = trimmed.strip_prefix('#') {
-            let title = heading.trim_start_matches('#').trim();
-            if !title.is_empty() {
-                return truncate_title(title);
-            }
-        }
-        return truncate_title(trimmed);
-    }
-    truncate_title(fallback)
-}
-
-fn truncate_title(title: &str) -> String {
-    const TITLE_LIMIT: usize = 80;
-    let mut result = String::new();
-    for character in title.chars().take(TITLE_LIMIT) {
-        result.push(character);
-    }
-    result
-}
-
-fn generate_extra_prompt_reference_id(title: &str) -> String {
+fn generate_extra_prompt_reference_id_slug(title: &str) -> String {
     let slug = title
         .chars()
         .flat_map(char::to_lowercase)
@@ -838,11 +811,38 @@ fn generate_extra_prompt_reference_id(title: &str) -> String {
     } else {
         slug.as_str()
     };
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("{slug}-{stamp}")
+    slug.to_string()
+}
+
+fn generate_unique_extra_prompt_reference_id(
+    state: &PromptAssemblyScopeState,
+    title: &str,
+) -> String {
+    let base = generate_extra_prompt_reference_id_slug(title);
+    let existing_reference_ids = state
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == PromptSourceKind::ExtraPrompt)
+        .map(|entry| entry.reference_id.as_str())
+        .chain(
+            state
+                .extra_prompts
+                .iter()
+                .map(|prompt| prompt.reference_id.as_str()),
+        )
+        .collect::<std::collections::HashSet<_>>();
+    if !existing_reference_ids.contains(base.as_str()) {
+        return base;
+    }
+
+    let mut suffix = 2usize;
+    loop {
+        let candidate = format!("{base}-{suffix}");
+        if !existing_reference_ids.contains(candidate.as_str()) {
+            return candidate;
+        }
+        suffix = suffix.saturating_add(1);
+    }
 }
 
 fn next_requested_order(entries: &[PersistedPromptAssemblyEntry]) -> u16 {
@@ -1147,6 +1147,7 @@ fn ordered_non_core_entry_addresses(
             .requested_order
             .unwrap_or(u16::MAX)
             .cmp(&right_entry.requested_order.unwrap_or(u16::MAX))
+            .then_with(|| natural_sort_text_cmp(&left_entry.title, &right_entry.title))
             .then_with(|| left_entry.reference_id.cmp(&right_entry.reference_id))
             .then_with(|| {
                 left.scope
@@ -1247,6 +1248,7 @@ fn managed_sources(
         left.requested_order
             .unwrap_or(u16::MAX)
             .cmp(&right.requested_order.unwrap_or(u16::MAX))
+            .then_with(|| natural_sort_text_cmp(&left.title, &right.title))
             .then_with(|| left.reference_id.cmp(&right.reference_id))
             .then_with(|| {
                 left_scope
@@ -1278,8 +1280,7 @@ fn extra_prompt_candidates(
     push_extra_prompt_candidates(&mut candidates, global_state, extra_prompt_bodies);
     push_extra_prompt_candidates(&mut candidates, project_state, extra_prompt_bodies);
     candidates.sort_by(|left, right| {
-        left.title
-            .cmp(&right.title)
+        natural_sort_text_cmp(&left.title, &right.title)
             .then_with(|| left.reference_id.cmp(&right.reference_id))
     });
     candidates
@@ -1352,7 +1353,7 @@ fn merged_skill_discovery_skill_state(
         left.requested_order
             .unwrap_or(u16::MAX)
             .cmp(&right.requested_order.unwrap_or(u16::MAX))
-            .then_with(|| left.skill_name.cmp(&right.skill_name))
+            .then_with(|| natural_sort_text_cmp(&left.skill_name, &right.skill_name))
     });
     state
 }
@@ -1462,18 +1463,16 @@ fn discovered_skill_inventory(
         .into_iter()
         .partition(|skill| skill.can_select_for_discovery);
     discovery_eligible.sort_by(|left, right| {
-        left.title
-            .cmp(&right.title)
-            .then_with(|| left.skill_name.cmp(&right.skill_name))
+        natural_sort_text_cmp(&left.title, &right.title)
+            .then_with(|| natural_sort_text_cmp(&left.skill_name, &right.skill_name))
             .then_with(|| {
                 prompt_source_origin_sort_key(left.origin)
                     .cmp(&prompt_source_origin_sort_key(right.origin))
             })
     });
     manual_only.sort_by(|left, right| {
-        left.title
-            .cmp(&right.title)
-            .then_with(|| left.skill_name.cmp(&right.skill_name))
+        natural_sort_text_cmp(&left.title, &right.title)
+            .then_with(|| natural_sort_text_cmp(&left.skill_name, &right.skill_name))
             .then_with(|| {
                 prompt_source_origin_sort_key(left.origin)
                     .cmp(&prompt_source_origin_sort_key(right.origin))
@@ -2698,5 +2697,87 @@ mod tests {
             assembled.provider_visible_user_text,
             "Please use $code-review"
         );
+    }
+
+    #[test]
+    fn removing_project_active_extra_prompt_preserves_it_as_inactive_candidate() {
+        let work_dir = temp_dir("remove-project-extra-prompt");
+        let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+        save_project_prompt_assembly_state(
+            &work_dir,
+            &PromptAssemblyScopeState {
+                scope: PromptAssemblyScope::Project,
+                core_system_override: None,
+                skill_discovery_override: None,
+                entries: vec![PersistedPromptAssemblyEntry {
+                    reference_id: "review-rules".to_string(),
+                    kind: PromptSourceKind::ExtraPrompt,
+                    title: "Review rules".to_string(),
+                    enabled: true,
+                    requested_order: Some(10),
+                }],
+                skill_discovery_skills: Vec::new(),
+                extra_prompts: vec![StoredPromptBody {
+                    reference_id: "review-rules".to_string(),
+                    title: "Review rules".to_string(),
+                    body: "# Review rules\nAlways verify tests.\n".to_string(),
+                }],
+            },
+        )
+        .expect("initial project prompt assembly should save");
+
+        let snapshot = apply_prompt_assembly_mutation(
+            store,
+            &work_dir,
+            PromptAssemblyMutation::RemovePromptSource {
+                scope: PromptAssemblyScope::Project,
+                kind: PromptSourceKind::ExtraPrompt,
+                reference_id: "review-rules".to_string(),
+            },
+        )
+        .expect("removing project extra prompt should succeed");
+
+        assert!(
+            snapshot
+                .managed_sources
+                .iter()
+                .all(|source| source.reference_id != "review-rules"),
+            "removed prompt should leave the active list"
+        );
+        assert_eq!(
+            snapshot.extra_prompt_candidates,
+            vec![PromptAssemblyExtraPromptCandidate {
+                reference_id: "review-rules".to_string(),
+                title: "Review rules".to_string(),
+                origin: PromptSourceOrigin::Project,
+                body: "# Review rules\nAlways verify tests.".to_string(),
+                selected: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn create_extra_prompt_keeps_supplied_legacy_default_body_verbatim() {
+        let work_dir = temp_dir("create-extra-prompt-legacy-default");
+        let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+
+        let snapshot = apply_prompt_assembly_mutation(
+            store,
+            &work_dir,
+            PromptAssemblyMutation::CreateExtraPrompt {
+                scope: PromptAssemblyScope::Project,
+                content: "# New prompt\n".to_string(),
+            },
+        )
+        .expect("create extra prompt should succeed");
+
+        let created = snapshot
+            .extra_prompt_candidates
+            .iter()
+            .find(|prompt| prompt.reference_id == "new-prompt")
+            .expect("legacy default body should stay verbatim");
+
+        assert_eq!(created.title, "New prompt");
+        assert_eq!(created.body, "# New prompt".to_string());
     }
 }

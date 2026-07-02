@@ -6,10 +6,11 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use super::PromptSourceKind;
+use super::{PromptSourceKind, derive_extra_prompt_title, natural_sort_text_cmp};
 
 pub const PROJECT_PROMPT_ASSEMBLY_FILE_NAME: &str = "prompt-assembly.toml";
 pub const PROJECT_PROMPTS_DIR_NAME: &str = "prompts";
+pub const PROJECT_CUSTOM_PROMPTS_DIR_NAME: &str = "custom";
 pub const PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME: &str = "__core-system__.md";
 pub const PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME: &str = "__skill-discovery__.md";
 const PROJECT_PROMPT_ASSEMBLY_VERSION: u32 = 1;
@@ -219,6 +220,12 @@ pub fn project_prompts_dir(work_dir: &Path) -> PathBuf {
     work_dir.join(".hunea").join(PROJECT_PROMPTS_DIR_NAME)
 }
 
+/// `project_custom_prompts_dir` 返回项目级 custom prompt body 目录。
+#[must_use]
+pub fn project_custom_prompts_dir(work_dir: &Path) -> PathBuf {
+    project_prompts_dir(work_dir).join(PROJECT_CUSTOM_PROMPTS_DIR_NAME)
+}
+
 /// `load_project_prompt_assembly_state` 读取项目级 prompt assembly TOML 与 prompt bodies。
 pub fn load_project_prompt_assembly_state(
     work_dir: &Path,
@@ -226,6 +233,7 @@ pub fn load_project_prompt_assembly_state(
     let config_path = project_prompt_assembly_path(work_dir);
     let config = read_project_prompt_assembly_file(&config_path)?;
     let prompts_dir = project_prompts_dir(work_dir);
+    let custom_prompts_dir = project_custom_prompts_dir(work_dir);
 
     let mut state = PromptAssemblyScopeState::empty(PromptAssemblyScope::Project);
     state.entries = sort_entries(config.entries);
@@ -234,21 +242,13 @@ pub fn load_project_prompt_assembly_state(
         read_optional_text_file(&prompts_dir.join(PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME))?;
     state.skill_discovery_override =
         read_optional_text_file(&prompts_dir.join(PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME))?;
-    state.extra_prompts = state
+    let entry_titles = state
         .entries
         .iter()
         .filter(|entry| entry.kind == PromptSourceKind::ExtraPrompt)
-        .filter_map(|entry| {
-            let body_path =
-                prompts_dir.join(project_extra_prompt_file_name(&entry.reference_id).ok()?);
-            let body = read_optional_text_file(&body_path).ok()??;
-            Some(StoredPromptBody {
-                reference_id: entry.reference_id.clone(),
-                title: entry.title.clone(),
-                body,
-            })
-        })
-        .collect();
+        .map(|entry| (entry.reference_id.as_str(), entry.title.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    state.extra_prompts = load_project_extra_prompt_bodies(&custom_prompts_dir, &entry_titles)?;
 
     Ok(state)
 }
@@ -264,37 +264,30 @@ pub fn save_project_prompt_assembly_state(
 
     let config_path = project_prompt_assembly_path(work_dir);
     let prompts_dir = project_prompts_dir(work_dir);
+    let custom_prompts_dir = project_custom_prompts_dir(work_dir);
     fs::create_dir_all(&prompts_dir).map_err(|source| ProjectPromptAssemblyError::Write {
         path: prompts_dir.clone(),
         source,
     })?;
-
-    let extra_prompt_entry_ids = state
-        .entries
-        .iter()
-        .filter(|entry| entry.kind == PromptSourceKind::ExtraPrompt)
-        .map(|entry| entry.reference_id.as_str())
-        .collect::<BTreeSet<_>>();
-
-    let mut desired_files = BTreeSet::new();
-    for prompt in &state.extra_prompts {
-        if !extra_prompt_entry_ids.contains(prompt.reference_id.as_str()) {
-            return Err(ProjectPromptAssemblyError::OrphanExtraPromptBody {
-                reference_id: prompt.reference_id.clone(),
-            });
+    fs::create_dir_all(&custom_prompts_dir).map_err(|source| {
+        ProjectPromptAssemblyError::Write {
+            path: custom_prompts_dir.clone(),
+            source,
         }
+    })?;
 
+    let mut desired_custom_prompt_files = BTreeSet::new();
+    for prompt in &state.extra_prompts {
         let file_name = project_extra_prompt_file_name(&prompt.reference_id)?;
-        let path = prompts_dir.join(&file_name);
+        let path = custom_prompts_dir.join(&file_name);
         write_text_file(&path, &prompt.body)?;
-        desired_files.insert(file_name);
+        desired_custom_prompt_files.insert(file_name);
     }
 
     let core_override_path = prompts_dir.join(PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME);
     match state.core_system_override.as_deref() {
         Some(body) => {
             write_text_file(&core_override_path, body)?;
-            desired_files.insert(PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME.to_string());
         }
         None => remove_file_if_exists(&core_override_path)?,
     }
@@ -304,12 +297,11 @@ pub fn save_project_prompt_assembly_state(
     match state.skill_discovery_override.as_deref() {
         Some(body) => {
             write_text_file(&skill_discovery_override_path, body)?;
-            desired_files.insert(PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME.to_string());
         }
         None => remove_file_if_exists(&skill_discovery_override_path)?,
     }
 
-    prune_stale_prompt_files(&prompts_dir, &desired_files)?;
+    prune_stale_prompt_files(&custom_prompts_dir, &desired_custom_prompt_files)?;
 
     let config = ProjectPromptAssemblyFile {
         version: PROJECT_PROMPT_ASSEMBLY_VERSION,
@@ -386,6 +378,83 @@ fn read_optional_text_file(path: &Path) -> Result<Option<String>, ProjectPromptA
     }
 }
 
+fn load_project_extra_prompt_bodies(
+    custom_prompts_dir: &Path,
+    entry_titles: &BTreeMap<&str, &str>,
+) -> Result<Vec<StoredPromptBody>, ProjectPromptAssemblyError> {
+    let mut prompts_by_reference = BTreeMap::new();
+    collect_project_extra_prompt_bodies(
+        custom_prompts_dir,
+        entry_titles,
+        &mut prompts_by_reference,
+    )?;
+    Ok(prompts_by_reference.into_values().collect())
+}
+
+fn collect_project_extra_prompt_bodies(
+    dir: &Path,
+    entry_titles: &BTreeMap<&str, &str>,
+    prompts_by_reference: &mut BTreeMap<String, StoredPromptBody>,
+) -> Result<(), ProjectPromptAssemblyError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(ProjectPromptAssemblyError::Read {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|source| ProjectPromptAssemblyError::Read {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|source| ProjectPromptAssemblyError::Read {
+                path: path.clone(),
+                source,
+            })?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        let Some(reference_id) = project_extra_prompt_reference_id_from_file_name(&file_name)
+        else {
+            continue;
+        };
+        if prompts_by_reference.contains_key(reference_id) {
+            continue;
+        }
+
+        let body =
+            fs::read_to_string(&path).map_err(|source| ProjectPromptAssemblyError::Read {
+                path: path.clone(),
+                source,
+            })?;
+        let title = entry_titles
+            .get(reference_id)
+            .copied()
+            .map(str::to_string)
+            .unwrap_or_else(|| derive_extra_prompt_title(&body, reference_id));
+        prompts_by_reference.insert(
+            reference_id.to_string(),
+            StoredPromptBody {
+                reference_id: reference_id.to_string(),
+                title,
+                body,
+            },
+        );
+    }
+
+    Ok(())
+}
+
 fn remove_file_if_exists(path: &Path) -> Result<(), ProjectPromptAssemblyError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -444,6 +513,19 @@ fn project_extra_prompt_file_name(
     Ok(format!("{reference_id}.md"))
 }
 
+fn project_extra_prompt_reference_id_from_file_name(file_name: &str) -> Option<&str> {
+    if matches!(
+        file_name,
+        PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME | PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME
+    ) {
+        return None;
+    }
+
+    let reference_id = file_name.strip_suffix(".md")?;
+    validate_project_reference_id(reference_id).ok()?;
+    Some(reference_id)
+}
+
 fn validate_project_reference_id(reference_id: &str) -> Result<(), ProjectPromptAssemblyError> {
     if reference_id.is_empty() || reference_id == "__core-system__" {
         return Err(ProjectPromptAssemblyError::InvalidProjectReferenceId {
@@ -474,6 +556,7 @@ fn sort_entries(
         left.requested_order
             .unwrap_or(u16::MAX)
             .cmp(&right.requested_order.unwrap_or(u16::MAX))
+            .then_with(|| natural_sort_text_cmp(&left.title, &right.title))
             .then_with(|| left.reference_id.cmp(&right.reference_id))
     });
     entries
@@ -486,7 +569,7 @@ fn sort_skill_discovery_skills(
         left.requested_order
             .unwrap_or(u16::MAX)
             .cmp(&right.requested_order.unwrap_or(u16::MAX))
-            .then_with(|| left.skill_name.cmp(&right.skill_name))
+            .then_with(|| natural_sort_text_cmp(&left.skill_name, &right.skill_name))
     });
     entries
 }
@@ -595,8 +678,9 @@ mod tests {
             .expect("updated project prompt assembly should save");
 
         let prompts_dir = project_prompts_dir(&work_dir);
+        let custom_prompts_dir = project_custom_prompts_dir(&work_dir);
         assert!(
-            !prompts_dir.join("repo-review-rules.md").exists(),
+            !custom_prompts_dir.join("repo-review-rules.md").exists(),
             "deleted extra prompt body should be pruned"
         );
         assert!(
@@ -632,5 +716,67 @@ mod tests {
 
         assert_eq!(loaded.entries, state.entries);
         assert!(loaded.extra_prompts.is_empty());
+    }
+
+    #[test]
+    fn project_scope_roundtrip_persists_unselected_extra_prompt_body_in_custom_dir() {
+        let work_dir = temp_test_dir("project-unselected-extra-prompt");
+        let state = PromptAssemblyScopeState {
+            scope: PromptAssemblyScope::Project,
+            core_system_override: None,
+            skill_discovery_override: None,
+            entries: vec![PersistedPromptAssemblyEntry {
+                reference_id: "skill-discovery".to_string(),
+                kind: PromptSourceKind::SkillDiscovery,
+                title: "Skill discovery source".to_string(),
+                enabled: true,
+                requested_order: Some(10),
+            }],
+            skill_discovery_skills: Vec::new(),
+            extra_prompts: vec![StoredPromptBody {
+                reference_id: "review-rules".to_string(),
+                title: "Review rules".to_string(),
+                body: "# Review rules\nAlways verify tests.\n".to_string(),
+            }],
+        };
+
+        save_project_prompt_assembly_state(&work_dir, &state)
+            .expect("project prompt assembly should save");
+        let loaded = load_project_prompt_assembly_state(&work_dir)
+            .expect("project prompt assembly should load");
+
+        assert_eq!(loaded.extra_prompts, state.extra_prompts);
+        assert!(
+            !project_prompts_dir(&work_dir)
+                .join("review-rules.md")
+                .exists(),
+            "extra prompt body should not live at the prompts root"
+        );
+        assert!(
+            project_custom_prompts_dir(&work_dir)
+                .join("review-rules.md")
+                .exists(),
+            "extra prompt body should be stored under prompts/custom"
+        );
+    }
+
+    #[test]
+    fn project_scope_ignores_root_extra_prompt_files() {
+        let work_dir = temp_test_dir("project-legacy-extra-prompt");
+        let prompts_dir = project_prompts_dir(&work_dir);
+        fs::create_dir_all(&prompts_dir).expect("legacy prompts dir should exist");
+        fs::write(
+            prompts_dir.join("legacy-review.md"),
+            "# Legacy review\nPrefer root-cause fixes.\n",
+        )
+        .expect("legacy extra prompt file should write");
+
+        let loaded = load_project_prompt_assembly_state(&work_dir)
+            .expect("project prompt assembly should ignore legacy root files");
+
+        assert!(
+            loaded.extra_prompts.is_empty(),
+            "root-level prompt files should no longer be loaded"
+        );
     }
 }

@@ -19,7 +19,7 @@ use crate::{
     transcript::wrap_plain_text,
 };
 
-const FOOTER_HINT: &str = "  Esc/Space back · ↑/←/h previous page · ↓/→/l next page";
+const FOOTER_HINT: &str = "  Esc/Space/p back · ↑/←/h previous page · ↓/→/l next page";
 const PROMPT_OVERLAY_PREVIEW_HORIZONTAL_PADDING: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +72,7 @@ impl Model {
         }
 
         match key.code {
-            KeyCode::Esc | KeyCode::Char(' ') if key.modifiers.is_empty() => {
+            KeyCode::Esc | KeyCode::Char(' ') | KeyCode::Char('p') if key.modifiers.is_empty() => {
                 self.close_prompt_overlay_preview();
                 OverlayInputResult::Handled
             }

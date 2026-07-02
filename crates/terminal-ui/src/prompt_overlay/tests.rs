@@ -1,4 +1,9 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton};
+use ratatui::{
+    buffer::Buffer,
+    layout::{Constraint, Layout, Rect},
+    style::Modifier,
+};
 use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate, PromptAssemblyLifecycle,
     PromptAssemblyManagedSource, PromptAssemblyManagerSnapshot, PromptAssemblyMoveDirection,
@@ -9,6 +14,7 @@ use runtime_domain::prompt_assembly::{
 
 use crate::{
     AppEffect, AppEvent, Model, ModelOptions, StartupBannerOptions,
+    fullscreen_list_chrome::fullscreen_list_chrome_rects,
     modal_layer::ModalLayer,
     runtime::RuntimeEventApply,
     test_helpers::{render_model_buffer, rendered_rows},
@@ -199,6 +205,31 @@ fn left_source_cell_text(row: &str, width: usize) -> String {
         .skip(source_start)
         .take(source_width)
         .collect::<String>()
+}
+
+fn find_text_position(rows: &[String], needle: &str) -> Option<(u16, u16)> {
+    rows.iter().enumerate().find_map(|(row_index, row)| {
+        row.find(needle).map(|byte_index| {
+            let column = row[..byte_index].chars().count();
+            (
+                u16::try_from(column).expect("column should fit in u16"),
+                u16::try_from(row_index).expect("row should fit in u16"),
+            )
+        })
+    })
+}
+
+fn find_buffer_text_position(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
+    find_text_position(&rendered_rows(buffer), needle)
+}
+
+fn click_left(model: &mut Model, column: u16, row: u16) {
+    let effect = model.update(AppEvent::MouseDown {
+        button: MouseButton::Left,
+        column,
+        row,
+    });
+    assert_eq!(effect, None);
 }
 
 #[test]
@@ -1131,6 +1162,131 @@ fn active_focus_only_shows_selection_marker_in_focused_pane() {
         .expect("right pane should exist");
     assert!(!left_pane.contains('█'));
     assert!(right_pane.contains('█'));
+}
+
+#[test]
+fn unfocused_inactive_row_does_not_keep_selected_text_style() {
+    let mut model = ready_model();
+    model.set_window(120, 16);
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    let focused_buffer = render_model_buffer(&mut model, 120, 16);
+    let (column, row) = find_buffer_text_position(&focused_buffer, "global-extra")
+        .expect("custom prompt row should render");
+    assert!(
+        focused_buffer[(column, row)]
+            .modifier
+            .contains(Modifier::BOLD),
+        "focused right-pane selection should still use selected text style"
+    );
+
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Active);
+    let unfocused_buffer = render_model_buffer(&mut model, 120, 16);
+    let (column, row) = find_buffer_text_position(&unfocused_buffer, "global-extra")
+        .expect("custom prompt row should keep rendering after focus switches away");
+    assert!(
+        !unfocused_buffer[(column, row)]
+            .modifier
+            .contains(Modifier::BOLD),
+        "remembered right-pane selection should not stay visually selected after focus returns left"
+    );
+}
+
+#[test]
+fn mouse_click_on_right_header_tab_switches_focus_and_tab() {
+    let mut model = ready_model();
+    model.set_window(120, 16);
+    model.open_prompt_overlay();
+
+    let buffer = render_model_buffer(&mut model, 120, 16);
+    let (column, row) =
+        find_buffer_text_position(&buffer, "Custom Prompts").expect("header tab should render");
+    click_left(&mut model, column, row);
+
+    let state = model
+        .prompt_overlay
+        .as_ref()
+        .expect("prompt overlay should remain open");
+    assert_eq!(state.focus, super::PromptOverlayFocus::Inactive);
+    assert_eq!(state.inactive_tab, PromptOverlayInactiveTab::ExtraPrompts);
+}
+
+#[test]
+fn mouse_click_on_right_row_switches_focus_and_selects_item() {
+    let mut model = ready_model();
+    model.set_window(120, 16);
+    model.open_prompt_overlay();
+
+    let buffer = render_model_buffer(&mut model, 120, 16);
+    let (column, row) = find_buffer_text_position(&buffer, "repo-bootstrap")
+        .expect("second discovered skill should render");
+    click_left(&mut model, column, row);
+
+    let state = model
+        .prompt_overlay
+        .as_ref()
+        .expect("prompt overlay should remain open");
+    assert_eq!(state.focus, super::PromptOverlayFocus::Inactive);
+    assert_eq!(
+        state.inactive_tab,
+        PromptOverlayInactiveTab::LongLivedSkills
+    );
+    assert_eq!(
+        state.inactive_selected_row_id.as_deref(),
+        Some("skill:repo-bootstrap:project")
+    );
+}
+
+#[test]
+fn mouse_click_on_left_row_switches_focus_and_selects_item() {
+    let mut model = ready_model();
+    model.set_window(120, 16);
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    let buffer = render_model_buffer(&mut model, 120, 16);
+    let (column, row) =
+        find_buffer_text_position(&buffer, "repo-rules").expect("active row should render");
+    click_left(&mut model, column, row);
+
+    let state = model
+        .prompt_overlay
+        .as_ref()
+        .expect("prompt overlay should remain open");
+    assert_eq!(state.focus, super::PromptOverlayFocus::Active);
+    assert_eq!(state.active_selected, 2);
+}
+
+#[test]
+fn custom_prompt_scope_dialog_is_centered_within_right_pane() {
+    let mut model = ready_model();
+    model.set_window(100, 16);
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('a')));
+
+    let buffer = render_model_buffer(&mut model, 100, 16);
+    let rows = rendered_rows(&buffer);
+    let (actual_x, actual_y) =
+        find_text_position(&rows, "╭").expect("dialog top-left corner should render");
+
+    let chrome = fullscreen_list_chrome_rects(Rect::new(0, 0, 100, 16)).expect("chrome should fit");
+    let [_left_pane, _gutter, right_pane] = Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Length(1),
+        Constraint::Percentage(50),
+    ])
+    .areas(chrome.body);
+    let dialog_width = right_pane.width.min(52);
+    let dialog_height = 7u16.min(right_pane.height);
+    let expected_x = right_pane.x + right_pane.width.saturating_sub(dialog_width) / 2;
+    let expected_y = right_pane.y + right_pane.height.saturating_sub(dialog_height) / 2;
+
+    assert_eq!(actual_x, expected_x);
+    assert_eq!(actual_y, expected_y);
 }
 
 #[test]

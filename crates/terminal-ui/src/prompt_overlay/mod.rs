@@ -1,6 +1,6 @@
 mod preview;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
@@ -202,6 +202,15 @@ struct PromptOverlayActionAvailability {
     can_reorder_active: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PromptOverlayLayoutRects {
+    chrome: crate::fullscreen_list_chrome::FullscreenListChromeRects,
+    left_pane: Rect,
+    left_body: Rect,
+    right_pane: Rect,
+    right_body: Rect,
+}
+
 impl Model {
     pub(crate) fn prompt_overlay_active(&self) -> bool {
         self.prompt_overlay.is_some()
@@ -348,7 +357,7 @@ impl Model {
         }
 
         frame.render_widget(Clear, area);
-        let Some(chrome) = fullscreen_list_chrome_rects(area) else {
+        let Some(layout) = prompt_overlay_layout_rects(area) else {
             return;
         };
 
@@ -356,19 +365,14 @@ impl Model {
             Paragraph::new(
                 self.prompt_overlay_header_line(usize::from(area.width), state.inactive_tab),
             ),
-            chrome.header,
+            layout.chrome.header,
         );
         frame.render_widget(
             Paragraph::new(subtle_rule_line(usize::from(area.width), self.palette)),
-            chrome.header_rule,
+            layout.chrome.header_rule,
         );
-
-        let [left_pane, gutter, right_pane] = Layout::horizontal([
-            Constraint::Percentage(50),
-            Constraint::Length(1),
-            Constraint::Percentage(50),
-        ])
-        .areas(chrome.body);
+        let gutter_x = layout.left_pane.x.saturating_add(layout.left_pane.width);
+        let gutter = Rect::new(gutter_x, layout.left_pane.y, 1, layout.left_pane.height);
 
         if gutter.width > 0 {
             frame.render_widget(
@@ -380,24 +384,24 @@ impl Model {
             );
         }
 
-        self.render_prompt_overlay_active_pane(frame, left_pane, state);
-        self.render_prompt_overlay_inactive_pane(frame, right_pane, state);
+        self.render_prompt_overlay_active_pane(frame, layout.left_pane, state);
+        self.render_prompt_overlay_inactive_pane(frame, layout.right_pane, state);
 
         let focused_page = self.prompt_overlay_focused_page_label(state, area.height);
         frame.render_widget(
             Paragraph::new(build_labeled_rule(area.width, focused_page, self.palette)),
-            chrome.page_rule,
+            layout.chrome.page_rule,
         );
         frame.render_widget(
             Paragraph::new(Line::styled(
                 self.prompt_overlay_footer_hint(area.width),
                 tertiary_text_style(self.palette).add_modifier(Modifier::ITALIC),
             )),
-            chrome.footer,
+            layout.chrome.footer,
         );
 
         if let Some(dialog) = state.dialog.as_ref() {
-            self.render_prompt_overlay_dialog(frame, area, dialog);
+            self.render_prompt_overlay_dialog(frame, layout.right_pane, dialog);
         }
     }
 
@@ -1311,6 +1315,67 @@ impl Model {
         self.sync_prompt_overlay_state();
     }
 
+    pub(crate) fn handle_prompt_overlay_mouse_down(
+        &mut self,
+        button: MouseButton,
+        column: u16,
+        row: u16,
+    ) -> OverlayInputResult {
+        if !self.prompt_overlay_active() {
+            return OverlayInputResult::Ignored;
+        }
+        if button != MouseButton::Left || self.prompt_overlay_preview_active() {
+            return OverlayInputResult::Handled;
+        }
+        if self.prompt_overlay_dialog_active() {
+            return self.handle_prompt_overlay_dialog_mouse_down(column, row);
+        }
+
+        let Some((active_tab, _focus)) = self
+            .prompt_overlay
+            .as_ref()
+            .map(|state| (state.inactive_tab, state.focus))
+        else {
+            return OverlayInputResult::Handled;
+        };
+        let Some(layout) = prompt_overlay_layout_rects(Rect::new(0, 0, self.width, self.height))
+        else {
+            return OverlayInputResult::Handled;
+        };
+
+        if let Some(tab) =
+            self.prompt_overlay_header_tab_at(column, row, layout.chrome.header, active_tab)
+        {
+            self.set_prompt_overlay_focus(PromptOverlayFocus::Inactive);
+            if active_tab != tab {
+                self.set_prompt_overlay_inactive_tab(tab);
+            }
+            return OverlayInputResult::Handled;
+        }
+
+        if prompt_overlay_rect_contains(layout.left_pane, column, row) {
+            self.set_prompt_overlay_focus(PromptOverlayFocus::Active);
+            if let Some(visible_offset) =
+                prompt_overlay_visible_offset_for_row(layout.left_body, row)
+            {
+                self.select_prompt_overlay_active_row(visible_offset);
+            }
+            return OverlayInputResult::Handled;
+        }
+
+        if prompt_overlay_rect_contains(layout.right_pane, column, row) {
+            self.set_prompt_overlay_focus(PromptOverlayFocus::Inactive);
+            if let Some(visible_offset) =
+                prompt_overlay_visible_offset_for_row(layout.right_body, row)
+            {
+                self.select_prompt_overlay_inactive_row(visible_offset);
+            }
+            return OverlayInputResult::Handled;
+        }
+
+        OverlayInputResult::Handled
+    }
+
     fn cycle_prompt_overlay_inactive_tab(&mut self, delta: isize) {
         let Some(state) = self.prompt_overlay.as_mut() else {
             return;
@@ -1320,6 +1385,14 @@ impl Model {
         } else {
             state.inactive_tab.next()
         };
+        self.sync_prompt_overlay_state();
+    }
+
+    fn set_prompt_overlay_inactive_tab(&mut self, tab: PromptOverlayInactiveTab) {
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return;
+        };
+        state.inactive_tab = tab;
         self.sync_prompt_overlay_state();
     }
 
@@ -1414,6 +1487,26 @@ impl Model {
         self.sync_prompt_overlay_state();
     }
 
+    fn select_prompt_overlay_active_row(&mut self, visible_offset: usize) {
+        let total = self.prompt_overlay_left_rows().len();
+        let current_scroll = self
+            .prompt_overlay
+            .as_ref()
+            .map(|state| state.active_scroll)
+            .unwrap_or_default();
+        let selected = current_scroll.saturating_add(visible_offset);
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return;
+        };
+        if total == 0 {
+            state.active_selected = 0;
+            state.active_scroll = 0;
+            return;
+        }
+        state.active_selected = selected.min(total.saturating_sub(1));
+        self.sync_prompt_overlay_state();
+    }
+
     fn move_prompt_overlay_inactive_selection(&mut self, direction: ListNavigationDirection) {
         let inactive_tab = match self.prompt_overlay.as_ref() {
             Some(state) => state.inactive_tab,
@@ -1451,6 +1544,40 @@ impl Model {
         };
         state.inactive_selected = next;
         state.inactive_selected_row_id = next_reference_id;
+        self.sync_prompt_overlay_state();
+    }
+
+    fn select_prompt_overlay_inactive_row(&mut self, visible_offset: usize) {
+        let (inactive_tab, current_scroll, rows) = match self.prompt_overlay.as_ref() {
+            Some(state) => (
+                state.inactive_tab,
+                state.inactive_scroll,
+                self.prompt_overlay_inactive_rows(state.inactive_tab),
+            ),
+            None => return,
+        };
+        if rows.is_empty() {
+            let Some(state) = self.prompt_overlay.as_mut() else {
+                return;
+            };
+            state.inactive_selected = 0;
+            state.inactive_scroll = 0;
+            state.inactive_selected_row_id = None;
+            return;
+        }
+
+        let selected = current_scroll
+            .saturating_add(visible_offset)
+            .min(rows.len().saturating_sub(1));
+        let row_id = rows.get(selected).map(prompt_overlay_inactive_row_id);
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return;
+        };
+        if state.inactive_tab != inactive_tab {
+            return;
+        }
+        state.inactive_selected = selected;
+        state.inactive_selected_row_id = row_id;
         self.sync_prompt_overlay_state();
     }
 
@@ -1806,18 +1933,10 @@ impl Model {
     fn render_prompt_overlay_dialog(
         &self,
         frame: &mut RenderFrame<'_>,
-        area: Rect,
+        anchor_area: Rect,
         dialog: &PromptOverlayDialog,
     ) {
-        let dialog_width = area.width.min(52);
-        let dialog_height = 7u16.min(area.height);
-        let dialog_x = area
-            .x
-            .saturating_add(area.width.saturating_sub(dialog_width) / 2);
-        let dialog_y = area
-            .y
-            .saturating_add(area.height.saturating_sub(dialog_height) / 2);
-        let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
+        let dialog_area = prompt_overlay_dialog_area(anchor_area);
         frame.render_widget(Clear, dialog_area);
 
         let lines = match dialog {
@@ -1840,6 +1959,112 @@ impl Model {
         let inner_area = block.inner(dialog_area);
         frame.render_widget(block, dialog_area);
         frame.render_widget(Paragraph::new(lines), inner_area);
+    }
+
+    fn handle_prompt_overlay_dialog_mouse_down(
+        &mut self,
+        column: u16,
+        row: u16,
+    ) -> OverlayInputResult {
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return OverlayInputResult::Handled;
+        };
+        let Some(layout) = prompt_overlay_layout_rects(Rect::new(0, 0, self.width, self.height))
+        else {
+            return OverlayInputResult::Handled;
+        };
+        let dialog_area = prompt_overlay_dialog_area(layout.right_pane);
+        if !prompt_overlay_rect_contains(dialog_area, column, row) {
+            return OverlayInputResult::Handled;
+        }
+
+        match state.dialog.as_mut() {
+            Some(PromptOverlayDialog::CreateExtraPromptScope { selected_scope }) => {
+                let inner_area = panel_block(self.palette).inner(dialog_area);
+                let scope_row = inner_area.y.saturating_add(2);
+                if row != scope_row {
+                    return OverlayInputResult::Handled;
+                }
+
+                let project_label = if *selected_scope == PromptAssemblyScope::Project {
+                    "[Project]"
+                } else {
+                    "Project"
+                };
+                let global_label = if *selected_scope == PromptAssemblyScope::Global {
+                    "[Global]"
+                } else {
+                    "Global"
+                };
+                let project_end = inner_area.x.saturating_add(
+                    u16::try_from(display_width(project_label)).unwrap_or(u16::MAX),
+                );
+                let global_start = project_end.saturating_add(1);
+                let global_end = global_start
+                    .saturating_add(u16::try_from(display_width(global_label)).unwrap_or(u16::MAX));
+
+                if column >= inner_area.x && column < project_end {
+                    *selected_scope = PromptAssemblyScope::Project;
+                } else if column >= global_start && column < global_end {
+                    *selected_scope = PromptAssemblyScope::Global;
+                }
+                OverlayInputResult::Handled
+            }
+            None => OverlayInputResult::Handled,
+        }
+    }
+
+    fn prompt_overlay_header_tab_at(
+        &self,
+        column: u16,
+        row: u16,
+        header_area: Rect,
+        active_tab: PromptOverlayInactiveTab,
+    ) -> Option<PromptOverlayInactiveTab> {
+        if row != header_area.y
+            || column < header_area.x
+            || column >= header_area.x.saturating_add(header_area.width)
+        {
+            return None;
+        }
+
+        let width = usize::from(header_area.width);
+        let title = "Prompt Assembly";
+        let tabs = self.prompt_overlay_tabs_plain(active_tab);
+        let available_width = width.saturating_sub(PROMPT_OVERLAY_HEADER_INSET);
+        let tabs_width = display_width(&tabs) + PROMPT_OVERLAY_HEADER_TRAILING_PADDING;
+        let title_width = available_width
+            .saturating_sub(tabs_width)
+            .saturating_sub(1)
+            .max(1);
+        let title = truncate_display_width_with_ellipsis(title, title_width);
+        let padding = available_width
+            .saturating_sub(display_width(&title))
+            .saturating_sub(tabs_width)
+            .max(1);
+        let mut current_column = usize::from(header_area.x)
+            .saturating_add(PROMPT_OVERLAY_HEADER_INSET)
+            .saturating_add(display_width(&title))
+            .saturating_add(padding);
+        let clicked_column = usize::from(column);
+
+        for (index, tab) in PromptOverlayInactiveTab::ALL.iter().copied().enumerate() {
+            if index > 0 {
+                current_column = current_column.saturating_add(1);
+            }
+            let label = if tab == active_tab {
+                format!("[{}]", tab.label())
+            } else {
+                tab.label().to_string()
+            };
+            let label_end = current_column.saturating_add(display_width(&label));
+            if clicked_column >= current_column && clicked_column < label_end {
+                return Some(tab);
+            }
+            current_column = label_end;
+        }
+
+        None
     }
 }
 
@@ -1950,6 +2175,71 @@ fn prompt_overlay_origin_sort_key(origin: PromptSourceOrigin) -> u8 {
     }
 }
 
+fn prompt_overlay_layout_rects(area: Rect) -> Option<PromptOverlayLayoutRects> {
+    let chrome = fullscreen_list_chrome_rects(area)?;
+    let [left_pane, _gutter, right_pane] = Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Length(1),
+        Constraint::Percentage(50),
+    ])
+    .areas(chrome.body);
+    let [_left_header, left_body] =
+        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(left_pane);
+    let [_right_header, right_body] =
+        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(right_pane);
+    Some(PromptOverlayLayoutRects {
+        chrome,
+        left_pane,
+        left_body,
+        right_pane,
+        right_body,
+    })
+}
+
+fn prompt_overlay_dialog_area(anchor_area: Rect) -> Rect {
+    let dialog_width = anchor_area.width.min(52);
+    let dialog_height = 7u16.min(anchor_area.height);
+    let dialog_x = anchor_area
+        .x
+        .saturating_add(anchor_area.width.saturating_sub(dialog_width) / 2);
+    let dialog_y = anchor_area
+        .y
+        .saturating_add(anchor_area.height.saturating_sub(dialog_height) / 2);
+    Rect::new(dialog_x, dialog_y, dialog_width, dialog_height)
+}
+
+fn prompt_overlay_rect_contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
+}
+
+fn prompt_overlay_visible_offset_for_row(body_area: Rect, row: u16) -> Option<usize> {
+    (row >= body_area.y && row < body_area.y.saturating_add(body_area.height))
+        .then(|| usize::from(row.saturating_sub(body_area.y)))
+}
+
+fn prompt_overlay_selection_styles(
+    selected: bool,
+    focused: bool,
+    palette: crate::theme::TerminalPalette,
+) -> (Style, Style, &'static str) {
+    let visually_selected = selected && focused;
+    let item_style = if visually_selected {
+        primary_text_style(palette).bold()
+    } else {
+        secondary_text_style(palette)
+    };
+    let marker_style = if visually_selected {
+        command_accent_text_style(palette)
+    } else {
+        tertiary_text_style(palette)
+    };
+    let marker = if visually_selected { "█" } else { " " };
+    (item_style, marker_style, marker)
+}
+
 struct PromptOverlayLineListWidget<'a> {
     lines: &'a [Line<'static>],
 }
@@ -2046,17 +2336,8 @@ fn prompt_overlay_left_row_line(
             prompt_overlay_shadowed_detail_row_text(source, content_width)
         }
     };
-    let item_style = if selected {
-        primary_text_style(palette).bold()
-    } else {
-        secondary_text_style(palette)
-    };
-    let marker_style = if selected {
-        command_accent_text_style(palette)
-    } else {
-        tertiary_text_style(palette)
-    };
-    let marker = if selected && focused { "█" } else { " " };
+    let (item_style, marker_style, marker) =
+        prompt_overlay_selection_styles(selected, focused, palette);
     prompt_overlay_list_line(
         marker,
         marker_style,
@@ -2090,17 +2371,8 @@ fn prompt_overlay_discovered_skill_lines(
         .map(|row| {
             let selected = selected_row_id == Some(prompt_overlay_inactive_row_id(row).as_str());
             let content_width = width.saturating_sub(PROMPT_OVERLAY_ROW_PREFIX_WIDTH).max(1);
-            let item_style = if selected {
-                primary_text_style(palette).bold()
-            } else {
-                secondary_text_style(palette)
-            };
-            let marker_style = if selected {
-                command_accent_text_style(palette)
-            } else {
-                tertiary_text_style(palette)
-            };
-            let marker = if selected && focused { "█" } else { " " };
+            let (item_style, marker_style, marker) =
+                prompt_overlay_selection_styles(selected, focused, palette);
             let label = prompt_overlay_skill_row_text(row, content_width);
             prompt_overlay_list_line(
                 marker,
@@ -2122,17 +2394,8 @@ fn prompt_overlay_inactive_row_line(
     palette: crate::theme::TerminalPalette,
 ) -> Line<'static> {
     let content_width = width.saturating_sub(PROMPT_OVERLAY_ROW_PREFIX_WIDTH).max(1);
-    let item_style = if selected {
-        primary_text_style(palette).bold()
-    } else {
-        secondary_text_style(palette)
-    };
-    let marker_style = if selected {
-        command_accent_text_style(palette)
-    } else {
-        tertiary_text_style(palette)
-    };
-    let marker = if selected && focused { "█" } else { " " };
+    let (item_style, marker_style, marker) =
+        prompt_overlay_selection_styles(selected, focused, palette);
     let label = match row {
         PromptOverlayInactiveRow::ExtraPromptCandidate {
             source,

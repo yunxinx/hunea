@@ -342,6 +342,9 @@ impl Model {
             Some(ModalLayer::MessageHistory) => {
                 self.handle_message_history_picker_mouse_down(button, column, row)
             }
+            Some(ModalLayer::PromptOverlay) => {
+                self.handle_prompt_overlay_mouse_down(button, column, row)
+            }
             Some(_) => OverlayInputResult::Handled,
             None => OverlayInputResult::Ignored,
         }

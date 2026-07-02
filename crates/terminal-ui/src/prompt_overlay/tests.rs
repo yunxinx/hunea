@@ -305,21 +305,60 @@ fn render_uses_single_header_row_with_right_aligned_tabs_and_table_headers() {
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 90, 16)).join("\n");
 
-    assert!(rows.contains("Prompt Assembly · 4 active · 3 candidates"));
+    assert!(rows.contains("Prompt Assembly"));
+    assert!(!rows.contains("active ·"));
+    assert!(!rows.contains("candidates"));
     assert!(!rows.contains("View:"));
     assert!(!rows.contains("scope=project"));
     assert!(!rows.contains("scope=global"));
     assert!(!rows.contains("Next New Session"));
     assert!(rows.contains("[Skill]"));
-    assert!(rows.contains("Custom"));
+    assert!(rows.contains("Custom Prompts"));
     assert!(rows.contains("Sel"));
     assert!(rows.contains("Ord"));
     assert!(rows.contains("Source"));
     assert!(rows.contains("Type"));
     assert!(rows.contains("Scope"));
+    assert!(!rows.contains("Num"));
     assert!(rows.contains("●"));
     assert!(!rows.contains("Active Sources"));
     assert!(!rows.contains("Inactive Sources"));
+}
+
+#[test]
+fn focused_page_label_uses_selection_counts_instead_of_pages() {
+    let mut model = ready_model();
+    model.set_window(90, 16);
+    model.open_prompt_overlay();
+
+    let active_label = {
+        let state = model
+            .prompt_overlay
+            .as_ref()
+            .expect("prompt overlay should open");
+        model.prompt_overlay_focused_page_label(state, 16)
+    };
+    assert_eq!(active_label, " Active 1/4 ");
+
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let inactive_skill_label = {
+        let state = model
+            .prompt_overlay
+            .as_ref()
+            .expect("prompt overlay should stay open");
+        model.prompt_overlay_focused_page_label(state, 16)
+    };
+    assert_eq!(inactive_skill_label, " 1/2 ");
+
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let inactive_custom_label = {
+        let state = model
+            .prompt_overlay
+            .as_ref()
+            .expect("prompt overlay should stay open");
+        model.prompt_overlay_focused_page_label(state, 16)
+    };
+    assert_eq!(inactive_custom_label, " 1/1 ");
 }
 
 #[test]
@@ -569,9 +608,59 @@ fn a_on_custom_tab_opens_scope_picker_instead_of_creating_immediately() {
     );
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 100, 16)).join("\n");
-    assert!(rows.contains("Create custom in"));
+    assert!(rows.contains("Create custom prompt in"));
     assert!(rows.contains("Project"));
     assert!(rows.contains("Global"));
+}
+
+#[test]
+fn scope_picker_renders_rounded_border_selected_scope_background_and_spacing() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('a')));
+
+    let buffer = render_model_buffer(&mut model, 100, 16);
+    let rows = rendered_rows(&buffer);
+    let joined = rows.join("\n");
+    assert!(joined.contains("╭"));
+    assert!(joined.contains("╮"));
+    assert!(joined.contains("╰"));
+    assert!(joined.contains("╯"));
+
+    let scope_row_index = rows
+        .iter()
+        .position(|row| row.contains("[Project]") && row.contains("Global"))
+        .expect("scope row should render");
+    let footer_row_index = rows
+        .iter()
+        .position(|row| {
+            row.contains("←/→/h/l select")
+                && row.contains("Enter confirm")
+                && row.contains("Esc cancel")
+        })
+        .expect("footer row should render");
+    assert!(
+        footer_row_index >= scope_row_index + 2,
+        "scope row and footer row should have a blank line between them: rows={rows:?}"
+    );
+
+    let scope_row = &rows[scope_row_index];
+    let scope_byte_index = scope_row
+        .find("[Project]")
+        .expect("selected scope should render");
+    let scope_column = scope_row[..scope_byte_index].chars().count();
+    assert_eq!(
+        buffer[(
+            u16::try_from(scope_column).expect("scope column should fit"),
+            u16::try_from(scope_row_index).expect("scope row index should fit")
+        )]
+            .bg,
+        default_palette()
+            .surface
+            .expect("default palette should expose a surface background"),
+    );
 }
 
 #[test]
@@ -669,7 +758,7 @@ fn render_uses_fixed_width_table_columns_with_balanced_split() {
 }
 
 #[test]
-fn skill_num_column_uses_visible_discovery_order_after_sorting() {
+fn skills_tab_keeps_sorted_names_after_removing_num_column() {
     let mut model = ready_model();
     model.set_window(120, 20);
     model.prompt_assembly.discovered_skills = vec![
@@ -710,12 +799,24 @@ fn skill_num_column_uses_visible_discovery_order_after_sorting() {
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
 
-    let rows = rendered_rows(&render_model_buffer(&mut model, 120, 20)).join("\n");
-    assert!(rows.contains("  1  caveman"));
-    assert!(rows.contains("  2  codebase-design"));
-    assert!(rows.contains("  M  ask-matt"));
-    assert!(!rows.contains(" 21  caveman"));
-    assert!(!rows.contains("  8  codebase-design"));
+    let rows = rendered_rows(&render_model_buffer(&mut model, 120, 20));
+    let caveman_row = rows
+        .iter()
+        .position(|row| row.contains("caveman"))
+        .expect("caveman row should render");
+    let codebase_design_row = rows
+        .iter()
+        .position(|row| row.contains("codebase-design"))
+        .expect("codebase-design row should render");
+    let ask_matt_row = rows
+        .iter()
+        .position(|row| row.contains("ask-matt") && row.contains("(manual)"))
+        .expect("manual skill row should render");
+
+    assert!(caveman_row < codebase_design_row);
+    assert!(codebase_design_row < ask_matt_row);
+    assert!(!rows.join("\n").contains(" 21 "));
+    assert!(!rows.join("\n").contains("  8 "));
 }
 
 #[test]
@@ -747,8 +848,7 @@ fn manual_only_skill_stays_visible_with_manual_marker() {
         .lines()
         .find(|row| row.contains("ask-matt") && row.contains("(manual)"))
         .expect("manual skill row should render");
-    assert!(manual_row.contains('-'));
-    assert!(manual_row.contains('M'));
+    assert!(manual_row.contains("(manual)"));
 }
 
 #[test]
@@ -844,7 +944,7 @@ fn manual_only_skill_preview_shows_notice_above_body() {
 }
 
 #[test]
-fn skills_tab_uses_num_column_label_instead_of_ord() {
+fn skills_tab_removes_num_column() {
     let mut model = ready_model();
     model.set_window(120, 16);
     model.open_prompt_overlay();
@@ -860,8 +960,8 @@ fn skills_tab_uses_num_column_label_instead_of_ord() {
         .nth(1)
         .expect("right pane should exist");
 
-    assert!(right_pane.contains("Num"));
     assert!(!right_pane.contains("Ord"));
+    assert!(!right_pane.contains("Num"));
 }
 
 #[test]
@@ -909,7 +1009,7 @@ fn empty_skills_state_aligns_with_sel_column() {
     let rows = rendered_rows(&render_model_buffer(&mut model, 120, 16));
     let right_header = rows
         .iter()
-        .find(|row| row.contains("Num") && row.contains("Name") && row.contains("Scope"))
+        .find(|row| row.contains("Sel") && row.contains("Name") && row.contains("Scope"))
         .expect("skills header should render");
     let empty_row = rows
         .iter()
@@ -945,7 +1045,7 @@ fn selected_header_tab_uses_surface_background_and_trailing_padding() {
         .find("[Skill]")
         .expect("selected skill tab should render");
     let skill_index = header_row[..skill_byte_index].chars().count();
-    let trailing_index = skill_index + "[Skill] Custom".chars().count();
+    let trailing_index = skill_index + "[Skill] Custom Prompts".chars().count();
 
     assert_eq!(
         buffer[(u16::try_from(skill_index).expect("tab index should fit"), 0)].bg,
@@ -1380,7 +1480,7 @@ fn footer_hides_custom_and_skill_actions_on_left_pane() {
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
 
-    assert!(!rows.contains("a/A add custom"));
+    assert!(!rows.contains("a create prompt"));
     assert!(!rows.contains("i/I add skill"));
     assert!(rows.contains("d remove"));
     assert!(rows.contains("x disable"));
@@ -1410,11 +1510,27 @@ fn footer_shows_custom_actions_only_on_custom_tab() {
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
 
-    assert!(rows.contains("a add custom"));
+    assert!(rows.contains("a create prompt"));
     assert!(!rows.contains("a/A add extra"));
     assert!(!rows.contains("i/I add skill"));
     assert!(rows.contains("d remove"));
     assert!(!rows.contains("J/K reorder"));
+}
+
+#[test]
+fn footer_shows_create_prompt_on_empty_custom_tab() {
+    let mut model = ready_model();
+    model.prompt_assembly.extra_prompt_candidates.clear();
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+
+    assert!(rows.contains("a create prompt"));
+    assert!(!rows.contains("d remove"));
+    assert!(!rows.contains("e/ctrl+g edit"));
 }
 
 #[test]
@@ -1426,7 +1542,7 @@ fn footer_hides_custom_edit_and_remove_actions_on_skills_tab() {
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
 
-    assert!(!rows.contains("a/A add custom"));
+    assert!(!rows.contains("a create prompt"));
     assert!(!rows.contains("i/I add skill"));
     assert!(!rows.contains("d remove"));
     assert!(!rows.contains("e/ctrl+g edit"));

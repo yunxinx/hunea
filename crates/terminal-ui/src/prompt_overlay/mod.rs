@@ -26,8 +26,9 @@ use crate::{
     status_line::truncate_display_width_with_ellipsis,
     styled_text::render_line_with_full_width_background,
     theme::{
-        build_labeled_rule, command_accent_text_style, primary_text_style, secondary_text_style,
-        subtle_rule_line, surface_text_style, table_header_text_style, tertiary_text_style,
+        build_labeled_rule, command_accent_text_style, panel_block, primary_text_style,
+        secondary_text_style, subtle_rule_line, surface_text_style, table_header_text_style,
+        tertiary_text_style,
     },
 };
 
@@ -46,7 +47,6 @@ const PROMPT_OVERLAY_LEFT_SEL_WIDTH: usize = 3;
 const PROMPT_OVERLAY_LEFT_ORD_WIDTH: usize = 3;
 const PROMPT_OVERLAY_LEFT_KIND_WIDTH: usize = 4;
 const PROMPT_OVERLAY_LEFT_SCOPE_WIDTH: usize = 7;
-const PROMPT_OVERLAY_RIGHT_SKILL_ORD_WIDTH: usize = 3;
 const PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH: usize = 7;
 const PROMPT_OVERLAY_SCOPE_TRAILING_PADDING: usize = 2;
 
@@ -139,7 +139,7 @@ impl PromptOverlayInactiveTab {
     fn label(self) -> &'static str {
         match self {
             Self::LongLivedSkills => "Skill",
-            Self::ExtraPrompts => "Custom",
+            Self::ExtraPrompts => "Custom Prompts",
         }
     }
 }
@@ -1223,7 +1223,7 @@ impl Model {
             Some(PromptOverlaySelection::ExtraPromptCandidate(_)) => {
                 PromptOverlayActionAvailability {
                     can_edit: true,
-                    can_add_custom: true,
+                    can_add_custom: self.prompt_overlay_can_add_custom(),
                     can_remove: true,
                     can_toggle_selection: true,
                     can_reorder_active: false,
@@ -1238,12 +1238,19 @@ impl Model {
             },
             None => PromptOverlayActionAvailability {
                 can_edit: false,
-                can_add_custom: false,
+                can_add_custom: self.prompt_overlay_can_add_custom(),
                 can_remove: false,
                 can_toggle_selection: false,
                 can_reorder_active: false,
             },
         }
+    }
+
+    fn prompt_overlay_can_add_custom(&self) -> bool {
+        self.prompt_overlay.as_ref().is_some_and(|state| {
+            state.focus == PromptOverlayFocus::Inactive
+                && state.inactive_tab == PromptOverlayInactiveTab::ExtraPrompts
+        })
     }
 
     fn core_system_editor_body_for_scope(&self, scope: PromptAssemblyScope) -> String {
@@ -1519,14 +1526,7 @@ impl Model {
         width: usize,
         active_tab: PromptOverlayInactiveTab,
     ) -> Line<'static> {
-        let title = format!(
-            "Prompt Assembly · {} active · {} candidates",
-            self.prompt_assembly.snapshot.active_sources.len(),
-            self.prompt_overlay_inactive_source_count(PromptOverlayInactiveTab::ExtraPrompts)
-                + self.prompt_overlay_inactive_source_count(
-                    PromptOverlayInactiveTab::LongLivedSkills
-                )
-        );
+        let title = "Prompt Assembly";
         let tabs = self.prompt_overlay_tabs_plain(active_tab);
         let available_width = width.saturating_sub(PROMPT_OVERLAY_HEADER_INSET);
         let tabs_width = display_width(&tabs) + PROMPT_OVERLAY_HEADER_TRAILING_PADDING;
@@ -1534,7 +1534,7 @@ impl Model {
             .saturating_sub(tabs_width)
             .saturating_sub(1)
             .max(1);
-        let title = truncate_display_width_with_ellipsis(&title, title_width);
+        let title = truncate_display_width_with_ellipsis(title, title_width);
         let padding = available_width
             .saturating_sub(display_width(&title))
             .saturating_sub(tabs_width)
@@ -1594,7 +1594,7 @@ impl Model {
             parts.push("e/ctrl+g edit");
         }
         if actions.can_add_custom {
-            parts.push("a add custom");
+            parts.push("a create prompt");
         }
         if actions.can_remove {
             parts.push("d remove");
@@ -1777,19 +1777,21 @@ impl Model {
         spans
     }
 
-    fn prompt_overlay_focused_page_label(&self, state: &PromptOverlayState, height: u16) -> String {
+    fn prompt_overlay_focused_page_label(
+        &self,
+        state: &PromptOverlayState,
+        _height: u16,
+    ) -> String {
         match state.focus {
-            PromptOverlayFocus::Active => page_label(
-                "Active",
+            PromptOverlayFocus::Active => selection_label(
+                Some("Active"),
                 state.active_selected,
                 self.prompt_overlay_left_rows().len(),
-                prompt_overlay_active_visible_rows(height),
             ),
-            PromptOverlayFocus::Inactive => page_label(
-                "Inactive",
+            PromptOverlayFocus::Inactive => selection_label(
+                None,
                 state.inactive_selected,
                 self.prompt_overlay_inactive_source_count(state.inactive_tab),
-                prompt_overlay_inactive_visible_rows(height),
             ),
         }
     }
@@ -1807,8 +1809,8 @@ impl Model {
         area: Rect,
         dialog: &PromptOverlayDialog,
     ) {
-        let dialog_width = area.width.min(36);
-        let dialog_height = 5u16.min(area.height);
+        let dialog_width = area.width.min(52);
+        let dialog_height = 7u16.min(area.height);
         let dialog_x = area
             .x
             .saturating_add(area.width.saturating_sub(dialog_width) / 2);
@@ -1820,20 +1822,24 @@ impl Model {
 
         let lines = match dialog {
             PromptOverlayDialog::CreateExtraPromptScope { selected_scope } => vec![
-                Line::styled("Create custom in", primary_text_style(self.palette).bold()),
+                Line::styled(
+                    "Create custom prompt in",
+                    primary_text_style(self.palette).bold(),
+                ),
+                Line::raw(""),
+                prompt_overlay_scope_picker_line(*selected_scope, self.palette),
                 Line::raw(""),
                 Line::styled(
-                    prompt_overlay_scope_picker_line(*selected_scope),
-                    secondary_text_style(self.palette),
-                ),
-                Line::styled(
-                    "Enter confirm · Esc cancel",
+                    "←/→/h/l select · Enter confirm · Esc cancel",
                     tertiary_text_style(self.palette),
                 ),
             ],
         };
 
-        frame.render_widget(Paragraph::new(lines), dialog_area);
+        let block = panel_block(self.palette);
+        let inner_area = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+        frame.render_widget(Paragraph::new(lines), inner_area);
     }
 }
 
@@ -1846,10 +1852,32 @@ fn prompt_overlay_matches_resolved_source(
     resolved.kind == kind && resolved.reference_id == reference_id && resolved.origin == origin
 }
 
-fn prompt_overlay_scope_picker_line(scope: PromptAssemblyScope) -> String {
+fn prompt_overlay_scope_picker_line(
+    scope: PromptAssemblyScope,
+    palette: crate::theme::TerminalPalette,
+) -> Line<'static> {
+    let (project_style, global_style) = match scope {
+        PromptAssemblyScope::Project => (
+            surface_text_style(palette).bold(),
+            secondary_text_style(palette),
+        ),
+        PromptAssemblyScope::Global => (
+            secondary_text_style(palette),
+            surface_text_style(palette).bold(),
+        ),
+    };
+
     match scope {
-        PromptAssemblyScope::Project => "[Project] Global".to_string(),
-        PromptAssemblyScope::Global => "Project [Global]".to_string(),
+        PromptAssemblyScope::Project => Line::from(vec![
+            Span::styled("[Project]", project_style),
+            Span::raw(" "),
+            Span::styled("Global", global_style),
+        ]),
+        PromptAssemblyScope::Global => Line::from(vec![
+            Span::styled("Project", project_style),
+            Span::raw(" "),
+            Span::styled("[Global]", global_style),
+        ]),
     }
 }
 
@@ -2057,19 +2085,9 @@ fn prompt_overlay_discovered_skill_lines(
         )];
     }
 
-    let mut discovery_display_num = 0usize;
     skills
         .iter()
         .map(|row| {
-            let display_num = match row {
-                PromptOverlayInactiveRow::DiscoveredSkill { skill, .. }
-                    if skill.can_select_for_discovery =>
-                {
-                    discovery_display_num += 1;
-                    Some(discovery_display_num)
-                }
-                _ => None,
-            };
             let selected = selected_row_id == Some(prompt_overlay_inactive_row_id(row).as_str());
             let content_width = width.saturating_sub(PROMPT_OVERLAY_ROW_PREFIX_WIDTH).max(1);
             let item_style = if selected {
@@ -2083,7 +2101,7 @@ fn prompt_overlay_discovered_skill_lines(
                 tertiary_text_style(palette)
             };
             let marker = if selected && focused { "█" } else { " " };
-            let label = prompt_overlay_skill_row_text(row, display_num, content_width);
+            let label = prompt_overlay_skill_row_text(row, content_width);
             prompt_overlay_list_line(
                 marker,
                 marker_style,
@@ -2124,19 +2142,10 @@ fn prompt_overlay_inactive_row_line(
             prompt_overlay_extra_shadowed_detail_row_text(source, content_width)
         }
         PromptOverlayInactiveRow::DiscoveredSkill {
-            skill,
-            shadowed_count: _,
-        } => prompt_overlay_skill_row_text(
-            row,
-            if skill.can_select_for_discovery {
-                Some(0)
-            } else {
-                None
-            },
-            content_width,
-        ),
+            shadowed_count: _, ..
+        } => prompt_overlay_skill_row_text(row, content_width),
         PromptOverlayInactiveRow::DiscoveredSkillShadowedDetail { .. } => {
-            prompt_overlay_skill_row_text(row, None, content_width)
+            prompt_overlay_skill_row_text(row, content_width)
         }
     };
     prompt_overlay_list_line(
@@ -2208,7 +2217,6 @@ fn prompt_overlay_skill_header_text(width: usize) -> String {
     let name_width = prompt_overlay_right_skill_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
     let sel = prompt_overlay_center_text("Sel", PROMPT_OVERLAY_LEFT_SEL_WIDTH);
-    let ord = left_pad_display_width("Num", PROMPT_OVERLAY_RIGHT_SKILL_ORD_WIDTH);
     let name = format!(
         "{:<width$}",
         truncate_display_width_with_ellipsis("Name", name_width),
@@ -2221,7 +2229,7 @@ fn prompt_overlay_skill_header_text(width: usize) -> String {
     );
     let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
     let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
-    format!("{left_pad}{sel}{gap}{ord}{gap}{name}{gap}{scope}{trailing}")
+    format!("{left_pad}{sel}{gap}{name}{gap}{scope}{trailing}")
 }
 
 fn prompt_overlay_active_row_text(
@@ -2321,20 +2329,12 @@ fn prompt_overlay_extra_row_text(
     format!("{left_pad}{sel}{gap}{name}{gap}{scope}{trailing}")
 }
 
-fn prompt_overlay_skill_row_text(
-    row: &PromptOverlayInactiveRow,
-    display_num: Option<usize>,
-    width: usize,
-) -> String {
+fn prompt_overlay_skill_row_text(row: &PromptOverlayInactiveRow, width: usize) -> String {
     let name_width = prompt_overlay_right_skill_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
     let sel = prompt_overlay_center_text(
         &prompt_overlay_skill_sel_label(row),
         PROMPT_OVERLAY_LEFT_SEL_WIDTH,
-    );
-    let ord = left_pad_display_width(
-        &prompt_overlay_skill_num_label(row, display_num),
-        PROMPT_OVERLAY_RIGHT_SKILL_ORD_WIDTH,
     );
     let name = prompt_overlay_skill_name_cell(row, name_width);
     let scope = format!(
@@ -2344,7 +2344,7 @@ fn prompt_overlay_skill_row_text(
     );
     let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
     let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
-    format!("{left_pad}{sel}{gap}{ord}{gap}{name}{gap}{scope}{trailing}")
+    format!("{left_pad}{sel}{gap}{name}{gap}{scope}{trailing}")
 }
 
 fn prompt_overlay_extra_shadowed_detail_row_text(
@@ -2382,30 +2382,6 @@ fn prompt_overlay_skill_sel_label(row: &PromptOverlayInactiveRow) -> String {
                 "●".to_string()
             } else {
                 "○".to_string()
-            }
-        }
-        _ => "-".to_string(),
-    }
-}
-
-fn prompt_overlay_skill_num_label(
-    row: &PromptOverlayInactiveRow,
-    display_num: Option<usize>,
-) -> String {
-    match row {
-        PromptOverlayInactiveRow::DiscoveredSkill { skill, .. } => {
-            if !skill.can_select_for_discovery {
-                return "M".to_string();
-            }
-            display_num
-                .map(|order| order.to_string())
-                .unwrap_or_else(|| "-".to_string())
-        }
-        PromptOverlayInactiveRow::DiscoveredSkillShadowedDetail { skill } => {
-            if skill.can_select_for_discovery {
-                "-".to_string()
-            } else {
-                "M".to_string()
             }
         }
         _ => "-".to_string(),
@@ -2516,10 +2492,9 @@ fn prompt_overlay_right_skill_name_width(width: usize) -> usize {
     width
         .saturating_sub(PROMPT_OVERLAY_OUTER_PADDING)
         .saturating_sub(PROMPT_OVERLAY_LEFT_SEL_WIDTH)
-        .saturating_sub(PROMPT_OVERLAY_RIGHT_SKILL_ORD_WIDTH)
         .saturating_sub(PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH)
         .saturating_sub(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING)
-        .saturating_sub(PROMPT_OVERLAY_COLUMN_GAP * 3)
+        .saturating_sub(PROMPT_OVERLAY_COLUMN_GAP * 2)
         .max(12)
 }
 
@@ -2568,15 +2543,17 @@ fn prompt_overlay_center_text(value: &str, width: usize) -> String {
     format!("{}{}{}", " ".repeat(left), value, " ".repeat(right))
 }
 
-fn page_label(label: &str, selected: usize, total: usize, visible_rows: usize) -> String {
-    let page_size = visible_rows.max(1);
-    let page_count = total.max(1).div_ceil(page_size);
-    let page_number = if total == 0 {
-        1
+fn selection_label(label: Option<&str>, selected: usize, total: usize) -> String {
+    let position = if total == 0 {
+        0
     } else {
-        selected / page_size + 1
+        selected.min(total.saturating_sub(1)) + 1
     };
-    format!(" {label} {page_number}/{page_count} ")
+
+    match label {
+        Some(label) => format!(" {label} {position}/{total} "),
+        None => format!(" {position}/{total} "),
+    }
 }
 
 fn clamp_scroll(

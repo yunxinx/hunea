@@ -296,10 +296,14 @@ fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
     let project_state = &effective_project_state;
 
     let discovered_skills = discover_skills(work_dir, global_skill_root_override);
+    let effective_discovered_skills = effective_discovered_skills(&discovered_skills);
     let extra_prompt_bodies = indexed_extra_prompt_bodies(global_state, project_state);
-    let skill_discovery_skill_state =
-        merged_skill_discovery_skill_state(global_state, project_state, &discovered_skills);
-    let skills_by_name = discovered_skills
+    let skill_discovery_skill_state = merged_skill_discovery_skill_state(
+        global_state,
+        project_state,
+        &effective_discovered_skills,
+    );
+    let skills_by_name = effective_discovered_skills
         .iter()
         .map(|skill| (skill.name.clone(), skill.clone()))
         .collect::<HashMap<_, _>>();
@@ -398,7 +402,7 @@ fn resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
             project_state,
             &skill_discovery_skill_state,
         ),
-        manual_skills: manual_skill_inventory(&discovered_skills),
+        manual_skills: manual_skill_inventory(&effective_discovered_skills),
         builtin_core_system_body: BUILTIN_CORE_SYSTEM_PROMPT.to_string(),
         global_core_system_override: global_state.core_system_override.clone(),
         project_core_system_override: project_state.core_system_override.clone(),
@@ -1281,6 +1285,15 @@ fn extra_prompt_candidates(
     candidates
 }
 
+fn effective_discovered_skills(discovered_skills: &[DiscoveredSkill]) -> Vec<DiscoveredSkill> {
+    let mut seen_names = std::collections::HashSet::<&str>::new();
+    discovered_skills
+        .iter()
+        .filter(|skill| seen_names.insert(skill.name.as_str()))
+        .cloned()
+        .collect()
+}
+
 fn push_extra_prompt_candidates(
     candidates: &mut Vec<PromptAssemblyExtraPromptCandidate>,
     state: &PromptAssemblyScopeState,
@@ -1400,11 +1413,21 @@ fn parse_skill_discovery_override(content: &str) -> Option<(&str, &str)> {
 
 fn discovered_skill_inventory(
     discovered_skills: &[DiscoveredSkill],
-    _global_state: &PromptAssemblyScopeState,
-    _project_state: &PromptAssemblyScopeState,
+    global_state: &PromptAssemblyScopeState,
+    project_state: &PromptAssemblyScopeState,
     skill_state: &[PersistedSkillDiscoverySkillEntry],
 ) -> Vec<PromptAssemblyDiscoveredSkill> {
-    let state_by_name = skill_state
+    let global_state_by_name = global_state
+        .skill_discovery_skills
+        .iter()
+        .map(|entry| (entry.skill_name.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let project_state_by_name = project_state
+        .skill_discovery_skills
+        .iter()
+        .map(|entry| (entry.skill_name.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let merged_state_by_name = skill_state
         .iter()
         .map(|entry| (entry.skill_name.as_str(), entry))
         .collect::<HashMap<_, _>>();
@@ -1423,10 +1446,15 @@ fn discovered_skill_inventory(
             skill_path: skill.skill_path.display().to_string(),
             body: format_long_lived_skill_body(skill),
             can_select_for_discovery: skill.can_select_for_discovery(),
-            selected: state_by_name
-                .get(skill.name.as_str())
-                .map(|entry| entry.enabled)
-                .unwrap_or(skill.can_select_for_discovery()),
+            selected: prompt_overlay_skill_state_for_origin(
+                skill.origin,
+                skill.name.as_str(),
+                &global_state_by_name,
+                &project_state_by_name,
+            )
+            .or_else(|| merged_state_by_name.get(skill.name.as_str()).copied())
+            .map(|entry| entry.enabled)
+            .unwrap_or(skill.can_select_for_discovery()),
             selected_order: selected_order_by_name.get(skill.name.as_str()).copied(),
         })
         .collect::<Vec<_>>();
@@ -1437,14 +1465,43 @@ fn discovered_skill_inventory(
         left.title
             .cmp(&right.title)
             .then_with(|| left.skill_name.cmp(&right.skill_name))
+            .then_with(|| {
+                prompt_source_origin_sort_key(left.origin)
+                    .cmp(&prompt_source_origin_sort_key(right.origin))
+            })
     });
     manual_only.sort_by(|left, right| {
         left.title
             .cmp(&right.title)
             .then_with(|| left.skill_name.cmp(&right.skill_name))
+            .then_with(|| {
+                prompt_source_origin_sort_key(left.origin)
+                    .cmp(&prompt_source_origin_sort_key(right.origin))
+            })
     });
     discovery_eligible.extend(manual_only);
     discovery_eligible
+}
+
+fn prompt_overlay_skill_state_for_origin<'a>(
+    origin: PromptSourceOrigin,
+    skill_name: &str,
+    global_state_by_name: &HashMap<&'a str, &'a PersistedSkillDiscoverySkillEntry>,
+    project_state_by_name: &HashMap<&'a str, &'a PersistedSkillDiscoverySkillEntry>,
+) -> Option<&'a PersistedSkillDiscoverySkillEntry> {
+    match origin {
+        PromptSourceOrigin::Global => global_state_by_name.get(skill_name).copied(),
+        PromptSourceOrigin::Project => project_state_by_name.get(skill_name).copied(),
+        PromptSourceOrigin::Builtin => None,
+    }
+}
+
+fn prompt_source_origin_sort_key(origin: PromptSourceOrigin) -> u8 {
+    match origin {
+        PromptSourceOrigin::Project => 0,
+        PromptSourceOrigin::Global => 1,
+        PromptSourceOrigin::Builtin => 2,
+    }
 }
 
 fn manual_skill_inventory(
@@ -1471,7 +1528,7 @@ fn discover_skills(
     global_skill_root_override: Option<&Path>,
 ) -> Vec<DiscoveredSkill> {
     let mut discovered = Vec::new();
-    let mut seen_names = HashMap::<String, usize>::new();
+    let mut seen_names = HashMap::<(String, PromptSourceOrigin), usize>::new();
 
     for path in project_skill_search_dirs(work_dir) {
         discover_skills_from_root(
@@ -1501,7 +1558,7 @@ fn discover_skills_from_root(
     root: &Path,
     origin: PromptSourceOrigin,
     discovered: &mut Vec<DiscoveredSkill>,
-    seen_names: &mut HashMap<String, usize>,
+    seen_names: &mut HashMap<(String, PromptSourceOrigin), usize>,
 ) {
     if !root.is_dir() {
         return;
@@ -1523,16 +1580,17 @@ fn discover_skill_dir(
     dir: &Path,
     origin: PromptSourceOrigin,
     discovered: &mut Vec<DiscoveredSkill>,
-    seen_names: &mut HashMap<String, usize>,
+    seen_names: &mut HashMap<(String, PromptSourceOrigin), usize>,
 ) {
     let skill_path = dir.join(SKILL_FILE_NAME);
     if skill_path.is_file() {
         if let Some(skill) = parse_skill_file(&skill_path, origin) {
-            if seen_names.contains_key(&skill.name) {
+            let seen_key = (skill.name.clone(), origin);
+            if seen_names.contains_key(&seen_key) {
                 return;
             }
             let next_index = discovered.len();
-            seen_names.insert(skill.name.clone(), next_index);
+            seen_names.insert(seen_key, next_index);
             discovered.push(skill);
         }
         return;
@@ -1873,6 +1931,52 @@ mod tests {
             skill.description,
             "Ultra-compressed communication mode. Cuts token usage without losing technical accuracy."
         );
+    }
+
+    #[test]
+    fn manager_snapshot_keeps_project_and_global_skill_duplicates_for_overlay() {
+        let work_dir = temp_dir("skill-duplicates-visible");
+        let project_skill_dir = work_dir.join(".agents/skills/repo-bootstrap");
+        fs::create_dir_all(&project_skill_dir).expect("project skill dir should exist");
+        fs::write(
+            project_skill_dir.join(SKILL_FILE_NAME),
+            "---\nname: repo-bootstrap\ndescription: Project bootstrap\n---\n# Project Bootstrap\n",
+        )
+        .expect("project skill file should exist");
+        let global_skill_root = temp_dir("skill-duplicates-visible-global");
+        let global_skill_dir = global_skill_root.join("repo-bootstrap");
+        fs::create_dir_all(&global_skill_dir).expect("global skill dir should exist");
+        fs::write(
+            global_skill_dir.join(SKILL_FILE_NAME),
+            "---\nname: repo-bootstrap\ndescription: Global bootstrap\n---\n# Global Bootstrap\n",
+        )
+        .expect("global skill file should exist");
+
+        let snapshot = resolve_prompt_assembly_manager_snapshot_with_global_skill_root(
+            &work_dir,
+            &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
+            &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+            Some(global_skill_root.as_path()),
+        );
+
+        let visible_origins = snapshot
+            .discovered_skills
+            .iter()
+            .filter(|skill| skill.skill_name == "repo-bootstrap")
+            .map(|skill| skill.origin)
+            .collect::<Vec<_>>();
+        let manual_origins = snapshot
+            .manual_skills
+            .iter()
+            .filter(|skill| skill.skill_name == "repo-bootstrap")
+            .map(|skill| skill.origin)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            visible_origins,
+            vec![PromptSourceOrigin::Project, PromptSourceOrigin::Global]
+        );
+        assert_eq!(manual_origins, vec![PromptSourceOrigin::Project]);
     }
 
     #[test]

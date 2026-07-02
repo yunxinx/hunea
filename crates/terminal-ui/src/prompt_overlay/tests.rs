@@ -187,6 +187,20 @@ fn ready_model() -> Model {
     model
 }
 
+fn left_source_cell_text(row: &str, width: usize) -> String {
+    let source_width = super::prompt_overlay_left_source_width(width);
+    let source_start = super::PROMPT_OVERLAY_OUTER_PADDING
+        + super::PROMPT_OVERLAY_LEFT_SEL_WIDTH
+        + super::PROMPT_OVERLAY_COLUMN_GAP
+        + super::PROMPT_OVERLAY_LEFT_ORD_WIDTH
+        + super::PROMPT_OVERLAY_COLUMN_GAP;
+
+    row.chars()
+        .skip(source_start)
+        .take(source_width)
+        .collect::<String>()
+}
+
 #[test]
 fn command_panel_lists_prompt_command() {
     let mut model = ready_model();
@@ -291,7 +305,10 @@ fn render_uses_single_header_row_with_right_aligned_tabs_and_table_headers() {
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 90, 16)).join("\n");
 
-    assert!(rows.contains("Prompt Assembly · scope=project"));
+    assert!(rows.contains("Prompt Assembly · 4 active · 3 candidates"));
+    assert!(!rows.contains("View:"));
+    assert!(!rows.contains("scope=project"));
+    assert!(!rows.contains("scope=global"));
     assert!(!rows.contains("Next New Session"));
     assert!(rows.contains("[Skill]"));
     assert!(rows.contains("Custom"));
@@ -303,6 +320,278 @@ fn render_uses_single_header_row_with_right_aligned_tabs_and_table_headers() {
     assert!(rows.contains("●"));
     assert!(!rows.contains("Active Sources"));
     assert!(!rows.contains("Inactive Sources"));
+}
+
+#[test]
+fn default_active_list_keeps_disabled_and_missing_sources_visible() {
+    let mut model = ready_model();
+    model
+        .prompt_assembly
+        .managed_sources
+        .push(PromptAssemblyManagedSource {
+            reference_id: "missing-skill".to_string(),
+            kind: PromptSourceKind::LongLivedSkill,
+            title: "missing-skill".to_string(),
+            origin: Some(PromptSourceOrigin::Project),
+            enabled: true,
+            order: 5,
+        });
+    model
+        .prompt_assembly
+        .snapshot
+        .inactive_sources
+        .push(prompt_source(
+            "missing-skill",
+            "missing-skill",
+            PromptSourceKind::LongLivedSkill,
+            Some(PromptSourceOrigin::Project),
+            PromptSourceStatus::Inactive {
+                reason: PromptSourceInactiveReason::Missing,
+            },
+        ));
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+
+    assert!(rows.contains("safety-policy"));
+    assert!(rows.contains("missing-skill"));
+    assert!(rows.contains("missing"));
+}
+
+#[test]
+fn disabled_source_row_does_not_repeat_disabled_label_in_effective_view() {
+    let mut model = ready_model();
+    model.set_window(200, 16);
+    model.open_prompt_overlay();
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 200, 16));
+    let disabled_row = rows
+        .iter()
+        .find(|row| row.contains("safety-policy"))
+        .expect("disabled source row should render");
+
+    assert!(!disabled_row.contains("disabled"));
+}
+
+#[test]
+fn source_status_marker_renders_at_right_edge_of_source_column() {
+    let source = ready_model().prompt_assembly.managed_sources[2].clone();
+    let width = 60;
+    let row = super::prompt_overlay_active_row_text(
+        &source,
+        super::PromptOverlayManagedStatus::Missing,
+        0,
+        width,
+    );
+    let source_cell = left_source_cell_text(&row, width);
+    let expected = format!(
+        "{:<padding$}missing",
+        source.title,
+        padding = super::prompt_overlay_left_source_width(width) - "missing".len(),
+    );
+
+    assert_eq!(source_cell, expected);
+    assert!(!source_cell.contains('·'));
+}
+
+#[test]
+fn source_shadowed_count_marker_renders_at_right_edge_of_source_column() {
+    let source = ready_model().prompt_assembly.managed_sources[2].clone();
+    let width = 60;
+    let row = super::prompt_overlay_active_row_text(
+        &source,
+        super::PromptOverlayManagedStatus::Active,
+        2,
+        width,
+    );
+    let source_cell = left_source_cell_text(&row, width);
+    let expected = format!(
+        "{:<padding$}+2 shadowed",
+        source.title,
+        padding = super::prompt_overlay_left_source_width(width) - "+2 shadowed".len(),
+    );
+
+    assert_eq!(source_cell, expected);
+    assert!(!source_cell.contains('·'));
+}
+
+#[test]
+fn ctrl_e_expands_shadowed_detail_under_selected_winner() {
+    let mut model = ready_model();
+    model
+        .prompt_assembly
+        .snapshot
+        .inactive_sources
+        .push(prompt_source(
+            "repo-rules",
+            "repo-rules",
+            PromptSourceKind::ExtraPrompt,
+            Some(PromptSourceOrigin::Global),
+            PromptSourceStatus::Inactive {
+                reason: PromptSourceInactiveReason::Shadowed,
+            },
+        ));
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    let collapsed_rows = rendered_rows(&render_model_buffer(&mut model, 120, 16)).join("\n");
+    assert!(collapsed_rows.contains("+1 shadowed"));
+    assert!(!collapsed_rows.contains("shadowed global"));
+
+    let _ = model.handle_prompt_overlay_key(KeyEvent::new(
+        KeyCode::Char('e'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
+    let expanded_rows = rendered_rows(&render_model_buffer(&mut model, 120, 16)).join("\n");
+    assert!(expanded_rows.contains("shadowed global"));
+}
+
+#[test]
+fn ctrl_e_expands_shadowed_extra_candidate_under_winner() {
+    let mut model = ready_model();
+    model
+        .prompt_assembly
+        .extra_prompt_candidates
+        .push(PromptAssemblyExtraPromptCandidate {
+            reference_id: "global-extra".to_string(),
+            title: "global-extra".to_string(),
+            origin: PromptSourceOrigin::Project,
+            body: "# Project Extra\n".to_string(),
+            selected: true,
+        });
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    let collapsed_rows = rendered_rows(&render_model_buffer(&mut model, 120, 16)).join("\n");
+    assert!(collapsed_rows.contains("+1 shadowed"));
+    assert!(!collapsed_rows.contains("shadowed global"));
+
+    let _ = model.handle_prompt_overlay_key(KeyEvent::new(
+        KeyCode::Char('e'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
+    let expanded_rows = rendered_rows(&render_model_buffer(&mut model, 120, 16)).join("\n");
+    assert!(expanded_rows.contains("shadowed global"));
+}
+
+#[test]
+fn ctrl_e_expands_shadowed_skill_under_winner() {
+    let mut model = ready_model();
+    model.prompt_assembly.discovered_skills = vec![
+        PromptAssemblyDiscoveredSkill {
+            skill_name: "repo-bootstrap".to_string(),
+            title: "repo-bootstrap".to_string(),
+            description: "Project bootstrap".to_string(),
+            origin: PromptSourceOrigin::Project,
+            skill_path: "/tmp/project-repo-bootstrap/SKILL.md".to_string(),
+            body: "# Project Repo Bootstrap\n".to_string(),
+            can_select_for_discovery: true,
+            selected: true,
+            selected_order: Some(1),
+        },
+        PromptAssemblyDiscoveredSkill {
+            skill_name: "repo-bootstrap".to_string(),
+            title: "repo-bootstrap".to_string(),
+            description: "Global bootstrap".to_string(),
+            origin: PromptSourceOrigin::Global,
+            skill_path: "/tmp/global-repo-bootstrap/SKILL.md".to_string(),
+            body: "# Global Repo Bootstrap\n".to_string(),
+            can_select_for_discovery: true,
+            selected: false,
+            selected_order: Some(1),
+        },
+    ];
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    let collapsed_rows = rendered_rows(&render_model_buffer(&mut model, 120, 16)).join("\n");
+    assert!(collapsed_rows.contains("+1 shadowed"));
+    assert!(!collapsed_rows.contains("shadowed global"));
+
+    let _ = model.handle_prompt_overlay_key(KeyEvent::new(
+        KeyCode::Char('e'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
+    let expanded_rows = rendered_rows(&render_model_buffer(&mut model, 120, 16)).join("\n");
+    assert!(expanded_rows.contains("shadowed global"));
+}
+
+#[test]
+fn shadowed_detail_row_delete_targets_shadowed_source() {
+    let mut model = ready_model();
+    model
+        .prompt_assembly
+        .snapshot
+        .inactive_sources
+        .push(prompt_source(
+            "repo-rules",
+            "repo-rules",
+            PromptSourceKind::ExtraPrompt,
+            Some(PromptSourceOrigin::Global),
+            PromptSourceStatus::Inactive {
+                reason: PromptSourceInactiveReason::Shadowed,
+            },
+        ));
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::new(
+        KeyCode::Char('e'),
+        crossterm::event::KeyModifiers::CONTROL,
+    ));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::RemovePromptSource {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+                kind: PromptSourceKind::ExtraPrompt,
+                reference_id: "repo-rules".to_string(),
+            },
+        })
+    );
+}
+
+#[test]
+fn a_on_custom_tab_opens_scope_picker_instead_of_creating_immediately() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('a'))),
+        super::OverlayInputResult::Handled
+    );
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 100, 16)).join("\n");
+    assert!(rows.contains("Create custom in"));
+    assert!(rows.contains("Project"));
+    assert!(rows.contains("Global"));
+}
+
+#[test]
+fn scope_picker_confirms_selected_scope_for_custom_creation() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('a')));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Right));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Enter)),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::CreateExtraPrompt {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+                content: "# New prompt\n".to_string(),
+            },
+        })
+    );
 }
 
 #[test]
@@ -1041,8 +1330,8 @@ fn x_on_discovered_skill_emits_selection_toggle_mutation() {
             mutation:
                 runtime_domain::prompt_assembly::PromptAssemblyMutation::SetDiscoveredSkillSelected {
                     scope:
-                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
-                    skill_name: "repo-bootstrap".to_string(),
+                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+                    skill_name: "code-review".to_string(),
                     selected: false,
                 },
         })
@@ -1121,7 +1410,7 @@ fn footer_shows_custom_actions_only_on_custom_tab() {
 
     let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
 
-    assert!(rows.contains("a/A add custom"));
+    assert!(rows.contains("a add custom"));
     assert!(!rows.contains("a/A add extra"));
     assert!(!rows.contains("i/I add skill"));
     assert!(rows.contains("d remove"));

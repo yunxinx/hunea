@@ -24,6 +24,7 @@ use super::{
     composer::{Composer, PendingComposerCursorClick},
     context_budget::ContextBudgetState,
     copy_picker::CopyPickerState,
+    custom_prompt_picker::CustomPromptPickerState,
     entry_tree::{BRANCH_PICKER_LIST_ROWS_MAX, BRANCH_PICKER_LIST_ROWS_MIN},
     external_editor::ExternalEditorLaunch,
     file_picker::{FILE_PICKER_POPUP_MAX_HEIGHT, FILE_PICKER_POPUP_MIN_HEIGHT, FilePickerState},
@@ -101,9 +102,11 @@ pub struct Model {
     pub(super) command_panel_scroll: usize,
     pub(super) file_picker: Option<FilePickerState>,
     pub(super) skill_picker: Option<SkillPickerState>,
+    pub(super) custom_prompt_picker: Option<CustomPromptPickerState>,
     pub(super) file_search_cache: FileSearchCache,
     pub(super) dismissed_file_picker_token: Option<String>,
     pub(super) dismissed_skill_picker_token: Option<String>,
+    pub(super) dismissed_custom_prompt_picker_token: Option<String>,
     pub(super) copy_on_mouse_selection_release: bool,
     pub(super) swap_enter_and_send: bool,
     pub(super) ctrl_c_clears_input: bool,
@@ -246,9 +249,11 @@ impl Model {
             command_panel_scroll: 0,
             file_picker: None,
             skill_picker: None,
+            custom_prompt_picker: None,
             file_search_cache: FileSearchCache::default(),
             dismissed_file_picker_token: None,
             dismissed_skill_picker_token: None,
+            dismissed_custom_prompt_picker_token: None,
             copy_on_mouse_selection_release: options.copy_on_mouse_selection_release,
             swap_enter_and_send: options.swap_enter_and_send,
             ctrl_c_clears_input: options.ctrl_c_clears_input,
@@ -480,8 +485,10 @@ impl Model {
         self.command_panel_scroll = 0;
         self.file_picker = None;
         self.skill_picker = None;
+        self.custom_prompt_picker = None;
         self.dismissed_file_picker_token = None;
         self.dismissed_skill_picker_token = None;
+        self.dismissed_custom_prompt_picker_token = None;
         self.selection_runtime = SelectionRuntimeState::default();
         self.pending_composer_cursor_click = PendingComposerCursorClick::default();
         self.pending_reasoning_toggle_click = PendingReasoningToggleClick::default();

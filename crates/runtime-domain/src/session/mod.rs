@@ -41,7 +41,7 @@ pub use permission::{
 pub use recovery::{
     SessionBranchSummary, SessionBranchTreeNode, SessionBranchTreePayload, SessionPickerRow,
     SessionPreviewPayload, SessionResumePayload, SessionTreeBranchChoice, SessionTreePayload,
-    SessionTreeRow, SessionTreeRowKind, TranscriptReplayItem, TranscriptReplayRole,
-    TranscriptSkillBinding, TranscriptUserMessage,
+    SessionTreeRow, SessionTreeRowKind, TranscriptCustomPromptBinding, TranscriptReplayItem,
+    TranscriptReplayRole, TranscriptSkillBinding, TranscriptUserMessage,
 };
 pub use target::{ProviderTarget, RuntimeTarget};

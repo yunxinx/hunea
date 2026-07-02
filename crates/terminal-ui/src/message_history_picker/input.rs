@@ -281,5 +281,6 @@ impl Model {
             && !self.command_panel_active()
             && !self.file_picker_active()
             && !self.skill_picker_active()
+            && !self.custom_prompt_picker_active()
     }
 }

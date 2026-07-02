@@ -3,7 +3,9 @@
 #[cfg(test)]
 use std::path::Path;
 
-use runtime_domain::session::{TranscriptSkillBinding, TranscriptUserMessage};
+use runtime_domain::session::{
+    TranscriptCustomPromptBinding, TranscriptSkillBinding, TranscriptUserMessage,
+};
 
 /// TUI 内部保存的用户输入源消息。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,19 +21,22 @@ impl ComposerSourceMessage {
             message: TranscriptUserMessage {
                 content: content.into(),
                 skill_bindings: Vec::new(),
+                custom_prompt_bindings: Vec::new(),
             },
         }
     }
 
-    /// 使用显式 skill 绑定创建用户输入源消息。
-    pub(crate) fn user_text_with_skill_bindings(
+    /// 使用显式结构化绑定创建用户输入源消息。
+    pub(crate) fn user_text_with_bindings(
         content: impl Into<String>,
         skill_bindings: Vec<TranscriptSkillBinding>,
+        custom_prompt_bindings: Vec<TranscriptCustomPromptBinding>,
     ) -> Self {
         Self {
             message: TranscriptUserMessage {
                 content: content.into(),
                 skill_bindings,
+                custom_prompt_bindings,
             },
         }
     }
@@ -49,6 +54,11 @@ impl ComposerSourceMessage {
     /// 返回当前消息里的 skill 绑定。
     pub(crate) fn skill_bindings(&self) -> &[TranscriptSkillBinding] {
         &self.message.skill_bindings
+    }
+
+    /// 返回当前消息里的 custom prompt 绑定。
+    pub(crate) fn custom_prompt_bindings(&self) -> &[TranscriptCustomPromptBinding] {
+        &self.message.custom_prompt_bindings
     }
 
     /// 消费并返回原始用户输入文本。

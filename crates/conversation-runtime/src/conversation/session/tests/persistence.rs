@@ -303,6 +303,7 @@ fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_
             start_char: 0,
             end_char: 12,
         }],
+        custom_prompt_bindings: Vec::new(),
     };
     let request = conversation
         .prepare_turn_with_transcript(

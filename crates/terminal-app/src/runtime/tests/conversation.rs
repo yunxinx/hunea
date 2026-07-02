@@ -92,7 +92,10 @@ fn conversation_failure_before_provider_request_rolls_back_pending_user() {
     let target = request.target();
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::SubmitConversationTurn { target, request })
+        .handle_runtime_command(RuntimeCommand::SubmitConversationTurn {
+            target,
+            request: Box::new(request),
+        })
         .expect("conversation request should start");
 
     let mut events = Vec::new();
@@ -239,12 +242,16 @@ fn manual_skill_mentions_emit_synthetic_skill_usage_events_before_worker_failure
                 start_char: 28,
                 end_char: 40,
             }],
+            custom_prompt_bindings: Vec::new(),
         },
     );
     let target = request.target();
 
     coordinator
-        .handle_runtime_command(RuntimeCommand::SubmitConversationTurn { target, request })
+        .handle_runtime_command(RuntimeCommand::SubmitConversationTurn {
+            target,
+            request: Box::new(request),
+        })
         .expect("conversation should start");
 
     let events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);

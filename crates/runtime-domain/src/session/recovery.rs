@@ -77,12 +77,39 @@ pub struct TranscriptSkillBinding {
     pub end_char: usize,
 }
 
-/// `TranscriptUserMessage` 表示 transcript-visible 的用户消息及其可选 skill 绑定。
+impl TranscriptSkillBinding {
+    /// `visible_token_text` 返回 transcript 中应当出现的 `$skill` 可见 token。
+    #[must_use]
+    pub fn visible_token_text(&self) -> String {
+        format!("${}", self.skill_name)
+    }
+}
+
+/// `TranscriptCustomPromptBinding` 表示一次 user transcript 中仍可恢复的 `#prompt` 结构化绑定。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptCustomPromptBinding {
+    pub reference_id: String,
+    pub origin: PromptSourceOrigin,
+    pub start_char: usize,
+    pub end_char: usize,
+}
+
+impl TranscriptCustomPromptBinding {
+    /// `visible_token_text` 返回 transcript 中应当出现的 `#prompt` 可见 token。
+    #[must_use]
+    pub fn visible_token_text(&self) -> String {
+        format!("#{}", self.reference_id)
+    }
+}
+
+/// `TranscriptUserMessage` 表示 transcript-visible 的用户消息及其可选结构化绑定。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TranscriptUserMessage {
     pub content: String,
     #[serde(default)]
     pub skill_bindings: Vec<TranscriptSkillBinding>,
+    #[serde(default)]
+    pub custom_prompt_bindings: Vec<TranscriptCustomPromptBinding>,
 }
 
 /// `TranscriptReplayRole` 是恢复普通消息时可见消息的角色。

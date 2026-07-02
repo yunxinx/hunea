@@ -6,7 +6,7 @@ use crate::prompt_assembly::PromptAssemblyMutation;
 pub enum RuntimeCommand {
     SubmitConversationTurn {
         target: RuntimeTarget,
-        request: ConversationTurnRequest,
+        request: Box<ConversationTurnRequest>,
     },
     TruncateConversation {
         retained_user_turns: usize,
@@ -73,7 +73,7 @@ impl RuntimeCommand {
     pub fn submit_conversation_turn(request: ConversationTurnRequest) -> Self {
         Self::SubmitConversationTurn {
             target: request.target(),
-            request,
+            request: Box::new(request),
         }
     }
 

@@ -7,10 +7,12 @@ mod benchmark;
 #[doc(hidden)]
 pub mod benchmark;
 
+mod attached_prompt_picker_row;
 mod command_panel;
 mod composer;
 mod context_budget;
 mod copy_picker;
+mod custom_prompt_picker;
 mod debug;
 mod display_width;
 mod document;

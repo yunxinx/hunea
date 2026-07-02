@@ -423,7 +423,7 @@ fn transcript_replay_items_from_transcript_user_message(
         return Vec::new();
     }
 
-    if message.skill_bindings.is_empty() {
+    if message.skill_bindings.is_empty() && message.custom_prompt_bindings.is_empty() {
         return vec![TranscriptReplayItem::Message {
             role: TranscriptReplayRole::User,
             content: message.content.clone(),

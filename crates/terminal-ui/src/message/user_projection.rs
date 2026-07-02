@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::cell::Cell;
 
 use ratatui::text::Line;
-use runtime_domain::session::TranscriptSkillBinding;
+use runtime_domain::session::{TranscriptCustomPromptBinding, TranscriptSkillBinding};
 
 use crate::{
     StyleMode,
@@ -39,6 +39,7 @@ pub(crate) struct UserMessageRenderProjection {
     pub(super) layout: UserMessageRenderLayout,
     pub(super) has_frame: bool,
     pub(super) skill_bindings: Rc<Vec<TranscriptSkillBinding>>,
+    pub(super) custom_prompt_bindings: Rc<Vec<TranscriptCustomPromptBinding>>,
     palette: TerminalPalette,
     style_mode: StyleMode,
 }
@@ -100,6 +101,7 @@ impl UserMessageRenderProjection {
                 self.palette,
                 self.style_mode,
                 &self.skill_bindings,
+                &self.custom_prompt_bindings,
             ),
             StyleMode::Cc => render_projected_compact_user_line(
                 line,
@@ -108,6 +110,7 @@ impl UserMessageRenderProjection {
                 self.palette,
                 self.style_mode,
                 &self.skill_bindings,
+                &self.custom_prompt_bindings,
             ),
             StyleMode::Ms => render_projected_legacy_user_line(
                 line,
@@ -115,6 +118,7 @@ impl UserMessageRenderProjection {
                 self.palette,
                 self.style_mode,
                 &self.skill_bindings,
+                &self.custom_prompt_bindings,
             ),
         })
     }
@@ -321,6 +325,11 @@ pub(super) fn render_user_message_projection(
         skill_bindings: Rc::new(
             source_message
                 .map(|message| message.skill_bindings().to_vec())
+                .unwrap_or_default(),
+        ),
+        custom_prompt_bindings: Rc::new(
+            source_message
+                .map(|message| message.custom_prompt_bindings().to_vec())
                 .unwrap_or_default(),
         ),
         palette,

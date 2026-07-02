@@ -7,7 +7,7 @@ use ratatui::{
     style::Style,
     text::{Line, Span},
 };
-use runtime_domain::session::TranscriptSkillBinding;
+use runtime_domain::session::{TranscriptCustomPromptBinding, TranscriptSkillBinding};
 
 use super::{
     Composer,
@@ -72,6 +72,7 @@ struct StyledVisualRenderOptions<'a> {
     text_style: ratatui::style::Style,
     highlighted_text_style: ratatui::style::Style,
     skill_bindings: &'a [TranscriptSkillBinding],
+    custom_prompt_bindings: &'a [TranscriptCustomPromptBinding],
     content_width: usize,
     frame_fill_width: usize,
     fill_style: Style,
@@ -167,6 +168,7 @@ pub(crate) fn render_document(
                 text_style: placeholder_style,
                 highlighted_text_style: placeholder_style,
                 skill_bindings: &[],
+                custom_prompt_bindings: &[],
                 content_width: composer.content_width(),
                 frame_fill_width,
                 fill_style,
@@ -231,6 +233,7 @@ pub(crate) fn render_document(
                 text_style,
                 highlighted_text_style,
                 skill_bindings: &composer.skill_bindings,
+                custom_prompt_bindings: &composer.custom_prompt_bindings,
                 content_width: composer.content_width(),
                 frame_fill_width,
                 fill_style,
@@ -340,6 +343,7 @@ fn render_visual_lines(
                 options.text_style,
                 options.highlighted_text_style,
                 options.skill_bindings,
+                options.custom_prompt_bindings,
             ));
             spans.push(Span::styled(" ".repeat(fill_width), options.fill_style));
             Line::from(spans)
@@ -353,27 +357,25 @@ fn styled_composer_content_spans(
     text_style: Style,
     highlighted_text_style: Style,
     skill_bindings: &[TranscriptSkillBinding],
+    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
 ) -> Vec<Span<'static>> {
     if text.is_empty() {
         return vec![Span::styled(String::new(), text_style)];
     }
-    if skill_bindings.is_empty() {
+    let binding_ranges = visible_binding_ranges(
+        skill_bindings,
+        custom_prompt_bindings,
+        visible_start_char,
+        text,
+    );
+    if binding_ranges.is_empty() {
         return vec![Span::styled(text.to_string(), text_style)];
     }
 
-    let visible_end_char = visible_start_char + text.chars().count();
     let mut spans = Vec::new();
     let mut cursor = 0usize;
 
-    for binding in skill_bindings {
-        let overlap_start = binding.start_char.max(visible_start_char);
-        let overlap_end = binding.end_char.min(visible_end_char);
-        if overlap_start >= overlap_end {
-            continue;
-        }
-
-        let relative_start = overlap_start - visible_start_char;
-        let relative_end = overlap_end - visible_start_char;
+    for (relative_start, relative_end) in binding_ranges {
         if cursor < relative_start {
             spans.push(Span::styled(
                 slice_char_range(text, cursor, relative_start),
@@ -399,6 +401,34 @@ fn styled_composer_content_spans(
         spans.push(Span::styled(text.to_string(), text_style));
     }
     spans
+}
+
+fn visible_binding_ranges(
+    skill_bindings: &[TranscriptSkillBinding],
+    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
+    visible_start_char: usize,
+    text: &str,
+) -> Vec<(usize, usize)> {
+    let visible_end_char = visible_start_char + text.chars().count();
+    let mut ranges = skill_bindings
+        .iter()
+        .map(|binding| (binding.start_char, binding.end_char))
+        .chain(
+            custom_prompt_bindings
+                .iter()
+                .map(|binding| (binding.start_char, binding.end_char)),
+        )
+        .filter_map(|(start_char, end_char)| {
+            let overlap_start = start_char.max(visible_start_char);
+            let overlap_end = end_char.min(visible_end_char);
+            (overlap_start < overlap_end).then_some((
+                overlap_start - visible_start_char,
+                overlap_end - visible_start_char,
+            ))
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|(start, _)| *start);
+    ranges
 }
 
 fn slice_char_range(text: &str, start: usize, end: usize) -> String {

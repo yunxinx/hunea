@@ -170,7 +170,9 @@ impl FloatingPlacement {
 
 impl Model {
     pub(crate) fn has_current_floating_layer(&self) -> bool {
-        self.file_picker.is_some() || self.skill_picker.is_some()
+        self.file_picker.is_some()
+            || self.skill_picker.is_some()
+            || self.custom_prompt_picker.is_some()
     }
 
     pub(crate) fn current_floating_layer(
@@ -221,6 +223,28 @@ impl Model {
                 scrollbar,
             );
         }
+        let custom_prompt_picker = self.current_custom_prompt_picker_render_result();
+        if custom_prompt_picker.has_content
+            && let Some(anchor) =
+                self.current_custom_prompt_picker_floating_anchor(document, viewport)
+        {
+            let scrollbar = self.custom_prompt_picker.as_ref().and_then(|state| {
+                let visible_rows = self.file_picker_list_visible_rows();
+                (state.items.len() > visible_rows).then_some(PickerScrollbar::new(
+                    state.items.len(),
+                    visible_rows,
+                    state.scroll,
+                    secondary_text_style(self.palette),
+                    tertiary_text_style(self.palette),
+                ))
+            });
+            layer.push_anchored_with_scrollbar(
+                FloatingAnchor::new(0, anchor.y),
+                FloatingSize::full_width(self.file_picker_popup_height),
+                custom_prompt_picker.lines,
+                scrollbar,
+            );
+        }
         layer
     }
 
@@ -239,6 +263,15 @@ impl Model {
         viewport: &DocumentViewport,
     ) -> Option<FloatingAnchor> {
         let token_start = self.composer.current_skill_token_start_char()?;
+        self.current_prefixed_picker_floating_anchor(document, viewport, token_start)
+    }
+
+    fn current_custom_prompt_picker_floating_anchor(
+        &self,
+        document: &DocumentLayout,
+        viewport: &DocumentViewport,
+    ) -> Option<FloatingAnchor> {
+        let token_start = self.composer.current_custom_prompt_token_start_char()?;
         self.current_prefixed_picker_floating_anchor(document, viewport, token_start)
     }
 

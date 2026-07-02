@@ -10,7 +10,7 @@ mod viewport;
 mod tests;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use runtime_domain::session::TranscriptSkillBinding;
+use runtime_domain::session::{TranscriptCustomPromptBinding, TranscriptSkillBinding};
 
 use self::{
     grapheme::{
@@ -51,6 +51,7 @@ const WORD_SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
 pub struct Composer {
     value: String,
     skill_bindings: Vec<TranscriptSkillBinding>,
+    custom_prompt_bindings: Vec<TranscriptCustomPromptBinding>,
     cursor: usize,
     width: u16,
     height: u16,
@@ -68,6 +69,7 @@ pub struct Composer {
 struct ComposerSnapshot {
     value: String,
     skill_bindings: Vec<TranscriptSkillBinding>,
+    custom_prompt_bindings: Vec<TranscriptCustomPromptBinding>,
     cursor: usize,
 }
 
@@ -94,6 +96,7 @@ impl Composer {
         Self {
             value: String::new(),
             skill_bindings: Vec::new(),
+            custom_prompt_bindings: Vec::new(),
             cursor: 0,
             width: 1,
             height: 1,
@@ -140,14 +143,14 @@ impl Composer {
     pub fn clear(&mut self) {
         self.has_active_grapheme_undo_group = false;
         if self.value.is_empty() {
-            self.skill_bindings.clear();
+            self.clear_structured_bindings();
             self.set_cursor(0);
             self.viewport_y = 0;
             return;
         }
 
         self.value.clear();
-        self.skill_bindings.clear();
+        self.clear_structured_bindings();
         self.set_cursor(0);
         self.viewport_y = 0;
         self.undo_history.clear();
@@ -158,7 +161,7 @@ impl Composer {
     pub(crate) fn clear_for_edit(&mut self) {
         if self.value.is_empty() {
             self.finish_grapheme_undo_group();
-            self.skill_bindings.clear();
+            self.clear_structured_bindings();
             self.set_cursor(0);
             self.viewport_y = 0;
             return;
@@ -167,7 +170,7 @@ impl Composer {
         self.finish_grapheme_undo_group();
         self.push_undo_snapshot();
         self.value.clear();
-        self.skill_bindings.clear();
+        self.clear_structured_bindings();
         self.set_cursor(0);
         self.viewport_y = 0;
         self.bump_content_revision();
@@ -204,7 +207,7 @@ impl Composer {
             ComposerReplaceUndoMode::Reset => {
                 self.undo_history.clear();
                 self.has_active_grapheme_undo_group = false;
-                self.skill_bindings.clear();
+                self.clear_structured_bindings();
             }
             ComposerReplaceUndoMode::Record => {}
         }
@@ -212,7 +215,7 @@ impl Composer {
         if changed {
             self.value = value;
             if matches!(undo_mode, ComposerReplaceUndoMode::Record) {
-                self.reconcile_skill_bindings();
+                self.reconcile_structured_bindings();
             }
             self.bump_content_revision();
         }
@@ -240,7 +243,7 @@ impl Composer {
         self.push_undo_snapshot();
         let byte_index = char_to_byte_index(&self.value, self.cursor);
         self.value.insert_str(byte_index, text);
-        self.reconcile_skill_bindings();
+        self.reconcile_structured_bindings();
         self.set_cursor(self.cursor + total_chars(text));
         self.bump_content_revision();
         self.sync_viewport_to_cursor();
@@ -271,7 +274,7 @@ impl Composer {
         let byte_start = char_to_byte_index(&self.value, start);
         let byte_end = char_to_byte_index(&self.value, end);
         self.value.replace_range(byte_start..byte_end, replacement);
-        self.reconcile_skill_bindings();
+        self.reconcile_structured_bindings();
         self.set_cursor(start + total_chars(replacement));
         self.bump_content_revision();
         self.sync_viewport_to_cursor();
@@ -322,9 +325,10 @@ impl Composer {
 
     /// `source_message` 返回当前草稿对应的 transcript-visible 用户消息。
     pub(crate) fn source_message(&self) -> ComposerSourceMessage {
-        ComposerSourceMessage::user_text_with_skill_bindings(
+        ComposerSourceMessage::user_text_with_bindings(
             self.value.clone(),
             self.skill_bindings.clone(),
+            self.custom_prompt_bindings.clone(),
         )
     }
 
@@ -361,7 +365,7 @@ impl Composer {
         self.finish_grapheme_undo_group();
         self.push_undo_snapshot();
         self.value.replace_range(byte_start..byte_end, replacement);
-        self.reconcile_skill_bindings();
+        self.reconcile_structured_bindings();
         self.set_cursor(token.start_char + total_chars(replacement));
         self.bump_content_revision();
         self.sync_viewport_to_cursor();
@@ -391,6 +395,16 @@ impl Composer {
     /// `current_skill_token_start_char` 返回当前 `$skill` token 起点的字符偏移。
     pub(crate) fn current_skill_token_start_char(&self) -> Option<usize> {
         self.current_prefixed_token_start_char('$')
+    }
+
+    /// `current_custom_prompt_token` 返回当前光标所在的 `#prompt` token，不含前导 `#`。
+    pub(crate) fn current_custom_prompt_token(&self) -> Option<String> {
+        self.current_prefixed_token_value('#')
+    }
+
+    /// `current_custom_prompt_token_start_char` 返回当前 `#prompt` token 起点的字符偏移。
+    pub(crate) fn current_custom_prompt_token_start_char(&self) -> Option<usize> {
+        self.current_prefixed_token_start_char('#')
     }
 
     /// `replace_current_skill_token` 替换当前 `$` token，建立绑定，并把光标移动到替换文本末尾。
@@ -424,9 +438,49 @@ impl Composer {
         true
     }
 
+    /// `replace_current_custom_prompt_token` 替换当前 `#` token，建立绑定，并把光标移动到替换文本末尾。
+    pub(crate) fn replace_current_custom_prompt_token(
+        &mut self,
+        reference_id: &str,
+        origin: runtime_domain::prompt_assembly::PromptSourceOrigin,
+    ) -> bool {
+        let Some(token) = self.current_prefixed_token('#') else {
+            return false;
+        };
+        let visible_token = format!("#{reference_id}");
+        let replacement = format!("{visible_token} ");
+        if !self.replace_current_prefixed_token('#', &replacement) {
+            return false;
+        }
+
+        self.custom_prompt_bindings.retain(|binding| {
+            !(binding.start_char >= token.start_char && binding.end_char <= token.end_char)
+        });
+        self.custom_prompt_bindings
+            .push(TranscriptCustomPromptBinding {
+                reference_id: reference_id.to_string(),
+                origin,
+                start_char: token.start_char,
+                end_char: token.start_char + total_chars(&visible_token),
+            });
+        self.custom_prompt_bindings
+            .sort_by_key(|binding| binding.start_char);
+        true
+    }
+
     pub(crate) fn current_skill_binding(&self) -> Option<TranscriptSkillBinding> {
         let token = self.current_prefixed_token('$')?;
         self.skill_bindings
+            .iter()
+            .find(|binding| {
+                binding.start_char == token.start_char && binding.end_char == token.end_char
+            })
+            .cloned()
+    }
+
+    pub(crate) fn current_custom_prompt_binding(&self) -> Option<TranscriptCustomPromptBinding> {
+        let token = self.current_prefixed_token('#')?;
+        self.custom_prompt_bindings
             .iter()
             .find(|binding| {
                 binding.start_char == token.start_char && binding.end_char == token.end_char
@@ -640,7 +694,7 @@ impl Composer {
         self.has_active_grapheme_undo_group = false;
         if self.value != value {
             self.value = value;
-            self.skill_bindings.clear();
+            self.clear_structured_bindings();
             self.bump_content_revision();
         }
         self.set_cursor(total_chars(&self.value));
@@ -703,7 +757,7 @@ impl Composer {
     fn insert_char_without_undo(&mut self, character: char) {
         let byte_index = char_to_byte_index(&self.value, self.cursor);
         self.value.insert(byte_index, character);
-        self.reconcile_skill_bindings();
+        self.reconcile_structured_bindings();
         self.set_cursor(self.cursor + 1);
         self.bump_content_revision();
     }
@@ -1080,7 +1134,7 @@ impl Composer {
         let byte_start = char_to_byte_index(&self.value, start);
         let byte_end = char_to_byte_index(&self.value, end);
         self.value.drain(byte_start..byte_end);
-        self.reconcile_skill_bindings();
+        self.reconcile_structured_bindings();
         self.set_cursor(start.min(total_chars(&self.value)));
         self.bump_content_revision();
     }
@@ -1089,6 +1143,7 @@ impl Composer {
         let snapshot = ComposerSnapshot {
             value: self.value.clone(),
             skill_bindings: self.skill_bindings.clone(),
+            custom_prompt_bindings: self.custom_prompt_bindings.clone(),
             cursor: self.cursor,
         };
         if self.undo_history.last() == Some(&snapshot) {
@@ -1114,9 +1169,11 @@ impl Composer {
         if self.value != snapshot.value {
             self.value = snapshot.value;
             self.skill_bindings = snapshot.skill_bindings;
+            self.custom_prompt_bindings = snapshot.custom_prompt_bindings;
             self.bump_content_revision();
         } else {
             self.skill_bindings = snapshot.skill_bindings;
+            self.custom_prompt_bindings = snapshot.custom_prompt_bindings;
         }
         self.set_cursor(snapshot.cursor.min(total_chars(&self.value)));
         self.sync_viewport_to_cursor();
@@ -1177,44 +1234,42 @@ impl Composer {
         self.cursor_revision = self.cursor_revision.saturating_add(1);
     }
 
+    fn clear_structured_bindings(&mut self) {
+        self.skill_bindings.clear();
+        self.custom_prompt_bindings.clear();
+    }
+
+    fn reconcile_structured_bindings(&mut self) {
+        self.reconcile_skill_bindings();
+        self.reconcile_custom_prompt_bindings();
+    }
+
     pub(crate) fn reconcile_skill_bindings(&mut self) {
         let tokens = prefixed_tokens_in_text(&self.value, '$');
-        if tokens.is_empty() {
-            self.skill_bindings.clear();
-            return;
-        }
+        self.skill_bindings = reconcile_bound_prefixed_tokens(
+            &self.skill_bindings,
+            &tokens,
+            |binding| (binding.start_char, binding.end_char),
+            TranscriptSkillBinding::visible_token_text,
+            |binding, token| {
+                binding.start_char = token.start_char;
+                binding.end_char = token.end_char;
+            },
+        );
+    }
 
-        let mut matched = vec![false; tokens.len()];
-        let mut next_bindings = Vec::new();
-        for binding in &self.skill_bindings {
-            let expected = format!("${}", binding.skill_name);
-            let preferred = tokens
-                .iter()
-                .enumerate()
-                .find(|(index, token)| {
-                    !matched[*index]
-                        && token.start_char == binding.start_char
-                        && token.end_char == binding.end_char
-                        && token.visible_text == expected
-                })
-                .map(|(index, token)| (index, token.clone()))
-                .or_else(|| {
-                    tokens
-                        .iter()
-                        .enumerate()
-                        .find(|(index, token)| !matched[*index] && token.visible_text == expected)
-                        .map(|(index, token)| (index, token.clone()))
-                });
-            let Some((index, token)) = preferred else {
-                continue;
-            };
-            matched[index] = true;
-            let mut binding = binding.clone();
-            binding.start_char = token.start_char;
-            binding.end_char = token.end_char;
-            next_bindings.push(binding);
-        }
-        self.skill_bindings = next_bindings;
+    fn reconcile_custom_prompt_bindings(&mut self) {
+        let tokens = prefixed_tokens_in_text(&self.value, '#');
+        self.custom_prompt_bindings = reconcile_bound_prefixed_tokens(
+            &self.custom_prompt_bindings,
+            &tokens,
+            |binding| (binding.start_char, binding.end_char),
+            TranscriptCustomPromptBinding::visible_token_text,
+            |binding, token| {
+                binding.start_char = token.start_char;
+                binding.end_char = token.end_char;
+            },
+        );
     }
 }
 
@@ -1423,6 +1478,50 @@ fn prefixed_tokens_in_text(value: &str, prefix: char) -> Vec<PrefixedToken> {
         });
     }
     tokens
+}
+
+fn reconcile_bound_prefixed_tokens<T: Clone>(
+    bindings: &[T],
+    tokens: &[PrefixedToken],
+    current_range: impl Fn(&T) -> (usize, usize),
+    expected_visible_text: impl Fn(&T) -> String,
+    mut update_range: impl FnMut(&mut T, &PrefixedToken),
+) -> Vec<T> {
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matched = vec![false; tokens.len()];
+    let mut next_bindings = Vec::new();
+    for binding in bindings {
+        let expected = expected_visible_text(binding);
+        let (start_char, end_char) = current_range(binding);
+        let preferred = tokens
+            .iter()
+            .enumerate()
+            .find(|(index, token)| {
+                !matched[*index]
+                    && token.start_char == start_char
+                    && token.end_char == end_char
+                    && token.visible_text == expected
+            })
+            .map(|(index, token)| (index, token.clone()))
+            .or_else(|| {
+                tokens
+                    .iter()
+                    .enumerate()
+                    .find(|(index, token)| !matched[*index] && token.visible_text == expected)
+                    .map(|(index, token)| (index, token.clone()))
+            });
+        let Some((index, token)) = preferred else {
+            continue;
+        };
+        matched[index] = true;
+        let mut binding = binding.clone();
+        update_range(&mut binding, &token);
+        next_bindings.push(binding);
+    }
+    next_bindings
 }
 
 fn prompt_width() -> u16 {

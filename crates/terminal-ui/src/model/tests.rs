@@ -19,8 +19,8 @@ use runtime_domain::model_catalog::{
 use runtime_domain::phrases::StatusPhraseOrder;
 use runtime_domain::prompt_assembly::PromptSourceOrigin;
 use runtime_domain::prompt_assembly::{
-    PromptAssemblyDiscoveredSkill, PromptAssemblyInput, PromptAssemblyManagerSnapshot,
-    PromptPreludeSnapshot, resolve_prompt_assembly,
+    PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate, PromptAssemblyInput,
+    PromptAssemblyManagerSnapshot, PromptPreludeSnapshot, resolve_prompt_assembly,
 };
 use runtime_domain::provider::ProviderKind;
 use std::path::{Path, PathBuf};
@@ -577,6 +577,136 @@ fn dollar_skill_picker_opens_and_enter_inserts_bound_skill_token() {
     let source_message = model.composer.source_message();
     assert_eq!(source_message.skill_bindings().len(), 1);
     assert_eq!(source_message.skill_bindings()[0].skill_name, "code-review");
+}
+
+#[test]
+fn hash_custom_prompt_picker_opens_and_enter_inserts_bound_prompt_token() {
+    let mut model = custom_prompt_picker_model();
+
+    type_text(&mut model, "#rev");
+
+    assert!(model.has_current_floating_layer());
+    let floating_rows = rendered_rows_for_model(&mut model, 40, 8);
+    assert!(
+        floating_rows
+            .iter()
+            .any(|row| row.contains("Review Rules") || row.contains("review-rules")),
+        "custom prompt picker should render matching prompt rows: {floating_rows:?}"
+    );
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    assert_eq!(effect, None);
+    assert_eq!(model.composer_text(), "#review-rules ");
+    let source_message = model.composer.source_message();
+    assert_eq!(source_message.custom_prompt_bindings().len(), 1);
+    assert_eq!(
+        source_message.custom_prompt_bindings()[0].reference_id,
+        "review-rules"
+    );
+}
+
+#[test]
+fn custom_prompt_picker_reserves_description_column_like_skill_picker() {
+    let mut model = custom_prompt_picker_model();
+    model.set_window(24, 8);
+
+    type_text(&mut model, "#");
+
+    let lines = model
+        .current_custom_prompt_picker_render_result()
+        .plain_lines;
+    let release_line = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .nth(1)
+        .expect("release checklist row should render");
+
+    assert_eq!(
+        release_line.rfind("... (global)"),
+        Some(12),
+        "custom prompt picker should keep the description column aligned with the skill picker: {release_line:?}"
+    );
+}
+
+#[test]
+fn custom_prompt_picker_renders_body_summary_with_scope_suffix() {
+    let mut model = custom_prompt_picker_model();
+    model.set_window(80, 8);
+
+    type_text(&mut model, "#rev");
+
+    let lines = model
+        .current_custom_prompt_picker_render_result()
+        .plain_lines;
+    let review_line = lines
+        .iter()
+        .find(|line| line.contains("Review Rules"))
+        .expect("review rules row should render");
+
+    assert!(
+        review_line.contains("Review every diff for regressions and missing tests."),
+        "custom prompt picker should show prompt content and scope in the description column: {review_line:?}"
+    );
+    assert!(
+        review_line.trim_end().ends_with("(project)"),
+        "custom prompt picker should pin the scope suffix at the row end: {review_line:?}"
+    );
+    assert!(
+        !review_line.contains("#review-rules"),
+        "custom prompt picker description should not fall back to the reference id when prompt content exists: {review_line:?}"
+    );
+}
+
+#[test]
+fn custom_prompt_picker_does_not_render_reference_id_when_prompt_has_only_title() {
+    let mut model = custom_prompt_picker_model();
+    model.prompt_assembly.extra_prompt_candidates[0].reference_id = "new-prompt-1".to_string();
+    model.prompt_assembly.extra_prompt_candidates[0].title = "测试用的".to_string();
+    model.prompt_assembly.extra_prompt_candidates[0].body = "# 测试用的\n".to_string();
+    model.set_window(80, 8);
+
+    type_text(&mut model, "#new");
+
+    let lines = model
+        .current_custom_prompt_picker_render_result()
+        .plain_lines;
+    let prompt_line = lines
+        .iter()
+        .find(|line| line.contains("测试用的"))
+        .expect("title-only prompt row should render");
+
+    assert!(
+        !prompt_line.contains("#new-prompt-1"),
+        "custom prompt picker should not fall back to the reference id when the prompt body only has a title: {prompt_line:?}"
+    );
+    assert!(
+        prompt_line.trim_end().ends_with("(project)"),
+        "custom prompt picker should still show the scope suffix for title-only prompts: {prompt_line:?}"
+    );
+}
+
+#[test]
+fn custom_prompt_picker_keeps_scope_suffix_visible_at_row_end_when_content_is_long() {
+    let mut model = custom_prompt_picker_model();
+    model.prompt_assembly.extra_prompt_candidates[0].body =
+        "This is a deliberately long custom prompt body that should be clipped before the scope suffix disappears.\n".to_string();
+    model.set_window(36, 8);
+
+    type_text(&mut model, "#rev");
+
+    let lines = model
+        .current_custom_prompt_picker_render_result()
+        .plain_lines;
+    let review_line = lines
+        .iter()
+        .find(|line| line.contains("Review Rules"))
+        .expect("review rules row should render");
+
+    assert!(
+        review_line.trim_end().ends_with("(project)"),
+        "custom prompt picker should keep the scope suffix fixed at the row end when body content is long: {review_line:?}"
+    );
 }
 
 #[test]
@@ -3039,6 +3169,47 @@ fn skill_picker_model_with_manual_skills(
                 extra_prompt_candidates: Vec::new(),
                 discovered_skills: Vec::new(),
                 manual_skills,
+                builtin_core_system_body: String::new(),
+                global_core_system_override: None,
+                project_core_system_override: None,
+            }),
+            ..ModelOptions::default()
+        },
+    );
+    model.transcript_mut().clear();
+    model.set_window(40, 8);
+    model.set_palette(default_palette(), true);
+    model
+}
+
+fn custom_prompt_picker_model() -> Model {
+    let mut model = Model::new_with_options(
+        StartupBannerOptions::default(),
+        ModelOptions {
+            file_picker_popup_height: 8,
+            prompt_assembly: Some(PromptAssemblyManagerSnapshot {
+                snapshot: resolve_prompt_assembly(&PromptAssemblyInput::default()),
+                prelude: PromptPreludeSnapshot::default(),
+                managed_sources: Vec::new(),
+                sources: Vec::new(),
+                extra_prompt_candidates: vec![
+                    PromptAssemblyExtraPromptCandidate {
+                        reference_id: "review-rules".to_string(),
+                        title: "Review Rules".to_string(),
+                        origin: PromptSourceOrigin::Project,
+                        body: "Review every diff for regressions and missing tests.".to_string(),
+                        selected: false,
+                    },
+                    PromptAssemblyExtraPromptCandidate {
+                        reference_id: "release-checklist".to_string(),
+                        title: "Release Checklist".to_string(),
+                        origin: PromptSourceOrigin::Global,
+                        body: "Verify changelog, version, and rollout notes.".to_string(),
+                        selected: false,
+                    },
+                ],
+                discovered_skills: Vec::new(),
+                manual_skills: Vec::new(),
                 builtin_core_system_body: String::new(),
                 global_core_system_override: None,
                 project_core_system_override: None,

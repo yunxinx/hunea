@@ -325,6 +325,7 @@ impl ProviderConversation {
             transcript_user_message.unwrap_or_else(|| TranscriptUserMessage {
                 content: user_message.text_content(),
                 skill_bindings: Vec::new(),
+                custom_prompt_bindings: Vec::new(),
             });
         let system_prompt = self.system_prompt.clone();
         let prompt_prelude = self.prompt_prelude.clone();

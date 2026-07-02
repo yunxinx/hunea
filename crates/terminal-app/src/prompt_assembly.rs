@@ -20,7 +20,7 @@ use runtime_domain::prompt_assembly::{
     PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
     derive_extra_prompt_title, natural_sort_text_cmp, resolve_prompt_assembly,
 };
-use runtime_domain::session::TranscriptUserMessage;
+use runtime_domain::session::{TranscriptCustomPromptBinding, TranscriptUserMessage};
 use serde::Deserialize;
 use session_store::SessionStore;
 
@@ -69,11 +69,21 @@ pub(crate) struct ManualSkillPromptUse {
     pub(crate) body: String,
 }
 
-/// `ManualSkillMessageAssembly` 表示手动 skill 注入后的 provider-visible 用户消息。
+/// `CustomPromptUse` 表示一次 `#prompt` 当前轮注入解析后的 custom prompt 使用项。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ManualSkillMessageAssembly {
+pub(crate) struct CustomPromptUse {
+    pub(crate) reference_id: String,
+    pub(crate) origin: PromptSourceOrigin,
+    pub(crate) title: String,
+    pub(crate) body: String,
+}
+
+/// `AttachedPromptMessageAssembly` 表示当前轮 `$skill` / `#prompt` 注入后的 provider-visible 用户消息。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttachedPromptMessageAssembly {
     pub(crate) provider_visible_user_text: String,
-    pub(crate) uses: Vec<ManualSkillPromptUse>,
+    pub(crate) manual_skill_uses: Vec<ManualSkillPromptUse>,
+    pub(crate) custom_prompt_uses: Vec<CustomPromptUse>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +98,28 @@ struct DiscoveredInstructionsFile {
     path: PathBuf,
     body: String,
     origin: PromptSourceOrigin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PromptAttachment {
+    ManualSkill {
+        start_char: usize,
+        use_item: ManualSkillPromptUse,
+    },
+    CustomPrompt {
+        start_char: usize,
+        use_item: CustomPromptUse,
+    },
+}
+
+impl PromptAttachment {
+    fn start_char(&self) -> usize {
+        match self {
+            Self::ManualSkill { start_char, .. } | Self::CustomPrompt { start_char, .. } => {
+                *start_char
+            }
+        }
+    }
 }
 
 struct PromptAssemblyResolutionContext<'a> {
@@ -196,11 +228,12 @@ pub(crate) fn check_prompt_assembly_missing_sources_from_states(
     PromptAssemblyMissingSourcesCheck::from_manager(&manager)
 }
 
-/// `assemble_manual_skill_message` 解析当前用户消息里的 `$skill` 提及并拼装 provider-visible 文本。
-pub(crate) fn assemble_manual_skill_message(
+/// `assemble_attached_prompt_message` 解析当前用户消息里的 `$skill` / `#prompt` 提及并拼装 provider-visible 文本。
+pub(crate) fn assemble_attached_prompt_message(
+    store: Option<Arc<dyn SessionStore>>,
     work_dir: &Path,
     user_message: &TranscriptUserMessage,
-) -> ManualSkillMessageAssembly {
+) -> Result<AttachedPromptMessageAssembly> {
     let discovered_skills = discover_skills(work_dir, None);
     let skills_by_locator = discovered_skills
         .iter()
@@ -215,51 +248,112 @@ pub(crate) fn assemble_manual_skill_message(
             )
         })
         .collect::<HashMap<_, _>>();
-    let mut seen_bindings = std::collections::HashSet::new();
-    let mut uses = Vec::new();
-    let mut bindings = user_message.skill_bindings.clone();
-    bindings.sort_by_key(|binding| binding.start_char);
-    for binding in bindings {
-        let binding_key = (
-            binding.skill_name.clone(),
-            binding.origin,
-            binding.skill_path.clone(),
-        );
-        if !seen_bindings.insert(binding_key) {
-            continue;
+    let extra_prompts_by_locator = if user_message.custom_prompt_bindings.is_empty() {
+        HashMap::new()
+    } else {
+        match store {
+            Some(store) => {
+                let manager = load_prompt_assembly_manager_snapshot(store, work_dir)?;
+                manager
+                    .extra_prompt_candidates
+                    .into_iter()
+                    .map(|prompt| ((prompt.reference_id.clone(), prompt.origin), prompt))
+                    .collect::<HashMap<_, _>>()
+            }
+            None => HashMap::new(),
         }
+    };
+
+    let mut attachments = Vec::new();
+    for binding in &user_message.skill_bindings {
         let skill_path = Path::new(binding.skill_path.as_str());
         let Some(skill) =
             skills_by_locator.get(&(binding.skill_name.as_str(), binding.origin, skill_path))
         else {
             continue;
         };
-        uses.push(ManualSkillPromptUse {
-            skill_name: skill.name.clone(),
-            origin: skill.origin,
-            skill_path: skill.skill_path.clone(),
-            body: format_long_lived_skill_body(skill),
+        attachments.push(PromptAttachment::ManualSkill {
+            start_char: binding.start_char,
+            use_item: ManualSkillPromptUse {
+                skill_name: skill.name.clone(),
+                origin: skill.origin,
+                skill_path: skill.skill_path.clone(),
+                body: format_long_lived_skill_body(skill),
+            },
+        });
+    }
+    for binding in &user_message.custom_prompt_bindings {
+        let Some(prompt) =
+            extra_prompts_by_locator.get(&(binding.reference_id.clone(), binding.origin))
+        else {
+            continue;
+        };
+        attachments.push(PromptAttachment::CustomPrompt {
+            start_char: binding.start_char,
+            use_item: CustomPromptUse {
+                reference_id: prompt.reference_id.clone(),
+                origin: prompt.origin,
+                title: prompt.title.clone(),
+                body: prompt.body.clone(),
+            },
         });
     }
 
-    let provider_visible_user_text = if uses.is_empty() {
-        user_message.content.clone()
+    attachments.sort_by_key(PromptAttachment::start_char);
+    let mut manual_skill_uses = Vec::new();
+    let mut custom_prompt_uses = Vec::new();
+    let mut seen_manual_skills = std::collections::HashSet::new();
+    let mut seen_custom_prompts = std::collections::HashSet::new();
+    let mut sections = Vec::new();
+    for attachment in attachments {
+        match attachment {
+            PromptAttachment::ManualSkill { use_item, .. } => {
+                let key = (
+                    use_item.skill_name.clone(),
+                    use_item.origin,
+                    use_item.skill_path.clone(),
+                );
+                if !seen_manual_skills.insert(key) {
+                    continue;
+                }
+                if !use_item.body.trim().is_empty() {
+                    sections.push(use_item.body.clone());
+                }
+                manual_skill_uses.push(use_item);
+            }
+            PromptAttachment::CustomPrompt { use_item, .. } => {
+                let key = (use_item.reference_id.clone(), use_item.origin);
+                if !seen_custom_prompts.insert(key) {
+                    continue;
+                }
+                custom_prompt_uses.push(use_item);
+            }
+        }
+    }
+
+    let expanded_custom_prompt_text = expand_custom_prompt_bindings(
+        &user_message.content,
+        &user_message.custom_prompt_bindings,
+        &extra_prompts_by_locator,
+    );
+    let provider_visible_user_text = if sections.is_empty() {
+        expanded_custom_prompt_text.unwrap_or_else(|| user_message.content.clone())
     } else {
-        let mut sections = uses
-            .iter()
-            .map(|skill| skill.body.clone())
-            .collect::<Vec<_>>();
-        let trimmed_user_text = user_message.content.trim();
+        let visible_user_text = expanded_custom_prompt_text
+            .as_deref()
+            .unwrap_or(user_message.content.as_str());
+        let trimmed_user_text = visible_user_text.trim();
         if !trimmed_user_text.is_empty() {
             sections.push(trimmed_user_text.to_string());
         }
         sections.join("\n\n")
     };
 
-    ManualSkillMessageAssembly {
+    Ok(AttachedPromptMessageAssembly {
         provider_visible_user_text,
-        uses,
-    }
+        manual_skill_uses,
+        custom_prompt_uses,
+    })
 }
 
 #[cfg(test)]
@@ -1967,6 +2061,111 @@ fn format_long_lived_skill_body(skill: &DiscoveredSkill) -> String {
     )
 }
 
+fn expand_custom_prompt_bindings(
+    content: &str,
+    bindings: &[TranscriptCustomPromptBinding],
+    prompts_by_locator: &HashMap<(String, PromptSourceOrigin), PromptAssemblyExtraPromptCandidate>,
+) -> Option<String> {
+    let mut sorted_bindings = bindings.iter().collect::<Vec<_>>();
+    sorted_bindings.sort_by_key(|binding| binding.start_char);
+
+    let char_boundaries = content
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(content.len()))
+        .collect::<Vec<_>>();
+
+    let mut expanded = String::with_capacity(content.len());
+    let mut cursor = 0;
+    let mut replaced_any = false;
+
+    for binding in sorted_bindings {
+        let Some(prompt) = prompts_by_locator.get(&(binding.reference_id.clone(), binding.origin))
+        else {
+            continue;
+        };
+        let trimmed_body = prompt.body.trim();
+        if trimmed_body.is_empty() {
+            continue;
+        }
+
+        let Some(&start_byte) = char_boundaries.get(binding.start_char) else {
+            continue;
+        };
+        let Some(&end_byte) = char_boundaries.get(binding.end_char) else {
+            continue;
+        };
+        if start_byte < cursor || end_byte < start_byte {
+            continue;
+        }
+
+        expanded.push_str(&content[cursor..start_byte]);
+
+        trim_trailing_inline_whitespace(&mut expanded);
+        ensure_blank_line_before_inline_prompt(&mut expanded);
+        expanded.push_str(trimmed_body);
+
+        let skipped_after_bytes = count_leading_inline_whitespace(&content[end_byte..]);
+        let trailing_text = &content[end_byte + skipped_after_bytes..];
+        ensure_blank_line_after_inline_prompt(&mut expanded, trailing_text);
+
+        cursor = end_byte + skipped_after_bytes;
+        replaced_any = true;
+    }
+
+    if !replaced_any {
+        return None;
+    }
+
+    expanded.push_str(&content[cursor..]);
+    Some(expanded)
+}
+
+fn trim_trailing_inline_whitespace(output: &mut String) {
+    while matches!(output.chars().last(), Some(' ' | '\t')) {
+        output.pop();
+    }
+}
+
+fn ensure_blank_line_before_inline_prompt(output: &mut String) {
+    if output.is_empty() {
+        return;
+    }
+    match trailing_newline_count(output) {
+        0 => output.push_str("\n\n"),
+        1 => output.push('\n'),
+        _ => {}
+    }
+}
+
+fn ensure_blank_line_after_inline_prompt(output: &mut String, trailing_text: &str) {
+    if trailing_text.is_empty() {
+        return;
+    }
+    match leading_newline_count(trailing_text) {
+        0 => output.push_str("\n\n"),
+        1 => output.push('\n'),
+        _ => {}
+    }
+}
+
+fn trailing_newline_count(value: &str) -> usize {
+    value.chars().rev().take_while(|ch| *ch == '\n').count()
+}
+
+fn leading_newline_count(value: &str) -> usize {
+    value.chars().take_while(|ch| *ch == '\n').count()
+}
+
+fn count_leading_inline_whitespace(value: &str) -> usize {
+    value
+        .char_indices()
+        .take_while(|(_, ch)| matches!(ch, ' ' | '\t'))
+        .map(|(index, ch)| index + ch.len_utf8())
+        .last()
+        .unwrap_or(0)
+}
+
 fn escape_xml(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -2988,7 +3187,7 @@ mod tests {
     }
 
     #[test]
-    fn assemble_manual_skill_message_expands_unique_mentions_in_first_use_order() {
+    fn assemble_attached_prompt_message_expands_unique_skill_mentions_in_first_use_order() {
         let work_dir = temp_dir("manual-skill-assembly");
         let repo_bootstrap_dir = work_dir.join(".agents/skills/repo-bootstrap");
         fs::create_dir_all(&repo_bootstrap_dir).expect("repo-bootstrap dir should exist");
@@ -3005,7 +3204,8 @@ mod tests {
         )
         .expect("code-review skill should write");
 
-        let assembled = assemble_manual_skill_message(
+        let assembled = assemble_attached_prompt_message(
+            None,
             &work_dir,
             &TranscriptUserMessage {
                 content:
@@ -3040,12 +3240,14 @@ mod tests {
                         end_char: 73,
                     },
                 ],
+                custom_prompt_bindings: Vec::new(),
             },
-        );
+        )
+        .expect("skill-only attachment assembly should succeed");
 
         assert_eq!(
             assembled
-                .uses
+                .manual_skill_uses
                 .iter()
                 .map(|skill| skill.skill_name.as_str())
                 .collect::<Vec<_>>(),
@@ -3076,7 +3278,7 @@ mod tests {
     }
 
     #[test]
-    fn assemble_manual_skill_message_ignores_plain_text_tokens_without_bindings() {
+    fn assemble_attached_prompt_message_ignores_plain_text_tokens_without_bindings() {
         let work_dir = temp_dir("manual-skill-without-bindings");
         let code_review_dir = work_dir.join(".agents/skills/code-review");
         fs::create_dir_all(&code_review_dir).expect("code-review dir should exist");
@@ -3086,18 +3288,93 @@ mod tests {
         )
         .expect("code-review skill should write");
 
-        let assembled = assemble_manual_skill_message(
+        let assembled = assemble_attached_prompt_message(
+            None,
             &work_dir,
             &TranscriptUserMessage {
                 content: "Please use $code-review".to_string(),
                 skill_bindings: Vec::new(),
+                custom_prompt_bindings: Vec::new(),
             },
-        );
+        )
+        .expect("plain text without bindings should assemble");
 
-        assert!(assembled.uses.is_empty());
+        assert!(assembled.manual_skill_uses.is_empty());
+        assert!(assembled.custom_prompt_uses.is_empty());
         assert_eq!(
             assembled.provider_visible_user_text,
             "Please use $code-review"
+        );
+    }
+
+    #[test]
+    fn assemble_attached_prompt_message_includes_custom_prompt_bodies_in_first_use_order() {
+        let work_dir = temp_dir("custom-prompt-attachment");
+        let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+        save_project_prompt_assembly_state(
+            &work_dir,
+            &PromptAssemblyScopeState {
+                scope: PromptAssemblyScope::Project,
+                core_system_override: None,
+                entries: vec![PersistedPromptAssemblyEntry {
+                    reference_id: "review-rules".to_string(),
+                    kind: PromptSourceKind::ExtraPrompt,
+                    title: "Review Rules".to_string(),
+                    enabled: false,
+                    requested_order: None,
+                }],
+                skill_discovery_override: None,
+                skill_discovery_skills: Vec::new(),
+                extra_prompts: vec![StoredPromptBody {
+                    reference_id: "review-rules".to_string(),
+                    title: "Review Rules".to_string(),
+                    body: "# Review Rules\nCheck regressions before approving.".to_string(),
+                }],
+            },
+        )
+        .expect("project prompt state should save");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build");
+        runtime
+            .block_on(
+                store.save_global_prompt_assembly_state(&PromptAssemblyScopeState::empty(
+                    PromptAssemblyScope::Global,
+                )),
+            )
+            .expect("global prompt state should save");
+
+        let assembled = assemble_attached_prompt_message(
+            Some(store),
+            &work_dir,
+            &TranscriptUserMessage {
+                content: "Before\n#review-rules\nAfter".to_string(),
+                skill_bindings: Vec::new(),
+                custom_prompt_bindings: vec![
+                    runtime_domain::session::TranscriptCustomPromptBinding {
+                        reference_id: "review-rules".to_string(),
+                        origin: PromptSourceOrigin::Project,
+                        start_char: 7,
+                        end_char: 20,
+                    },
+                ],
+            },
+        )
+        .expect("custom prompt attachment assembly should succeed");
+
+        assert!(assembled.manual_skill_uses.is_empty());
+        assert_eq!(
+            assembled
+                .custom_prompt_uses
+                .iter()
+                .map(|prompt| prompt.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["review-rules"]
+        );
+        assert_eq!(
+            assembled.provider_visible_user_text,
+            "Before\n\n# Review Rules\nCheck regressions before approving.\n\nAfter"
         );
     }
 

@@ -333,6 +333,12 @@ fn message_item_render_cache_key(
                 binding.start_char.hash(&mut hasher);
                 binding.end_char.hash(&mut hasher);
             }
+            for binding in message.custom_prompt_bindings() {
+                binding.reference_id.hash(&mut hasher);
+                binding.origin.hash(&mut hasher);
+                binding.start_char.hash(&mut hasher);
+                binding.end_char.hash(&mut hasher);
+            }
         }
     }
     content.hash(&mut hasher);

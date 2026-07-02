@@ -8,7 +8,7 @@ use runtime_domain::{
 };
 
 use super::{AppRuntimeCoordinator, ensure_conversation_target};
-use crate::prompt_assembly::{ManualSkillMessageAssembly, ManualSkillPromptUse};
+use crate::prompt_assembly::{AttachedPromptMessageAssembly, ManualSkillPromptUse};
 
 impl AppRuntimeCoordinator {
     pub(super) fn truncate_conversation(
@@ -84,9 +84,13 @@ impl AppRuntimeCoordinator {
                 .unwrap_or_else(|| TranscriptUserMessage {
                     content: request.message_text(),
                     skill_bindings: Vec::new(),
+                    custom_prompt_bindings: Vec::new(),
                 });
-        let manual_skill_assembly = self.manual_skill_message_assembly(&transcript_user_message)?;
-        let provider_request = if manual_skill_assembly.uses.is_empty() {
+        let attached_prompt_assembly =
+            self.attached_prompt_message_assembly(&transcript_user_message)?;
+        let provider_request = if attached_prompt_assembly.manual_skill_uses.is_empty()
+            && attached_prompt_assembly.custom_prompt_uses.is_empty()
+        {
             request.clone()
         } else {
             ConversationTurnRequest::new_user_text(
@@ -96,10 +100,11 @@ impl AppRuntimeCoordinator {
                 request.base_url().map(str::to_string),
                 request.api_key().cloned(),
                 request.api_key_env().map(str::to_string),
-                manual_skill_assembly.provider_visible_user_text.clone(),
+                attached_prompt_assembly.provider_visible_user_text.clone(),
             )
         };
-        let manual_skill_activities = self.manual_skill_activities(&manual_skill_assembly.uses);
+        let manual_skill_activities =
+            self.manual_skill_activities(&attached_prompt_assembly.manual_skill_uses);
         let activity_label = request.model_id().to_string();
         let prepared_request = self
             .provider_conversation
@@ -151,25 +156,28 @@ impl AppRuntimeCoordinator {
         }
     }
 
-    fn manual_skill_message_assembly(
+    fn attached_prompt_message_assembly(
         &self,
         user_message: &TranscriptUserMessage,
-    ) -> Result<ManualSkillMessageAssembly, String> {
+    ) -> Result<AttachedPromptMessageAssembly, String> {
         let Some(work_dir) = self
             .options
             .session_header_template
             .as_ref()
             .map(|header| header.work_dir.as_path())
         else {
-            return Ok(ManualSkillMessageAssembly {
+            return Ok(AttachedPromptMessageAssembly {
                 provider_visible_user_text: user_message.content.clone(),
-                uses: Vec::new(),
+                manual_skill_uses: Vec::new(),
+                custom_prompt_uses: Vec::new(),
             });
         };
-        Ok(crate::prompt_assembly::assemble_manual_skill_message(
+        crate::prompt_assembly::assemble_attached_prompt_message(
+            self.options.session_store.clone(),
             work_dir,
             user_message,
-        ))
+        )
+        .map_err(|error| error.to_string())
     }
 
     fn manual_skill_activities(

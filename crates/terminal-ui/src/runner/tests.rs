@@ -123,7 +123,7 @@ impl RuntimeCoordinator for TestRuntimeCoordinator {
 
                 let activity_label = request.model_id().to_string();
                 self.conversation_running = true;
-                self.conversation_request = Some(request);
+                self.conversation_request = Some(*request);
                 Ok(RuntimeCommandReceipt::ConversationStarted { activity_label })
             }
             RuntimeCommand::Interrupt { target } => {

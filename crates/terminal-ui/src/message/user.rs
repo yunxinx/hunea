@@ -1,5 +1,5 @@
 use ratatui::text::{Line, Span};
-use runtime_domain::session::TranscriptSkillBinding;
+use runtime_domain::session::{TranscriptCustomPromptBinding, TranscriptSkillBinding};
 
 pub(super) use crate::display_width::display_width as measure_width;
 use crate::{
@@ -21,7 +21,9 @@ pub(super) fn render_user_message_lines(
     style_mode: StyleMode,
     source_message: Option<&ComposerSourceMessage>,
 ) -> Vec<Line<'static>> {
-    if source_message.is_some_and(|message| !message.skill_bindings().is_empty()) {
+    if source_message.is_some_and(|message| {
+        !message.skill_bindings().is_empty() || !message.custom_prompt_bindings().is_empty()
+    }) {
         let projection = super::user_projection::render_user_message_projection(
             content,
             width,
@@ -145,6 +147,7 @@ pub(super) fn render_projected_framed_user_line(
     palette: TerminalPalette,
     style_mode: StyleMode,
     skill_bindings: &[TranscriptSkillBinding],
+    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
 ) -> Line<'static> {
     let prefix_style = surface_text_style(palette);
     let mut prefix_glyph_style = secondary_text_style(palette);
@@ -164,6 +167,7 @@ pub(super) fn render_projected_framed_user_line(
         content_style,
         skill_style,
         skill_bindings,
+        custom_prompt_bindings,
     );
 
     if is_first && layout.shows_prefix {
@@ -229,6 +233,7 @@ pub(super) fn render_projected_compact_user_line(
     palette: TerminalPalette,
     style_mode: StyleMode,
     skill_bindings: &[TranscriptSkillBinding],
+    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
 ) -> Line<'static> {
     let prefix_style = surface_text_style(palette);
     let mut prefix_glyph_style = secondary_text_style(palette);
@@ -247,6 +252,7 @@ pub(super) fn render_projected_compact_user_line(
         content_style,
         skill_style,
         skill_bindings,
+        custom_prompt_bindings,
     );
 
     if is_first {
@@ -299,6 +305,7 @@ pub(super) fn render_projected_legacy_user_line(
     palette: TerminalPalette,
     style_mode: StyleMode,
     skill_bindings: &[TranscriptSkillBinding],
+    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
 ) -> Line<'static> {
     let prefix_style = surface_text_style(palette);
     let content_style = surface_emphasis_style(palette);
@@ -310,6 +317,7 @@ pub(super) fn render_projected_legacy_user_line(
         content_style,
         skill_style,
         skill_bindings,
+        custom_prompt_bindings,
     );
 
     if is_first {
@@ -329,28 +337,26 @@ fn styled_user_content_spans(
     content_style: ratatui::style::Style,
     skill_style: ratatui::style::Style,
     skill_bindings: &[TranscriptSkillBinding],
+    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
 ) -> Vec<Span<'static>> {
     if text.is_empty() {
         return vec![Span::styled(String::new(), content_style)];
     }
-    if skill_bindings.is_empty() {
+    let binding_ranges = visible_binding_ranges(
+        skill_bindings,
+        custom_prompt_bindings,
+        visible_start_char,
+        text,
+    );
+    if binding_ranges.is_empty() {
         return vec![Span::styled(text.to_string(), content_style)];
     }
 
     let line_char_len = text.chars().count();
-    let visible_end_char = visible_start_char + line_char_len;
     let mut spans = Vec::new();
     let mut cursor = 0usize;
 
-    for binding in skill_bindings {
-        let overlap_start = binding.start_char.max(visible_start_char);
-        let overlap_end = binding.end_char.min(visible_end_char);
-        if overlap_start >= overlap_end {
-            continue;
-        }
-
-        let relative_start = overlap_start - visible_start_char;
-        let relative_end = overlap_end - visible_start_char;
+    for (relative_start, relative_end) in binding_ranges {
         if cursor < relative_start {
             spans.push(Span::styled(
                 slice_char_range(text, cursor, relative_start),
@@ -382,6 +388,34 @@ fn slice_char_range(text: &str, start: usize, end: usize) -> String {
         .skip(start)
         .take(end.saturating_sub(start))
         .collect()
+}
+
+fn visible_binding_ranges(
+    skill_bindings: &[TranscriptSkillBinding],
+    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
+    visible_start_char: usize,
+    text: &str,
+) -> Vec<(usize, usize)> {
+    let visible_end_char = visible_start_char + text.chars().count();
+    let mut ranges = skill_bindings
+        .iter()
+        .map(|binding| (binding.start_char, binding.end_char))
+        .chain(
+            custom_prompt_bindings
+                .iter()
+                .map(|binding| (binding.start_char, binding.end_char)),
+        )
+        .filter_map(|(start_char, end_char)| {
+            let overlap_start = start_char.max(visible_start_char);
+            let overlap_end = end_char.min(visible_end_char);
+            (overlap_start < overlap_end).then_some((
+                overlap_start - visible_start_char,
+                overlap_end - visible_start_char,
+            ))
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|(start, _)| *start);
+    ranges
 }
 
 pub(super) fn format_user_plain_lines(lines: &[String], style_mode: StyleMode) -> String {

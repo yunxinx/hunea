@@ -301,6 +301,7 @@ fn prepare_turn_with_transcript_keeps_provider_and_transcript_user_messages_sepa
     let transcript_user_message = TranscriptUserMessage {
         content: "raw user message".to_string(),
         skill_bindings: Vec::new(),
+        custom_prompt_bindings: Vec::new(),
     };
     let transcript_replay_after_user = vec![TranscriptReplayItem::Message {
         role: TranscriptReplayRole::Assistant,

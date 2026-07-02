@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
-use runtime_domain::prompt_assembly::PromptAssemblyDiscoveredSkill;
+use runtime_domain::prompt_assembly::{PromptAssemblyExtraPromptCandidate, PromptSourceOrigin};
 
 use super::{
     Model,
@@ -16,58 +16,50 @@ use super::{
     theme::tertiary_text_style,
 };
 
-/// `SkillPickerState` 保存 `$skill` 选择器的当前查询、结果和导航位置。
+/// `CustomPromptPickerState` 保存 `#prompt` 选择器的当前查询、结果和导航位置。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct SkillPickerState {
+pub(crate) struct CustomPromptPickerState {
     pub(crate) query: String,
-    pub(crate) items: Vec<PromptAssemblyDiscoveredSkill>,
+    pub(crate) items: Vec<PromptAssemblyExtraPromptCandidate>,
     pub(crate) selected: usize,
     pub(crate) scroll: usize,
 }
 
 impl Model {
-    pub(crate) fn skill_picker_active(&self) -> bool {
-        self.skill_picker.is_some()
+    pub(crate) fn custom_prompt_picker_active(&self) -> bool {
+        self.custom_prompt_picker.is_some()
     }
 
-    pub(crate) fn sync_composer_attached_picker_state(&mut self) {
-        self.sync_file_picker_state();
-        self.sync_skill_picker_state();
-        self.sync_custom_prompt_picker_state();
-    }
-
-    pub(crate) fn sync_skill_picker_state(&mut self) {
+    pub(crate) fn sync_custom_prompt_picker_state(&mut self) {
         if self.blocks_composer_input() || self.command_panel_active() {
-            self.close_skill_picker();
+            self.close_custom_prompt_picker();
             return;
         }
 
-        let Some(query) = self.composer.current_skill_token() else {
-            self.close_skill_picker();
-            self.dismissed_skill_picker_token = None;
+        let Some(query) = self.composer.current_custom_prompt_token() else {
+            self.close_custom_prompt_picker();
+            self.dismissed_custom_prompt_picker_token = None;
             return;
         };
 
-        if self.dismissed_skill_picker_token.as_ref() == Some(&query) {
-            self.close_skill_picker();
+        if self.dismissed_custom_prompt_picker_token.as_ref() == Some(&query) {
+            self.close_custom_prompt_picker();
             return;
         }
 
-        let items = filter_manual_skill_items(&self.prompt_assembly.manual_skills, &query);
+        let items =
+            filter_custom_prompt_items(&self.prompt_assembly.extra_prompt_candidates, &query);
         let visible_rows = self.file_picker_list_visible_rows();
-        let previous = self.skill_picker.as_ref();
+        let previous = self.custom_prompt_picker.as_ref();
         let query_changed = previous.is_none_or(|state| state.query != query);
-        let bound_skill_name = self
-            .composer
-            .current_skill_binding()
-            .map(|binding| binding.skill_name);
+        let bound_prompt = self.composer.current_custom_prompt_binding();
         let mut selected = if query_changed {
-            bound_skill_name
-                .as_deref()
-                .and_then(|skill_name| {
-                    items
-                        .iter()
-                        .position(|item| item.skill_name.as_str() == skill_name)
+            bound_prompt
+                .as_ref()
+                .and_then(|binding| {
+                    items.iter().position(|item| {
+                        item.reference_id == binding.reference_id && item.origin == binding.origin
+                    })
                 })
                 .unwrap_or(0)
         } else {
@@ -84,10 +76,10 @@ impl Model {
             scroll = 0;
         } else {
             selected = selected.min(items.len() - 1);
-            scroll = clamp_skill_picker_scroll(scroll, selected, items.len(), visible_rows);
+            scroll = clamp_custom_prompt_picker_scroll(scroll, selected, items.len(), visible_rows);
         }
 
-        self.skill_picker = Some(SkillPickerState {
+        self.custom_prompt_picker = Some(CustomPromptPickerState {
             query,
             items,
             selected,
@@ -95,47 +87,47 @@ impl Model {
         });
     }
 
-    pub(crate) fn handle_skill_picker_key(&mut self, key: KeyEvent) -> OverlayInputResult {
-        if !self.skill_picker_active() {
+    pub(crate) fn handle_custom_prompt_picker_key(&mut self, key: KeyEvent) -> OverlayInputResult {
+        if !self.custom_prompt_picker_active() {
             return OverlayInputResult::Ignored;
         }
 
         match key.code {
             KeyCode::Up if key.modifiers.is_empty() => {
-                self.move_skill_picker_selection(-1);
+                self.move_custom_prompt_picker_selection(-1);
                 OverlayInputResult::Handled
             }
             KeyCode::Down if key.modifiers.is_empty() => {
-                self.move_skill_picker_selection(1);
+                self.move_custom_prompt_picker_selection(1);
                 OverlayInputResult::Handled
             }
             KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
-                self.move_skill_picker_selection(-1);
+                self.move_custom_prompt_picker_selection(-1);
                 OverlayInputResult::Handled
             }
             KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
-                self.move_skill_picker_selection(1);
+                self.move_custom_prompt_picker_selection(1);
                 OverlayInputResult::Handled
             }
             KeyCode::Esc if key.modifiers.is_empty() => {
-                self.dismiss_current_skill_picker_token();
-                self.close_skill_picker();
+                self.dismiss_current_custom_prompt_picker_token();
+                self.close_custom_prompt_picker();
                 OverlayInputResult::Handled
             }
             KeyCode::Tab if key.modifiers.is_empty() => {
-                self.complete_skill_picker_common_prefix();
+                self.complete_custom_prompt_picker_common_prefix();
                 OverlayInputResult::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
-                let _ = self.insert_selected_skill_picker_skill();
+                let _ = self.insert_selected_custom_prompt_picker_item();
                 OverlayInputResult::Handled
             }
             _ => OverlayInputResult::Ignored,
         }
     }
 
-    pub(crate) fn current_skill_picker_render_result(&self) -> InlinePanelRenderResult {
-        let Some(state) = self.skill_picker.as_ref() else {
+    pub(crate) fn current_custom_prompt_picker_render_result(&self) -> InlinePanelRenderResult {
+        let Some(state) = self.custom_prompt_picker.as_ref() else {
             return InlinePanelRenderResult::default();
         };
 
@@ -144,7 +136,7 @@ impl Model {
         let has_scrollbar = state.items.len() > visible_rows;
         let content_width = width.saturating_sub(usize::from(has_scrollbar && width > 1));
         let (lines, plain_lines, selectable) =
-            self.render_skill_picker_lines(state, content_width, visible_rows);
+            self.render_custom_prompt_picker_lines(state, content_width, visible_rows);
 
         InlinePanelRenderResult {
             lines,
@@ -154,9 +146,9 @@ impl Model {
         }
     }
 
-    fn render_skill_picker_lines(
+    fn render_custom_prompt_picker_lines(
         &self,
-        state: &SkillPickerState,
+        state: &CustomPromptPickerState,
         width: usize,
         visible_rows: usize,
     ) -> (Vec<Line<'static>>, Vec<String>, Vec<SelectableLineRange>) {
@@ -166,12 +158,12 @@ impl Model {
         let mut plain_lines = Vec::with_capacity(visible_rows);
         let mut selectable = Vec::with_capacity(visible_rows);
         let name_column_width = attached_prompt_picker_name_column_width(
-            state.items.iter().map(skill_picker_display_name),
+            state.items.iter().map(custom_prompt_picker_display_name),
             width.saturating_sub(ATTACHED_PROMPT_PICKER_INSET_WIDTH),
         );
 
         if state.items.is_empty() {
-            let plain_line = pad_display_width_right("  No skills", width);
+            let plain_line = pad_display_width_right("  No custom prompts", width);
             lines.push(Line::styled(
                 plain_line.clone(),
                 tertiary_text_style(self.palette),
@@ -191,14 +183,14 @@ impl Model {
             };
 
             let selected = index == state.selected;
-            let (line, plain_line) = self.render_skill_picker_line(
+            let (line, plain_line) = self.render_custom_prompt_picker_line(
                 item,
                 &state.query,
                 selected,
                 width,
                 name_column_width,
             );
-            selectable.push(skill_picker_selectable_range(&plain_line, width));
+            selectable.push(custom_prompt_picker_selectable_range(&plain_line, width));
             lines.push(line);
             plain_lines.push(plain_line);
         }
@@ -206,9 +198,9 @@ impl Model {
         (lines, plain_lines, selectable)
     }
 
-    fn render_skill_picker_line(
+    fn render_custom_prompt_picker_line(
         &self,
-        item: &PromptAssemblyDiscoveredSkill,
+        item: &PromptAssemblyExtraPromptCandidate,
         query: &str,
         selected: bool,
         width: usize,
@@ -216,9 +208,11 @@ impl Model {
     ) -> (Line<'static>, String) {
         render_attached_prompt_picker_row(
             AttachedPromptPickerRowContent {
-                display_name: skill_picker_display_name(item),
-                description: item.description.trim(),
-                trailing_suffix: None,
+                display_name: custom_prompt_picker_display_name(item),
+                description: custom_prompt_picker_body_summary(&item.body)
+                    .as_deref()
+                    .unwrap_or_default(),
+                trailing_suffix: Some(custom_prompt_picker_origin_suffix(item.origin)),
             },
             query,
             selected,
@@ -228,9 +222,9 @@ impl Model {
         )
     }
 
-    fn move_skill_picker_selection(&mut self, delta: isize) {
+    fn move_custom_prompt_picker_selection(&mut self, delta: isize) {
         let visible_rows = self.file_picker_list_visible_rows();
-        let Some(state) = self.skill_picker.as_mut() else {
+        let Some(state) = self.custom_prompt_picker.as_mut() else {
             return;
         };
         if state.items.is_empty() {
@@ -243,7 +237,7 @@ impl Model {
         } else {
             state.selected = state.selected.saturating_add(delta as usize).min(last);
         }
-        state.scroll = clamp_skill_picker_scroll(
+        state.scroll = clamp_custom_prompt_picker_scroll(
             state.scroll,
             state.selected,
             state.items.len(),
@@ -251,21 +245,21 @@ impl Model {
         );
     }
 
-    fn complete_skill_picker_common_prefix(&mut self) {
-        let Some(state) = self.skill_picker.as_ref() else {
+    fn complete_custom_prompt_picker_common_prefix(&mut self) {
+        let Some(state) = self.custom_prompt_picker.as_ref() else {
             return;
         };
-        let prefix = common_skill_completion_prefix(&state.items, &state.query);
+        let prefix = common_custom_prompt_completion_prefix(&state.items, &state.query);
         if prefix.is_empty() || state.query == prefix {
             return;
         }
 
-        self.replace_skill_picker_token(format!("${prefix}"));
+        self.replace_custom_prompt_picker_token(format!("#{prefix}"));
     }
 
-    fn insert_selected_skill_picker_skill(&mut self) -> bool {
-        let Some(skill) = self
-            .skill_picker
+    fn insert_selected_custom_prompt_picker_item(&mut self) -> bool {
+        let Some(prompt) = self
+            .custom_prompt_picker
             .as_ref()
             .and_then(|state| state.items.get(state.selected))
             .cloned()
@@ -276,14 +270,13 @@ impl Model {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
-        if !self.composer.replace_current_skill_token(
-            &skill.skill_name,
-            &skill.skill_path,
-            skill.origin,
-        ) {
+        if !self
+            .composer
+            .replace_current_custom_prompt_token(&prompt.reference_id, prompt.origin)
+        {
             return false;
         }
-        self.dismissed_skill_picker_token = None;
+        self.dismissed_custom_prompt_picker_token = None;
         self.sync_command_panel_navigation();
         self.sync_composer_attached_picker_state();
         self.sync_external_editor_helper_after_draft_change(&old_value);
@@ -292,15 +285,15 @@ impl Model {
         true
     }
 
-    fn replace_skill_picker_token(&mut self, replacement: String) {
+    fn replace_custom_prompt_picker_token(&mut self, replacement: String) {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
         if self
             .composer
-            .replace_current_prefixed_token('$', &replacement)
+            .replace_current_prefixed_token('#', &replacement)
         {
-            self.dismissed_skill_picker_token = None;
+            self.dismissed_custom_prompt_picker_token = None;
             self.sync_command_panel_navigation();
             self.sync_composer_attached_picker_state();
             self.sync_external_editor_helper_after_draft_change(&old_value);
@@ -311,16 +304,16 @@ impl Model {
         }
     }
 
-    pub(crate) fn close_skill_picker(&mut self) {
-        self.skill_picker = None;
+    pub(crate) fn close_custom_prompt_picker(&mut self) {
+        self.custom_prompt_picker = None;
     }
 
-    fn dismiss_current_skill_picker_token(&mut self) {
-        self.dismissed_skill_picker_token = self.composer.current_skill_token();
+    fn dismiss_current_custom_prompt_picker_token(&mut self) {
+        self.dismissed_custom_prompt_picker_token = self.composer.current_custom_prompt_token();
     }
 }
 
-fn clamp_skill_picker_scroll(
+fn clamp_custom_prompt_picker_scroll(
     scroll: usize,
     selected: usize,
     item_count: usize,
@@ -341,77 +334,117 @@ fn clamp_skill_picker_scroll(
     scroll.min(max_scroll)
 }
 
-fn filter_manual_skill_items(
-    skills: &[PromptAssemblyDiscoveredSkill],
+fn filter_custom_prompt_items(
+    prompts: &[PromptAssemblyExtraPromptCandidate],
     query: &str,
-) -> Vec<PromptAssemblyDiscoveredSkill> {
+) -> Vec<PromptAssemblyExtraPromptCandidate> {
     let trimmed_query = query.trim().to_ascii_lowercase();
     if trimmed_query.is_empty() {
-        return skills.to_vec();
+        return prompts.to_vec();
     }
 
     let mut prefix_matches = Vec::new();
     let mut fuzzy_matches = Vec::new();
-    for skill in skills {
-        let skill_name = skill.skill_name.to_ascii_lowercase();
-        let title = skill_picker_display_name(skill).to_ascii_lowercase();
-        let description = skill.description.to_ascii_lowercase();
-        if skill_name.starts_with(&trimmed_query) || title.starts_with(&trimmed_query) {
-            prefix_matches.push(skill.clone());
-        } else if skill_name.contains(&trimmed_query)
+    for prompt in prompts {
+        let reference_id = prompt.reference_id.to_ascii_lowercase();
+        let title = custom_prompt_picker_display_name(prompt).to_ascii_lowercase();
+        let description = custom_prompt_picker_description(prompt).to_ascii_lowercase();
+        let body = prompt.body.to_ascii_lowercase();
+        if reference_id.starts_with(&trimmed_query) || title.starts_with(&trimmed_query) {
+            prefix_matches.push(prompt.clone());
+        } else if reference_id.contains(&trimmed_query)
             || title.contains(&trimmed_query)
             || description.contains(&trimmed_query)
+            || body.contains(&trimmed_query)
         {
-            fuzzy_matches.push(skill.clone());
+            fuzzy_matches.push(prompt.clone());
         }
     }
     prefix_matches.extend(fuzzy_matches);
     prefix_matches
 }
 
-fn common_skill_completion_prefix(skills: &[PromptAssemblyDiscoveredSkill], query: &str) -> String {
-    let mut iter = skills.iter().map(|skill| skill.skill_name.as_str());
-    let Some(first) = iter.next() else {
+fn common_custom_prompt_completion_prefix(
+    prompts: &[PromptAssemblyExtraPromptCandidate],
+    query: &str,
+) -> String {
+    let mut matches = prompts
+        .iter()
+        .filter(|prompt| {
+            prompt
+                .reference_id
+                .to_ascii_lowercase()
+                .starts_with(&query.to_ascii_lowercase())
+        })
+        .map(|prompt| prompt.reference_id.as_str());
+    let Some(first) = matches.next() else {
         return String::new();
     };
     let mut prefix = first.to_string();
-    for name in iter {
-        let next_len = prefix
+    for reference_id in matches {
+        let common_len = prefix
             .chars()
-            .zip(name.chars())
-            .take_while(|(left, right)| left == right)
+            .zip(reference_id.chars())
+            .take_while(|(left, right)| left.eq_ignore_ascii_case(right))
             .count();
-        prefix = prefix.chars().take(next_len).collect();
+        prefix = prefix.chars().take(common_len).collect();
         if prefix.is_empty() {
             break;
         }
     }
-
-    if prefix.len() <= query.len() {
-        String::new()
-    } else {
-        prefix
-    }
+    prefix
 }
 
-fn skill_picker_selectable_range(plain_line: &str, width: usize) -> SelectableLineRange {
+fn custom_prompt_picker_selectable_range(plain_line: &str, width: usize) -> SelectableLineRange {
     attached_prompt_picker_selectable_range(plain_line, width)
 }
 
-fn skill_picker_display_name(item: &PromptAssemblyDiscoveredSkill) -> &str {
-    let trimmed_title = item.title.trim();
-    if trimmed_title.is_empty() {
-        item.skill_name.as_str()
+fn custom_prompt_picker_display_name(item: &PromptAssemblyExtraPromptCandidate) -> &str {
+    if item.title.trim().is_empty() {
+        item.reference_id.as_str()
     } else {
-        trimmed_title
+        item.title.trim()
+    }
+}
+
+fn custom_prompt_picker_description(item: &PromptAssemblyExtraPromptCandidate) -> String {
+    let scope = custom_prompt_picker_origin_suffix(item.origin);
+    match custom_prompt_picker_body_summary(&item.body) {
+        Some(content) => format!("{content} {scope}"),
+        None => scope.to_string(),
+    }
+}
+
+fn custom_prompt_picker_body_summary(body: &str) -> Option<String> {
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .find_map(|line| {
+            if let Some(heading) = line.strip_prefix('#') {
+                let heading = heading.trim_start_matches('#').trim();
+                if !heading.is_empty() {
+                    return None;
+                }
+            }
+
+            Some(line.split_whitespace().collect::<Vec<_>>().join(" "))
+        })
+        .filter(|summary| !summary.is_empty())
+}
+
+fn custom_prompt_picker_origin_suffix(origin: PromptSourceOrigin) -> &'static str {
+    match origin {
+        PromptSourceOrigin::Project => "(project)",
+        PromptSourceOrigin::Global => "(global)",
+        PromptSourceOrigin::Builtin => "(builtin)",
     }
 }
 
 fn pad_display_width_right(text: &str, width: usize) -> String {
-    let mut padded = text.to_string();
     let current_width = display_width(text);
-    if current_width < width {
-        padded.push_str(&" ".repeat(width - current_width));
-    }
+    let padding = width.saturating_sub(current_width);
+    let mut padded = String::with_capacity(text.len() + padding);
+    padded.push_str(text);
+    padded.push_str(&" ".repeat(padding));
     padded
 }

@@ -67,7 +67,7 @@ fn user_render_colors_entire_bound_skill_token_with_command_accent() {
         Sender::User,
         "$code-review needs changes",
         StyleMode::Cx,
-        Some(ComposerSourceMessage::user_text_with_skill_bindings(
+        Some(ComposerSourceMessage::user_text_with_bindings(
             "$code-review needs changes",
             vec![TranscriptSkillBinding {
                 skill_name: "code-review".to_string(),
@@ -76,6 +76,7 @@ fn user_render_colors_entire_bound_skill_token_with_command_accent() {
                 start_char: 0,
                 end_char: 12,
             }],
+            Vec::new(),
         )),
     );
 

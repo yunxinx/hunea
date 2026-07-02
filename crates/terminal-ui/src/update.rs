@@ -494,6 +494,10 @@ impl Model {
         if !result.is_ignored() {
             return result.into_effect();
         }
+        let result = self.handle_custom_prompt_picker_key(key);
+        if !result.is_ignored() {
+            return result.into_effect();
+        }
 
         if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.can_open_message_history_picker_via_ctrl_r() {
@@ -568,15 +572,19 @@ impl Model {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
-        let composer_picker_was_active = self.file_picker_active() || self.skill_picker_active();
+        let composer_picker_was_active = self.file_picker_active()
+            || self.skill_picker_active()
+            || self.custom_prompt_picker_active();
         let file_picker_manual_viewport_state = (composer_picker_was_active
             && self.document_runtime.manual_scroll)
             .then(|| self.current_document_viewport_state());
         self.handle_composer_editing_key(key);
         self.sync_command_panel_navigation();
         self.sync_composer_attached_picker_state();
-        let file_picker_closed =
-            composer_picker_was_active && !self.file_picker_active() && !self.skill_picker_active();
+        let file_picker_closed = composer_picker_was_active
+            && !self.file_picker_active()
+            && !self.skill_picker_active()
+            && !self.custom_prompt_picker_active();
         self.sync_external_editor_helper_after_draft_change(&old_value);
         self.sync_composer_height();
         if self.composer_text() != old_value

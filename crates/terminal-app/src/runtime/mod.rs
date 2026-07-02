@@ -89,7 +89,7 @@ impl AppRuntimeCoordinator {
     ) -> Result<RuntimeCommandReceipt, String> {
         match command {
             RuntimeCommand::SubmitConversationTurn { target, request } => {
-                self.start_conversation_turn(target, request)
+                self.start_conversation_turn(target, *request)
             }
             RuntimeCommand::TruncateConversation {
                 retained_user_turns,

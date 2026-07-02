@@ -1,9 +1,12 @@
-use runtime_domain::prompt_assembly::PromptAssemblyDiscoveredSkill;
+use runtime_domain::prompt_assembly::{
+    PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate,
+};
 use runtime_domain::session::{
     RuntimeEvent, RuntimePermissionOptionKind, RuntimePermissionRequest, RuntimeTarget,
     RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityStatus,
-    RuntimeToolActivityUpdate, RuntimeToolKind, SessionResumePayload, TranscriptReplayItem,
-    TranscriptReplayRole, TranscriptSkillBinding, TranscriptUserMessage,
+    RuntimeToolActivityUpdate, RuntimeToolKind, SessionResumePayload,
+    TranscriptCustomPromptBinding, TranscriptReplayItem, TranscriptReplayRole,
+    TranscriptSkillBinding, TranscriptUserMessage,
 };
 
 use super::super::{
@@ -433,6 +436,7 @@ impl Model {
                 self.style_mode,
                 self.reasoning_display_mode,
                 &self.prompt_assembly.manual_skills,
+                &self.prompt_assembly.extra_prompt_candidates,
             );
         }
         for snapshot in terminal_snapshots.iter().cloned() {
@@ -464,6 +468,7 @@ trait TranscriptReplayItemSource {
         style_mode: crate::style_mode::StyleMode,
         reasoning_display_mode: crate::ReasoningDisplayMode,
         manual_skills: &[PromptAssemblyDiscoveredSkill],
+        extra_prompt_candidates: &[PromptAssemblyExtraPromptCandidate],
     );
 }
 
@@ -478,6 +483,7 @@ impl TranscriptReplayItemSource for TranscriptReplayItem {
         style_mode: crate::style_mode::StyleMode,
         reasoning_display_mode: crate::ReasoningDisplayMode,
         manual_skills: &[PromptAssemblyDiscoveredSkill],
+        extra_prompt_candidates: &[PromptAssemblyExtraPromptCandidate],
     ) {
         append_transcript_replay_item(
             transcript,
@@ -485,6 +491,7 @@ impl TranscriptReplayItemSource for TranscriptReplayItem {
             style_mode,
             reasoning_display_mode,
             manual_skills,
+            extra_prompt_candidates,
         );
     }
 }
@@ -500,6 +507,7 @@ impl TranscriptReplayItemSource for &TranscriptReplayItem {
         style_mode: crate::style_mode::StyleMode,
         reasoning_display_mode: crate::ReasoningDisplayMode,
         manual_skills: &[PromptAssemblyDiscoveredSkill],
+        extra_prompt_candidates: &[PromptAssemblyExtraPromptCandidate],
     ) {
         append_transcript_replay_item(
             transcript,
@@ -507,6 +515,7 @@ impl TranscriptReplayItemSource for &TranscriptReplayItem {
             style_mode,
             reasoning_display_mode,
             manual_skills,
+            extra_prompt_candidates,
         );
     }
 }
@@ -531,6 +540,7 @@ fn append_transcript_replay_item(
     style_mode: crate::style_mode::StyleMode,
     reasoning_display_mode: crate::ReasoningDisplayMode,
     manual_skills: &[PromptAssemblyDiscoveredSkill],
+    extra_prompt_candidates: &[PromptAssemblyExtraPromptCandidate],
 ) {
     match item {
         TranscriptReplayItem::Message {
@@ -550,7 +560,11 @@ fn append_transcript_replay_item(
             );
         }
         TranscriptReplayItem::BoundUserMessage { message } => {
-            let source_message = validated_transcript_user_source_message(message, manual_skills);
+            let source_message = validated_transcript_user_source_message(
+                message,
+                manual_skills,
+                extra_prompt_candidates,
+            );
             transcript.append_message_with_style_mode_and_source(
                 crate::Sender::User,
                 source_message.content().to_string(),
@@ -594,8 +608,9 @@ fn upsert_replay_terminal_snapshot(
 fn validated_transcript_user_source_message(
     message: TranscriptUserMessage,
     manual_skills: &[PromptAssemblyDiscoveredSkill],
+    extra_prompt_candidates: &[PromptAssemblyExtraPromptCandidate],
 ) -> crate::composer::ComposerSourceMessage {
-    let valid_bindings = message
+    let valid_skill_bindings = message
         .skill_bindings
         .into_iter()
         .filter(|binding| {
@@ -607,9 +622,20 @@ fn validated_transcript_user_source_message(
                 })
         })
         .collect();
+    let valid_custom_prompt_bindings = message
+        .custom_prompt_bindings
+        .into_iter()
+        .filter(|binding| {
+            is_visible_custom_prompt_binding_range_valid(binding, &message.content)
+                && extra_prompt_candidates.iter().any(|prompt| {
+                    prompt.reference_id == binding.reference_id && prompt.origin == binding.origin
+                })
+        })
+        .collect();
     crate::composer::ComposerSourceMessage::from_transcript_user_message(TranscriptUserMessage {
         content: message.content,
-        skill_bindings: valid_bindings,
+        skill_bindings: valid_skill_bindings,
+        custom_prompt_bindings: valid_custom_prompt_bindings,
     })
 }
 
@@ -624,7 +650,24 @@ fn is_visible_binding_range_valid(binding: &TranscriptSkillBinding, content: &st
         .skip(binding.start_char)
         .take(binding.end_char - binding.start_char)
         .collect::<String>();
-    visible_text == format!("${}", binding.skill_name)
+    visible_text == binding.visible_token_text()
+}
+
+fn is_visible_custom_prompt_binding_range_valid(
+    binding: &TranscriptCustomPromptBinding,
+    content: &str,
+) -> bool {
+    let total_chars = content.chars().count();
+    if binding.start_char >= binding.end_char || binding.end_char > total_chars {
+        return false;
+    }
+
+    let visible_text = content
+        .chars()
+        .skip(binding.start_char)
+        .take(binding.end_char - binding.start_char)
+        .collect::<String>();
+    visible_text == binding.visible_token_text()
 }
 
 fn split_error_description_and_json_body(message: &str) -> (String, Option<String>) {

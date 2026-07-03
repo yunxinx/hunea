@@ -16,7 +16,7 @@ use runtime_domain::{
         PromptAssemblyInput, PromptAssemblyManagerSnapshot, PromptPreludeSnapshot,
         resolve_prompt_assembly,
     },
-    session::{RuntimeTerminalSnapshot, SessionLoadRequestId},
+    session::{PromptAssemblyUpdateNotice, RuntimeTerminalSnapshot, SessionLoadRequestId},
 };
 
 use super::{
@@ -141,6 +141,7 @@ pub struct Model {
     pub(super) has_dark_background: bool,
     pub(super) notice_state: NoticeState,
     pub(super) toast_state: ToastState,
+    pub(super) pending_prompt_assembly_notice: Option<PromptAssemblyUpdateNotice>,
     pub(super) status_line_revision: usize,
     quitting: bool,
 }
@@ -296,6 +297,7 @@ impl Model {
             has_dark_background: true,
             notice_state: NoticeState::default(),
             toast_state: ToastState::default(),
+            pending_prompt_assembly_notice: None,
             status_line_revision: 1,
             quitting: false,
         }

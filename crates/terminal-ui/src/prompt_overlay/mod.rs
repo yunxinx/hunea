@@ -260,6 +260,7 @@ impl Model {
     pub(crate) fn close_prompt_overlay(&mut self) {
         self.prompt_overlay = None;
         self.sync_composer_height();
+        self.present_pending_prompt_assembly_notice_if_ready();
     }
 
     pub(crate) fn handle_prompt_overlay_key(&mut self, key: KeyEvent) -> OverlayInputResult {

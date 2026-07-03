@@ -8,6 +8,13 @@ use super::{
 use crate::context_budget::ContextBudgetSnapshot;
 use crate::prompt_assembly::PromptAssemblyManagerSnapshot;
 
+/// `PromptAssemblyUpdateNotice` 描述 `/prompt` 变更对当前运行时会话的生效范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptAssemblyUpdateNotice {
+    CurrentEmptySessionUpdated,
+    NextNewSessionUpdated,
+}
+
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
@@ -150,6 +157,7 @@ pub enum RuntimeEvent {
     },
     PromptAssemblyUpdated {
         manager: PromptAssemblyManagerSnapshot,
+        notice: Option<PromptAssemblyUpdateNotice>,
     },
     MessageFinished {
         target: Option<RuntimeTarget>,

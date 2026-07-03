@@ -10,8 +10,8 @@ pub(crate) enum ToastSeverity {
 impl ToastSeverity {
     const fn hold_duration(self) -> Duration {
         match self {
-            Self::Info => Duration::from_secs(2),
-            Self::Error => Duration::from_secs(3),
+            Self::Info => Duration::from_secs(3),
+            Self::Error => Duration::from_secs(4),
         }
     }
 

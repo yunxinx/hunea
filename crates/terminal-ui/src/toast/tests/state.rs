@@ -88,7 +88,7 @@ fn hold_duration_depends_on_severity_after_enter_completes() {
     let info_visible_at = complete_current_enter(&mut state, now, bounds, palette);
     assert_eq!(
         state.next_timeout_deadline(),
-        Some(info_visible_at + Duration::from_secs(2))
+        Some(info_visible_at + Duration::from_secs(3))
     );
 
     let mut state = ToastState::default();
@@ -96,6 +96,6 @@ fn hold_duration_depends_on_severity_after_enter_completes() {
     let error_visible_at = complete_current_enter(&mut state, now, bounds, palette);
     assert_eq!(
         state.next_timeout_deadline(),
-        Some(error_visible_at + Duration::from_secs(3))
+        Some(error_visible_at + Duration::from_secs(4))
     );
 }

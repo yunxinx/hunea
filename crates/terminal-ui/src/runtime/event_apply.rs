@@ -240,9 +240,13 @@ impl RuntimeEventApply for Model {
                     format!("Message history not saved: {message}"),
                 );
             }
-            RuntimeEvent::PromptAssemblyUpdated { manager } => {
+            RuntimeEvent::PromptAssemblyUpdated { manager, notice } => {
                 self.prompt_assembly = manager;
                 self.sync_prompt_overlay_state();
+                if let Some(notice) = notice {
+                    self.pending_prompt_assembly_notice = Some(notice);
+                    self.present_pending_prompt_assembly_notice_if_ready();
+                }
             }
             RuntimeEvent::SessionResumed { payload } => {
                 self.apply_session_resume_payload(payload);

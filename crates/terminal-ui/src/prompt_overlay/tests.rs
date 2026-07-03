@@ -15,6 +15,7 @@ use runtime_domain::prompt_assembly::{
     PromptAssemblyToolCandidate, PromptPreludeSnapshot, PromptSourceInactiveReason,
     PromptSourceKind, PromptSourceOrigin, PromptSourceStatus, ResolvedPromptSource,
 };
+use runtime_domain::session::PromptAssemblyUpdateNotice;
 
 use crate::{
     AppEffect, AppEvent, Model, ModelOptions, StartupBannerOptions,
@@ -1646,6 +1647,7 @@ fn prompt_runtime_update_replaces_manager_snapshot() {
                 global_core_system_override: None,
                 project_core_system_override: Some("project core".to_string()),
             },
+            notice: None,
         },
     );
 
@@ -1810,6 +1812,7 @@ fn active_selection_follows_reordered_source_after_runtime_update() {
                 global_core_system_override: None,
                 project_core_system_override: None,
             },
+            notice: None,
         },
     );
 
@@ -2921,5 +2924,70 @@ fn r_still_restores_core_system_override_on_left_selection() {
                         runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
                 },
         })
+    );
+}
+
+#[test]
+fn prompt_overlay_close_shows_system_message_for_current_empty_session_notice() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+
+    model.apply_runtime_event(
+        runtime_domain::session::RuntimeEvent::PromptAssemblyUpdated {
+            manager: model.prompt_assembly.clone(),
+            notice: Some(PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated),
+        },
+    );
+
+    assert_eq!(model.active_toast_text_for_test(), None);
+    assert!(
+        !model
+            .transcript_plain_items()
+            .iter()
+            .any(|item| item.contains("Prompt updated for current empty session."))
+    );
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Esc)),
+        super::OverlayInputResult::Handled
+    );
+
+    assert_eq!(model.active_toast_text_for_test(), None);
+    assert!(
+        model
+            .transcript_plain_items()
+            .iter()
+            .any(|item| item.contains("Prompt updated for current empty session."))
+    );
+}
+
+#[test]
+fn prompt_overlay_close_shows_toast_for_next_new_session_notice() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+
+    model.apply_runtime_event(
+        runtime_domain::session::RuntimeEvent::PromptAssemblyUpdated {
+            manager: model.prompt_assembly.clone(),
+            notice: Some(PromptAssemblyUpdateNotice::NextNewSessionUpdated),
+        },
+    );
+
+    assert_eq!(model.active_toast_text_for_test(), None);
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Esc)),
+        super::OverlayInputResult::Handled
+    );
+
+    assert_eq!(
+        model.active_toast_text_for_test(),
+        Some("Prompt updated. Applies to next new session.")
+    );
+    assert!(
+        !model
+            .transcript_plain_items()
+            .iter()
+            .any(|item| item.contains("Prompt updated for current empty session."))
     );
 }

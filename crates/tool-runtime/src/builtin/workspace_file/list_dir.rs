@@ -80,6 +80,7 @@ impl Tool for ListDirTool {
                 "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Always)
+            .with_prompt_guidelines("Prefer list_dir over shell ls.")
     }
 
     fn execute<'a>(

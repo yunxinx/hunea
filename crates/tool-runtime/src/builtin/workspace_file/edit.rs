@@ -71,7 +71,7 @@ impl Tool for EditTool {
             .with_label("Edit")
             .with_kind(ToolKind::Edit)
             .with_description(
-                "Edit an existing UTF-8 text file inside the current workspace by applying one or more targeted replacements. Existing files must be read completely with read first. Use write to create files.",
+                "Edit an existing UTF-8 text file inside the current workspace by applying one or more targeted replacements. Existing files must be read completely with read first. Each old_string is matched against the original file, not incrementally after earlier edits. Keep old_string as small as possible while still unique; merge nearby changes into one edit and avoid including large unchanged regions. Use write to create files.",
             )
             .with_input_schema(json!({
                 "type": "object",
@@ -89,7 +89,7 @@ impl Tool for EditTool {
                             "properties": {
                                 "old_string": {
                                     "type": "string",
-                                    "description": "Text to replace for this targeted edit. Must not be empty."
+                                    "description": "Text to replace for this targeted edit. Must not be empty, must be unique in the original file, and must not overlap with any other old_string in the same call."
                                 },
                                 "new_string": {
                                     "type": "string",
@@ -105,6 +105,9 @@ impl Tool for EditTool {
                 "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Ask)
+            .with_prompt_guidelines(
+                "Read a file before editing it. Use edit for targeted changes; use write for new files or full rewrites.",
+            )
     }
 
     fn execute<'a>(

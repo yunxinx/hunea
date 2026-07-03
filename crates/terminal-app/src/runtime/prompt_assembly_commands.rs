@@ -1,4 +1,5 @@
 use runtime_domain::session::{RuntimeCommandReceipt, RuntimeEvent};
+use tool_runtime::ToolDefinition;
 
 use super::AppRuntimeCoordinator;
 use crate::prompt_assembly::{
@@ -6,10 +7,19 @@ use crate::prompt_assembly::{
 };
 
 impl AppRuntimeCoordinator {
+    pub(super) fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.workspace_tools
+            .definitions()
+            .definitions()
+            .cloned()
+            .collect()
+    }
+
     pub(super) fn reload_prompt_assembly(&mut self) -> Result<RuntimeCommandReceipt, String> {
         let store = self.session_store()?;
         let header = self.session_header()?;
-        let manager = load_prompt_assembly_manager_snapshot(store, &header.work_dir)
+        let tool_defs = self.tool_definitions();
+        let manager = load_prompt_assembly_manager_snapshot(store, &header.work_dir, &tool_defs)
             .map_err(|error| error.to_string())?;
         self.options.initial_prompt_prelude = Some(manager.prelude.clone());
         self.pending_runtime_events
@@ -23,7 +33,8 @@ impl AppRuntimeCoordinator {
     ) -> Result<RuntimeCommandReceipt, String> {
         let store = self.session_store()?;
         let header = self.session_header()?;
-        let manager = apply_prompt_assembly_mutation(store, &header.work_dir, mutation)
+        let tool_defs = self.tool_definitions();
+        let manager = apply_prompt_assembly_mutation(store, &header.work_dir, mutation, &tool_defs)
             .map_err(|error| error.to_string())?;
         self.options.initial_prompt_prelude = Some(manager.prelude.clone());
         self.pending_runtime_events

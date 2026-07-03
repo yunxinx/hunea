@@ -160,6 +160,8 @@ fn startup_prompt_missing_source_check_emits_aggregated_runtime_event() {
                 skill_discovery_override: None,
                 skill_discovery_skills: Vec::new(),
                 extra_prompts: Vec::new(),
+                tool_guidelines_override: None,
+                tool_selections: Vec::new(),
             },
         ))
         .expect("global prompt state should save");

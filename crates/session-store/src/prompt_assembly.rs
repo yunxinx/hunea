@@ -5,8 +5,9 @@ use std::path::Path;
 use runtime_domain::prompt_assembly::{
     PromptSourceKind,
     persistence::{
-        PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PromptAssemblyScope,
-        PromptAssemblyScopeState, StoredPromptBody,
+        PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry,
+        PersistedToolSelectionEntry, PromptAssemblyScope, PromptAssemblyScopeState,
+        StoredPromptBody,
     },
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
@@ -59,6 +60,18 @@ pub(crate) fn save_global_prompt_assembly_state(
         transaction
             .execute(
                 "DELETE FROM prompt_assembly_skill_discovery_skills WHERE scope = ?1",
+                params![scope],
+            )
+            .map_err(sqlite_err)?;
+        transaction
+            .execute(
+                "DELETE FROM prompt_assembly_tool_guideline_overrides WHERE scope = ?1",
+                params![scope],
+            )
+            .map_err(sqlite_err)?;
+        transaction
+            .execute(
+                "DELETE FROM prompt_assembly_tool_selections WHERE scope = ?1",
                 params![scope],
             )
             .map_err(sqlite_err)?;
@@ -132,6 +145,34 @@ pub(crate) fn save_global_prompt_assembly_state(
                         skill.skill_name,
                         skill.enabled,
                         skill.requested_order.map(i64::from),
+                    ],
+                )
+                .map_err(sqlite_err)?;
+        }
+
+        if let Some(body) = state.tool_guidelines_override.as_deref() {
+            transaction
+                .execute(
+                    "INSERT INTO prompt_assembly_tool_guideline_overrides (scope, body) VALUES (?1, ?2)",
+                    params![scope, body],
+                )
+                .map_err(sqlite_err)?;
+        }
+
+        for tool in sort_tool_selections(state.tool_selections.clone()) {
+            transaction
+                .execute(
+                    "INSERT INTO prompt_assembly_tool_selections (
+                        scope,
+                        tool_name,
+                        enabled,
+                        requested_order
+                    ) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        scope,
+                        tool.tool_name,
+                        tool.enabled,
+                        tool.requested_order.map(i64::from),
                     ],
                 )
                 .map_err(sqlite_err)?;
@@ -262,12 +303,60 @@ pub(crate) fn load_global_prompt_assembly_state(
             .collect::<Result<Vec<_>, _>>()
             .map_err(sqlite_err)?;
 
+        let tool_guidelines_override = conn
+            .query_row(
+                "SELECT body FROM prompt_assembly_tool_guideline_overrides WHERE scope = ?1",
+                params![scope],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_err)?;
+
+        let mut tool_selections_statement = conn
+            .prepare(
+                "SELECT tool_name, enabled, requested_order
+                 FROM prompt_assembly_tool_selections
+                 WHERE scope = ?1
+                 ORDER BY
+                    CASE WHEN requested_order IS NULL THEN 1 ELSE 0 END,
+                    requested_order ASC,
+                    tool_name ASC",
+            )
+            .map_err(sqlite_err)?;
+        let tool_selections = tool_selections_statement
+            .query_map(params![scope], |row| {
+                let requested_order = row
+                    .get::<_, Option<i64>>(2)?
+                    .map(|value| {
+                        u16::try_from(value).map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Integer,
+                                Box::new(std::io::Error::other(
+                                    "requested_order exceeds u16 range",
+                                )),
+                            )
+                        })
+                    })
+                    .transpose()?;
+                Ok(PersistedToolSelectionEntry {
+                    tool_name: row.get(0)?,
+                    enabled: row.get(1)?,
+                    requested_order,
+                })
+            })
+            .map_err(sqlite_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_err)?;
+
         Ok(PromptAssemblyScopeState {
             scope: PromptAssemblyScope::Global,
             core_system_override,
             skill_discovery_override,
+            tool_guidelines_override,
             entries,
             skill_discovery_skills,
+            tool_selections,
             extra_prompts,
         })
     })
@@ -280,6 +369,7 @@ fn prompt_source_kind_value(kind: PromptSourceKind) -> &'static str {
         PromptSourceKind::ExtraPrompt => "extra_prompt",
         PromptSourceKind::SkillDiscovery => "skill_discovery",
         PromptSourceKind::LongLivedSkill => "long_lived_skill",
+        PromptSourceKind::ToolGuidelines => "tool_guidelines",
     }
 }
 
@@ -290,6 +380,7 @@ fn parse_prompt_source_kind(value: &str) -> Result<PromptSourceKind, rusqlite::E
         "extra_prompt" => Ok(PromptSourceKind::ExtraPrompt),
         "skill_discovery" => Ok(PromptSourceKind::SkillDiscovery),
         "long_lived_skill" => Ok(PromptSourceKind::LongLivedSkill),
+        "tool_guidelines" => Ok(PromptSourceKind::ToolGuidelines),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             1,
             rusqlite::types::Type::Text,
@@ -324,6 +415,18 @@ fn sort_skill_discovery_skills(
             .unwrap_or(u16::MAX)
             .cmp(&right.requested_order.unwrap_or(u16::MAX))
             .then_with(|| left.skill_name.cmp(&right.skill_name))
+    });
+    entries
+}
+
+fn sort_tool_selections(
+    mut entries: Vec<PersistedToolSelectionEntry>,
+) -> Vec<PersistedToolSelectionEntry> {
+    entries.sort_by(|left, right| {
+        left.requested_order
+            .unwrap_or(u16::MAX)
+            .cmp(&right.requested_order.unwrap_or(u16::MAX))
+            .then_with(|| left.tool_name.cmp(&right.tool_name))
     });
     entries
 }
@@ -365,6 +468,8 @@ mod tests {
                 title: "shared-rules".to_string(),
                 body: "global rules".to_string(),
             }],
+            tool_guidelines_override: None,
+            tool_selections: Vec::new(),
         }
     }
 
@@ -421,6 +526,8 @@ mod tests {
                     title: "shared-rules".to_string(),
                     body: "project rules".to_string(),
                 }],
+                tool_guidelines_override: None,
+                tool_selections: Vec::new(),
             };
         runtime_domain::prompt_assembly::persistence::save_project_prompt_assembly_state(
             &work_dir,

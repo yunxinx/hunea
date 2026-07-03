@@ -28,7 +28,7 @@ use session_store::{
     SessionStore, SessionTreeSnapshot, SessionTreeSnapshotRow,
 };
 use terminal_ui::RuntimeCoordinator;
-use tool_runtime::{ToolExecutorRegistry, builtin::ManagedSearchToolConfig};
+use tool_runtime::{ToolDefinition, ToolExecutorRegistry, builtin::ManagedSearchToolConfig};
 
 use self::{
     context_budget_worker::ContextBudgetWorker,
@@ -40,6 +40,18 @@ use self::{
     },
     session_worker::{SessionStoreWorker, SessionStoreWorkerEvent},
 };
+
+/// `tool_definitions_for_managed_search` 在 coordinator 创建前收集内置工具定义，
+/// 供初始 prompt assembly 加载使用。
+pub(crate) fn tool_definitions_for_managed_search(
+    managed_search_tools: &ManagedSearchToolConfig,
+) -> Vec<ToolDefinition> {
+    conversation_workspace_tools(managed_search_tools)
+        .definitions()
+        .definitions()
+        .cloned()
+        .collect()
+}
 
 /// `AppRuntimeOptions` 保存 app 层对话运行时所需的配置。
 #[derive(Clone, Default)]

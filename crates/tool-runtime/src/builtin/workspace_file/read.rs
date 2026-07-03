@@ -95,6 +95,9 @@ impl Tool for ReadTool {
                 "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Always)
+            .with_prompt_guidelines(
+                "Prefer read over cat for reading files. Use offset and limit for large files.",
+            )
     }
 
     fn execute<'a>(

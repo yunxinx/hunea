@@ -11,6 +11,8 @@ pub struct ToolDefinition {
     pub description: Option<String>,
     pub input_schema: Option<Value>,
     pub permission_policy: ToolPermissionPolicy,
+    /// 动态注入 system prompt 的工具使用指南；为 None 时不参与 tool guidelines 装配。
+    pub prompt_guidelines: Option<String>,
 }
 
 impl ToolDefinition {
@@ -23,6 +25,7 @@ impl ToolDefinition {
             description: None,
             input_schema: None,
             permission_policy: ToolPermissionPolicy::Never,
+            prompt_guidelines: None,
         }
     }
 
@@ -53,6 +56,12 @@ impl ToolDefinition {
     /// `with_permission_policy` 设置工具执行前的权限策略。
     pub const fn with_permission_policy(mut self, policy: ToolPermissionPolicy) -> Self {
         self.permission_policy = policy;
+        self
+    }
+
+    /// `with_prompt_guidelines` 设置动态注入 system prompt 的工具使用指南。
+    pub fn with_prompt_guidelines(mut self, guidelines: impl Into<String>) -> Self {
+        self.prompt_guidelines = Some(guidelines.into());
         self
     }
 }

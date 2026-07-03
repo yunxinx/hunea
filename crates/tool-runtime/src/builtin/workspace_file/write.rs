@@ -88,6 +88,7 @@ impl Tool for WriteTool {
                 "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Ask)
+            .with_prompt_guidelines("Use write for new files or full rewrites.")
     }
 
     fn execute<'a>(

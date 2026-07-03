@@ -11,8 +11,8 @@ use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
 use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyEditorTarget, PromptAssemblyExtraPromptCandidate,
     PromptAssemblyManagedSource, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
-    PromptAssemblyMutation, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
-    ResolvedPromptSource, default_extra_prompt_body, natural_sort_text_cmp,
+    PromptAssemblyMutation, PromptAssemblyToolCandidate, PromptSourceKind, PromptSourceOrigin,
+    PromptSourceStatus, ResolvedPromptSource, default_extra_prompt_body, natural_sort_text_cmp,
     next_default_extra_prompt_title,
 };
 
@@ -24,6 +24,7 @@ use crate::{
     overlay_input_result::OverlayInputResult,
     relative_age::left_pad_display_width,
     render_frame::RenderFrame,
+    shortcut_help_popover::{ShortcutHelpEntry, ShortcutHelpPopover, aligned_shortcut_help_lines},
     status_line::truncate_display_width_with_ellipsis,
     styled_text::render_line_with_full_width_background,
     theme::{
@@ -37,19 +38,25 @@ use crate::{
 mod tests;
 
 const PROMPT_OVERLAY_HEADER_INSET: usize = 2;
-const PROMPT_OVERLAY_FOOTER_TABS_SUFFIX: &str = " · Tab tabs";
 const SKILL_DISCOVERY_GENERATED_START: &str = "<!-- hunea:skill-discovery generated:start -->";
 const SKILL_DISCOVERY_GENERATED_END: &str = "<!-- hunea:skill-discovery generated:end -->";
+const TOOL_GUIDELINES_GENERATED_START: &str = "<!-- hunea:tool-guidelines generated:start -->";
+const TOOL_GUIDELINES_GENERATED_END: &str = "<!-- hunea:tool-guidelines generated:end -->";
 const PROMPT_OVERLAY_HEADER_TRAILING_PADDING: usize = 2;
 const PROMPT_OVERLAY_ROW_PREFIX_WIDTH: usize = 1;
 const PROMPT_OVERLAY_COLUMN_GAP: usize = 2;
 const PROMPT_OVERLAY_OUTER_PADDING: usize = 2;
 const PROMPT_OVERLAY_LEFT_SEL_WIDTH: usize = 3;
 const PROMPT_OVERLAY_LEFT_ORD_WIDTH: usize = 3;
+const PROMPT_OVERLAY_RIGHT_ORD_WIDTH: usize = 3;
 const PROMPT_OVERLAY_LEFT_KIND_WIDTH: usize = "instructions".len();
 const PROMPT_OVERLAY_LEFT_SCOPE_WIDTH: usize = 7;
 const PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH: usize = 7;
 const PROMPT_OVERLAY_SCOPE_TRAILING_PADDING: usize = 2;
+const PROMPT_OVERLAY_LEFT_PANE_RATIO_NUMERATOR: u32 = 9;
+const PROMPT_OVERLAY_RIGHT_PANE_RATIO_NUMERATOR: u32 = 11;
+const PROMPT_OVERLAY_PANE_RATIO_DENOMINATOR: u32 = 20;
+const PROMPT_OVERLAY_FOOTER_MORE_LABEL: &str = "? more";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptOverlayFocus {
@@ -61,6 +68,7 @@ pub(crate) enum PromptOverlayFocus {
 pub(crate) enum PromptOverlayInactiveTab {
     LongLivedSkills,
     ExtraPrompts,
+    Tools,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,22 +133,27 @@ enum PromptOverlayInactiveRow {
     DiscoveredSkillShadowedDetail {
         skill: PromptAssemblyDiscoveredSkill,
     },
+    ToolCandidate {
+        tool: PromptAssemblyToolCandidate,
+    },
 }
 
 impl PromptOverlayInactiveTab {
-    const ALL: [Self; 2] = [Self::LongLivedSkills, Self::ExtraPrompts];
+    const ALL: [Self; 3] = [Self::LongLivedSkills, Self::ExtraPrompts, Self::Tools];
 
     fn next(self) -> Self {
         match self {
             Self::LongLivedSkills => Self::ExtraPrompts,
-            Self::ExtraPrompts => Self::LongLivedSkills,
+            Self::ExtraPrompts => Self::Tools,
+            Self::Tools => Self::LongLivedSkills,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            Self::LongLivedSkills => Self::ExtraPrompts,
+            Self::LongLivedSkills => Self::Tools,
             Self::ExtraPrompts => Self::LongLivedSkills,
+            Self::Tools => Self::ExtraPrompts,
         }
     }
 
@@ -148,6 +161,7 @@ impl PromptOverlayInactiveTab {
         match self {
             Self::LongLivedSkills => "Skill",
             Self::ExtraPrompts => "Custom Prompts",
+            Self::Tools => "Tools",
         }
     }
 }
@@ -165,6 +179,7 @@ pub(crate) struct PromptOverlayState {
     expanded_row: Option<PromptOverlayExpandedRow>,
     dialog: Option<PromptOverlayDialog>,
     pub(crate) preview: Option<preview::PromptOverlayPreviewState>,
+    shortcut_help_open: bool,
     pub(crate) draft_scope: PromptAssemblyScope,
     pub(crate) pending_editor: Option<PromptOverlayPendingEditor>,
 }
@@ -183,6 +198,7 @@ impl Default for PromptOverlayState {
             expanded_row: None,
             dialog: None,
             preview: None,
+            shortcut_help_open: false,
             draft_scope: PromptAssemblyScope::Project,
             pending_editor: None,
         }
@@ -202,6 +218,7 @@ enum PromptOverlaySelection {
     ResolvedSource(ResolvedPromptSource),
     ExtraPromptCandidate(PromptAssemblyExtraPromptCandidate),
     DiscoveredSkill(PromptAssemblyDiscoveredSkill),
+    ToolCandidate(PromptAssemblyToolCandidate),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,8 +272,22 @@ impl Model {
         if self.prompt_overlay_dialog_active() {
             return self.handle_prompt_overlay_dialog_key(key);
         }
+        if self.prompt_overlay_shortcut_help_open() {
+            if matches!(key.code, KeyCode::Char('?')) {
+                self.toggle_prompt_overlay_shortcut_help();
+                return OverlayInputResult::Handled;
+            }
+            self.close_prompt_overlay_shortcut_help();
+            if matches!(key.code, KeyCode::Esc) && key.modifiers.is_empty() {
+                return OverlayInputResult::Handled;
+            }
+        }
 
         match key.code {
+            KeyCode::Char('?') => {
+                self.toggle_prompt_overlay_shortcut_help();
+                OverlayInputResult::Handled
+            }
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.close_prompt_overlay();
                 OverlayInputResult::Handled
@@ -355,9 +386,10 @@ impl Model {
                     self.move_selected_active_source(PromptAssemblyMoveDirection::Down),
                 )
             }
-            KeyCode::Char('r') if key.modifiers.is_empty() => {
-                OverlayInputResult::from_effect(self.restore_selected_core_system_override())
-            }
+            KeyCode::Char('r') if key.modifiers.is_empty() => OverlayInputResult::from_effect(
+                self.reset_selected_discovered_skill_order()
+                    .or_else(|| self.restore_selected_core_system_override()),
+            ),
             _ => OverlayInputResult::Handled,
         }
     }
@@ -408,12 +440,17 @@ impl Model {
             layout.chrome.page_rule,
         );
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                self.prompt_overlay_footer_hint(area.width),
-                tertiary_text_style(self.palette).add_modifier(Modifier::ITALIC),
-            )),
+            Paragraph::new(self.prompt_overlay_footer_line(area.width)),
             layout.chrome.footer,
         );
+        if state.shortcut_help_open {
+            let shortcut_help_lines = self.prompt_overlay_shortcut_help_lines();
+            let popover = ShortcutHelpPopover {
+                title: Some("More"),
+                lines: &shortcut_help_lines,
+            };
+            popover.render(frame, layout.chrome.body, self.palette);
+        }
 
         if let Some(dialog) = state.dialog.as_ref() {
             self.render_prompt_overlay_dialog(frame, layout.right_pane, dialog);
@@ -499,6 +536,14 @@ impl Model {
             }
             PromptOverlaySelection::DiscoveredSkill(skill) => {
                 self.open_prompt_overlay_skill_preview(skill);
+            }
+            PromptOverlaySelection::ToolCandidate(tool) => {
+                let body = tool.prompt_guidelines.unwrap_or_default();
+                self.open_prompt_overlay_plain_text_preview(
+                    tool.label.unwrap_or(tool.name),
+                    &body,
+                    None,
+                );
             }
         }
     }
@@ -709,8 +754,16 @@ impl Model {
                         return Some(AppEffect::LaunchExternalEditor(launch));
                     }
                     PromptSourceKind::SkillDiscovery => (
-                        PromptAssemblyEditorTarget::SkillDiscovery { scope },
-                        self.skill_discovery_editor_body_for_scope(scope),
+                        PromptAssemblyEditorTarget::SkillDiscovery {
+                            scope: source.scope?,
+                        },
+                        self.skill_discovery_editor_body_for_scope(source.scope?),
+                    ),
+                    PromptSourceKind::ToolGuidelines => (
+                        PromptAssemblyEditorTarget::ToolGuidelines {
+                            scope: source.scope?,
+                        },
+                        self.tool_guidelines_editor_body(),
                     ),
                     PromptSourceKind::ExtraPrompt => {
                         let origin = selected.origin?;
@@ -745,10 +798,12 @@ impl Model {
                     PromptSourceKind::CoreSystemPrompt
                     | PromptSourceKind::InstructionsFile
                     | PromptSourceKind::SkillDiscovery
-                    | PromptSourceKind::LongLivedSkill => return None,
+                    | PromptSourceKind::LongLivedSkill
+                    | PromptSourceKind::ToolGuidelines => return None,
                 }
             }
             PromptOverlaySelection::DiscoveredSkill(_) => return None,
+            PromptOverlaySelection::ToolCandidate(_) => return None,
         };
 
         let launch = self.prepare_external_editor_launch_for_content(&initial_content)?;
@@ -773,7 +828,7 @@ impl Model {
                 }
                 Some(AppEffect::MutatePromptAssembly {
                     mutation: PromptAssemblyMutation::RemovePromptSource {
-                        scope: prompt_scope_from_origin(selected.origin?)?,
+                        scope: selected.scope?,
                         kind: selected.kind,
                         reference_id: selected.reference_id,
                     },
@@ -804,6 +859,7 @@ impl Model {
                 })
             }
             PromptOverlaySelection::DiscoveredSkill(_) => None,
+            PromptOverlaySelection::ToolCandidate(_) => None,
         }
     }
 
@@ -822,6 +878,19 @@ impl Model {
         })
     }
 
+    fn reset_selected_discovered_skill_order(&mut self) -> Option<AppEffect> {
+        let PromptOverlaySelection::DiscoveredSkill(skill) =
+            self.selected_prompt_overlay_selection()?
+        else {
+            return None;
+        };
+        Some(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::ResetDiscoveredSkillOrder {
+                scope: skill.selection_scope,
+            },
+        })
+    }
+
     fn selected_prompt_overlay_source(&self) -> Option<ResolvedPromptSource> {
         match self.selected_prompt_overlay_selection()? {
             PromptOverlaySelection::ManagedSource(selected) => Some(ResolvedPromptSource {
@@ -835,7 +904,8 @@ impl Model {
             }),
             PromptOverlaySelection::ResolvedSource(source) => Some(source),
             PromptOverlaySelection::ExtraPromptCandidate(_)
-            | PromptOverlaySelection::DiscoveredSkill(_) => None,
+            | PromptOverlaySelection::DiscoveredSkill(_)
+            | PromptOverlaySelection::ToolCandidate(_) => None,
         }
     }
 
@@ -902,6 +972,9 @@ impl Model {
                 | PromptOverlayInactiveRow::DiscoveredSkillShadowedDetail { skill } => {
                     Some(PromptOverlaySelection::DiscoveredSkill(skill))
                 }
+                PromptOverlayInactiveRow::ToolCandidate { tool } => {
+                    Some(PromptOverlaySelection::ToolCandidate(tool))
+                }
             },
         }
     }
@@ -966,6 +1039,7 @@ impl Model {
         match tab {
             PromptOverlayInactiveTab::ExtraPrompts => self.prompt_overlay_extra_rows(),
             PromptOverlayInactiveTab::LongLivedSkills => self.prompt_overlay_skill_rows(),
+            PromptOverlayInactiveTab::Tools => self.prompt_overlay_tool_rows(),
         }
     }
 
@@ -1051,6 +1125,12 @@ impl Model {
             let right_winner = prompt_overlay_discovered_skill_winner(right);
             (!left_winner.can_select_for_discovery)
                 .cmp(&!right_winner.can_select_for_discovery)
+                .then_with(|| {
+                    left_winner
+                        .selected_order
+                        .unwrap_or(usize::MAX)
+                        .cmp(&right_winner.selected_order.unwrap_or(usize::MAX))
+                })
                 .then_with(|| natural_sort_text_cmp(&left_winner.title, &right_winner.title))
                 .then_with(|| {
                     natural_sort_text_cmp(&left_winner.skill_name, &right_winner.skill_name)
@@ -1079,6 +1159,15 @@ impl Model {
             }
         }
         rows
+    }
+
+    fn prompt_overlay_tool_rows(&self) -> Vec<PromptOverlayInactiveRow> {
+        self.prompt_assembly
+            .tool_candidates
+            .iter()
+            .cloned()
+            .map(|tool| PromptOverlayInactiveRow::ToolCandidate { tool })
+            .collect()
     }
 
     fn prompt_overlay_managed_status_for(
@@ -1161,13 +1250,35 @@ impl Model {
         &mut self,
         direction: PromptAssemblyMoveDirection,
     ) -> Option<AppEffect> {
+        if let Some(PromptOverlaySelection::DiscoveredSkill(skill)) =
+            self.selected_prompt_overlay_selection()
+        {
+            return Some(AppEffect::MutatePromptAssembly {
+                mutation: PromptAssemblyMutation::MoveDiscoveredSkill {
+                    scope: skill.selection_scope,
+                    skill_name: skill.skill_name,
+                    direction,
+                },
+            });
+        }
+        if let Some(PromptOverlaySelection::ToolCandidate(tool)) =
+            self.selected_prompt_overlay_selection()
+        {
+            return Some(AppEffect::MutatePromptAssembly {
+                mutation: PromptAssemblyMutation::MoveTool {
+                    scope: tool.selection_scope,
+                    tool_name: tool.name,
+                    direction,
+                },
+            });
+        }
         let selected = self.selected_prompt_overlay_managed_source()?;
         if selected.kind == PromptSourceKind::CoreSystemPrompt {
             return None;
         }
         Some(AppEffect::MutatePromptAssembly {
             mutation: PromptAssemblyMutation::MoveActiveSource {
-                scope: prompt_scope_from_origin(selected.origin?)?,
+                scope: selected.scope?,
                 kind: selected.kind,
                 reference_id: selected.reference_id,
                 direction,
@@ -1180,17 +1291,9 @@ impl Model {
             if selected.kind == PromptSourceKind::CoreSystemPrompt {
                 return None;
             }
-            let scope = if selected.kind == PromptSourceKind::SkillDiscovery {
-                self.prompt_overlay
-                    .as_ref()
-                    .map(|state| state.draft_scope)
-                    .unwrap_or(PromptAssemblyScope::Project)
-            } else {
-                prompt_scope_from_origin(selected.origin?)?
-            };
             return Some(AppEffect::MutatePromptAssembly {
                 mutation: PromptAssemblyMutation::SetPromptSourceEnabled {
-                    scope,
+                    scope: selected.scope?,
                     kind: selected.kind,
                     reference_id: selected.reference_id,
                     enabled: !selected.enabled,
@@ -1228,9 +1331,21 @@ impl Model {
                 }
                 Some(AppEffect::MutatePromptAssembly {
                     mutation: PromptAssemblyMutation::SetDiscoveredSkillSelected {
-                        scope: prompt_scope_from_origin(skill.origin)?,
+                        scope: skill.selection_scope,
                         skill_name: skill.skill_name,
                         selected: !skill.selected,
+                    },
+                })
+            }
+            PromptOverlaySelection::ToolCandidate(tool) => {
+                if !tool.can_select {
+                    return None;
+                }
+                Some(AppEffect::MutatePromptAssembly {
+                    mutation: PromptAssemblyMutation::SetToolSelected {
+                        scope: tool.selection_scope,
+                        tool_name: tool.name,
+                        selected: !tool.selected,
                     },
                 })
             }
@@ -1311,20 +1426,24 @@ impl Model {
             Some(PromptOverlaySelection::ManagedSource(source)) => {
                 let can_remove = !matches!(
                     source.kind,
-                    PromptSourceKind::CoreSystemPrompt | PromptSourceKind::SkillDiscovery
+                    PromptSourceKind::CoreSystemPrompt
+                        | PromptSourceKind::SkillDiscovery
+                        | PromptSourceKind::ToolGuidelines
                 );
                 PromptOverlayActionAvailability {
                     can_edit: source.kind != PromptSourceKind::LongLivedSkill,
                     can_add_custom: false,
                     can_remove: can_remove && source.kind != PromptSourceKind::InstructionsFile,
-                    can_toggle_selection: true,
+                    can_toggle_selection: source.kind != PromptSourceKind::CoreSystemPrompt,
                     can_reorder_active: source.kind != PromptSourceKind::CoreSystemPrompt,
                 }
             }
             Some(PromptOverlaySelection::ResolvedSource(source)) => {
                 let can_remove = !matches!(
                     source.kind,
-                    PromptSourceKind::CoreSystemPrompt | PromptSourceKind::SkillDiscovery
+                    PromptSourceKind::CoreSystemPrompt
+                        | PromptSourceKind::SkillDiscovery
+                        | PromptSourceKind::ToolGuidelines
                 );
                 PromptOverlayActionAvailability {
                     can_edit: source.kind == PromptSourceKind::ExtraPrompt,
@@ -1348,7 +1467,14 @@ impl Model {
                 can_add_custom: false,
                 can_remove: false,
                 can_toggle_selection: true,
-                can_reorder_active: false,
+                can_reorder_active: true,
+            },
+            Some(PromptOverlaySelection::ToolCandidate(_)) => PromptOverlayActionAvailability {
+                can_edit: false,
+                can_add_custom: false,
+                can_remove: false,
+                can_toggle_selection: true,
+                can_reorder_active: true,
             },
             None => PromptOverlayActionAvailability {
                 can_edit: false,
@@ -1410,6 +1536,28 @@ impl Model {
         format!("{SKILL_DISCOVERY_GENERATED_START}\n{body}\n{SKILL_DISCOVERY_GENERATED_END}\n")
     }
 
+    fn tool_guidelines_editor_body(&self) -> String {
+        let body = self
+            .prompt_assembly
+            .sources
+            .iter()
+            .find(|source| {
+                source.reference_id == "tool-guidelines"
+                    && source.kind == PromptSourceKind::ToolGuidelines
+            })
+            .and_then(|source| source.body.clone())
+            .unwrap_or_default();
+        if body.is_empty() {
+            return format!("{TOOL_GUIDELINES_GENERATED_START}\n{TOOL_GUIDELINES_GENERATED_END}\n");
+        }
+        if body.contains(TOOL_GUIDELINES_GENERATED_START)
+            && body.contains(TOOL_GUIDELINES_GENERATED_END)
+        {
+            return body;
+        }
+        format!("{TOOL_GUIDELINES_GENERATED_START}\n{body}\n{TOOL_GUIDELINES_GENERATED_END}\n")
+    }
+
     pub(crate) fn move_prompt_overlay_selection_by_delta(&mut self, delta: isize) {
         let Some(direction) = ListNavigationDirection::from_delta(delta) else {
             return;
@@ -1452,6 +1600,13 @@ impl Model {
         else {
             return OverlayInputResult::Handled;
         };
+        if self.prompt_overlay_shortcut_help_open() {
+            let popover_area = self.prompt_overlay_shortcut_help_area(layout.chrome.body);
+            if prompt_overlay_rect_contains(popover_area, column, row) {
+                return OverlayInputResult::Handled;
+            }
+            self.close_prompt_overlay_shortcut_help();
+        }
 
         if let Some(tab) =
             self.prompt_overlay_header_tab_at(column, row, layout.chrome.header, active_tab)
@@ -1825,18 +1980,12 @@ impl Model {
         Line::from(spans)
     }
 
-    fn prompt_overlay_footer_hint(&self, width: u16) -> String {
+    fn prompt_overlay_footer_line(&self, width: u16) -> Line<'static> {
         let actions = self.prompt_overlay_action_availability();
         let mut parts = if width < 120 {
-            vec!["Esc close", "Space preview"]
+            Vec::new()
         } else {
-            vec![
-                "Esc close",
-                "←/→/h/l focus panes",
-                "↑/↓/j/k move",
-                "Space source",
-                "p assembled",
-            ]
+            vec!["p assembled"]
         };
         let show_shadowed_toggle = matches!(
             self.selected_prompt_overlay_left_row(),
@@ -1862,6 +2011,10 @@ impl Model {
         let selected_core = self
             .selected_prompt_overlay_source()
             .is_some_and(|source| source.kind == PromptSourceKind::CoreSystemPrompt);
+        let selected_discovered_skill = matches!(
+            self.selected_prompt_overlay_selection(),
+            Some(PromptOverlaySelection::DiscoveredSkill(_))
+        );
         if actions.can_edit {
             parts.push("e/ctrl+g edit");
         }
@@ -1877,21 +2030,47 @@ impl Model {
         if selected_core {
             parts.push("r restore");
         }
+        if selected_discovered_skill {
+            parts.push("r reset order");
+        }
         if actions.can_reorder_active && width >= 120 {
             parts.push("J/K reorder");
         }
         if show_shadowed_toggle {
             parts.push("ctrl+e shadowed");
         }
-        let mut text = format!("  {}", parts.join(" · "));
         let focus_right = self
             .prompt_overlay
             .as_ref()
             .is_some_and(|state| state.focus == PromptOverlayFocus::Inactive);
         if focus_right {
-            text.push_str(PROMPT_OVERLAY_FOOTER_TABS_SUFFIX);
+            parts.push("Tab tabs");
         }
-        text
+        parts.push(PROMPT_OVERLAY_FOOTER_MORE_LABEL);
+        let text = if parts.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", parts.join(" · "))
+        };
+        if parts.len() == 1 {
+            return Line::styled(
+                truncate_display_width_with_ellipsis(&text, usize::from(width).max(1)),
+                command_accent_text_style(self.palette).add_modifier(Modifier::ITALIC),
+            );
+        }
+        let more_separator = " · ? more";
+        let separator_index = text.rfind(more_separator).unwrap_or(text.len());
+        let prefix = text[..separator_index].to_string();
+        Line::from(vec![
+            Span::styled(
+                truncate_display_width_with_ellipsis(&prefix, usize::from(width).max(1)),
+                tertiary_text_style(self.palette).add_modifier(Modifier::ITALIC),
+            ),
+            Span::styled(
+                truncate_display_width_with_ellipsis(more_separator, usize::from(width).max(1)),
+                command_accent_text_style(self.palette).add_modifier(Modifier::ITALIC),
+            ),
+        ])
     }
 
     fn render_prompt_overlay_active_pane(
@@ -1942,8 +2121,8 @@ impl Model {
             header_area,
         );
 
-        let lines = if state.inactive_tab == PromptOverlayInactiveTab::LongLivedSkills {
-            prompt_overlay_discovered_skill_lines(
+        let lines = match state.inactive_tab {
+            PromptOverlayInactiveTab::LongLivedSkills => prompt_overlay_discovered_skill_lines(
                 &self.prompt_overlay_inactive_rows(PromptOverlayInactiveTab::LongLivedSkills),
                 state.inactive_selected_row_id.as_deref(),
                 state.inactive_scroll,
@@ -1951,9 +2130,17 @@ impl Model {
                 usize::from(body_area.width),
                 usize::from(body_area.height),
                 self.palette,
-            )
-        } else {
-            prompt_overlay_inactive_lines(
+            ),
+            PromptOverlayInactiveTab::Tools => prompt_overlay_tool_lines(
+                &self.prompt_overlay_inactive_rows(PromptOverlayInactiveTab::Tools),
+                state.inactive_selected_row_id.as_deref(),
+                state.inactive_scroll,
+                state.focus == PromptOverlayFocus::Inactive,
+                usize::from(body_area.width),
+                usize::from(body_area.height),
+                self.palette,
+            ),
+            PromptOverlayInactiveTab::ExtraPrompts => prompt_overlay_inactive_lines(
                 &self.prompt_overlay_inactive_rows(PromptOverlayInactiveTab::ExtraPrompts),
                 state.inactive_selected_row_id.as_deref(),
                 state.inactive_scroll,
@@ -1961,7 +2148,7 @@ impl Model {
                 usize::from(body_area.width),
                 usize::from(body_area.height),
                 self.palette,
-            )
+            ),
         };
         frame.render_widget(PromptOverlayLineListWidget { lines: &lines }, body_area);
     }
@@ -1995,6 +2182,7 @@ impl Model {
             PromptOverlayInactiveTab::LongLivedSkills => {
                 prompt_overlay_skill_header_text(content_width)
             }
+            PromptOverlayInactiveTab::Tools => prompt_overlay_tool_header_text(content_width),
         };
         let text = format!(
             "{}{}",
@@ -2042,11 +2230,78 @@ impl Model {
                 surface_text_style(self.palette).bold()
             } else {
                 tertiary_text_style(self.palette)
-            };
+            }
+            .add_modifier(Modifier::UNDERLINED);
             spans.push(Span::styled(label, style));
         }
 
         spans
+    }
+
+    fn prompt_overlay_shortcut_help_open(&self) -> bool {
+        self.prompt_overlay
+            .as_ref()
+            .is_some_and(|state| state.shortcut_help_open)
+    }
+
+    fn toggle_prompt_overlay_shortcut_help(&mut self) {
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return;
+        };
+        state.shortcut_help_open = !state.shortcut_help_open;
+    }
+
+    fn close_prompt_overlay_shortcut_help(&mut self) {
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return;
+        };
+        state.shortcut_help_open = false;
+    }
+
+    fn prompt_overlay_shortcut_help_area(&self, bounds: Rect) -> Rect {
+        let lines = self.prompt_overlay_shortcut_help_lines();
+        ShortcutHelpPopover {
+            title: Some("More"),
+            lines: &lines,
+        }
+        .area(bounds)
+    }
+
+    fn prompt_overlay_shortcut_help_lines(&self) -> Vec<Line<'static>> {
+        let key_style = command_accent_text_style(self.palette).add_modifier(Modifier::ITALIC);
+        let text_style = tertiary_text_style(self.palette).add_modifier(Modifier::ITALIC);
+        let mut lines = aligned_shortcut_help_lines(
+            &[
+                ShortcutHelpEntry {
+                    shortcut: "Esc",
+                    description: "close",
+                },
+                ShortcutHelpEntry {
+                    shortcut: "←/→/h/l",
+                    description: "focus panes",
+                },
+                ShortcutHelpEntry {
+                    shortcut: "↑/↓/j/k",
+                    description: "move",
+                },
+                ShortcutHelpEntry {
+                    shortcut: "Space",
+                    description: "source",
+                },
+            ],
+            key_style,
+            text_style,
+        );
+        lines.push(Line::raw(""));
+        lines.extend(aligned_shortcut_help_lines(
+            &[ShortcutHelpEntry {
+                shortcut: "? / Esc",
+                description: "close help",
+            }],
+            key_style,
+            text_style,
+        ));
+        lines
     }
 
     fn prompt_overlay_focused_page_label(
@@ -2289,6 +2544,9 @@ fn prompt_overlay_inactive_row_id(row: &PromptOverlayInactiveRow) -> String {
                 prompt_overlay_origin_label(skill.origin)
             )
         }
+        PromptOverlayInactiveRow::ToolCandidate { tool } => {
+            format!("tool:{}", tool.name)
+        }
     }
 }
 
@@ -2360,9 +2618,15 @@ fn prompt_overlay_origin_sort_key(origin: PromptSourceOrigin) -> u8 {
 fn prompt_overlay_layout_rects(area: Rect) -> Option<PromptOverlayLayoutRects> {
     let chrome = fullscreen_list_chrome_rects(area)?;
     let [left_pane, _gutter, right_pane] = Layout::horizontal([
-        Constraint::Percentage(50),
+        Constraint::Ratio(
+            PROMPT_OVERLAY_LEFT_PANE_RATIO_NUMERATOR,
+            PROMPT_OVERLAY_PANE_RATIO_DENOMINATOR,
+        ),
         Constraint::Length(1),
-        Constraint::Percentage(50),
+        Constraint::Ratio(
+            PROMPT_OVERLAY_RIGHT_PANE_RATIO_NUMERATOR,
+            PROMPT_OVERLAY_PANE_RATIO_DENOMINATOR,
+        ),
     ])
     .areas(chrome.body);
     let [_left_header, left_body] =
@@ -2592,6 +2856,9 @@ fn prompt_overlay_inactive_row_line(
         PromptOverlayInactiveRow::DiscoveredSkillShadowedDetail { .. } => {
             prompt_overlay_skill_row_text(row, content_width)
         }
+        PromptOverlayInactiveRow::ToolCandidate { .. } => {
+            prompt_overlay_tool_row_text(row, content_width)
+        }
     };
     prompt_overlay_list_line(
         marker,
@@ -2616,6 +2883,7 @@ fn prompt_overlay_kind_label(kind: PromptSourceKind) -> &'static str {
         PromptSourceKind::ExtraPrompt => "custom",
         PromptSourceKind::SkillDiscovery => "discovery",
         PromptSourceKind::LongLivedSkill => "skill",
+        PromptSourceKind::ToolGuidelines => "tools",
     }
 }
 
@@ -2660,9 +2928,10 @@ fn prompt_overlay_extra_header_text(width: usize) -> String {
 }
 
 fn prompt_overlay_skill_header_text(width: usize) -> String {
-    let name_width = prompt_overlay_right_skill_name_width(width);
+    let name_width = prompt_overlay_right_inactive_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
     let sel = prompt_overlay_center_text("Sel", PROMPT_OVERLAY_LEFT_SEL_WIDTH);
+    let ord = left_pad_display_width("Ord", PROMPT_OVERLAY_RIGHT_ORD_WIDTH);
     let name = format!(
         "{:<width$}",
         truncate_display_width_with_ellipsis("Name", name_width),
@@ -2675,7 +2944,7 @@ fn prompt_overlay_skill_header_text(width: usize) -> String {
     );
     let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
     let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
-    format!("{left_pad}{sel}{gap}{name}{gap}{scope}{trailing}")
+    format!("{left_pad}{sel}{gap}{ord}{gap}{name}{gap}{scope}{trailing}")
 }
 
 fn prompt_overlay_active_row_text(
@@ -2776,11 +3045,15 @@ fn prompt_overlay_extra_row_text(
 }
 
 fn prompt_overlay_skill_row_text(row: &PromptOverlayInactiveRow, width: usize) -> String {
-    let name_width = prompt_overlay_right_skill_name_width(width);
+    let name_width = prompt_overlay_right_inactive_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
     let sel = prompt_overlay_center_text(
         &prompt_overlay_skill_sel_label(row),
         PROMPT_OVERLAY_LEFT_SEL_WIDTH,
+    );
+    let ord = left_pad_display_width(
+        &prompt_overlay_skill_order_label(row),
+        PROMPT_OVERLAY_RIGHT_ORD_WIDTH,
     );
     let name = prompt_overlay_skill_name_cell(row, name_width);
     let scope = format!(
@@ -2790,7 +3063,7 @@ fn prompt_overlay_skill_row_text(row: &PromptOverlayInactiveRow, width: usize) -
     );
     let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
     let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
-    format!("{left_pad}{sel}{gap}{name}{gap}{scope}{trailing}")
+    format!("{left_pad}{sel}{gap}{ord}{gap}{name}{gap}{scope}{trailing}")
 }
 
 fn prompt_overlay_extra_shadowed_detail_row_text(
@@ -2868,6 +3141,140 @@ fn prompt_overlay_inactive_skill_origin(row: &PromptOverlayInactiveRow) -> Promp
     }
 }
 
+fn prompt_overlay_skill_order_label(row: &PromptOverlayInactiveRow) -> String {
+    match row {
+        PromptOverlayInactiveRow::DiscoveredSkill { skill, .. } => skill
+            .selected_order
+            .map(|order| order.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        PromptOverlayInactiveRow::DiscoveredSkillShadowedDetail { .. } => String::new(),
+        _ => "-".to_string(),
+    }
+}
+
+fn prompt_overlay_tool_lines(
+    rows: &[PromptOverlayInactiveRow],
+    selected_row_id: Option<&str>,
+    scroll: usize,
+    focused: bool,
+    width: usize,
+    body_height: usize,
+    palette: crate::theme::TerminalPalette,
+) -> Vec<Line<'static>> {
+    if body_height == 0 {
+        return Vec::new();
+    }
+    if rows.is_empty() {
+        return vec![prompt_overlay_empty_inactive_line(
+            "No tools available",
+            width,
+            palette,
+        )];
+    }
+
+    rows.iter()
+        .map(|row| {
+            let selected = selected_row_id == Some(prompt_overlay_inactive_row_id(row).as_str());
+            let content_width = width.saturating_sub(PROMPT_OVERLAY_ROW_PREFIX_WIDTH).max(1);
+            let (item_style, marker_style, marker) =
+                prompt_overlay_selection_styles(selected, focused, palette);
+            let label = prompt_overlay_tool_row_text(row, content_width);
+            prompt_overlay_list_line(
+                marker,
+                marker_style,
+                truncate_display_width_with_ellipsis(&label, content_width),
+                item_style,
+            )
+        })
+        .skip(scroll)
+        .take(body_height)
+        .collect()
+}
+
+fn prompt_overlay_tool_row_text(row: &PromptOverlayInactiveRow, width: usize) -> String {
+    let name_width = prompt_overlay_right_inactive_name_width(width);
+    let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
+    let sel = prompt_overlay_center_text(
+        &prompt_overlay_tool_sel_label(row),
+        PROMPT_OVERLAY_LEFT_SEL_WIDTH,
+    );
+    let ord = left_pad_display_width(
+        &prompt_overlay_tool_order_label(row),
+        PROMPT_OVERLAY_RIGHT_ORD_WIDTH,
+    );
+    let name = prompt_overlay_tool_name_cell(row, name_width);
+    let scope = format!(
+        "{:<width$}",
+        prompt_overlay_origin_label(prompt_overlay_tool_origin(row)),
+        width = PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH
+    );
+    let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
+    let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
+    format!("{left_pad}{sel}{gap}{ord}{gap}{name}{gap}{scope}{trailing}")
+}
+
+fn prompt_overlay_tool_sel_label(row: &PromptOverlayInactiveRow) -> String {
+    match row {
+        PromptOverlayInactiveRow::ToolCandidate { tool } => {
+            if !tool.can_select {
+                "-".to_string()
+            } else if tool.selected {
+                "●".to_string()
+            } else {
+                "○".to_string()
+            }
+        }
+        _ => "-".to_string(),
+    }
+}
+
+fn prompt_overlay_tool_name_cell(row: &PromptOverlayInactiveRow, width: usize) -> String {
+    match row {
+        PromptOverlayInactiveRow::ToolCandidate { tool } => {
+            let label = tool.label.as_deref().unwrap_or(&tool.name);
+            prompt_overlay_cell_with_trailing_marker(label, None, width)
+        }
+        _ => prompt_overlay_fill_cell("", width),
+    }
+}
+
+fn prompt_overlay_tool_order_label(row: &PromptOverlayInactiveRow) -> String {
+    match row {
+        PromptOverlayInactiveRow::ToolCandidate { tool } => tool
+            .selected_order
+            .map(|order| order.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        _ => "-".to_string(),
+    }
+}
+
+fn prompt_overlay_tool_origin(row: &PromptOverlayInactiveRow) -> PromptSourceOrigin {
+    match row {
+        PromptOverlayInactiveRow::ToolCandidate { tool } => tool.origin,
+        _ => PromptSourceOrigin::Project,
+    }
+}
+
+fn prompt_overlay_tool_header_text(width: usize) -> String {
+    let name_width = prompt_overlay_right_inactive_name_width(width);
+    let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
+    let sel = prompt_overlay_center_text("Sel", PROMPT_OVERLAY_LEFT_SEL_WIDTH);
+    let ord = left_pad_display_width("Ord", PROMPT_OVERLAY_RIGHT_ORD_WIDTH);
+    let name = format!(
+        "{:<width$}",
+        truncate_display_width_with_ellipsis("Name", name_width),
+        width = name_width
+    );
+    let scope = format!(
+        "{:<width$}",
+        "Scope",
+        width = PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH
+    );
+    let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
+    let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
+    format!("{left_pad}{sel}{gap}{ord}{gap}{name}{gap}{scope}{trailing}")
+}
+
 fn prompt_overlay_shadowed_count_marker(shadowed_count: usize) -> Option<String> {
     (shadowed_count > 0).then(|| format!("+{shadowed_count} shadowed"))
 }
@@ -2934,13 +3341,14 @@ fn prompt_overlay_right_extra_name_width(width: usize) -> usize {
         .max(12)
 }
 
-fn prompt_overlay_right_skill_name_width(width: usize) -> usize {
+fn prompt_overlay_right_inactive_name_width(width: usize) -> usize {
     width
         .saturating_sub(PROMPT_OVERLAY_OUTER_PADDING)
         .saturating_sub(PROMPT_OVERLAY_LEFT_SEL_WIDTH)
+        .saturating_sub(PROMPT_OVERLAY_RIGHT_ORD_WIDTH)
         .saturating_sub(PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH)
         .saturating_sub(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING)
-        .saturating_sub(PROMPT_OVERLAY_COLUMN_GAP * 2)
+        .saturating_sub(PROMPT_OVERLAY_COLUMN_GAP * 3)
         .max(12)
 }
 

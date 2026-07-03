@@ -97,6 +97,7 @@ impl Tool for FindTool {
                 "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Always)
+            .with_prompt_guidelines("Prefer find over shell find.")
     }
 
     fn execute<'a>(

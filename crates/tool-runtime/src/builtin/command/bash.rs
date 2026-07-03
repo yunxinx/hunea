@@ -56,7 +56,7 @@ impl std::fmt::Debug for BashTool {
 impl Tool for BashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(BASH_TOOL_NAME)
-            .with_label("Shell:")
+            .with_label("Shell")
             .with_kind(ToolKind::Execute)
             .with_description(
                 "Execute a shell command in the current workspace. Returns merged stdout and stderr. Output is truncated to the last 2000 lines or 50KB, with full output saved to a temp file when truncated.",
@@ -86,6 +86,9 @@ impl Tool for BashTool {
                 "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Ask)
+            .with_prompt_guidelines(
+                "Use bash only when you need a shell pipeline, environment variable, or a command not covered by a dedicated tool.",
+            )
     }
 
     fn execute<'a>(

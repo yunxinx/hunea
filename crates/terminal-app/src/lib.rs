@@ -25,7 +25,7 @@ pub use replay::{
     write_terminal_replay, write_terminal_replay_preserving_ansi,
     write_terminal_replay_with_context,
 };
-use runtime::{AppRuntimeCoordinator, AppRuntimeOptions};
+use runtime::{AppRuntimeCoordinator, AppRuntimeOptions, tool_definitions_for_managed_search};
 
 #[cfg(test)]
 use app_config::appconfig::{
@@ -149,6 +149,7 @@ fn attach_default_session_persistence(
         git_head,
         cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     });
+    let tool_definitions = tool_definitions_for_managed_search(&options.managed_search_tools);
     let loaded_prompt_assembly = load_initial_prompt_assembly(
         options
             .session_store
@@ -161,6 +162,7 @@ fn attach_default_session_persistence(
             .expect("session header was just initialized")
             .work_dir
             .as_path(),
+        &tool_definitions,
     )?;
     model_options.prompt_assembly = Some(loaded_prompt_assembly.clone());
     options.initial_prompt_prelude = Some(loaded_prompt_assembly.prelude.clone());

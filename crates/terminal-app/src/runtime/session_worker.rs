@@ -724,6 +724,7 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                 &work_dir,
                 &global_state,
                 &project_state,
+                &[],
             );
             SessionStoreWorkerEvent::runtime(RuntimeEvent::PromptAssemblyMissingSourcesChecked {
                 missing_count: check.missing_count,

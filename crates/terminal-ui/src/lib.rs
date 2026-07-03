@@ -52,6 +52,7 @@ mod session_preview;
 mod session_tree_preview_replay;
 mod session_tree_row_kind_view;
 mod shimmer;
+mod shortcut_help_popover;
 mod skill_picker;
 mod startup_banner;
 mod status_line;

@@ -13,6 +13,7 @@ pub const PROJECT_PROMPTS_DIR_NAME: &str = "prompts";
 pub const PROJECT_CUSTOM_PROMPTS_DIR_NAME: &str = "custom";
 pub const PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME: &str = "__core-system__.md";
 pub const PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME: &str = "__skill-discovery__.md";
+pub const PROJECT_TOOL_GUIDELINES_OVERRIDE_FILE_NAME: &str = "__tool-guidelines__.md";
 const PROJECT_PROMPT_ASSEMBLY_VERSION: u32 = 1;
 
 /// `PromptAssemblyScope` 表示 prompt assembly 配置的生效范围。
@@ -61,6 +62,14 @@ pub struct PersistedSkillDiscoverySkillEntry {
     pub requested_order: Option<u16>,
 }
 
+/// `PersistedToolSelectionEntry` 表示 tool guidelines 里单个工具的选中与顺序。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedToolSelectionEntry {
+    pub tool_name: String,
+    pub enabled: bool,
+    pub requested_order: Option<u16>,
+}
+
 /// `StoredPromptBody` 表示持久化的 prompt 文本实体。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredPromptBody {
@@ -75,8 +84,10 @@ pub struct PromptAssemblyScopeState {
     pub scope: PromptAssemblyScope,
     pub core_system_override: Option<String>,
     pub skill_discovery_override: Option<String>,
+    pub tool_guidelines_override: Option<String>,
     pub entries: Vec<PersistedPromptAssemblyEntry>,
     pub skill_discovery_skills: Vec<PersistedSkillDiscoverySkillEntry>,
+    pub tool_selections: Vec<PersistedToolSelectionEntry>,
     pub extra_prompts: Vec<StoredPromptBody>,
 }
 
@@ -88,8 +99,10 @@ impl PromptAssemblyScopeState {
             scope,
             core_system_override: None,
             skill_discovery_override: None,
+            tool_guidelines_override: None,
             entries: Vec::new(),
             skill_discovery_skills: Vec::new(),
+            tool_selections: Vec::new(),
             extra_prompts: Vec::new(),
         }
     }
@@ -204,6 +217,8 @@ struct ProjectPromptAssemblyFile {
     entries: Vec<PersistedPromptAssemblyEntry>,
     #[serde(default)]
     skill_discovery_skills: Vec<PersistedSkillDiscoverySkillEntry>,
+    #[serde(default)]
+    tool_selections: Vec<PersistedToolSelectionEntry>,
 }
 
 /// `project_prompt_assembly_path` 返回项目级 prompt assembly TOML 路径。
@@ -242,6 +257,9 @@ pub fn load_project_prompt_assembly_state(
         read_optional_text_file(&prompts_dir.join(PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME))?;
     state.skill_discovery_override =
         read_optional_text_file(&prompts_dir.join(PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME))?;
+    state.tool_guidelines_override =
+        read_optional_text_file(&prompts_dir.join(PROJECT_TOOL_GUIDELINES_OVERRIDE_FILE_NAME))?;
+    state.tool_selections = sort_tool_selections(config.tool_selections);
     let entry_titles = state
         .entries
         .iter()
@@ -301,12 +319,22 @@ pub fn save_project_prompt_assembly_state(
         None => remove_file_if_exists(&skill_discovery_override_path)?,
     }
 
+    let tool_guidelines_override_path =
+        prompts_dir.join(PROJECT_TOOL_GUIDELINES_OVERRIDE_FILE_NAME);
+    match state.tool_guidelines_override.as_deref() {
+        Some(body) => {
+            write_text_file(&tool_guidelines_override_path, body)?;
+        }
+        None => remove_file_if_exists(&tool_guidelines_override_path)?,
+    }
+
     prune_stale_prompt_files(&custom_prompts_dir, &desired_custom_prompt_files)?;
 
     let config = ProjectPromptAssemblyFile {
         version: PROJECT_PROMPT_ASSEMBLY_VERSION,
         entries: sort_entries(state.entries.clone()),
         skill_discovery_skills: sort_skill_discovery_skills(state.skill_discovery_skills.clone()),
+        tool_selections: sort_tool_selections(state.tool_selections.clone()),
     };
     let encoded =
         toml::to_string_pretty(&config).map_err(|source| ProjectPromptAssemblyError::Encode {
@@ -328,6 +356,7 @@ fn read_project_prompt_assembly_file(
                 version: PROJECT_PROMPT_ASSEMBLY_VERSION,
                 entries: Vec::new(),
                 skill_discovery_skills: Vec::new(),
+                tool_selections: Vec::new(),
             });
         }
         Err(source) => {
@@ -574,6 +603,18 @@ fn sort_skill_discovery_skills(
     entries
 }
 
+fn sort_tool_selections(
+    mut entries: Vec<PersistedToolSelectionEntry>,
+) -> Vec<PersistedToolSelectionEntry> {
+    entries.sort_by(|left, right| {
+        left.requested_order
+            .unwrap_or(u16::MAX)
+            .cmp(&right.requested_order.unwrap_or(u16::MAX))
+            .then_with(|| natural_sort_text_cmp(&left.tool_name, &right.tool_name))
+    });
+    entries
+}
+
 /// `extra_prompt_bodies_by_reference` 把 extra prompt bodies 投影成按 reference_id 索引的映射。
 #[must_use]
 pub fn extra_prompt_bodies_by_reference(
@@ -638,6 +679,8 @@ mod tests {
                 title: "repo-review-rules".to_string(),
                 body: "always check tests".to_string(),
             }],
+            tool_guidelines_override: None,
+            tool_selections: Vec::new(),
         }
     }
 
@@ -673,6 +716,8 @@ mod tests {
             }],
             skill_discovery_skills: Vec::new(),
             extra_prompts: Vec::new(),
+            tool_guidelines_override: None,
+            tool_selections: Vec::new(),
         };
         save_project_prompt_assembly_state(&work_dir, &cleared_state)
             .expect("updated project prompt assembly should save");
@@ -707,6 +752,8 @@ mod tests {
             }],
             skill_discovery_skills: Vec::new(),
             extra_prompts: Vec::new(),
+            tool_guidelines_override: None,
+            tool_selections: Vec::new(),
         };
 
         save_project_prompt_assembly_state(&work_dir, &state)
@@ -738,6 +785,8 @@ mod tests {
                 title: "Review rules".to_string(),
                 body: "# Review rules\nAlways verify tests.\n".to_string(),
             }],
+            tool_guidelines_override: None,
+            tool_selections: Vec::new(),
         };
 
         save_project_prompt_assembly_state(&work_dir, &state)

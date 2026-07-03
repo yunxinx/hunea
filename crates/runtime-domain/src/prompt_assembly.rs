@@ -24,6 +24,8 @@ pub enum PromptSourceKind {
     SkillDiscovery,
     /// 长期注入型 skill，和当前消息里的 `$skill` 临时注入不同。
     LongLivedSkill,
+    /// 工具使用指南，body 从工具注册表动态生成。
+    ToolGuidelines,
 }
 
 /// `PromptSourceOrigin` 表示 prompt source 的来源层级。
@@ -144,6 +146,7 @@ pub struct PromptAssemblyManagedSource {
     pub kind: PromptSourceKind,
     pub title: String,
     pub origin: Option<PromptSourceOrigin>,
+    pub scope: Option<PromptAssemblyScope>,
     pub enabled: bool,
     pub order: usize,
 }
@@ -165,9 +168,24 @@ pub struct PromptAssemblyDiscoveredSkill {
     pub title: String,
     pub description: String,
     pub origin: PromptSourceOrigin,
+    pub selection_scope: PromptAssemblyScope,
     pub skill_path: String,
     pub body: String,
     pub can_select_for_discovery: bool,
+    pub selected: bool,
+    pub selected_order: Option<usize>,
+}
+
+/// `PromptAssemblyToolCandidate` 表示 `/prompt` Tools Tab 中的一个工具候选项。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAssemblyToolCandidate {
+    pub name: String,
+    pub label: Option<String>,
+    pub description: Option<String>,
+    pub prompt_guidelines: Option<String>,
+    pub origin: PromptSourceOrigin,
+    pub selection_scope: PromptAssemblyScope,
+    pub can_select: bool,
     pub selected: bool,
     pub selected_order: Option<usize>,
 }
@@ -182,6 +200,7 @@ pub struct PromptAssemblyManagerSnapshot {
     pub extra_prompt_candidates: Vec<PromptAssemblyExtraPromptCandidate>,
     pub discovered_skills: Vec<PromptAssemblyDiscoveredSkill>,
     pub manual_skills: Vec<PromptAssemblyDiscoveredSkill>,
+    pub tool_candidates: Vec<PromptAssemblyToolCandidate>,
     pub builtin_core_system_body: String,
     pub global_core_system_override: Option<String>,
     pub project_core_system_override: Option<String>,
@@ -194,6 +213,9 @@ pub enum PromptAssemblyEditorTarget {
         scope: PromptAssemblyScope,
     },
     SkillDiscovery {
+        scope: PromptAssemblyScope,
+    },
+    ToolGuidelines {
         scope: PromptAssemblyScope,
     },
     InstructionsFile {
@@ -235,6 +257,19 @@ pub enum PromptAssemblyMutation {
     MoveDiscoveredSkill {
         scope: PromptAssemblyScope,
         skill_name: String,
+        direction: PromptAssemblyMoveDirection,
+    },
+    ResetDiscoveredSkillOrder {
+        scope: PromptAssemblyScope,
+    },
+    SetToolSelected {
+        scope: PromptAssemblyScope,
+        tool_name: String,
+        selected: bool,
+    },
+    MoveTool {
+        scope: PromptAssemblyScope,
+        tool_name: String,
         direction: PromptAssemblyMoveDirection,
     },
     ActivateLongLivedSkill {

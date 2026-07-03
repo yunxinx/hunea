@@ -176,6 +176,7 @@ impl AppRuntimeCoordinator {
             self.options.session_store.clone(),
             work_dir,
             user_message,
+            &self.tool_definitions(),
         )
         .map_err(|error| error.to_string())
     }

@@ -119,6 +119,9 @@ impl Tool for GrepTool {
                 "additionalProperties": false
             }))
             .with_permission_policy(ToolPermissionPolicy::Always)
+            .with_prompt_guidelines(
+                "Uses ripgrep internally but handles permissions and .gitignore — prefer over running rg in bash.",
+            )
     }
 
     fn execute<'a>(

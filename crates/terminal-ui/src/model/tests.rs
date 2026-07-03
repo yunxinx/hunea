@@ -18,6 +18,7 @@ use runtime_domain::model_catalog::{
 };
 use runtime_domain::phrases::StatusPhraseOrder;
 use runtime_domain::prompt_assembly::PromptSourceOrigin;
+use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
 use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate, PromptAssemblyInput,
     PromptAssemblyManagerSnapshot, PromptPreludeSnapshot, resolve_prompt_assembly,
@@ -3113,6 +3114,7 @@ fn skill_picker_model() -> Model {
                 title: "Code Review".to_string(),
                 description: "Review code and inspect regressions".to_string(),
                 origin: PromptSourceOrigin::Project,
+                selection_scope: PromptAssemblyScope::Project,
                 skill_path: "/tmp/code-review/SKILL.md".to_string(),
                 body: "# Code Review".to_string(),
                 can_select_for_discovery: true,
@@ -3125,6 +3127,7 @@ fn skill_picker_model() -> Model {
                 description: "Explore intent, requirements, and design before implementation"
                     .to_string(),
                 origin: PromptSourceOrigin::Builtin,
+                selection_scope: PromptAssemblyScope::Project,
                 skill_path: "/tmp/brainstorming/SKILL.md".to_string(),
                 body: "# Brainstorming".to_string(),
                 can_select_for_discovery: true,
@@ -3143,6 +3146,7 @@ fn overflowing_skill_picker_model() -> Model {
             title: format!("Skill {index:02}"),
             description: format!("Skill description {index:02}"),
             origin: PromptSourceOrigin::Project,
+            selection_scope: PromptAssemblyScope::Project,
             skill_path: format!("/tmp/skill-{index:02}/SKILL.md"),
             body: format!("# Skill {index:02}"),
             can_select_for_discovery: true,
@@ -3169,6 +3173,7 @@ fn skill_picker_model_with_manual_skills(
                 extra_prompt_candidates: Vec::new(),
                 discovered_skills: Vec::new(),
                 manual_skills,
+                tool_candidates: Vec::new(),
                 builtin_core_system_body: String::new(),
                 global_core_system_override: None,
                 project_core_system_override: None,
@@ -3210,6 +3215,7 @@ fn custom_prompt_picker_model() -> Model {
                 ],
                 discovered_skills: Vec::new(),
                 manual_skills: Vec::new(),
+                tool_candidates: Vec::new(),
                 builtin_core_system_body: String::new(),
                 global_core_system_override: None,
                 project_core_system_override: None,

@@ -1,18 +1,19 @@
 use std::{fs, path::PathBuf};
 
-use crossterm::event::{KeyCode, KeyEvent, MouseButton};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::Color,
     style::Modifier,
 };
+use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
 use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate, PromptAssemblyLifecycle,
     PromptAssemblyManagedSource, PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource,
     PromptAssemblyMoveDirection, PromptAssemblyMutation, PromptAssemblySnapshot,
-    PromptPreludeSnapshot, PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin,
-    PromptSourceStatus, ResolvedPromptSource,
+    PromptAssemblyToolCandidate, PromptPreludeSnapshot, PromptSourceInactiveReason,
+    PromptSourceKind, PromptSourceOrigin, PromptSourceStatus, ResolvedPromptSource,
 };
 
 use crate::{
@@ -113,6 +114,7 @@ fn ready_model() -> Model {
                         kind: PromptSourceKind::CoreSystemPrompt,
                         title: "Core system prompt".to_string(),
                         origin: Some(PromptSourceOrigin::Builtin),
+                        scope: None,
                         enabled: true,
                         order: 1,
                     },
@@ -120,7 +122,8 @@ fn ready_model() -> Model {
                         reference_id: "skill-discovery".to_string(),
                         kind: PromptSourceKind::SkillDiscovery,
                         title: "Skill discovery".to_string(),
-                        origin: Some(PromptSourceOrigin::Builtin),
+                        origin: Some(PromptSourceOrigin::Project),
+                        scope: Some(PromptAssemblyScope::Project),
                         enabled: true,
                         order: 2,
                     },
@@ -129,6 +132,7 @@ fn ready_model() -> Model {
                         kind: PromptSourceKind::ExtraPrompt,
                         title: "repo-rules".to_string(),
                         origin: Some(PromptSourceOrigin::Project),
+                        scope: Some(PromptAssemblyScope::Project),
                         enabled: true,
                         order: 3,
                     },
@@ -137,6 +141,7 @@ fn ready_model() -> Model {
                         kind: PromptSourceKind::ExtraPrompt,
                         title: "safety-policy".to_string(),
                         origin: Some(PromptSourceOrigin::Global),
+                        scope: Some(PromptAssemblyScope::Global),
                         enabled: false,
                         order: 4,
                     },
@@ -155,6 +160,7 @@ fn ready_model() -> Model {
                         title: "repo-bootstrap".to_string(),
                         description: "Bootstrap repo".to_string(),
                         origin: PromptSourceOrigin::Project,
+                        selection_scope: PromptAssemblyScope::Project,
                         skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
                         body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
                         can_select_for_discovery: true,
@@ -166,6 +172,7 @@ fn ready_model() -> Model {
                         title: "code-review".to_string(),
                         description: "Review code".to_string(),
                         origin: PromptSourceOrigin::Global,
+                        selection_scope: PromptAssemblyScope::Project,
                         skill_path: "/tmp/code-review/SKILL.md".to_string(),
                         body: "# Code Review\n\nUse this skill.".to_string(),
                         can_select_for_discovery: true,
@@ -178,12 +185,14 @@ fn ready_model() -> Model {
                     title: "repo-bootstrap".to_string(),
                     description: "Bootstrap repo".to_string(),
                     origin: PromptSourceOrigin::Project,
+                    selection_scope: PromptAssemblyScope::Project,
                     skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
                     body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
                     can_select_for_discovery: true,
                     selected: false,
                     selected_order: None,
                 }],
+                tool_candidates: Vec::new(),
                 builtin_core_system_body: "builtin core".to_string(),
                 global_core_system_override: None,
                 project_core_system_override: None,
@@ -216,6 +225,30 @@ fn ready_model_with_external_editor() -> Model {
     model
 }
 
+fn tool_guidelines_managed_source() -> PromptAssemblyManagedSource {
+    PromptAssemblyManagedSource {
+        reference_id: "tool-guidelines".to_string(),
+        kind: PromptSourceKind::ToolGuidelines,
+        title: "Tool guidelines".to_string(),
+        origin: Some(PromptSourceOrigin::Builtin),
+        scope: Some(PromptAssemblyScope::Global),
+        enabled: true,
+        order: 2,
+    }
+}
+
+fn tool_guidelines_source() -> PromptAssemblyManagerSource {
+    PromptAssemblyManagerSource {
+        reference_id: "tool-guidelines".to_string(),
+        kind: PromptSourceKind::ToolGuidelines,
+        title: "Tool guidelines".to_string(),
+        origin: Some(PromptSourceOrigin::Builtin),
+        resolved_body_origin: Some(PromptSourceOrigin::Builtin),
+        backing_file_path: None,
+        body: Some("generated tool guidance".to_string()),
+    }
+}
+
 fn left_source_cell_text(row: &str, width: usize) -> String {
     let source_width = super::prompt_overlay_left_source_width(width);
     let source_start = super::PROMPT_OVERLAY_OUTER_PADDING
@@ -242,6 +275,11 @@ fn find_text_position(rows: &[String], needle: &str) -> Option<(u16, u16)> {
     })
 }
 
+fn column_in_row(row: &str, needle: &str) -> usize {
+    let byte_index = row.find(needle).expect("needle should exist in row");
+    row[..byte_index].chars().count()
+}
+
 fn find_buffer_text_position(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
     find_text_position(&rendered_rows(buffer), needle)
 }
@@ -262,6 +300,20 @@ fn assert_text_cells_use_color_at(
             cell.fg, expected,
             "expected `{character}` in `{text}` to use {expected:?}, got {:?}",
             cell.fg
+        );
+    }
+}
+
+fn assert_text_cells_are_underlined_at(buffer: &Buffer, text: &str, row: u16, column: u16) {
+    for (offset, character) in text.chars().enumerate() {
+        let cell = &buffer[(
+            column + u16::try_from(offset).expect("text offset should fit in u16"),
+            row,
+        )];
+        assert!(
+            cell.modifier.contains(Modifier::UNDERLINED),
+            "expected `{character}` in `{text}` to be underlined, got {:?}",
+            cell.modifier
         );
     }
 }
@@ -457,6 +509,7 @@ fn default_active_list_keeps_disabled_and_missing_sources_visible() {
             kind: PromptSourceKind::LongLivedSkill,
             title: "missing-skill".to_string(),
             origin: Some(PromptSourceOrigin::Project),
+            scope: Some(PromptAssemblyScope::Project),
             enabled: true,
             order: 5,
         });
@@ -610,6 +663,7 @@ fn ctrl_e_expands_shadowed_skill_under_winner() {
             title: "repo-bootstrap".to_string(),
             description: "Project bootstrap".to_string(),
             origin: PromptSourceOrigin::Project,
+            selection_scope: PromptAssemblyScope::Project,
             skill_path: "/tmp/project-repo-bootstrap/SKILL.md".to_string(),
             body: "# Project Repo Bootstrap\n".to_string(),
             can_select_for_discovery: true,
@@ -621,6 +675,7 @@ fn ctrl_e_expands_shadowed_skill_under_winner() {
             title: "repo-bootstrap".to_string(),
             description: "Global bootstrap".to_string(),
             origin: PromptSourceOrigin::Global,
+            selection_scope: PromptAssemblyScope::Project,
             skill_path: "/tmp/global-repo-bootstrap/SKILL.md".to_string(),
             body: "# Global Repo Bootstrap\n".to_string(),
             can_select_for_discovery: true,
@@ -802,7 +857,7 @@ fn create_extra_prompt_uses_next_numbered_default_title() {
 }
 
 #[test]
-fn render_uses_fixed_width_table_columns_with_balanced_split() {
+fn render_uses_fixed_width_table_columns_with_right_heavier_split() {
     let mut model = ready_model();
     model.set_window(120, 16);
     model.open_prompt_overlay();
@@ -845,8 +900,8 @@ fn render_uses_fixed_width_table_columns_with_balanced_split() {
     let total_columns = right_header.chars().count();
     let right_pane_width = total_columns.saturating_sub(divider_column + 1);
     assert!(
-        right_pane_width.abs_diff(divider_column) <= 1,
-        "left and right panes should stay balanced: left={left_header_pane:?}, right={right_header_pane:?}"
+        right_pane_width > divider_column,
+        "right pane should be wider than left: left={left_header_pane:?}, right={right_header_pane:?}"
     );
 
     let left_header_ord = left_header.find("Ord").expect("Ord col should exist");
@@ -876,7 +931,7 @@ fn render_uses_fixed_width_table_columns_with_balanced_split() {
 }
 
 #[test]
-fn skills_tab_keeps_sorted_names_after_removing_num_column() {
+fn skills_tab_orders_rows_by_selected_order_before_manual_only_suffix() {
     let mut model = ready_model();
     model.set_window(120, 20);
     model.prompt_assembly.discovered_skills = vec![
@@ -885,6 +940,7 @@ fn skills_tab_keeps_sorted_names_after_removing_num_column() {
             title: "caveman".to_string(),
             description: "Be brief".to_string(),
             origin: PromptSourceOrigin::Project,
+            selection_scope: PromptAssemblyScope::Project,
             skill_path: "/tmp/caveman/SKILL.md".to_string(),
             body: "# caveman".to_string(),
             can_select_for_discovery: true,
@@ -896,6 +952,7 @@ fn skills_tab_keeps_sorted_names_after_removing_num_column() {
             title: "codebase-design".to_string(),
             description: "Design modules".to_string(),
             origin: PromptSourceOrigin::Project,
+            selection_scope: PromptAssemblyScope::Project,
             skill_path: "/tmp/codebase-design/SKILL.md".to_string(),
             body: "# codebase-design".to_string(),
             can_select_for_discovery: true,
@@ -907,6 +964,7 @@ fn skills_tab_keeps_sorted_names_after_removing_num_column() {
             title: "ask-matt".to_string(),
             description: "Ask which skill fits".to_string(),
             origin: PromptSourceOrigin::Project,
+            selection_scope: PromptAssemblyScope::Project,
             skill_path: "/tmp/ask-matt/SKILL.md".to_string(),
             body: "# ask-matt".to_string(),
             can_select_for_discovery: false,
@@ -931,10 +989,10 @@ fn skills_tab_keeps_sorted_names_after_removing_num_column() {
         .position(|row| row.contains("ask-matt") && row.contains("(manual)"))
         .expect("manual skill row should render");
 
-    assert!(caveman_row < codebase_design_row);
-    assert!(codebase_design_row < ask_matt_row);
-    assert!(!rows.join("\n").contains(" 21 "));
-    assert!(!rows.join("\n").contains("  8 "));
+    assert!(codebase_design_row < caveman_row);
+    assert!(caveman_row < ask_matt_row);
+    assert!(rows.join("\n").contains(" 21 "));
+    assert!(rows.join("\n").contains("  8 "));
 }
 
 #[test]
@@ -948,6 +1006,7 @@ fn manual_only_skill_stays_visible_with_manual_marker() {
             title: "ask-matt".to_string(),
             description: "Ask which skill fits".to_string(),
             origin: PromptSourceOrigin::Project,
+            selection_scope: PromptAssemblyScope::Project,
             skill_path: "/tmp/ask-matt/SKILL.md".to_string(),
             body: "# Ask Matt".to_string(),
             can_select_for_discovery: false,
@@ -977,6 +1036,7 @@ fn manual_only_skill_does_not_emit_selection_mutation() {
         title: "ask-matt".to_string(),
         description: "Ask which skill fits".to_string(),
         origin: PromptSourceOrigin::Project,
+        selection_scope: PromptAssemblyScope::Project,
         skill_path: "/tmp/ask-matt/SKILL.md".to_string(),
         body: "# Ask Matt".to_string(),
         can_select_for_discovery: false,
@@ -1001,6 +1061,7 @@ fn manual_only_skills_sort_after_discovery_eligible_skills() {
             title: "aaa-discovery".to_string(),
             description: "discovery".to_string(),
             origin: PromptSourceOrigin::Project,
+            selection_scope: PromptAssemblyScope::Project,
             skill_path: "/tmp/aaa-discovery/SKILL.md".to_string(),
             body: "# aaa-discovery".to_string(),
             can_select_for_discovery: true,
@@ -1012,6 +1073,7 @@ fn manual_only_skills_sort_after_discovery_eligible_skills() {
             title: "zzz-manual".to_string(),
             description: "manual".to_string(),
             origin: PromptSourceOrigin::Project,
+            selection_scope: PromptAssemblyScope::Project,
             skill_path: "/tmp/zzz-manual/SKILL.md".to_string(),
             body: "# zzz-manual".to_string(),
             can_select_for_discovery: false,
@@ -1038,6 +1100,7 @@ fn manual_only_skill_preview_shows_notice_above_body() {
         title: "ask-matt".to_string(),
         description: "Ask which skill fits".to_string(),
         origin: PromptSourceOrigin::Project,
+        selection_scope: PromptAssemblyScope::Project,
         skill_path: "/tmp/ask-matt/SKILL.md".to_string(),
         body: "# Ask Matt".to_string(),
         can_select_for_discovery: false,
@@ -1062,7 +1125,7 @@ fn manual_only_skill_preview_shows_notice_above_body() {
 }
 
 #[test]
-fn skills_tab_removes_num_column() {
+fn skills_tab_shows_ord_column() {
     let mut model = ready_model();
     model.set_window(120, 16);
     model.open_prompt_overlay();
@@ -1071,15 +1134,14 @@ fn skills_tab_removes_num_column() {
     let rows = rendered_rows(&render_model_buffer(&mut model, 120, 16));
     let right_header = rows
         .iter()
-        .find(|row| row.contains("Name") && row.contains("Scope"))
+        .find(|row| row.contains("Ord") && row.contains("Name") && row.contains("Scope"))
         .expect("right header should render");
     let right_pane = right_header
         .split('│')
         .nth(1)
         .expect("right pane should exist");
 
-    assert!(!right_pane.contains("Ord"));
-    assert!(!right_pane.contains("Num"));
+    assert!(right_pane.contains("Ord"));
 }
 
 #[test]
@@ -1163,7 +1225,7 @@ fn selected_header_tab_uses_surface_background_and_trailing_padding() {
         .find("[Skill]")
         .expect("selected skill tab should render");
     let skill_index = header_row[..skill_byte_index].chars().count();
-    let trailing_index = skill_index + "[Skill] Custom Prompts".chars().count();
+    let trailing_index = skill_index + "[Skill] Custom Prompts Tools".chars().count();
 
     assert_eq!(
         buffer[(u16::try_from(skill_index).expect("tab index should fit"), 0)].bg,
@@ -1190,6 +1252,19 @@ fn selected_header_tab_uses_surface_background_and_trailing_padding() {
 }
 
 #[test]
+fn right_header_tabs_are_all_underlined() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+
+    let buffer = render_model_buffer(&mut model, 90, 16);
+    for label in ["[Skill]", "Custom Prompts", "Tools"] {
+        let (column, row) =
+            find_buffer_text_position(&buffer, label).expect("header tab should render");
+        assert_text_cells_are_underlined_at(&buffer, label, row, column);
+    }
+}
+
+#[test]
 fn type_column_uses_full_words_and_fits_discovery_label() {
     let mut model = ready_model();
     model.set_window(120, 16);
@@ -1204,11 +1279,11 @@ fn type_column_uses_full_words_and_fits_discovery_label() {
     let discovery_index = skill_discovery_row
         .find("discovery")
         .expect("type label should render");
-    let builtin_index = skill_discovery_row
-        .find("builtin")
+    let project_index = skill_discovery_row
+        .find("project")
         .expect("scope label should render");
     assert!(
-        discovery_index < builtin_index,
+        discovery_index < project_index,
         "Type column should render the full discovery label before scope: {skill_discovery_row:?}"
     );
 }
@@ -1386,9 +1461,15 @@ fn custom_prompt_scope_dialog_is_centered_within_right_pane() {
 
     let chrome = fullscreen_list_chrome_rects(Rect::new(0, 0, 100, 16)).expect("chrome should fit");
     let [_left_pane, _gutter, right_pane] = Layout::horizontal([
-        Constraint::Percentage(50),
+        Constraint::Ratio(
+            super::PROMPT_OVERLAY_LEFT_PANE_RATIO_NUMERATOR,
+            super::PROMPT_OVERLAY_PANE_RATIO_DENOMINATOR,
+        ),
         Constraint::Length(1),
-        Constraint::Percentage(50),
+        Constraint::Ratio(
+            super::PROMPT_OVERLAY_RIGHT_PANE_RATIO_NUMERATOR,
+            super::PROMPT_OVERLAY_PANE_RATIO_DENOMINATOR,
+        ),
     ])
     .areas(chrome.body);
     let dialog_width = right_pane.width.min(52);
@@ -1560,6 +1641,7 @@ fn prompt_runtime_update_replaces_manager_snapshot() {
                 extra_prompt_candidates: Vec::new(),
                 discovered_skills: Vec::new(),
                 manual_skills: Vec::new(),
+                tool_candidates: Vec::new(),
                 builtin_core_system_body: "builtin core".to_string(),
                 global_core_system_override: None,
                 project_core_system_override: Some("project core".to_string()),
@@ -1645,6 +1727,7 @@ fn active_selection_follows_reordered_source_after_runtime_update() {
                         kind: PromptSourceKind::CoreSystemPrompt,
                         title: "Core system prompt".to_string(),
                         origin: Some(PromptSourceOrigin::Builtin),
+                        scope: None,
                         enabled: true,
                         order: 1,
                     },
@@ -1652,7 +1735,8 @@ fn active_selection_follows_reordered_source_after_runtime_update() {
                         reference_id: "skill-discovery".to_string(),
                         kind: PromptSourceKind::SkillDiscovery,
                         title: "Skill discovery".to_string(),
-                        origin: Some(PromptSourceOrigin::Builtin),
+                        origin: Some(PromptSourceOrigin::Project),
+                        scope: Some(PromptAssemblyScope::Project),
                         enabled: true,
                         order: 2,
                     },
@@ -1661,6 +1745,7 @@ fn active_selection_follows_reordered_source_after_runtime_update() {
                         kind: PromptSourceKind::ExtraPrompt,
                         title: "safety-policy".to_string(),
                         origin: Some(PromptSourceOrigin::Global),
+                        scope: Some(PromptAssemblyScope::Global),
                         enabled: false,
                         order: 3,
                     },
@@ -1669,6 +1754,7 @@ fn active_selection_follows_reordered_source_after_runtime_update() {
                         kind: PromptSourceKind::ExtraPrompt,
                         title: "repo-rules".to_string(),
                         origin: Some(PromptSourceOrigin::Project),
+                        scope: Some(PromptAssemblyScope::Project),
                         enabled: true,
                         order: 4,
                     },
@@ -1687,6 +1773,7 @@ fn active_selection_follows_reordered_source_after_runtime_update() {
                         title: "repo-bootstrap".to_string(),
                         description: "Bootstrap repo".to_string(),
                         origin: PromptSourceOrigin::Project,
+                        selection_scope: PromptAssemblyScope::Project,
                         skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
                         body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
                         can_select_for_discovery: true,
@@ -1698,6 +1785,7 @@ fn active_selection_follows_reordered_source_after_runtime_update() {
                         title: "code-review".to_string(),
                         description: "Review code".to_string(),
                         origin: PromptSourceOrigin::Global,
+                        selection_scope: PromptAssemblyScope::Project,
                         skill_path: "/tmp/code-review/SKILL.md".to_string(),
                         body: "# Code Review\n\nUse this skill.".to_string(),
                         can_select_for_discovery: true,
@@ -1710,12 +1798,14 @@ fn active_selection_follows_reordered_source_after_runtime_update() {
                     title: "repo-bootstrap".to_string(),
                     description: "Bootstrap repo".to_string(),
                     origin: PromptSourceOrigin::Project,
+                    selection_scope: PromptAssemblyScope::Project,
                     skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
                     body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
                     can_select_for_discovery: true,
                     selected: false,
                     selected_order: None,
                 }],
+                tool_candidates: Vec::new(),
                 builtin_core_system_body: "builtin core".to_string(),
                 global_core_system_override: None,
                 project_core_system_override: None,
@@ -1937,6 +2027,59 @@ fn shifted_j_and_k_reorder_active_source() {
 }
 
 #[test]
+fn moving_tool_guidelines_emits_reorder_mutation_with_managed_scope() {
+    let mut model = ready_model();
+    model
+        .prompt_assembly
+        .managed_sources
+        .insert(1, tool_guidelines_managed_source());
+    model.prompt_assembly.sources.push(tool_guidelines_source());
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(
+            KeyCode::Char('J'),
+            crossterm::event::KeyModifiers::SHIFT,
+        )),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveActiveSource {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+                kind: PromptSourceKind::ToolGuidelines,
+                reference_id: "tool-guidelines".to_string(),
+                direction: PromptAssemblyMoveDirection::Down,
+            },
+        })
+    );
+}
+
+#[test]
+fn toggling_tool_guidelines_emits_scope_aware_disable_mutation() {
+    let mut model = ready_model();
+    model
+        .prompt_assembly
+        .managed_sources
+        .insert(1, tool_guidelines_managed_source());
+    model.prompt_assembly.sources.push(tool_guidelines_source());
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation:
+                runtime_domain::prompt_assembly::PromptAssemblyMutation::SetPromptSourceEnabled {
+                    scope:
+                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+                    kind: PromptSourceKind::ToolGuidelines,
+                    reference_id: "tool-guidelines".to_string(),
+                    enabled: false,
+                },
+        })
+    );
+}
+
+#[test]
 fn restore_hint_only_shows_for_selected_core_system_prompt() {
     let mut model = ready_model();
     model.open_prompt_overlay();
@@ -2011,8 +2154,8 @@ fn x_on_discovered_skill_emits_selection_toggle_mutation() {
             mutation:
                 runtime_domain::prompt_assembly::PromptAssemblyMutation::SetDiscoveredSkillSelected {
                     scope:
-                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
-                    skill_name: "code-review".to_string(),
+                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                    skill_name: "repo-bootstrap".to_string(),
                     selected: false,
                 },
         })
@@ -2143,6 +2286,13 @@ fn footer_hides_custom_and_skill_actions_on_left_pane() {
     assert!(rows.contains("d remove"));
     assert!(rows.contains("x disable"));
     assert!(rows.contains("J/K reorder"));
+    assert!(rows.contains("? more"));
+    assert!(!rows.contains("Esc close"));
+    assert!(!rows.contains("←/→/h/l focus panes"));
+    assert!(!rows.contains("↑/↓/j/k move"));
+    assert!(!rows.contains("Space source"));
+    assert!(rows.contains("J/K reorder"));
+    assert!(rows.contains("· ? more"));
 }
 
 #[test]
@@ -2178,6 +2328,7 @@ fn footer_hides_remove_for_active_instruction_file() {
             kind: PromptSourceKind::InstructionsFile,
             title: "AGENTS.md".to_string(),
             origin: Some(PromptSourceOrigin::Project),
+            scope: Some(PromptAssemblyScope::Project),
             enabled: true,
             order: 2,
         },
@@ -2225,6 +2376,7 @@ fn d_does_not_remove_active_instruction_file() {
             kind: PromptSourceKind::InstructionsFile,
             title: "AGENTS.md".to_string(),
             origin: Some(PromptSourceOrigin::Project),
+            scope: Some(PromptAssemblyScope::Project),
             enabled: true,
             order: 2,
         },
@@ -2260,6 +2412,7 @@ fn e_on_instruction_file_opens_real_file_in_external_editor() {
             kind: PromptSourceKind::InstructionsFile,
             title: "AGENTS.md".to_string(),
             origin: Some(PromptSourceOrigin::Project),
+            scope: Some(PromptAssemblyScope::Project),
             enabled: true,
             order: 2,
         },
@@ -2307,6 +2460,13 @@ fn footer_shows_custom_actions_only_on_custom_tab() {
     assert!(!rows.contains("i/I add skill"));
     assert!(rows.contains("d remove"));
     assert!(!rows.contains("J/K reorder"));
+    assert!(rows.contains("? more"));
+    assert!(!rows.contains("Esc close"));
+    assert!(!rows.contains("←/→/h/l focus panes"));
+    assert!(!rows.contains("↑/↓/j/k move"));
+    assert!(!rows.contains("Space source"));
+    assert!(rows.contains("Tab tabs"));
+    assert!(rows.contains("· ? more"));
 }
 
 #[test]
@@ -2323,6 +2483,9 @@ fn footer_shows_create_prompt_on_empty_custom_tab() {
     assert!(rows.contains("a create prompt"));
     assert!(!rows.contains("d remove"));
     assert!(!rows.contains("e/ctrl+g edit"));
+    assert!(rows.contains("? more"));
+    assert!(rows.contains("Tab tabs"));
+    assert!(rows.contains("· ? more"));
 }
 
 #[test]
@@ -2339,5 +2502,424 @@ fn footer_hides_custom_edit_and_remove_actions_on_skills_tab() {
     assert!(!rows.contains("d remove"));
     assert!(!rows.contains("e/ctrl+g edit"));
     assert!(rows.contains("x disable"));
-    assert!(!rows.contains("J/K reorder"));
+    assert!(rows.contains("J/K reorder"));
+    assert!(rows.contains("? more"));
+    assert!(!rows.contains("Esc close"));
+    assert!(!rows.contains("←/→/h/l focus panes"));
+    assert!(!rows.contains("↑/↓/j/k move"));
+    assert!(!rows.contains("Space source"));
+    assert!(rows.contains("J/K reorder"));
+    assert!(rows.contains("Tab tabs"));
+    assert!(rows.contains("· ? more"));
+}
+
+#[test]
+fn footer_hides_disable_for_core_system_prompt() {
+    let mut model = ready_model();
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+
+    assert!(!rows.contains("x disable"));
+    assert!(rows.contains("r restore"));
+    assert!(rows.contains("? more"));
+    assert!(rows.contains("· ? more"));
+}
+
+#[test]
+fn footer_hides_remove_for_active_tool_guidelines() {
+    let mut model = ready_model();
+    model.prompt_assembly.snapshot.active_sources.insert(
+        1,
+        prompt_source(
+            "tool-guidelines",
+            "Tool guidelines",
+            PromptSourceKind::ToolGuidelines,
+            Some(PromptSourceOrigin::Builtin),
+            PromptSourceStatus::Active { order: 1 },
+        ),
+    );
+    model
+        .prompt_assembly
+        .managed_sources
+        .insert(1, tool_guidelines_managed_source());
+    model.prompt_assembly.sources.push(tool_guidelines_source());
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+
+    assert!(!rows.contains("d remove"));
+    assert!(rows.contains("x disable"));
+    assert!(rows.contains("e/ctrl+g edit"));
+    assert!(rows.contains("? more"));
+    assert!(rows.contains("x disable"));
+    assert!(rows.contains("· ? more"));
+}
+
+#[test]
+fn question_mark_opens_shortcut_help_popover() {
+    let mut model = ready_model();
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT)),
+        super::OverlayInputResult::Handled
+    );
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+
+    assert!(rows.contains("? more"));
+    assert!(rows.contains("Esc"));
+    assert!(rows.contains("close"));
+    assert!(rows.contains("←/→/h/l"));
+    assert!(rows.contains("focus panes"));
+    assert!(rows.contains("↑/↓/j/k"));
+    assert!(rows.contains("move"));
+    assert!(rows.contains("Space"));
+    assert!(rows.contains("source"));
+    assert!(rows.contains("? / Esc"));
+    assert!(rows.contains("close help"));
+}
+
+#[test]
+fn shortcut_help_escape_closes_help_before_overlay() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Esc)),
+        super::OverlayInputResult::Handled
+    );
+    assert!(model.prompt_overlay_active());
+    assert!(
+        !model
+            .prompt_overlay
+            .as_ref()
+            .expect("prompt overlay should stay open")
+            .shortcut_help_open
+    );
+}
+
+#[test]
+fn shortcut_help_closes_on_other_shortcut_and_keeps_action() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down)),
+        super::OverlayInputResult::Handled
+    );
+
+    let state = model
+        .prompt_overlay
+        .as_ref()
+        .expect("prompt overlay should stay open");
+    assert!(!state.shortcut_help_open);
+    assert_eq!(state.active_selected, 1);
+}
+
+#[test]
+fn shortcut_help_closes_on_non_shortcut_key() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('z'))),
+        super::OverlayInputResult::Handled
+    );
+
+    assert!(
+        !model
+            .prompt_overlay
+            .as_ref()
+            .expect("prompt overlay should stay open")
+            .shortcut_help_open
+    );
+}
+
+#[test]
+fn mouse_click_inside_shortcut_help_does_not_close_it() {
+    let mut model = ready_model();
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+
+    let buffer = render_model_buffer(&mut model, 140, 16);
+    let (column, row) =
+        find_buffer_text_position(&buffer, "? / Esc").expect("shortcut help footer should render");
+    click_left(&mut model, column, row);
+
+    assert!(
+        model
+            .prompt_overlay
+            .as_ref()
+            .expect("prompt overlay should stay open")
+            .shortcut_help_open
+    );
+}
+
+#[test]
+fn shortcut_help_uses_aligned_two_column_layout() {
+    let mut model = ready_model();
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16));
+    let esc_row = rows
+        .iter()
+        .find(|row| row.contains("Esc") && row.contains("close"))
+        .expect("Esc row should render");
+    let focus_row = rows
+        .iter()
+        .find(|row| row.contains("←/→/h/l") && row.contains("focus panes"))
+        .expect("focus row should render");
+    let move_row = rows
+        .iter()
+        .find(|row| row.contains("↑/↓/j/k") && row.contains("move"))
+        .expect("move row should render");
+    let space_row = rows
+        .iter()
+        .find(|row| row.contains("Space") && row.contains("source"))
+        .expect("Space row should render");
+
+    let close_column = column_in_row(esc_row, "close");
+    let focus_column = column_in_row(focus_row, "focus panes");
+    let move_column = column_in_row(move_row, "move");
+    let source_column = column_in_row(space_row, "source");
+
+    assert_eq!(focus_column, close_column);
+    assert_eq!(move_column, close_column);
+    assert_eq!(source_column, close_column);
+}
+
+#[test]
+fn mouse_click_outside_shortcut_help_closes_it_and_continues_click_action() {
+    let mut model = ready_model();
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+
+    let buffer = render_model_buffer(&mut model, 140, 16);
+    let (column, row) = find_buffer_text_position(&buffer, "repo-bootstrap")
+        .expect("second discovered skill should render");
+    click_left(&mut model, column, row);
+
+    let state = model
+        .prompt_overlay
+        .as_ref()
+        .expect("prompt overlay should stay open");
+    assert!(!state.shortcut_help_open);
+    assert_eq!(state.focus, super::PromptOverlayFocus::Inactive);
+    assert_eq!(
+        state.inactive_selected_row_id.as_deref(),
+        Some("skill:repo-bootstrap:project")
+    );
+}
+
+#[test]
+fn shifted_j_and_k_reorder_discovered_skill() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(
+            KeyCode::Char('K'),
+            crossterm::event::KeyModifiers::SHIFT,
+        )),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation:
+                runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveDiscoveredSkill {
+                    scope:
+                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                    skill_name: "repo-bootstrap".to_string(),
+                    direction: PromptAssemblyMoveDirection::Up,
+                },
+        })
+    );
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(
+            KeyCode::Char('J'),
+            crossterm::event::KeyModifiers::SHIFT,
+        )),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation:
+                runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveDiscoveredSkill {
+                    scope:
+                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                    skill_name: "repo-bootstrap".to_string(),
+                    direction: PromptAssemblyMoveDirection::Down,
+                },
+        })
+    );
+}
+
+#[test]
+fn r_resets_discovered_skill_order() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(
+            KeyCode::Char('r'),
+            crossterm::event::KeyModifiers::NONE,
+        )),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation:
+                runtime_domain::prompt_assembly::PromptAssemblyMutation::ResetDiscoveredSkillOrder {
+                    scope:
+                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                },
+        })
+    );
+}
+
+#[test]
+fn global_discovered_skill_reorder_uses_selection_scope_not_item_origin() {
+    let mut model = ready_model();
+    model.prompt_assembly.discovered_skills = vec![PromptAssemblyDiscoveredSkill {
+        skill_name: "code-review".to_string(),
+        title: "code-review".to_string(),
+        description: "Review code".to_string(),
+        origin: PromptSourceOrigin::Global,
+        selection_scope: PromptAssemblyScope::Project,
+        skill_path: "/tmp/code-review/SKILL.md".to_string(),
+        body: "# Code Review".to_string(),
+        can_select_for_discovery: true,
+        selected: true,
+        selected_order: Some(1),
+    }];
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(
+            KeyCode::Char('J'),
+            crossterm::event::KeyModifiers::SHIFT,
+        )),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation:
+                runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveDiscoveredSkill {
+                    scope:
+                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                    skill_name: "code-review".to_string(),
+                    direction: PromptAssemblyMoveDirection::Down,
+                },
+        })
+    );
+}
+
+#[test]
+fn global_discovered_skill_reset_uses_selection_scope_not_item_origin() {
+    let mut model = ready_model();
+    model.prompt_assembly.discovered_skills = vec![PromptAssemblyDiscoveredSkill {
+        skill_name: "code-review".to_string(),
+        title: "code-review".to_string(),
+        description: "Review code".to_string(),
+        origin: PromptSourceOrigin::Global,
+        selection_scope: PromptAssemblyScope::Project,
+        skill_path: "/tmp/code-review/SKILL.md".to_string(),
+        body: "# Code Review".to_string(),
+        can_select_for_discovery: true,
+        selected: true,
+        selected_order: Some(1),
+    }];
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(
+            KeyCode::Char('r'),
+            crossterm::event::KeyModifiers::NONE,
+        )),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation:
+                runtime_domain::prompt_assembly::PromptAssemblyMutation::ResetDiscoveredSkillOrder {
+                    scope:
+                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                },
+        })
+    );
+}
+
+#[test]
+fn tools_tab_shows_ord_column_and_supports_reorder() {
+    let mut model = ready_model();
+    model.prompt_assembly.tool_candidates = vec![
+        PromptAssemblyToolCandidate {
+            name: "bash".to_string(),
+            label: Some("Bash".to_string()),
+            description: Some("run shell commands".to_string()),
+            prompt_guidelines: Some("Prefer rg over grep.".to_string()),
+            origin: PromptSourceOrigin::Builtin,
+            selection_scope: PromptAssemblyScope::Global,
+            can_select: true,
+            selected: true,
+            selected_order: Some(1),
+        },
+        PromptAssemblyToolCandidate {
+            name: "read_file".to_string(),
+            label: Some("Read file".to_string()),
+            description: Some("read workspace files".to_string()),
+            prompt_guidelines: Some("Use for direct file reads.".to_string()),
+            origin: PromptSourceOrigin::Builtin,
+            selection_scope: PromptAssemblyScope::Global,
+            can_select: true,
+            selected: true,
+            selected_order: Some(2),
+        },
+    ];
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+    assert!(rows.contains("Ord"));
+    assert!(rows.contains("J/K reorder"));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(
+            KeyCode::Char('J'),
+            crossterm::event::KeyModifiers::SHIFT,
+        )),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveTool {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+                tool_name: "bash".to_string(),
+                direction: PromptAssemblyMoveDirection::Down,
+            },
+        })
+    );
+}
+
+#[test]
+fn r_still_restores_core_system_override_on_left_selection() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(
+            KeyCode::Char('r'),
+            crossterm::event::KeyModifiers::NONE,
+        )),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation:
+                runtime_domain::prompt_assembly::PromptAssemblyMutation::RestoreCoreSystemOverride {
+                    scope:
+                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+                },
+        })
+    );
 }

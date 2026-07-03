@@ -1,6 +1,7 @@
 use ratatui::{buffer::Buffer, style::Color};
 use runtime_domain::{
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
+    prompt_assembly::persistence::PromptAssemblyScope,
     prompt_assembly::{
         PromptAssemblyDiscoveredSkill, PromptAssemblyInput, PromptAssemblyManagerSnapshot,
         PromptPreludeSnapshot, PromptSourceOrigin, resolve_prompt_assembly,
@@ -318,12 +319,14 @@ fn model_with_manual_skill(skill_name: &str) -> Model {
                     title: skill_name.to_string(),
                     description: "Manual skill".to_string(),
                     origin: PromptSourceOrigin::Project,
+                    selection_scope: PromptAssemblyScope::Project,
                     skill_path: format!("/tmp/{skill_name}/SKILL.md"),
                     body: "# Manual Skill".to_string(),
                     can_select_for_discovery: false,
                     selected: false,
                     selected_order: None,
                 }],
+                tool_candidates: Vec::new(),
                 builtin_core_system_body: String::new(),
                 global_core_system_override: None,
                 project_core_system_override: None,

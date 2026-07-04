@@ -309,6 +309,7 @@ fn first_placeholder_visual_line(text: &str, width: usize, line_prefix_width: us
         .unwrap_or(VisualLine {
             text: String::new(),
             logical_line: 0,
+            logical_line_start_char: 0,
             visible_start_char: 0,
             end_char: 0,
             column_offsets: Vec::new(),
@@ -337,9 +338,11 @@ fn render_visual_lines(
                 .frame_fill_width
                 .saturating_sub(options.prompt_width + measure_width(&line_text));
             let mut spans = vec![Span::styled(line_prefix, options.prompt_style)];
+            let absolute_visible_start_char =
+                line.logical_line_start_char + line.visible_start_char;
             spans.extend(styled_composer_content_spans(
                 &line_text,
-                line.visible_start_char,
+                absolute_visible_start_char,
                 options.text_style,
                 options.highlighted_text_style,
                 options.skill_bindings,

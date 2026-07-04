@@ -511,6 +511,32 @@ fn bound_skill_token_keeps_same_background_as_live_cx_input() {
     );
 }
 
+#[test]
+fn bound_custom_prompt_token_renders_from_sigil_on_later_logical_line() {
+    let mut composer = test_composer(80, 4, "啊啊\n#prompt");
+    assert!(composer.replace_current_custom_prompt_token("prompt-1", PromptSourceOrigin::Project));
+
+    let palette = default_palette();
+    let highlighted = highlighted_composer_contents(&composer, palette);
+
+    assert_eq!(highlighted, vec!["#prompt-1"]);
+}
+
+#[test]
+fn bound_skill_token_renders_from_sigil_after_blank_lines() {
+    let mut composer = test_composer(80, 4, "\n\n$code");
+    assert!(composer.replace_current_skill_token(
+        "code-review",
+        "/tmp/code-review/SKILL.md",
+        PromptSourceOrigin::Project,
+    ));
+
+    let palette = default_palette();
+    let highlighted = highlighted_composer_contents(&composer, palette);
+
+    assert_eq!(highlighted, vec!["$code-review"]);
+}
+
 fn test_composer(width: u16, height: u16, value: &str) -> Composer {
     let mut composer = Composer::new(StyleMode::Ms);
     // 测试里的 width 表达可编辑内容加 prompt 的旧视觉宽度；真实 frame 还要包含右侧留白。
@@ -518,6 +544,20 @@ fn test_composer(width: u16, height: u16, value: &str) -> Composer {
     composer.set_height(height);
     composer.set_text_for_test(value);
     composer
+}
+
+fn highlighted_composer_contents(
+    composer: &Composer,
+    palette: crate::theme::TerminalPalette,
+) -> Vec<String> {
+    composer
+        .render_document(palette)
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .filter(|span| span.style.fg == Some(palette.command_accent))
+        .map(|span| span.content.to_string())
+        .collect()
 }
 
 fn composer_with_cursor(mut composer: Composer, cursor: usize) -> Composer {

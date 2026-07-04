@@ -9,6 +9,7 @@ use crate::transcript::wrap_prompt_visual_lines;
 pub(crate) struct VisualLine {
     pub(crate) text: String,
     pub(crate) logical_line: usize,
+    pub(crate) logical_line_start_char: usize,
     pub(crate) visible_start_char: usize,
     pub(crate) end_char: usize,
     pub(crate) column_offsets: Vec<usize>,
@@ -63,6 +64,7 @@ fn visual_lines_for_text_with_options(
     line_prefix_width: usize,
 ) -> Vec<VisualLine> {
     let wrapped_lines = wrap_prompt_visual_lines(text, width, line_prefix_width);
+    let logical_line_start_chars = logical_line_start_chars(text);
     let mut lines = Vec::with_capacity(wrapped_lines.len());
 
     for wrapped_line in wrapped_lines {
@@ -73,6 +75,10 @@ fn visual_lines_for_text_with_options(
         lines.push(VisualLine {
             text: wrapped_line.text,
             logical_line: wrapped_line.logical_line,
+            logical_line_start_char: logical_line_start_chars
+                .get(wrapped_line.logical_line)
+                .copied()
+                .unwrap_or(0),
             visible_start_char: wrapped_line.visible_start_char,
             end_char: wrapped_line.end_char,
             column_offsets: wrapped_line.column_offsets,
@@ -84,6 +90,7 @@ fn visual_lines_for_text_with_options(
         lines.push(VisualLine {
             text: String::new(),
             logical_line: 0,
+            logical_line_start_char: 0,
             visible_start_char: 0,
             end_char: 0,
             column_offsets: Vec::new(),
@@ -92,6 +99,22 @@ fn visual_lines_for_text_with_options(
     }
 
     lines
+}
+
+fn logical_line_start_chars(text: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut start_char = 0usize;
+
+    for line in text.split('\n') {
+        starts.push(start_char);
+        start_char += line.chars().count() + 1;
+    }
+
+    if starts.is_empty() {
+        starts.push(0);
+    }
+
+    starts
 }
 
 #[cfg(test)]

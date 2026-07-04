@@ -487,6 +487,7 @@ fn user_config_directory() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn non_openai_provider_requires_configured_model_allowlist_for_sync() {
@@ -509,6 +510,41 @@ mod tests {
     }
 
     #[test]
+    fn config_accepts_openai_responses_provider_kind() {
+        let root = tempdir_path("models-openai-responses");
+        let models_path = root.join(".hunea").join("models.toml");
+        fs::create_dir_all(models_path.parent().expect("models parent should exist"))
+            .expect("models parent should be creatable");
+        fs::write(
+            &models_path,
+            r#"
+default = "responses/fast-responses-model"
+
+[providers.responses]
+kind = "openai_responses"
+base_url = "https://responses.example.com/v1"
+models = ["fast-responses-model"]
+"#,
+        )
+        .expect("models config should be writable");
+
+        let loaded = load_from_paths(Some(&root), None).expect("models config should load");
+        let provider = loaded
+            .catalog
+            .enabled_provider_by_id("responses")
+            .expect("provider should exist");
+
+        assert_eq!(provider.connection.kind, ProviderKind::OpenAiResponses);
+        assert_eq!(
+            loaded.selected_model,
+            Some(runtime_domain::model_catalog::ModelSelection::new(
+                "responses",
+                "fast-responses-model"
+            ))
+        );
+    }
+
+    #[test]
     fn openai_custom_base_url_syncs_through_models_endpoint() {
         let request = ProviderSyncRequest {
             provider_id: "openai_proxy".to_string(),
@@ -523,5 +559,16 @@ mod tests {
             .expect_err("unreachable endpoint should fail after choosing /models sync");
 
         assert!(error.contains("transport error"));
+    }
+
+    fn tempdir_path(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "hunea-models-config-{label}-{}-{stamp}",
+            std::process::id()
+        ))
     }
 }

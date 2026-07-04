@@ -1,5 +1,6 @@
 mod client;
 mod error;
+mod prompt_cache;
 mod provider;
 mod request;
 mod tool_errors;

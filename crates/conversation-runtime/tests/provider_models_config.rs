@@ -18,7 +18,7 @@ default = "local/qwen3"
 enabled = true
 kind = "openai_compatible"
 display_name = "LM Studio"
-base_url = "http://192.168.1.71:1234/v1"
+base_url = "http://127.0.0.1:1234/v1"
 "#,
     )
     .expect("models config should be written");
@@ -89,6 +89,13 @@ display_name = "OpenAI"
 api_key_env = "OPENAI_API_KEY"
 models = ["gpt-4.1"]
 
+[providers.responses]
+enabled = true
+kind = "openai_responses"
+display_name = "Responses"
+base_url = "https://responses.example.com/v1"
+models = ["fast-responses-model"]
+
 [providers.anthropic]
 enabled = true
 kind = "anthropic"
@@ -123,6 +130,7 @@ models = ["gemini-2.5-pro"]
             ("anthropic", ProviderKind::Anthropic),
             ("gemini", ProviderKind::Gemini),
             ("openai", ProviderKind::OpenAi),
+            ("responses", ProviderKind::OpenAiResponses),
         ]
     );
 }
@@ -139,7 +147,7 @@ default = "local/qwen3"
 enabled = true
 kind = "openai_compatible"
 display_name = "LM Studio"
-base_url = "http://192.168.1.71:1234/v1"
+base_url = "http://127.0.0.1:1234/v1"
 "#,
     )
     .expect("models config should be written");

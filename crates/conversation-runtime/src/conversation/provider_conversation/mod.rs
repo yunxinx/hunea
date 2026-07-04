@@ -48,6 +48,7 @@ pub struct PreparedConversationRequest {
     api_key: Option<ProviderApiKey>,
     api_key_env: Option<String>,
     items: Vec<ConversationItem>,
+    session_prompt_cache_key: Option<String>,
     prompt_prelude: Option<PromptPreludeSnapshot>,
     persistence: Option<PreparedConversationPersistence>,
 }
@@ -62,6 +63,10 @@ impl std::fmt::Debug for PreparedConversationRequest {
             .field("api_key", &self.api_key)
             .field("api_key_env", &self.api_key_env)
             .field("items", &self.items)
+            .field(
+                "has_session_prompt_cache_key",
+                &self.session_prompt_cache_key.is_some(),
+            )
             .field("has_prompt_prelude", &self.prompt_prelude.is_some())
             .field("has_persistence", &self.persistence.is_some())
             .finish()
@@ -73,6 +78,7 @@ impl PreparedConversationRequest {
     pub(crate) fn from_turn(
         turn: &ConversationTurnRequest,
         items: Vec<ConversationItem>,
+        session_prompt_cache_key: Option<String>,
         prompt_prelude: Option<PromptPreludeSnapshot>,
         persistence: Option<PreparedConversationPersistence>,
     ) -> Self {
@@ -84,6 +90,7 @@ impl PreparedConversationRequest {
             api_key: turn.api_key().cloned(),
             api_key_env: turn.api_key_env().map(str::to_string),
             items,
+            session_prompt_cache_key,
             prompt_prelude,
             persistence,
         }
@@ -137,6 +144,11 @@ impl PreparedConversationRequest {
     pub(crate) fn persistence_cloned(&self) -> Option<PreparedConversationPersistence> {
         self.persistence.clone()
     }
+
+    /// `session_prompt_cache_key` 返回本次请求可用于 provider prompt cache 的稳定会话键。
+    pub fn session_prompt_cache_key(&self) -> Option<&str> {
+        self.session_prompt_cache_key.as_deref()
+    }
 }
 
 /// `ProviderConversation` 持有 provider-visible 内存对话。
@@ -150,6 +162,7 @@ pub struct ProviderConversation {
     pending_user_items: Vec<ConversationItem>,
     pending_dynamic_environment_observations: Option<Vec<DynamicEnvironmentObservation>>,
     upstream_context_tokens: Option<usize>,
+    session_prompt_cache_key: Option<String>,
     persistence: Option<ProviderConversationPersistence>,
 }
 
@@ -224,6 +237,12 @@ impl ProviderConversation {
             pending_user_items: Vec::new(),
             pending_dynamic_environment_observations: None,
             upstream_context_tokens: None,
+            session_prompt_cache_key: Some(
+                session_id
+                    .as_ref()
+                    .unwrap_or(&header_template.session_id)
+                    .to_string(),
+            ),
             persistence: Some(ProviderConversationPersistence {
                 store,
                 session_id,
@@ -242,7 +261,11 @@ impl ProviderConversation {
         self.pending_user_items.clear();
         self.pending_dynamic_environment_observations = None;
         self.upstream_context_tokens = None;
+        self.session_prompt_cache_key = None;
         if let Some(persistence) = self.persistence.as_mut() {
+            persistence.header_template.session_id = SessionId::new();
+            self.session_prompt_cache_key =
+                Some(persistence.header_template.session_id.to_string());
             persistence.session_id = None;
         }
     }
@@ -472,6 +495,7 @@ impl ProviderConversation {
         Ok(PreparedConversationRequest::from_turn(
             turn,
             self.provider_items_with_pending_user_items(&current_user_items),
+            self.session_prompt_cache_key.clone(),
             self.prompt_prelude.clone(),
             persistence,
         ))

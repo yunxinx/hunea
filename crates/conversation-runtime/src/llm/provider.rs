@@ -2,6 +2,7 @@ use std::{env, time::Duration};
 
 use openai_compat_provider::{
     DEFAULT_OPENAI_BASE_URL, OpenAiChatCompletionsClient, OpenAiClientConfig,
+    OpenAiCompatibleClient, OpenAiResponsesClient,
 };
 use provider_protocol::ProviderClient;
 use runtime_domain::{provider::ProviderKind, session::ProviderRequest};
@@ -11,7 +12,7 @@ use crate::llm::ProviderRequestError;
 
 pub(crate) fn openai_client_for_request(
     request: &ProviderRequest,
-) -> Result<OpenAiChatCompletionsClient, ProviderRequestError> {
+) -> Result<OpenAiCompatibleClient, ProviderRequestError> {
     openai_client_from_parts(
         &request.provider_id,
         request.provider_kind,
@@ -23,7 +24,7 @@ pub(crate) fn openai_client_for_request(
 
 pub(crate) fn openai_client_for_prepared_request(
     request: &PreparedConversationRequest,
-) -> Result<OpenAiChatCompletionsClient, ProviderRequestError> {
+) -> Result<OpenAiCompatibleClient, ProviderRequestError> {
     openai_client_from_parts(
         request.provider_id(),
         request.provider_kind(),
@@ -39,9 +40,9 @@ fn openai_client_from_parts(
     base_url: Option<&str>,
     api_key: Option<&runtime_domain::provider::ProviderApiKey>,
     api_key_env: Option<&str>,
-) -> Result<OpenAiChatCompletionsClient, ProviderRequestError> {
+) -> Result<OpenAiCompatibleClient, ProviderRequestError> {
     let config = match provider_kind {
-        ProviderKind::OpenAiCompatible => {
+        ProviderKind::OpenAiCompatible | ProviderKind::OpenAiResponses => {
             let Some(base_url) = base_url.filter(|value| !value.trim().is_empty()) else {
                 return Err(ProviderRequestError::MissingBaseUrl {
                     provider_id: provider_id.to_string(),
@@ -76,7 +77,20 @@ fn openai_client_from_parts(
         }
     }?;
 
-    OpenAiChatCompletionsClient::new(config).map_err(Into::into)
+    match provider_kind {
+        ProviderKind::OpenAiResponses => OpenAiResponsesClient::new(config)
+            .map(OpenAiCompatibleClient::Responses)
+            .map_err(Into::into),
+        ProviderKind::OpenAiCompatible | ProviderKind::OpenAi => {
+            OpenAiChatCompletionsClient::new(config)
+                .map(OpenAiCompatibleClient::ChatCompletions)
+                .map_err(Into::into)
+        }
+        provider_kind => Err(ProviderRequestError::UnsupportedProvider {
+            provider_id: provider_id.to_string(),
+            provider_kind,
+        }),
+    }
 }
 
 fn openai_config_for_base_url(
@@ -190,6 +204,26 @@ mod tests {
             .expect_err("official OpenAI provider should require API key");
 
         assert!(error.to_string().contains("requires API key"));
+    }
+
+    #[test]
+    fn openai_responses_request_uses_responses_client() {
+        let request = ProviderRequest {
+            provider_id: "responses".to_string(),
+            provider_kind: ProviderKind::OpenAiResponses,
+            model_id: "fast-responses-model".to_string(),
+            base_url: Some("https://responses.example.com/v1".to_string()),
+            api_key: None,
+            api_key_env: None,
+            items: vec![user_item("hello")],
+        };
+
+        let client = openai_client_for_request(&request).expect("client should build");
+
+        assert!(matches!(
+            client,
+            openai_compat_provider::OpenAiCompatibleClient::Responses(_)
+        ));
     }
 
     #[test]

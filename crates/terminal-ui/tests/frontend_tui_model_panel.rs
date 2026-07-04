@@ -471,7 +471,7 @@ fn model_options_with_catalog() -> ModelOptions {
                 "deepseek",
                 ProviderKind::OpenAiCompatible,
                 "DeepSeek",
-                Some("https://api.deepseek.com/v1".to_string()),
+                Some("https://api.example.com/v1".to_string()),
                 ModelSource::Configured,
                 vec![
                     ModelEntry::new(

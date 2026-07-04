@@ -1,6 +1,8 @@
 //! Context budget helpers for prepared turns.
 
-use openai_compat_provider::prompt_request_projection_from_parts;
+use openai_compat_provider::{
+    OpenAiRequestFormat, prompt_request_projection_from_parts_for_format,
+};
 use provider_protocol::{ConversationItem, ToolDefinition};
 use runtime_domain::{
     context_budget::{
@@ -148,9 +150,19 @@ fn project_probe(
 > {
     let projection = match probe.provider_kind {
         ProviderKind::OpenAiCompatible | ProviderKind::OpenAi => {
-            prompt_request_projection_from_parts(probe.items, probe.tool_definitions)
-                .map_err(ContextBudgetError::projection)?
+            prompt_request_projection_from_parts_for_format(
+                OpenAiRequestFormat::ChatCompletions,
+                probe.items,
+                probe.tool_definitions,
+            )
+            .map_err(ContextBudgetError::projection)?
         }
+        ProviderKind::OpenAiResponses => prompt_request_projection_from_parts_for_format(
+            OpenAiRequestFormat::Responses,
+            probe.items,
+            probe.tool_definitions,
+        )
+        .map_err(ContextBudgetError::projection)?,
         provider_kind => {
             return Err(ContextBudgetError::UnsupportedProvider { provider_kind });
         }
@@ -166,7 +178,7 @@ fn collect_segments(
     should_cancel: impl Fn() -> bool,
 ) -> Result<Option<Vec<ContextSegment>>, ContextBudgetError> {
     let message_texts = projection
-        .serialized_message_texts()
+        .serialized_item_texts()
         .map_err(ContextBudgetError::projection)?;
     let tools_text = projection
         .serialized_tools_text()
@@ -648,6 +660,45 @@ mod tests {
         assert!(
             snapshot.segments[0].estimated_tokens > estimate_text_tokens("gpt-4o", "review "),
             "multimodal user segment should include provider payload structure instead of only visible text"
+        );
+    }
+
+    #[test]
+    fn openai_responses_context_budget_projects_function_call_items() {
+        let items = [
+            ConversationItem::assistant_with_tool_calls(
+                String::new(),
+                vec![ToolCall::new("call-1", "read", r#"{"path":"Cargo.toml"}"#)],
+            ),
+            ConversationItem::tool_result(
+                "call-1",
+                vec![ContentBlock::Text("workspace package".to_string())],
+                false,
+            ),
+        ];
+
+        let snapshot = build_context_budget_snapshot_with_cancellation(
+            ContextBudgetProbe::new(
+                ProviderKind::OpenAiResponses,
+                "gpt-5-mini",
+                &items,
+                &[ProviderToolDefinition::new(
+                    "read",
+                    "Read a file",
+                    json!({"type": "object"}),
+                )],
+                ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
+            ),
+            || false,
+        )
+        .expect("responses context budget should project function call items")
+        .expect("never-cancelled snapshot should be present");
+
+        assert_eq!(snapshot.segments[0].kind, SegmentKind::AssistantMessage);
+        assert!(
+            snapshot.segments[0].estimated_tokens
+                > estimate_text_tokens("gpt-5-mini", r#"{"path":"Cargo.toml"}"#),
+            "Responses function call segment should count provider payload structure"
         );
     }
 

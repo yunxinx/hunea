@@ -7,8 +7,10 @@ mod models;
 mod request;
 mod stream;
 
-pub use client::OpenAiChatCompletionsClient;
+pub use client::{OpenAiChatCompletionsClient, OpenAiCompatibleClient, OpenAiResponsesClient};
 pub use config::{DEFAULT_OPENAI_BASE_URL, OpenAiClientConfig};
 pub use request::{
-    PromptRequestProjection, prompt_request_projection, prompt_request_projection_from_parts,
+    OpenAiRequestFormat, PromptRequestProjection, prompt_request_projection,
+    prompt_request_projection_for_format, prompt_request_projection_from_parts,
+    prompt_request_projection_from_parts_for_format,
 };

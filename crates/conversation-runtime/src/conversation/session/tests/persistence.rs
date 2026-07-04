@@ -82,6 +82,74 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
 }
 
 #[test]
+fn conversation_worker_persists_user_turn_when_request_fails_before_streaming() {
+    let root = tempdir_path("worker-pre-stream-failure-persistence");
+    let work_dir = root.join("workspace");
+    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+    let store =
+        Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
+    let store_trait: Arc<dyn SessionStore> = store.clone();
+    let mut conversation = ProviderConversation::with_session_store(
+        store_trait,
+        sample_header(&work_dir, "gpt-5-mini"),
+    )
+    .expect("persisted conversation should initialize");
+    let user = ConversationItem::text(Role::User, "please persist even if provider setup fails");
+    let request = conversation
+        .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
+            "openai",
+            ProviderKind::OpenAi,
+            "gpt-5-mini",
+            None,
+            None,
+            None,
+            user.clone(),
+        ))
+        .expect("turn should prepare");
+    let (sender, receiver) = mpsc::channel();
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build")
+        .block_on(run_conversation_worker(
+            request,
+            ToolExecutorRegistry::new(),
+            RuntimeRequestPolicy::default(),
+            CancellationToken::new(),
+            ConversationPermissionBroker::default(),
+            sender,
+        ));
+
+    let events = receiver.try_iter().collect::<Vec<_>>();
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            ConversationWorkerEvent::Progress(ConversationEvent::Failed { message })
+                if message.contains("requires API key")
+        )
+    }));
+
+    let metas = run_store(store.list_sessions(
+        &ProjectDir::from_work_dir(&work_dir),
+        SessionListOptions::default(),
+    ))
+    .expect("session meta should list");
+    assert_eq!(metas.len(), 1);
+    let resolved = run_store(store.resolve(&metas[0].session_id, None))
+        .expect("resolved items should be readable");
+    let tree = run_store(store.load_session_tree(&metas[0].session_id))
+        .expect("session tree should be readable");
+
+    assert_eq!(resolved, vec![user]);
+    assert_eq!(tree.rows.len(), 1);
+    assert_eq!(
+        tree.rows[0].preview_content,
+        "please persist even if provider setup fails"
+    );
+}
+
+#[test]
 fn flush_session_persistence_preserves_store_error_source() {
     let root = tempdir_path("worker-flush-error-source");
     let work_dir = root.join("workspace");

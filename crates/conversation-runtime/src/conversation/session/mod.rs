@@ -212,6 +212,15 @@ async fn run_conversation_worker(
         sender.clone(),
         session_actor_cancellation,
     ));
+    if cancellation.is_cancelled() {
+        let _ = sender.send(ConversationWorkerEvent::progress(
+            ConversationEvent::Interrupted,
+        ));
+        drop(session_sender);
+        let _ = session_actor.await;
+        return;
+    }
+    let _ = session_sender.send(SessionPersistenceCommand::ProviderTurnStarted);
     for attempt in 0..=request_policy.attempts() {
         let progress_sender = sender.clone();
         let progress_session_sender = session_sender.clone();
@@ -237,10 +246,7 @@ async fn run_conversation_worker(
                 request_policy.tool_max_turns(),
                 Some(permission_handler),
                 move |progress| match progress {
-                    crate::conversation::ConversationProgress::ProviderTurnStarted => {
-                        let _ = progress_session_sender
-                            .send(SessionPersistenceCommand::ProviderTurnStarted);
-                    }
+                    crate::conversation::ConversationProgress::ProviderTurnStarted => {}
                     crate::conversation::ConversationProgress::ProviderContextItem { item } => {
                         attempt_provider_context_items_started.store(true, Ordering::Relaxed);
                         attempt_provider_context_repair_ledger

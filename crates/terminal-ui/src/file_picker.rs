@@ -7,6 +7,7 @@ use super::{
     Model,
     display_width::display_width,
     file_search::{FileSearchMatch, common_path_completion_prefix},
+    image_attachment::{is_supported_image_path, load_image_attachment},
     inline_panel::InlinePanelRenderResult,
     overlay_input_result::OverlayInputResult,
     path_resolve::{resolve_configured_current_dir, resolve_path_token},
@@ -14,6 +15,7 @@ use super::{
     selection::{SelectableLineRange, selectable_range_for_plain_line},
     status_line::truncate_display_width_with_ellipsis,
     theme::{command_accent_text_style, secondary_text_style, tertiary_text_style},
+    toast::ToastSeverity,
 };
 
 const FILE_PICKER_INSET_WIDTH: usize = 2;
@@ -116,6 +118,9 @@ impl Model {
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 if self.current_file_picker_query_resolves_to_file() {
+                    if self.insert_exact_file_picker_image_attachment() {
+                        return OverlayInputResult::Handled;
+                    }
                     self.close_file_picker();
                     self.dismissed_file_picker_token = None;
                     return OverlayInputResult::Ignored;
@@ -275,7 +280,40 @@ impl Model {
             return false;
         };
 
+        if self.insert_file_picker_image_attachment(&path) {
+            return true;
+        }
         self.replace_file_picker_token(format!("@{path} "));
+        self.close_file_picker();
+        true
+    }
+
+    fn insert_exact_file_picker_image_attachment(&mut self) -> bool {
+        let Some(path) = self.file_picker.as_ref().map(|state| state.query.clone()) else {
+            return false;
+        };
+        self.insert_file_picker_image_attachment(&path)
+    }
+
+    fn insert_file_picker_image_attachment(&mut self, uri: &str) -> bool {
+        let root = resolve_configured_current_dir(&self.current_dir);
+        let path = resolve_path_token(&root, uri);
+        if !is_supported_image_path(&path) {
+            return false;
+        }
+
+        let attachment = match load_image_attachment(uri, &path) {
+            Ok(attachment) => attachment,
+            Err(error) => {
+                self.show_toast(
+                    ToastSeverity::Error,
+                    format!("Image attachment failed: {error}"),
+                );
+                return true;
+            }
+        };
+
+        self.replace_file_picker_token_with_image_attachment(attachment);
         self.close_file_picker();
         true
     }
@@ -285,6 +323,28 @@ impl Model {
         let old_line = self.composer.line();
         let old_column = self.composer.column();
         if self.composer.replace_current_at_token(&replacement) {
+            self.dismissed_file_picker_token = None;
+            self.sync_command_panel_navigation();
+            self.sync_composer_attached_picker_state();
+            self.sync_external_editor_helper_after_draft_change(&old_value);
+            self.sync_composer_height();
+            self.sync_document_viewport_after_composer_interaction(
+                &old_value, old_line, old_column,
+            );
+        }
+    }
+
+    fn replace_file_picker_token_with_image_attachment(
+        &mut self,
+        attachment: runtime_domain::session::TranscriptUserAttachment,
+    ) {
+        let old_value = self.composer_text().to_string();
+        let old_line = self.composer.line();
+        let old_column = self.composer.column();
+        if self
+            .composer
+            .replace_current_at_token_with_image_attachment(attachment)
+        {
             self.dismissed_file_picker_token = None;
             self.sync_command_panel_navigation();
             self.sync_composer_attached_picker_state();

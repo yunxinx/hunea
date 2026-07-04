@@ -40,6 +40,10 @@ pub fn workspace_readonly_tool_registry_with_options(
         access.clone(),
         read_state,
     ));
+    registry.insert(super::view_image::view_image_tool_with_access(
+        &root,
+        access.clone(),
+    ));
     registry.insert(super::list_dir::list_dir_tool_with_access(
         &root,
         access.clone(),
@@ -74,6 +78,10 @@ pub fn workspace_tool_registry_with_options(
         &root,
         access.clone(),
         read_state.clone(),
+    ));
+    registry.insert(super::view_image::view_image_tool_with_access(
+        &root,
+        access.clone(),
     ));
     registry.insert(super::list_dir::list_dir_tool_with_access(
         &root,

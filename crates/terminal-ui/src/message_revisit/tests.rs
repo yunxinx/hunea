@@ -4,9 +4,12 @@ use runtime_domain::model_catalog::{
     ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource,
 };
 use runtime_domain::provider::ProviderKind;
+use runtime_domain::session::TranscriptUserAttachment;
 
 use crate::{
     AppEffect, AppEvent, EscRewindMode, Model, ModelOptions, Sender, StartupBannerOptions,
+    StyleMode,
+    composer::ComposerSourceMessage,
     test_helpers::{render_model_buffer, rendered_rows},
     theme::default_palette,
 };
@@ -59,6 +62,64 @@ fn conversation_message_revisit_prefills_composer_and_truncates_history() {
         panic!("expected conversation turn effect, got {effect:?}");
     };
     assert_eq!(request.message_text(), "second question");
+}
+
+#[test]
+fn conversation_message_revisit_preserves_image_attachments() {
+    let mut model = conversation_test_model();
+    model
+        .transcript_mut()
+        .append_message(Sender::User, "first question");
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "first answer");
+    model
+        .transcript_mut()
+        .append_message_with_style_mode_and_source(
+            Sender::User,
+            "[Image #1] inspect",
+            StyleMode::Cx,
+            Some(
+                ComposerSourceMessage::user_text_with_bindings_and_attachments(
+                    "[Image #1] inspect",
+                    Vec::new(),
+                    Vec::new(),
+                    vec![TranscriptUserAttachment::local_image(
+                        "iVBORw0KGgo=",
+                        "image/png",
+                        Some("assets/sample.png".to_string()),
+                    )],
+                ),
+            ),
+        );
+    model
+        .transcript_mut()
+        .append_message(Sender::Assistant, "second answer");
+    model.sync_transcript_render();
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Esc)));
+
+    assert_eq!(
+        model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter))),
+        Some(AppEffect::TruncateConversation {
+            retained_user_turns: 1,
+        })
+    );
+    assert_eq!(model.composer_text(), "[Image #1] inspect");
+    assert_eq!(model.composer.source_message().attachments().len(), 1);
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    let Some(AppEffect::SendConversationTurn { request, .. }) = effect else {
+        panic!("expected conversation turn effect, got {effect:?}");
+    };
+    assert_eq!(request.message_text(), "[Image #1] inspect");
+    assert_eq!(
+        request
+            .transcript_user_message()
+            .map(|message| message.attachments.len()),
+        Some(1)
+    );
 }
 
 #[test]

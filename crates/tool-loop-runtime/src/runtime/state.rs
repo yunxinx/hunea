@@ -3,13 +3,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use provider_protocol::{ConversationItem, PromptCompletion, TokenUsage, ToolCall as AiToolCall};
+use provider_protocol::{
+    ContentBlock, ConversationItem, PromptCompletion, TokenUsage, ToolCall as AiToolCall,
+};
 use runtime_domain::{
     session::{
         ProviderRequestMetrics, RuntimeTerminalSnapshot, RuntimeToolActivityContent,
         RuntimeToolActivityUpdate,
     },
-    token_count::StreamingTokenProgress,
+    token_count::{ESTIMATED_IMAGE_TOKENS, StreamingTokenProgress, TokenEncoding},
 };
 
 use super::{ToolLoopCompletion, ToolLoopProgress, ToolLoopResponse};
@@ -337,13 +339,12 @@ impl RuntimeTurnState {
 
     pub(super) fn observe_tool_result_input(
         &mut self,
-        content: &str,
+        item: &ConversationItem,
         now: Instant,
         on_progress: &mut impl FnMut(ToolLoopProgress),
     ) {
-        let Some(total_tokens) =
-            observe_complete_token_total(&mut self.input_progress, content, now)
-        else {
+        let token_count = estimate_provider_item_input_tokens(&self.model_id, item);
+        let Some(total_tokens) = self.input_progress.observe_token_count(token_count, now) else {
             return;
         };
 
@@ -469,6 +470,37 @@ fn observe_complete_token_total(
     progress
         .observe_delta(content, now)
         .or_else(|| progress.flush(now))
+}
+
+fn estimate_provider_item_input_tokens(model_id: &str, item: &ConversationItem) -> usize {
+    let encoding = TokenEncoding::for_model(model_id);
+    match item {
+        ConversationItem::Message { content, .. }
+        | ConversationItem::ToolResult { content, .. } => {
+            estimate_content_blocks_tokens(encoding, content)
+        }
+        ConversationItem::Reasoning { content, .. } => encoding.estimate_text(content),
+    }
+}
+
+fn estimate_content_blocks_tokens(encoding: TokenEncoding, blocks: &[ContentBlock]) -> usize {
+    blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text(text) | ContentBlock::ResourceText { text, .. } => {
+                encoding.estimate_text(text)
+            }
+            ContentBlock::Image { .. } => ESTIMATED_IMAGE_TOKENS,
+            ContentBlock::Audio { data_base64, .. }
+            | ContentBlock::Document { data_base64, .. } => encoding.estimate_text(data_base64),
+            ContentBlock::ResourceLink { .. } => encoding.estimate_text(
+                &provider_protocol::summary_text_from_blocks(std::slice::from_ref(block)),
+            ),
+            ContentBlock::ToolCall(call) => encoding
+                .estimate_text(&call.name)
+                .saturating_add(encoding.estimate_text(&call.arguments)),
+        })
+        .sum()
 }
 
 pub(super) fn runtime_tool_activity_update_token_text(

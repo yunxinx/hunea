@@ -1057,6 +1057,61 @@ fn at_file_picker_enter_inserts_selected_path_with_prefix_and_space() {
 }
 
 #[test]
+fn at_file_picker_enter_inserts_image_placeholder_and_attachment() {
+    let root = TempFileTree::new("enter-selected-image");
+    root.write_file_with_content("assets/sample.png", valid_png_header());
+    root.write_file("src/main.rs");
+
+    let mut model = conversation_test_model();
+    model.current_dir = root.path().display().to_string();
+    type_text(&mut model, "@assets/s");
+
+    assert!(model.file_picker_active());
+
+    model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    let source_message = model.composer.source_message();
+    assert_eq!(model.composer_text(), "[Image #1] ");
+    assert_eq!(source_message.attachments().len(), 1);
+    assert!(!model.file_picker_active());
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+    let Some(AppEffect::SendConversationTurn {
+        request,
+        record_message_history,
+    }) = effect
+    else {
+        panic!("expected conversation turn effect");
+    };
+    assert!(record_message_history.is_none());
+    assert_eq!(
+        request
+            .transcript_user_message()
+            .map(|message| message.attachments.len()),
+        Some(1)
+    );
+}
+
+#[test]
+fn at_file_picker_enter_on_exact_image_path_inserts_attachment_instead_of_submitting() {
+    let root = TempFileTree::new("enter-exact-image");
+    root.write_file_with_content("assets/sample.png", valid_png_header());
+
+    let mut model = file_picker_model(root.path());
+    type_text(&mut model, "@assets/sample.png");
+
+    assert!(model.file_picker_active());
+
+    let effect = model.update(AppEvent::Key(KeyEvent::from(KeyCode::Enter)));
+
+    let source_message = model.composer.source_message();
+    assert!(effect.is_none());
+    assert_eq!(model.composer_text(), "[Image #1] ");
+    assert_eq!(source_message.attachments().len(), 1);
+    assert!(!model.file_picker_active());
+}
+
+#[test]
 fn at_file_picker_down_then_enter_inserts_the_selected_path() {
     let root = TempFileTree::new("down-enter-selected");
     root.write_file("src/lib.rs");
@@ -3296,4 +3351,8 @@ impl Drop for TempFileTree {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+fn valid_png_header() -> &'static [u8] {
+    &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
 }

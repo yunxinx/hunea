@@ -73,6 +73,7 @@ struct StyledVisualRenderOptions<'a> {
     highlighted_text_style: ratatui::style::Style,
     skill_bindings: &'a [TranscriptSkillBinding],
     custom_prompt_bindings: &'a [TranscriptCustomPromptBinding],
+    image_attachment_ranges: &'a [(usize, usize)],
     content_width: usize,
     frame_fill_width: usize,
     fill_style: Style,
@@ -169,6 +170,7 @@ pub(crate) fn render_document(
                 highlighted_text_style: placeholder_style,
                 skill_bindings: &[],
                 custom_prompt_bindings: &[],
+                image_attachment_ranges: &[],
                 content_width: composer.content_width(),
                 frame_fill_width,
                 fill_style,
@@ -200,6 +202,7 @@ pub(crate) fn render_document(
 
     let visual_lines =
         visual_lines_for_text(composer.value(), composer.content_width(), prompt_width);
+    let image_attachment_ranges = composer.image_attachment_highlight_ranges();
     let (row, column) = composer.cursor_position();
     let (cursor_y, cursor_visual_x) =
         calculate_cursor_visual_position(&visual_lines, row, column, prompt_width);
@@ -234,6 +237,7 @@ pub(crate) fn render_document(
                 highlighted_text_style,
                 skill_bindings: &composer.skill_bindings,
                 custom_prompt_bindings: &composer.custom_prompt_bindings,
+                image_attachment_ranges: &image_attachment_ranges,
                 content_width: composer.content_width(),
                 frame_fill_width,
                 fill_style,
@@ -347,6 +351,7 @@ fn render_visual_lines(
                 options.highlighted_text_style,
                 options.skill_bindings,
                 options.custom_prompt_bindings,
+                options.image_attachment_ranges,
             ));
             spans.push(Span::styled(" ".repeat(fill_width), options.fill_style));
             Line::from(spans)
@@ -361,6 +366,7 @@ fn styled_composer_content_spans(
     highlighted_text_style: Style,
     skill_bindings: &[TranscriptSkillBinding],
     custom_prompt_bindings: &[TranscriptCustomPromptBinding],
+    image_attachment_ranges: &[(usize, usize)],
 ) -> Vec<Span<'static>> {
     if text.is_empty() {
         return vec![Span::styled(String::new(), text_style)];
@@ -368,6 +374,7 @@ fn styled_composer_content_spans(
     let binding_ranges = visible_binding_ranges(
         skill_bindings,
         custom_prompt_bindings,
+        image_attachment_ranges,
         visible_start_char,
         text,
     );
@@ -409,6 +416,7 @@ fn styled_composer_content_spans(
 fn visible_binding_ranges(
     skill_bindings: &[TranscriptSkillBinding],
     custom_prompt_bindings: &[TranscriptCustomPromptBinding],
+    image_attachment_ranges: &[(usize, usize)],
     visible_start_char: usize,
     text: &str,
 ) -> Vec<(usize, usize)> {
@@ -421,6 +429,7 @@ fn visible_binding_ranges(
                 .iter()
                 .map(|binding| (binding.start_char, binding.end_char)),
         )
+        .chain(image_attachment_ranges.iter().copied())
         .filter_map(|(start_char, end_char)| {
             let overlap_start = start_char.max(visible_start_char);
             let overlap_end = end_char.min(visible_end_char);

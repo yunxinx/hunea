@@ -71,10 +71,11 @@ fn tool_error_display_reason(tool_name: &str, raw_error: &str) -> String {
     }
 
     if let Some(path) = quoted_target(raw_error, "read failed for ") {
-        if raw_error
-            .contains("must be attached explicitly in the user prompt instead of using read")
-        {
-            return format!("File requires explicit attachment: {path}");
+        if raw_error.contains("files are image content; use view_image instead of read") {
+            return format!("Image file requires view_image: {path}");
+        }
+        if raw_error.contains("cannot be read as UTF-8 text") {
+            return format!("File is not UTF-8 text: {path}");
         }
         if raw_error.contains("No such file or directory") {
             return format!("File not found: {path}");
@@ -157,8 +158,11 @@ fn tool_error_hint(tool_name: &str, display_reason: &str) -> &'static str {
     if display_reason.starts_with("File not found:") {
         return "Use list_dir to verify the file exists before reading.";
     }
-    if display_reason.starts_with("File requires explicit attachment:") {
-        return "Ask the user to attach the file explicitly instead of using read.";
+    if display_reason.starts_with("Image file requires view_image:") {
+        return "Use view_image to inspect local image files.";
+    }
+    if display_reason.starts_with("File is not UTF-8 text:") {
+        return "Use a text file, or an appropriate multimodal tool if one is available.";
     }
     if display_reason == "File must be read before writing" {
         return "Use read without offset or limit to read the complete file, then retry.";
@@ -270,9 +274,15 @@ mod tests {
             },
             Case {
                 tool_name: "read",
-                raw_error: "read failed for '/workspace/assets/sample.png': image/png files must be attached explicitly in the user prompt instead of using read",
-                display_reason: "File requires explicit attachment: /workspace/assets/sample.png",
-                hint: "Ask the user to attach the file explicitly instead of using read.",
+                raw_error: "read failed for '/workspace/assets/sample.png': image/png files are image content; use view_image instead of read",
+                display_reason: "Image file requires view_image: /workspace/assets/sample.png",
+                hint: "Use view_image to inspect local image files.",
+            },
+            Case {
+                tool_name: "read",
+                raw_error: "read failed for '/workspace/audio/sample.wav': audio/wav files are audio content and cannot be read as UTF-8 text",
+                display_reason: "File is not UTF-8 text: /workspace/audio/sample.wav",
+                hint: "Use a text file, or an appropriate multimodal tool if one is available.",
             },
             Case {
                 tool_name: "list_dir",

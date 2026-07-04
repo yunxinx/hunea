@@ -1,6 +1,6 @@
 use provider_protocol::{
-    ToolCall as AiToolCall, ToolCallArgumentsError, ToolDefinition as AiToolDefinition,
-    ToolResult as AiToolResult,
+    ContentBlock, ToolCall as AiToolCall, ToolCallArgumentsError,
+    ToolDefinition as AiToolDefinition, ToolResult as AiToolResult,
 };
 use runtime_domain::session::{
     ManagedSearchTool, RuntimeTerminalExitStatus, RuntimeTerminalSnapshot,
@@ -33,7 +33,9 @@ pub(super) fn interrupted_tool_execution(call: &AiToolCall) -> ToolExecution {
         provider_result: AiToolResult::error(
             call.call_id.clone(),
             call.name.clone(),
-            processed_error.assistant_message.clone(),
+            vec![ContentBlock::Text(
+                processed_error.assistant_message.clone(),
+            )],
             None,
         ),
         processed_error: Some(processed_error),
@@ -53,7 +55,7 @@ fn invalid_arguments_tool_execution(
         provider_result: AiToolResult::error(
             call.call_id.clone(),
             call.name.clone(),
-            message,
+            vec![ContentBlock::Text(message)],
             None,
         ),
         processed_error: None,
@@ -96,12 +98,12 @@ pub(super) async fn execute_tool_call(
     .then(|| {
         context
             .error_formatter
-            .format_tool_error(&call.name, &raw_result.content)
+            .format_tool_error(&call.name, &raw_result.text_content())
     });
     let provider_content = processed_error
         .as_ref()
-        .map(|processed| processed.assistant_message.clone())
-        .unwrap_or_else(|| raw_result.content.clone());
+        .map(|processed| vec![ContentBlock::Text(processed.assistant_message.clone())])
+        .unwrap_or_else(|| provider_content_from_tool_result(&raw_result));
     let provider_result = if raw_result.is_error {
         AiToolResult::error(
             call.call_id.clone(),
@@ -123,6 +125,36 @@ pub(super) async fn execute_tool_call(
         provider_result,
         processed_error,
     }
+}
+
+fn provider_content_from_tool_result(result: &ToolResult) -> Vec<ContentBlock> {
+    result
+        .content
+        .iter()
+        .map(|content| match content {
+            tool_runtime::ToolResultContent::Text(text) => ContentBlock::Text(text.clone()),
+            tool_runtime::ToolResultContent::Image {
+                data_base64,
+                mime_type,
+                uri,
+                detail,
+            } => ContentBlock::Image {
+                data_base64: data_base64.clone(),
+                mime_type: mime_type.clone(),
+                uri: uri.clone(),
+                detail: provider_image_detail(*detail),
+            },
+        })
+        .collect()
+}
+
+fn provider_image_detail(
+    detail: Option<tool_runtime::ToolImageDetail>,
+) -> Option<provider_protocol::ImageDetail> {
+    detail.map(|detail| match detail {
+        tool_runtime::ToolImageDetail::High => provider_protocol::ImageDetail::High,
+        tool_runtime::ToolImageDetail::Original => provider_protocol::ImageDetail::Original,
+    })
 }
 
 fn is_command_execution_error(
@@ -366,10 +398,10 @@ mod tests {
         assert!(
             execution
                 .raw_result
-                .content
+                .text_content()
                 .contains("Invalid tool call arguments")
         );
-        assert!(execution.raw_result.content.contains("bash"));
+        assert!(execution.raw_result.text_content().contains("bash"));
         assert!(execution.provider_result.is_error);
         assert_eq!(execution.provider_result.call_id, "call-1");
         assert_eq!(execution.provider_result.name, "bash");

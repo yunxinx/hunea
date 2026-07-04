@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Color;
-use runtime_domain::prompt_assembly::PromptSourceOrigin;
+use runtime_domain::{prompt_assembly::PromptSourceOrigin, session::TranscriptUserAttachment};
 
 use super::Composer;
 use crate::{StyleMode, theme::default_palette};
@@ -537,6 +537,38 @@ fn bound_skill_token_renders_from_sigil_after_blank_lines() {
     assert_eq!(highlighted, vec!["$code-review"]);
 }
 
+#[test]
+fn image_attachment_placeholder_renders_from_sigil_on_later_logical_line() {
+    let mut composer = test_composer(80, 4, "啊啊\n@assets/sample.png");
+    assert!(
+        composer.replace_current_at_token_with_image_attachment(sample_image_attachment(
+            "assets/sample.png"
+        ),)
+    );
+
+    let palette = default_palette();
+    let highlighted = highlighted_composer_contents(&composer, palette);
+
+    assert_eq!(composer.value(), "啊啊\n[Image #1] ");
+    assert_eq!(highlighted, vec!["[Image #1]"]);
+    assert_eq!(composer.source_message().attachments().len(), 1);
+}
+
+#[test]
+fn image_attachment_placeholder_renders_from_sigil_after_blank_lines() {
+    let mut composer = test_composer(80, 4, "\n\n@assets/sample.png");
+    assert!(
+        composer.replace_current_at_token_with_image_attachment(sample_image_attachment(
+            "assets/sample.png"
+        ),)
+    );
+
+    let palette = default_palette();
+    let highlighted = highlighted_composer_contents(&composer, palette);
+
+    assert_eq!(highlighted, vec!["[Image #1]"]);
+}
+
 fn test_composer(width: u16, height: u16, value: &str) -> Composer {
     let mut composer = Composer::new(StyleMode::Ms);
     // 测试里的 width 表达可编辑内容加 prompt 的旧视觉宽度；真实 frame 还要包含右侧留白。
@@ -567,6 +599,10 @@ fn composer_with_cursor(mut composer: Composer, cursor: usize) -> Composer {
     }
 
     composer
+}
+
+fn sample_image_attachment(uri: &str) -> TranscriptUserAttachment {
+    TranscriptUserAttachment::local_image("iVBORw0KGgo=", "image/png", Some(uri.to_string()))
 }
 
 fn plain_lines(render: &super::render::RenderResult) -> Vec<String> {

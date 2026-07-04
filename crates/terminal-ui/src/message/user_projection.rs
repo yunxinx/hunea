@@ -17,11 +17,12 @@ use crate::{
 use super::{
     UserMessageRenderLayout,
     user::{
-        has_visible_user_message_frame, measure_width, projected_compact_user_plain_line,
-        projected_compact_user_plain_line_len, projected_framed_user_plain_line,
-        projected_framed_user_plain_line_len, projected_legacy_user_plain_line,
-        projected_legacy_user_plain_line_len, render_projected_compact_user_line,
-        render_projected_framed_user_line, render_projected_legacy_user_line, rendered_line_anchor,
+        UserMessageStructuredRanges, has_visible_user_message_frame, measure_width,
+        projected_compact_user_plain_line, projected_compact_user_plain_line_len,
+        projected_framed_user_plain_line, projected_framed_user_plain_line_len,
+        projected_legacy_user_plain_line, projected_legacy_user_plain_line_len,
+        render_projected_compact_user_line, render_projected_framed_user_line,
+        render_projected_legacy_user_line, rendered_line_anchor,
         user_message_compact_content_width, user_message_inset_width, user_message_layout,
         user_message_legacy_content_width, user_message_surface_padding_line,
     },
@@ -40,6 +41,7 @@ pub(crate) struct UserMessageRenderProjection {
     pub(super) has_frame: bool,
     pub(super) skill_bindings: Rc<Vec<TranscriptSkillBinding>>,
     pub(super) custom_prompt_bindings: Rc<Vec<TranscriptCustomPromptBinding>>,
+    pub(super) attachment_ranges: Rc<Vec<(usize, usize)>>,
     palette: TerminalPalette,
     style_mode: StyleMode,
 }
@@ -49,15 +51,20 @@ pub(super) struct UserMessageProjectedLine {
     // transcript render cache 只会消费渲染文本与 anchor 元数据，不需要列映射。
     pub(super) text: String,
     pub(super) logical_line: usize,
+    pub(super) logical_line_start_char: usize,
     pub(super) visible_start_char: usize,
     pub(super) end_char: usize,
 }
 
-impl From<PromptVisualLine> for UserMessageProjectedLine {
-    fn from(line: PromptVisualLine) -> Self {
+impl UserMessageProjectedLine {
+    fn from_prompt_line(line: PromptVisualLine, logical_line_start_chars: &[usize]) -> Self {
         Self {
             text: line.text,
             logical_line: line.logical_line,
+            logical_line_start_char: logical_line_start_chars
+                .get(line.logical_line)
+                .copied()
+                .unwrap_or(0),
             visible_start_char: line.visible_start_char,
             end_char: line.end_char,
         }
@@ -100,8 +107,7 @@ impl UserMessageRenderProjection {
                 self.layout,
                 self.palette,
                 self.style_mode,
-                &self.skill_bindings,
-                &self.custom_prompt_bindings,
+                self.structured_ranges(),
             ),
             StyleMode::Cc => render_projected_compact_user_line(
                 line,
@@ -109,16 +115,14 @@ impl UserMessageRenderProjection {
                 self.layout.frame_width.max(1),
                 self.palette,
                 self.style_mode,
-                &self.skill_bindings,
-                &self.custom_prompt_bindings,
+                self.structured_ranges(),
             ),
             StyleMode::Ms => render_projected_legacy_user_line(
                 line,
                 is_first,
                 self.palette,
                 self.style_mode,
-                &self.skill_bindings,
-                &self.custom_prompt_bindings,
+                self.structured_ranges(),
             ),
         })
     }
@@ -144,6 +148,14 @@ impl UserMessageRenderProjection {
             ),
             StyleMode::Ms => projected_legacy_user_plain_line(line, is_first, self.style_mode),
         })
+    }
+
+    fn structured_ranges(&self) -> UserMessageStructuredRanges<'_> {
+        UserMessageStructuredRanges {
+            skill_bindings: &self.skill_bindings,
+            custom_prompt_bindings: &self.custom_prompt_bindings,
+            attachment_ranges: &self.attachment_ranges,
+        }
     }
 
     pub(crate) fn plain_line_lens(&self) -> Vec<usize> {
@@ -313,11 +325,14 @@ pub(super) fn render_user_message_projection(
         layout,
         has_frame,
     } = user_message_wrap_snapshot(content, width, palette, style_mode);
+    let logical_line_start_chars = logical_line_start_chars(content);
     UserMessageRenderProjection {
         lines: Rc::new(
             lines
                 .into_iter()
-                .map(UserMessageProjectedLine::from)
+                .map(|line| {
+                    UserMessageProjectedLine::from_prompt_line(line, &logical_line_start_chars)
+                })
                 .collect(),
         ),
         layout,
@@ -332,9 +347,27 @@ pub(super) fn render_user_message_projection(
                 .map(|message| message.custom_prompt_bindings().to_vec())
                 .unwrap_or_default(),
         ),
+        attachment_ranges: Rc::new(
+            source_message
+                .map(ComposerSourceMessage::attachment_highlight_ranges)
+                .unwrap_or_default(),
+        ),
         palette,
         style_mode,
     }
+}
+
+fn logical_line_start_chars(text: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut start_char = 0usize;
+    for line in text.split('\n') {
+        starts.push(start_char);
+        start_char += line.chars().count() + 1;
+    }
+    if starts.is_empty() {
+        starts.push(0);
+    }
+    starts
 }
 
 pub(super) fn render_user_message_selectable_line_ranges(

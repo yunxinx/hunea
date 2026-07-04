@@ -5039,6 +5039,7 @@ mod tests {
                 content:
                     "Please use $repo-bootstrap before $code-review and repeat $repo-bootstrap"
                         .to_string(),
+                attachments: Vec::new(),
                 skill_bindings: vec![
                     runtime_domain::session::TranscriptSkillBinding {
                         skill_name: "repo-bootstrap".to_string(),
@@ -5122,6 +5123,7 @@ mod tests {
             &work_dir,
             &TranscriptUserMessage {
                 content: "Please use $code-review".to_string(),
+                attachments: Vec::new(),
                 skill_bindings: Vec::new(),
                 custom_prompt_bindings: Vec::new(),
             },
@@ -5183,6 +5185,7 @@ mod tests {
             &work_dir,
             &TranscriptUserMessage {
                 content: "Before\n#review-rules\nAfter".to_string(),
+                attachments: Vec::new(),
                 skill_bindings: Vec::new(),
                 custom_prompt_bindings: vec![
                     runtime_domain::session::TranscriptCustomPromptBinding {

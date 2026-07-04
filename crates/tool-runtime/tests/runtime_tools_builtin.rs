@@ -7,9 +7,9 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tool_runtime::{
     ToolCall, ToolExecutionContext, ToolExecutor, ToolExecutorRegistry, ToolKind,
-    ToolPermissionPolicy, ToolProgress, ToolProgressSink,
+    ToolPermissionPolicy, ToolProgress, ToolProgressSink, ToolResultContent,
     builtin::{
-        bash_tool, find_tool, grep_tool, list_dir_tool, read_tool,
+        bash_tool, find_tool, grep_tool, list_dir_tool, read_tool, view_image_tool,
         workspace_readonly_tool_registry, workspace_tool_registry,
     },
 };
@@ -21,12 +21,19 @@ fn builtin_workspace_readonly_registry_exposes_file_tools() {
     let definitions = registry.definitions();
 
     assert!(definitions.definition("read").is_some());
+    assert!(definitions.definition("view_image").is_some());
     assert!(definitions.definition("list_dir").is_some());
     assert!(definitions.definition("grep").is_some());
     assert!(definitions.definition("find").is_some());
     assert_eq!(
         definitions
             .definition("read")
+            .map(|definition| definition.kind),
+        Some(ToolKind::Read)
+    );
+    assert_eq!(
+        definitions
+            .definition("view_image")
             .map(|definition| definition.kind),
         Some(ToolKind::Read)
     );
@@ -59,6 +66,7 @@ fn builtin_workspace_registry_exposes_read_write_and_edit_tools() {
     let definitions = registry.definitions();
 
     assert!(definitions.definition("read").is_some());
+    assert!(definitions.definition("view_image").is_some());
     assert!(definitions.definition("list_dir").is_some());
     assert!(definitions.definition("grep").is_some());
     assert!(definitions.definition("find").is_some());
@@ -616,7 +624,41 @@ async fn builtin_read_tool_can_be_registered_independently() {
         .await;
 
     assert!(!result.is_error);
-    assert_eq!(result.content, "2\ttwo\n3\tthree");
+    assert_eq!(result.text_content(), "2\ttwo\n3\tthree");
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_view_image_tool_can_be_registered_independently() {
+    let root = temp_root("builtin-view-image");
+    fs::write(root.join("pixel.png"), png_fixture()).expect("write image fixture");
+    let mut registry = ToolExecutorRegistry::new();
+    registry.insert(view_image_tool(&root));
+    let definitions = registry.definitions();
+
+    assert!(definitions.definition("view_image").is_some());
+    assert!(definitions.definition("read").is_none());
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "view_image",
+                serde_json::json!({ "path": "pixel.png" }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error);
+    assert!(matches!(
+        result.content.as_slice(),
+        [ToolResultContent::Image { data_base64, mime_type, uri, detail }]
+            if !data_base64.is_empty()
+                && mime_type == "image/png"
+                && uri.as_deref() == Some("pixel.png")
+                && detail == &Some(tool_runtime::ToolImageDetail::High)
+    ));
     cleanup(&root);
 }
 
@@ -832,7 +874,7 @@ async fn builtin_find_tool_can_be_registered_independently() {
         .await;
 
     assert!(!result.is_error, "find should succeed: {result:?}");
-    assert_eq!(result.content, "src/bin/main.rs\nsrc/lib.rs");
+    assert_eq!(result.text_content(), "src/bin/main.rs\nsrc/lib.rs");
     cleanup(&root);
 }
 
@@ -1441,7 +1483,7 @@ async fn builtin_read_rejects_paths_outside_workspace_root() {
 }
 
 #[tokio::test]
-async fn builtin_read_rejects_explicit_attachment_formats() {
+async fn builtin_read_directs_image_files_to_view_image() {
     let root = temp_root("builtin-read-image");
     fs::write(
         root.join("pixel.png"),
@@ -1463,8 +1505,185 @@ async fn builtin_read_rejects_explicit_attachment_formats() {
     assert!(result.is_error);
     assert!(
         result
-            .content
-            .contains("image/png files must be attached explicitly")
+            .text_content()
+            .contains("image/png files are image content")
+    );
+    assert!(
+        result
+            .text_content()
+            .contains("use view_image instead of read")
+    );
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_view_image_rejects_directory_paths() {
+    let root = temp_root("builtin-view-image-directory");
+    fs::create_dir(root.join("assets")).expect("create directory fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "view_image",
+                serde_json::json!({ "path": "assets" }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.text_content().contains("is not a file"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_view_image_rejects_paths_outside_workspace_root() {
+    let root = temp_root("builtin-view-image-outside-root");
+    let outside = temp_root("builtin-view-image-outside-target");
+    fs::write(outside.join("pixel.png"), png_fixture()).expect("write outside image fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "view_image",
+                serde_json::json!({ "path": outside.join("pixel.png") }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.text_content().contains("outside workspace"));
+    cleanup(&outside);
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_view_image_rejects_unsupported_detail_values() {
+    let root = temp_root("builtin-view-image-detail");
+    fs::write(root.join("pixel.png"), png_fixture()).expect("write image fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "view_image",
+                serde_json::json!({ "path": "pixel.png", "detail": "low" }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.text_content().contains("high"));
+    assert!(result.text_content().contains("original"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_view_image_preserves_original_detail_hint() {
+    let root = temp_root("builtin-view-image-original-detail");
+    fs::write(root.join("pixel.png"), png_fixture()).expect("write image fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "view_image",
+                serde_json::json!({ "path": "pixel.png", "detail": "original" }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(!result.is_error);
+    assert!(matches!(
+        result.content.as_slice(),
+        [ToolResultContent::Image { detail, .. }]
+            if detail == &Some(tool_runtime::ToolImageDetail::Original)
+    ));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_view_image_rejects_unsupported_extensions() {
+    let root = temp_root("builtin-view-image-extension");
+    fs::write(root.join("image.bmp"), [b'B', b'M', 0x00, 0x00]).expect("write bmp fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "view_image",
+                serde_json::json!({ "path": "image.bmp" }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.text_content().contains("unsupported image type"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_view_image_rejects_oversized_images_before_encoding() {
+    let root = temp_root("builtin-view-image-oversized");
+    let image_path = root.join("large.png");
+    fs::write(&image_path, png_fixture()).expect("write image fixture");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&image_path)
+        .expect("open image fixture")
+        .set_len(20 * 1024 * 1024 + 1)
+        .expect("extend image fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "view_image",
+                serde_json::json!({ "path": "large.png" }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(result.text_content().contains("too large for view_image"));
+    cleanup(&root);
+}
+
+#[tokio::test]
+async fn builtin_view_image_rejects_invalid_image_signatures() {
+    let root = temp_root("builtin-view-image-invalid");
+    fs::write(root.join("pixel.png"), b"not really a png").expect("write invalid image fixture");
+    let registry = workspace_readonly_tool_registry(&root);
+
+    let result = registry
+        .execute_tool(
+            ToolCall::new(
+                "call-1",
+                "view_image",
+                serde_json::json!({ "path": "pixel.png" }),
+            ),
+            &CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(
+        result
+            .text_content()
+            .contains("does not look like image/png")
     );
     cleanup(&root);
 }
@@ -1529,7 +1748,7 @@ async fn builtin_read_returns_interrupted_when_cancellation_is_pre_triggered() {
         .await;
 
     assert!(result.is_error);
-    assert_eq!(result.content, "Tool call interrupted");
+    assert_eq!(result.text_content(), "Tool call interrupted");
     cleanup(&root);
 }
 
@@ -1549,7 +1768,7 @@ async fn builtin_list_dir_returns_interrupted_when_cancellation_is_pre_triggered
         .await;
 
     assert!(result.is_error);
-    assert_eq!(result.content, "Tool call interrupted");
+    assert_eq!(result.text_content(), "Tool call interrupted");
     cleanup(&root);
 }
 
@@ -1565,4 +1784,11 @@ fn temp_root(prefix: &str) -> PathBuf {
 
 fn cleanup(path: &Path) {
     let _ = fs::remove_dir_all(path);
+}
+
+fn png_fixture() -> Vec<u8> {
+    vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H', b'D',
+        b'R',
+    ]
 }

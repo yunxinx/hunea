@@ -304,6 +304,7 @@ fn prepare_turn_with_transcript_keeps_provider_and_transcript_user_messages_sepa
     );
     let transcript_user_message = TranscriptUserMessage {
         content: "raw user message".to_string(),
+        attachments: Vec::new(),
         skill_bindings: Vec::new(),
         custom_prompt_bindings: Vec::new(),
     };
@@ -376,6 +377,7 @@ fn prepare_turn_with_transcript_can_prepend_provider_visible_meta_items() {
             vec![meta_item.clone()],
             Some(TranscriptUserMessage {
                 content: "actual user message".to_string(),
+                attachments: Vec::new(),
                 skill_bindings: Vec::new(),
                 custom_prompt_bindings: Vec::new(),
             }),

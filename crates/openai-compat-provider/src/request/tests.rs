@@ -1,6 +1,6 @@
 use provider_protocol::{
-    ContentBlock, ConversationItem, PromptCacheRetention, PromptRequest, ProviderError, Role,
-    ToolCall, ToolDefinition,
+    ContentBlock, ConversationItem, ImageDetail, PromptCacheRetention, PromptRequest,
+    ProviderError, Role, ToolCall, ToolDefinition,
 };
 use serde_json::{Value, json};
 
@@ -10,7 +10,7 @@ use super::{
     projection::{
         ItemFragmentProjection, OpenAiRequestFormat, PromptRequestProjection,
         prompt_request_projection, prompt_request_projection_for_format,
-        prompt_request_projection_from_parts,
+        prompt_request_projection_from_parts, prompt_request_projection_from_parts_for_format,
     },
 };
 
@@ -24,6 +24,7 @@ fn multimodal_user_blocks_project_to_chat_completion_parts() {
                 data_base64: "iVBORw==".to_string(),
                 mime_type: "image/png".to_string(),
                 uri: None,
+                detail: None,
             },
         ])],
     );
@@ -36,6 +37,46 @@ fn multimodal_user_blocks_project_to_chat_completion_parts() {
         content[1]["image_url"]["url"],
         "data:image/png;base64,iVBORw=="
     );
+}
+
+#[test]
+fn multimodal_user_image_detail_projects_to_chat_completion_image_url() {
+    let request = PromptRequest::new(
+        "qwen3",
+        vec![ConversationItem::user(vec![ContentBlock::Image {
+            data_base64: "iVBORw==".to_string(),
+            mime_type: "image/png".to_string(),
+            uri: None,
+            detail: Some(ImageDetail::High),
+        }])],
+    );
+
+    let body = chat_completion_request_body(&request).expect("request should build");
+    let image_url = &body["messages"][0]["content"][0]["image_url"];
+
+    assert_eq!(image_url["url"], "data:image/png;base64,iVBORw==");
+    assert_eq!(image_url["detail"], "high");
+}
+
+#[test]
+fn chat_completion_omits_original_image_detail_not_supported_by_image_url_parts() {
+    let request = PromptRequest::new(
+        "qwen3",
+        vec![ConversationItem::user(vec![ContentBlock::Image {
+            data_base64: "iVBORw==".to_string(),
+            mime_type: "image/png".to_string(),
+            uri: None,
+            detail: Some(ImageDetail::Original),
+        }])],
+    );
+
+    let body = chat_completion_request_body(&request).expect("request should build");
+    let image_url = body["messages"][0]["content"][0]["image_url"]
+        .as_object()
+        .expect("image_url should be an object");
+
+    assert_eq!(image_url["url"], "data:image/png;base64,iVBORw==");
+    assert!(!image_url.contains_key("detail"));
 }
 
 #[test]
@@ -205,6 +246,95 @@ fn responses_body_projects_tool_call_history_as_response_items() {
     assert_eq!(body["input"][1]["type"], "function_call_output");
     assert_eq!(body["input"][1]["call_id"], "c1");
     assert_eq!(body["input"][1]["output"], "workspace package");
+}
+
+#[test]
+fn responses_body_projects_tool_result_images_as_structured_output_items() {
+    let request = PromptRequest::new(
+        "fast-compatible-model",
+        vec![
+            ConversationItem::assistant_with_tool_calls(
+                String::new(),
+                vec![ToolCall::new(
+                    "c1",
+                    "view_image",
+                    r#"{"path":"assets/a.png"}"#,
+                )],
+            ),
+            ConversationItem::tool_result(
+                "c1",
+                vec![
+                    ContentBlock::Text("image loaded".to_string()),
+                    ContentBlock::Image {
+                        data_base64: "iVBORw==".to_string(),
+                        mime_type: "image/png".to_string(),
+                        uri: Some("assets/a.png".to_string()),
+                        detail: Some(ImageDetail::Original),
+                    },
+                ],
+                false,
+            ),
+        ],
+    );
+
+    let body = responses_request_body(&request).expect("request should build");
+    let output = &body["input"][1]["output"];
+
+    assert_eq!(body["input"][1]["type"], "function_call_output");
+    assert_eq!(body["input"][1]["call_id"], "c1");
+    assert_eq!(output[0]["type"], "input_text");
+    assert_eq!(output[0]["text"], "image loaded");
+    assert_eq!(output[1]["type"], "input_image");
+    assert_eq!(output[1]["detail"], "original");
+    assert_eq!(output[1]["image_url"], "data:image/png;base64,iVBORw==");
+}
+
+#[test]
+fn chat_completion_projects_tool_result_images_as_following_user_image_message() {
+    let request = PromptRequest::new(
+        "gpt-4o",
+        vec![
+            ConversationItem::assistant_with_tool_calls(
+                String::new(),
+                vec![ToolCall::new(
+                    "c1",
+                    "view_image",
+                    r#"{"path":"assets/a.png"}"#,
+                )],
+            ),
+            ConversationItem::tool_result(
+                "c1",
+                vec![
+                    ContentBlock::Text("image loaded".to_string()),
+                    ContentBlock::Image {
+                        data_base64: "iVBORw==".to_string(),
+                        mime_type: "image/png".to_string(),
+                        uri: Some("assets/a.png".to_string()),
+                        detail: None,
+                    },
+                ],
+                false,
+            ),
+        ],
+    );
+
+    let body = chat_completion_request_body(&request).expect("request should build");
+    let messages = body["messages"].as_array().expect("messages array");
+
+    assert_eq!(messages[1]["role"], "tool");
+    assert_eq!(messages[1]["tool_call_id"], "c1");
+    assert_eq!(messages[1]["content"], "image loaded");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[2]["content"][0]["type"], "text");
+    assert_eq!(
+        messages[2]["content"][0]["text"],
+        "Attached image(s) from tool result:"
+    );
+    assert_eq!(messages[2]["content"][1]["type"], "image_url");
+    assert_eq!(
+        messages[2]["content"][1]["image_url"]["url"],
+        "data:image/png;base64,iVBORw=="
+    );
 }
 
 #[test]
@@ -617,6 +747,61 @@ fn serialized_item_texts_returns_error_for_inconsistent_fragment_indices() {
     assert!(
         matches!(error, ProviderError::Protocol(message) if message.contains("internal inconsistency"))
     );
+}
+
+#[test]
+fn chat_completion_keeps_tool_result_batch_before_attached_image_messages() {
+    let items = vec![
+        ConversationItem::assistant_with_tool_calls(
+            String::new(),
+            vec![
+                ToolCall::new("call-1", "view_image", r#"{"path":"one.png"}"#),
+                ToolCall::new("call-2", "view_image", r#"{"path":"two.png"}"#),
+            ],
+        ),
+        ConversationItem::tool_result(
+            "call-1",
+            vec![ContentBlock::Image {
+                data_base64: "one".to_string(),
+                mime_type: "image/png".to_string(),
+                uri: Some("one.png".to_string()),
+                detail: None,
+            }],
+            false,
+        ),
+        ConversationItem::tool_result(
+            "call-2",
+            vec![ContentBlock::Image {
+                data_base64: "two".to_string(),
+                mime_type: "image/png".to_string(),
+                uri: Some("two.png".to_string()),
+                detail: None,
+            }],
+            false,
+        ),
+    ];
+
+    let projection = prompt_request_projection_from_parts_for_format(
+        OpenAiRequestFormat::ChatCompletions,
+        &items,
+        &[],
+    )
+    .expect("projection should accept paired tool results");
+
+    let messages = projection.payload_values();
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[1]["role"], "tool");
+    assert_eq!(messages[2]["role"], "tool");
+    assert_eq!(messages[3]["role"], "user");
+
+    let user_content = messages[3]["content"]
+        .as_array()
+        .expect("attached images should use multipart user content");
+    let image_count = user_content
+        .iter()
+        .filter(|part| part["type"] == "image_url")
+        .count();
+    assert_eq!(image_count, 2);
 }
 
 #[test]

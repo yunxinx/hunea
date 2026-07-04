@@ -825,7 +825,11 @@ impl Model {
         let old_value = self.composer_text().to_string();
         let old_line = self.composer.line();
         let old_column = self.composer.column();
-        let record_effect = crate::message_history_recall::commit_message_history(self, &old_value);
+        let record_effect = if !self.composer.has_image_attachments() {
+            crate::message_history_recall::commit_message_history(self, &old_value)
+        } else {
+            None
+        };
         self.composer_mut().clear_for_edit();
         self.sync_command_panel_navigation();
         self.sync_composer_attached_picker_state();
@@ -854,12 +858,18 @@ impl Model {
             return None;
         }
 
-        let record_message_history =
-            crate::message_history_recall::stage_message_history_recall(self, &content);
-
         let preserved_viewport_state = self.preserved_viewport_state_for_transcript_refresh();
         let style_mode = self.style_mode;
         let source_message = self.composer.source_message();
+        let record_message_history = if source_message
+            .as_transcript_user_message()
+            .attachments
+            .is_empty()
+        {
+            crate::message_history_recall::stage_message_history_recall(self, &content)
+        } else {
+            None
+        };
         self.transcript_mut()
             .append_message_with_style_mode_and_source(
                 Sender::User,

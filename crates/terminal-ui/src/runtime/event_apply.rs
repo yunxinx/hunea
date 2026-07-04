@@ -571,7 +571,9 @@ fn append_transcript_replay_item(
             );
             transcript.append_message_with_style_mode_and_source(
                 crate::Sender::User,
-                source_message.content().to_string(),
+                source_message
+                    .as_transcript_user_message()
+                    .display_content(),
                 style_mode,
                 Some(source_message),
             );
@@ -638,6 +640,7 @@ fn validated_transcript_user_source_message(
         .collect();
     crate::composer::ComposerSourceMessage::from_transcript_user_message(TranscriptUserMessage {
         content: message.content,
+        attachments: message.attachments,
         skill_bindings: valid_skill_bindings,
         custom_prompt_bindings: valid_custom_prompt_bindings,
     })

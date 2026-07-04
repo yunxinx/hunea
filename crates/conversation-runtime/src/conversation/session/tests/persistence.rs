@@ -366,6 +366,7 @@ fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_
     );
     let transcript_user = runtime_domain::session::TranscriptUserMessage {
         content: "$code-review raw user message".to_string(),
+        attachments: Vec::new(),
         skill_bindings: vec![runtime_domain::session::TranscriptSkillBinding {
             skill_name: "code-review".to_string(),
             origin: runtime_domain::prompt_assembly::PromptSourceOrigin::Project,
@@ -445,5 +446,147 @@ fn persist_turn_start_keeps_provider_message_in_items_and_transcript_projection_
             && message.skill_bindings.len() == 1
             && message.skill_bindings[0].skill_name == "code-review"
             && activity.activity_id == "manual-skill-1-code-review"
+    ));
+}
+
+#[test]
+fn persist_turn_start_replays_image_only_user_message_as_bound_message() {
+    let root = tempdir_path("worker-image-only-user-replay");
+    let work_dir = root.join("workspace");
+    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+    let store =
+        Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
+    let store_trait: Arc<dyn SessionStore> = store.clone();
+    let mut conversation =
+        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "gpt-4o"))
+            .expect("persisted conversation should initialize");
+    let transcript_user = runtime_domain::session::TranscriptUserMessage {
+        content: String::new(),
+        attachments: vec![runtime_domain::session::TranscriptUserAttachment::Image {
+            data_base64: "iVBORw0KGgo=".to_string(),
+            mime_type: "image/png".to_string(),
+            uri: Some("assets/a.png".to_string()),
+            detail: None,
+        }],
+        skill_bindings: Vec::new(),
+        custom_prompt_bindings: Vec::new(),
+    };
+    let request = conversation
+        .prepare_turn(
+            &runtime_domain::session::ConversationTurnRequest::new_user_source_message(
+                "local",
+                ProviderKind::OpenAiCompatible,
+                "gpt-4o",
+                Some("http://127.0.0.1:1234/v1".to_string()),
+                None,
+                None,
+                transcript_user.clone(),
+            ),
+        )
+        .expect("turn should prepare");
+    let (sender, _receiver) = mpsc::channel();
+    let persistence = request.persistence_cloned();
+    let cancellation = CancellationToken::new();
+    let mut state = SessionPersistenceState::default();
+
+    run_persistence(persist_turn_start(
+        persistence.as_ref(),
+        &sender,
+        &cancellation,
+        &mut state,
+    ))
+    .expect("turn start should persist");
+
+    let meta = run_store(store.list_sessions(
+        &ProjectDir::from_work_dir(&work_dir),
+        SessionListOptions::default(),
+    ))
+    .expect("session meta should list")
+    .into_iter()
+    .next()
+    .expect("session should exist");
+    let restored =
+        run_store(store.load_session(&meta.session_id, None)).expect("session should load");
+
+    assert!(matches!(
+        restored.transcript.as_slice(),
+        [TranscriptReplayItem::BoundUserMessage { message }]
+            if message == &transcript_user
+    ));
+}
+
+#[test]
+fn persist_context_item_replays_image_only_tool_result_with_visible_summary() {
+    let root = tempdir_path("worker-image-only-tool-result-replay");
+    let work_dir = root.join("workspace");
+    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+    let store =
+        Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
+    let store_trait: Arc<dyn SessionStore> = store.clone();
+    let mut conversation =
+        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "gpt-4o"))
+            .expect("persisted conversation should initialize");
+    let user = ConversationItem::text(Role::User, "inspect image");
+    let request = conversation
+        .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "gpt-4o",
+            Some("http://127.0.0.1:1234/v1".to_string()),
+            None,
+            None,
+            user,
+        ))
+        .expect("turn should prepare");
+    let tool_result = ConversationItem::tool_result(
+        "call-1",
+        vec![ContentBlock::Image {
+            data_base64: "iVBORw0KGgo=".to_string(),
+            mime_type: "image/png".to_string(),
+            uri: Some("assets/a.png".to_string()),
+            detail: None,
+        }],
+        false,
+    );
+    let (sender, _receiver) = mpsc::channel();
+    let persistence = request.persistence_cloned();
+    let cancellation = CancellationToken::new();
+    let mut state = SessionPersistenceState::default();
+
+    run_persistence(persist_turn_start(
+        persistence.as_ref(),
+        &sender,
+        &cancellation,
+        &mut state,
+    ))
+    .expect("turn start should persist");
+    run_persistence(persist_context_item(
+        persistence.as_ref(),
+        &sender,
+        &cancellation,
+        tool_result,
+        &mut state,
+    ))
+    .expect("tool result should persist");
+
+    let meta = run_store(store.list_sessions(
+        &ProjectDir::from_work_dir(&work_dir),
+        SessionListOptions::default(),
+    ))
+    .expect("session meta should list")
+    .into_iter()
+    .next()
+    .expect("session should exist");
+    let restored =
+        run_store(store.load_session(&meta.session_id, None)).expect("session should load");
+
+    assert!(matches!(
+        restored.transcript.as_slice(),
+        [
+            TranscriptReplayItem::Message { .. },
+            TranscriptReplayItem::ToolResult { content }
+        ] if content.contains("Attached image")
+            && content.contains("image/png")
+            && content.contains("assets/a.png")
     ));
 }

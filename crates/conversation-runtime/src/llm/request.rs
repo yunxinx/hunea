@@ -68,6 +68,7 @@ mod tests {
                     data_base64: "iVBORw==".to_string(),
                     mime_type: "image/png".to_string(),
                     uri: None,
+                    detail: None,
                 },
             ])],
         };

@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::ContentBlock;
+
 /// `ToolDefinition` is the provider-visible schema for a callable tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -145,7 +147,7 @@ mod tests {
 pub struct ToolResult {
     pub call_id: String,
     pub name: String,
-    pub content: String,
+    pub content: Vec<ContentBlock>,
     pub is_error: bool,
     pub details: Option<Value>,
 }
@@ -155,13 +157,13 @@ impl ToolResult {
     pub fn success(
         call_id: impl Into<String>,
         name: impl Into<String>,
-        content: impl Into<String>,
+        content: Vec<ContentBlock>,
         details: Option<Value>,
     ) -> Self {
         Self {
             call_id: call_id.into(),
             name: name.into(),
-            content: content.into(),
+            content,
             is_error: false,
             details,
         }
@@ -171,13 +173,13 @@ impl ToolResult {
     pub fn error(
         call_id: impl Into<String>,
         name: impl Into<String>,
-        content: impl Into<String>,
+        content: Vec<ContentBlock>,
         details: Option<Value>,
     ) -> Self {
         Self {
             call_id: call_id.into(),
             name: name.into(),
-            content: content.into(),
+            content,
             is_error: true,
             details,
         }

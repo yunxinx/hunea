@@ -9,7 +9,8 @@ use runtime_domain::{
     provider::ProviderKind,
     session::{
         RuntimeEvent, RuntimeIdentity, RuntimeTarget, SessionResumePayload, TranscriptReplayItem,
-        TranscriptReplayRole, TranscriptSkillBinding, TranscriptUserMessage,
+        TranscriptReplayRole, TranscriptSkillBinding, TranscriptUserAttachment,
+        TranscriptUserMessage,
     },
     session::{
         RuntimeTerminalSnapshot, RuntimeToolActivity, RuntimeToolActivityContent,
@@ -243,6 +244,7 @@ fn session_resumed_keeps_valid_skill_binding_colored() {
             transcript: vec![TranscriptReplayItem::BoundUserMessage {
                 message: TranscriptUserMessage {
                     content: "$code-review please inspect".to_string(),
+                    attachments: Vec::new(),
                     skill_bindings: vec![TranscriptSkillBinding {
                         skill_name: "code-review".to_string(),
                         origin: PromptSourceOrigin::Project,
@@ -262,6 +264,37 @@ fn session_resumed_keeps_valid_skill_binding_colored() {
 }
 
 #[test]
+fn session_resumed_keeps_labeled_image_attachment_colored_without_duplicate_summary() {
+    let mut model = model_with_manual_skill("unused");
+
+    model.apply_runtime_event(RuntimeEvent::SessionResumed {
+        payload: SessionResumePayload {
+            session_id: "session-1".to_string(),
+            transcript: vec![TranscriptReplayItem::BoundUserMessage {
+                message: TranscriptUserMessage {
+                    content: "啊\n[Image #1] inspect".to_string(),
+                    attachments: vec![TranscriptUserAttachment::local_image(
+                        "iVBORw0KGgo=",
+                        "image/png",
+                        Some("assets/a.png".to_string()),
+                    )],
+                    skill_bindings: Vec::new(),
+                    custom_prompt_bindings: Vec::new(),
+                },
+            }],
+            restored_model: None,
+        },
+    });
+
+    let transcript = model.transcript_plain_items().join("\n");
+    assert!(transcript.contains("[Image #1] inspect"));
+    assert!(!transcript.contains("Attached image"));
+
+    let buffer = render_model_buffer(&mut model, 60, 10);
+    assert_text_cells_use_color(&buffer, "[Image #1]", default_palette().command_accent);
+}
+
+#[test]
 fn session_resumed_drops_missing_skill_binding_color() {
     let mut model = model_with_manual_skill("other-skill");
 
@@ -271,6 +304,7 @@ fn session_resumed_drops_missing_skill_binding_color() {
             transcript: vec![TranscriptReplayItem::BoundUserMessage {
                 message: TranscriptUserMessage {
                     content: "$code-review please inspect".to_string(),
+                    attachments: Vec::new(),
                     skill_bindings: vec![TranscriptSkillBinding {
                         skill_name: "code-review".to_string(),
                         origin: PromptSourceOrigin::Project,

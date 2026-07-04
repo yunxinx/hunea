@@ -3603,6 +3603,7 @@ dependencies = [
 name = "tool-runtime"
 version = "0.9.0"
 dependencies = [
+ "base64",
  "directories",
  "flate2",
  "globset",

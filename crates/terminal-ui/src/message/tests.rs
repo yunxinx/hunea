@@ -11,7 +11,10 @@ use crate::{
     },
 };
 use ratatui::style::Modifier;
-use runtime_domain::{prompt_assembly::PromptSourceOrigin, session::TranscriptSkillBinding};
+use runtime_domain::{
+    prompt_assembly::PromptSourceOrigin,
+    session::{TranscriptSkillBinding, TranscriptUserAttachment},
+};
 use std::rc::Rc;
 
 #[test]
@@ -98,6 +101,38 @@ fn user_render_colors_entire_bound_skill_token_with_command_accent() {
             .map(|span| span.style.fg),
         Some(command_accent_text_style(palette).fg)
     );
+}
+
+#[test]
+fn user_render_colors_image_placeholder_with_command_accent_on_later_line() {
+    let palette = default_palette();
+    let item = MessageItem::new_with_style_mode_and_source(
+        Sender::User,
+        "啊啊\n[Image #1] inspect",
+        StyleMode::Cx,
+        Some(
+            ComposerSourceMessage::user_text_with_bindings_and_attachments(
+                "啊啊\n[Image #1] inspect",
+                Vec::new(),
+                Vec::new(),
+                vec![TranscriptUserAttachment::local_image(
+                    "iVBORw0KGgo=",
+                    "image/png",
+                    Some("assets/sample.png".to_string()),
+                )],
+            ),
+        ),
+    );
+
+    let lines = item.render_lines(40, palette);
+    let highlighted = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .filter(|span| span.style.fg == Some(palette.command_accent))
+        .map(|span| span.content.to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(highlighted, vec!["[Image #1]"]);
 }
 
 #[test]

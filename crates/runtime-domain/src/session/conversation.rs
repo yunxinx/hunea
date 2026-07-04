@@ -1,6 +1,6 @@
 use crate::provider::{ProviderApiKey, ProviderKind};
 
-use provider_protocol::{ConversationItem, Role};
+use provider_protocol::{ContentBlock, ConversationItem, Role};
 
 use std::time::Duration;
 
@@ -99,6 +99,33 @@ impl ConversationTurnRequest {
         api_key_env: Option<String>,
         text: impl Into<String>,
     ) -> Self {
+        let text = text.into();
+        let content = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![ContentBlock::Text(text)]
+        };
+        Self::new_user_content(
+            provider_id,
+            provider_kind,
+            model_id,
+            base_url,
+            api_key,
+            api_key_env,
+            content,
+        )
+    }
+
+    /// `new_user_content` 从结构化用户内容创建一次对话轮次提交请求。
+    pub fn new_user_content(
+        provider_id: impl Into<String>,
+        provider_kind: ProviderKind,
+        model_id: impl Into<String>,
+        base_url: Option<String>,
+        api_key: Option<ProviderApiKey>,
+        api_key_env: Option<String>,
+        content: Vec<ContentBlock>,
+    ) -> Self {
         Self::new(
             provider_id,
             provider_kind,
@@ -106,7 +133,7 @@ impl ConversationTurnRequest {
             base_url,
             api_key,
             api_key_env,
-            ConversationItem::text(Role::User, text),
+            ConversationItem::user(content),
         )
     }
 
@@ -120,14 +147,14 @@ impl ConversationTurnRequest {
         api_key_env: Option<String>,
         message: TranscriptUserMessage,
     ) -> Self {
-        let mut request = Self::new_user_text(
+        let mut request = Self::new(
             provider_id,
             provider_kind,
             model_id,
             base_url,
             api_key,
             api_key_env,
-            message.content.clone(),
+            message.provider_message(),
         );
         request.transcript_user_message = Some(message);
         request
@@ -221,6 +248,57 @@ impl ProviderRequest {
             api_key_env,
             items,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use provider_protocol::ContentBlock;
+
+    use crate::provider::ProviderKind;
+
+    use crate::session::TranscriptUserAttachment;
+
+    use super::{ConversationTurnRequest, TranscriptUserMessage};
+
+    #[test]
+    fn user_source_message_builds_structured_provider_content() {
+        let request = ConversationTurnRequest::new_user_source_message(
+            "openai",
+            ProviderKind::OpenAi,
+            "gpt-4o",
+            None,
+            None,
+            None,
+            TranscriptUserMessage {
+                content: "inspect this".to_string(),
+                attachments: vec![TranscriptUserAttachment::Image {
+                    data_base64: "iVBORw==".to_string(),
+                    mime_type: "image/png".to_string(),
+                    uri: Some("assets/a.png".to_string()),
+                    detail: None,
+                }],
+                skill_bindings: Vec::new(),
+                custom_prompt_bindings: Vec::new(),
+            },
+        );
+
+        let provider_protocol::ConversationItem::Message { content, .. } = request.message() else {
+            panic!("turn request should carry a user message");
+        };
+
+        assert!(matches!(
+            &content[0],
+            ContentBlock::Text(text) if text == "inspect this"
+        ));
+        assert!(matches!(
+            &content[1],
+            ContentBlock::Image { data_base64, mime_type, uri, detail }
+                if data_base64 == "iVBORw=="
+                    && mime_type == "image/png"
+                    && uri.as_deref() == Some("assets/a.png")
+                    && detail.is_none()
+        ));
     }
 }
 

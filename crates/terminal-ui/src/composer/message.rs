@@ -4,7 +4,8 @@
 use std::path::Path;
 
 use runtime_domain::session::{
-    TranscriptCustomPromptBinding, TranscriptSkillBinding, TranscriptUserMessage,
+    TranscriptCustomPromptBinding, TranscriptSkillBinding, TranscriptUserAttachment,
+    TranscriptUserMessage, transcript_image_label_ranges,
 };
 
 /// TUI 内部保存的用户输入源消息。
@@ -15,11 +16,11 @@ pub(crate) struct ComposerSourceMessage {
 
 impl ComposerSourceMessage {
     /// 创建用户输入源消息。
-    #[cfg(test)]
     pub(crate) fn user_text(content: impl Into<String>) -> Self {
         Self {
             message: TranscriptUserMessage {
                 content: content.into(),
+                attachments: Vec::new(),
                 skill_bindings: Vec::new(),
                 custom_prompt_bindings: Vec::new(),
             },
@@ -27,14 +28,31 @@ impl ComposerSourceMessage {
     }
 
     /// 使用显式结构化绑定创建用户输入源消息。
+    #[cfg(test)]
     pub(crate) fn user_text_with_bindings(
         content: impl Into<String>,
         skill_bindings: Vec<TranscriptSkillBinding>,
         custom_prompt_bindings: Vec<TranscriptCustomPromptBinding>,
     ) -> Self {
+        Self::user_text_with_bindings_and_attachments(
+            content,
+            skill_bindings,
+            custom_prompt_bindings,
+            Vec::new(),
+        )
+    }
+
+    /// 使用显式结构化绑定和附件创建用户输入源消息。
+    pub(crate) fn user_text_with_bindings_and_attachments(
+        content: impl Into<String>,
+        skill_bindings: Vec<TranscriptSkillBinding>,
+        custom_prompt_bindings: Vec<TranscriptCustomPromptBinding>,
+        attachments: Vec<TranscriptUserAttachment>,
+    ) -> Self {
         Self {
             message: TranscriptUserMessage {
                 content: content.into(),
+                attachments,
                 skill_bindings,
                 custom_prompt_bindings,
             },
@@ -61,6 +79,29 @@ impl ComposerSourceMessage {
         &self.message.custom_prompt_bindings
     }
 
+    /// 返回当前消息里的结构化附件。
+    #[cfg(test)]
+    pub(crate) fn attachments(&self) -> &[TranscriptUserAttachment] {
+        &self.message.attachments
+    }
+
+    /// 返回用户消息里需要着色的附件占位符范围。
+    pub(crate) fn attachment_highlight_ranges(&self) -> Vec<(usize, usize)> {
+        image_attachment_ranges_in_text(&self.message.content, &self.message.attachments)
+    }
+
+    /// 返回该消息是否有需要 projection 渲染的结构化片段。
+    pub(crate) fn has_structured_highlights(&self) -> bool {
+        !self.message.skill_bindings.is_empty()
+            || !self.message.custom_prompt_bindings.is_empty()
+            || !self.message.attachments.is_empty()
+    }
+
+    /// 返回完整 transcript-visible 用户消息。
+    pub(crate) fn as_transcript_user_message(&self) -> &TranscriptUserMessage {
+        &self.message
+    }
+
     /// 消费并返回原始用户输入文本。
     #[cfg(test)]
     pub(crate) fn into_content(self) -> String {
@@ -71,6 +112,16 @@ impl ComposerSourceMessage {
     pub(crate) fn into_transcript_user_message(self) -> TranscriptUserMessage {
         self.message
     }
+}
+
+fn image_attachment_ranges_in_text(
+    content: &str,
+    attachments: &[TranscriptUserAttachment],
+) -> Vec<(usize, usize)> {
+    transcript_image_label_ranges(content)
+        .into_iter()
+        .take(attachments.len())
+        .collect()
 }
 
 /// `source_message_from_composer_text` 保留用户输入原文。

@@ -64,6 +64,18 @@ impl StreamingTokenProgress {
         Some(self.total_tokens)
     }
 
+    pub fn observe_token_count(&mut self, tokens: usize, now: Instant) -> Option<usize> {
+        if tokens == 0 {
+            return None;
+        }
+
+        self.total_tokens = self.total_tokens.saturating_add(tokens);
+        self.last_snapshot_at = now;
+        self.has_snapshot = true;
+
+        Some(self.total_tokens)
+    }
+
     pub fn total_tokens(&self) -> usize {
         self.total_tokens
     }
@@ -119,5 +131,19 @@ mod tests {
             .expect("large pending token delta should not wait for the time interval");
 
         assert!(second > first);
+    }
+
+    #[test]
+    fn streaming_token_progress_observes_precomputed_token_count() {
+        let started_at = Instant::now();
+        let mut progress = StreamingTokenProgress::new("gpt-4o");
+
+        assert_eq!(progress.observe_token_count(0, started_at), None);
+        assert_eq!(progress.observe_token_count(12, started_at), Some(12));
+        assert_eq!(
+            progress.observe_token_count(8, started_at + Duration::from_millis(1)),
+            Some(20)
+        );
+        assert_eq!(progress.total_tokens(), 20);
     }
 }

@@ -181,6 +181,10 @@ impl MessageItem {
             .unwrap_or_else(|| self.content.as_ref())
     }
 
+    pub(crate) fn source_message(&self) -> Option<&ComposerSourceMessage> {
+        self.source_message.as_ref()
+    }
+
     pub(crate) fn render_cache_key(&self) -> u64 {
         self.render_cache_key
     }
@@ -338,6 +342,10 @@ fn message_item_render_cache_key(
                 binding.origin.hash(&mut hasher);
                 binding.start_char.hash(&mut hasher);
                 binding.end_char.hash(&mut hasher);
+            }
+            for (start_char, end_char) in message.attachment_highlight_ranges() {
+                start_char.hash(&mut hasher);
+                end_char.hash(&mut hasher);
             }
         }
     }

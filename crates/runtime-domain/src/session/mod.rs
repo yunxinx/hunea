@@ -42,6 +42,7 @@ pub use recovery::{
     SessionBranchSummary, SessionBranchTreeNode, SessionBranchTreePayload, SessionPickerRow,
     SessionPreviewPayload, SessionResumePayload, SessionTreeBranchChoice, SessionTreePayload,
     SessionTreeRow, SessionTreeRowKind, TranscriptCustomPromptBinding, TranscriptReplayItem,
-    TranscriptReplayRole, TranscriptSkillBinding, TranscriptUserMessage,
+    TranscriptReplayRole, TranscriptSkillBinding, TranscriptUserAttachment, TranscriptUserMessage,
+    transcript_image_label_ranges, transcript_image_label_text,
 };
 pub use target::{ProviderTarget, RuntimeTarget};

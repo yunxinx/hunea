@@ -25,6 +25,28 @@ impl Role {
     }
 }
 
+/// provider-neutral 图片细节等级。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageDetail {
+    Auto,
+    Low,
+    High,
+    Original,
+}
+
+impl ImageDetail {
+    /// 返回 OpenAI-compatible payload 使用的字符串。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Low => "low",
+            Self::High => "high",
+            Self::Original => "original",
+        }
+    }
+}
+
 /// provider-neutral 内容承载单元。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +56,8 @@ pub enum ContentBlock {
         data_base64: String,
         mime_type: String,
         uri: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
     },
     Audio {
         data_base64: String,
@@ -88,6 +112,88 @@ pub fn visible_text_from_blocks(blocks: &[ContentBlock]) -> String {
             _ => None,
         })
         .collect::<String>()
+}
+
+/// 为 transcript、预览和搜索生成结构化内容的可读摘要。
+///
+/// 该摘要不是 provider payload；图片等非文本内容会被折叠成稳定的占位文本，
+/// 只用于避免 image-only / attachment-only 内容在可见历史里消失。
+pub fn summary_text_from_blocks(blocks: &[ContentBlock]) -> String {
+    let mut summary = String::new();
+    let mut previous_was_attachment_summary = false;
+    for block in blocks {
+        match block {
+            ContentBlock::Text(text) | ContentBlock::ResourceText { text, .. } => {
+                if previous_was_attachment_summary
+                    && !summary.is_empty()
+                    && !summary.ends_with('\n')
+                {
+                    summary.push('\n');
+                }
+                summary.push_str(text);
+                previous_was_attachment_summary = false;
+            }
+            ContentBlock::Image { mime_type, uri, .. } => {
+                append_summary_segment(
+                    &mut summary,
+                    &attachment_summary("image", mime_type, uri.as_deref()),
+                );
+                previous_was_attachment_summary = true;
+            }
+            ContentBlock::Audio { mime_type, uri, .. } => {
+                append_summary_segment(
+                    &mut summary,
+                    &attachment_summary("audio", mime_type, uri.as_deref()),
+                );
+                previous_was_attachment_summary = true;
+            }
+            ContentBlock::Document {
+                mime_type,
+                filename,
+                uri,
+                ..
+            } => {
+                append_summary_segment(
+                    &mut summary,
+                    &attachment_summary(
+                        "document",
+                        mime_type,
+                        filename.as_deref().or(uri.as_deref()),
+                    ),
+                );
+                previous_was_attachment_summary = true;
+            }
+            ContentBlock::ResourceLink {
+                name,
+                uri,
+                mime_type,
+                ..
+            } => {
+                let label = match mime_type {
+                    Some(mime_type) => format!("[Attached resource: {name} {mime_type} {uri}]"),
+                    None => format!("[Attached resource: {name} {uri}]"),
+                };
+                append_summary_segment(&mut summary, &label);
+                previous_was_attachment_summary = true;
+            }
+            ContentBlock::ToolCall(_) => {}
+        }
+    }
+    summary
+}
+
+fn append_summary_segment(output: &mut String, segment: &str) {
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(segment);
+}
+
+fn attachment_summary(kind: &str, mime_type: &str, label: Option<&str>) -> String {
+    match label.filter(|label| !label.trim().is_empty()) {
+        Some(label) => format!("[Attached {kind}: {mime_type} {label}]"),
+        None => format!("[Attached {kind}: {mime_type}]"),
+    }
 }
 
 /// provider-neutral 协议的原子语义单元。
@@ -211,6 +317,15 @@ impl ConversationItem {
         visible_text_from_blocks(blocks)
     }
 
+    /// 返回适合 transcript/preview 的可读摘要，包含非文本结构化内容占位。
+    pub fn summary_text_content(&self) -> String {
+        let blocks = match self {
+            Self::Message { content, .. } | Self::ToolResult { content, .. } => content,
+            Self::Reasoning { content, .. } => return content.clone(),
+        };
+        summary_text_from_blocks(blocks)
+    }
+
     /// 返回 assistant 消息中的 tool call。
     pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCall> {
         let blocks = match self {
@@ -271,6 +386,7 @@ mod tests {
                 data_base64: "x".into(),
                 mime_type: "image/png".into(),
                 uri: None,
+                detail: None,
             }
             .as_text(),
             None,
@@ -413,6 +529,24 @@ mod tests {
     }
 
     #[test]
+    fn item_summary_text_content_preserves_attachment_boundaries() {
+        let item = ConversationItem::user(vec![
+            ContentBlock::Image {
+                data_base64: "x".into(),
+                mime_type: "image/png".into(),
+                uri: Some("assets/a.png".into()),
+                detail: None,
+            },
+            ContentBlock::Text("caption".into()),
+        ]);
+
+        assert_eq!(
+            item.summary_text_content(),
+            "[Attached image: image/png assets/a.png]\ncaption"
+        );
+    }
+
+    #[test]
     fn item_tool_calls_only_for_assistant() {
         let assistant = ConversationItem::assistant_with_tool_calls(
             String::new(),
@@ -471,6 +605,7 @@ mod tests {
                 data_base64: "x".into(),
                 mime_type: "image/png".into(),
                 uri: None,
+                detail: None,
             },
         ]);
 

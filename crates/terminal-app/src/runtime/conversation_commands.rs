@@ -91,6 +91,7 @@ impl AppRuntimeCoordinator {
                 .cloned()
                 .unwrap_or_else(|| TranscriptUserMessage {
                     content: request.message_text(),
+                    attachments: Vec::new(),
                     skill_bindings: Vec::new(),
                     custom_prompt_bindings: Vec::new(),
                 });
@@ -101,14 +102,16 @@ impl AppRuntimeCoordinator {
         {
             request.clone()
         } else {
-            ConversationTurnRequest::new_user_text(
+            ConversationTurnRequest::new_user_content(
                 request.provider_id(),
                 request.provider_kind(),
                 request.model_id(),
                 request.base_url().map(str::to_string),
                 request.api_key().cloned(),
                 request.api_key_env().map(str::to_string),
-                attached_prompt_assembly.provider_visible_user_text.clone(),
+                transcript_user_message.provider_content_with_text(
+                    attached_prompt_assembly.provider_visible_user_text.clone(),
+                ),
             )
         };
         let manual_skill_activities =

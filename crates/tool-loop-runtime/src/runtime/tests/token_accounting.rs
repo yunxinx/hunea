@@ -108,6 +108,65 @@ async fn tool_result_input_tokens_emit_progress() {
 }
 
 #[tokio::test]
+async fn image_only_tool_result_input_tokens_emit_progress() {
+    struct ImageOnlyEchoTool;
+
+    impl Tool for ImageOnlyEchoTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new("echo")
+                .with_label("Echo")
+                .with_kind(ToolKind::Read)
+                .with_permission_policy(ToolPermissionPolicy::Always)
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: RuntimeToolCall,
+            _cancellation: &'a CancellationToken,
+        ) -> ToolExecutionFuture<'a> {
+            Box::pin(async move {
+                ToolResult::success_content(
+                    call.call_id,
+                    vec![tool_runtime::ToolResultContent::Image {
+                        data_base64: "iVBORw0KGgo=".to_string(),
+                        mime_type: "image/png".to_string(),
+                        uri: Some("assets/a.png".to_string()),
+                        detail: None,
+                    }],
+                )
+            })
+        }
+    }
+
+    let provider = FakeProvider {
+        calls: Mutex::new(0),
+    };
+    let mut executor = ToolExecutorRegistry::new();
+    executor.insert(ImageOnlyEchoTool);
+    let request = PromptRequest::new(
+        "gpt-4o",
+        vec![ConversationItem::text(Role::User, "call echo")],
+    );
+    let cancellation = CancellationToken::new();
+    let mut events = Vec::new();
+
+    let _ = run_tool_loop(
+        &provider,
+        request,
+        executor,
+        &cancellation,
+        ToolLoopOptions::default(),
+        |event| events.push(event),
+    )
+    .await
+    .expect("runtime should complete");
+
+    assert!(events.iter().any(|event| {
+        matches!(event, ToolLoopProgress::InputTokens { total_tokens } if *total_tokens > 0)
+    }));
+}
+
+#[tokio::test]
 async fn tool_activity_update_output_emits_token_progress_before_provider_input() {
     let provider = FakeProvider {
         calls: Mutex::new(0),

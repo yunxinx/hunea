@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::{
     content::{
         assistant_projection, openai_tool_from_definition, system_message_value,
-        tool_result_message_value, user_message_value,
+        tool_result_image_attachment_message, tool_result_message_projection, user_message_value,
     },
     validation::validate_openai_projection_items,
 };
@@ -223,15 +223,46 @@ fn flush_tool_results(
     messages: &mut Vec<Value>,
     item_fragments: &mut [ItemFragmentProjection],
 ) -> Result<(), ProviderError> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let mut projected_results = Vec::with_capacity(pending.len());
+    let mut attached_image_parts = Vec::new();
     for (index, item) in pending.drain(..) {
         if let ConversationItem::ToolResult {
             call_id, content, ..
         } = item
         {
-            let value = tool_result_message_value(call_id, content)?;
-            item_fragments[index] = ItemFragmentProjection::SharedPayload(messages.len());
-            messages.push(value);
+            let projection = tool_result_message_projection(call_id, content)?;
+            attached_image_parts.extend(projection.image_parts.iter().cloned());
+            projected_results.push((index, projection));
         }
+    }
+
+    let mut tool_message_indexes = Vec::with_capacity(projected_results.len());
+    for (_, projection) in &projected_results {
+        tool_message_indexes.push(messages.len());
+        messages.push(projection.tool_message.clone());
+    }
+
+    let attached_image_message = (!attached_image_parts.is_empty())
+        .then(|| tool_result_image_attachment_message(attached_image_parts));
+    if let Some(message) = attached_image_message.as_ref() {
+        messages.push(message.clone());
+    }
+
+    for ((index, projection), tool_message_index) in
+        projected_results.into_iter().zip(tool_message_indexes)
+    {
+        item_fragments[index] = if projection.image_parts.is_empty() {
+            ItemFragmentProjection::SharedPayload(tool_message_index)
+        } else {
+            ItemFragmentProjection::Standalone(Value::Array(vec![
+                projection.tool_message,
+                tool_result_image_attachment_message(projection.image_parts),
+            ]))
+        };
     }
     Ok(())
 }
@@ -306,14 +337,21 @@ fn responses_input_values_for_item(item: &ConversationItem) -> Result<Vec<Value>
         } => values.push(json!({
             "type": "function_call_output",
             "call_id": call_id,
-            "output": visible_text_without_tool_calls(content)?,
+            "output": responses_tool_result_output(content)?,
         })),
         ConversationItem::Reasoning { .. } => {}
     }
     Ok(values)
 }
 
-fn responses_user_content(blocks: &[ContentBlock]) -> Result<Value, ProviderError> {
+fn responses_tool_result_output(blocks: &[ContentBlock]) -> Result<Value, ProviderError> {
+    if !blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }))
+    {
+        return Ok(Value::String(visible_text_without_tool_calls(blocks)?));
+    }
+
     let mut parts = Vec::new();
     for block in blocks {
         match block {
@@ -323,11 +361,12 @@ fn responses_user_content(blocks: &[ContentBlock]) -> Result<Value, ProviderErro
             ContentBlock::Image {
                 data_base64,
                 mime_type,
+                detail,
                 ..
             } => {
                 parts.push(json!({
                     "type": "input_image",
-                    "detail": "auto",
+                    "detail": responses_image_detail(*detail),
                     "image_url": format!("data:{mime_type};base64,{data_base64}"),
                 }));
             }
@@ -348,6 +387,50 @@ fn responses_user_content(blocks: &[ContentBlock]) -> Result<Value, ProviderErro
         }
     }
     Ok(Value::Array(parts))
+}
+
+fn responses_user_content(blocks: &[ContentBlock]) -> Result<Value, ProviderError> {
+    let mut parts = Vec::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text(text) => {
+                parts.push(json!({ "type": "input_text", "text": text }));
+            }
+            ContentBlock::Image {
+                data_base64,
+                mime_type,
+                detail,
+                ..
+            } => {
+                parts.push(json!({
+                    "type": "input_image",
+                    "detail": responses_image_detail(*detail),
+                    "image_url": format!("data:{mime_type};base64,{data_base64}"),
+                }));
+            }
+            ContentBlock::Audio { .. }
+            | ContentBlock::Document { .. }
+            | ContentBlock::ResourceLink { .. }
+            | ContentBlock::ResourceText { .. } => {
+                let text = super::content::non_assistant_visible_text(std::slice::from_ref(block))?;
+                if !text.is_empty() {
+                    parts.push(json!({ "type": "input_text", "text": text }));
+                }
+            }
+            ContentBlock::ToolCall(_) => {
+                return Err(ProviderError::Protocol(
+                    "tool call content is only valid on assistant messages".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(Value::Array(parts))
+}
+
+fn responses_image_detail(detail: Option<provider_protocol::ImageDetail>) -> &'static str {
+    detail
+        .unwrap_or(provider_protocol::ImageDetail::Auto)
+        .as_str()
 }
 
 fn visible_text_without_tool_calls(blocks: &[ContentBlock]) -> Result<String, ProviderError> {

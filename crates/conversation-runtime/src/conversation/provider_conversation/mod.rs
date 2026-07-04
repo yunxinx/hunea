@@ -376,7 +376,7 @@ impl ProviderConversation {
         &mut self,
         turn: &ConversationTurnRequest,
     ) -> Result<PreparedConversationRequest, ProviderConversationError> {
-        self.prepare_turn_with_transcript(turn, None, Vec::new())
+        self.prepare_turn_with_transcript(turn, turn.transcript_user_message().cloned(), Vec::new())
     }
 
     /// `prepare_turn_with_transcript` 允许调用方为当前 turn 指定单独的 transcript 展示消息。
@@ -465,6 +465,7 @@ impl ProviderConversation {
         let transcript_user_message =
             transcript_user_message.unwrap_or_else(|| TranscriptUserMessage {
                 content: user_message.text_content(),
+                attachments: Vec::new(),
                 skill_bindings: Vec::new(),
                 custom_prompt_bindings: Vec::new(),
             });

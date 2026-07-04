@@ -28,14 +28,14 @@ impl SessionMetaDeriver {
             }
             SessionEntryKind::Header(_) => {}
             SessionEntryKind::Item(item) if item.role() == Some(Role::User) => {
-                let text = item.text_content();
+                let text = item.summary_text_content();
                 if self.first_user_message.is_none() {
                     self.first_user_message = Some(text.clone());
                 }
                 self.latest_user_message = Some(text);
             }
             SessionEntryKind::Item(item) if item.role() == Some(Role::Assistant) => {
-                self.latest_assistant_message = Some(item.text_content());
+                self.latest_assistant_message = Some(item.summary_text_content());
             }
             SessionEntryKind::ConfigChange(snapshot) => {
                 self.latest_model = Some(snapshot.model.clone());

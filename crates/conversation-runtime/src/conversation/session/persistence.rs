@@ -384,7 +384,7 @@ fn transcript_replay_items_from_context_item(
 ) -> Vec<TranscriptReplayItem> {
     match item {
         ConversationItem::Message { role, .. } => {
-            let content = item.text_content();
+            let content = item.summary_text_content();
             if content.trim().is_empty() {
                 return Vec::new();
             }
@@ -407,7 +407,7 @@ fn transcript_replay_items_from_context_item(
             if state.final_tool_activity_ids.contains(call_id) {
                 return Vec::new();
             }
-            let content = item.text_content();
+            let content = item.summary_text_content();
             if content.trim().is_empty() {
                 Vec::new()
             } else {
@@ -420,11 +420,11 @@ fn transcript_replay_items_from_context_item(
 fn transcript_replay_items_from_transcript_user_message(
     message: &TranscriptUserMessage,
 ) -> Vec<TranscriptReplayItem> {
-    if message.content.trim().is_empty() {
+    if message.display_content().trim().is_empty() {
         return Vec::new();
     }
 
-    if message.skill_bindings.is_empty() && message.custom_prompt_bindings.is_empty() {
+    if !message.requires_bound_replay() {
         return vec![TranscriptReplayItem::Message {
             role: TranscriptReplayRole::User,
             content: message.content.clone(),

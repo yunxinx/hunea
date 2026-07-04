@@ -12,7 +12,7 @@ use runtime_domain::{
     prompt_assembly::{PromptPreludeSnapshot, PromptSourceKind},
     provider::ProviderKind,
     session::ContextBudgetProjectionErrorKind,
-    token_count::TokenEncoding,
+    token_count::{ESTIMATED_IMAGE_TOKENS, TokenEncoding},
 };
 use tool_loop_runtime::provider_tool_definitions_from_registry;
 use tool_runtime::ToolExecutorRegistry;
@@ -314,8 +314,50 @@ fn context_segments_for_item(
 
     vec![ContextSegment {
         kind: segment_kind(item),
-        estimated_tokens: token_encoding.estimate_text(projection_text),
+        estimated_tokens: estimate_projected_item_tokens(item, projection_text, token_encoding),
     }]
+}
+
+fn estimate_projected_item_tokens(
+    item: &ConversationItem,
+    projection_text: &str,
+    token_encoding: TokenEncoding,
+) -> usize {
+    let Some(image_blocks) = image_blocks_for_item(item) else {
+        return token_encoding.estimate_text(projection_text);
+    };
+
+    let mut estimation_text = projection_text.to_string();
+    for &(mime_type, data_base64) in &image_blocks {
+        let data_uri = format!("data:{mime_type};base64,{data_base64}");
+        let placeholder = format!("data:{mime_type};base64,[image]");
+        estimation_text = estimation_text.replace(&data_uri, &placeholder);
+    }
+
+    token_encoding
+        .estimate_text(&estimation_text)
+        .saturating_add(image_blocks.len().saturating_mul(ESTIMATED_IMAGE_TOKENS))
+}
+
+fn image_blocks_for_item(item: &ConversationItem) -> Option<Vec<(&str, &str)>> {
+    let blocks = match item {
+        ConversationItem::Message { content, .. }
+        | ConversationItem::ToolResult { content, .. } => content,
+        ConversationItem::Reasoning { .. } => return None,
+    };
+    let images = blocks
+        .iter()
+        .filter_map(|block| match block {
+            provider_protocol::ContentBlock::Image {
+                mime_type,
+                data_base64,
+                ..
+            } => Some((mime_type.as_str(), data_base64.as_str())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    (!images.is_empty()).then_some(images)
 }
 
 fn split_prompt_prelude_system_segment(
@@ -642,6 +684,7 @@ mod tests {
                 data_base64: "iVBORw0KGgo=".to_string(),
                 mime_type: "image/png".to_string(),
                 uri: None,
+                detail: None,
             },
         ])];
         let snapshot = build_context_budget_snapshot_with_cancellation(
@@ -660,6 +703,93 @@ mod tests {
         assert!(
             snapshot.segments[0].estimated_tokens > estimate_text_tokens("gpt-4o", "review "),
             "multimodal user segment should include provider payload structure instead of only visible text"
+        );
+    }
+
+    #[test]
+    fn multimodal_image_context_budget_uses_semantic_image_estimate_not_base64_text_size() {
+        let large_base64_payload = "a".repeat(96_000);
+        let items = [ConversationItem::user(vec![ContentBlock::Image {
+            data_base64: large_base64_payload.clone(),
+            mime_type: "image/png".to_string(),
+            uri: Some("assets/large.png".to_string()),
+            detail: None,
+        }])];
+
+        for provider_kind in [
+            ProviderKind::OpenAiCompatible,
+            ProviderKind::OpenAiResponses,
+        ] {
+            let snapshot = build_context_budget_snapshot_with_cancellation(
+                ContextBudgetProbe::new(
+                    provider_kind,
+                    "gpt-4o",
+                    &items,
+                    &[],
+                    ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
+                ),
+                || false,
+            )
+            .expect("context budget snapshot should build")
+            .expect("never-cancelled snapshot should be present");
+
+            assert!(
+                snapshot.segments[0].estimated_tokens >= ESTIMATED_IMAGE_TOKENS,
+                "{provider_kind:?} image segment should include the shared image token estimate"
+            );
+            assert!(
+                snapshot.segments[0].estimated_tokens
+                    < estimate_text_tokens("gpt-4o", &large_base64_payload) / 2,
+                "{provider_kind:?} image segment should not be dominated by base64 transfer bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn multimodal_tool_result_content_counts_more_than_visible_text_only() {
+        let items = [
+            ConversationItem::assistant_with_tool_calls(
+                String::new(),
+                vec![ToolCall::new(
+                    "call-1",
+                    "view_image",
+                    r#"{"path":"assets/a.png"}"#,
+                )],
+            ),
+            ConversationItem::tool_result(
+                "call-1",
+                vec![
+                    ContentBlock::Text("loaded ".to_string()),
+                    ContentBlock::Image {
+                        data_base64: "iVBORw0KGgo=".to_string(),
+                        mime_type: "image/png".to_string(),
+                        uri: Some("assets/a.png".to_string()),
+                        detail: None,
+                    },
+                ],
+                false,
+            ),
+        ];
+        let snapshot = build_context_budget_snapshot_with_cancellation(
+            ContextBudgetProbe::new(
+                ProviderKind::OpenAiCompatible,
+                "gpt-4o",
+                &items,
+                &[ProviderToolDefinition::new(
+                    "view_image",
+                    "View an image",
+                    json!({"type": "object"}),
+                )],
+                ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
+            ),
+            || false,
+        )
+        .expect("context budget snapshot should build")
+        .expect("never-cancelled snapshot should be present");
+
+        assert!(
+            snapshot.segments[1].estimated_tokens > estimate_text_tokens("gpt-4o", "loaded "),
+            "multimodal tool result segment should include provider payload structure instead of only visible text"
         );
     }
 

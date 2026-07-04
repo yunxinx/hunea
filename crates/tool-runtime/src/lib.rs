@@ -10,7 +10,9 @@ mod schema;
 mod tool_error;
 
 pub use definition::ToolDefinition;
-pub use execution::{ToolCall, ToolResult};
+pub use execution::{
+    ToolCall, ToolImageDetail, ToolResult, ToolResultContent, ToolResultContentBlocks,
+};
 pub use executor::{
     Tool, ToolExecutionContext, ToolExecutionFuture, ToolExecutor, ToolExecutorRegistry,
     ToolProgress, ToolProgressSink, ToolTerminalExitStatus, ToolTerminalSnapshot,

@@ -70,7 +70,7 @@ impl Tool for ReadTool {
             .with_label("Read")
             .with_kind(ToolKind::Read)
             .with_description(
-                "Read a UTF-8 text file inside the current workspace. Use offset and limit to read large text files in chunks; text output includes 1-based line numbers.",
+                "Read a UTF-8 text file inside the current workspace. Use view_image for image files. Use offset and limit to read large text files in chunks; text output includes 1-based line numbers.",
             )
             .with_input_schema(json!({
                 "type": "object",
@@ -96,7 +96,7 @@ impl Tool for ReadTool {
             }))
             .with_permission_policy(ToolPermissionPolicy::Always)
             .with_prompt_guidelines(
-                "Prefer read over cat for reading files. Use offset and limit for large files.",
+                "Prefer read over cat for text files. Use view_image for image files. Use offset and limit for large text files.",
             )
     }
 
@@ -185,12 +185,13 @@ fn execute_read(
             format!("'{}' is not a regular file", arguments.path),
         );
     }
-    if let Some(mime_type) = explicit_attachment_mime_type_for_path(&path) {
+    if let Some(content_type) = structured_content_type_for_path(&path) {
         return ToolResult::error(
             call.call_id,
             format!(
-                "read failed for '{}': {mime_type} files must be attached explicitly in the user prompt instead of using read",
-                path.display()
+                "read failed for '{}': {}",
+                path.display(),
+                content_type.read_error()
             ),
         );
     }
@@ -348,25 +349,58 @@ fn read_text_file_lines(
     })
 }
 
-fn explicit_attachment_mime_type_for_path(path: &Path) -> Option<&'static str> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    match extension.as_str() {
-        "png" => Some("image/png"),
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "gif" => Some("image/gif"),
-        "webp" => Some("image/webp"),
-        "heic" => Some("image/heic"),
-        "heif" => Some("image/heif"),
-        "svg" => Some("image/svg+xml"),
-        "wav" => Some("audio/wav"),
-        "mp3" => Some("audio/mp3"),
-        "ogg" => Some("audio/ogg"),
-        "flac" => Some("audio/flac"),
-        "m4a" => Some("audio/m4a"),
-        "aac" => Some("audio/aac"),
-        "pdf" => Some("application/pdf"),
-        _ => None,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StructuredContentType {
+    mime_type: &'static str,
+    kind: StructuredContentKind,
+}
+
+impl StructuredContentType {
+    fn read_error(self) -> String {
+        match self.kind {
+            StructuredContentKind::Image => format!(
+                "{} files are image content; use view_image instead of read",
+                self.mime_type
+            ),
+            StructuredContentKind::Audio => format!(
+                "{} files are audio content and cannot be read as UTF-8 text",
+                self.mime_type
+            ),
+            StructuredContentKind::Document => format!(
+                "{} files are document content and cannot be read as UTF-8 text",
+                self.mime_type
+            ),
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructuredContentKind {
+    Image,
+    Audio,
+    Document,
+}
+
+fn structured_content_type_for_path(path: &Path) -> Option<StructuredContentType> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let (mime_type, kind) = match extension.as_str() {
+        "png" => ("image/png", StructuredContentKind::Image),
+        "jpg" | "jpeg" => ("image/jpeg", StructuredContentKind::Image),
+        "gif" => ("image/gif", StructuredContentKind::Image),
+        "webp" => ("image/webp", StructuredContentKind::Image),
+        "heic" => ("image/heic", StructuredContentKind::Image),
+        "heif" => ("image/heif", StructuredContentKind::Image),
+        "svg" => ("image/svg+xml", StructuredContentKind::Image),
+        "wav" => ("audio/wav", StructuredContentKind::Audio),
+        "mp3" => ("audio/mp3", StructuredContentKind::Audio),
+        "ogg" => ("audio/ogg", StructuredContentKind::Audio),
+        "flac" => ("audio/flac", StructuredContentKind::Audio),
+        "m4a" => ("audio/m4a", StructuredContentKind::Audio),
+        "aac" => ("audio/aac", StructuredContentKind::Audio),
+        "pdf" => ("application/pdf", StructuredContentKind::Document),
+        _ => return None,
+    };
+    Some(StructuredContentType { mime_type, kind })
 }
 
 fn contains_disallowed_text_control_chars(text: &str) -> bool {

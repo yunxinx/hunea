@@ -14,6 +14,13 @@ use crate::{
 
 use super::{UserMessageRenderLayout, user_projection::UserMessageProjectedLine};
 
+#[derive(Clone, Copy)]
+pub(super) struct UserMessageStructuredRanges<'a> {
+    pub(super) skill_bindings: &'a [TranscriptSkillBinding],
+    pub(super) custom_prompt_bindings: &'a [TranscriptCustomPromptBinding],
+    pub(super) attachment_ranges: &'a [(usize, usize)],
+}
+
 pub(super) fn render_user_message_lines(
     content: &str,
     width: u16,
@@ -21,9 +28,7 @@ pub(super) fn render_user_message_lines(
     style_mode: StyleMode,
     source_message: Option<&ComposerSourceMessage>,
 ) -> Vec<Line<'static>> {
-    if source_message.is_some_and(|message| {
-        !message.skill_bindings().is_empty() || !message.custom_prompt_bindings().is_empty()
-    }) {
+    if source_message.is_some_and(|message| message.has_structured_highlights()) {
         let projection = super::user_projection::render_user_message_projection(
             content,
             width,
@@ -146,8 +151,7 @@ pub(super) fn render_projected_framed_user_line(
     layout: UserMessageRenderLayout,
     palette: TerminalPalette,
     style_mode: StyleMode,
-    skill_bindings: &[TranscriptSkillBinding],
-    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
+    structured_ranges: UserMessageStructuredRanges<'_>,
 ) -> Line<'static> {
     let prefix_style = surface_text_style(palette);
     let mut prefix_glyph_style = secondary_text_style(palette);
@@ -163,11 +167,10 @@ pub(super) fn render_projected_framed_user_line(
     let trailing_fill = " ".repeat(trailing_fill_width);
     let content_spans = styled_user_content_spans(
         &line.text,
-        line.visible_start_char,
+        line.logical_line_start_char + line.visible_start_char,
         content_style,
         skill_style,
-        skill_bindings,
-        custom_prompt_bindings,
+        structured_ranges,
     );
 
     if is_first && layout.shows_prefix {
@@ -232,8 +235,7 @@ pub(super) fn render_projected_compact_user_line(
     width: usize,
     palette: TerminalPalette,
     style_mode: StyleMode,
-    skill_bindings: &[TranscriptSkillBinding],
-    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
+    structured_ranges: UserMessageStructuredRanges<'_>,
 ) -> Line<'static> {
     let prefix_style = surface_text_style(palette);
     let mut prefix_glyph_style = secondary_text_style(palette);
@@ -248,11 +250,10 @@ pub(super) fn render_projected_compact_user_line(
     let trailing_fill = " ".repeat(trailing_fill_width);
     let content_spans = styled_user_content_spans(
         &line.text,
-        line.visible_start_char,
+        line.logical_line_start_char + line.visible_start_char,
         content_style,
         skill_style,
-        skill_bindings,
-        custom_prompt_bindings,
+        structured_ranges,
     );
 
     if is_first {
@@ -304,8 +305,7 @@ pub(super) fn render_projected_legacy_user_line(
     is_first: bool,
     palette: TerminalPalette,
     style_mode: StyleMode,
-    skill_bindings: &[TranscriptSkillBinding],
-    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
+    structured_ranges: UserMessageStructuredRanges<'_>,
 ) -> Line<'static> {
     let prefix_style = surface_text_style(palette);
     let content_style = surface_emphasis_style(palette);
@@ -313,11 +313,10 @@ pub(super) fn render_projected_legacy_user_line(
     let continuation_prefix = " ".repeat(user_message_inset_width(style_mode));
     let content_spans = styled_user_content_spans(
         &line.text,
-        line.visible_start_char,
+        line.logical_line_start_char + line.visible_start_char,
         content_style,
         skill_style,
-        skill_bindings,
-        custom_prompt_bindings,
+        structured_ranges,
     );
 
     if is_first {
@@ -336,18 +335,12 @@ fn styled_user_content_spans(
     visible_start_char: usize,
     content_style: ratatui::style::Style,
     skill_style: ratatui::style::Style,
-    skill_bindings: &[TranscriptSkillBinding],
-    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
+    structured_ranges: UserMessageStructuredRanges<'_>,
 ) -> Vec<Span<'static>> {
     if text.is_empty() {
         return vec![Span::styled(String::new(), content_style)];
     }
-    let binding_ranges = visible_binding_ranges(
-        skill_bindings,
-        custom_prompt_bindings,
-        visible_start_char,
-        text,
-    );
+    let binding_ranges = visible_binding_ranges(structured_ranges, visible_start_char, text);
     if binding_ranges.is_empty() {
         return vec![Span::styled(text.to_string(), content_style)];
     }
@@ -391,20 +384,22 @@ fn slice_char_range(text: &str, start: usize, end: usize) -> String {
 }
 
 fn visible_binding_ranges(
-    skill_bindings: &[TranscriptSkillBinding],
-    custom_prompt_bindings: &[TranscriptCustomPromptBinding],
+    structured_ranges: UserMessageStructuredRanges<'_>,
     visible_start_char: usize,
     text: &str,
 ) -> Vec<(usize, usize)> {
     let visible_end_char = visible_start_char + text.chars().count();
-    let mut ranges = skill_bindings
+    let mut ranges = structured_ranges
+        .skill_bindings
         .iter()
         .map(|binding| (binding.start_char, binding.end_char))
         .chain(
-            custom_prompt_bindings
+            structured_ranges
+                .custom_prompt_bindings
                 .iter()
                 .map(|binding| (binding.start_char, binding.end_char)),
         )
+        .chain(structured_ranges.attachment_ranges.iter().copied())
         .filter_map(|(start_char, end_char)| {
             let overlap_start = start_char.max(visible_start_char);
             let overlap_end = end_char.min(visible_end_char);

@@ -303,20 +303,35 @@ pub(super) fn is_execute_like_tool_call(call: &RuntimeToolActivity) -> bool {
 }
 
 pub(super) fn execute_tool_call_display_command(call: &RuntimeToolActivity) -> String {
+    execute_tool_call_shell_command(call).unwrap_or_else(|| {
+        let title = runtime_tool_activity_display_title(call);
+        title
+            .strip_prefix("Run ")
+            .map(str::trim_start)
+            .filter(|command| !command.is_empty())
+            .unwrap_or(&title)
+            .to_string()
+    })
+}
+
+pub(super) fn execute_tool_call_shell_command(call: &RuntimeToolActivity) -> Option<String> {
     call.raw_input
         .as_ref()
         .and_then(|raw_input| raw_input.string_field(&["command", "cmd"]))
         .map(|command| command.trim().to_string())
         .filter(|command| !command.is_empty())
-        .unwrap_or_else(|| {
-            let title = runtime_tool_activity_display_title(call);
-            title
-                .strip_prefix("Run ")
-                .map(str::trim_start)
-                .filter(|command| !command.is_empty())
-                .unwrap_or(&title)
-                .to_string()
-        })
+        .or_else(|| shell_command_from_title(&call.title))
+}
+
+fn shell_command_from_title(title: &str) -> Option<String> {
+    let title = title.trim();
+    ["Shell:", "Shell "].into_iter().find_map(|prefix| {
+        title
+            .strip_prefix(prefix)
+            .map(str::trim_start)
+            .filter(|command| !command.is_empty())
+            .map(ToOwned::to_owned)
+    })
 }
 
 fn execute_terminal_snapshot_command(

@@ -173,6 +173,74 @@ fn runtime_tool_activity_header_highlights_shell_titles() {
 }
 
 #[test]
+fn completed_execute_tool_call_uses_raw_command_when_shell_label_has_no_colon() {
+    let palette = default_palette();
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-1".to_string(),
+            title: "Shell git commit -m \"feat: demo\"".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(r#"{"command":"git commit -m \"feat: demo\""}"#.into()),
+            raw_output: None,
+        },
+        ToolActivityRenderMode::Compact,
+    );
+    let lines = item.render_lines(80, palette);
+
+    assert_eq!(
+        line_to_plain_text(&lines[0]),
+        "● Ran git commit -m \"feat: demo\""
+    );
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .all(|span| !span.content.as_ref().contains("Shell")),
+        "shell label should not be part of the runtime header: {:?}",
+        lines[0].spans
+    );
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .skip(1)
+            .any(|span| span.style.fg.is_some()),
+        "raw shell command should carry syntax highlight foreground colors: {:?}",
+        lines[0].spans
+    );
+}
+
+#[test]
+fn pending_execute_tool_call_uses_raw_command_when_shell_label_has_no_colon() {
+    let item = ToolResultItem::from_runtime_tool_activity(
+        RuntimeToolActivity {
+            activity_id: "call-approval".to_string(),
+            title: "Shell cargo check".to_string(),
+            kind: RuntimeToolKind::Execute,
+            status: RuntimeToolActivityStatus::Pending,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(r#"{"command":"cargo check"}"#.into()),
+            raw_output: None,
+        },
+        ToolActivityRenderMode::Compact,
+    );
+    let rendered_plain = item
+        .render_lines(80, default_palette())
+        .iter()
+        .map(line_to_plain_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered_plain,
+        vec!["● cargo check".to_string(), "  └ Waiting...".to_string()]
+    );
+}
+
+#[test]
 fn pending_execute_tool_call_renders_waiting_detail() {
     let palette = default_palette();
     let item = ToolResultItem::from_runtime_tool_activity(

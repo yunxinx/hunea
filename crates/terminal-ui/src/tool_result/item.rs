@@ -11,13 +11,14 @@ use ratatui::{
 use super::activity::{
     RuntimeDiffDetailLine, RuntimeExecuteFooterLine, RuntimeExecuteFooterStatus,
     RuntimeExecuteTranscriptBlock, RuntimeToolActivityDetailBlock, ToolActivityGroupFamily,
-    active_marker_visible_at, is_execute_like_tool_call, is_list_dir_tool_call,
-    is_runtime_read_tool_activity, list_dir_tool_call_title_chunks, runtime_diff_line_prefix,
-    runtime_read_tool_activity_title_chunks, runtime_tool_activity_detail_blocks,
-    runtime_tool_activity_diff_header_chunks, runtime_tool_activity_diff_line_style,
-    runtime_tool_activity_diff_row_style, runtime_tool_activity_display_title,
-    runtime_tool_activity_has_diff_content, runtime_tool_activity_location_suffix,
-    runtime_tool_activity_status_color, runtime_write_tool_activity_title_chunks, style_for_color,
+    active_marker_visible_at, execute_tool_call_shell_command, is_execute_like_tool_call,
+    is_list_dir_tool_call, is_runtime_read_tool_activity, list_dir_tool_call_title_chunks,
+    runtime_diff_line_prefix, runtime_read_tool_activity_title_chunks,
+    runtime_tool_activity_detail_blocks, runtime_tool_activity_diff_header_chunks,
+    runtime_tool_activity_diff_line_style, runtime_tool_activity_diff_row_style,
+    runtime_tool_activity_display_title, runtime_tool_activity_has_diff_content,
+    runtime_tool_activity_location_suffix, runtime_tool_activity_status_color,
+    runtime_write_tool_activity_title_chunks, style_for_color,
 };
 use super::approval::{ParsedToolResultLine, looks_like_shell_command, style_core_result_line};
 use super::exploration::{
@@ -855,7 +856,8 @@ impl ToolResultItem {
         let title = runtime_tool_activity_display_title(call);
         let title_style = Style::new().add_modifier(Modifier::BOLD);
         if is_finished_execute_like_tool_call(call) {
-            let title = runtime_finished_execute_title(&title);
+            let title = execute_tool_call_shell_command(call)
+                .unwrap_or_else(|| runtime_finished_execute_title(&title));
             let mut chunks = vec![
                 HighlightChunk {
                     text: "Ran".to_string(),
@@ -875,6 +877,17 @@ impl ToolResultItem {
                 });
             }
             return chunks;
+        }
+
+        if let Some(command) = execute_tool_call_shell_command(call) {
+            if looks_like_shell_command(&command) {
+                return self.shell_command_chunks_with_style(&command, title_style);
+            }
+
+            return vec![HighlightChunk {
+                text: command,
+                style: title_style,
+            }];
         }
 
         if looks_like_shell_command(&title) {

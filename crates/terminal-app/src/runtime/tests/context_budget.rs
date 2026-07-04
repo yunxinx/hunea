@@ -27,6 +27,7 @@ fn context_budget_worker_shutdown_stops_accepting_new_commands() {
                         256_000,
                     )
                     .expect("fixture limit should be valid"),
+                    upstream_context_tokens: None,
                 }
             )
             .is_err(),
@@ -140,6 +141,65 @@ fn context_budget_snapshot_includes_provider_visible_tool_definitions() {
                 && segment.estimated_tokens > 0
         }),
         "context budget snapshot should include non-empty provider-visible tool definitions"
+    );
+}
+
+#[test]
+fn context_budget_snapshot_uses_upstream_context_tokens_for_total() {
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        loaded_models: conversation_runtime::models::LoadedModelCatalog {
+            catalog: runtime_domain::model_catalog::ModelCatalog::new(vec![
+                runtime_domain::model_catalog::ModelProvider::new(
+                    "local",
+                    ProviderKind::OpenAiCompatible,
+                    "Local",
+                    Some("http://127.0.0.1:1234/v1".to_string()),
+                    runtime_domain::model_catalog::ModelSource::Configured,
+                    vec![runtime_domain::model_catalog::ModelEntry::new(
+                        "qwen3",
+                        None,
+                        runtime_domain::model_catalog::ModelSource::Configured,
+                    )],
+                ),
+            ]),
+            ..conversation_runtime::models::LoadedModelCatalog::default()
+        },
+        ..AppRuntimeOptions::default()
+    });
+    coordinator
+        .provider_conversation
+        .set_upstream_context_tokens(Some(48_052));
+    let request_id = request_id(402);
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::LoadContextBudgetSnapshot {
+            request_id,
+            selection: ModelSelection::new("local", "qwen3"),
+        })
+        .expect("context budget snapshot command should be accepted");
+
+    let payload = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::ContextBudgetSnapshotLoaded {
+                request_id: actual_request_id,
+                payload,
+            } if actual_request_id == request_id => Some(payload),
+            _ => None,
+        },
+        "context budget snapshot payload",
+    );
+
+    assert_eq!(payload.usage.used, 48_052);
+    assert_eq!(payload.total_estimated_tokens, 48_052);
+    assert_eq!(
+        payload
+            .segments
+            .iter()
+            .map(|segment| segment.estimated_tokens)
+            .sum::<usize>(),
+        48_052,
+        "category estimates should be scaled onto the upstream context total"
     );
 }
 

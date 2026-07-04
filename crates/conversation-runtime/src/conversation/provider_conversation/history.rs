@@ -17,6 +17,7 @@ impl ProviderConversation {
         retained_user_turns: usize,
     ) -> Result<Option<(SessionId, String)>, ProviderConversationError> {
         self.pending_user_message = None;
+        self.upstream_context_tokens = None;
         let mut user_turn_count = 0usize;
         let mut truncate_index = self.persisted_history.len();
         for (index, item) in self.persisted_history.iter().enumerate() {
@@ -90,7 +91,11 @@ impl ProviderConversation {
     /// `rollback_pending_user` 丢弃尚未开始发送给 provider 的当前用户消息。
     #[must_use]
     pub fn rollback_pending_user(&mut self) -> bool {
-        self.pending_user_message.take().is_some()
+        let had_pending = self.pending_user_message.take().is_some();
+        if had_pending {
+            self.upstream_context_tokens = None;
+        }
+        had_pending
     }
 
     /// `commit_turn_items` 把 runtime 生成的 provider-visible 对话项写回会话历史。
@@ -98,8 +103,13 @@ impl ProviderConversation {
         &mut self,
         items: impl IntoIterator<Item = PersistedConversationItem>,
     ) {
+        let mut committed_any = false;
         for item in items {
             self.persisted_history.push(item);
+            committed_any = true;
+        }
+        if committed_any {
+            self.upstream_context_tokens = None;
         }
     }
 
@@ -112,6 +122,7 @@ impl ProviderConversation {
         if items.is_empty() {
             return Ok(());
         }
+        self.upstream_context_tokens = None;
 
         self.commit_turn_items(items.into_iter().map(|item| PersistedConversationItem {
             entry_id: None,

@@ -30,7 +30,12 @@ impl ConversationWorker {
                 ConversationWorkerEvent::Session(event) => {
                     self.apply_session_event(event);
                 }
-                ConversationWorkerEvent::Finished { response, metrics } => {
+                ConversationWorkerEvent::Finished {
+                    response,
+                    metrics,
+                    upstream_context_tokens,
+                } => {
+                    self.upstream_context_tokens = upstream_context_tokens;
                     self.clear_runtime_state();
                     return Some(ConversationEvent::Finished { response, metrics });
                 }

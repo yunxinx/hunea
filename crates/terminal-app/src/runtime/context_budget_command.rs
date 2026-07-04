@@ -41,6 +41,7 @@ impl AppRuntimeCoordinator {
                 prompt_prelude: self.provider_conversation.prompt_prelude().cloned(),
                 tool_definitions,
                 context_limit: self.options.loaded_models.context_limit_for(selection),
+                upstream_context_tokens: self.provider_conversation.upstream_context_tokens(),
             })
         {
             self.pending_runtime_events

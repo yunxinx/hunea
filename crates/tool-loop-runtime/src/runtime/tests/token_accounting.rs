@@ -30,6 +30,29 @@ async fn usage_updates_replace_output_token_metric() {
 }
 
 #[tokio::test]
+async fn usage_total_tokens_become_upstream_context_tokens() {
+    let provider = UsageProvider;
+    let request = PromptRequest::new(
+        "qwen3",
+        vec![ConversationItem::text(Role::User, "count tokens")],
+    );
+    let cancellation = CancellationToken::new();
+
+    let completion = run_tool_loop(
+        &provider,
+        request,
+        ToolExecutorRegistry::new(),
+        &cancellation,
+        ToolLoopOptions::default(),
+        |_| {},
+    )
+    .await
+    .expect("runtime should complete");
+
+    assert_eq!(completion.upstream_context_tokens, Some(48));
+}
+
+#[tokio::test]
 async fn request_latency_starts_before_first_stream_frame() {
     let provider = DelayedFirstTokenProvider;
     let request = PromptRequest::new("qwen3", vec![ConversationItem::text(Role::User, "hello")]);

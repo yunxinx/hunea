@@ -47,6 +47,7 @@ pub(crate) enum ConversationProgress {
 pub(crate) struct ConversationCompletion {
     pub(crate) response: ConversationResponse,
     pub(crate) metrics: Option<ProviderRequestMetrics>,
+    pub(crate) upstream_context_tokens: Option<usize>,
 }
 
 impl ConversationCompletion {
@@ -57,11 +58,14 @@ impl ConversationCompletion {
                 completion.response.reasoning_duration,
             ),
             metrics: completion.metrics,
+            upstream_context_tokens: completion.upstream_context_tokens,
         }
     }
 
     pub(crate) fn into_response(self) -> ConversationResponse {
-        let Self { response, metrics } = self;
+        let Self {
+            response, metrics, ..
+        } = self;
         let _ = metrics;
         response
     }

@@ -36,6 +36,7 @@ pub(super) struct ContextBudgetSnapshotRequest {
     pub(super) prompt_prelude: Option<PromptPreludeSnapshot>,
     pub(super) tool_definitions: Vec<ToolDefinition>,
     pub(super) context_limit: ContextTokenLimit,
+    pub(super) upstream_context_tokens: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -48,6 +49,7 @@ struct ContextBudgetWorkerCommand {
     prompt_prelude: Option<PromptPreludeSnapshot>,
     tool_definitions: Vec<ToolDefinition>,
     context_limit: ContextTokenLimit,
+    upstream_context_tokens: Option<usize>,
 }
 
 enum WorkerControl {
@@ -138,6 +140,7 @@ impl ContextBudgetWorker {
             prompt_prelude,
             tool_definitions,
             context_limit,
+            upstream_context_tokens,
         } = request;
         let command = ContextBudgetWorkerCommand {
             request_id,
@@ -148,6 +151,7 @@ impl ContextBudgetWorker {
             prompt_prelude,
             tool_definitions,
             context_limit,
+            upstream_context_tokens,
         };
 
         if self.active_generation.is_some() {
@@ -336,6 +340,7 @@ fn handle_context_budget_command(
         prompt_prelude,
         tool_definitions,
         context_limit,
+        upstream_context_tokens,
     } = command;
 
     let is_cancelled = || current_generation.load(Ordering::Acquire) != generation;
@@ -351,6 +356,7 @@ fn handle_context_budget_command(
         context_limit,
     )
     .with_prompt_prelude(prompt_prelude.as_ref());
+    let probe = probe.with_upstream_context_tokens(upstream_context_tokens);
 
     match build_context_budget_snapshot_with_cancellation(probe, is_cancelled) {
         Ok(Some(snapshot)) => ContextBudgetTaskResult::Loaded(snapshot),
@@ -484,6 +490,7 @@ mod tests {
             tool_definitions: Vec::new(),
             context_limit: ContextTokenLimit::try_from(1_000)
                 .expect("fixture limit should be valid"),
+            upstream_context_tokens: None,
         }
     }
 
@@ -497,6 +504,7 @@ mod tests {
             prompt_prelude: command.prompt_prelude.clone(),
             tool_definitions: command.tool_definitions.clone(),
             context_limit: command.context_limit,
+            upstream_context_tokens: command.upstream_context_tokens,
         }
     }
 }

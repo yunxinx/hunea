@@ -336,7 +336,16 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
                 self.reconcile_conversation_updates();
                 break;
             };
+            let upstream_context_tokens = if matches!(event, ConversationEvent::Finished { .. }) {
+                self.conversation_worker.take_upstream_context_tokens()
+            } else {
+                None
+            };
             self.reconcile_conversation_updates();
+            if upstream_context_tokens.is_some() {
+                self.provider_conversation
+                    .set_upstream_context_tokens(upstream_context_tokens);
+            }
             if let ConversationEvent::ManagedSearchToolAuthorization { tool } = event {
                 if let Some(event) = persist_managed_search_tool_authorization(
                     &mut self.options,

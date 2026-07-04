@@ -16,6 +16,7 @@ fn conversation_runtime_clears_receiver_after_terminal_event() {
         pending_session_id: None,
         pending_user_entry_id: None,
         session_items: Vec::new(),
+        upstream_context_tokens: None,
     };
 
     assert_eq!(
@@ -37,6 +38,7 @@ fn conversation_runtime_keeps_receiver_after_retry_event() {
         pending_session_id: None,
         pending_user_entry_id: None,
         session_items: Vec::new(),
+        upstream_context_tokens: None,
     };
 
     sender
@@ -59,6 +61,7 @@ fn conversation_runtime_keeps_receiver_after_retry_event() {
         .send(ConversationWorkerEvent::Finished {
             response: ConversationResponse::assistant_text("完成"),
             metrics: None,
+            upstream_context_tokens: Some(48),
         })
         .expect("finish event should be queued");
 
@@ -71,6 +74,7 @@ fn conversation_runtime_keeps_receiver_after_retry_event() {
     );
     assert!(!runtime.is_running());
     assert!(runtime.take_session_items().is_empty());
+    assert_eq!(runtime.take_upstream_context_tokens(), Some(48));
 }
 
 #[test]
@@ -84,6 +88,7 @@ fn conversation_runtime_keeps_receiver_after_token_estimate_event() {
         pending_session_id: None,
         pending_user_entry_id: None,
         session_items: Vec::new(),
+        upstream_context_tokens: None,
     };
 
     sender
@@ -110,6 +115,7 @@ fn conversation_runtime_keeps_receiver_after_text_delta_event() {
         pending_session_id: None,
         pending_user_entry_id: None,
         session_items: Vec::new(),
+        upstream_context_tokens: None,
     };
 
     sender
@@ -140,6 +146,7 @@ fn conversation_runtime_buffers_session_events_without_ui_event() {
         pending_session_id: None,
         pending_user_entry_id: None,
         session_items: Vec::new(),
+        upstream_context_tokens: None,
     };
     let message = ConversationItem::text(Role::Assistant, "stored");
 
@@ -186,6 +193,7 @@ fn conversation_runtime_preserves_turn_entry_id_when_retry_replays_turn_start() 
         pending_session_id: None,
         pending_user_entry_id: None,
         session_items: Vec::new(),
+        upstream_context_tokens: None,
     };
 
     sender
@@ -223,6 +231,7 @@ fn conversation_interrupt_keeps_receiver_until_worker_terminal_event() {
         pending_session_id: None,
         pending_user_entry_id: None,
         session_items: Vec::new(),
+        upstream_context_tokens: None,
     };
 
     assert!(runtime.interrupt());

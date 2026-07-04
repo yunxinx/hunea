@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use provider_protocol::{ConversationItem, PromptCompletion, ToolCall as AiToolCall};
+use provider_protocol::{ConversationItem, PromptCompletion, TokenUsage, ToolCall as AiToolCall};
 use runtime_domain::{
     session::{
         ProviderRequestMetrics, RuntimeTerminalSnapshot, RuntimeToolActivityContent,
@@ -30,6 +30,8 @@ pub(super) struct RuntimeTurnState {
     current_provider_generation_started_at: Option<Instant>,
     llm_generation_duration: Duration,
     current_provider_output_tokens: Option<usize>,
+    current_provider_context_tokens: Option<usize>,
+    upstream_context_tokens: Option<usize>,
     llm_output_tokens_total: usize,
     terminal_output_by_id: HashMap<String, String>,
     tool_call_ids_by_index: HashMap<usize, String>,
@@ -54,6 +56,8 @@ impl RuntimeTurnState {
             current_provider_generation_started_at: None,
             llm_generation_duration: Duration::ZERO,
             current_provider_output_tokens: None,
+            current_provider_context_tokens: None,
+            upstream_context_tokens: None,
             llm_output_tokens_total: 0,
             terminal_output_by_id: HashMap::new(),
             tool_call_ids_by_index: HashMap::new(),
@@ -71,15 +75,27 @@ impl RuntimeTurnState {
         self.current_provider_turn_started_at = Some(now);
         self.current_provider_generation_started_at = None;
         self.current_provider_output_tokens = None;
+        self.current_provider_context_tokens = None;
         self.llm_output_progress = StreamingTokenProgress::new(self.model_id.clone());
     }
 
-    pub(super) fn record_provider_output_usage(&mut self, output_tokens: usize) {
-        self.current_provider_output_tokens = Some(
-            self.current_provider_output_tokens
-                .map(|current| current.max(output_tokens))
-                .unwrap_or(output_tokens),
-        );
+    pub(super) fn record_provider_usage(&mut self, usage: TokenUsage) {
+        if let Some(output_tokens) = usage.output_tokens {
+            let output_tokens = usize::try_from(output_tokens).unwrap_or(usize::MAX);
+            self.current_provider_output_tokens = Some(
+                self.current_provider_output_tokens
+                    .map(|current| current.max(output_tokens))
+                    .unwrap_or(output_tokens),
+            );
+        }
+
+        if let Some(context_tokens) = context_tokens_from_usage(usage) {
+            self.current_provider_context_tokens = Some(
+                self.current_provider_context_tokens
+                    .map(|current| current.max(context_tokens))
+                    .unwrap_or(context_tokens),
+            );
+        }
     }
 
     pub(super) fn complete_provider_turn(
@@ -87,11 +103,14 @@ impl RuntimeTurnState {
         response: &PromptCompletion,
         finished_at: Instant,
     ) {
+        if let Some(usage) = response.usage {
+            self.record_provider_usage(usage);
+        }
         let response_output_tokens = response
             .usage
             .as_ref()
             .and_then(|usage| usage.output_tokens)
-            .map(|tokens| tokens as usize);
+            .map(|tokens| usize::try_from(tokens).unwrap_or(usize::MAX));
         let turn_output_tokens = self
             .current_provider_output_tokens
             .max(response_output_tokens);
@@ -115,7 +134,9 @@ impl RuntimeTurnState {
 
         self.current_provider_turn_started_at = None;
         self.current_provider_generation_started_at = None;
+        self.upstream_context_tokens = self.current_provider_context_tokens;
         self.current_provider_output_tokens = None;
+        self.current_provider_context_tokens = None;
     }
 
     fn provider_turn_has_output(
@@ -398,6 +419,7 @@ impl RuntimeTurnState {
         ToolLoopCompletion {
             response: ToolLoopResponse::new(appended_items, reasoning_duration),
             metrics,
+            upstream_context_tokens: self.upstream_context_tokens,
         }
     }
 
@@ -420,6 +442,19 @@ impl RuntimeTurnState {
         let finished_at = self.reasoning_finished_at.unwrap_or(started_at);
         Some(finished_at.saturating_duration_since(started_at))
     }
+}
+
+fn context_tokens_from_usage(usage: TokenUsage) -> Option<usize> {
+    usage
+        .total_tokens
+        .or_else(|| match (usage.input_tokens, usage.output_tokens) {
+            (Some(input_tokens), Some(output_tokens)) => {
+                Some(input_tokens.saturating_add(output_tokens))
+            }
+            _ => None,
+        })
+        .or(usage.input_tokens)
+        .map(|tokens| usize::try_from(tokens).unwrap_or(usize::MAX))
 }
 
 fn observe_complete_token_total(

@@ -47,6 +47,7 @@ pub struct ContextBudgetProbe<'a> {
     prompt_prelude: Option<&'a PromptPreludeSnapshot>,
     tool_definitions: &'a [ToolDefinition],
     context_limit: ContextTokenLimit,
+    upstream_context_tokens: Option<usize>,
 }
 
 impl<'a> ContextBudgetProbe<'a> {
@@ -66,6 +67,7 @@ impl<'a> ContextBudgetProbe<'a> {
             prompt_prelude: None,
             tool_definitions,
             context_limit,
+            upstream_context_tokens: None,
         }
     }
 
@@ -76,6 +78,13 @@ impl<'a> ContextBudgetProbe<'a> {
         prompt_prelude: Option<&'a PromptPreludeSnapshot>,
     ) -> Self {
         self.prompt_prelude = prompt_prelude;
+        self
+    }
+
+    /// `with_upstream_context_tokens` 使用 provider 返回的总 token 数校准展示总量。
+    #[must_use]
+    pub fn with_upstream_context_tokens(mut self, upstream_context_tokens: Option<usize>) -> Self {
+        self.upstream_context_tokens = upstream_context_tokens;
         self
     }
 
@@ -191,12 +200,18 @@ fn collect_segments(
 
 fn finish_snapshot(
     probe: ContextBudgetProbe<'_>,
-    segments: Vec<ContextSegment>,
+    mut segments: Vec<ContextSegment>,
 ) -> ContextBudgetSnapshot {
-    let total_estimated_tokens = segments
-        .iter()
-        .map(|segment| segment.estimated_tokens)
-        .sum();
+    let total_estimated_tokens = match probe.upstream_context_tokens {
+        Some(upstream_context_tokens) => {
+            scale_segments_to_total(&mut segments, upstream_context_tokens);
+            upstream_context_tokens
+        }
+        None => segments
+            .iter()
+            .map(|segment| segment.estimated_tokens)
+            .sum(),
+    };
     let usage: ContextWindowUsage =
         context_window_usage(total_estimated_tokens, probe.context_limit);
 
@@ -205,6 +220,23 @@ fn finish_snapshot(
         segments,
         total_estimated_tokens,
         usage,
+    }
+}
+
+fn scale_segments_to_total(segments: &mut [ContextSegment], total_tokens: usize) {
+    if segments.is_empty() {
+        return;
+    }
+
+    let weights = segments
+        .iter()
+        .map(|segment| segment.estimated_tokens)
+        .collect::<Vec<_>>();
+    for (segment, estimated_tokens) in segments
+        .iter_mut()
+        .zip(distribute_tokens_by_weight(total_tokens, &weights))
+    {
+        segment.estimated_tokens = estimated_tokens;
     }
 }
 
@@ -616,6 +648,46 @@ mod tests {
         assert!(
             snapshot.segments[0].estimated_tokens > estimate_text_tokens("gpt-4o", "review "),
             "multimodal user segment should include provider payload structure instead of only visible text"
+        );
+    }
+
+    #[test]
+    fn upstream_context_tokens_scale_estimated_breakdown() {
+        let items = [
+            ConversationItem::text(Role::User, "first message"),
+            ConversationItem::text(Role::Assistant, "second message"),
+        ];
+        let snapshot = build_context_budget_snapshot_with_cancellation(
+            ContextBudgetProbe::new(
+                ProviderKind::OpenAiCompatible,
+                "gpt-4o",
+                &items,
+                &[],
+                ContextTokenLimit::try_from(200_000).expect("fixture limit should be valid"),
+            )
+            .with_upstream_context_tokens(Some(1_000)),
+            || false,
+        )
+        .expect("context budget snapshot should build")
+        .expect("never-cancelled snapshot should be present");
+
+        assert_eq!(snapshot.usage.used, 1_000);
+        assert_eq!(snapshot.total_estimated_tokens, 1_000);
+        assert_eq!(
+            snapshot
+                .segments
+                .iter()
+                .map(|segment| segment.estimated_tokens)
+                .sum::<usize>(),
+            1_000,
+            "estimated category proportions should be mapped onto the upstream total"
+        );
+        assert!(
+            snapshot
+                .segments
+                .iter()
+                .all(|segment| segment.estimated_tokens > 0),
+            "non-empty estimated categories should remain visible after scaling"
         );
     }
 

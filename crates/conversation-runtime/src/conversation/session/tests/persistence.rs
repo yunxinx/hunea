@@ -33,6 +33,7 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
         pending_session_id: None,
         pending_user_entry_id: None,
         session_items: Vec::new(),
+        upstream_context_tokens: None,
     };
     let sender_copy = sender.clone();
     let persistence = request.persistence_cloned();
@@ -57,6 +58,7 @@ fn conversation_worker_persists_config_change_and_flushes_finished_turn() {
         .send(ConversationWorkerEvent::Finished {
             response: ConversationResponse::assistant_text("hi"),
             metrics: None,
+            upstream_context_tokens: None,
         })
         .expect("finish event should queue");
 

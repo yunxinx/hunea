@@ -105,10 +105,7 @@ where
                     .observe_reasoning_chunk(&content, self.clock.now(), self.on_progress)
             }
             StreamEvent::UsageUpdated(usage) => {
-                if let Some(output_tokens) = usage.output_tokens {
-                    self.state
-                        .record_provider_output_usage(output_tokens as usize);
-                }
+                self.state.record_provider_usage(usage);
             }
             StreamEvent::ToolCallStarted { index, call_id, .. } => {
                 self.state.observe_tool_call_started(index, call_id);

@@ -145,6 +145,7 @@ pub struct ProviderConversation {
     prompt_prelude: Option<PromptPreludeSnapshot>,
     persisted_history: Vec<PersistedConversationItem>,
     pending_user_message: Option<ConversationItem>,
+    upstream_context_tokens: Option<usize>,
     persistence: Option<ProviderConversationPersistence>,
 }
 
@@ -208,6 +209,7 @@ impl ProviderConversation {
                 .and_then(|config| config.prompt_prelude.clone()),
             persisted_history,
             pending_user_message: None,
+            upstream_context_tokens: None,
             persistence: Some(ProviderConversationPersistence {
                 store,
                 session_id,
@@ -222,6 +224,7 @@ impl ProviderConversation {
         self.prompt_prelude = None;
         self.persisted_history.clear();
         self.pending_user_message = None;
+        self.upstream_context_tokens = None;
         if let Some(persistence) = self.persistence.as_mut() {
             persistence.session_id = None;
         }
@@ -231,6 +234,7 @@ impl ProviderConversation {
     pub fn set_system_prompt(&mut self, prompt: Option<String>) {
         self.system_prompt = prompt.and_then(normalize_system_prompt);
         self.prompt_prelude = None;
+        self.upstream_context_tokens = None;
     }
 
     /// `system_prompt` 返回当前生效的 system prompt。
@@ -246,12 +250,24 @@ impl ProviderConversation {
             .and_then(PromptPreludeSnapshot::effective_system_prompt)
             .and_then(normalize_system_prompt);
         self.prompt_prelude = prompt_prelude;
+        self.upstream_context_tokens = None;
     }
 
     /// `prompt_prelude` 返回当前 session 绑定的 prompt prelude 快照。
     #[must_use]
     pub fn prompt_prelude(&self) -> Option<&PromptPreludeSnapshot> {
         self.prompt_prelude.as_ref()
+    }
+
+    /// `upstream_context_tokens` 返回最近一次 provider usage 给出的上下文总量。
+    #[must_use]
+    pub fn upstream_context_tokens(&self) -> Option<usize> {
+        self.upstream_context_tokens
+    }
+
+    /// `set_upstream_context_tokens` 记录最近一次成功 turn 的 provider token 总量。
+    pub fn set_upstream_context_tokens(&mut self, upstream_context_tokens: Option<usize>) {
+        self.upstream_context_tokens = upstream_context_tokens;
     }
 
     /// `context_budget_probe_items` 返回 `/context` 估算使用的只读会话快照。
@@ -321,6 +337,7 @@ impl ProviderConversation {
 
         let user_message = turn.message().clone();
         self.pending_user_message = Some(user_message.clone());
+        self.upstream_context_tokens = None;
         let transcript_user_message =
             transcript_user_message.unwrap_or_else(|| TranscriptUserMessage {
                 content: user_message.text_content(),

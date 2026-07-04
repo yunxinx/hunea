@@ -51,17 +51,17 @@ impl ProviderClient for UsageProvider {
             sink.emit(StreamEvent::UsageUpdated(TokenUsage::new(
                 None,
                 Some(3),
-                None,
+                Some(46),
             )));
             sink.emit(StreamEvent::UsageUpdated(TokenUsage::new(
                 None,
                 Some(5),
-                None,
+                Some(48),
             )));
             let response = text_completion_with_usage(
                 Role::Assistant,
                 "done",
-                TokenUsage::new(None, Some(5), None),
+                TokenUsage::new(None, Some(5), Some(48)),
             );
             sink.emit(StreamEvent::TurnCompleted(response.clone()));
             Ok(response)

@@ -48,7 +48,7 @@ pub(crate) fn context_usage_summary(model_id: &str, usage: ContextWindowUsage) -
     let percent = format_percent(context_usage_percent(usage));
 
     format!(
-        "{model_id} · {}/{} tokens ({})",
+        "{model_id} · ~{}/{} tokens ({})",
         used,
         format_compact_tokens(usage.limit.get() as usize),
         percent,
@@ -262,7 +262,7 @@ mod tests {
             },
         );
 
-        assert_eq!(text, "gpt-4o · 32k/128k tokens (25.0%)");
+        assert_eq!(text, "gpt-4o · ~32k/128k tokens (25.0%)");
     }
 
     #[test]
@@ -275,7 +275,7 @@ mod tests {
             },
         );
 
-        assert_eq!(text, "deepseek-v4-flash · 1.2k/256k tokens (0.5%)");
+        assert_eq!(text, "deepseek-v4-flash · ~1.2k/256k tokens (0.5%)");
     }
 
     #[test]
@@ -288,7 +288,7 @@ mod tests {
             },
         );
 
-        assert_eq!(text, "local/qwen3 · 1.2k/256k tokens (0.5%)");
+        assert_eq!(text, "local/qwen3 · ~1.2k/256k tokens (0.5%)");
     }
 
     #[test]
@@ -301,7 +301,7 @@ mod tests {
             },
         );
 
-        assert_eq!(text, "local/qwen3 · 4294967.3k/256k tokens (1677721.6%)");
+        assert_eq!(text, "local/qwen3 · ~4294967.3k/256k tokens (1677721.6%)");
     }
 
     #[test]

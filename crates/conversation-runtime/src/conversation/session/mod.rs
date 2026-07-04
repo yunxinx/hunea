@@ -59,6 +59,7 @@ enum ConversationWorkerEvent {
     Finished {
         response: runtime_domain::session::ConversationResponse,
         metrics: Option<crate::ProviderRequestMetrics>,
+        upstream_context_tokens: Option<usize>,
     },
 }
 
@@ -78,6 +79,7 @@ pub struct ConversationWorker {
     pending_session_id: Option<SessionId>,
     pending_user_entry_id: Option<String>,
     session_items: Vec<PersistedConversationItem>,
+    upstream_context_tokens: Option<usize>,
 }
 
 impl ConversationWorker {
@@ -124,6 +126,7 @@ impl ConversationWorker {
         self.pending_session_id = None;
         self.pending_user_entry_id = None;
         self.session_items.clear();
+        self.upstream_context_tokens = None;
     }
 
     pub fn is_running(&self) -> bool {
@@ -142,6 +145,7 @@ impl ConversationWorker {
         self.pending_session_id = None;
         self.pending_user_entry_id = None;
         self.session_items.clear();
+        self.upstream_context_tokens = None;
     }
 
     pub fn interrupt(&mut self) -> bool {
@@ -182,6 +186,10 @@ impl ConversationWorker {
 
     pub fn take_session_items(&mut self) -> Vec<PersistedConversationItem> {
         std::mem::take(&mut self.session_items)
+    }
+
+    pub fn take_upstream_context_tokens(&mut self) -> Option<usize> {
+        self.upstream_context_tokens.take()
     }
 }
 
@@ -345,6 +353,7 @@ async fn run_conversation_worker(
                 let _ = sender.send(ConversationWorkerEvent::Finished {
                     response: completion.response,
                     metrics: completion.metrics,
+                    upstream_context_tokens: completion.upstream_context_tokens,
                 });
                 drop(session_sender);
                 let _ = session_actor.await;

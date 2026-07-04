@@ -4,6 +4,10 @@ use std::{
 };
 
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
+use runtime_domain::dynamic_environment::{
+    DynamicEnvironmentSessionConfig, DynamicEnvironmentSnapshotKind, DynamicEnvironmentSourceKind,
+    DynamicEnvironmentSourceSelection,
+};
 use runtime_domain::prompt_assembly::{
     PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
 };
@@ -324,13 +328,85 @@ fn prepare_turn_with_transcript_keeps_provider_and_transcript_user_messages_sepa
         Some("<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message".to_string())
     );
     assert_eq!(
-        persistence.current_user_message.text_content(),
-        "<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message"
+        persistence
+            .current_user_items
+            .last()
+            .map(ConversationItem::text_content),
+        Some("<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message".to_string())
+    );
+    assert_eq!(
+        persistence
+            .current_user_items
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["<skill>\n<name>code-review</name>\nbody\n</skill>\n\nraw user message"]
     );
     assert_eq!(persistence.transcript_user_message, transcript_user_message);
     assert_eq!(
         persistence.transcript_replay_after_user,
         transcript_replay_after_user
+    );
+}
+
+#[test]
+fn prepare_turn_with_transcript_can_prepend_provider_visible_meta_items() {
+    let work_dir = PathBuf::from("/tmp/hunea-provider-conversation-prefix");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let mut conversation =
+        ProviderConversation::with_session_store(store, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    let turn = ConversationTurnRequest::new(
+        "local",
+        ProviderKind::OpenAiCompatible,
+        "qwen3",
+        Some("http://127.0.0.1:1234/v1".to_string()),
+        None,
+        None,
+        ConversationItem::text(Role::User, "actual user message"),
+    );
+    let meta_item = ConversationItem::text(
+        Role::User,
+        "<system-reminder>\nEnvironment baseline\n</system-reminder>",
+    );
+
+    let request = conversation
+        .prepare_turn_with_transcript_and_prefix_items(
+            &turn,
+            vec![meta_item.clone()],
+            Some(TranscriptUserMessage {
+                content: "actual user message".to_string(),
+                skill_bindings: Vec::new(),
+                custom_prompt_bindings: Vec::new(),
+            }),
+            Vec::new(),
+        )
+        .expect("turn should prepare");
+    let persistence = request
+        .persistence_cloned()
+        .expect("persistence should be attached");
+
+    assert_eq!(
+        request
+            .items()
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec![
+            "<system-reminder>\nEnvironment baseline\n</system-reminder>",
+            "actual user message"
+        ]
+    );
+    assert_eq!(
+        persistence
+            .current_user_items
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec![
+            "<system-reminder>\nEnvironment baseline\n</system-reminder>",
+            "actual user message"
+        ]
     );
 }
 
@@ -422,6 +498,8 @@ fn persisted_conversation_restores_latest_system_prompt_snapshot() {
             model: "qwen3".to_string(),
             system_prompt: Some("keep it sharp".to_string()),
             prompt_prelude: None,
+            dynamic_environment_session_config: None,
+            dynamic_environment_observations: Vec::new(),
         },
     ))
     .expect("config snapshot should persist");
@@ -471,6 +549,8 @@ fn persisted_conversation_restores_prompt_prelude_snapshot() {
             model: "qwen3".to_string(),
             system_prompt: Some("stale fallback".to_string()),
             prompt_prelude: Some(prompt_prelude.clone()),
+            dynamic_environment_session_config: None,
+            dynamic_environment_observations: Vec::new(),
         },
     ))
     .expect("config snapshot should persist");
@@ -490,6 +570,51 @@ fn persisted_conversation_restores_prompt_prelude_snapshot() {
     assert_eq!(
         session.system_prompt(),
         Some("builtin core\n\n<available_skills></available_skills>")
+    );
+}
+
+#[test]
+fn persisted_conversation_restores_dynamic_environment_session_config() {
+    let work_dir = tempdir_path("restored-dynamic-config");
+    let store = Arc::new(InMemorySessionStore::new());
+    let session_id = block_on_session(store.create_session(sample_header(&work_dir, "qwen3")))
+        .expect("session should be created");
+    let dynamic_environment_session_config = DynamicEnvironmentSessionConfig {
+        baseline_enabled: false,
+        changes_enabled: true,
+        source_selections: vec![DynamicEnvironmentSourceSelection {
+            snapshot_kind: DynamicEnvironmentSnapshotKind::Changes,
+            source_kind: DynamicEnvironmentSourceKind::Date,
+            enabled: true,
+        }],
+    };
+    block_on_session(store.append_config_change(
+        &session_id,
+        session_store::ConfigSnapshot {
+            provider_id: "local".to_string(),
+            model: "qwen3".to_string(),
+            system_prompt: None,
+            prompt_prelude: None,
+            dynamic_environment_session_config: Some(dynamic_environment_session_config.clone()),
+            dynamic_environment_observations: Vec::new(),
+        },
+    ))
+    .expect("config snapshot should persist");
+
+    let restored_state =
+        block_on_session(store.load_session(&session_id, None)).expect("session state should load");
+    let store_trait: Arc<dyn SessionStore> = store;
+    let session = ProviderConversation::with_resolved_session_store(
+        store_trait,
+        sample_header(&work_dir, "qwen3"),
+        Some(session_id),
+        &restored_state,
+    )
+    .expect("persisted conversation should load config");
+
+    assert_eq!(
+        session.dynamic_environment_session_config(),
+        Some(&dynamic_environment_session_config)
     );
 }
 

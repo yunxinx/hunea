@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use provider_protocol::{ConversationItem, Role};
 use runtime_domain::{
+    dynamic_environment::{DynamicEnvironmentObservation, DynamicEnvironmentSessionConfig},
     prompt_assembly::PromptPreludeSnapshot,
     session::{
         ConversationTurnRequest, RuntimeTarget, TranscriptReplayItem, TranscriptUserMessage,
@@ -143,8 +144,11 @@ impl PreparedConversationRequest {
 pub struct ProviderConversation {
     system_prompt: Option<String>,
     prompt_prelude: Option<PromptPreludeSnapshot>,
+    dynamic_environment_session_config: Option<DynamicEnvironmentSessionConfig>,
+    dynamic_environment_observations: Vec<DynamicEnvironmentObservation>,
     persisted_history: Vec<PersistedConversationItem>,
-    pending_user_message: Option<ConversationItem>,
+    pending_user_items: Vec<ConversationItem>,
+    pending_dynamic_environment_observations: Option<Vec<DynamicEnvironmentObservation>>,
     upstream_context_tokens: Option<usize>,
     persistence: Option<ProviderConversationPersistence>,
 }
@@ -207,8 +211,18 @@ impl ProviderConversation {
                 .latest_config
                 .as_ref()
                 .and_then(|config| config.prompt_prelude.clone()),
+            dynamic_environment_session_config: restored_state
+                .latest_config
+                .as_ref()
+                .and_then(|config| config.dynamic_environment_session_config.clone()),
+            dynamic_environment_observations: restored_state
+                .latest_config
+                .as_ref()
+                .map(|config| config.dynamic_environment_observations.clone())
+                .unwrap_or_default(),
             persisted_history,
-            pending_user_message: None,
+            pending_user_items: Vec::new(),
+            pending_dynamic_environment_observations: None,
             upstream_context_tokens: None,
             persistence: Some(ProviderConversationPersistence {
                 store,
@@ -222,8 +236,11 @@ impl ProviderConversation {
     pub fn clear(&mut self) {
         self.system_prompt = None;
         self.prompt_prelude = None;
+        self.dynamic_environment_session_config = None;
+        self.dynamic_environment_observations.clear();
         self.persisted_history.clear();
-        self.pending_user_message = None;
+        self.pending_user_items.clear();
+        self.pending_dynamic_environment_observations = None;
         self.upstream_context_tokens = None;
         if let Some(persistence) = self.persistence.as_mut() {
             persistence.session_id = None;
@@ -259,6 +276,27 @@ impl ProviderConversation {
         self.prompt_prelude.as_ref()
     }
 
+    /// `set_dynamic_environment_session_config` 设置当前 session 绑定的动态环境配置。
+    pub fn set_dynamic_environment_session_config(
+        &mut self,
+        dynamic_environment_session_config: Option<DynamicEnvironmentSessionConfig>,
+    ) {
+        self.dynamic_environment_session_config = dynamic_environment_session_config;
+        self.upstream_context_tokens = None;
+    }
+
+    /// `dynamic_environment_session_config` 返回当前 session 绑定的动态环境配置。
+    #[must_use]
+    pub fn dynamic_environment_session_config(&self) -> Option<&DynamicEnvironmentSessionConfig> {
+        self.dynamic_environment_session_config.as_ref()
+    }
+
+    /// `dynamic_environment_observations` 返回最近已持久化的动态环境观测。
+    #[must_use]
+    pub fn dynamic_environment_observations(&self) -> &[DynamicEnvironmentObservation] {
+        &self.dynamic_environment_observations
+    }
+
     /// `upstream_context_tokens` 返回最近一次 provider usage 给出的上下文总量。
     #[must_use]
     pub fn upstream_context_tokens(&self) -> Option<usize> {
@@ -280,7 +318,7 @@ impl ProviderConversation {
         let mut items = Vec::with_capacity(
             self.persisted_history.len()
                 + usize::from(self.system_prompt.is_some())
-                + usize::from(self.pending_user_message.is_some()),
+                + self.pending_user_items.len(),
         );
         if let Some(system_prompt) = self.system_prompt.as_deref() {
             items.push(ConversationItem::text(Role::System, system_prompt));
@@ -290,9 +328,7 @@ impl ProviderConversation {
                 .iter()
                 .map(|persisted_item| persisted_item.item.clone()),
         );
-        if let Some(pending) = self.pending_user_message.as_ref() {
-            items.push(pending.clone());
-        }
+        items.extend(self.pending_user_items.iter().cloned());
         Arc::from(items)
     }
 
@@ -328,15 +364,80 @@ impl ProviderConversation {
         transcript_user_message: Option<TranscriptUserMessage>,
         transcript_replay_after_user: Vec<TranscriptReplayItem>,
     ) -> Result<PreparedConversationRequest, ProviderConversationError> {
+        self.prepare_turn_with_transcript_and_prefix_items(
+            turn,
+            Vec::new(),
+            transcript_user_message,
+            transcript_replay_after_user,
+        )
+    }
+
+    /// `prepare_turn_with_transcript_and_prefix_items` 允许当前 turn 在真实用户消息前追加 provider-visible meta items。
+    #[must_use = "prepared turn requests must be submitted or explicitly discarded"]
+    pub fn prepare_turn_with_transcript_and_prefix_items(
+        &mut self,
+        turn: &ConversationTurnRequest,
+        provider_prefix_items: Vec<ConversationItem>,
+        transcript_user_message: Option<TranscriptUserMessage>,
+        transcript_replay_after_user: Vec<TranscriptReplayItem>,
+    ) -> Result<PreparedConversationRequest, ProviderConversationError> {
+        self.prepare_turn_with_transcript_prefix_items_and_dynamic_environment(
+            turn,
+            provider_prefix_items,
+            transcript_user_message,
+            transcript_replay_after_user,
+            None,
+        )
+    }
+
+    /// `prepare_turn_with_transcript_prefix_texts_and_dynamic_environment` 允许上层用文本形式传入 provider-visible meta user items。
+    #[must_use = "prepared turn requests must be submitted or explicitly discarded"]
+    pub fn prepare_turn_with_transcript_prefix_texts_and_dynamic_environment(
+        &mut self,
+        turn: &ConversationTurnRequest,
+        provider_prefix_texts: Vec<String>,
+        transcript_user_message: Option<TranscriptUserMessage>,
+        transcript_replay_after_user: Vec<TranscriptReplayItem>,
+        dynamic_environment_observations: Option<Vec<DynamicEnvironmentObservation>>,
+    ) -> Result<PreparedConversationRequest, ProviderConversationError> {
+        let provider_prefix_items = provider_prefix_texts
+            .into_iter()
+            .map(|text| ConversationItem::text(Role::User, text))
+            .collect();
+        self.prepare_turn_with_transcript_prefix_items_and_dynamic_environment(
+            turn,
+            provider_prefix_items,
+            transcript_user_message,
+            transcript_replay_after_user,
+            dynamic_environment_observations,
+        )
+    }
+
+    /// `prepare_turn_with_transcript_prefix_items_and_dynamic_environment` 同时绑定本轮动态环境快照。
+    #[must_use = "prepared turn requests must be submitted or explicitly discarded"]
+    pub fn prepare_turn_with_transcript_prefix_items_and_dynamic_environment(
+        &mut self,
+        turn: &ConversationTurnRequest,
+        provider_prefix_items: Vec<ConversationItem>,
+        transcript_user_message: Option<TranscriptUserMessage>,
+        transcript_replay_after_user: Vec<TranscriptReplayItem>,
+        dynamic_environment_observations: Option<Vec<DynamicEnvironmentObservation>>,
+    ) -> Result<PreparedConversationRequest, ProviderConversationError> {
         if turn.message().role() != Some(Role::User) {
             return Err(ProviderConversationError::NonUserTurnMessage);
         }
-        if self.pending_user_message.is_some() {
+        if !self.pending_user_items.is_empty() {
             return Err(ProviderConversationError::PendingTurnAlreadyActive);
         }
 
         let user_message = turn.message().clone();
-        self.pending_user_message = Some(user_message.clone());
+        let mut current_user_items = provider_prefix_items;
+        current_user_items.push(user_message.clone());
+        self.pending_user_items = current_user_items.clone();
+        let next_dynamic_environment_observations = dynamic_environment_observations
+            .unwrap_or_else(|| self.dynamic_environment_observations.clone());
+        self.pending_dynamic_environment_observations =
+            Some(next_dynamic_environment_observations.clone());
         self.upstream_context_tokens = None;
         let transcript_user_message =
             transcript_user_message.unwrap_or_else(|| TranscriptUserMessage {
@@ -358,15 +459,19 @@ impl ProviderConversation {
                         model: turn.model_id().to_string(),
                         system_prompt,
                         prompt_prelude,
+                        dynamic_environment_session_config: self
+                            .dynamic_environment_session_config
+                            .clone(),
+                        dynamic_environment_observations: next_dynamic_environment_observations,
                     },
-                    current_user_message: user_message.clone(),
+                    current_user_items: current_user_items.clone(),
                     transcript_user_message,
                     transcript_replay_after_user,
                 });
 
         Ok(PreparedConversationRequest::from_turn(
             turn,
-            self.provider_items_with_pending_user(&user_message),
+            self.provider_items_with_pending_user_items(&current_user_items),
             self.prompt_prelude.clone(),
             persistence,
         ))

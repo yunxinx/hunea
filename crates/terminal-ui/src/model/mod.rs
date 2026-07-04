@@ -201,6 +201,7 @@ impl Model {
                     discovered_skills: Vec::new(),
                     manual_skills: Vec::new(),
                     tool_candidates: Vec::new(),
+                    dynamic_environment_candidates: Vec::new(),
                     builtin_core_system_body: String::new(),
                     global_core_system_override: None,
                     project_core_system_override: None,

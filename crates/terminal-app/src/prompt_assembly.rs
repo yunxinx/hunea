@@ -6,6 +6,12 @@ use std::{
 };
 
 use color_eyre::eyre::{Result, WrapErr};
+use runtime_domain::dynamic_environment::{
+    DynamicEnvironmentObservation, DynamicEnvironmentSessionConfig, DynamicEnvironmentSnapshotKind,
+    DynamicEnvironmentSourceKind, DynamicEnvironmentSourceSelection,
+    build_dynamic_environment_snapshot, default_dynamic_environment_selections,
+    enabled_dynamic_environment_sources,
+};
 use runtime_domain::paths::hunea_config_dir;
 use runtime_domain::prompt_assembly::persistence::{
     PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry, PersistedToolSelectionEntry,
@@ -13,7 +19,8 @@ use runtime_domain::prompt_assembly::persistence::{
     load_project_prompt_assembly_state, save_project_prompt_assembly_state,
 };
 use runtime_domain::prompt_assembly::{
-    CoreSystemPromptInput, PromptAssemblyDiscoveredSkill, PromptAssemblyEditorTarget,
+    CoreSystemPromptInput, PromptAssemblyDiscoveredSkill,
+    PromptAssemblyDynamicEnvironmentCandidate, PromptAssemblyEditorTarget,
     PromptAssemblyExtraPromptCandidate, PromptAssemblyInput, PromptAssemblyManagedSource,
     PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
     PromptAssemblyMutation, PromptAssemblyToolCandidate, PromptPreludeSection,
@@ -68,6 +75,8 @@ const SKILL_DISCOVERY_GENERATED_END: &str = "<!-- hunea:skill-discovery generate
 const TOOL_GUIDELINES_GENERATED_START: &str = "<!-- hunea:tool-guidelines generated:start -->";
 const TOOL_GUIDELINES_GENERATED_END: &str = "<!-- hunea:tool-guidelines generated:end -->";
 const DEFAULT_TOOL_GUIDELINES_REQUESTED_ORDER: u16 = 10;
+const DEFAULT_DYNAMIC_BASELINE_REQUESTED_ORDER: u16 = 15;
+const DEFAULT_DYNAMIC_CHANGES_REQUESTED_ORDER: u16 = 16;
 const DEFAULT_INSTRUCTIONS_REQUESTED_ORDER_START: u16 = 20;
 const DEFAULT_SKILL_DISCOVERY_REQUESTED_ORDER: u16 = 30;
 
@@ -168,6 +177,9 @@ struct PromptAssemblyResolutionContext<'a> {
     skill_discovery_skill_state: &'a [PersistedSkillDiscoverySkillEntry],
     tool_definitions: &'a [ToolDefinition],
     tool_selection_state: &'a [PersistedToolSelectionEntry],
+    dynamic_environment_selection_state: &'a [DynamicEnvironmentSourceSelection],
+    dynamic_environment_observations:
+        &'a HashMap<DynamicEnvironmentSourceKind, DynamicEnvironmentObservation>,
     global_state: &'a PromptAssemblyScopeState,
     project_state: &'a PromptAssemblyScopeState,
 }
@@ -424,6 +436,44 @@ pub(crate) fn load_initial_prompt_prelude(
     Ok(load_initial_prompt_assembly(store, work_dir, &[])?.prelude)
 }
 
+pub(crate) fn dynamic_environment_session_config_from_manager(
+    manager: &PromptAssemblyManagerSnapshot,
+) -> DynamicEnvironmentSessionConfig {
+    let mut source_selections = manager
+        .dynamic_environment_candidates
+        .iter()
+        .flat_map(|candidate| {
+            [
+                DynamicEnvironmentSourceSelection {
+                    snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
+                    source_kind: candidate.source_kind,
+                    enabled: candidate.baseline_selected,
+                },
+                DynamicEnvironmentSourceSelection {
+                    snapshot_kind: DynamicEnvironmentSnapshotKind::Changes,
+                    source_kind: candidate.source_kind,
+                    enabled: candidate.changes_selected,
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+    source_selections.sort_by_key(|selection| (selection.snapshot_kind, selection.source_kind));
+
+    DynamicEnvironmentSessionConfig {
+        baseline_enabled: manager
+            .snapshot
+            .active_sources
+            .iter()
+            .any(|source| source.kind == PromptSourceKind::DynamicEnvironmentBaseline),
+        changes_enabled: manager
+            .snapshot
+            .active_sources
+            .iter()
+            .any(|source| source.kind == PromptSourceKind::DynamicEnvironmentChanges),
+        source_selections,
+    }
+}
+
 #[cfg(test)]
 fn resolve_initial_prompt_prelude_with_overrides(
     work_dir: &Path,
@@ -495,6 +545,10 @@ fn resolve_prompt_assembly_manager_snapshot_with_overrides(
         &mut effective_global_state,
         &mut effective_project_state,
     );
+    ensure_default_dynamic_environment_sources(
+        &mut effective_global_state,
+        &mut effective_project_state,
+    );
     let discovered_skills = discover_skills(work_dir, global_skill_root_override);
     let discovered_instruction_files =
         discover_instruction_files(work_dir, global_instructions_path_override);
@@ -518,6 +572,9 @@ fn resolve_prompt_assembly_manager_snapshot_with_overrides(
     );
     let tool_selection_state =
         merged_tool_selection_state(global_state, project_state, tool_definitions);
+    let dynamic_environment_selection_state =
+        merged_dynamic_environment_selection_state(global_state, project_state);
+    let dynamic_environment_observations = observe_dynamic_environment_inventory(work_dir);
     let skills_by_name = effective_discovered_skills
         .iter()
         .map(|skill| (skill.name.clone(), skill.clone()))
@@ -529,6 +586,8 @@ fn resolve_prompt_assembly_manager_snapshot_with_overrides(
         skill_discovery_skill_state: &skill_discovery_skill_state,
         tool_definitions,
         tool_selection_state: &tool_selection_state,
+        dynamic_environment_selection_state: &dynamic_environment_selection_state,
+        dynamic_environment_observations: &dynamic_environment_observations,
         global_state,
         project_state,
     };
@@ -578,6 +637,13 @@ fn resolve_prompt_assembly_manager_snapshot_with_overrides(
         if !matches!(source.status, PromptSourceStatus::Active { .. }) {
             continue;
         }
+        if matches!(
+            source.kind,
+            PromptSourceKind::DynamicEnvironmentBaseline
+                | PromptSourceKind::DynamicEnvironmentChanges
+        ) {
+            continue;
+        }
 
         let body = match source.kind {
             PromptSourceKind::CoreSystemPrompt => {
@@ -625,6 +691,12 @@ fn resolve_prompt_assembly_manager_snapshot_with_overrides(
         tool_candidates: tool_candidate_inventory(
             tool_definitions,
             &tool_selection_state,
+            global_state,
+            project_state,
+        ),
+        dynamic_environment_candidates: dynamic_environment_candidate_inventory(
+            &dynamic_environment_observations,
+            &dynamic_environment_selection_state,
             global_state,
             project_state,
         ),
@@ -738,6 +810,24 @@ fn apply_mutation_to_scope_states(
             set_tool_selected(
                 scope_state_mut(global_state, project_state, scope),
                 &tool_name,
+                selected,
+            );
+            Ok(())
+        }
+        PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
+            snapshot_kind,
+            source_kind,
+            selected,
+        } => {
+            ensure_dynamic_environment_selection_state_materialized(
+                global_state,
+                project_state,
+                PromptAssemblyScope::Global,
+            );
+            set_dynamic_environment_source_selected(
+                scope_state_mut(global_state, project_state, PromptAssemblyScope::Global),
+                snapshot_kind,
+                source_kind,
                 selected,
             );
             Ok(())
@@ -1045,6 +1135,8 @@ fn resolvable_for_entry(
         }
         PromptSourceKind::SkillDiscovery => true,
         PromptSourceKind::ToolGuidelines => true,
+        PromptSourceKind::DynamicEnvironmentBaseline
+        | PromptSourceKind::DynamicEnvironmentChanges => true,
         PromptSourceKind::LongLivedSkill => skills_by_name.contains_key(&entry.reference_id),
         PromptSourceKind::CoreSystemPrompt => true,
     }
@@ -1082,6 +1174,16 @@ fn body_for_entry(
             context.global_state,
             context.project_state,
         )),
+        PromptSourceKind::DynamicEnvironmentBaseline => dynamic_environment_preview_body(
+            context.dynamic_environment_observations,
+            DynamicEnvironmentSnapshotKind::Baseline,
+            context.dynamic_environment_selection_state,
+        ),
+        PromptSourceKind::DynamicEnvironmentChanges => dynamic_environment_preview_body(
+            context.dynamic_environment_observations,
+            DynamicEnvironmentSnapshotKind::Changes,
+            context.dynamic_environment_selection_state,
+        ),
         PromptSourceKind::CoreSystemPrompt => None,
     }
 }
@@ -1117,7 +1219,9 @@ fn collision_key_for_entry(entry: &PersistedPromptAssemblyEntry) -> Option<Strin
     match entry.kind {
         PromptSourceKind::InstructionsFile
         | PromptSourceKind::SkillDiscovery
-        | PromptSourceKind::ToolGuidelines => None,
+        | PromptSourceKind::ToolGuidelines
+        | PromptSourceKind::DynamicEnvironmentBaseline
+        | PromptSourceKind::DynamicEnvironmentChanges => None,
         PromptSourceKind::ExtraPrompt | PromptSourceKind::LongLivedSkill => {
             Some(entry.reference_id.clone())
         }
@@ -1175,7 +1279,12 @@ fn scope_origin(scope: PromptAssemblyScope) -> PromptSourceOrigin {
 }
 
 fn entry_origin(scope: PromptAssemblyScope, kind: PromptSourceKind) -> PromptSourceOrigin {
-    if kind == PromptSourceKind::ToolGuidelines {
+    if matches!(
+        kind,
+        PromptSourceKind::ToolGuidelines
+            | PromptSourceKind::DynamicEnvironmentBaseline
+            | PromptSourceKind::DynamicEnvironmentChanges
+    ) {
         PromptSourceOrigin::Builtin
     } else {
         scope_origin(scope)
@@ -1215,6 +1324,11 @@ fn prompt_source_effective_scope(
         }
         PromptSourceKind::ToolGuidelines => {
             tool_guidelines_scope(global_state, project_state, fallback)
+        }
+        PromptSourceKind::DynamicEnvironmentBaseline
+        | PromptSourceKind::DynamicEnvironmentChanges => {
+            let _ = (global_state, project_state, fallback);
+            PromptAssemblyScope::Global
         }
         PromptSourceKind::CoreSystemPrompt
         | PromptSourceKind::InstructionsFile
@@ -1299,6 +1413,10 @@ fn ensure_prompt_source_entry_materialized(
                 kind,
             ));
         }
+        PromptSourceKind::DynamicEnvironmentBaseline
+        | PromptSourceKind::DynamicEnvironmentChanges => {
+            ensure_default_dynamic_environment_sources(global_state, project_state);
+        }
         PromptSourceKind::InstructionsFile => {
             let discovered_instruction_files = discover_instruction_files(work_dir, None);
             ensure_discovered_instruction_entries(
@@ -1321,6 +1439,7 @@ fn ensure_active_prompt_source_ordering_materialized(
 ) {
     ensure_default_skill_discovery_source(global_state, project_state);
     ensure_default_tool_guidelines_source(global_state, project_state);
+    ensure_default_dynamic_environment_sources(global_state, project_state);
     let discovered_instruction_files = discover_instruction_files(work_dir, None);
     ensure_discovered_instruction_entries(
         global_state,
@@ -1362,6 +1481,18 @@ fn ensure_tool_selection_state_materialized(
     let state = scope_state_mut(global_state, project_state, scope);
     if state.tool_selections != merged_state {
         state.tool_selections = merged_state;
+    }
+}
+
+fn ensure_dynamic_environment_selection_state_materialized(
+    global_state: &mut PromptAssemblyScopeState,
+    project_state: &mut PromptAssemblyScopeState,
+    scope: PromptAssemblyScope,
+) {
+    let merged_state = merged_dynamic_environment_selection_state(global_state, project_state);
+    let state = scope_state_mut(global_state, project_state, scope);
+    if state.dynamic_environment_sources != merged_state {
+        state.dynamic_environment_sources = merged_state;
     }
 }
 
@@ -1665,6 +1796,8 @@ fn remove_prompt_source(
         PromptSourceKind::InstructionsFile
             | PromptSourceKind::SkillDiscovery
             | PromptSourceKind::ToolGuidelines
+            | PromptSourceKind::DynamicEnvironmentBaseline
+            | PromptSourceKind::DynamicEnvironmentChanges
     ) {
         return;
     }
@@ -2587,6 +2720,53 @@ fn ensure_default_tool_guidelines_source(
     ensure_tool_guidelines_entry_exists(target);
 }
 
+fn ensure_dynamic_environment_entry_exists(
+    state: &mut PromptAssemblyScopeState,
+    kind: PromptSourceKind,
+) {
+    let (reference_id, title, requested_order) = match kind {
+        PromptSourceKind::DynamicEnvironmentBaseline => (
+            "env-baseline",
+            "Env baseline",
+            DEFAULT_DYNAMIC_BASELINE_REQUESTED_ORDER,
+        ),
+        PromptSourceKind::DynamicEnvironmentChanges => (
+            "env-changes",
+            "Env changes",
+            DEFAULT_DYNAMIC_CHANGES_REQUESTED_ORDER,
+        ),
+        _ => return,
+    };
+    if state
+        .entries
+        .iter()
+        .any(|entry| entry.kind == kind && entry.reference_id == reference_id)
+    {
+        return;
+    }
+    state.entries.push(PersistedPromptAssemblyEntry {
+        reference_id: reference_id.to_string(),
+        kind,
+        title: title.to_string(),
+        enabled: true,
+        requested_order: Some(requested_order),
+    });
+}
+
+fn ensure_default_dynamic_environment_sources(
+    global_state: &mut PromptAssemblyScopeState,
+    _project_state: &mut PromptAssemblyScopeState,
+) {
+    ensure_dynamic_environment_entry_exists(
+        global_state,
+        PromptSourceKind::DynamicEnvironmentBaseline,
+    );
+    ensure_dynamic_environment_entry_exists(
+        global_state,
+        PromptSourceKind::DynamicEnvironmentChanges,
+    );
+}
+
 fn default_tool_guidelines_requested_order(entries: &[PersistedPromptAssemblyEntry]) -> u16 {
     entries
         .iter()
@@ -2684,6 +2864,175 @@ fn tool_candidate_inventory(
             .then_with(|| natural_sort_text_cmp(&left.name, &right.name))
     });
     inventory
+}
+
+fn merged_dynamic_environment_selection_state(
+    global_state: &PromptAssemblyScopeState,
+    _project_state: &PromptAssemblyScopeState,
+) -> Vec<DynamicEnvironmentSourceSelection> {
+    let mut selections = default_dynamic_environment_selections();
+    apply_dynamic_environment_selection_overrides(
+        &mut selections,
+        &global_state.dynamic_environment_sources,
+    );
+    selections.sort_by_key(|selection| (selection.snapshot_kind, selection.source_kind));
+    selections
+}
+
+fn apply_dynamic_environment_selection_overrides(
+    selections: &mut [DynamicEnvironmentSourceSelection],
+    overrides: &[DynamicEnvironmentSourceSelection],
+) {
+    for override_selection in overrides {
+        if let Some(selection) = selections.iter_mut().find(|selection| {
+            selection.snapshot_kind == override_selection.snapshot_kind
+                && selection.source_kind == override_selection.source_kind
+        }) {
+            selection.enabled = override_selection.enabled;
+        }
+    }
+}
+
+fn dynamic_environment_candidate_inventory(
+    observations_by_source: &HashMap<DynamicEnvironmentSourceKind, DynamicEnvironmentObservation>,
+    selection_state: &[DynamicEnvironmentSourceSelection],
+    _global_state: &PromptAssemblyScopeState,
+    _project_state: &PromptAssemblyScopeState,
+) -> Vec<PromptAssemblyDynamicEnvironmentCandidate> {
+    [
+        DynamicEnvironmentSourceKind::GitReference,
+        DynamicEnvironmentSourceKind::GitWorkingTree,
+        DynamicEnvironmentSourceKind::Date,
+        DynamicEnvironmentSourceKind::Workdir,
+    ]
+    .into_iter()
+    .map(|source_kind| {
+        let baseline_selected = dynamic_environment_selection_enabled(
+            selection_state,
+            DynamicEnvironmentSnapshotKind::Baseline,
+            source_kind,
+        );
+        let changes_selected = dynamic_environment_selection_enabled(
+            selection_state,
+            DynamicEnvironmentSnapshotKind::Changes,
+            source_kind,
+        );
+        PromptAssemblyDynamicEnvironmentCandidate {
+            source_kind,
+            label: source_kind.label().to_string(),
+            origin: PromptSourceOrigin::Builtin,
+            baseline_selected,
+            changes_selected,
+            baseline_preview_body: dynamic_environment_candidate_preview_body(
+                observations_by_source,
+                DynamicEnvironmentSnapshotKind::Baseline,
+                source_kind,
+            ),
+            changes_preview_body: dynamic_environment_candidate_preview_body(
+                observations_by_source,
+                DynamicEnvironmentSnapshotKind::Changes,
+                source_kind,
+            ),
+        }
+    })
+    .collect()
+}
+
+fn dynamic_environment_selection_enabled(
+    selection_state: &[DynamicEnvironmentSourceSelection],
+    snapshot_kind: DynamicEnvironmentSnapshotKind,
+    source_kind: DynamicEnvironmentSourceKind,
+) -> bool {
+    selection_state
+        .iter()
+        .find(|selection| {
+            selection.snapshot_kind == snapshot_kind && selection.source_kind == source_kind
+        })
+        .is_some_and(|selection| selection.enabled)
+}
+
+fn set_dynamic_environment_source_selected(
+    state: &mut PromptAssemblyScopeState,
+    snapshot_kind: DynamicEnvironmentSnapshotKind,
+    source_kind: DynamicEnvironmentSourceKind,
+    selected: bool,
+) {
+    if let Some(selection) = state
+        .dynamic_environment_sources
+        .iter_mut()
+        .find(|selection| {
+            selection.snapshot_kind == snapshot_kind && selection.source_kind == source_kind
+        })
+    {
+        selection.enabled = selected;
+        return;
+    }
+
+    state
+        .dynamic_environment_sources
+        .push(DynamicEnvironmentSourceSelection {
+            snapshot_kind,
+            source_kind,
+            enabled: selected,
+        });
+}
+
+fn dynamic_environment_preview_body(
+    observations_by_source: &HashMap<DynamicEnvironmentSourceKind, DynamicEnvironmentObservation>,
+    snapshot_kind: DynamicEnvironmentSnapshotKind,
+    selection_state: &[DynamicEnvironmentSourceSelection],
+) -> Option<String> {
+    let observations = dynamic_environment_observations_for_snapshot_kind(
+        observations_by_source,
+        selection_state,
+        snapshot_kind,
+    );
+    build_dynamic_environment_snapshot(snapshot_kind, observations).map(|snapshot| snapshot.body)
+}
+
+fn observe_dynamic_environment_inventory(
+    work_dir: &Path,
+) -> HashMap<DynamicEnvironmentSourceKind, DynamicEnvironmentObservation> {
+    [
+        DynamicEnvironmentSourceKind::GitReference,
+        DynamicEnvironmentSourceKind::GitWorkingTree,
+        DynamicEnvironmentSourceKind::Date,
+        DynamicEnvironmentSourceKind::Workdir,
+    ]
+    .into_iter()
+    .filter_map(|source_kind| {
+        crate::dynamic_environment::observe_dynamic_environment_sources(work_dir, &[source_kind])
+            .into_iter()
+            .next()
+            .map(|observation| (source_kind, observation))
+    })
+    .collect()
+}
+
+fn dynamic_environment_observations_for_snapshot_kind(
+    observations_by_source: &HashMap<DynamicEnvironmentSourceKind, DynamicEnvironmentObservation>,
+    selection_state: &[DynamicEnvironmentSourceSelection],
+    snapshot_kind: DynamicEnvironmentSnapshotKind,
+) -> Vec<DynamicEnvironmentObservation> {
+    enabled_dynamic_environment_sources(selection_state, snapshot_kind)
+        .into_iter()
+        .filter_map(|source_kind| observations_by_source.get(&source_kind).cloned())
+        .collect()
+}
+
+fn dynamic_environment_candidate_preview_body(
+    observations_by_source: &HashMap<DynamicEnvironmentSourceKind, DynamicEnvironmentObservation>,
+    snapshot_kind: DynamicEnvironmentSnapshotKind,
+    source_kind: DynamicEnvironmentSourceKind,
+) -> String {
+    observations_by_source
+        .get(&source_kind)
+        .cloned()
+        .and_then(|observation| {
+            build_dynamic_environment_snapshot(snapshot_kind, vec![observation])
+        })
+        .map(|snapshot| snapshot.body)
+        .unwrap_or_default()
 }
 
 fn set_tool_selected(state: &mut PromptAssemblyScopeState, tool_name: &str, selected: bool) {
@@ -2950,6 +3299,72 @@ mod tests {
     }
 
     #[test]
+    fn manager_snapshot_includes_default_dynamic_environment_sources() {
+        let work_dir = temp_dir("dynamic-defaults");
+        let snapshot = resolve_prompt_assembly_manager_snapshot(
+            &work_dir,
+            &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
+            &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+            &[],
+        );
+
+        assert!(snapshot.managed_sources.iter().any(|source| {
+            source.kind == PromptSourceKind::DynamicEnvironmentBaseline
+                && source.title == "Env baseline"
+                && source.enabled
+        }));
+        assert!(snapshot.managed_sources.iter().any(|source| {
+            source.kind == PromptSourceKind::DynamicEnvironmentChanges
+                && source.title == "Env changes"
+                && source.enabled
+        }));
+        assert_eq!(snapshot.dynamic_environment_candidates.len(), 4);
+        assert!(
+            snapshot
+                .dynamic_environment_candidates
+                .iter()
+                .any(|candidate| {
+                    candidate.source_kind == DynamicEnvironmentSourceKind::GitWorkingTree
+                        && candidate.origin == PromptSourceOrigin::Builtin
+                        && candidate.baseline_selected
+                        && candidate.changes_selected
+                        && candidate
+                            .baseline_preview_body
+                            .contains("Environment baseline for this session:")
+                        && candidate
+                            .changes_preview_body
+                            .contains("Environment changed since the last turn:")
+                })
+        );
+        assert!(
+            snapshot
+                .dynamic_environment_candidates
+                .iter()
+                .any(|candidate| {
+                    candidate.source_kind == DynamicEnvironmentSourceKind::Workdir
+                        && candidate.origin == PromptSourceOrigin::Builtin
+                        && !candidate.baseline_selected
+                        && !candidate.changes_selected
+                })
+        );
+        assert_eq!(
+            snapshot
+                .snapshot
+                .active_sources
+                .iter()
+                .map(|source| source.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "core-system",
+                "tool-guidelines",
+                "env-baseline",
+                "env-changes",
+                "skill-discovery",
+            ]
+        );
+    }
+
+    #[test]
     fn resolve_initial_prompt_prelude_orders_core_extra_discovery_and_long_lived_skill() {
         let work_dir = temp_dir("resolve");
         let project_skill_dir = work_dir.join(".agents/skills/repo-bootstrap");
@@ -2985,6 +3400,7 @@ mod tests {
             extra_prompts: Vec::new(),
             tool_guidelines_override: None,
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
         };
         let project_state = PromptAssemblyScopeState {
             scope: PromptAssemblyScope::Project,
@@ -3005,6 +3421,7 @@ mod tests {
             }],
             tool_guidelines_override: None,
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
         };
 
         let prelude = resolve_initial_prompt_prelude_with_overrides(
@@ -3074,6 +3491,7 @@ mod tests {
                 extra_prompts: Vec::new(),
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             },
             &PromptAssemblyScopeState {
                 scope: PromptAssemblyScope::Project,
@@ -3094,6 +3512,7 @@ mod tests {
                 }],
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             },
             None,
             Some(&global_instructions_path),
@@ -3161,12 +3580,13 @@ mod tests {
                 extra_prompts: Vec::new(),
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             },
             &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
             &[],
         );
 
-        assert_eq!(resolved.snapshot.active_sources.len(), 3);
+        assert_eq!(resolved.snapshot.active_sources.len(), 5);
         assert_eq!(
             resolved
                 .snapshot
@@ -3174,7 +3594,13 @@ mod tests {
                 .iter()
                 .map(|source| source.reference_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["core-system", "tool-guidelines", "skill-discovery"]
+            vec![
+                "core-system",
+                "tool-guidelines",
+                "env-baseline",
+                "env-changes",
+                "skill-discovery",
+            ]
         );
         assert_eq!(
             resolved
@@ -3257,6 +3683,8 @@ mod tests {
             vec![
                 ("core-system", Some(PromptSourceOrigin::Builtin)),
                 ("tool-guidelines", Some(PromptSourceOrigin::Builtin)),
+                ("env-baseline", Some(PromptSourceOrigin::Builtin)),
+                ("env-changes", Some(PromptSourceOrigin::Builtin)),
                 ("skill-discovery", Some(PromptSourceOrigin::Project)),
             ]
         );
@@ -3311,6 +3739,135 @@ mod tests {
     }
 
     #[test]
+    fn disabling_default_dynamic_environment_changes_keeps_baseline_visible() {
+        let work_dir = temp_dir("disable-dynamic-changes");
+        let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+
+        let disabled_snapshot = apply_prompt_assembly_mutation(
+            store.clone(),
+            &work_dir,
+            PromptAssemblyMutation::SetPromptSourceEnabled {
+                scope: PromptAssemblyScope::Global,
+                kind: PromptSourceKind::DynamicEnvironmentChanges,
+                reference_id: "env-changes".to_string(),
+                enabled: false,
+            },
+            &[],
+        )
+        .expect("disable should succeed");
+
+        assert!(disabled_snapshot.managed_sources.iter().any(|source| {
+            source.kind == PromptSourceKind::DynamicEnvironmentBaseline && source.enabled
+        }));
+        assert!(disabled_snapshot.managed_sources.iter().any(|source| {
+            source.kind == PromptSourceKind::DynamicEnvironmentChanges && !source.enabled
+        }));
+        assert!(
+            disabled_snapshot
+                .snapshot
+                .active_sources
+                .iter()
+                .any(|source| {
+                    source.kind == PromptSourceKind::DynamicEnvironmentBaseline
+                        && source.reference_id == "env-baseline"
+                })
+        );
+        assert!(
+            disabled_snapshot
+                .snapshot
+                .inactive_sources
+                .iter()
+                .any(|source| {
+                    source.kind == PromptSourceKind::DynamicEnvironmentChanges
+                        && source.reference_id == "env-changes"
+                        && matches!(
+                            source.status,
+                            PromptSourceStatus::Inactive {
+                                reason: PromptSourceInactiveReason::Disabled
+                            }
+                        )
+                })
+        );
+    }
+
+    #[test]
+    fn dynamic_environment_prompt_source_stays_visible_after_disable_and_can_be_restored() {
+        let work_dir = temp_dir("toggle-dynamic-prompt-source");
+        let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+
+        let disabled_snapshot = apply_prompt_assembly_mutation(
+            store.clone(),
+            &work_dir,
+            PromptAssemblyMutation::SetPromptSourceEnabled {
+                scope: PromptAssemblyScope::Global,
+                kind: PromptSourceKind::DynamicEnvironmentBaseline,
+                reference_id: "env-baseline".to_string(),
+                enabled: false,
+            },
+            &[],
+        )
+        .expect("disable should succeed");
+
+        assert!(disabled_snapshot.managed_sources.iter().any(|source| {
+            source.kind == PromptSourceKind::DynamicEnvironmentBaseline && !source.enabled
+        }));
+        assert!(disabled_snapshot.managed_sources.iter().any(|source| {
+            source.kind == PromptSourceKind::DynamicEnvironmentChanges && source.enabled
+        }));
+
+        let restored_snapshot = apply_prompt_assembly_mutation(
+            store,
+            &work_dir,
+            PromptAssemblyMutation::SetPromptSourceEnabled {
+                scope: PromptAssemblyScope::Global,
+                kind: PromptSourceKind::DynamicEnvironmentBaseline,
+                reference_id: "env-baseline".to_string(),
+                enabled: true,
+            },
+            &[],
+        )
+        .expect("re-enable should succeed");
+
+        assert!(restored_snapshot.managed_sources.iter().any(|source| {
+            source.kind == PromptSourceKind::DynamicEnvironmentBaseline && source.enabled
+        }));
+    }
+
+    #[test]
+    fn moving_default_dynamic_environment_source_reorders_managed_list() {
+        let work_dir = temp_dir("move-dynamic-environment");
+        let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+
+        let snapshot = apply_prompt_assembly_mutation(
+            store,
+            &work_dir,
+            PromptAssemblyMutation::MoveActiveSource {
+                scope: PromptAssemblyScope::Global,
+                kind: PromptSourceKind::DynamicEnvironmentBaseline,
+                reference_id: "env-baseline".to_string(),
+                direction: PromptAssemblyMoveDirection::Down,
+            },
+            &[],
+        )
+        .expect("move should succeed");
+
+        assert_eq!(
+            snapshot
+                .managed_sources
+                .iter()
+                .map(|source| source.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "core-system",
+                "tool-guidelines",
+                "env-changes",
+                "env-baseline",
+                "skill-discovery",
+            ]
+        );
+    }
+
+    #[test]
     fn moving_default_instruction_file_materializes_and_reorders_project_entry() {
         let work_dir = temp_dir("move-discovered-instructions");
         fs::write(work_dir.join("AGENTS.md"), "project instructions\n")
@@ -3340,6 +3897,8 @@ mod tests {
             vec![
                 "core-system",
                 "tool-guidelines",
+                "env-baseline",
+                "env-changes",
                 "skill-discovery",
                 "instructions:project:."
             ]
@@ -3554,6 +4113,7 @@ mod tests {
                 extra_prompts: Vec::new(),
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             },
         )
         .expect("project state should save");
@@ -3620,6 +4180,7 @@ mod tests {
                 extra_prompts: Vec::new(),
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             },
             &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
             Some(global_skill_root.as_path()),
@@ -3673,6 +4234,7 @@ mod tests {
                         requested_order: Some(30),
                     },
                 ],
+                dynamic_environment_sources: Vec::new(),
             },
             &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
             &tool_definitions_with_unguided_tool(),
@@ -3745,6 +4307,7 @@ mod tests {
             extra_prompts: Vec::new(),
             tool_guidelines_override: None,
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
         };
 
         move_discovered_skill(&mut state, "code-review", PromptAssemblyMoveDirection::Up)
@@ -3905,6 +4468,7 @@ mod tests {
                 extra_prompts: Vec::new(),
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             },
         )
         .expect("project prompt assembly should save");
@@ -4093,6 +4657,7 @@ mod tests {
             }],
             tool_guidelines_override: None,
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
         };
         save_project_prompt_assembly_state(&work_dir, &project_state)
             .expect("project state should save");
@@ -4111,6 +4676,7 @@ mod tests {
                     extra_prompts: Vec::new(),
                     tool_guidelines_override: None,
                     tool_selections: Vec::new(),
+                    dynamic_environment_sources: Vec::new(),
                 }),
             )
             .expect("global state should save");
@@ -4151,6 +4717,7 @@ mod tests {
                     extra_prompts: Vec::new(),
                     tool_guidelines_override: None,
                     tool_selections: Vec::new(),
+                    dynamic_environment_sources: Vec::new(),
                 }),
             )
             .expect("global state should save");
@@ -4208,6 +4775,8 @@ mod tests {
             vec![
                 "core-system",
                 "tool-guidelines",
+                "env-baseline",
+                "env-changes",
                 "skill-discovery",
                 "repo-bootstrap"
             ]
@@ -4276,6 +4845,7 @@ mod tests {
                 extra_prompts: Vec::new(),
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             },
             &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
             Some(&home_dir.join(".agents").join("skills")),
@@ -4333,6 +4903,7 @@ mod tests {
                     }],
                     tool_guidelines_override: None,
                     tool_selections: Vec::new(),
+                    dynamic_environment_sources: Vec::new(),
                 }),
             )
             .expect("global state should save");
@@ -4357,6 +4928,7 @@ mod tests {
                 }],
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             },
         )
         .expect("project state should save");
@@ -4383,9 +4955,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "core-system",
-                "repo-rules",
                 "shared-rules",
                 "tool-guidelines",
+                "env-baseline",
+                "repo-rules",
+                "env-changes",
                 "skill-discovery",
             ]
         );
@@ -4419,6 +4993,7 @@ mod tests {
                 extra_prompts: Vec::new(),
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             },
             &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
             &[],
@@ -4587,6 +5162,7 @@ mod tests {
                 }],
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             },
         )
         .expect("project prompt state should save");
@@ -4661,6 +5237,7 @@ mod tests {
                 }],
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             },
         )
         .expect("initial project prompt assembly should save");

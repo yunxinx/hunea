@@ -488,6 +488,8 @@ mod tests {
                     model: "gpt-4.1-mini".to_string(),
                     system_prompt: Some("be terse".to_string()),
                     prompt_prelude: None,
+                    dynamic_environment_session_config: None,
+                    dynamic_environment_observations: Vec::new(),
                 }),
             },
             SessionEntry {

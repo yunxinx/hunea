@@ -14,6 +14,7 @@ use conversation_runtime::{
     ConversationWorker, ModelRefreshWorker, ProviderConversation, models as provider_models,
 };
 use runtime_domain::{
+    dynamic_environment::DynamicEnvironmentSessionConfig,
     model_catalog::{ModelProviderRefreshEvent, ModelSelection, ProviderSyncRequest},
     prompt_assembly::PromptPreludeSnapshot,
     request_policy::RuntimeRequestPolicy,
@@ -63,6 +64,7 @@ pub(crate) struct AppRuntimeOptions {
     pub(crate) session_store: Option<Arc<dyn SessionStore>>,
     pub(crate) session_header_template: Option<SessionHeader>,
     pub(crate) initial_prompt_prelude: Option<PromptPreludeSnapshot>,
+    pub(crate) initial_dynamic_environment_session_config: Option<DynamicEnvironmentSessionConfig>,
 }
 
 /// `AppRuntimeCoordinator` 负责把 TUI runtime command 连接到对话运行时。
@@ -502,6 +504,9 @@ fn fresh_provider_conversation(
         _ => ProviderConversation::default(),
     };
     provider_conversation.set_prompt_prelude(options.initial_prompt_prelude.clone());
+    provider_conversation.set_dynamic_environment_session_config(
+        options.initial_dynamic_environment_session_config.clone(),
+    );
     Ok(provider_conversation)
 }
 

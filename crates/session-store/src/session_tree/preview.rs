@@ -345,6 +345,8 @@ mod tests {
                 model: "qwen3".to_string(),
                 system_prompt: None,
                 prompt_prelude: None,
+                dynamic_environment_session_config: None,
+                dynamic_environment_observations: Vec::new(),
             }),
         };
 

@@ -10,6 +10,7 @@ use runtime_domain::{envinfo, phrases};
 use session_store::{LocalSessionStore, SessionHeader, SessionId, SessionStore};
 use terminal_ui::{self, StartupBannerOptions};
 
+mod dynamic_environment;
 mod options_mapping;
 mod prompt_assembly;
 mod replay;
@@ -19,7 +20,9 @@ use options_mapping::{
     model_options_from_app_config_and_models, model_options_from_config_and_models,
     runtime_options_from_app_config_and_models,
 };
-use prompt_assembly::load_initial_prompt_assembly;
+use prompt_assembly::{
+    dynamic_environment_session_config_from_manager, load_initial_prompt_assembly,
+};
 use replay::write_terminal_replay_on_exit;
 pub use replay::{
     write_terminal_replay, write_terminal_replay_preserving_ansi,
@@ -166,6 +169,9 @@ fn attach_default_session_persistence(
     )?;
     model_options.prompt_assembly = Some(loaded_prompt_assembly.clone());
     options.initial_prompt_prelude = Some(loaded_prompt_assembly.prelude.clone());
+    options.initial_dynamic_environment_session_config = Some(
+        dynamic_environment_session_config_from_manager(&loaded_prompt_assembly),
+    );
     Ok(())
 }
 

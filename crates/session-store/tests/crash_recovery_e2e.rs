@@ -156,6 +156,8 @@ async fn local_store_rebuilds_sqlite_index_from_jsonl_after_index_deletion() {
                     model: "gpt-4.1-mini".to_string(),
                     system_prompt: Some("brief".to_string()),
                     prompt_prelude: None,
+                    dynamic_environment_session_config: None,
+                    dynamic_environment_observations: Vec::new(),
                 },
             )
             .await

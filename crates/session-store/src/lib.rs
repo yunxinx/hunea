@@ -6,7 +6,10 @@ use std::{
 
 use provider_protocol::{ConversationItem, ConversationItemValidationError};
 use runtime_domain::{
-    paths::hunea_config_dir, prompt_assembly::PromptPreludeSnapshot, session::TranscriptReplayItem,
+    dynamic_environment::{DynamicEnvironmentObservation, DynamicEnvironmentSessionConfig},
+    paths::hunea_config_dir,
+    prompt_assembly::PromptPreludeSnapshot,
+    session::TranscriptReplayItem,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -187,6 +190,10 @@ pub struct ConfigSnapshot {
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_prelude: Option<PromptPreludeSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_environment_session_config: Option<DynamicEnvironmentSessionConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dynamic_environment_observations: Vec<DynamicEnvironmentObservation>,
 }
 
 /// session 列表与恢复所需的元数据快照。
@@ -533,6 +540,8 @@ mod tests {
                 model: "gpt-4.1-mini".to_string(),
                 system_prompt: Some("be terse".to_string()),
                 prompt_prelude: None,
+                dynamic_environment_session_config: None,
+                dynamic_environment_observations: Vec::new(),
             }),
             SessionEntryKind::TranscriptReplay(TranscriptReplayItem::ToolActivity {
                 activity: sample_tool_activity("call-1", "first"),

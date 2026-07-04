@@ -60,6 +60,8 @@ fn resume_session_emits_transcript_and_restored_model() {
                         model: "qwen3".to_string(),
                         system_prompt: Some("historical prompt".to_string()),
                         prompt_prelude: None,
+                        dynamic_environment_session_config: None,
+                        dynamic_environment_observations: Vec::new(),
                     },
                 )
                 .await?;
@@ -277,6 +279,8 @@ fn reset_after_resume_restores_fresh_prompt_prelude_for_next_new_session() {
                                 body: "historical prompt".to_string(),
                             }],
                         }),
+                        dynamic_environment_session_config: None,
+                        dynamic_environment_observations: Vec::new(),
                     },
                 )
                 .await?;

@@ -2,12 +2,15 @@
 
 use std::path::Path;
 
-use runtime_domain::prompt_assembly::{
-    PromptSourceKind,
-    persistence::{
-        PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry,
-        PersistedToolSelectionEntry, PromptAssemblyScope, PromptAssemblyScopeState,
-        StoredPromptBody,
+use runtime_domain::{
+    dynamic_environment::{DynamicEnvironmentSnapshotKind, DynamicEnvironmentSourceKind},
+    prompt_assembly::{
+        PromptSourceKind,
+        persistence::{
+            PersistedPromptAssemblyEntry, PersistedSkillDiscoverySkillEntry,
+            PersistedToolSelectionEntry, PromptAssemblyScope, PromptAssemblyScopeState,
+            StoredPromptBody,
+        },
     },
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
@@ -72,6 +75,12 @@ pub(crate) fn save_global_prompt_assembly_state(
         transaction
             .execute(
                 "DELETE FROM prompt_assembly_tool_selections WHERE scope = ?1",
+                params![scope],
+            )
+            .map_err(sqlite_err)?;
+        transaction
+            .execute(
+                "DELETE FROM prompt_assembly_dynamic_environment_sources WHERE scope = ?1",
                 params![scope],
             )
             .map_err(sqlite_err)?;
@@ -173,6 +182,25 @@ pub(crate) fn save_global_prompt_assembly_state(
                         tool.tool_name,
                         tool.enabled,
                         tool.requested_order.map(i64::from),
+                    ],
+                )
+                .map_err(sqlite_err)?;
+        }
+
+        for source in &state.dynamic_environment_sources {
+            transaction
+                .execute(
+                    "INSERT INTO prompt_assembly_dynamic_environment_sources (
+                        scope,
+                        snapshot_kind,
+                        source_kind,
+                        enabled
+                    ) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        scope,
+                        dynamic_environment_snapshot_kind_value(source.snapshot_kind),
+                        dynamic_environment_source_kind_value(source.source_kind),
+                        source.enabled,
                     ],
                 )
                 .map_err(sqlite_err)?;
@@ -349,6 +377,32 @@ pub(crate) fn load_global_prompt_assembly_state(
             .collect::<Result<Vec<_>, _>>()
             .map_err(sqlite_err)?;
 
+        let mut dynamic_environment_statement = conn
+            .prepare(
+                "SELECT snapshot_kind, source_kind, enabled
+                 FROM prompt_assembly_dynamic_environment_sources
+                 WHERE scope = ?1
+                 ORDER BY snapshot_kind ASC, source_kind ASC",
+            )
+            .map_err(sqlite_err)?;
+        let dynamic_environment_sources = dynamic_environment_statement
+            .query_map(params![scope], |row| {
+                Ok(
+                    runtime_domain::dynamic_environment::DynamicEnvironmentSourceSelection {
+                        snapshot_kind: parse_dynamic_environment_snapshot_kind(
+                            &row.get::<_, String>(0)?,
+                        )?,
+                        source_kind: parse_dynamic_environment_source_kind(
+                            &row.get::<_, String>(1)?,
+                        )?,
+                        enabled: row.get(2)?,
+                    },
+                )
+            })
+            .map_err(sqlite_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_err)?;
+
         Ok(PromptAssemblyScopeState {
             scope: PromptAssemblyScope::Global,
             core_system_override,
@@ -357,6 +411,7 @@ pub(crate) fn load_global_prompt_assembly_state(
             entries,
             skill_discovery_skills,
             tool_selections,
+            dynamic_environment_sources,
             extra_prompts,
         })
     })
@@ -370,6 +425,8 @@ fn prompt_source_kind_value(kind: PromptSourceKind) -> &'static str {
         PromptSourceKind::SkillDiscovery => "skill_discovery",
         PromptSourceKind::LongLivedSkill => "long_lived_skill",
         PromptSourceKind::ToolGuidelines => "tool_guidelines",
+        PromptSourceKind::DynamicEnvironmentBaseline => "dynamic_environment_baseline",
+        PromptSourceKind::DynamicEnvironmentChanges => "dynamic_environment_changes",
     }
 }
 
@@ -381,11 +438,63 @@ fn parse_prompt_source_kind(value: &str) -> Result<PromptSourceKind, rusqlite::E
         "skill_discovery" => Ok(PromptSourceKind::SkillDiscovery),
         "long_lived_skill" => Ok(PromptSourceKind::LongLivedSkill),
         "tool_guidelines" => Ok(PromptSourceKind::ToolGuidelines),
+        "dynamic_environment_baseline" => Ok(PromptSourceKind::DynamicEnvironmentBaseline),
+        "dynamic_environment_changes" => Ok(PromptSourceKind::DynamicEnvironmentChanges),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             1,
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::other(format!(
                 "unknown prompt source kind `{value}`"
+            ))),
+        )),
+    }
+}
+
+fn dynamic_environment_snapshot_kind_value(kind: DynamicEnvironmentSnapshotKind) -> &'static str {
+    match kind {
+        DynamicEnvironmentSnapshotKind::Baseline => "baseline",
+        DynamicEnvironmentSnapshotKind::Changes => "changes",
+    }
+}
+
+fn parse_dynamic_environment_snapshot_kind(
+    value: &str,
+) -> Result<DynamicEnvironmentSnapshotKind, rusqlite::Error> {
+    match value {
+        "baseline" => Ok(DynamicEnvironmentSnapshotKind::Baseline),
+        "changes" => Ok(DynamicEnvironmentSnapshotKind::Changes),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(format!(
+                "unknown dynamic environment snapshot kind `{value}`"
+            ))),
+        )),
+    }
+}
+
+fn dynamic_environment_source_kind_value(kind: DynamicEnvironmentSourceKind) -> &'static str {
+    match kind {
+        DynamicEnvironmentSourceKind::GitReference => "git_reference",
+        DynamicEnvironmentSourceKind::GitWorkingTree => "git_working_tree",
+        DynamicEnvironmentSourceKind::Date => "date",
+        DynamicEnvironmentSourceKind::Workdir => "workdir",
+    }
+}
+
+fn parse_dynamic_environment_source_kind(
+    value: &str,
+) -> Result<DynamicEnvironmentSourceKind, rusqlite::Error> {
+    match value {
+        "git_reference" => Ok(DynamicEnvironmentSourceKind::GitReference),
+        "git_working_tree" => Ok(DynamicEnvironmentSourceKind::GitWorkingTree),
+        "date" => Ok(DynamicEnvironmentSourceKind::Date),
+        "workdir" => Ok(DynamicEnvironmentSourceKind::Workdir),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(format!(
+                "unknown dynamic environment source kind `{value}`"
             ))),
         )),
     }
@@ -470,6 +579,7 @@ mod tests {
             }],
             tool_guidelines_override: None,
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
         }
     }
 
@@ -528,6 +638,7 @@ mod tests {
                 }],
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             };
         runtime_domain::prompt_assembly::persistence::save_project_prompt_assembly_state(
             &work_dir,

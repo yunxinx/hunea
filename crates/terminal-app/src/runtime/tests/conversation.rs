@@ -162,6 +162,7 @@ fn startup_prompt_missing_source_check_emits_aggregated_runtime_event() {
                 extra_prompts: Vec::new(),
                 tool_guidelines_override: None,
                 tool_selections: Vec::new(),
+                dynamic_environment_sources: Vec::new(),
             },
         ))
         .expect("global prompt state should save");
@@ -195,6 +196,65 @@ fn startup_prompt_missing_source_check_emits_aggregated_runtime_event() {
     );
 
     assert_eq!(missing_count, 1);
+    cleanup(&root);
+}
+
+#[test]
+fn dynamic_environment_does_not_advance_observations_without_injected_snapshot() {
+    let root = temp_test_dir("dynamic-environment-empty-snapshot");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let store_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build");
+    let mut dynamic_environment_sources =
+        runtime_domain::dynamic_environment::default_dynamic_environment_selections();
+    for source in &mut dynamic_environment_sources {
+        source.enabled = false;
+    }
+    store_runtime
+        .block_on(store.save_global_prompt_assembly_state(
+            &runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+                core_system_override: None,
+                entries: Vec::new(),
+                skill_discovery_override: None,
+                skill_discovery_skills: Vec::new(),
+                extra_prompts: Vec::new(),
+                tool_guidelines_override: None,
+                tool_selections: Vec::new(),
+                dynamic_environment_sources,
+            },
+        ))
+        .expect("global prompt state should save");
+
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+
+    let injection = coordinator
+        .dynamic_environment_prefix_items()
+        .expect("dynamic environment assembly should succeed");
+
+    assert!(
+        injection.prefix_texts.is_empty(),
+        "no dynamic source is selected, so no provider-visible snapshot should be injected"
+    );
+    assert_eq!(
+        injection.next_observations, None,
+        "unsent observations must not become the next comparison baseline"
+    );
     cleanup(&root);
 }
 

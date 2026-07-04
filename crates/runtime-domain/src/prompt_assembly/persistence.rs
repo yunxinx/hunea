@@ -6,6 +6,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::dynamic_environment::DynamicEnvironmentSourceSelection;
+
 use super::{PromptSourceKind, derive_extra_prompt_title, natural_sort_text_cmp};
 
 pub const PROJECT_PROMPT_ASSEMBLY_FILE_NAME: &str = "prompt-assembly.toml";
@@ -88,6 +90,7 @@ pub struct PromptAssemblyScopeState {
     pub entries: Vec<PersistedPromptAssemblyEntry>,
     pub skill_discovery_skills: Vec<PersistedSkillDiscoverySkillEntry>,
     pub tool_selections: Vec<PersistedToolSelectionEntry>,
+    pub dynamic_environment_sources: Vec<DynamicEnvironmentSourceSelection>,
     pub extra_prompts: Vec<StoredPromptBody>,
 }
 
@@ -103,6 +106,7 @@ impl PromptAssemblyScopeState {
             entries: Vec::new(),
             skill_discovery_skills: Vec::new(),
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
             extra_prompts: Vec::new(),
         }
     }
@@ -681,6 +685,7 @@ mod tests {
             }],
             tool_guidelines_override: None,
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
         }
     }
 
@@ -718,6 +723,7 @@ mod tests {
             extra_prompts: Vec::new(),
             tool_guidelines_override: None,
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
         };
         save_project_prompt_assembly_state(&work_dir, &cleared_state)
             .expect("updated project prompt assembly should save");
@@ -754,6 +760,7 @@ mod tests {
             extra_prompts: Vec::new(),
             tool_guidelines_override: None,
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
         };
 
         save_project_prompt_assembly_state(&work_dir, &state)
@@ -787,6 +794,7 @@ mod tests {
             }],
             tool_guidelines_override: None,
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
         };
 
         save_project_prompt_assembly_state(&work_dir, &state)

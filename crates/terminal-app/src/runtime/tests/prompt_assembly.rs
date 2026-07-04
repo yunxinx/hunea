@@ -42,6 +42,7 @@ fn reload_prompt_assembly_reads_latest_filesystem_state() {
             }],
             tool_guidelines_override: None,
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
         },
     )
     .expect("project prompt assembly should save");
@@ -160,6 +161,7 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
             }],
             tool_guidelines_override: None,
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
         },
     )
     .expect("project prompt assembly should save");
@@ -255,6 +257,7 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
             }],
             tool_guidelines_override: None,
             tool_selections: Vec::new(),
+            dynamic_environment_sources: Vec::new(),
         },
     )
     .expect("project prompt assembly should save");
@@ -327,6 +330,194 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
     assert_eq!(
         coordinator.provider_conversation.prompt_prelude(),
         coordinator.options.initial_prompt_prelude.as_ref()
+    );
+    cleanup(&root);
+}
+
+#[test]
+fn dynamic_environment_selection_change_on_empty_session_emits_current_session_notice() {
+    let root = temp_test_dir("dynamic-environment-notice-empty-session");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let store_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build");
+    store_runtime
+        .block_on(
+            store.save_global_prompt_assembly_state(&PromptAssemblyScopeState {
+                scope: PromptAssemblyScope::Global,
+                core_system_override: None,
+                skill_discovery_override: None,
+                entries: Vec::new(),
+                skill_discovery_skills: Vec::new(),
+                extra_prompts: Vec::new(),
+                tool_guidelines_override: None,
+                tool_selections: Vec::new(),
+                dynamic_environment_sources:
+                    runtime_domain::dynamic_environment::default_dynamic_environment_selections(),
+            }),
+        )
+        .expect("global prompt state should save");
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+    coordinator
+        .handle_runtime_command(RuntimeCommand::ReloadPromptAssembly)
+        .expect("initial prompt assembly reload should be accepted");
+    let _ = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdated { manager, .. } => Some(manager),
+            _ => None,
+        },
+        "initial prompt assembly snapshot",
+    );
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
+            mutation:
+                runtime_domain::prompt_assembly::PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
+                    snapshot_kind:
+                        runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind::Baseline,
+                    source_kind:
+                        runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind::Date,
+                    selected: false,
+                },
+        })
+        .expect("dynamic environment mutation should be accepted");
+    let notice = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdated { notice, .. } => Some(notice),
+            _ => None,
+        },
+        "prompt assembly updated notice",
+    );
+
+    assert_eq!(
+        notice,
+        Some(PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated)
+    );
+    cleanup(&root);
+}
+
+#[test]
+fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
+    let root = temp_test_dir("dynamic-environment-next-new-session");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let store_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build");
+    let mut dynamic_environment_sources =
+        runtime_domain::dynamic_environment::default_dynamic_environment_selections();
+    for source in &mut dynamic_environment_sources {
+        source.enabled = source.snapshot_kind
+            == runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind::Changes
+            && source.source_kind
+                == runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind::Date;
+    }
+    store_runtime
+        .block_on(
+            store.save_global_prompt_assembly_state(&PromptAssemblyScopeState {
+                scope: PromptAssemblyScope::Global,
+                core_system_override: None,
+                skill_discovery_override: None,
+                entries: Vec::new(),
+                skill_discovery_skills: Vec::new(),
+                extra_prompts: Vec::new(),
+                tool_guidelines_override: None,
+                tool_selections: Vec::new(),
+                dynamic_environment_sources,
+            }),
+        )
+        .expect("global prompt state should save");
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+    coordinator
+        .handle_runtime_command(RuntimeCommand::ReloadPromptAssembly)
+        .expect("initial prompt assembly reload should be accepted");
+    let _ = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdated { manager, .. } => Some(manager),
+            _ => None,
+        },
+        "initial prompt assembly snapshot",
+    );
+    coordinator
+        .provider_conversation
+        .append_items(vec![ConversationItem::text(Role::User, "already started")])
+        .expect("seed history should succeed");
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
+            mutation:
+                runtime_domain::prompt_assembly::PromptAssemblyMutation::SetPromptSourceEnabled {
+                    scope: PromptAssemblyScope::Global,
+                    kind: PromptSourceKind::DynamicEnvironmentChanges,
+                    reference_id: "env-changes".to_string(),
+                    enabled: false,
+                },
+        })
+        .expect("dynamic environment source mutation should be accepted");
+    let notice = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdated { notice, .. } => Some(notice),
+            _ => None,
+        },
+        "prompt assembly updated notice",
+    );
+    assert_eq!(
+        notice,
+        Some(PromptAssemblyUpdateNotice::NextNewSessionUpdated)
+    );
+
+    let current_session_injection = coordinator
+        .dynamic_environment_prefix_items()
+        .expect("current session dynamic environment should resolve");
+    assert!(
+        !current_session_injection.prefix_texts.is_empty(),
+        "current started session should keep the old dynamic environment config until reset"
+    );
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::Reset)
+        .expect("reset should succeed");
+    coordinator
+        .provider_conversation
+        .append_items(vec![ConversationItem::text(Role::User, "fresh session")])
+        .expect("fresh session history should seed");
+    let next_session_injection = coordinator
+        .dynamic_environment_prefix_items()
+        .expect("next new session dynamic environment should resolve");
+    assert!(
+        next_session_injection.prefix_texts.is_empty(),
+        "after reset the disabled dynamic environment source should stop injecting changes"
     );
     cleanup(&root);
 }

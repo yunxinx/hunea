@@ -327,6 +327,7 @@ fn model_with_manual_skill(skill_name: &str) -> Model {
                     selected_order: None,
                 }],
                 tool_candidates: Vec::new(),
+                dynamic_environment_candidates: Vec::new(),
                 builtin_core_system_body: String::new(),
                 global_core_system_override: None,
                 project_core_system_override: None,

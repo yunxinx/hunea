@@ -86,6 +86,7 @@ pub(crate) fn runtime_options_from_app_config_and_models(
         session_store: None,
         session_header_template: None,
         initial_prompt_prelude: None,
+        initial_dynamic_environment_session_config: None,
     }
 }
 

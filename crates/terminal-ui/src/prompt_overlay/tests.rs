@@ -7,13 +7,17 @@ use ratatui::{
     style::Color,
     style::Modifier,
 };
+use runtime_domain::dynamic_environment::{
+    DynamicEnvironmentSnapshotKind, DynamicEnvironmentSourceKind,
+};
 use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
 use runtime_domain::prompt_assembly::{
-    PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate, PromptAssemblyLifecycle,
-    PromptAssemblyManagedSource, PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource,
-    PromptAssemblyMoveDirection, PromptAssemblyMutation, PromptAssemblySnapshot,
-    PromptAssemblyToolCandidate, PromptPreludeSnapshot, PromptSourceInactiveReason,
-    PromptSourceKind, PromptSourceOrigin, PromptSourceStatus, ResolvedPromptSource,
+    PromptAssemblyDiscoveredSkill, PromptAssemblyDynamicEnvironmentCandidate,
+    PromptAssemblyExtraPromptCandidate, PromptAssemblyLifecycle, PromptAssemblyManagedSource,
+    PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
+    PromptAssemblyMutation, PromptAssemblySnapshot, PromptAssemblyToolCandidate,
+    PromptPreludeSnapshot, PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin,
+    PromptSourceStatus, ResolvedPromptSource,
 };
 use runtime_domain::session::PromptAssemblyUpdateNotice;
 
@@ -194,6 +198,7 @@ fn ready_model() -> Model {
                     selected_order: None,
                 }],
                 tool_candidates: Vec::new(),
+                dynamic_environment_candidates: Vec::new(),
                 builtin_core_system_body: "builtin core".to_string(),
                 global_core_system_override: None,
                 project_core_system_override: None,
@@ -231,6 +236,18 @@ fn tool_guidelines_managed_source() -> PromptAssemblyManagedSource {
         reference_id: "tool-guidelines".to_string(),
         kind: PromptSourceKind::ToolGuidelines,
         title: "Tool guidelines".to_string(),
+        origin: Some(PromptSourceOrigin::Builtin),
+        scope: Some(PromptAssemblyScope::Global),
+        enabled: true,
+        order: 2,
+    }
+}
+
+fn dynamic_environment_baseline_managed_source() -> PromptAssemblyManagedSource {
+    PromptAssemblyManagedSource {
+        reference_id: "env-baseline".to_string(),
+        kind: PromptSourceKind::DynamicEnvironmentBaseline,
+        title: "Env baseline".to_string(),
         origin: Some(PromptSourceOrigin::Builtin),
         scope: Some(PromptAssemblyScope::Global),
         enabled: true,
@@ -317,6 +334,15 @@ fn assert_text_cells_are_underlined_at(buffer: &Buffer, text: &str, row: u16, co
             cell.modifier
         );
     }
+}
+
+fn assert_cell_is_not_underlined(buffer: &Buffer, row: u16, column: u16) {
+    let cell = &buffer[(column, row)];
+    assert!(
+        !cell.modifier.contains(Modifier::UNDERLINED),
+        "expected cell at ({column}, {row}) to not be underlined, got {:?}",
+        cell.modifier
+    );
 }
 
 fn temp_test_file(prefix: &str) -> PathBuf {
@@ -1226,7 +1252,7 @@ fn selected_header_tab_uses_surface_background_and_trailing_padding() {
         .find("[Skill]")
         .expect("selected skill tab should render");
     let skill_index = header_row[..skill_byte_index].chars().count();
-    let trailing_index = skill_index + "[Skill] Custom Prompts Tools".chars().count();
+    let trailing_index = skill_index + "[Skill] Custom Prompts Tools Dynamic".chars().count();
 
     assert_eq!(
         buffer[(u16::try_from(skill_index).expect("tab index should fit"), 0)].bg,
@@ -1258,7 +1284,7 @@ fn right_header_tabs_are_all_underlined() {
     model.open_prompt_overlay();
 
     let buffer = render_model_buffer(&mut model, 90, 16);
-    for label in ["[Skill]", "Custom Prompts", "Tools"] {
+    for label in ["[Skill]", "Custom Prompts", "Tools", "Dynamic"] {
         let (column, row) =
             find_buffer_text_position(&buffer, label).expect("header tab should render");
         assert_text_cells_are_underlined_at(&buffer, label, row, column);
@@ -1643,6 +1669,7 @@ fn prompt_runtime_update_replaces_manager_snapshot() {
                 discovered_skills: Vec::new(),
                 manual_skills: Vec::new(),
                 tool_candidates: Vec::new(),
+                dynamic_environment_candidates: Vec::new(),
                 builtin_core_system_body: "builtin core".to_string(),
                 global_core_system_override: None,
                 project_core_system_override: Some("project core".to_string()),
@@ -1808,6 +1835,7 @@ fn active_selection_follows_reordered_source_after_runtime_update() {
                     selected_order: None,
                 }],
                 tool_candidates: Vec::new(),
+                dynamic_environment_candidates: Vec::new(),
                 builtin_core_system_body: "builtin core".to_string(),
                 global_core_system_override: None,
                 project_core_system_override: None,
@@ -2146,6 +2174,55 @@ fn x_does_not_disable_core_system_prompt() {
 }
 
 #[test]
+fn x_on_active_dynamic_environment_baseline_emits_disable_mutation() {
+    let mut model = ready_model();
+    model
+        .prompt_assembly
+        .managed_sources
+        .insert(1, dynamic_environment_baseline_managed_source());
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::SetPromptSourceEnabled {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+                kind: PromptSourceKind::DynamicEnvironmentBaseline,
+                reference_id: "env-baseline".to_string(),
+                enabled: false,
+            },
+        })
+    );
+}
+
+#[test]
+fn moving_dynamic_environment_baseline_emits_reorder_mutation() {
+    let mut model = ready_model();
+    model
+        .prompt_assembly
+        .managed_sources
+        .insert(1, dynamic_environment_baseline_managed_source());
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(
+            KeyCode::Char('J'),
+            crossterm::event::KeyModifiers::SHIFT,
+        )),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveActiveSource {
+                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+                kind: PromptSourceKind::DynamicEnvironmentBaseline,
+                reference_id: "env-baseline".to_string(),
+                direction: PromptAssemblyMoveDirection::Down,
+            },
+        })
+    );
+}
+
+#[test]
 fn x_on_discovered_skill_emits_selection_toggle_mutation() {
     let mut model = ready_model();
     model.open_prompt_overlay();
@@ -2293,7 +2370,7 @@ fn footer_hides_custom_and_skill_actions_on_left_pane() {
     assert!(!rows.contains("Esc close"));
     assert!(!rows.contains("←/→/h/l focus panes"));
     assert!(!rows.contains("↑/↓/j/k move"));
-    assert!(!rows.contains("Space source"));
+    assert!(rows.contains("Space preview"));
     assert!(rows.contains("J/K reorder"));
     assert!(rows.contains("· ? more"));
 }
@@ -2467,7 +2544,7 @@ fn footer_shows_custom_actions_only_on_custom_tab() {
     assert!(!rows.contains("Esc close"));
     assert!(!rows.contains("←/→/h/l focus panes"));
     assert!(!rows.contains("↑/↓/j/k move"));
-    assert!(!rows.contains("Space source"));
+    assert!(rows.contains("Space preview"));
     assert!(rows.contains("Tab tabs"));
     assert!(rows.contains("· ? more"));
 }
@@ -2510,10 +2587,76 @@ fn footer_hides_custom_edit_and_remove_actions_on_skills_tab() {
     assert!(!rows.contains("Esc close"));
     assert!(!rows.contains("←/→/h/l focus panes"));
     assert!(!rows.contains("↑/↓/j/k move"));
-    assert!(!rows.contains("Space source"));
+    assert!(rows.contains("Space preview"));
     assert!(rows.contains("J/K reorder"));
     assert!(rows.contains("Tab tabs"));
     assert!(rows.contains("· ? more"));
+}
+
+#[test]
+fn footer_shows_preview_disable_and_reorder_for_dynamic_environment_source() {
+    let mut model = ready_model();
+    model
+        .prompt_assembly
+        .managed_sources
+        .insert(1, dynamic_environment_baseline_managed_source());
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    let rows = rendered_rows(&render_model_buffer(&mut model, 140, 16)).join("\n");
+
+    assert!(rows.contains("Space preview"));
+    assert!(rows.contains("x disable"));
+    assert!(rows.contains("J/K reorder"));
+}
+
+#[test]
+fn space_opens_dynamic_environment_candidate_preview_for_selected_snapshot_column() {
+    let mut model = ready_model();
+    model.prompt_assembly.dynamic_environment_candidates =
+        vec![PromptAssemblyDynamicEnvironmentCandidate {
+            source_kind: DynamicEnvironmentSourceKind::GitReference,
+            label: "Git reference".to_string(),
+            origin: PromptSourceOrigin::Builtin,
+            baseline_selected: true,
+            changes_selected: false,
+            baseline_preview_body: "baseline preview".to_string(),
+            changes_preview_body: "changes preview".to_string(),
+        }];
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char(' '))),
+        super::OverlayInputResult::Handled
+    );
+    let preview = model
+        .prompt_overlay
+        .as_ref()
+        .and_then(|state| state.preview.as_ref())
+        .expect("dynamic preview should open");
+    assert_eq!(preview.content, "baseline preview");
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char(' '))),
+        super::OverlayInputResult::Handled
+    );
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Right));
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char(' '))),
+        super::OverlayInputResult::Handled
+    );
+    let preview = model
+        .prompt_overlay
+        .as_ref()
+        .and_then(|state| state.preview.as_ref())
+        .expect("changes preview should open");
+    assert_eq!(preview.content, "changes preview");
 }
 
 #[test]
@@ -2583,7 +2726,7 @@ fn question_mark_opens_shortcut_help_popover() {
     assert!(rows.contains("↑/↓/j/k"));
     assert!(rows.contains("move"));
     assert!(rows.contains("Space"));
-    assert!(rows.contains("source"));
+    assert!(rows.contains("preview"));
     assert!(rows.contains("? / Esc"));
     assert!(rows.contains("close help"));
 }
@@ -2690,13 +2833,13 @@ fn shortcut_help_uses_aligned_two_column_layout() {
         .expect("move row should render");
     let space_row = rows
         .iter()
-        .find(|row| row.contains("Space") && row.contains("source"))
+        .find(|row| row.contains("Space") && row.contains("preview"))
         .expect("Space row should render");
 
     let close_column = column_in_row(esc_row, "close");
     let focus_column = column_in_row(focus_row, "focus panes");
     let move_column = column_in_row(move_row, "move");
-    let source_column = column_in_row(space_row, "source");
+    let source_column = column_in_row(space_row, "preview");
 
     assert_eq!(focus_column, close_column);
     assert_eq!(move_column, close_column);
@@ -2904,6 +3047,139 @@ fn tools_tab_shows_ord_column_and_supports_reorder() {
                 direction: PromptAssemblyMoveDirection::Down,
             },
         })
+    );
+}
+
+#[test]
+fn dynamic_tab_groups_baseline_and_changes_columns_for_builtin_sources() {
+    let mut model = ready_model();
+    model.prompt_assembly.dynamic_environment_candidates =
+        vec![PromptAssemblyDynamicEnvironmentCandidate {
+            source_kind: DynamicEnvironmentSourceKind::GitReference,
+            label: "Git reference".to_string(),
+            origin: PromptSourceOrigin::Builtin,
+            baseline_selected: true,
+            changes_selected: false,
+            baseline_preview_body: "baseline preview".to_string(),
+            changes_preview_body: "changes preview".to_string(),
+        }];
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    let buffer = render_model_buffer(&mut model, 140, 16);
+    let rows = rendered_rows(&buffer).join("\n");
+    assert!(rows.contains("Base"));
+    assert!(rows.contains("Change"));
+    assert!(rows.contains("[x]"));
+    assert!(rows.contains("[ ]"));
+    assert!(rows.contains("Git reference"));
+    assert!(rows.contains("builtin"));
+    let (selected_checkbox_column, selected_checkbox_row) =
+        find_buffer_text_position(&buffer, "[x]").expect("selected dynamic checkbox should render");
+    assert_text_cells_are_underlined_at(
+        &buffer,
+        "[x]",
+        selected_checkbox_row,
+        selected_checkbox_column,
+    );
+    assert_cell_is_not_underlined(
+        &buffer,
+        selected_checkbox_row,
+        selected_checkbox_column.saturating_sub(1),
+    );
+    assert_cell_is_not_underlined(&buffer, selected_checkbox_row, selected_checkbox_column + 3);
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
+                snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
+                source_kind: DynamicEnvironmentSourceKind::GitReference,
+                selected: false,
+            },
+        })
+    );
+
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Right));
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
+                snapshot_kind: DynamicEnvironmentSnapshotKind::Changes,
+                source_kind: DynamicEnvironmentSourceKind::GitReference,
+                selected: true,
+            },
+        })
+    );
+}
+
+#[test]
+fn mouse_click_on_dynamic_checkbox_selects_snapshot_column_for_x_toggle() {
+    let mut model = ready_model();
+    model.prompt_assembly.dynamic_environment_candidates =
+        vec![PromptAssemblyDynamicEnvironmentCandidate {
+            source_kind: DynamicEnvironmentSourceKind::GitReference,
+            label: "Git reference".to_string(),
+            origin: PromptSourceOrigin::Builtin,
+            baseline_selected: true,
+            changes_selected: false,
+            baseline_preview_body: "baseline preview".to_string(),
+            changes_preview_body: "changes preview".to_string(),
+        }];
+    model.set_window(140, 16);
+    model.open_prompt_overlay();
+    model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
+
+    let buffer = render_model_buffer(&mut model, 140, 16);
+    let (changes_column, changes_row) =
+        find_buffer_text_position(&buffer, "[ ]").expect("changes checkbox should render");
+    click_left(&mut model, changes_column, changes_row);
+
+    let state = model
+        .prompt_overlay
+        .as_ref()
+        .expect("prompt overlay should remain open");
+    assert_eq!(state.focus, super::PromptOverlayFocus::Inactive);
+    assert_eq!(state.inactive_tab, PromptOverlayInactiveTab::Dynamic);
+    assert_eq!(
+        state.inactive_selected_row_id.as_deref(),
+        Some("dynamic:GitReference")
+    );
+    assert_eq!(
+        state.dynamic_selected_snapshot_kind,
+        DynamicEnvironmentSnapshotKind::Changes
+    );
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+        super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
+                snapshot_kind: DynamicEnvironmentSnapshotKind::Changes,
+                source_kind: DynamicEnvironmentSourceKind::GitReference,
+                selected: true,
+            },
+        })
+    );
+
+    let buffer = render_model_buffer(&mut model, 140, 16);
+    let (baseline_column, baseline_row) =
+        find_buffer_text_position(&buffer, "[x]").expect("baseline checkbox should render");
+    click_left(&mut model, baseline_column, baseline_row);
+
+    let state = model
+        .prompt_overlay
+        .as_ref()
+        .expect("prompt overlay should remain open");
+    assert_eq!(
+        state.dynamic_selected_snapshot_kind,
+        DynamicEnvironmentSnapshotKind::Baseline
     );
 }
 

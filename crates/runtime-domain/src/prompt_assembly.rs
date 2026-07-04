@@ -3,6 +3,8 @@ use std::{cmp::Ordering, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::dynamic_environment::{DynamicEnvironmentSnapshotKind, DynamicEnvironmentSourceKind};
+
 pub mod persistence;
 use persistence::PromptAssemblyScope;
 
@@ -26,6 +28,10 @@ pub enum PromptSourceKind {
     LongLivedSkill,
     /// 工具使用指南，body 从工具注册表动态生成。
     ToolGuidelines,
+    /// 首轮注入的环境基线。
+    DynamicEnvironmentBaseline,
+    /// 后续轮次按变化注入的环境差异。
+    DynamicEnvironmentChanges,
 }
 
 /// `PromptSourceOrigin` 表示 prompt source 的来源层级。
@@ -190,6 +196,18 @@ pub struct PromptAssemblyToolCandidate {
     pub selected_order: Option<usize>,
 }
 
+/// `PromptAssemblyDynamicEnvironmentCandidate` 表示 Dynamic Tab 中的一个环境来源开关。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAssemblyDynamicEnvironmentCandidate {
+    pub source_kind: DynamicEnvironmentSourceKind,
+    pub label: String,
+    pub origin: PromptSourceOrigin,
+    pub baseline_selected: bool,
+    pub changes_selected: bool,
+    pub baseline_preview_body: String,
+    pub changes_preview_body: String,
+}
+
 /// `PromptAssemblyManagerSnapshot` 表示 `/prompt` 所需的完整只读快照。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptAssemblyManagerSnapshot {
@@ -201,6 +219,7 @@ pub struct PromptAssemblyManagerSnapshot {
     pub discovered_skills: Vec<PromptAssemblyDiscoveredSkill>,
     pub manual_skills: Vec<PromptAssemblyDiscoveredSkill>,
     pub tool_candidates: Vec<PromptAssemblyToolCandidate>,
+    pub dynamic_environment_candidates: Vec<PromptAssemblyDynamicEnvironmentCandidate>,
     pub builtin_core_system_body: String,
     pub global_core_system_override: Option<String>,
     pub project_core_system_override: Option<String>,
@@ -265,6 +284,11 @@ pub enum PromptAssemblyMutation {
     SetToolSelected {
         scope: PromptAssemblyScope,
         tool_name: String,
+        selected: bool,
+    },
+    SetDynamicEnvironmentSourceSelected {
+        snapshot_kind: DynamicEnvironmentSnapshotKind,
+        source_kind: DynamicEnvironmentSourceKind,
         selected: bool,
     },
     MoveTool {

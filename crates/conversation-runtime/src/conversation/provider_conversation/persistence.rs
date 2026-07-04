@@ -10,7 +10,7 @@ pub(crate) struct PreparedConversationPersistence {
     pub(crate) session_id: Option<SessionId>,
     pub(crate) header_template: SessionHeader,
     pub(crate) config_snapshot: ConfigSnapshot,
-    pub(crate) current_user_message: ConversationItem,
+    pub(crate) current_user_items: Vec<ConversationItem>,
     pub(crate) transcript_user_message: TranscriptUserMessage,
     pub(crate) transcript_replay_after_user: Vec<TranscriptReplayItem>,
 }

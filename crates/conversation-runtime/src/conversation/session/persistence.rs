@@ -176,12 +176,13 @@ pub(super) async fn persist_turn_start(
             .append_config_change(&session_id, persistence.config_snapshot.clone())
             .await
             .map_err(|source| SessionPersistenceError::PersistConfigChange { source })?;
-        let user_entry_id = persistence
+        let user_entry_ids = persistence
             .store
-            .append(&session_id, persistence.current_user_message.clone())
+            .append_many(&session_id, persistence.current_user_items.clone())
             .await
             .map_err(|source| SessionPersistenceError::PersistUserMessage { source })?;
-        (Some(session_id), Some(user_entry_id))
+        let user_entry_id = user_entry_ids.last().cloned();
+        (Some(session_id), user_entry_id)
     } else {
         (None, None)
     };

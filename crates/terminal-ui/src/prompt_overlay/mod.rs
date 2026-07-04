@@ -7,12 +7,14 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, Paragraph, Widget},
 };
+use runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind;
 use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
 use runtime_domain::prompt_assembly::{
-    PromptAssemblyDiscoveredSkill, PromptAssemblyEditorTarget, PromptAssemblyExtraPromptCandidate,
-    PromptAssemblyManagedSource, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
-    PromptAssemblyMutation, PromptAssemblyToolCandidate, PromptSourceKind, PromptSourceOrigin,
-    PromptSourceStatus, ResolvedPromptSource, default_extra_prompt_body, natural_sort_text_cmp,
+    PromptAssemblyDiscoveredSkill, PromptAssemblyDynamicEnvironmentCandidate,
+    PromptAssemblyEditorTarget, PromptAssemblyExtraPromptCandidate, PromptAssemblyManagedSource,
+    PromptAssemblyManagerSource, PromptAssemblyMoveDirection, PromptAssemblyMutation,
+    PromptAssemblyToolCandidate, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
+    ResolvedPromptSource, default_extra_prompt_body, natural_sort_text_cmp,
     next_default_extra_prompt_title,
 };
 
@@ -49,6 +51,7 @@ const PROMPT_OVERLAY_OUTER_PADDING: usize = 2;
 const PROMPT_OVERLAY_LEFT_SEL_WIDTH: usize = 3;
 const PROMPT_OVERLAY_LEFT_ORD_WIDTH: usize = 3;
 const PROMPT_OVERLAY_RIGHT_ORD_WIDTH: usize = 3;
+const PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH: usize = "Change".len();
 const PROMPT_OVERLAY_LEFT_KIND_WIDTH: usize = "instructions".len();
 const PROMPT_OVERLAY_LEFT_SCOPE_WIDTH: usize = 7;
 const PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH: usize = 7;
@@ -69,6 +72,7 @@ pub(crate) enum PromptOverlayInactiveTab {
     LongLivedSkills,
     ExtraPrompts,
     Tools,
+    Dynamic,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,24 +140,34 @@ enum PromptOverlayInactiveRow {
     ToolCandidate {
         tool: PromptAssemblyToolCandidate,
     },
+    DynamicEnvironmentCandidate {
+        source: PromptAssemblyDynamicEnvironmentCandidate,
+    },
 }
 
 impl PromptOverlayInactiveTab {
-    const ALL: [Self; 3] = [Self::LongLivedSkills, Self::ExtraPrompts, Self::Tools];
+    const ALL: [Self; 4] = [
+        Self::LongLivedSkills,
+        Self::ExtraPrompts,
+        Self::Tools,
+        Self::Dynamic,
+    ];
 
     fn next(self) -> Self {
         match self {
             Self::LongLivedSkills => Self::ExtraPrompts,
             Self::ExtraPrompts => Self::Tools,
-            Self::Tools => Self::LongLivedSkills,
+            Self::Tools => Self::Dynamic,
+            Self::Dynamic => Self::LongLivedSkills,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            Self::LongLivedSkills => Self::Tools,
+            Self::LongLivedSkills => Self::Dynamic,
             Self::ExtraPrompts => Self::LongLivedSkills,
             Self::Tools => Self::ExtraPrompts,
+            Self::Dynamic => Self::Tools,
         }
     }
 
@@ -162,6 +176,7 @@ impl PromptOverlayInactiveTab {
             Self::LongLivedSkills => "Skill",
             Self::ExtraPrompts => "Custom Prompts",
             Self::Tools => "Tools",
+            Self::Dynamic => "Dynamic",
         }
     }
 }
@@ -176,6 +191,7 @@ pub(crate) struct PromptOverlayState {
     pub(crate) inactive_selected: usize,
     pub(crate) inactive_scroll: usize,
     pub(crate) inactive_selected_row_id: Option<String>,
+    dynamic_selected_snapshot_kind: DynamicEnvironmentSnapshotKind,
     expanded_row: Option<PromptOverlayExpandedRow>,
     dialog: Option<PromptOverlayDialog>,
     pub(crate) preview: Option<preview::PromptOverlayPreviewState>,
@@ -195,6 +211,7 @@ impl Default for PromptOverlayState {
             inactive_selected: 0,
             inactive_scroll: 0,
             inactive_selected_row_id: None,
+            dynamic_selected_snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
             expanded_row: None,
             dialog: None,
             preview: None,
@@ -219,6 +236,7 @@ enum PromptOverlaySelection {
     ExtraPromptCandidate(PromptAssemblyExtraPromptCandidate),
     DiscoveredSkill(PromptAssemblyDiscoveredSkill),
     ToolCandidate(PromptAssemblyToolCandidate),
+    DynamicEnvironmentCandidate(PromptAssemblyDynamicEnvironmentCandidate),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,10 +312,16 @@ impl Model {
                 OverlayInputResult::Handled
             }
             KeyCode::Left | KeyCode::Char('h') if key.modifiers.is_empty() => {
+                if self.move_prompt_overlay_dynamic_snapshot_column(-1) {
+                    return OverlayInputResult::Handled;
+                }
                 self.set_prompt_overlay_focus(PromptOverlayFocus::Active);
                 OverlayInputResult::Handled
             }
             KeyCode::Right | KeyCode::Char('l') if key.modifiers.is_empty() => {
+                if self.move_prompt_overlay_dynamic_snapshot_column(1) {
+                    return OverlayInputResult::Handled;
+                }
                 self.set_prompt_overlay_focus(PromptOverlayFocus::Inactive);
                 OverlayInputResult::Handled
             }
@@ -546,6 +570,9 @@ impl Model {
                     None,
                 );
             }
+            PromptOverlaySelection::DynamicEnvironmentCandidate(source) => {
+                self.open_prompt_overlay_dynamic_environment_preview(source);
+            }
         }
     }
 
@@ -559,6 +586,26 @@ impl Model {
             &skill.body,
             preview_notice,
         );
+    }
+
+    fn open_prompt_overlay_dynamic_environment_preview(
+        &mut self,
+        source: PromptAssemblyDynamicEnvironmentCandidate,
+    ) {
+        let snapshot_kind = self.prompt_overlay_dynamic_selected_snapshot_kind();
+        let title = match snapshot_kind {
+            DynamicEnvironmentSnapshotKind::Baseline => {
+                format!("{} · Baseline", source.label)
+            }
+            DynamicEnvironmentSnapshotKind::Changes => {
+                format!("{} · Changes", source.label)
+            }
+        };
+        let content = match snapshot_kind {
+            DynamicEnvironmentSnapshotKind::Baseline => source.baseline_preview_body,
+            DynamicEnvironmentSnapshotKind::Changes => source.changes_preview_body,
+        };
+        self.open_prompt_overlay_plain_text_preview(title, &content, None);
     }
 
     fn prompt_overlay_dialog_active(&self) -> bool {
@@ -776,7 +823,9 @@ impl Model {
                             manager_source.body.unwrap_or_default(),
                         )
                     }
-                    PromptSourceKind::LongLivedSkill => return None,
+                    PromptSourceKind::LongLivedSkill
+                    | PromptSourceKind::DynamicEnvironmentBaseline
+                    | PromptSourceKind::DynamicEnvironmentChanges => return None,
                 }
             }
             PromptOverlaySelection::ExtraPromptCandidate(candidate) => (
@@ -800,11 +849,14 @@ impl Model {
                     | PromptSourceKind::InstructionsFile
                     | PromptSourceKind::SkillDiscovery
                     | PromptSourceKind::LongLivedSkill
-                    | PromptSourceKind::ToolGuidelines => return None,
+                    | PromptSourceKind::ToolGuidelines
+                    | PromptSourceKind::DynamicEnvironmentBaseline
+                    | PromptSourceKind::DynamicEnvironmentChanges => return None,
                 }
             }
             PromptOverlaySelection::DiscoveredSkill(_) => return None,
             PromptOverlaySelection::ToolCandidate(_) => return None,
+            PromptOverlaySelection::DynamicEnvironmentCandidate(_) => return None,
         };
 
         let launch = self.prepare_external_editor_launch_for_content(&initial_content)?;
@@ -823,7 +875,10 @@ impl Model {
             PromptOverlaySelection::ManagedSource(selected) => {
                 if matches!(
                     selected.kind,
-                    PromptSourceKind::CoreSystemPrompt | PromptSourceKind::InstructionsFile
+                    PromptSourceKind::CoreSystemPrompt
+                        | PromptSourceKind::InstructionsFile
+                        | PromptSourceKind::DynamicEnvironmentBaseline
+                        | PromptSourceKind::DynamicEnvironmentChanges
                 ) {
                     return None;
                 }
@@ -847,7 +902,10 @@ impl Model {
             PromptOverlaySelection::ResolvedSource(selected) => {
                 if matches!(
                     selected.kind,
-                    PromptSourceKind::CoreSystemPrompt | PromptSourceKind::InstructionsFile
+                    PromptSourceKind::CoreSystemPrompt
+                        | PromptSourceKind::InstructionsFile
+                        | PromptSourceKind::DynamicEnvironmentBaseline
+                        | PromptSourceKind::DynamicEnvironmentChanges
                 ) {
                     return None;
                 }
@@ -861,6 +919,7 @@ impl Model {
             }
             PromptOverlaySelection::DiscoveredSkill(_) => None,
             PromptOverlaySelection::ToolCandidate(_) => None,
+            PromptOverlaySelection::DynamicEnvironmentCandidate(_) => None,
         }
     }
 
@@ -906,7 +965,8 @@ impl Model {
             PromptOverlaySelection::ResolvedSource(source) => Some(source),
             PromptOverlaySelection::ExtraPromptCandidate(_)
             | PromptOverlaySelection::DiscoveredSkill(_)
-            | PromptOverlaySelection::ToolCandidate(_) => None,
+            | PromptOverlaySelection::ToolCandidate(_)
+            | PromptOverlaySelection::DynamicEnvironmentCandidate(_) => None,
         }
     }
 
@@ -976,6 +1036,9 @@ impl Model {
                 PromptOverlayInactiveRow::ToolCandidate { tool } => {
                     Some(PromptOverlaySelection::ToolCandidate(tool))
                 }
+                PromptOverlayInactiveRow::DynamicEnvironmentCandidate { source } => {
+                    Some(PromptOverlaySelection::DynamicEnvironmentCandidate(source))
+                }
             },
         }
     }
@@ -1041,6 +1104,7 @@ impl Model {
             PromptOverlayInactiveTab::ExtraPrompts => self.prompt_overlay_extra_rows(),
             PromptOverlayInactiveTab::LongLivedSkills => self.prompt_overlay_skill_rows(),
             PromptOverlayInactiveTab::Tools => self.prompt_overlay_tool_rows(),
+            PromptOverlayInactiveTab::Dynamic => self.prompt_overlay_dynamic_rows(),
         }
     }
 
@@ -1168,6 +1232,15 @@ impl Model {
             .iter()
             .cloned()
             .map(|tool| PromptOverlayInactiveRow::ToolCandidate { tool })
+            .collect()
+    }
+
+    fn prompt_overlay_dynamic_rows(&self) -> Vec<PromptOverlayInactiveRow> {
+        self.prompt_assembly
+            .dynamic_environment_candidates
+            .iter()
+            .cloned()
+            .map(|source| PromptOverlayInactiveRow::DynamicEnvironmentCandidate { source })
             .collect()
     }
 
@@ -1350,6 +1423,16 @@ impl Model {
                     },
                 })
             }
+            PromptOverlaySelection::DynamicEnvironmentCandidate(source) => {
+                let snapshot_kind = self.prompt_overlay_dynamic_selected_snapshot_kind();
+                Some(AppEffect::MutatePromptAssembly {
+                    mutation: PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
+                        snapshot_kind,
+                        source_kind: source.source_kind,
+                        selected: !prompt_overlay_dynamic_source_selected(&source, snapshot_kind),
+                    },
+                })
+            }
         }
     }
 
@@ -1430,9 +1513,16 @@ impl Model {
                     PromptSourceKind::CoreSystemPrompt
                         | PromptSourceKind::SkillDiscovery
                         | PromptSourceKind::ToolGuidelines
+                        | PromptSourceKind::DynamicEnvironmentBaseline
+                        | PromptSourceKind::DynamicEnvironmentChanges
                 );
                 PromptOverlayActionAvailability {
-                    can_edit: source.kind != PromptSourceKind::LongLivedSkill,
+                    can_edit: !matches!(
+                        source.kind,
+                        PromptSourceKind::LongLivedSkill
+                            | PromptSourceKind::DynamicEnvironmentBaseline
+                            | PromptSourceKind::DynamicEnvironmentChanges
+                    ),
                     can_add_custom: false,
                     can_remove: can_remove && source.kind != PromptSourceKind::InstructionsFile,
                     can_toggle_selection: source.kind != PromptSourceKind::CoreSystemPrompt,
@@ -1445,6 +1535,8 @@ impl Model {
                     PromptSourceKind::CoreSystemPrompt
                         | PromptSourceKind::SkillDiscovery
                         | PromptSourceKind::ToolGuidelines
+                        | PromptSourceKind::DynamicEnvironmentBaseline
+                        | PromptSourceKind::DynamicEnvironmentChanges
                 );
                 PromptOverlayActionAvailability {
                     can_edit: source.kind == PromptSourceKind::ExtraPrompt,
@@ -1477,6 +1569,15 @@ impl Model {
                 can_toggle_selection: true,
                 can_reorder_active: true,
             },
+            Some(PromptOverlaySelection::DynamicEnvironmentCandidate(_)) => {
+                PromptOverlayActionAvailability {
+                    can_edit: false,
+                    can_add_custom: false,
+                    can_remove: false,
+                    can_toggle_selection: true,
+                    can_reorder_active: false,
+                }
+            }
             None => PromptOverlayActionAvailability {
                 can_edit: false,
                 can_add_custom: self.prompt_overlay_can_add_custom(),
@@ -1634,7 +1735,15 @@ impl Model {
             if let Some(visible_offset) =
                 prompt_overlay_visible_offset_for_row(layout.right_body, row)
             {
+                let snapshot_kind = self.prompt_overlay_dynamic_snapshot_kind_for_mouse_down(
+                    column,
+                    visible_offset,
+                    layout.right_body,
+                );
                 self.select_prompt_overlay_inactive_row(visible_offset);
+                if let Some(snapshot_kind) = snapshot_kind {
+                    self.set_prompt_overlay_dynamic_snapshot_kind(snapshot_kind);
+                }
             }
             return OverlayInputResult::Handled;
         }
@@ -1660,6 +1769,68 @@ impl Model {
         };
         state.inactive_tab = tab;
         self.sync_prompt_overlay_state();
+    }
+
+    fn move_prompt_overlay_dynamic_snapshot_column(&mut self, delta: isize) -> bool {
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return false;
+        };
+        if state.focus != PromptOverlayFocus::Inactive
+            || state.inactive_tab != PromptOverlayInactiveTab::Dynamic
+        {
+            return false;
+        }
+
+        let snapshot_kind = if delta.is_negative() {
+            DynamicEnvironmentSnapshotKind::Baseline
+        } else {
+            DynamicEnvironmentSnapshotKind::Changes
+        };
+        state.dynamic_selected_snapshot_kind = snapshot_kind;
+        true
+    }
+
+    fn set_prompt_overlay_dynamic_snapshot_kind(
+        &mut self,
+        snapshot_kind: DynamicEnvironmentSnapshotKind,
+    ) {
+        let Some(state) = self.prompt_overlay.as_mut() else {
+            return;
+        };
+        if state.inactive_tab != PromptOverlayInactiveTab::Dynamic {
+            return;
+        }
+        state.dynamic_selected_snapshot_kind = snapshot_kind;
+    }
+
+    fn prompt_overlay_dynamic_snapshot_kind_for_mouse_down(
+        &self,
+        column: u16,
+        visible_offset: usize,
+        body_area: Rect,
+    ) -> Option<DynamicEnvironmentSnapshotKind> {
+        let state = self.prompt_overlay.as_ref()?;
+        if state.inactive_tab != PromptOverlayInactiveTab::Dynamic {
+            return None;
+        }
+
+        let row_index = state.inactive_scroll.saturating_add(visible_offset);
+        let rows = self.prompt_overlay_inactive_rows(PromptOverlayInactiveTab::Dynamic);
+        if !matches!(
+            rows.get(row_index),
+            Some(PromptOverlayInactiveRow::DynamicEnvironmentCandidate { .. })
+        ) {
+            return None;
+        }
+
+        prompt_overlay_dynamic_checkbox_hit_test(column, body_area)
+    }
+
+    fn prompt_overlay_dynamic_selected_snapshot_kind(&self) -> DynamicEnvironmentSnapshotKind {
+        self.prompt_overlay
+            .as_ref()
+            .map(|state| state.dynamic_selected_snapshot_kind)
+            .unwrap_or(DynamicEnvironmentSnapshotKind::Baseline)
     }
 
     fn move_prompt_overlay_selection(&mut self, direction: ListNavigationDirection) {
@@ -2016,6 +2187,7 @@ impl Model {
             self.selected_prompt_overlay_selection(),
             Some(PromptOverlaySelection::DiscoveredSkill(_))
         );
+        let selected_previewable = self.selected_prompt_overlay_selection().is_some();
         if actions.can_edit {
             parts.push("e/ctrl+g edit");
         }
@@ -2036,6 +2208,9 @@ impl Model {
         }
         if actions.can_reorder_active && width >= 120 {
             parts.push("J/K reorder");
+        }
+        if selected_previewable {
+            parts.push("Space preview");
         }
         if show_shadowed_toggle {
             parts.push("ctrl+e shadowed");
@@ -2141,6 +2316,18 @@ impl Model {
                 usize::from(body_area.height),
                 self.palette,
             ),
+            PromptOverlayInactiveTab::Dynamic => prompt_overlay_dynamic_lines(
+                &self.prompt_overlay_inactive_rows(PromptOverlayInactiveTab::Dynamic),
+                PromptOverlayDynamicSelection {
+                    row_id: state.inactive_selected_row_id.as_deref(),
+                    snapshot_kind: state.dynamic_selected_snapshot_kind,
+                },
+                state.inactive_scroll,
+                state.focus == PromptOverlayFocus::Inactive,
+                usize::from(body_area.width),
+                usize::from(body_area.height),
+                self.palette,
+            ),
             PromptOverlayInactiveTab::ExtraPrompts => prompt_overlay_inactive_lines(
                 &self.prompt_overlay_inactive_rows(PromptOverlayInactiveTab::ExtraPrompts),
                 state.inactive_selected_row_id.as_deref(),
@@ -2184,6 +2371,7 @@ impl Model {
                 prompt_overlay_skill_header_text(content_width)
             }
             PromptOverlayInactiveTab::Tools => prompt_overlay_tool_header_text(content_width),
+            PromptOverlayInactiveTab::Dynamic => prompt_overlay_dynamic_header_text(content_width),
         };
         let text = format!(
             "{}{}",
@@ -2287,7 +2475,7 @@ impl Model {
                 },
                 ShortcutHelpEntry {
                     shortcut: "Space",
-                    description: "source",
+                    description: "preview",
                 },
             ],
             key_style,
@@ -2547,6 +2735,9 @@ fn prompt_overlay_inactive_row_id(row: &PromptOverlayInactiveRow) -> String {
         }
         PromptOverlayInactiveRow::ToolCandidate { tool } => {
             format!("tool:{}", tool.name)
+        }
+        PromptOverlayInactiveRow::DynamicEnvironmentCandidate { source } => {
+            format!("dynamic:{:?}", source.source_kind)
         }
     }
 }
@@ -2860,6 +3051,9 @@ fn prompt_overlay_inactive_row_line(
         PromptOverlayInactiveRow::ToolCandidate { .. } => {
             prompt_overlay_tool_row_text(row, content_width)
         }
+        PromptOverlayInactiveRow::DynamicEnvironmentCandidate { .. } => {
+            prompt_overlay_dynamic_plain_row_text(row, content_width)
+        }
     };
     prompt_overlay_list_line(
         marker,
@@ -2885,6 +3079,8 @@ fn prompt_overlay_kind_label(kind: PromptSourceKind) -> &'static str {
         PromptSourceKind::SkillDiscovery => "discovery",
         PromptSourceKind::LongLivedSkill => "skill",
         PromptSourceKind::ToolGuidelines => "tools",
+        PromptSourceKind::DynamicEnvironmentBaseline => "dynamic",
+        PromptSourceKind::DynamicEnvironmentChanges => "dynamic",
     }
 }
 
@@ -3256,6 +3452,246 @@ fn prompt_overlay_tool_origin(row: &PromptOverlayInactiveRow) -> PromptSourceOri
     }
 }
 
+#[derive(Clone, Copy)]
+struct PromptOverlayDynamicSelection<'a> {
+    row_id: Option<&'a str>,
+    snapshot_kind: DynamicEnvironmentSnapshotKind,
+}
+
+fn prompt_overlay_dynamic_lines(
+    rows: &[PromptOverlayInactiveRow],
+    selection: PromptOverlayDynamicSelection<'_>,
+    scroll: usize,
+    focused: bool,
+    width: usize,
+    body_height: usize,
+    palette: crate::theme::TerminalPalette,
+) -> Vec<Line<'static>> {
+    if body_height == 0 {
+        return Vec::new();
+    }
+    if rows.is_empty() {
+        return vec![prompt_overlay_empty_inactive_line(
+            "No dynamic sources",
+            width,
+            palette,
+        )];
+    }
+
+    rows.iter()
+        .map(|row| {
+            let selected = selection.row_id == Some(prompt_overlay_inactive_row_id(row).as_str());
+            prompt_overlay_dynamic_row_line(
+                row,
+                selected,
+                focused,
+                selection.snapshot_kind,
+                width,
+                palette,
+            )
+        })
+        .skip(scroll)
+        .take(body_height)
+        .collect()
+}
+
+fn prompt_overlay_dynamic_row_line(
+    row: &PromptOverlayInactiveRow,
+    selected: bool,
+    focused: bool,
+    selected_snapshot_kind: DynamicEnvironmentSnapshotKind,
+    width: usize,
+    palette: crate::theme::TerminalPalette,
+) -> Line<'static> {
+    let content_width = width.saturating_sub(PROMPT_OVERLAY_ROW_PREFIX_WIDTH).max(1);
+    let (item_style, marker_style, marker) =
+        prompt_overlay_selection_styles(selected, focused, palette);
+    let highlighted_cell_style = if selected && focused {
+        command_accent_text_style(palette)
+            .bold()
+            .add_modifier(Modifier::UNDERLINED)
+    } else {
+        item_style
+    };
+    let name_width = prompt_overlay_dynamic_name_width(content_width);
+    let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
+    let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
+    let scope = format!(
+        "{:<width$}",
+        prompt_overlay_origin_label(prompt_overlay_dynamic_origin(row)),
+        width = PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH
+    );
+    let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
+    let baseline_style = if selected_snapshot_kind == DynamicEnvironmentSnapshotKind::Baseline {
+        highlighted_cell_style
+    } else {
+        item_style
+    };
+    let changes_style = if selected_snapshot_kind == DynamicEnvironmentSnapshotKind::Changes {
+        highlighted_cell_style
+    } else {
+        item_style
+    };
+    let baseline = prompt_overlay_dynamic_checkbox_spans(
+        row,
+        DynamicEnvironmentSnapshotKind::Baseline,
+        baseline_style,
+        item_style,
+    );
+    let changes = prompt_overlay_dynamic_checkbox_spans(
+        row,
+        DynamicEnvironmentSnapshotKind::Changes,
+        changes_style,
+        item_style,
+    );
+    let name = prompt_overlay_dynamic_name_cell(row, name_width);
+
+    Line::from(vec![
+        Span::styled(marker.to_string(), marker_style),
+        Span::styled(left_pad, item_style),
+        baseline.0,
+        baseline.1,
+        baseline.2,
+        Span::styled(gap.clone(), item_style),
+        changes.0,
+        changes.1,
+        changes.2,
+        Span::styled(gap.clone(), item_style),
+        Span::styled(name, item_style),
+        Span::styled(gap, item_style),
+        Span::styled(scope, item_style),
+        Span::styled(trailing, item_style),
+    ])
+}
+
+fn prompt_overlay_dynamic_plain_row_text(row: &PromptOverlayInactiveRow, width: usize) -> String {
+    let name_width = prompt_overlay_dynamic_name_width(width);
+    let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
+    let baseline = prompt_overlay_center_text(
+        &prompt_overlay_dynamic_checkbox_label(row, DynamicEnvironmentSnapshotKind::Baseline),
+        PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH,
+    );
+    let changes = prompt_overlay_center_text(
+        &prompt_overlay_dynamic_checkbox_label(row, DynamicEnvironmentSnapshotKind::Changes),
+        PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH,
+    );
+    let name = prompt_overlay_dynamic_name_cell(row, name_width);
+    let scope = format!(
+        "{:<width$}",
+        prompt_overlay_origin_label(prompt_overlay_dynamic_origin(row)),
+        width = PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH
+    );
+    let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
+    let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
+    format!("{left_pad}{baseline}{gap}{changes}{gap}{name}{gap}{scope}{trailing}")
+}
+
+fn prompt_overlay_dynamic_checkbox_label(
+    row: &PromptOverlayInactiveRow,
+    snapshot_kind: DynamicEnvironmentSnapshotKind,
+) -> String {
+    match row {
+        PromptOverlayInactiveRow::DynamicEnvironmentCandidate { source } => {
+            if prompt_overlay_dynamic_source_selected(source, snapshot_kind) {
+                "[x]".to_string()
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        _ => "-".to_string(),
+    }
+}
+
+fn prompt_overlay_dynamic_checkbox_spans(
+    row: &PromptOverlayInactiveRow,
+    snapshot_kind: DynamicEnvironmentSnapshotKind,
+    checkbox_style: Style,
+    padding_style: Style,
+) -> (Span<'static>, Span<'static>, Span<'static>) {
+    let label = prompt_overlay_dynamic_checkbox_label(row, snapshot_kind);
+    let label_width = display_width(&label).min(PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH);
+    let left_padding = PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH.saturating_sub(label_width) / 2;
+    let right_padding = PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH
+        .saturating_sub(label_width)
+        .saturating_sub(left_padding);
+
+    (
+        Span::styled(" ".repeat(left_padding), padding_style),
+        Span::styled(label, checkbox_style),
+        Span::styled(" ".repeat(right_padding), padding_style),
+    )
+}
+
+fn prompt_overlay_dynamic_checkbox_hit_test(
+    column: u16,
+    body_area: Rect,
+) -> Option<DynamicEnvironmentSnapshotKind> {
+    if body_area.width == 0 || column < body_area.x {
+        return None;
+    }
+
+    let relative_column = usize::from(column.saturating_sub(body_area.x));
+    let baseline_start = PROMPT_OVERLAY_ROW_PREFIX_WIDTH + PROMPT_OVERLAY_OUTER_PADDING;
+    let baseline_end = baseline_start.saturating_add(PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH);
+    if relative_column >= baseline_start && relative_column < baseline_end {
+        return Some(DynamicEnvironmentSnapshotKind::Baseline);
+    }
+
+    let changes_start = baseline_end.saturating_add(PROMPT_OVERLAY_COLUMN_GAP);
+    let changes_end = changes_start.saturating_add(PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH);
+    if relative_column >= changes_start && relative_column < changes_end {
+        return Some(DynamicEnvironmentSnapshotKind::Changes);
+    }
+
+    None
+}
+
+fn prompt_overlay_dynamic_source_selected(
+    source: &PromptAssemblyDynamicEnvironmentCandidate,
+    snapshot_kind: DynamicEnvironmentSnapshotKind,
+) -> bool {
+    match snapshot_kind {
+        DynamicEnvironmentSnapshotKind::Baseline => source.baseline_selected,
+        DynamicEnvironmentSnapshotKind::Changes => source.changes_selected,
+    }
+}
+
+fn prompt_overlay_dynamic_name_cell(row: &PromptOverlayInactiveRow, width: usize) -> String {
+    match row {
+        PromptOverlayInactiveRow::DynamicEnvironmentCandidate { source } => {
+            prompt_overlay_cell_with_trailing_marker(&source.label, None, width)
+        }
+        _ => prompt_overlay_fill_cell("", width),
+    }
+}
+
+fn prompt_overlay_dynamic_origin(row: &PromptOverlayInactiveRow) -> PromptSourceOrigin {
+    match row {
+        PromptOverlayInactiveRow::DynamicEnvironmentCandidate { source } => source.origin,
+        _ => PromptSourceOrigin::Project,
+    }
+}
+
+fn prompt_overlay_dynamic_header_text(width: usize) -> String {
+    let name_width = prompt_overlay_dynamic_name_width(width);
+    let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
+    let baseline = prompt_overlay_center_text("Base", PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH);
+    let changes = prompt_overlay_center_text("Change", PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH);
+    let name = format!(
+        "{:<width$}",
+        truncate_display_width_with_ellipsis("Source", name_width),
+        width = name_width
+    );
+    let scope = format!(
+        "{:<width$}",
+        "Scope",
+        width = PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH
+    );
+    let gap = " ".repeat(PROMPT_OVERLAY_COLUMN_GAP);
+    let trailing = " ".repeat(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING);
+    format!("{left_pad}{baseline}{gap}{changes}{gap}{name}{gap}{scope}{trailing}")
+}
+
 fn prompt_overlay_tool_header_text(width: usize) -> String {
     let name_width = prompt_overlay_right_inactive_name_width(width);
     let left_pad = " ".repeat(PROMPT_OVERLAY_OUTER_PADDING);
@@ -3347,6 +3783,16 @@ fn prompt_overlay_right_inactive_name_width(width: usize) -> usize {
         .saturating_sub(PROMPT_OVERLAY_OUTER_PADDING)
         .saturating_sub(PROMPT_OVERLAY_LEFT_SEL_WIDTH)
         .saturating_sub(PROMPT_OVERLAY_RIGHT_ORD_WIDTH)
+        .saturating_sub(PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH)
+        .saturating_sub(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING)
+        .saturating_sub(PROMPT_OVERLAY_COLUMN_GAP * 3)
+        .max(12)
+}
+
+fn prompt_overlay_dynamic_name_width(width: usize) -> usize {
+    width
+        .saturating_sub(PROMPT_OVERLAY_OUTER_PADDING)
+        .saturating_sub(PROMPT_OVERLAY_DYNAMIC_CHECKBOX_WIDTH * 2)
         .saturating_sub(PROMPT_OVERLAY_RIGHT_SCOPE_WIDTH)
         .saturating_sub(PROMPT_OVERLAY_SCOPE_TRAILING_PADDING)
         .saturating_sub(PROMPT_OVERLAY_COLUMN_GAP * 3)

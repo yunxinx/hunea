@@ -316,6 +316,14 @@ fn initialize_database_schema(conn: &Connection) -> Result<(), SessionStoreError
             requested_order INTEGER,
             PRIMARY KEY (scope, tool_name)
         );
+
+        CREATE TABLE IF NOT EXISTS prompt_assembly_dynamic_environment_sources (
+            scope TEXT NOT NULL,
+            snapshot_kind TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            PRIMARY KEY (scope, snapshot_kind, source_kind)
+        );
         ",
     )
     .map_err(sqlite_error)

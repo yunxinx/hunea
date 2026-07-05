@@ -169,17 +169,14 @@ fn apply_scoped_mutation_to_scope_states(
             let title = derive_extra_prompt_title(&content, "New prompt");
             let reference_id = generate_unique_extra_prompt_reference_id(state, &title);
             let requested_order = next_requested_order(state.entries());
-            state.entries_mut().push(PersistedPromptAssemblyEntry {
+            state.upsert_entry(PersistedPromptAssemblyEntry {
                 reference_id: reference_id.clone(),
                 kind: PromptSourceKind::ExtraPrompt,
                 title: title.clone(),
                 enabled: true,
                 requested_order: Some(requested_order),
             });
-            state
-                .extra_prompts_mut()
-                .retain(|prompt| prompt.reference_id != reference_id);
-            state.extra_prompts_mut().push(StoredPromptBody {
+            state.upsert_extra_prompt(StoredPromptBody {
                 reference_id,
                 title,
                 body: content,
@@ -188,12 +185,8 @@ fn apply_scoped_mutation_to_scope_states(
         }
         PromptAssemblyScopedMutationKind::DeleteExtraPrompt { reference_id } => {
             let state = scope_state_mut(global_state, project_state, scope);
-            state.entries_mut().retain(|entry| {
-                !(entry.kind == PromptSourceKind::ExtraPrompt && entry.reference_id == reference_id)
-            });
-            state
-                .extra_prompts_mut()
-                .retain(|prompt| prompt.reference_id != reference_id);
+            state.remove_entry(PromptSourceKind::ExtraPrompt, &reference_id);
+            state.remove_extra_prompt(&reference_id);
             Ok(())
         }
         PromptAssemblyScopedMutationKind::RemovePromptSource { kind, reference_id } => {
@@ -288,13 +281,11 @@ pub(super) fn apply_save_editor_target(
         } => {
             let state = scope_state_mut(global_state, project_state, scope);
             let title = derive_extra_prompt_title(&content, &reference_id);
-            if let Some(entry) = state.entries_mut().iter_mut().find(|entry| {
-                entry.kind == PromptSourceKind::ExtraPrompt && entry.reference_id == reference_id
-            }) {
+            if let Some(entry) = state.entry_mut(PromptSourceKind::ExtraPrompt, &reference_id) {
                 entry.title = title.clone();
             } else {
                 let requested_order = next_requested_order(state.entries());
-                state.entries_mut().push(PersistedPromptAssemblyEntry {
+                state.upsert_entry(PersistedPromptAssemblyEntry {
                     reference_id: reference_id.clone(),
                     kind: PromptSourceKind::ExtraPrompt,
                     title: title.clone(),
@@ -303,15 +294,11 @@ pub(super) fn apply_save_editor_target(
                 });
             }
 
-            if let Some(prompt) = state
-                .extra_prompts_mut()
-                .iter_mut()
-                .find(|prompt| prompt.reference_id == reference_id)
-            {
+            if let Some(prompt) = state.extra_prompt_mut(&reference_id) {
                 prompt.title = title;
                 prompt.body = content;
             } else {
-                state.extra_prompts_mut().push(StoredPromptBody {
+                state.upsert_extra_prompt(StoredPromptBody {
                     reference_id,
                     title,
                     body: content,
@@ -709,7 +696,7 @@ pub(super) fn ensure_prompt_source_entry_materialized(
         }
         PromptSourceKind::DynamicEnvironmentBaseline
         | PromptSourceKind::DynamicEnvironmentChanges => {
-            ensure_default_dynamic_environment_sources(global_state, project_state);
+            ensure_default_dynamic_environment_sources(global_state);
         }
         PromptSourceKind::InstructionsFile => {
             let (discovered_instruction_files, _) = discover_instruction_files(work_dir, None);
@@ -733,7 +720,7 @@ pub(super) fn ensure_active_prompt_source_ordering_materialized(
 ) {
     ensure_default_skill_discovery_source(global_state, project_state);
     ensure_default_tool_guidelines_source(global_state, project_state);
-    ensure_default_dynamic_environment_sources(global_state, project_state);
+    ensure_default_dynamic_environment_sources(global_state);
     let (discovered_instruction_files, _) = discover_instruction_files(work_dir, None);
     ensure_discovered_instruction_entries(
         global_state,
@@ -859,9 +846,7 @@ pub(super) fn activate_long_lived_skill(
 ) {
     let state = scope_state_mut(global_state, project_state, scope);
     let next_order = next_requested_order(state.entries());
-    if let Some(entry) = state.entries_mut().iter_mut().find(|entry| {
-        entry.kind == PromptSourceKind::LongLivedSkill && entry.reference_id == skill_name
-    }) {
+    if let Some(entry) = state.entry_mut(PromptSourceKind::LongLivedSkill, skill_name) {
         entry.enabled = true;
         if entry.requested_order.is_none() {
             entry.requested_order = Some(next_order);
@@ -869,7 +854,7 @@ pub(super) fn activate_long_lived_skill(
         return;
     }
 
-    state.entries_mut().push(PersistedPromptAssemblyEntry {
+    state.upsert_entry(PersistedPromptAssemblyEntry {
         reference_id: skill_name.to_string(),
         kind: PromptSourceKind::LongLivedSkill,
         title: skill_name.to_string(),
@@ -887,7 +872,7 @@ pub(super) fn ensure_skill_discovery_entry_exists(state: &mut PromptAssemblyScop
         return;
     }
     let requested_order = default_skill_discovery_requested_order(state.entries());
-    state.entries_mut().push(PersistedPromptAssemblyEntry {
+    state.upsert_entry(PersistedPromptAssemblyEntry {
         reference_id: "skill-discovery".to_string(),
         kind: PromptSourceKind::SkillDiscovery,
         title: "Skill discovery".to_string(),
@@ -945,11 +930,7 @@ pub(super) fn set_prompt_source_enabled(
     reference_id: &str,
     enabled: bool,
 ) {
-    if let Some(entry) = state
-        .entries_mut()
-        .iter_mut()
-        .find(|entry| entry.kind == kind && entry.reference_id == reference_id)
-    {
+    if let Some(entry) = state.entry_mut(kind, reference_id) {
         entry.enabled = enabled;
     }
 }
@@ -978,7 +959,7 @@ pub(super) fn set_extra_prompt_selected(
             return;
         }
         let requested_order = next_requested_order(state.entries());
-        state.entries_mut().push(PersistedPromptAssemblyEntry {
+        state.upsert_entry(PersistedPromptAssemblyEntry {
             reference_id: prompt.reference_id,
             kind: PromptSourceKind::ExtraPrompt,
             title: prompt.title,
@@ -988,9 +969,7 @@ pub(super) fn set_extra_prompt_selected(
         return;
     }
 
-    state.entries_mut().retain(|entry| {
-        !(entry.kind == PromptSourceKind::ExtraPrompt && entry.reference_id == reference_id)
-    });
+    state.remove_entry(PromptSourceKind::ExtraPrompt, reference_id);
 }
 
 pub(super) fn set_discovered_skill_selected(
@@ -999,11 +978,7 @@ pub(super) fn set_discovered_skill_selected(
     selected: bool,
 ) {
     let next_order = next_skill_discovery_requested_order(state.skill_discovery_skills());
-    if let Some(entry) = state
-        .skill_discovery_skills_mut()
-        .iter_mut()
-        .find(|entry| entry.skill_name == skill_name)
-    {
+    if let Some(entry) = state.skill_discovery_skill_mut(skill_name) {
         entry.enabled = selected;
         if selected && entry.requested_order.is_none() {
             entry.requested_order = Some(next_order);
@@ -1011,13 +986,11 @@ pub(super) fn set_discovered_skill_selected(
         return;
     }
 
-    state
-        .skill_discovery_skills_mut()
-        .push(PersistedSkillDiscoverySkillEntry {
-            skill_name: skill_name.to_string(),
-            enabled: selected,
-            requested_order: Some(next_order),
-        });
+    state.upsert_skill_discovery_skill(PersistedSkillDiscoverySkillEntry {
+        skill_name: skill_name.to_string(),
+        enabled: selected,
+        requested_order: Some(next_order),
+    });
 }
 
 pub(super) fn move_discovered_skill(
@@ -1040,7 +1013,7 @@ pub(super) fn move_discovered_skill(
     }) else {
         return Ok(());
     };
-    state.skill_discovery_skills_mut().swap(position, neighbor);
+    state.swap_skill_discovery_skills(position, neighbor);
     normalize_skill_discovery_requested_orders(state);
     Ok(())
 }
@@ -1083,8 +1056,10 @@ pub(super) fn next_skill_discovery_requested_order(
 }
 
 pub(super) fn normalize_skill_discovery_requested_orders(state: &mut PromptAssemblyScopeState) {
-    for (index, entry) in state.skill_discovery_skills_mut().iter_mut().enumerate() {
-        entry.requested_order = Some(u16::try_from(index + 1).unwrap_or(u16::MAX));
+    for index in 0..state.skill_discovery_skills().len() {
+        if let Some(entry) = state.skill_discovery_skill_at_mut(index) {
+            entry.requested_order = Some(u16::try_from(index + 1).unwrap_or(u16::MAX));
+        }
     }
 }
 
@@ -1103,9 +1078,7 @@ pub(super) fn remove_prompt_source(
     ) {
         return;
     }
-    state
-        .entries_mut()
-        .retain(|entry| !(entry.kind == kind && entry.reference_id == reference_id));
+    state.remove_entry(kind, reference_id);
 }
 
 pub(super) fn move_active_source(
@@ -1200,8 +1173,12 @@ pub(super) fn entry_ref<'a>(
     address: PromptEntryAddress,
 ) -> &'a PersistedPromptAssemblyEntry {
     match address.scope {
-        PromptAssemblyScope::Global => &global_state.entries()[address.index],
-        PromptAssemblyScope::Project => &project_state.entries()[address.index],
+        PromptAssemblyScope::Global => global_state
+            .entry_at(address.index)
+            .expect("prompt entry address should refer to an existing global entry"),
+        PromptAssemblyScope::Project => project_state
+            .entry_at(address.index)
+            .expect("prompt entry address should refer to an existing project entry"),
     }
 }
 
@@ -1211,8 +1188,12 @@ pub(super) fn entry_mut<'a>(
     address: PromptEntryAddress,
 ) -> &'a mut PersistedPromptAssemblyEntry {
     match address.scope {
-        PromptAssemblyScope::Global => &mut global_state.entries_mut()[address.index],
-        PromptAssemblyScope::Project => &mut project_state.entries_mut()[address.index],
+        PromptAssemblyScope::Global => global_state
+            .entry_at_mut(address.index)
+            .expect("prompt entry address should refer to an existing global entry"),
+        PromptAssemblyScope::Project => project_state
+            .entry_at_mut(address.index)
+            .expect("prompt entry address should refer to an existing project entry"),
     }
 }
 

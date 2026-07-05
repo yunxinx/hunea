@@ -168,14 +168,48 @@ impl PromptAssemblyScopeState {
         &self.entries
     }
 
-    /// `entries_mut` 返回该 scope 下持久化 source entries 的可变集合。
-    pub fn entries_mut(&mut self) -> &mut Vec<PersistedPromptAssemblyEntry> {
-        &mut self.entries
-    }
-
     /// `set_entries` 替换该 scope 下持久化的 source entries。
     pub fn set_entries(&mut self, entries: Vec<PersistedPromptAssemblyEntry>) {
         self.entries = entries;
+    }
+
+    /// `entry_mut` 返回指定 source entry 的可变引用。
+    pub fn entry_mut(
+        &mut self,
+        kind: PromptSourceKind,
+        reference_id: &str,
+    ) -> Option<&mut PersistedPromptAssemblyEntry> {
+        self.entries
+            .iter_mut()
+            .find(|entry| entry.kind == kind && entry.reference_id == reference_id)
+    }
+
+    /// `entry_at` 返回指定位置的 source entry。
+    #[must_use]
+    pub fn entry_at(&self, index: usize) -> Option<&PersistedPromptAssemblyEntry> {
+        self.entries.get(index)
+    }
+
+    /// `entry_at_mut` 返回指定位置的 source entry 可变引用。
+    pub fn entry_at_mut(&mut self, index: usize) -> Option<&mut PersistedPromptAssemblyEntry> {
+        self.entries.get_mut(index)
+    }
+
+    /// `upsert_entry` 按 kind/reference_id 插入或替换 source entry。
+    pub fn upsert_entry(&mut self, entry: PersistedPromptAssemblyEntry) {
+        if let Some(existing) = self.entry_mut(entry.kind, &entry.reference_id) {
+            *existing = entry;
+        } else {
+            self.entries.push(entry);
+        }
+    }
+
+    /// `remove_entry` 删除指定 kind/reference_id 的 source entry，返回是否删除了内容。
+    pub fn remove_entry(&mut self, kind: PromptSourceKind, reference_id: &str) -> bool {
+        let original_len = self.entries.len();
+        self.entries
+            .retain(|entry| !(entry.kind == kind && entry.reference_id == reference_id));
+        self.entries.len() != original_len
     }
 
     /// `skill_discovery_skills` 返回 skill discovery 中单个 skill 的持久化选择。
@@ -184,14 +218,41 @@ impl PromptAssemblyScopeState {
         &self.skill_discovery_skills
     }
 
-    /// `skill_discovery_skills_mut` 返回 skill discovery skill 选择的可变集合。
-    pub fn skill_discovery_skills_mut(&mut self) -> &mut Vec<PersistedSkillDiscoverySkillEntry> {
-        &mut self.skill_discovery_skills
-    }
-
     /// `set_skill_discovery_skills` 替换 skill discovery skill 选择。
     pub fn set_skill_discovery_skills(&mut self, skills: Vec<PersistedSkillDiscoverySkillEntry>) {
         self.skill_discovery_skills = skills;
+    }
+
+    /// `skill_discovery_skill_mut` 返回指定 skill 选择项的可变引用。
+    pub fn skill_discovery_skill_mut(
+        &mut self,
+        skill_name: &str,
+    ) -> Option<&mut PersistedSkillDiscoverySkillEntry> {
+        self.skill_discovery_skills
+            .iter_mut()
+            .find(|entry| entry.skill_name == skill_name)
+    }
+
+    /// `skill_discovery_skill_at_mut` 返回指定位置的 skill 选择项可变引用。
+    pub fn skill_discovery_skill_at_mut(
+        &mut self,
+        index: usize,
+    ) -> Option<&mut PersistedSkillDiscoverySkillEntry> {
+        self.skill_discovery_skills.get_mut(index)
+    }
+
+    /// `upsert_skill_discovery_skill` 按 skill_name 插入或替换 skill 选择项。
+    pub fn upsert_skill_discovery_skill(&mut self, entry: PersistedSkillDiscoverySkillEntry) {
+        if let Some(existing) = self.skill_discovery_skill_mut(&entry.skill_name) {
+            *existing = entry;
+        } else {
+            self.skill_discovery_skills.push(entry);
+        }
+    }
+
+    /// `swap_skill_discovery_skills` 交换两个 skill 选择项。
+    pub fn swap_skill_discovery_skills(&mut self, left: usize, right: usize) {
+        self.skill_discovery_skills.swap(left, right);
     }
 
     /// `tool_selections` 返回 tool guideline 中单个 tool 的持久化选择。
@@ -200,27 +261,47 @@ impl PromptAssemblyScopeState {
         &self.tool_selections
     }
 
-    /// `tool_selections_mut` 返回 tool guideline tool 选择的可变集合。
-    pub fn tool_selections_mut(&mut self) -> &mut Vec<PersistedToolSelectionEntry> {
-        &mut self.tool_selections
-    }
-
     /// `set_tool_selections` 替换 tool guideline tool 选择。
     pub fn set_tool_selections(&mut self, tool_selections: Vec<PersistedToolSelectionEntry>) {
         self.tool_selections = tool_selections;
+    }
+
+    /// `tool_selection_mut` 返回指定 tool 选择项的可变引用。
+    pub fn tool_selection_mut(
+        &mut self,
+        tool_name: &str,
+    ) -> Option<&mut PersistedToolSelectionEntry> {
+        self.tool_selections
+            .iter_mut()
+            .find(|entry| entry.tool_name == tool_name)
+    }
+
+    /// `tool_selection_at_mut` 返回指定位置的 tool 选择项可变引用。
+    pub fn tool_selection_at_mut(
+        &mut self,
+        index: usize,
+    ) -> Option<&mut PersistedToolSelectionEntry> {
+        self.tool_selections.get_mut(index)
+    }
+
+    /// `upsert_tool_selection` 按 tool_name 插入或替换 tool 选择项。
+    pub fn upsert_tool_selection(&mut self, entry: PersistedToolSelectionEntry) {
+        if let Some(existing) = self.tool_selection_mut(&entry.tool_name) {
+            *existing = entry;
+        } else {
+            self.tool_selections.push(entry);
+        }
+    }
+
+    /// `swap_tool_selections` 交换两个 tool 选择项。
+    pub fn swap_tool_selections(&mut self, left: usize, right: usize) {
+        self.tool_selections.swap(left, right);
     }
 
     /// `dynamic_environment_sources` 返回 dynamic environment source 选择。
     #[must_use]
     pub fn dynamic_environment_sources(&self) -> &[DynamicEnvironmentSourceSelection] {
         &self.dynamic_environment_sources
-    }
-
-    /// `dynamic_environment_sources_mut` 返回 dynamic environment source 选择的可变集合。
-    pub fn dynamic_environment_sources_mut(
-        &mut self,
-    ) -> &mut Vec<DynamicEnvironmentSourceSelection> {
-        &mut self.dynamic_environment_sources
     }
 
     /// `set_dynamic_environment_sources` 替换 dynamic environment source 选择。
@@ -231,20 +312,63 @@ impl PromptAssemblyScopeState {
         self.dynamic_environment_sources = sources;
     }
 
+    /// `dynamic_environment_source_mut` 返回指定 dynamic environment source 选择项。
+    pub fn dynamic_environment_source_mut(
+        &mut self,
+        snapshot_kind: crate::dynamic_environment::DynamicEnvironmentSnapshotKind,
+        source_kind: crate::dynamic_environment::DynamicEnvironmentSourceKind,
+    ) -> Option<&mut DynamicEnvironmentSourceSelection> {
+        self.dynamic_environment_sources
+            .iter_mut()
+            .find(|selection| {
+                selection.snapshot_kind == snapshot_kind && selection.source_kind == source_kind
+            })
+    }
+
+    /// `upsert_dynamic_environment_source` 按 snapshot/source kind 插入或替换 dynamic environment 选择。
+    pub fn upsert_dynamic_environment_source(&mut self, source: DynamicEnvironmentSourceSelection) {
+        if let Some(existing) =
+            self.dynamic_environment_source_mut(source.snapshot_kind, source.source_kind)
+        {
+            *existing = source;
+        } else {
+            self.dynamic_environment_sources.push(source);
+        }
+    }
+
     /// `extra_prompts` 返回该 scope 下持久化的 custom prompt bodies。
     #[must_use]
     pub fn extra_prompts(&self) -> &[StoredPromptBody] {
         &self.extra_prompts
     }
 
-    /// `extra_prompts_mut` 返回该 scope 下 custom prompt bodies 的可变集合。
-    pub fn extra_prompts_mut(&mut self) -> &mut Vec<StoredPromptBody> {
-        &mut self.extra_prompts
-    }
-
     /// `set_extra_prompts` 替换该 scope 下持久化的 custom prompt bodies。
     pub fn set_extra_prompts(&mut self, prompts: Vec<StoredPromptBody>) {
         self.extra_prompts = prompts;
+    }
+
+    /// `extra_prompt_mut` 返回指定 custom prompt body 的可变引用。
+    pub fn extra_prompt_mut(&mut self, reference_id: &str) -> Option<&mut StoredPromptBody> {
+        self.extra_prompts
+            .iter_mut()
+            .find(|prompt| prompt.reference_id == reference_id)
+    }
+
+    /// `upsert_extra_prompt` 按 reference_id 插入或替换 custom prompt body。
+    pub fn upsert_extra_prompt(&mut self, prompt: StoredPromptBody) {
+        if let Some(existing) = self.extra_prompt_mut(&prompt.reference_id) {
+            *existing = prompt;
+        } else {
+            self.extra_prompts.push(prompt);
+        }
+    }
+
+    /// `remove_extra_prompt` 删除指定 custom prompt body，返回是否删除了内容。
+    pub fn remove_extra_prompt(&mut self, reference_id: &str) -> bool {
+        let original_len = self.extra_prompts.len();
+        self.extra_prompts
+            .retain(|prompt| prompt.reference_id != reference_id);
+        self.extra_prompts.len() != original_len
     }
 }
 
@@ -783,7 +907,7 @@ mod tests {
     fn scope_state_new_builds_state_through_domain_api() {
         let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Global);
         state.set_core_system_override(Some("core".to_string()));
-        state.entries_mut().push(PersistedPromptAssemblyEntry {
+        state.upsert_entry(PersistedPromptAssemblyEntry {
             reference_id: "skill-discovery".to_string(),
             kind: PromptSourceKind::SkillDiscovery,
             title: "Skill discovery".to_string(),
@@ -794,6 +918,88 @@ mod tests {
         assert_eq!(state.scope(), PromptAssemblyScope::Global);
         assert_eq!(state.core_system_override(), Some("core"));
         assert_eq!(state.entries()[0].reference_id, "skill-discovery");
+    }
+
+    #[test]
+    fn scope_state_upserts_entries_by_kind_and_reference() {
+        let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Project);
+
+        state.upsert_entry(PersistedPromptAssemblyEntry {
+            reference_id: "review".to_string(),
+            kind: PromptSourceKind::ExtraPrompt,
+            title: "Review".to_string(),
+            enabled: true,
+            requested_order: Some(10),
+        });
+        state.upsert_entry(PersistedPromptAssemblyEntry {
+            reference_id: "review".to_string(),
+            kind: PromptSourceKind::ExtraPrompt,
+            title: "Updated review".to_string(),
+            enabled: false,
+            requested_order: Some(20),
+        });
+
+        assert_eq!(state.entries().len(), 1);
+        assert_eq!(state.entries()[0].title, "Updated review");
+        assert!(!state.entries()[0].enabled);
+        assert_eq!(state.entries()[0].requested_order, Some(20));
+        assert!(state.remove_entry(PromptSourceKind::ExtraPrompt, "review"));
+        assert!(state.entries().is_empty());
+    }
+
+    #[test]
+    fn scope_state_upserts_extra_prompts_by_reference() {
+        let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Project);
+
+        state.upsert_extra_prompt(StoredPromptBody {
+            reference_id: "review".to_string(),
+            title: "Review".to_string(),
+            body: "First".to_string(),
+        });
+        state.upsert_extra_prompt(StoredPromptBody {
+            reference_id: "review".to_string(),
+            title: "Review updated".to_string(),
+            body: "Second".to_string(),
+        });
+
+        assert_eq!(state.extra_prompts().len(), 1);
+        assert_eq!(state.extra_prompts()[0].title, "Review updated");
+        assert_eq!(state.extra_prompts()[0].body, "Second");
+        assert!(state.remove_extra_prompt("review"));
+        assert!(state.extra_prompts().is_empty());
+    }
+
+    #[test]
+    fn scope_state_updates_selection_collections_by_key() {
+        let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Global);
+
+        state.upsert_skill_discovery_skill(PersistedSkillDiscoverySkillEntry {
+            skill_name: "review".to_string(),
+            enabled: true,
+            requested_order: Some(1),
+        });
+        state.upsert_skill_discovery_skill(PersistedSkillDiscoverySkillEntry {
+            skill_name: "review".to_string(),
+            enabled: false,
+            requested_order: Some(2),
+        });
+        assert_eq!(state.skill_discovery_skills().len(), 1);
+        assert!(!state.skill_discovery_skills()[0].enabled);
+        assert_eq!(state.skill_discovery_skills()[0].requested_order, Some(2));
+
+        state.upsert_tool_selection(PersistedToolSelectionEntry {
+            tool_name: "bash".to_string(),
+            enabled: true,
+            requested_order: Some(1),
+        });
+        state.upsert_tool_selection(PersistedToolSelectionEntry {
+            tool_name: "bash".to_string(),
+            enabled: false,
+            requested_order: Some(2),
+        });
+        assert_eq!(state.tool_selections().len(), 1);
+        assert!(!state.tool_selections()[0].enabled);
+        assert_eq!(state.tool_selections()[0].requested_order, Some(2));
     }
 
     #[test]

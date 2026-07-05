@@ -310,15 +310,13 @@ pub(super) fn ensure_scope_instruction_entries(
         .unwrap_or(starting_order);
 
     for file in discovered_instruction_files {
-        if let Some(entry) = state.entries_mut().iter_mut().find(|entry| {
-            entry.kind == PromptSourceKind::InstructionsFile
-                && entry.reference_id == file.reference_id
-        }) {
+        if let Some(entry) = state.entry_mut(PromptSourceKind::InstructionsFile, &file.reference_id)
+        {
             entry.title = file.title.clone();
             continue;
         }
 
-        state.entries_mut().push(PersistedPromptAssemblyEntry {
+        state.upsert_entry(PersistedPromptAssemblyEntry {
             reference_id: file.reference_id.clone(),
             kind: PromptSourceKind::InstructionsFile,
             title: file.title.clone(),
@@ -661,7 +659,7 @@ pub(super) fn ensure_tool_guidelines_entry_exists(state: &mut PromptAssemblyScop
         return;
     }
     let requested_order = default_tool_guidelines_requested_order(state.entries());
-    state.entries_mut().push(PersistedPromptAssemblyEntry {
+    state.upsert_entry(PersistedPromptAssemblyEntry {
         reference_id: "tool-guidelines".to_string(),
         kind: PromptSourceKind::ToolGuidelines,
         title: "Tool guidelines".to_string(),
@@ -717,7 +715,7 @@ pub(super) fn ensure_dynamic_environment_entry_exists(
     {
         return;
     }
-    state.entries_mut().push(PersistedPromptAssemblyEntry {
+    state.upsert_entry(PersistedPromptAssemblyEntry {
         reference_id: reference_id.to_string(),
         kind,
         title: title.to_string(),
@@ -728,7 +726,6 @@ pub(super) fn ensure_dynamic_environment_entry_exists(
 
 pub(super) fn ensure_default_dynamic_environment_sources(
     global_state: &mut PromptAssemblyScopeState,
-    _project_state: &mut PromptAssemblyScopeState,
 ) {
     ensure_dynamic_environment_entry_exists(
         global_state,
@@ -931,24 +928,16 @@ pub(super) fn set_dynamic_environment_source_selected(
     source_kind: DynamicEnvironmentSourceKind,
     selected: bool,
 ) {
-    if let Some(selection) = state
-        .dynamic_environment_sources_mut()
-        .iter_mut()
-        .find(|selection| {
-            selection.snapshot_kind == snapshot_kind && selection.source_kind == source_kind
-        })
-    {
+    if let Some(selection) = state.dynamic_environment_source_mut(snapshot_kind, source_kind) {
         selection.enabled = selected;
         return;
     }
 
-    state
-        .dynamic_environment_sources_mut()
-        .push(DynamicEnvironmentSourceSelection {
-            snapshot_kind,
-            source_kind,
-            enabled: selected,
-        });
+    state.upsert_dynamic_environment_source(DynamicEnvironmentSourceSelection {
+        snapshot_kind,
+        source_kind,
+        enabled: selected,
+    });
 }
 
 pub(super) fn dynamic_environment_preview_body(
@@ -1017,11 +1006,7 @@ pub(super) fn set_tool_selected(
     selected: bool,
 ) {
     let next_order = next_tool_requested_order(state.tool_selections());
-    if let Some(entry) = state
-        .tool_selections_mut()
-        .iter_mut()
-        .find(|entry| entry.tool_name == tool_name)
-    {
+    if let Some(entry) = state.tool_selection_mut(tool_name) {
         entry.enabled = selected;
         if selected && entry.requested_order.is_none() {
             entry.requested_order = Some(next_order);
@@ -1029,13 +1014,11 @@ pub(super) fn set_tool_selected(
         return;
     }
 
-    state
-        .tool_selections_mut()
-        .push(PersistedToolSelectionEntry {
-            tool_name: tool_name.to_string(),
-            enabled: selected,
-            requested_order: Some(next_order),
-        });
+    state.upsert_tool_selection(PersistedToolSelectionEntry {
+        tool_name: tool_name.to_string(),
+        enabled: selected,
+        requested_order: Some(next_order),
+    });
 }
 
 pub(super) fn move_tool(
@@ -1058,7 +1041,7 @@ pub(super) fn move_tool(
     }) else {
         return Ok(());
     };
-    state.tool_selections_mut().swap(position, neighbor);
+    state.swap_tool_selections(position, neighbor);
     normalize_tool_requested_orders(state);
     Ok(())
 }
@@ -1073,8 +1056,10 @@ pub(super) fn next_tool_requested_order(entries: &[PersistedToolSelectionEntry])
 }
 
 pub(super) fn normalize_tool_requested_orders(state: &mut PromptAssemblyScopeState) {
-    for (index, entry) in state.tool_selections_mut().iter_mut().enumerate() {
-        entry.requested_order = Some(u16::try_from(index + 1).unwrap_or(u16::MAX));
+    for index in 0..state.tool_selections().len() {
+        if let Some(entry) = state.tool_selection_at_mut(index) {
+            entry.requested_order = Some(u16::try_from(index + 1).unwrap_or(u16::MAX));
+        }
     }
 }
 

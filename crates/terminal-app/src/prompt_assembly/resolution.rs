@@ -124,10 +124,7 @@ pub(super) fn resolve_prompt_assembly_manager_snapshot_with_overrides(
         &mut effective_global_state,
         &mut effective_project_state,
     );
-    ensure_default_dynamic_environment_sources(
-        &mut effective_global_state,
-        &mut effective_project_state,
-    );
+    ensure_default_dynamic_environment_sources(&mut effective_global_state);
     let (discovered_skills, mut diagnostics) =
         discover_skills_with_diagnostics(work_dir, global_skill_root_override);
     let (discovered_instruction_files, instruction_diagnostics) =

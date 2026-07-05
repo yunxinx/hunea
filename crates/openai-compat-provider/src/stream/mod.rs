@@ -127,8 +127,7 @@ enum ResponsesStreamEvent {
     #[serde(rename = "response.function_call_arguments.done")]
     FunctionCallArgumentsDone {
         output_index: usize,
-        #[serde(default)]
-        arguments: String,
+        arguments: Option<String>,
     },
     #[serde(rename = "response.completed")]
     Completed { response: ResponsesTerminalResponse },

@@ -43,15 +43,16 @@ impl ToolCallAccumulator {
         &mut self,
         delta: OpenAiToolCallDelta,
         sink: &mut (dyn StreamEventSink + Send),
-    ) {
+    ) -> Result<(), ProviderError> {
         let index = delta.index;
+        let has_started = self.started.contains(&index);
         let partial = self.partials.entry(index).or_default();
         if let Some(id) = delta.id.filter(|id| !id.is_empty()) {
-            partial.call_id = Some(id);
+            apply_call_id(index, partial, has_started, id)?;
         }
         if let Some(function) = delta.function {
             if let Some(name) = function.name.filter(|name| !name.is_empty()) {
-                partial.name = Some(name);
+                apply_name(index, partial, has_started, name)?;
             }
             if let Some(arguments) = function.arguments.filter(|arguments| !arguments.is_empty()) {
                 partial.arguments.push_str(&arguments);
@@ -62,6 +63,7 @@ impl ToolCallAccumulator {
             }
         }
         self.emit_started_if_ready(index, sink);
+        Ok(())
     }
 
     pub(super) fn apply_responses_item(
@@ -70,21 +72,31 @@ impl ToolCallAccumulator {
         item: ResponsesOutputItem,
         arguments_mode: ResponsesToolArgumentsMode,
         sink: &mut (dyn StreamEventSink + Send),
-    ) {
+    ) -> Result<(), ProviderError> {
+        let has_started = self.started.contains(&index);
         let partial = self.partials.entry(index).or_default();
         if let Some(call_id) = item.call_id.filter(|value| !value.is_empty()) {
-            partial.call_id = Some(call_id);
+            apply_call_id(index, partial, has_started, call_id)?;
         }
         if let Some(name) = item.name.filter(|value| !value.is_empty()) {
-            partial.name = Some(name);
+            apply_name(index, partial, has_started, name)?;
         }
         if let Some(arguments) = item.arguments.filter(|value| !value.is_empty()) {
             match arguments_mode {
-                ResponsesToolArgumentsMode::Append => partial.arguments.push_str(&arguments),
-                ResponsesToolArgumentsMode::Replace => partial.arguments = arguments,
+                ResponsesToolArgumentsMode::Append => {
+                    partial.arguments.push_str(&arguments);
+                    sink.emit(StreamEvent::ToolCallArgumentsDelta {
+                        index,
+                        delta: arguments,
+                    });
+                }
+                ResponsesToolArgumentsMode::Replace => {
+                    replace_arguments(index, partial, arguments, sink)?;
+                }
             }
         }
         self.emit_started_if_ready(index, sink);
+        Ok(())
     }
 
     pub(super) fn append_arguments_delta(
@@ -104,17 +116,14 @@ impl ToolCallAccumulator {
     pub(super) fn replace_arguments_emitting_missing_delta(
         &mut self,
         index: usize,
-        arguments: String,
+        arguments: Option<String>,
         sink: &mut (dyn StreamEventSink + Send),
-    ) {
+    ) -> Result<(), ProviderError> {
+        let Some(arguments) = arguments.filter(|value| !value.is_empty()) else {
+            return Ok(());
+        };
         let partial = self.partials.entry(index).or_default();
-        if arguments.starts_with(&partial.arguments) {
-            let delta = arguments[partial.arguments.len()..].to_string();
-            if !delta.is_empty() {
-                sink.emit(StreamEvent::ToolCallArgumentsDelta { index, delta });
-            }
-        }
-        partial.arguments = arguments;
+        replace_arguments(index, partial, arguments, sink)
     }
 
     pub(super) fn finalized_calls(&self) -> Result<Vec<(usize, ToolCall)>, ProviderError> {
@@ -157,4 +166,65 @@ impl ToolCallAccumulator {
 pub(super) enum ResponsesToolArgumentsMode {
     Append,
     Replace,
+}
+
+fn apply_call_id(
+    index: usize,
+    partial: &mut PartialToolCall,
+    has_started: bool,
+    call_id: String,
+) -> Result<(), ProviderError> {
+    if has_started
+        && partial
+            .call_id
+            .as_ref()
+            .is_some_and(|current| current != &call_id)
+    {
+        return Err(ProviderError::Protocol(format!(
+            "tool call {index} id changed after start"
+        )));
+    }
+    partial.call_id = Some(call_id);
+    Ok(())
+}
+
+fn apply_name(
+    index: usize,
+    partial: &mut PartialToolCall,
+    has_started: bool,
+    name: String,
+) -> Result<(), ProviderError> {
+    if has_started
+        && partial
+            .name
+            .as_ref()
+            .is_some_and(|current| current != &name)
+    {
+        return Err(ProviderError::Protocol(format!(
+            "tool call {index} name changed after start"
+        )));
+    }
+    partial.name = Some(name);
+    Ok(())
+}
+
+fn replace_arguments(
+    index: usize,
+    partial: &mut PartialToolCall,
+    arguments: String,
+    sink: &mut (dyn StreamEventSink + Send),
+) -> Result<(), ProviderError> {
+    let Some(delta) = arguments.strip_prefix(partial.arguments.as_str()) else {
+        return Err(ProviderError::Protocol(format!(
+            "final arguments for tool call {index} do not extend streamed arguments"
+        )));
+    };
+    if !delta.is_empty() {
+        sink.emit(StreamEvent::ToolCallArgumentsDelta {
+            index,
+            delta: delta.to_string(),
+        });
+    }
+    partial.arguments = arguments;
+    Ok(())
 }

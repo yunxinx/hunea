@@ -39,7 +39,7 @@ impl OpenAiResponsesStreamState {
 
         match event {
             ResponsesStreamEvent::OutputItemAdded { output_index, item } => {
-                self.apply_output_item_added(output_index, item, sink);
+                self.apply_output_item_added(output_index, item, sink)?;
             }
             ResponsesStreamEvent::OutputTextDelta {
                 output_index,
@@ -95,10 +95,10 @@ impl OpenAiResponsesStreamState {
                     output_index,
                     arguments,
                     sink,
-                );
+                )?;
             }
             ResponsesStreamEvent::OutputItemDone { output_index, item } => {
-                self.apply_output_item_done(output_index, item, sink);
+                self.apply_output_item_done(output_index, item, sink)?;
             }
             ResponsesStreamEvent::Completed { response }
             | ResponsesStreamEvent::Incomplete { response } => {
@@ -211,16 +211,17 @@ impl OpenAiResponsesStreamState {
         output_index: usize,
         item: ResponsesOutputItem,
         sink: &mut (dyn StreamEventSink + Send),
-    ) {
+    ) -> Result<(), ProviderError> {
         if !item.kind.is_function_call() {
-            return;
+            return Ok(());
         }
         self.tool_calls.apply_responses_item(
             output_index,
             item,
             ResponsesToolArgumentsMode::Append,
             sink,
-        );
+        )?;
+        Ok(())
     }
 
     fn apply_output_item_done(
@@ -228,25 +229,26 @@ impl OpenAiResponsesStreamState {
         output_index: usize,
         item: ResponsesOutputItem,
         sink: &mut (dyn StreamEventSink + Send),
-    ) {
+    ) -> Result<(), ProviderError> {
         if item.kind.is_function_call() {
             self.tool_calls.apply_responses_item(
                 output_index,
                 item,
                 ResponsesToolArgumentsMode::Replace,
                 sink,
-            );
+            )?;
         } else if item.kind.is_message() {
             if let Some(text) = item.visible_output_text().filter(|value| !value.is_empty()) {
-                self.apply_final_text_output(output_index, text, sink);
+                self.apply_final_text_output(output_index, text, sink)?;
             }
         } else if item.kind.is_reasoning()
             && let Some(text) = item
                 .visible_reasoning_text()
                 .filter(|value| !value.is_empty())
         {
-            self.apply_final_reasoning_output(output_index, text, sink);
+            self.apply_final_reasoning_output(output_index, text, sink)?;
         }
+        Ok(())
     }
 
     fn apply_final_text_output(
@@ -254,14 +256,18 @@ impl OpenAiResponsesStreamState {
         output_index: usize,
         final_text: String,
         sink: &mut (dyn StreamEventSink + Send),
-    ) {
+    ) -> Result<(), ProviderError> {
         let current = self.text_outputs.entry(output_index).or_default();
-        if let Some(delta) = final_text.strip_prefix(current.as_str())
-            && !delta.is_empty()
-        {
+        let Some(delta) = final_text.strip_prefix(current.as_str()) else {
+            return Err(ProviderError::Protocol(format!(
+                "final text for output {output_index} does not extend streamed text"
+            )));
+        };
+        if !delta.is_empty() {
             sink.emit(StreamEvent::TextDelta(delta.to_string()));
         }
         *current = final_text;
+        Ok(())
     }
 
     fn apply_final_reasoning_output(
@@ -269,13 +275,15 @@ impl OpenAiResponsesStreamState {
         output_index: usize,
         final_text: String,
         sink: &mut (dyn StreamEventSink + Send),
-    ) {
+    ) -> Result<(), ProviderError> {
         let current = self.reasoning_outputs.entry(output_index).or_default();
-        if let Some(delta) = final_text.strip_prefix(current.as_str())
-            && !delta.is_empty()
-        {
+        let Some(delta) = final_text.strip_prefix(current.as_str()) else {
+            return Ok(());
+        };
+        if !delta.is_empty() {
             sink.emit(StreamEvent::ReasoningDelta(delta.to_string()));
         }
         *current = final_text;
+        Ok(())
     }
 }

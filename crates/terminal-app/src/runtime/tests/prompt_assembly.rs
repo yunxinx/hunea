@@ -3,7 +3,8 @@ use runtime_domain::prompt_assembly::{
     PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
     persistence::{
         PersistedPromptAssemblyEntry, PromptAssemblyScope, StoredPromptBody,
-        project_custom_prompts_dir, save_project_prompt_assembly_state,
+        load_project_prompt_assembly_state, project_custom_prompts_dir,
+        save_project_prompt_assembly_state,
     },
 };
 use runtime_domain::session::{PromptAssemblyCommandFailureKind, PromptAssemblyUpdateNotice};
@@ -332,6 +333,73 @@ fn mutate_prompt_assembly_reports_structured_apply_failure_event() {
 }
 
 #[test]
+fn project_prompt_assembly_mutation_does_not_touch_global_save_path() {
+    let root = temp_test_dir("mutate-project-prompt-assembly-with-failing-global-save");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let store: Arc<dyn SessionStore> = Arc::new(FailingSessionStore::new(
+        Arc::new(InMemorySessionStore::new()),
+        FailingSessionStoreLoad::PromptAssemblySave,
+    ));
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                    content: "# Project-only prompt\nThis must not be half-saved.\n".to_string(),
+                },
+            ),
+        })
+        .expect("mutation command should be accepted and report failures via events");
+
+    let manager = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdated { manager, .. } => Some(manager),
+            _ => None,
+        },
+        "project prompt assembly mutation success",
+    );
+    assert!(
+        manager
+            .candidates
+            .extra_prompts
+            .iter()
+            .any(|prompt| prompt.title == "Project-only prompt")
+    );
+
+    let project_state = load_project_prompt_assembly_state(&work_dir)
+        .expect("project prompt assembly state should remain readable");
+    assert!(
+        project_state
+            .extra_prompts()
+            .iter()
+            .any(|prompt| prompt.title == "Project-only prompt"),
+        "project custom prompt should be written without touching global state"
+    );
+    assert!(
+        project_state.entries().iter().any(|entry| {
+            entry.kind == PromptSourceKind::ExtraPrompt && entry.title == "Project-only prompt"
+        }),
+        "project entry should be written without touching global state"
+    );
+    cleanup(&root);
+}
+
+#[test]
 fn mutate_prompt_assembly_dispatches_without_waiting_for_store_or_project_io() {
     let root = temp_test_dir("mutate-prompt-assembly-async");
     let work_dir = root.join("repo");
@@ -402,6 +470,96 @@ fn mutate_prompt_assembly_dispatches_without_waiting_for_store_or_project_io() {
     release_thread
         .join()
         .expect("release thread should finish cleanly");
+    cleanup(&root);
+}
+
+#[test]
+fn prompt_assembly_mutations_queue_without_session_mutation_rejection() {
+    let root = temp_test_dir("prompt-assembly-mutations-queue");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let store: Arc<dyn SessionStore> =
+        Arc::new(DelayedListSessionStore::new_with_prompt_assembly_delay(
+            Arc::new(InMemorySessionStore::new()),
+            started_tx,
+            release_rx,
+        ));
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                    content: "# First queued prompt\nInitial mutation.\n".to_string(),
+                },
+            ),
+        })
+        .expect("first prompt assembly mutation should dispatch");
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first mutation should be waiting in prompt assembly I/O");
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                    content: "# Second queued prompt\nFollow-up mutation.\n".to_string(),
+                },
+            ),
+        })
+        .expect("second prompt assembly mutation should be queued");
+
+    let immediate_events = RuntimeCoordinator::drain_runtime_events(&mut coordinator);
+    assert!(
+        !immediate_events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::PromptAssemblyUpdateFailed { message, .. }
+                if message.contains("session mutation is running")
+        )),
+        "prompt assembly mutations should not reject each other as session mutations: {immediate_events:?}"
+    );
+
+    release_tx
+        .send(())
+        .expect("test should release delayed prompt assembly mutation");
+    let manager = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdated { manager, .. }
+                if manager
+                    .candidates
+                    .extra_prompts
+                    .iter()
+                    .any(|prompt| prompt.title == "Second queued prompt") =>
+            {
+                Some(manager)
+            }
+            _ => None,
+        },
+        "queued prompt assembly mutation loaded by worker",
+    );
+    assert!(
+        manager
+            .candidates
+            .extra_prompts
+            .iter()
+            .any(|prompt| prompt.title == "First queued prompt")
+    );
     cleanup(&root);
 }
 

@@ -136,8 +136,9 @@ impl AppRuntimeCoordinator {
         if let Some(dynamic_environment_request) = self.dynamic_environment_request()? {
             self.dynamic_environment_worker
                 .load(dynamic_environment_request)?;
+            let activity_label = pending_turn.activity_label.clone();
             self.pending_conversation_turn = Some(pending_turn);
-            return Ok(RuntimeCommandReceipt::Accepted);
+            return Ok(RuntimeCommandReceipt::ConversationStarted { activity_label });
         }
 
         self.start_pending_conversation_turn(pending_turn, DynamicEnvironmentInjection::default())

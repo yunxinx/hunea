@@ -24,7 +24,8 @@ use super::super::workspace_file::{
 use super::{
     error::SearchToolError,
     external_tool::{
-        ExternalCommand, ManagedSearchToolConfig, ManagedToolKind, resolve_external_command,
+        ExternalCommand, ExternalCommandPlan, ManagedSearchToolConfig, ManagedToolKind,
+        resolve_external_command_from_plan, resolve_external_command_plan,
     },
     search_fallback::{
         BoundedSortedPaths, SEARCH_MAX_OUTPUT_BYTES, TOOL_CALL_INTERRUPTED,
@@ -144,6 +145,14 @@ struct FindOutcome {
     backend: &'static str,
 }
 
+#[derive(Debug, Clone)]
+struct FindExecutionPlan {
+    root: PathBuf,
+    search_path: PathBuf,
+    arguments: NormalizedFindArguments,
+    external_command: ExternalCommandPlan,
+}
+
 async fn execute_find(
     root: PathBuf,
     managed_tools: ManagedSearchToolConfig,
@@ -153,52 +162,71 @@ async fn execute_find(
     if context.cancellation().is_cancelled() {
         return ToolResult::error(call.call_id, TOOL_CALL_INTERRUPTED);
     }
-    let arguments = match parse_arguments(call.arguments) {
-        Ok(arguments) => arguments,
-        Err(error) => return ToolResult::error(call.call_id, error.to_string()),
+    let call_id = call.call_id;
+    let cancellation = context.cancellation().clone();
+    let plan = match task::spawn_blocking(move || {
+        build_find_execution_plan(root, managed_tools, call.arguments, &cancellation)
+    })
+    .await
+    {
+        Ok(Ok(plan)) => plan,
+        Ok(Err(error)) => return ToolResult::error(call_id, error.to_string()),
+        Err(error) => return join_error_result(call_id, error),
     };
-    let access = local_workspace_access();
-    let root = match access.as_ref().canonicalize(&root) {
-        Ok(root) => root,
-        Err(error) => {
-            return ToolResult::error(
-                call.call_id,
-                SearchToolError::WorkspaceRoot {
-                    path: root,
-                    source: error,
-                }
-                .to_string(),
-            );
-        }
-    };
-    let search_path =
-        match resolve_workspace_path(access.as_ref(), &root, &arguments.requested_path) {
-            Ok(path) => path,
-            Err(source) => {
-                return ToolResult::error(
-                    call.call_id,
-                    SearchToolError::WorkspacePath { source }.to_string(),
-                );
-            }
-        };
+
+    let FindExecutionPlan {
+        root,
+        search_path,
+        arguments,
+        external_command,
+    } = plan;
 
     if let Some(command) =
-        resolve_external_command(ManagedToolKind::Fd, &managed_tools, &context).await
+        resolve_external_command_from_plan(ManagedToolKind::Fd, external_command, &context).await
         && let Ok(outcome) =
             run_external_find(&command, &root, &search_path, &arguments, &context).await
     {
-        return find_result(call.call_id, outcome);
+        return find_result(call_id, outcome);
     }
 
-    let call_id = call.call_id.clone();
+    let fallback_call_id = call_id.clone();
     let cancellation = context.cancellation().clone();
     match task::spawn_blocking(move || rust_find(&root, &search_path, &arguments, &cancellation))
         .await
     {
-        Ok(Ok(outcome)) => find_result(call.call_id, outcome),
-        Ok(Err(error)) => ToolResult::error(call.call_id, error.to_string()),
-        Err(error) => join_error_result(call_id, error),
+        Ok(Ok(outcome)) => find_result(call_id, outcome),
+        Ok(Err(error)) => ToolResult::error(call_id, error.to_string()),
+        Err(error) => join_error_result(fallback_call_id, error),
     }
+}
+
+fn build_find_execution_plan(
+    root: PathBuf,
+    managed_tools: ManagedSearchToolConfig,
+    arguments: serde_json::Value,
+    cancellation: &CancellationToken,
+) -> Result<FindExecutionPlan, SearchToolError> {
+    if cancellation.is_cancelled() {
+        return Err(SearchToolError::Interrupted);
+    }
+    let arguments = parse_arguments(arguments)?;
+    let access = local_workspace_access();
+    let root = match access.as_ref().canonicalize(&root) {
+        Ok(root) => root,
+        Err(source) => return Err(SearchToolError::WorkspaceRoot { path: root, source }),
+    };
+    let search_path =
+        match resolve_workspace_path(access.as_ref(), &root, &arguments.requested_path) {
+            Ok(path) => path,
+            Err(source) => return Err(SearchToolError::WorkspacePath { source }),
+        };
+
+    Ok(FindExecutionPlan {
+        root,
+        search_path,
+        arguments,
+        external_command: resolve_external_command_plan(ManagedToolKind::Fd, &managed_tools),
+    })
 }
 
 fn parse_arguments(value: serde_json::Value) -> Result<NormalizedFindArguments, SearchToolError> {
@@ -505,6 +533,36 @@ mod tests {
             result,
             Err(SearchToolError::InvalidGlob { pattern, .. }) if pattern == "["
         ));
+    }
+
+    #[test]
+    fn find_execution_plan_resolves_workspace_paths_before_async_execution() {
+        let root = temp_root("find-execution-plan-paths");
+        let source_dir = root.join("src");
+        fs::create_dir_all(&source_dir).expect("source directory should exist");
+        let cancellation = CancellationToken::new();
+
+        let plan = build_find_execution_plan(
+            root.clone(),
+            ManagedSearchToolConfig::default(),
+            json!({
+                "pattern": "*.rs",
+                "path": "src",
+            }),
+            &cancellation,
+        )
+        .expect("find execution plan should resolve workspace paths");
+
+        assert_eq!(
+            plan.root,
+            fs::canonicalize(&root).expect("root should canonicalize")
+        );
+        assert_eq!(
+            plan.search_path,
+            fs::canonicalize(&source_dir).expect("source dir should canonicalize")
+        );
+        assert_eq!(plan.arguments.pattern, "*.rs");
+        cleanup(&root);
     }
 
     #[cfg(unix)]

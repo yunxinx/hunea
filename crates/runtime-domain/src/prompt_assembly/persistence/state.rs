@@ -260,6 +260,9 @@ impl PromptAssemblyScopeState {
         &mut self,
         sources: Vec<DynamicEnvironmentSourceSelection>,
     ) {
+        if !sources.is_empty() {
+            self.assert_global_dynamic_environment_scope();
+        }
         self.dynamic_environment_sources = sources;
     }
 
@@ -269,6 +272,9 @@ impl PromptAssemblyScopeState {
         snapshot_kind: DynamicEnvironmentSnapshotKind,
         source_kind: DynamicEnvironmentSourceKind,
     ) -> Option<&mut DynamicEnvironmentSourceSelection> {
+        if self.scope != PromptAssemblyScope::Global {
+            return None;
+        }
         self.dynamic_environment_sources
             .iter_mut()
             .find(|selection| {
@@ -278,6 +284,7 @@ impl PromptAssemblyScopeState {
 
     /// `upsert_dynamic_environment_source` 按 snapshot/source kind 插入或替换 dynamic environment 选择。
     pub fn upsert_dynamic_environment_source(&mut self, source: DynamicEnvironmentSourceSelection) {
+        self.assert_global_dynamic_environment_scope();
         if let Some(existing) =
             self.dynamic_environment_source_mut(source.snapshot_kind, source.source_kind)
         {
@@ -285,6 +292,14 @@ impl PromptAssemblyScopeState {
         } else {
             self.dynamic_environment_sources.push(source);
         }
+    }
+
+    fn assert_global_dynamic_environment_scope(&self) {
+        assert!(
+            self.scope == PromptAssemblyScope::Global,
+            "dynamic environment source selections are global-only, got {} scope",
+            self.scope.as_stored_value()
+        );
     }
 
     /// `extra_prompts` 返回该 scope 下持久化的 custom prompt bodies。
@@ -436,5 +451,19 @@ mod tests {
         assert_eq!(state.tool_selections().len(), 1);
         assert!(!state.tool_selections()[0].enabled);
         assert_eq!(state.tool_selections()[0].requested_order, Some(2));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "dynamic environment source selections are global-only, got project scope"
+    )]
+    fn project_scope_rejects_dynamic_environment_source_state() {
+        let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Project);
+
+        state.set_dynamic_environment_sources(vec![DynamicEnvironmentSourceSelection {
+            snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
+            source_kind: DynamicEnvironmentSourceKind::Date,
+            enabled: true,
+        }]);
     }
 }

@@ -204,6 +204,68 @@ fn flush_session_persistence_preserves_store_error_source() {
 }
 
 #[test]
+fn session_persistence_actor_replies_to_pending_flush_when_error_stops_actor() {
+    let root = tempdir_path("worker-error-drains-pending-flush");
+    let work_dir = root.join("workspace");
+    fs::create_dir_all(&work_dir).expect("work dir should be creatable");
+    let store =
+        Arc::new(run_store(LocalSessionStore::open_in(root)).expect("local store should open"));
+    let store_trait: Arc<dyn SessionStore> = store;
+    let mut conversation =
+        ProviderConversation::with_session_store(store_trait, sample_header(&work_dir, "qwen3"))
+            .expect("persisted conversation should initialize");
+    let request = conversation
+        .prepare_turn(&runtime_domain::session::ConversationTurnRequest::new(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            "qwen3",
+            Some("http://127.0.0.1:1234/v1".to_string()),
+            None,
+            None,
+            ConversationItem::text(Role::User, "hello"),
+        ))
+        .expect("turn should prepare");
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build")
+        .block_on(async {
+            let (command_sender, command_receiver) = tokio_mpsc::channel(16);
+            let (event_sender, _event_receiver) = mpsc::channel();
+            command_sender
+                .send(SessionPersistenceCommand::ProviderContextItem(
+                    ConversationItem::text(Role::Assistant, "hi"),
+                ))
+                .await
+                .expect("context item command should queue before actor starts");
+            let (flush_ack, flush_result) = tokio::sync::oneshot::channel();
+            command_sender
+                .send(SessionPersistenceCommand::Flush { ack: flush_ack })
+                .await
+                .expect("flush command should queue behind the failing command");
+
+            let actor = tokio::spawn(run_session_persistence_actor(
+                request.persistence_cloned(),
+                command_receiver,
+                event_sender,
+                CancellationToken::new(),
+            ));
+            let error = flush_result
+                .await
+                .expect("pending flush acknowledgement should not be dropped")
+                .expect_err("pending flush should receive the actor stop error");
+
+            assert!(matches!(
+                error.as_ref(),
+                SessionPersistenceError::MissingSession
+            ));
+            drop(command_sender);
+            actor.await.expect("persistence actor should stop cleanly");
+        });
+}
+
+#[test]
 fn session_persistence_actor_exits_when_cancelled_with_sender_alive() {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

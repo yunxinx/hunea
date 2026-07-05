@@ -349,6 +349,31 @@ fn responses_stream_state_uses_final_message_item_when_text_deltas_are_absent() 
 }
 
 #[test]
+fn responses_stream_state_rejects_final_message_text_that_replaces_prior_delta() {
+    let mut state = OpenAiResponsesStreamState::default();
+    let mut events = Events::default();
+    state
+        .apply_data_frame(
+            r#"{"type":"response.output_text.delta","output_index":0,"delta":"draft"}"#,
+            &mut events,
+        )
+        .unwrap();
+
+    let error = state
+        .apply_data_frame(
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"final","annotations":[]}]}}"#,
+            &mut events,
+        )
+        .expect_err("final text must extend already-emitted text deltas");
+
+    assert!(
+        error
+            .to_string()
+            .contains("final text for output 0 does not extend streamed text")
+    );
+}
+
+#[test]
 fn responses_stream_state_uses_final_reasoning_item_when_deltas_are_absent() {
     let mut state = OpenAiResponsesStreamState::default();
     let mut events = Events::default();
@@ -374,6 +399,157 @@ fn responses_stream_state_uses_final_reasoning_item_when_deltas_are_absent() {
     assert!(events.0.iter().any(|event| {
         matches!(event, StreamEvent::ReasoningDelta(delta) if delta == "final reasoning")
     }));
+}
+
+#[test]
+fn responses_stream_state_preserves_streamed_reasoning_when_final_reasoning_differs() {
+    let mut state = OpenAiResponsesStreamState::default();
+    let mut events = Events::default();
+    state
+        .apply_data_frame(
+            r#"{"type":"response.reasoning_text.delta","output_index":0,"delta":"draft"}"#,
+            &mut events,
+        )
+        .unwrap();
+
+    state
+        .apply_data_frame(
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","summary":[{"type":"summary_text","text":"final"}]}}"#,
+            &mut events,
+        )
+        .unwrap();
+    state
+        .apply_data_frame(
+            r#"{"type":"response.completed","response":{"status":"completed"}}"#,
+            &mut events,
+        )
+        .unwrap();
+
+    let completion = state.finish(&mut events).unwrap();
+
+    assert!(matches!(
+        &completion.items[0],
+        ConversationItem::Reasoning { content, .. } if content == "draft"
+    ));
+}
+
+#[test]
+fn responses_stream_state_keeps_accumulated_arguments_when_done_omits_arguments() {
+    let mut state = OpenAiResponsesStreamState::default();
+    let mut events = Events::default();
+    state
+            .apply_data_frame(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"read","arguments":""}}"#,
+                &mut events,
+            )
+            .unwrap();
+    state
+            .apply_data_frame(
+                r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"path\":\"Cargo.toml\"}"}"#,
+                &mut events,
+            )
+            .unwrap();
+    state
+        .apply_data_frame(
+            r#"{"type":"response.function_call_arguments.done","output_index":0}"#,
+            &mut events,
+        )
+        .unwrap();
+    state
+        .apply_data_frame(
+            r#"{"type":"response.completed","response":{"status":"completed"}}"#,
+            &mut events,
+        )
+        .unwrap();
+
+    let completion = state.finish(&mut events).unwrap();
+    let call = assistant_item(&completion)
+        .tool_calls()
+        .next()
+        .expect("expected response tool call");
+
+    assert_eq!(call.arguments, r#"{"path":"Cargo.toml"}"#);
+}
+
+#[test]
+fn responses_stream_state_rejects_done_arguments_that_replace_prior_delta() {
+    let mut state = OpenAiResponsesStreamState::default();
+    let mut events = Events::default();
+    state
+            .apply_data_frame(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"read","arguments":""}}"#,
+                &mut events,
+            )
+            .unwrap();
+    state
+        .apply_data_frame(
+            r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"path\""}"#,
+            &mut events,
+        )
+        .unwrap();
+
+    let error = state
+            .apply_data_frame(
+                r#"{"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\"query\":\"Cargo.toml\"}"}"#,
+                &mut events,
+            )
+            .expect_err("done arguments must extend already-emitted argument deltas");
+
+    assert!(
+        error
+            .to_string()
+            .contains("final arguments for tool call 0 do not extend streamed arguments")
+    );
+}
+
+#[test]
+fn responses_stream_state_rejects_late_tool_call_id_change_after_started_event() {
+    let mut state = OpenAiResponsesStreamState::default();
+    let mut events = Events::default();
+    state
+            .apply_data_frame(
+                r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"read","arguments":""}}"#,
+                &mut events,
+            )
+            .unwrap();
+
+    let error = state
+            .apply_data_frame(
+                r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"call_2","name":"read","arguments":"{}"}}"#,
+                &mut events,
+            )
+            .expect_err("started tool call metadata must remain stable");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tool call 0 id changed after start")
+    );
+}
+
+#[test]
+fn stream_state_rejects_late_tool_call_name_change_after_started_event() {
+    let mut state = OpenAiStreamState::new();
+    let mut events = Events::default();
+    state
+            .apply_data_frame(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read"}}]}}]}"#,
+                &mut events,
+            )
+            .unwrap();
+
+    let error = state
+            .apply_data_frame(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"write","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+                &mut events,
+            )
+            .expect_err("started tool call metadata must remain stable");
+
+    assert!(
+        error
+            .to_string()
+            .contains("tool call 0 name changed after start")
+    );
 }
 
 #[test]

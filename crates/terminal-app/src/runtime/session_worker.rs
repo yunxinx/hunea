@@ -407,7 +407,7 @@ impl SessionStoreWorker {
                 mutation,
                 tool_definitions,
             },
-            true,
+            false,
         )
     }
 
@@ -514,7 +514,6 @@ impl SessionStoreWorkerEvent {
             } | Self::Restored { .. }
                 | Self::RestoredWithTree { .. }
                 | Self::Noop
-                | Self::PromptAssemblyMutated { .. }
                 | Self::Failed {
                     is_mutation: true,
                     ..
@@ -840,12 +839,12 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
         .await
         {
             Ok(manager) => SessionStoreWorkerEvent::PromptAssemblyMutated { manager },
-            Err(report) => SessionStoreWorkerEvent::runtime_mutation(
-                RuntimeEvent::PromptAssemblyUpdateFailed {
+            Err(report) => {
+                SessionStoreWorkerEvent::runtime(RuntimeEvent::PromptAssemblyUpdateFailed {
                     kind: PromptAssemblyCommandFailureKind::ApplyMutation,
                     message: prompt_assembly_report_message(report),
-                },
-            ),
+                })
+            }
         },
         SessionStoreCommand::LoadMessageHistoryPickerRows { store, request_id } => {
             match store.load_message_history_all().await {

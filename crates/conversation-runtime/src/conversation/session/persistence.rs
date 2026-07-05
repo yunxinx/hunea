@@ -161,6 +161,7 @@ pub(super) async fn run_session_persistence_actor(
             let _ = sender.send(ConversationWorkerEvent::progress(
                 ConversationEvent::Failed { message },
             ));
+            cancel_pending_flushes(drain_pending_commands(&mut receiver), error);
             return;
         }
     }

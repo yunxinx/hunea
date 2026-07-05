@@ -131,6 +131,14 @@ pub(crate) struct ExternalCommand {
     pub(crate) backend: ExternalToolBackend,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExternalCommandPlan {
+    Ready(ExternalCommand),
+    AskManagedRebuild,
+    InstallManaged,
+    AskManagedDownload,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ManagedToolManifest {
     asset_name: &'static str,
@@ -168,39 +176,59 @@ struct ManagedInstallPaths {
     stable_entry: PathBuf,
 }
 
-pub(crate) async fn resolve_external_command(
+pub(crate) fn resolve_external_command_plan(
     tool: ManagedToolKind,
     config: &ManagedSearchToolConfig,
-    context: &ToolExecutionContext<'_>,
-) -> Option<ExternalCommand> {
+) -> ExternalCommandPlan {
     if let Some(path) = find_system_binary(tool) {
-        return Some(ExternalCommand {
+        return ExternalCommandPlan::Ready(ExternalCommand {
             path,
             backend: ExternalToolBackend::SystemPath,
         });
     }
     if let Some(path) = find_bundled_binary(tool) {
-        return Some(ExternalCommand {
+        return ExternalCommandPlan::Ready(ExternalCommand {
             path,
             backend: ExternalToolBackend::Bundled,
         });
     }
     if config.allows(tool) && managed_cache_needs_rebuild(tool) {
-        if !confirm_managed_rebuild(tool, context).await {
-            return None;
-        }
-        return install_managed_command(tool, context).await;
+        return ExternalCommandPlan::AskManagedRebuild;
     }
     if let Some(path) = usable_managed_entry(tool) {
-        return Some(ExternalCommand {
+        return ExternalCommandPlan::Ready(ExternalCommand {
             path,
             backend: ExternalToolBackend::Managed,
         });
     }
-    if !config.allows(tool) && !confirm_managed_download(tool, context).await {
-        return None;
+    if config.allows(tool) {
+        ExternalCommandPlan::InstallManaged
+    } else {
+        ExternalCommandPlan::AskManagedDownload
     }
-    install_managed_command(tool, context).await
+}
+
+pub(crate) async fn resolve_external_command_from_plan(
+    tool: ManagedToolKind,
+    plan: ExternalCommandPlan,
+    context: &ToolExecutionContext<'_>,
+) -> Option<ExternalCommand> {
+    match plan {
+        ExternalCommandPlan::Ready(command) => Some(command),
+        ExternalCommandPlan::AskManagedRebuild => {
+            if !confirm_managed_rebuild(tool, context).await {
+                return None;
+            }
+            install_managed_command(tool, context).await
+        }
+        ExternalCommandPlan::InstallManaged => install_managed_command(tool, context).await,
+        ExternalCommandPlan::AskManagedDownload => {
+            if !confirm_managed_download(tool, context).await {
+                return None;
+            }
+            install_managed_command(tool, context).await
+        }
+    }
 }
 
 async fn install_managed_command(

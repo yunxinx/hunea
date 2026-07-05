@@ -410,7 +410,12 @@ fn conversation_submit_dispatches_without_waiting_for_dynamic_environment_observ
         })
         .expect("conversation request should dispatch");
 
-    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
+    assert_eq!(
+        receipt,
+        RuntimeCommandReceipt::ConversationStarted {
+            activity_label: "gpt-4o-mini".to_string()
+        }
+    );
     assert!(
         started.elapsed() < Duration::from_millis(100),
         "submit should not wait for dynamic environment observation"

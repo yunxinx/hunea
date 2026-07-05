@@ -122,7 +122,6 @@ impl AppRuntimeCoordinator {
     ) -> Result<RuntimeCommandReceipt, String> {
         let store = self.session_store()?;
         let header = self.session_header()?;
-        self.ensure_session_mutation_available("mutate prompt assembly")?;
         self.session_store_worker.apply_prompt_assembly_mutation(
             store,
             header.work_dir,

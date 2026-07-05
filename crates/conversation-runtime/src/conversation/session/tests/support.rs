@@ -26,7 +26,7 @@ pub(super) use tokio::sync::mpsc as tokio_mpsc;
 pub(super) use tokio_util::sync::CancellationToken;
 pub(super) use tool_runtime::ToolExecutorRegistry;
 
-pub(super) use super::super::persistence::SessionPersistenceError;
+pub(super) use super::super::persistence::{SessionPersistenceCommand, SessionPersistenceError};
 pub(super) use super::super::{
     ConversationDelta, ConversationEvent, ConversationPermissionBroker, ConversationTimeoutPause,
     ConversationWorker, ConversationWorkerEvent, ProviderContextRepairLedger,

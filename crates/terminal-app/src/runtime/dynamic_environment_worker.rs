@@ -4,7 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    thread::{self, JoinHandle},
+    thread::{self, JoinHandle as ThreadJoinHandle},
 };
 
 use runtime_domain::dynamic_environment::{
@@ -13,6 +13,7 @@ use runtime_domain::dynamic_environment::{
     enabled_dynamic_environment_sources_for_session_config,
 };
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle as TokioJoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::dynamic_environment::DynamicEnvironmentObserver;
@@ -22,7 +23,7 @@ pub(super) struct DynamicEnvironmentWorker {
     generation: Arc<AtomicU64>,
     command_tx: Option<mpsc::UnboundedSender<DynamicEnvironmentWorkerCommand>>,
     result_rx: mpsc::UnboundedReceiver<DynamicEnvironmentTaskEnvelope>,
-    worker_thread: Option<JoinHandle<()>>,
+    worker_thread: Option<ThreadJoinHandle<()>>,
     active_generation: Option<u64>,
     active_cancellation: Option<CancellationToken>,
 }
@@ -44,6 +45,11 @@ pub(super) struct DynamicEnvironmentInjection {
 struct DynamicEnvironmentTaskEnvelope {
     generation: u64,
     result: Result<DynamicEnvironmentInjection, String>,
+}
+
+struct ActiveDynamicEnvironmentTask {
+    cancellation: CancellationToken,
+    handle: TokioJoinHandle<()>,
 }
 
 enum DynamicEnvironmentWorkerCommand {
@@ -116,7 +122,9 @@ impl DynamicEnvironmentWorker {
         if let Some(command_tx) = self.command_tx.take() {
             let _ = command_tx.send(DynamicEnvironmentWorkerCommand::Shutdown);
         }
-        let _ = self.worker_thread.take();
+        if let Some(worker_thread) = self.worker_thread.take() {
+            let _ = worker_thread.join();
+        }
     }
 
     pub(super) fn try_recv_injection(
@@ -155,6 +163,7 @@ fn dynamic_environment_worker_loop(
     };
 
     runtime.block_on(async move {
+        let mut active_task: Option<ActiveDynamicEnvironmentTask> = None;
         while let Some(command) = command_rx.recv().await {
             match command {
                 DynamicEnvironmentWorkerCommand::Load {
@@ -163,21 +172,40 @@ fn dynamic_environment_worker_loop(
                     observer,
                     request,
                 } => {
+                    cancel_and_join_active_task(&mut active_task).await;
                     let result_tx = result_tx.clone();
-                    tokio::spawn(async move {
-                        let result =
-                            build_dynamic_environment_injection(observer, request, &cancellation)
-                                .await;
+                    let task_cancellation = cancellation.clone();
+                    let handle = tokio::spawn(async move {
+                        let result = build_dynamic_environment_injection(
+                            observer,
+                            request,
+                            &task_cancellation,
+                        )
+                        .await;
                         let _ =
                             result_tx.send(DynamicEnvironmentTaskEnvelope { generation, result });
                     });
+                    active_task = Some(ActiveDynamicEnvironmentTask {
+                        cancellation,
+                        handle,
+                    });
                 }
                 DynamicEnvironmentWorkerCommand::Shutdown => {
+                    cancel_and_join_active_task(&mut active_task).await;
                     break;
                 }
             }
         }
+        cancel_and_join_active_task(&mut active_task).await;
     });
+}
+
+async fn cancel_and_join_active_task(active_task: &mut Option<ActiveDynamicEnvironmentTask>) {
+    let Some(active_task) = active_task.take() else {
+        return;
+    };
+    active_task.cancellation.cancel();
+    let _ = active_task.handle.await;
 }
 
 pub(super) async fn build_dynamic_environment_injection(
@@ -229,4 +257,128 @@ pub(super) fn dynamic_environment_snapshot_for_turn(
         return Some(DynamicEnvironmentSnapshotKind::Changes);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::Path,
+        sync::{Arc, Mutex, mpsc as std_mpsc},
+        time::Duration,
+    };
+
+    use runtime_domain::dynamic_environment::{
+        DynamicEnvironmentSourceKind, DynamicEnvironmentSourceSelection,
+    };
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    #[test]
+    fn shutdown_waits_for_active_observation_to_finish_after_cancellation() {
+        let (started_tx, started_rx) = std_mpsc::channel();
+        let (cancelled_tx, cancelled_rx) = std_mpsc::channel();
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let observer = Arc::new(ShutdownBlockingObserver {
+            started: Mutex::new(Some(started_tx)),
+            cancelled: Mutex::new(Some(cancelled_tx)),
+            finish: Mutex::new(Some(finish_rx)),
+        });
+        let mut worker = DynamicEnvironmentWorker::new(observer);
+
+        worker
+            .load(DynamicEnvironmentRequest {
+                work_dir: std::env::temp_dir(),
+                session_config: DynamicEnvironmentSessionConfig {
+                    baseline_enabled: true,
+                    changes_enabled: false,
+                    source_selections: vec![DynamicEnvironmentSourceSelection {
+                        snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
+                        source_kind: DynamicEnvironmentSourceKind::Date,
+                        enabled: true,
+                    }],
+                },
+                is_first_turn: true,
+                previous_observations: Vec::new(),
+            })
+            .expect("dynamic environment worker should start load");
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("observer should start before shutdown");
+
+        let (shutdown_done_tx, shutdown_done_rx) = std_mpsc::channel();
+        std::thread::spawn(move || {
+            worker.shutdown();
+            let _ = shutdown_done_tx.send(());
+        });
+
+        cancelled_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("shutdown should cancel the active observation");
+        assert!(
+            shutdown_done_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "shutdown returned before the active observation finished"
+        );
+
+        finish_tx
+            .send(())
+            .expect("observer finish signal should be delivered");
+        shutdown_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("shutdown should finish after active observation exits");
+    }
+
+    struct ShutdownBlockingObserver {
+        started: Mutex<Option<std_mpsc::Sender<()>>>,
+        cancelled: Mutex<Option<std_mpsc::Sender<()>>>,
+        finish: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl crate::dynamic_environment::DynamicEnvironmentObserver for ShutdownBlockingObserver {
+        fn observe<'a>(
+            &'a self,
+            _work_dir: &'a Path,
+            sources: &'a [DynamicEnvironmentSourceKind],
+            cancellation: &'a CancellationToken,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Vec<DynamicEnvironmentObservation>,
+                            crate::dynamic_environment::DynamicEnvironmentObservationError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                if let Some(started) = self.started.lock().expect("started lock").take() {
+                    let _ = started.send(());
+                }
+                cancellation.cancelled().await;
+                if let Some(cancelled) = self.cancelled.lock().expect("cancelled lock").take() {
+                    let _ = cancelled.send(());
+                }
+                let finish = self
+                    .finish
+                    .lock()
+                    .expect("finish lock")
+                    .take()
+                    .expect("test should provide finish receiver");
+                finish.await.expect("test should release observer");
+                Ok(sources
+                    .iter()
+                    .copied()
+                    .map(|source_kind| DynamicEnvironmentObservation {
+                        source_kind,
+                        fingerprint: "observed".to_string(),
+                        summary: "observed".to_string(),
+                        details: None,
+                    })
+                    .collect())
+            })
+        }
+    }
 }

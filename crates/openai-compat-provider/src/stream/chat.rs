@@ -66,7 +66,7 @@ impl OpenAiStreamState {
                 sink.emit(StreamEvent::ReasoningDelta(delta));
             }
             for tool_call in choice.delta.tool_calls.unwrap_or_default() {
-                self.tool_calls.apply_chat_delta(tool_call, sink);
+                self.tool_calls.apply_chat_delta(tool_call, sink)?;
             }
             if let Some(finish_reason) = choice.finish_reason {
                 self.finish_reason = Some(finish_reason_from_openai(&finish_reason));

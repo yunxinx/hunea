@@ -25,7 +25,8 @@ pub(super) use runtime_domain::{
 };
 pub(super) use session_store::{
     ConfigSnapshot, InMemorySessionStore, LocalSessionStore, ProjectDir, SessionEntry,
-    SessionEntryKind, SessionHeader, SessionId, SessionStore, SessionStoreError, session_filename,
+    SessionEntryKind, SessionFlushStore, SessionHeader, SessionId, SessionLifecycleStore,
+    SessionStore, SessionStoreError, session_filename,
 };
 pub(super) use terminal_ui::RuntimeCoordinator;
 

@@ -19,8 +19,8 @@ pub(super) use runtime_domain::{
     },
 };
 pub(super) use session_store::{
-    LocalSessionStore, ProjectDir, SessionHeader, SessionId, SessionListOptions, SessionStore,
-    SessionStoreError,
+    LocalSessionStore, ProjectDir, SessionCatalogStore, SessionHeader, SessionId,
+    SessionLifecycleStore, SessionListOptions, SessionStore, SessionStoreError, SessionTreeStore,
 };
 pub(super) use tokio::sync::mpsc as tokio_mpsc;
 pub(super) use tokio_util::sync::CancellationToken;

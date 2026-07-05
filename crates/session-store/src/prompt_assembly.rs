@@ -581,10 +581,10 @@ mod tests {
             .expect("local session store should open");
         let state = sample_global_state();
 
-        crate::store::SessionStore::save_global_prompt_assembly_state(&store, &state)
+        crate::store::PromptAssemblyStore::save_global_prompt_assembly_state(&store, &state)
             .await
             .expect("global prompt assembly should save");
-        let loaded = crate::store::SessionStore::load_global_prompt_assembly_state(&store)
+        let loaded = crate::store::PromptAssemblyStore::load_global_prompt_assembly_state(&store)
             .await
             .expect("global prompt assembly should load");
 
@@ -616,12 +616,13 @@ mod tests {
             .expect("local session store should open");
 
         let global_state = sample_global_state();
-        crate::store::SessionStore::save_global_prompt_assembly_state(&store, &global_state)
+        crate::store::PromptAssemblyStore::save_global_prompt_assembly_state(&store, &global_state)
             .await
             .expect("global prompt assembly should save");
-        let loaded_global = crate::store::SessionStore::load_global_prompt_assembly_state(&store)
-            .await
-            .expect("global prompt assembly should load");
+        let loaded_global =
+            crate::store::PromptAssemblyStore::load_global_prompt_assembly_state(&store)
+                .await
+                .expect("global prompt assembly should load");
 
         let mut project_state =
             runtime_domain::prompt_assembly::persistence::PromptAssemblyScopeState::new(

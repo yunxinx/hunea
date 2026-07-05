@@ -28,8 +28,8 @@ mod tests;
 pub use local::LocalSessionStore;
 pub use memory::InMemorySessionStore;
 
-/// `SessionStore` 定义 conversation-runtime 依赖的持久化接口。
-pub trait SessionStore: Send + Sync {
+/// `SessionLifecycleStore` 定义 session 创建、追加与恢复所需的持久化接口。
+pub trait SessionLifecycleStore: Send + Sync {
     #[must_use]
     fn create_session<'a>(
         &'a self,
@@ -84,7 +84,10 @@ pub trait SessionStore: Send + Sync {
         session_id: &'a SessionId,
         leaf_id: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSessionState, SessionStoreError>> + Send + 'a>>;
+}
 
+/// `SessionTreeStore` 定义 session tree 与 branch 视图所需的查询接口。
+pub trait SessionTreeStore: Send + Sync {
     #[must_use]
     fn load_session_tree<'a>(
         &'a self,
@@ -112,7 +115,10 @@ pub trait SessionStore: Send + Sync {
     ) -> Pin<
         Box<dyn Future<Output = Result<SessionBranchTreeSnapshot, SessionStoreError>> + Send + 'a>,
     >;
+}
 
+/// `SessionCatalogStore` 定义 session 列表与元数据查询接口。
+pub trait SessionCatalogStore: Send + Sync {
     #[must_use]
     fn list_sessions<'a>(
         &'a self,
@@ -125,7 +131,10 @@ pub trait SessionStore: Send + Sync {
         &'a self,
         session_id: &'a SessionId,
     ) -> Pin<Box<dyn Future<Output = Result<SessionMeta, SessionStoreError>> + Send + 'a>>;
+}
 
+/// `SessionFlushStore` 定义持久化刷盘接口。
+pub trait SessionFlushStore: Send + Sync {
     #[must_use]
     fn flush<'a>(
         &'a self,
@@ -136,7 +145,10 @@ pub trait SessionStore: Send + Sync {
     fn flush_all<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>>;
+}
 
+/// `MessageHistoryStore` 定义 message history 持久化接口。
+pub trait MessageHistoryStore: Send + Sync {
     #[must_use]
     fn record_message_history<'a>(
         &'a self,
@@ -157,6 +169,18 @@ pub trait SessionStore: Send + Sync {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<MessageHistoryRow>, SessionStoreError>> + Send + 'a>>;
 
+    /// 启动盲回溯缓存（固定 25 条，oldest-first）。
+    fn load_message_history_startup_cache<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Vec<MessageHistoryEntry>, SessionStoreError>> + Send + 'a>,
+    > {
+        self.load_message_history_recent(MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN)
+    }
+}
+
+/// `PromptAssemblyStore` 定义全局 prompt assembly 持久化接口。
+pub trait PromptAssemblyStore: Send + Sync {
     #[must_use]
     fn save_global_prompt_assembly_state<'a>(
         &'a self,
@@ -169,15 +193,17 @@ pub trait SessionStore: Send + Sync {
     ) -> Pin<
         Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
     >;
+}
 
-    /// 启动盲回溯缓存（固定 25 条，oldest-first）。
-    fn load_message_history_startup_cache<'a>(
-        &'a self,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<Vec<MessageHistoryEntry>, SessionStoreError>> + Send + 'a>,
-    > {
-        self.load_message_history_recent(MESSAGE_HISTORY_BLIND_RECALL_CACHE_LEN)
-    }
+/// `SessionStore` 聚合 runtime 当前需要的持久化能力。
+pub trait SessionStore:
+    SessionLifecycleStore
+    + SessionTreeStore
+    + SessionCatalogStore
+    + SessionFlushStore
+    + MessageHistoryStore
+    + PromptAssemblyStore
+{
 }
 
 pub(super) fn requested_leaf_id<'a>(

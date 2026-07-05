@@ -24,7 +24,10 @@ pub(crate) mod recorder;
 mod store;
 pub(crate) mod util;
 
-pub use store::{InMemorySessionStore, LocalSessionStore, SessionStore};
+pub use store::{
+    InMemorySessionStore, LocalSessionStore, MessageHistoryStore, PromptAssemblyStore,
+    SessionCatalogStore, SessionFlushStore, SessionLifecycleStore, SessionStore, SessionTreeStore,
+};
 
 /// 短 entry id 固定为 8 个 hex 字符。
 const SHORT_ENTRY_ID_HEX_LEN: usize = 8;

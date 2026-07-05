@@ -12,7 +12,8 @@ use runtime_domain::prompt_assembly::{
     PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
 };
 use session_store::{
-    InMemorySessionStore, SessionHeader, SessionId, SessionStore, SessionStoreError,
+    InMemorySessionStore, SessionHeader, SessionId, SessionLifecycleStore, SessionStore,
+    SessionStoreError,
 };
 
 use super::{PersistedConversationItem, ProviderConversation, ProviderConversationError};

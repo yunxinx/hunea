@@ -537,7 +537,7 @@ fn persist_turn_start_replays_image_only_user_message_as_bound_message() {
     assert!(matches!(
         restored.transcript.as_slice(),
         [TranscriptReplayItem::BoundUserMessage { message }]
-            if message == &transcript_user
+            if *message == transcript_user
     ));
 }
 

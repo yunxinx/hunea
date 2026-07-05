@@ -16,8 +16,9 @@ use crash_recovery_support::{
 };
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
 use session_store::{
-    ConfigSnapshot, ProjectDir, SessionEntry, SessionEntryKind, SessionHeader, SessionId,
-    SessionListOptions, SessionMeta, SessionStore,
+    ConfigSnapshot, ProjectDir, SessionCatalogStore, SessionEntry, SessionEntryKind,
+    SessionFlushStore, SessionHeader, SessionId, SessionLifecycleStore, SessionListOptions,
+    SessionMeta,
 };
 
 #[tokio::test]

@@ -5,8 +5,8 @@ mod support;
 
 use provider_protocol::{ContentBlock, ConversationItem, Role, ToolCall};
 use session_store::{
-    InMemorySessionStore, ProjectDir, ResolveError, SessionListOptions, SessionStore,
-    SessionStoreError,
+    InMemorySessionStore, ProjectDir, ResolveError, SessionCatalogStore, SessionFlushStore,
+    SessionLifecycleStore, SessionListOptions, SessionStoreError, SessionTreeStore,
 };
 use support::{TestSessionRoot, first_item_entry_id, item_entry_ids, open_store, sample_header};
 

@@ -16,7 +16,7 @@ use tokio::{
 use crate::{SessionEntry, SessionEntryKind, SessionHeader, SessionId, metadata::MetadataIndex};
 
 use super::{
-    SessionStore,
+    MessageHistoryStore, SessionLifecycleStore,
     local::{LocalSessionHandle, LocalSessionStore, MAX_OPEN_SESSION_HANDLES, session_jsonl_path},
     memory::InMemorySessionStore,
 };

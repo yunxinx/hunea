@@ -2,7 +2,6 @@ use runtime_domain::{
     dynamic_environment::{
         DynamicEnvironmentSessionConfig, enabled_dynamic_environment_sources_for_session_config,
     },
-    prompt_assembly::PromptSourceOrigin,
     session::{
         ConversationTurnRequest, RuntimeCommandReceipt, RuntimeEvent, RuntimeTarget,
         RuntimeToolActivity, RuntimeToolActivityRawValue, RuntimeToolActivityStatus,
@@ -422,17 +421,9 @@ impl AppRuntimeCoordinator {
             raw_input: Some(RuntimeToolActivityRawValue::from(serde_json::json!({
                 "path": skill_use.skill_path.display().to_string(),
                 "hunea_skill_name": skill_use.skill_name,
-                "hunea_skill_origin": manual_skill_origin_label(skill_use.origin),
+                "hunea_skill_origin": skill_use.origin.as_str(),
             }))),
             raw_output: None,
         }
-    }
-}
-
-fn manual_skill_origin_label(origin: PromptSourceOrigin) -> &'static str {
-    match origin {
-        PromptSourceOrigin::Builtin => "builtin",
-        PromptSourceOrigin::Global => "global",
-        PromptSourceOrigin::Project => "project",
     }
 }

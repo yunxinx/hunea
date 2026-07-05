@@ -106,23 +106,7 @@ impl Tool for ViewImageTool {
 #[derive(Debug, Deserialize)]
 struct ViewImageArguments {
     path: String,
-    detail: Option<ViewImageDetail>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum ViewImageDetail {
-    High,
-    Original,
-}
-
-impl From<ViewImageDetail> for ToolImageDetail {
-    fn from(detail: ViewImageDetail) -> Self {
-        match detail {
-            ViewImageDetail::High => Self::High,
-            ViewImageDetail::Original => Self::Original,
-        }
-    }
+    detail: Option<ToolImageDetail>,
 }
 
 fn join_error_result(call_id: String, error: JoinError) -> ToolResult {
@@ -149,7 +133,7 @@ fn execute_view_image(
         }
     };
 
-    let detail = arguments.detail.unwrap_or(ViewImageDetail::High).into();
+    let detail = arguments.detail.unwrap_or(ToolImageDetail::High);
 
     if cancellation.is_cancelled() {
         return ToolResult::error(call.call_id, WorkspaceFileError::Interrupted.to_string());
@@ -253,9 +237,6 @@ fn read_file_bytes(
             path: path.to_path_buf(),
             source,
         })?;
-    if cancellation.is_cancelled() {
-        return Err(WorkspaceFileError::Interrupted);
-    }
     Ok(bytes)
 }
 
@@ -277,5 +258,80 @@ fn image_signature_matches(mime_type: &str, bytes: &[u8]) -> bool {
         "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
         "image/webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP",
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{self, Cursor, Read},
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
+
+    use tokio_util::sync::CancellationToken;
+
+    use super::super::workspace_access::{
+        WorkspaceAccess, WorkspaceDirectoryEntry, WorkspaceMetadata,
+    };
+
+    #[test]
+    fn read_file_bytes_returns_completed_read_even_when_cancelled_after_read() {
+        let cancellation = CancellationToken::new();
+        let access = CancellingReadAccess {
+            cancellation: cancellation.clone(),
+        };
+
+        let bytes =
+            super::read_file_bytes(&access, Path::new("/workspace/image.png"), &cancellation)
+                .expect("completed read should be returned");
+
+        assert_eq!(bytes, b"image bytes");
+        assert!(cancellation.is_cancelled());
+    }
+
+    struct CancellingReadAccess {
+        cancellation: CancellationToken,
+    }
+
+    impl WorkspaceAccess for CancellingReadAccess {
+        fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            Ok(path.to_path_buf())
+        }
+
+        fn metadata(&self, _path: &Path) -> io::Result<WorkspaceMetadata> {
+            Ok(WorkspaceMetadata {
+                is_dir: false,
+                is_file: true,
+                len: 11,
+                modified_at: None,
+            })
+        }
+
+        fn open_reader(&self, _path: &Path) -> io::Result<Box<dyn Read + Send>> {
+            Ok(Box::new(CancellingReader {
+                inner: Mutex::new(Cursor::new(b"image bytes".to_vec())),
+                cancellation: self.cancellation.clone(),
+            }))
+        }
+
+        fn read_dir(&self, _path: &Path) -> io::Result<Vec<WorkspaceDirectoryEntry>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct CancellingReader {
+        inner: Mutex<Cursor<Vec<u8>>>,
+        cancellation: CancellationToken,
+    }
+
+    impl Read for CancellingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let read = self.inner.lock().unwrap().read(buf)?;
+            if read > 0 {
+                self.cancellation.cancel();
+            }
+            Ok(read)
+        }
     }
 }

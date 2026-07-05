@@ -97,7 +97,11 @@ pub(super) async fn run_session_persistence_actor(
     let mut state = SessionPersistenceState::default();
     loop {
         let command = tokio::select! {
-            _ = cancellation.cancelled() => break,
+            _ = cancellation.cancelled() => {
+                let error = Arc::new(SessionPersistenceError::WorkerStopped);
+                cancel_pending_flushes(drain_pending_commands(&mut receiver), error);
+                break;
+            },
             command = receiver.recv() => {
                 let Some(command) = command else {
                     break;
@@ -158,6 +162,28 @@ pub(super) async fn run_session_persistence_actor(
                 ConversationEvent::Failed { message },
             ));
             return;
+        }
+    }
+}
+
+fn drain_pending_commands(
+    receiver: &mut tokio_mpsc::Receiver<SessionPersistenceCommand>,
+) -> Vec<SessionPersistenceCommand> {
+    receiver.close();
+    let mut commands = Vec::new();
+    while let Ok(command) = receiver.try_recv() {
+        commands.push(command);
+    }
+    commands
+}
+
+fn cancel_pending_flushes(
+    commands: impl IntoIterator<Item = SessionPersistenceCommand>,
+    error: Arc<SessionPersistenceError>,
+) {
+    for command in commands {
+        if let SessionPersistenceCommand::Flush { ack } = command {
+            let _ = ack.send(Err(error.clone()));
         }
     }
 }
@@ -529,4 +555,24 @@ pub(super) async fn flush_session_persistence(
     ack_rx
         .await
         .map_err(|_| Arc::new(SessionPersistenceError::FlushAckDropped))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_pending_flushes_replies_to_waiting_acknowledgements() {
+        let (flush_ack, flush_result) = oneshot::channel();
+        let commands = vec![SessionPersistenceCommand::Flush { ack: flush_ack }];
+        let error = Arc::new(SessionPersistenceError::WorkerStopped);
+
+        cancel_pending_flushes(commands, error.clone());
+
+        let received = flush_result
+            .blocking_recv()
+            .expect("flush acknowledgement should be sent")
+            .expect_err("cancelled flush should receive the cancellation error");
+        assert!(Arc::ptr_eq(&received, &error));
+    }
 }

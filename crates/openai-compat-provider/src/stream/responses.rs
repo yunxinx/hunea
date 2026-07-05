@@ -117,7 +117,6 @@ impl OpenAiResponsesStreamState {
                 }
             }
             ResponsesStreamEvent::Failed { response } => {
-                self.saw_terminal_event = true;
                 let message = response
                     .error
                     .and_then(|error| error.message)

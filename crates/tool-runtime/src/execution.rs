@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use serde_json::Value;
 use std::fmt;
 
@@ -59,7 +60,8 @@ pub enum ToolResultContent {
 }
 
 /// `ToolImageDetail` 描述工具返回图片希望 provider 使用的细节等级。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ToolImageDetail {
     High,
     Original,

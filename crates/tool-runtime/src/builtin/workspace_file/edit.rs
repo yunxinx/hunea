@@ -203,7 +203,7 @@ struct EditItemArgument {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-enum EditRequestError {
+pub(crate) enum EditRequestError {
     #[error("edits must contain at least one replacement")]
     EmptyEdits,
     #[error("edits[{index}].old_string must not be empty")]
@@ -257,6 +257,18 @@ mod argument_tests {
             EditRequestError::EmptyOldString { index: 0 }
         ));
     }
+
+    #[test]
+    fn edit_request_error_is_a_workspace_file_error_source() {
+        let error = super::super::error::WorkspaceFileError::EditRequest {
+            source: EditRequestError::EmptyEdits,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "edit arguments are invalid: edits must contain at least one replacement"
+        );
+    }
 }
 
 fn join_error_result(call_id: String, error: JoinError) -> ToolResult {
@@ -274,15 +286,25 @@ fn execute_edit(
 ) -> ToolResult {
     let arguments = match serde_json::from_value::<EditArguments>(call.arguments) {
         Ok(arguments) => arguments,
-        Err(error) => {
-            return ToolResult::error(call.call_id, format!("edit arguments are invalid: {error}"));
+        Err(source) => {
+            return ToolResult::error(
+                call.call_id,
+                WorkspaceFileError::InvalidArguments {
+                    tool: "edit",
+                    source,
+                }
+                .to_string(),
+            );
         }
     };
 
     let (requested_path, request) = match arguments.into_request() {
         Ok(request) => request,
-        Err(error) => {
-            return ToolResult::error(call.call_id, format!("edit arguments are invalid: {error}"));
+        Err(source) => {
+            return ToolResult::error(
+                call.call_id,
+                WorkspaceFileError::EditRequest { source }.to_string(),
+            );
         }
     };
 

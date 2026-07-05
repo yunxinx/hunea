@@ -190,10 +190,14 @@ fn execute_write(
 ) -> ToolResult {
     let arguments = match serde_json::from_value::<WriteArguments>(call.arguments) {
         Ok(arguments) => arguments,
-        Err(error) => {
+        Err(source) => {
             return ToolResult::error(
                 call.call_id,
-                format!("write arguments are invalid: {error}"),
+                WorkspaceFileError::InvalidArguments {
+                    tool: "write",
+                    source,
+                }
+                .to_string(),
             );
         }
     };

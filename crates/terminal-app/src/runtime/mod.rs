@@ -197,14 +197,14 @@ impl AppRuntimeCoordinator {
             RuntimeCommand::LoadMessageHistoryPickerRows { request_id } => {
                 self.load_message_history_picker_rows(request_id)
             }
-            RuntimeCommand::ReloadPromptAssembly => self.reload_prompt_assembly(),
+            RuntimeCommand::ReloadPromptAssembly => Ok(self.reload_prompt_assembly()),
             RuntimeCommand::RecordMessageHistory {
                 entry_id,
                 text,
                 limit,
             } => self.record_message_history(entry_id, text, limit),
             RuntimeCommand::MutatePromptAssembly { mutation } => {
-                self.mutate_prompt_assembly(mutation)
+                Ok(self.mutate_prompt_assembly(mutation))
             }
             RuntimeCommand::Reset => {
                 self.conversation_worker.reset_after_clear();

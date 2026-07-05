@@ -1098,7 +1098,12 @@ pub(super) fn expand_custom_prompt_bindings(
     let mut replaced_any = false;
 
     for binding in sorted_bindings {
-        let Some(prompt) = prompts_by_locator.get(&(binding.reference_id.clone(), binding.origin))
+        let Some(prompt) = prompts_by_locator
+            .iter()
+            .find(|((reference_id, origin), _)| {
+                reference_id.as_str() == binding.reference_id.as_str() && *origin == binding.origin
+            })
+            .map(|(_, prompt)| prompt)
         else {
             continue;
         };

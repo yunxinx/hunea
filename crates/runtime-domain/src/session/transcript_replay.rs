@@ -13,11 +13,17 @@ pub fn transcript_image_label_text(label_number: usize) -> String {
 /// `transcript_image_label_ranges` 返回 transcript 文本里的本地图片占位符字符范围。
 #[must_use]
 pub fn transcript_image_label_ranges(content: &str) -> Vec<(usize, usize)> {
+    const IMAGE_LABEL_PREFIX: &str = "[Image #";
+
     let mut ranges = Vec::new();
-    for (byte_start, _) in content.match_indices("[Image #") {
-        let after_prefix = byte_start + "[Image #".len();
+    let mut byte_cursor = 0;
+    let mut char_cursor = 0;
+    while let Some(relative_start) = content[byte_cursor..].find(IMAGE_LABEL_PREFIX) {
+        let byte_start = byte_cursor + relative_start;
+        char_cursor += content[byte_cursor..byte_start].chars().count();
+        let after_prefix = byte_start + IMAGE_LABEL_PREFIX.len();
         let Some(rest) = content.get(after_prefix..) else {
-            continue;
+            break;
         };
         let digit_len = rest
             .chars()
@@ -25,12 +31,20 @@ pub fn transcript_image_label_ranges(content: &str) -> Vec<(usize, usize)> {
             .map(char::len_utf8)
             .sum::<usize>();
         if digit_len == 0 || !content[after_prefix + digit_len..].starts_with(']') {
+            let next_char_len = content[byte_start..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(1);
+            byte_cursor = byte_start + next_char_len;
+            char_cursor += 1;
             continue;
         }
         let byte_end = after_prefix + digit_len + ']'.len_utf8();
-        let start_char = content[..byte_start].chars().count();
-        let end_char = start_char + content[byte_start..byte_end].chars().count();
-        ranges.push((start_char, end_char));
+        let label_char_len = content[byte_start..byte_end].chars().count();
+        ranges.push((char_cursor, char_cursor + label_char_len));
+        byte_cursor = byte_end;
+        char_cursor += label_char_len;
     }
     ranges
 }

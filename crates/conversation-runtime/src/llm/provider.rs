@@ -1,6 +1,6 @@
 use std::{
     env,
-    sync::{OnceLock, mpsc},
+    sync::{Mutex, OnceLock, mpsc},
     thread,
     time::Duration,
 };
@@ -126,6 +126,7 @@ struct ModelListJob {
 }
 
 static MODEL_LIST_WORKER: OnceLock<ModelListWorker> = OnceLock::new();
+static MODEL_LIST_WORKER_INIT: Mutex<()> = Mutex::new(());
 
 impl ModelListWorker {
     fn list_models(&self, request: ProviderRequest) -> Result<Vec<String>, ProviderRequestError> {
@@ -146,7 +147,18 @@ fn model_list_worker() -> Result<ModelListWorker, ProviderRequestError> {
     if let Some(worker) = MODEL_LIST_WORKER.get() {
         return Ok(worker.clone());
     }
+    let _init_guard = MODEL_LIST_WORKER_INIT.lock().map_err(|_| {
+        ProviderRequestError::Provider("model sync worker init lock was poisoned".to_string())
+    })?;
+    if let Some(worker) = MODEL_LIST_WORKER.get() {
+        return Ok(worker.clone());
+    }
+    let worker = start_model_list_worker()?;
+    let _ = MODEL_LIST_WORKER.set(worker.clone());
+    Ok(worker)
+}
 
+fn start_model_list_worker() -> Result<ModelListWorker, ProviderRequestError> {
     let (sender, receiver) = mpsc::channel::<ModelListJob>();
     thread::Builder::new()
         .name("hunea-model-list-worker".to_string())
@@ -185,11 +197,7 @@ fn model_list_worker() -> Result<ModelListWorker, ProviderRequestError> {
         .map_err(|source| {
             ProviderRequestError::Provider(format!("start model sync worker: {source}"))
         })?;
-    let worker = ModelListWorker { sender };
-    let _ = MODEL_LIST_WORKER.set(worker.clone());
-    MODEL_LIST_WORKER.get().cloned().ok_or_else(|| {
-        ProviderRequestError::Provider("model sync worker was not initialized".to_string())
-    })
+    Ok(ModelListWorker { sender })
 }
 
 fn optional_api_key_from_parts(

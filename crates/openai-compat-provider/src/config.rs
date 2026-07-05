@@ -27,6 +27,13 @@ impl OpenAiClientConfig {
     pub(crate) fn endpoint(&self, path: &str) -> String {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
     }
+
+    pub(crate) fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.api_key.as_deref() {
+            Some(api_key) if !api_key.trim().is_empty() => request.bearer_auth(api_key.trim()),
+            _ => request,
+        }
+    }
 }
 
 fn normalize_base_url(base_url: String) -> Result<String, ProviderError> {

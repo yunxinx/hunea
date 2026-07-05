@@ -814,6 +814,18 @@ fn d_does_not_remove_active_instruction_file() {
 }
 
 #[test]
+fn d_does_not_remove_active_skill_discovery() {
+    let mut model = ready_model();
+    model.open_prompt_overlay();
+    let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
+
+    assert_eq!(
+        model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
+        super::OverlayInputResult::Handled
+    );
+}
+
+#[test]
 fn shifted_j_and_k_reorder_discovered_skill() {
     let mut model = ready_model();
     model.open_prompt_overlay();

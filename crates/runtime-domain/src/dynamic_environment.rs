@@ -222,7 +222,7 @@ pub fn git_working_tree_observation(status_porcelain: &str) -> DynamicEnvironmen
     }
 }
 
-/// `stable_sha256` 返回稳定短 hash，用于较长观测值的 fingerprint。
+/// `stable_sha256` 返回稳定 SHA-256 hex，用于较长观测值的 fingerprint。
 #[must_use]
 pub fn stable_sha256(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
@@ -237,9 +237,9 @@ fn git_status_summary(status_porcelain: &str) -> String {
             continue;
         }
         if line.starts_with("??") {
-            untracked_count = untracked_count.saturating_add(1);
+            untracked_count += 1;
         } else if !line.trim().is_empty() {
-            changed_count = changed_count.saturating_add(1);
+            changed_count += 1;
         }
     }
 
@@ -263,7 +263,9 @@ fn truncate_status_output(status_porcelain: &str) -> String {
         }
         truncated.push(character);
     }
-    truncated.push_str("\n... (truncated because git status exceeds 2000 characters)");
+    truncated.push_str(&format!(
+        "\n... (truncated because git status exceeds {STATUS_OUTPUT_LIMIT} characters)"
+    ));
     truncated
 }
 

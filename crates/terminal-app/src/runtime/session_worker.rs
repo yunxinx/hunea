@@ -765,27 +765,27 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                     );
                 }
             };
-            let project_state =
-                match runtime_domain::prompt_assembly::persistence::load_project_prompt_assembly_state(
-                    &work_dir,
-                ) {
-                    Ok(state) => state,
-                    Err(_) => {
-                        return SessionStoreWorkerEvent::runtime(
-                            RuntimeEvent::PromptAssemblyMissingSourcesChecked {
-                                missing_count: 0,
-                            },
-                        );
-                    }
-                };
-            let check = crate::prompt_assembly::check_prompt_assembly_missing_sources_from_states(
-                &work_dir,
-                &global_state,
-                &project_state,
-                &[],
-            );
+            let missing_count = tokio::task::spawn_blocking(move || {
+                let project_state =
+                    runtime_domain::prompt_assembly::persistence::load_project_prompt_assembly_state(
+                        &work_dir,
+                    )?;
+                Ok::<_, runtime_domain::prompt_assembly::persistence::ProjectPromptAssemblyError>(
+                    crate::prompt_assembly::check_prompt_assembly_missing_sources_from_states(
+                        &work_dir,
+                        &global_state,
+                        &project_state,
+                        &[],
+                    )
+                    .missing_count,
+                )
+            })
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(0);
             SessionStoreWorkerEvent::runtime(RuntimeEvent::PromptAssemblyMissingSourcesChecked {
-                missing_count: check.missing_count,
+                missing_count,
             })
         }
         SessionStoreCommand::LoadPromptAssembly {

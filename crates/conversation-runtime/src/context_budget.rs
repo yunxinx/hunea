@@ -1,5 +1,7 @@
 //! Context budget helpers for prepared turns.
 
+use std::cmp::Reverse;
+
 use openai_compat_provider::{
     OpenAiRequestFormat, prompt_request_projection_from_parts_for_format,
 };
@@ -478,7 +480,7 @@ fn distribute_tokens_by_weight(total_tokens: usize, weights: &[usize]) -> Vec<us
     }
 
     let mut leftover = total_tokens.saturating_sub(assigned);
-    remainders.sort_by(|left, right| right.cmp(left));
+    remainders.sort_by_key(|&(remainder, _, _)| Reverse(remainder));
     for (_, index, _) in remainders {
         if leftover == 0 {
             break;

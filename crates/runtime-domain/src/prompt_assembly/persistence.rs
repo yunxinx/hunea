@@ -18,6 +18,16 @@ pub const PROJECT_CUSTOM_PROMPTS_DIR_NAME: &str = "custom";
 pub const PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME: &str = "__core-system__.md";
 pub const PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME: &str = "__skill-discovery__.md";
 pub const PROJECT_TOOL_GUIDELINES_OVERRIDE_FILE_NAME: &str = "__tool-guidelines__.md";
+const PROJECT_RESERVED_PROMPT_REFERENCE_IDS: [&str; 3] = [
+    "__core-system__",
+    "__skill-discovery__",
+    "__tool-guidelines__",
+];
+const PROJECT_RESERVED_PROMPT_FILE_NAMES: [&str; 3] = [
+    PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME,
+    PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME,
+    PROJECT_TOOL_GUIDELINES_OVERRIDE_FILE_NAME,
+];
 const PROJECT_PROMPT_ASSEMBLY_VERSION: u32 = 1;
 
 /// `PromptAssemblyScope` 表示 prompt assembly 配置的生效范围。
@@ -271,8 +281,6 @@ pub enum ProjectPromptAssemblyError {
     InvalidProjectReferenceId { reference_id: String },
     #[error("project prompt assembly persistence only accepts project scope, got {}", scope.as_stored_value())]
     UnexpectedScope { scope: PromptAssemblyScope },
-    #[error("extra prompt body `{reference_id}` has no matching extra prompt entry")]
-    OrphanExtraPromptBody { reference_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -570,15 +578,15 @@ fn remove_file_if_exists(path: &Path) -> Result<(), ProjectPromptAssemblyError> 
 }
 
 fn prune_stale_prompt_files(
-    prompts_dir: &Path,
+    custom_prompts_dir: &Path,
     desired_files: &BTreeSet<String>,
 ) -> Result<(), ProjectPromptAssemblyError> {
-    let entries = match fs::read_dir(prompts_dir) {
+    let entries = match fs::read_dir(custom_prompts_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
             return Err(ProjectPromptAssemblyError::Read {
-                path: prompts_dir.to_path_buf(),
+                path: custom_prompts_dir.to_path_buf(),
                 source,
             });
         }
@@ -586,7 +594,7 @@ fn prune_stale_prompt_files(
 
     for entry in entries {
         let entry = entry.map_err(|source| ProjectPromptAssemblyError::Read {
-            path: prompts_dir.to_path_buf(),
+            path: custom_prompts_dir.to_path_buf(),
             source,
         })?;
         let file_type = entry
@@ -617,10 +625,7 @@ fn project_extra_prompt_file_name(
 }
 
 fn project_extra_prompt_reference_id_from_file_name(file_name: &str) -> Option<&str> {
-    if matches!(
-        file_name,
-        PROJECT_CORE_SYSTEM_OVERRIDE_FILE_NAME | PROJECT_SKILL_DISCOVERY_OVERRIDE_FILE_NAME
-    ) {
+    if PROJECT_RESERVED_PROMPT_FILE_NAMES.contains(&file_name) {
         return None;
     }
 
@@ -630,7 +635,7 @@ fn project_extra_prompt_reference_id_from_file_name(file_name: &str) -> Option<&
 }
 
 fn validate_project_reference_id(reference_id: &str) -> Result<(), ProjectPromptAssemblyError> {
-    if reference_id.is_empty() || reference_id == "__core-system__" {
+    if reference_id.is_empty() || PROJECT_RESERVED_PROMPT_REFERENCE_IDS.contains(&reference_id) {
         return Err(ProjectPromptAssemblyError::InvalidProjectReferenceId {
             reference_id: reference_id.to_string(),
         });
@@ -902,6 +907,33 @@ mod tests {
                 .exists(),
             "extra prompt body should be stored under prompts/custom"
         );
+    }
+
+    #[test]
+    fn project_scope_rejects_reserved_extra_prompt_reference_ids() {
+        for reference_id in [
+            "__core-system__",
+            "__skill-discovery__",
+            "__tool-guidelines__",
+        ] {
+            let work_dir = temp_test_dir(reference_id);
+            let mut state = sample_project_state();
+            state.extra_prompts = vec![StoredPromptBody {
+                reference_id: reference_id.to_string(),
+                title: reference_id.to_string(),
+                body: "reserved body must not be saved as a custom prompt".to_string(),
+            }];
+
+            let error = save_project_prompt_assembly_state(&work_dir, &state)
+                .expect_err("reserved custom prompt reference id should be rejected");
+
+            assert!(matches!(
+                error,
+                ProjectPromptAssemblyError::InvalidProjectReferenceId {
+                    reference_id: rejected
+                } if rejected == reference_id
+            ));
+        }
     }
 
     #[test]

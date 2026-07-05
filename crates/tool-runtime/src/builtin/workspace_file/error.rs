@@ -1,5 +1,6 @@
 use std::{io, path::PathBuf};
 
+use super::edit::EditRequestError;
 use super::edit_apply::EditApplicationError;
 
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +60,11 @@ pub(crate) enum WorkspaceFileError {
     EditRejected {
         #[source]
         source: EditApplicationError,
+    },
+    #[error("edit arguments are invalid: {source}")]
+    EditRequest {
+        #[source]
+        source: EditRequestError,
     },
     #[error("read directory failed for '{path}': {source}")]
     ReadDirectory { path: PathBuf, source: io::Error },

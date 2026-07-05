@@ -141,6 +141,18 @@ struct PromptOverlayActionAvailability {
     can_reorder_active: bool,
 }
 
+fn prompt_overlay_source_kind_can_remove(kind: PromptSourceKind) -> bool {
+    !matches!(
+        kind,
+        PromptSourceKind::CoreSystemPrompt
+            | PromptSourceKind::InstructionsFile
+            | PromptSourceKind::SkillDiscovery
+            | PromptSourceKind::ToolGuidelines
+            | PromptSourceKind::DynamicEnvironmentBaseline
+            | PromptSourceKind::DynamicEnvironmentChanges
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PromptOverlayLayoutRects {
     chrome: crate::fullscreen_list_chrome::FullscreenListChromeRects,

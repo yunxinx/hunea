@@ -38,6 +38,7 @@ fn session_affinity_header_values(
             ("x-client-request-id", session_id),
             ("x-session-affinity", session_id),
         ],
+        // Responses API ignores `x-session-affinity`; keep only headers that are accepted there.
         OpenAiSessionAffinityHeaderSet::Responses => vec![
             ("session_id", session_id),
             ("x-client-request-id", session_id),
@@ -71,13 +72,6 @@ impl OpenAiChatCompletionsClient {
             .map_err(|source| ProviderError::Transport(source.to_string()))?;
         Ok(Self { http, config })
     }
-
-    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.config.api_key.as_deref() {
-            Some(api_key) if !api_key.trim().is_empty() => request.bearer_auth(api_key.trim()),
-            _ => request,
-        }
-    }
 }
 
 impl ProviderClient for OpenAiChatCompletionsClient {
@@ -89,6 +83,7 @@ impl ProviderClient for OpenAiChatCompletionsClient {
         Box::pin(async move {
             let body = chat_completion_request_body(request)?;
             let response = self
+                .config
                 .apply_auth(apply_session_affinity_headers(
                     self.http.post(self.config.endpoint("/chat/completions")),
                     request,
@@ -132,6 +127,7 @@ impl ProviderClient for OpenAiChatCompletionsClient {
     ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
         Box::pin(async move {
             let response = self
+                .config
                 .apply_auth(self.http.get(self.config.endpoint("/models")))
                 .send()
                 .await
@@ -165,13 +161,6 @@ impl OpenAiResponsesClient {
             .map_err(|source| ProviderError::Transport(source.to_string()))?;
         Ok(Self { http, config })
     }
-
-    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.config.api_key.as_deref() {
-            Some(api_key) if !api_key.trim().is_empty() => request.bearer_auth(api_key.trim()),
-            _ => request,
-        }
-    }
 }
 
 impl ProviderClient for OpenAiResponsesClient {
@@ -183,6 +172,7 @@ impl ProviderClient for OpenAiResponsesClient {
         Box::pin(async move {
             let body = responses_request_body(request)?;
             let response = self
+                .config
                 .apply_auth(apply_session_affinity_headers(
                     self.http.post(self.config.endpoint("/responses")),
                     request,
@@ -226,6 +216,7 @@ impl ProviderClient for OpenAiResponsesClient {
     ) -> ProviderFuture<'a, Result<Vec<ModelDescriptor>, ProviderError>> {
         Box::pin(async move {
             let response = self
+                .config
                 .apply_auth(self.http.get(self.config.endpoint("/models")))
                 .send()
                 .await

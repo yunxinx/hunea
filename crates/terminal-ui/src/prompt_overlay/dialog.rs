@@ -26,13 +26,14 @@ impl Model {
                 self.close_prompt_overlay_dialog();
                 OverlayInputResult::Handled
             }
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::Up | KeyCode::Char('k')
-                if key.modifiers.is_empty() =>
-            {
-                self.toggle_prompt_overlay_dialog_scope();
-                OverlayInputResult::Handled
-            }
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Down | KeyCode::Char('j')
+            KeyCode::Left
+            | KeyCode::Char('h')
+            | KeyCode::Up
+            | KeyCode::Char('k')
+            | KeyCode::Right
+            | KeyCode::Char('l')
+            | KeyCode::Down
+            | KeyCode::Char('j')
                 if key.modifiers.is_empty() =>
             {
                 self.toggle_prompt_overlay_dialog_scope();

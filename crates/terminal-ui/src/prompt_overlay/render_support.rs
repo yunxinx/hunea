@@ -92,8 +92,9 @@ pub(super) fn prompt_overlay_partition_extra_candidates(
         return None;
     }
     candidates.sort_by_key(|candidate| prompt_overlay_origin_sort_key(candidate.origin));
-    let winner = candidates.remove(0);
-    Some((winner, candidates))
+    let mut candidates = candidates.into_iter();
+    let winner = candidates.next()?;
+    Some((winner, candidates.collect()))
 }
 
 pub(super) fn prompt_overlay_extra_candidate_winner(
@@ -114,8 +115,9 @@ pub(super) fn prompt_overlay_partition_discovered_skills(
         return None;
     }
     skills.sort_by_key(|skill| prompt_overlay_origin_sort_key(skill.origin));
-    let winner = skills.remove(0);
-    Some((winner, skills))
+    let mut skills = skills.into_iter();
+    let winner = skills.next()?;
+    Some((winner, skills.collect()))
 }
 
 pub(super) fn prompt_overlay_discovered_skill_winner(

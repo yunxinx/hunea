@@ -345,8 +345,9 @@ async fn run_conversation_worker(
                     provider_context_repair_ledger.as_ref(),
                     &session_sender,
                     TOOL_EXECUTION_TIMED_OUT,
-                )
-                .await;
+                    &cancellation,
+                    &sender,
+                );
                 send_terminal_after_session_persistence(
                     &session_sender,
                     &sender,
@@ -390,8 +391,9 @@ async fn run_conversation_worker(
                     provider_context_repair_ledger.as_ref(),
                     &session_sender,
                     TOOL_EXECUTION_INTERRUPTED,
-                )
-                .await;
+                    &cancellation,
+                    &sender,
+                );
                 send_terminal_after_session_persistence(
                     &session_sender,
                     &sender,
@@ -408,8 +410,9 @@ async fn run_conversation_worker(
                     provider_context_repair_ledger.as_ref(),
                     &session_sender,
                     TOOL_EXECUTION_INTERRUPTED,
-                )
-                .await;
+                    &cancellation,
+                    &sender,
+                );
                 send_terminal_after_session_persistence(
                     &session_sender,
                     &sender,
@@ -444,8 +447,9 @@ async fn run_conversation_worker(
                     provider_context_repair_ledger.as_ref(),
                     &session_sender,
                     TOOL_EXECUTION_INTERRUPTED,
-                )
-                .await;
+                    &cancellation,
+                    &sender,
+                );
                 send_terminal_after_session_persistence(
                     &session_sender,
                     &sender,
@@ -479,15 +483,23 @@ async fn send_terminal_after_session_persistence(
     let _ = sender.send(ConversationWorkerEvent::progress(event));
 }
 
-async fn send_repair_items(
+fn send_repair_items(
     ledger: &Mutex<ProviderContextRepairLedger>,
     sender: &tokio_mpsc::Sender<SessionPersistenceCommand>,
     content: &'static str,
+    cancellation: &CancellationToken,
+    progress_sender: &mpsc::Sender<ConversationWorkerEvent>,
 ) {
     for item in take_provider_context_repair_items(ledger, content) {
-        let _ = sender
-            .send(SessionPersistenceCommand::ProviderContextItem(item))
-            .await;
+        try_send_session_persistence(
+            sender,
+            SessionPersistenceCommand::ProviderContextItem(item),
+            cancellation,
+            progress_sender,
+        );
+        if cancellation.is_cancelled() {
+            break;
+        }
     }
 }
 

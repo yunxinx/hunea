@@ -73,7 +73,7 @@ impl Model {
     pub(super) fn remove_selected_prompt_source(&mut self) -> Option<AppEffect> {
         match self.selected_prompt_overlay_selection()? {
             PromptOverlaySelection::ManagedSource(selected) => {
-                if prompt_overlay_source_kind_is_protected_from_remove(selected.kind) {
+                if !prompt_overlay_source_kind_can_remove(selected.kind) {
                     return None;
                 }
                 Some(AppEffect::MutatePromptAssembly {
@@ -96,7 +96,7 @@ impl Model {
                 None
             }
             PromptOverlaySelection::ResolvedSource(selected) => {
-                if prompt_overlay_source_kind_is_protected_from_remove(selected.kind) {
+                if !prompt_overlay_source_kind_can_remove(selected.kind) {
                     return None;
                 }
                 Some(AppEffect::MutatePromptAssembly {
@@ -146,14 +146,4 @@ impl Model {
             ),
         })
     }
-}
-
-fn prompt_overlay_source_kind_is_protected_from_remove(kind: PromptSourceKind) -> bool {
-    matches!(
-        kind,
-        PromptSourceKind::CoreSystemPrompt
-            | PromptSourceKind::InstructionsFile
-            | PromptSourceKind::DynamicEnvironmentBaseline
-            | PromptSourceKind::DynamicEnvironmentChanges
-    )
 }

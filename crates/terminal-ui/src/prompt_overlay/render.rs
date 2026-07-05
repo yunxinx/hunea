@@ -329,16 +329,9 @@ impl Model {
     }
 
     pub(super) fn prompt_overlay_tabs_plain(&self, active_tab: PromptOverlayInactiveTab) -> String {
-        PromptOverlayInactiveTab::ALL
-            .iter()
-            .copied()
-            .map(|tab| {
-                if tab == active_tab {
-                    format!("[{}]", tab.label())
-                } else {
-                    tab.label().to_string()
-                }
-            })
+        prompt_overlay_tab_labels(active_tab)
+            .into_iter()
+            .map(|(_, _, label)| label)
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -349,16 +342,13 @@ impl Model {
     ) -> Vec<Span<'static>> {
         let mut spans = Vec::new();
 
-        for (index, tab) in PromptOverlayInactiveTab::ALL.iter().copied().enumerate() {
+        for (index, (_, is_active, label)) in prompt_overlay_tab_labels(active_tab)
+            .into_iter()
+            .enumerate()
+        {
             if index > 0 {
                 spans.push(Span::raw(" "));
             }
-            let is_active = tab == active_tab;
-            let label = if is_active {
-                format!("[{}]", tab.label())
-            } else {
-                tab.label().to_string()
-            };
             let style = if is_active {
                 surface_text_style(self.palette).bold()
             } else {
@@ -497,15 +487,13 @@ impl Model {
             .saturating_add(padding);
         let clicked_column = usize::from(column);
 
-        for (index, tab) in PromptOverlayInactiveTab::ALL.iter().copied().enumerate() {
+        for (index, (tab, _, label)) in prompt_overlay_tab_labels(active_tab)
+            .into_iter()
+            .enumerate()
+        {
             if index > 0 {
                 current_column = current_column.saturating_add(1);
             }
-            let label = if tab == active_tab {
-                format!("[{}]", tab.label())
-            } else {
-                tab.label().to_string()
-            };
             let label_end = current_column.saturating_add(display_width(&label));
             if clicked_column >= current_column && clicked_column < label_end {
                 return Some(tab);
@@ -515,4 +503,22 @@ impl Model {
 
         None
     }
+}
+
+fn prompt_overlay_tab_labels(
+    active_tab: PromptOverlayInactiveTab,
+) -> Vec<(PromptOverlayInactiveTab, bool, String)> {
+    PromptOverlayInactiveTab::ALL
+        .iter()
+        .copied()
+        .map(|tab| {
+            let is_active = tab == active_tab;
+            let label = if is_active {
+                format!("[{}]", tab.label())
+            } else {
+                tab.label().to_string()
+            };
+            (tab, is_active, label)
+        })
+        .collect()
 }

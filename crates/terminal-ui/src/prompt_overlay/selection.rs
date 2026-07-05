@@ -610,14 +610,6 @@ impl Model {
     pub(super) fn prompt_overlay_action_availability(&self) -> PromptOverlayActionAvailability {
         match self.selected_prompt_overlay_selection() {
             Some(PromptOverlaySelection::ManagedSource(source)) => {
-                let can_remove = !matches!(
-                    source.kind,
-                    PromptSourceKind::CoreSystemPrompt
-                        | PromptSourceKind::SkillDiscovery
-                        | PromptSourceKind::ToolGuidelines
-                        | PromptSourceKind::DynamicEnvironmentBaseline
-                        | PromptSourceKind::DynamicEnvironmentChanges
-                );
                 PromptOverlayActionAvailability {
                     can_edit: !matches!(
                         source.kind,
@@ -626,24 +618,16 @@ impl Model {
                             | PromptSourceKind::DynamicEnvironmentChanges
                     ),
                     can_add_custom: false,
-                    can_remove: can_remove && source.kind != PromptSourceKind::InstructionsFile,
+                    can_remove: prompt_overlay_source_kind_can_remove(source.kind),
                     can_toggle_selection: source.kind != PromptSourceKind::CoreSystemPrompt,
                     can_reorder_active: source.kind != PromptSourceKind::CoreSystemPrompt,
                 }
             }
             Some(PromptOverlaySelection::ResolvedSource(source)) => {
-                let can_remove = !matches!(
-                    source.kind,
-                    PromptSourceKind::CoreSystemPrompt
-                        | PromptSourceKind::SkillDiscovery
-                        | PromptSourceKind::ToolGuidelines
-                        | PromptSourceKind::DynamicEnvironmentBaseline
-                        | PromptSourceKind::DynamicEnvironmentChanges
-                );
                 PromptOverlayActionAvailability {
                     can_edit: source.kind == PromptSourceKind::ExtraPrompt,
                     can_add_custom: false,
-                    can_remove: can_remove && source.kind != PromptSourceKind::InstructionsFile,
+                    can_remove: prompt_overlay_source_kind_can_remove(source.kind),
                     can_toggle_selection: source.kind != PromptSourceKind::CoreSystemPrompt,
                     can_reorder_active: false,
                 }

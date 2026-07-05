@@ -68,16 +68,16 @@ impl AppRuntimeCoordinator {
         }
     }
 
-    pub(super) fn reload_prompt_assembly(&mut self) -> Result<RuntimeCommandReceipt, String> {
+    pub(super) fn reload_prompt_assembly(&mut self) -> RuntimeCommandReceipt {
         match self.reload_prompt_assembly_result() {
-            Ok(receipt) => Ok(receipt),
+            Ok(receipt) => receipt,
             Err(error) => {
                 self.pending_runtime_events
                     .push(RuntimeEvent::PromptAssemblyUpdateFailed {
                         kind: error.failure_kind(),
                         message: error.display_message(),
                     });
-                Ok(RuntimeCommandReceipt::Accepted)
+                RuntimeCommandReceipt::Accepted
             }
         }
     }
@@ -128,16 +128,16 @@ impl AppRuntimeCoordinator {
     pub(super) fn mutate_prompt_assembly(
         &mut self,
         mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
-    ) -> Result<RuntimeCommandReceipt, String> {
+    ) -> RuntimeCommandReceipt {
         match self.mutate_prompt_assembly_result(mutation) {
-            Ok(receipt) => Ok(receipt),
+            Ok(receipt) => receipt,
             Err(error) => {
                 self.pending_runtime_events
                     .push(RuntimeEvent::PromptAssemblyUpdateFailed {
                         kind: error.failure_kind(),
                         message: error.display_message(),
                     });
-                Ok(RuntimeCommandReceipt::Accepted)
+                RuntimeCommandReceipt::Accepted
             }
         }
     }

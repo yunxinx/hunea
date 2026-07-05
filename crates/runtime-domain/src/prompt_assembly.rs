@@ -17,6 +17,9 @@ pub const SKILL_DISCOVERY_GENERATED_END: &str = "<!-- hunea:skill-discovery gene
 pub const TOOL_GUIDELINES_GENERATED_START: &str = "<!-- hunea:tool-guidelines generated:start -->";
 /// 受管 tool-guidelines 内容的 generated 区块结束标记。
 pub const TOOL_GUIDELINES_GENERATED_END: &str = "<!-- hunea:tool-guidelines generated:end -->";
+const CORE_SYSTEM_REFERENCE_ID: &str = "core-system";
+const CORE_SYSTEM_TITLE: &str = "Core system prompt";
+const DEFAULT_EXTRA_PROMPT_TITLE_PREFIX: &str = "New prompt";
 
 /// `PromptAssemblyLifecycle` 表示 prompt assembly 生效的生命周期边界。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +54,18 @@ pub enum PromptSourceOrigin {
     Builtin,
     Global,
     Project,
+}
+
+impl PromptSourceOrigin {
+    /// `as_str` 返回适合序列化到 tool metadata 的稳定来源标签。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Global => "global",
+            Self::Project => "project",
+        }
+    }
 }
 
 /// `PromptSourceInactiveReason` 表示 source 为何没有进入 active assembly。
@@ -432,8 +447,6 @@ pub fn derive_extra_prompt_title(body: &str, fallback: &str) -> String {
 /// `next_default_extra_prompt_title` 为默认新建 prompt 生成递增标题。
 #[must_use]
 pub fn next_default_extra_prompt_title<'a>(titles: impl IntoIterator<Item = &'a str>) -> String {
-    const DEFAULT_TITLE_PREFIX: &str = "New prompt";
-
     let next_index = titles
         .into_iter()
         .filter_map(default_extra_prompt_title_index)
@@ -441,7 +454,7 @@ pub fn next_default_extra_prompt_title<'a>(titles: impl IntoIterator<Item = &'a 
         .unwrap_or(0)
         .saturating_add(1);
 
-    format!("{DEFAULT_TITLE_PREFIX} {next_index}")
+    format!("{DEFAULT_EXTRA_PROMPT_TITLE_PREFIX} {next_index}")
 }
 
 /// `default_extra_prompt_body` 返回新建 extra prompt 的默认正文模板。
@@ -452,22 +465,16 @@ pub fn default_extra_prompt_body(title: &str) -> String {
 
 fn truncate_extra_prompt_title(title: &str) -> String {
     const TITLE_LIMIT: usize = 80;
-    let mut result = String::new();
-    for character in title.chars().take(TITLE_LIMIT) {
-        result.push(character);
-    }
-    result
+    title.chars().take(TITLE_LIMIT).collect()
 }
 
 fn default_extra_prompt_title_index(title: &str) -> Option<usize> {
-    const DEFAULT_TITLE_PREFIX: &str = "New prompt";
-
-    if title == DEFAULT_TITLE_PREFIX {
+    if title == DEFAULT_EXTRA_PROMPT_TITLE_PREFIX {
         return Some(1);
     }
 
     let suffix = title
-        .strip_prefix(DEFAULT_TITLE_PREFIX)?
+        .strip_prefix(DEFAULT_EXTRA_PROMPT_TITLE_PREFIX)?
         .strip_prefix(' ')?;
     suffix.parse::<usize>().ok().filter(|index| *index > 0)
 }
@@ -476,9 +483,9 @@ fn default_extra_prompt_title_index(title: &str) -> Option<usize> {
 #[must_use]
 pub fn resolve_prompt_assembly(input: &PromptAssemblyInput) -> PromptAssemblySnapshot {
     let mut active_sources = vec![ResolvedPromptSource {
-        reference_id: "core-system".to_string(),
+        reference_id: CORE_SYSTEM_REFERENCE_ID.to_string(),
         kind: PromptSourceKind::CoreSystemPrompt,
-        title: "Core system prompt".to_string(),
+        title: CORE_SYSTEM_TITLE.to_string(),
         origin: Some(resolve_core_system_origin(&input.core_system)),
         status: PromptSourceStatus::Active { order: 0 },
     }];

@@ -1,4 +1,9 @@
-use std::{env, time::Duration};
+use std::{
+    env,
+    sync::{OnceLock, mpsc},
+    thread,
+    time::Duration,
+};
 
 use openai_compat_provider::{
     DEFAULT_OPENAI_BASE_URL, OpenAiChatCompletionsClient, OpenAiClientConfig,
@@ -107,21 +112,83 @@ fn openai_config_for_base_url(
 pub(crate) fn list_provider_models(
     request: &ProviderRequest,
 ) -> Result<Vec<String>, ProviderRequestError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|source| {
-            ProviderRequestError::Provider(format!("start model sync runtime: {source}"))
-        })?;
+    model_list_worker()?.list_models(request.clone())
+}
 
-    runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(3), async {
-            let client = openai_client_for_request(request)?;
-            let models = client.list_models().await?;
-            Ok(models.into_iter().map(|model| model.id).collect::<Vec<_>>())
+#[derive(Clone)]
+struct ModelListWorker {
+    sender: mpsc::Sender<ModelListJob>,
+}
+
+struct ModelListJob {
+    request: ProviderRequest,
+    result_sender: mpsc::SyncSender<Result<Vec<String>, ProviderRequestError>>,
+}
+
+static MODEL_LIST_WORKER: OnceLock<ModelListWorker> = OnceLock::new();
+
+impl ModelListWorker {
+    fn list_models(&self, request: ProviderRequest) -> Result<Vec<String>, ProviderRequestError> {
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        self.sender
+            .send(ModelListJob {
+                request,
+                result_sender,
+            })
+            .map_err(|_| ProviderRequestError::Provider("model sync worker stopped".to_string()))?;
+        result_receiver
+            .recv()
+            .map_err(|_| ProviderRequestError::Provider("model sync worker stopped".to_string()))?
+    }
+}
+
+fn model_list_worker() -> Result<ModelListWorker, ProviderRequestError> {
+    if let Some(worker) = MODEL_LIST_WORKER.get() {
+        return Ok(worker.clone());
+    }
+
+    let (sender, receiver) = mpsc::channel::<ModelListJob>();
+    thread::Builder::new()
+        .name("hunea-model-list-worker".to_string())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            match runtime {
+                Ok(runtime) => {
+                    while let Ok(job) = receiver.recv() {
+                        let result = runtime.block_on(async {
+                            tokio::time::timeout(Duration::from_secs(3), async {
+                                let client = openai_client_for_request(&job.request)?;
+                                let models = client.list_models().await?;
+                                Ok(models.into_iter().map(|model| model.id).collect::<Vec<_>>())
+                            })
+                            .await
+                            .map_err(|_| {
+                                ProviderRequestError::Provider("model sync timed out".to_string())
+                            })?
+                        });
+                        let _ = job.result_sender.send(result);
+                    }
+                }
+                Err(error) => {
+                    for job in receiver {
+                        let _ =
+                            job.result_sender
+                                .send(Err(ProviderRequestError::Provider(format!(
+                                    "start model sync runtime: {error}"
+                                ))));
+                    }
+                }
+            }
         })
-        .await
-        .map_err(|_| ProviderRequestError::Provider("model sync timed out".to_string()))?
+        .map_err(|source| {
+            ProviderRequestError::Provider(format!("start model sync worker: {source}"))
+        })?;
+    let worker = ModelListWorker { sender };
+    let _ = MODEL_LIST_WORKER.set(worker.clone());
+    MODEL_LIST_WORKER.get().cloned().ok_or_else(|| {
+        ProviderRequestError::Provider("model sync worker was not initialized".to_string())
     })
 }
 

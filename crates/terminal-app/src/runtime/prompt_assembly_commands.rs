@@ -7,11 +7,32 @@ use crate::prompt_assembly::{
     load_prompt_assembly_manager_snapshot,
 };
 
+#[derive(Debug, thiserror::Error)]
+enum PromptAssemblyCommandError {
+    #[error("{0}")]
+    RuntimeState(String),
+    #[error("load prompt assembly manager snapshot: {source}")]
+    LoadManager { source: color_eyre::Report },
+    #[error("apply prompt assembly mutation: {source}")]
+    ApplyMutation { source: color_eyre::Report },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptSessionConfigRefreshTarget {
+    CurrentEmptySession,
+    NextNewSession,
+}
+
 impl AppRuntimeCoordinator {
-    fn current_session_accepts_prompt_session_config_refresh(&self) -> bool {
-        !self.conversation_worker.is_running()
+    fn prompt_session_config_refresh_target(&self) -> PromptSessionConfigRefreshTarget {
+        if !self.conversation_worker.is_running()
             && self.provider_conversation.is_history_empty()
             && self.provider_conversation.session_id().is_none()
+        {
+            PromptSessionConfigRefreshTarget::CurrentEmptySession
+        } else {
+            PromptSessionConfigRefreshTarget::NextNewSession
+        }
     }
 
     fn prompt_assembly_update_notice(
@@ -23,17 +44,20 @@ impl AppRuntimeCoordinator {
         if !session_prompt_config_changed {
             return None;
         }
-        if !self.current_session_accepts_prompt_session_config_refresh() {
-            return Some(PromptAssemblyUpdateNotice::NextNewSessionUpdated);
+        match self.prompt_session_config_refresh_target() {
+            PromptSessionConfigRefreshTarget::CurrentEmptySession => {
+                self.provider_conversation
+                    .set_prompt_prelude(Some(manager.prelude.clone()));
+                self.provider_conversation
+                    .set_dynamic_environment_session_config(Some(
+                        dynamic_environment_session_config.clone(),
+                    ));
+                Some(PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated)
+            }
+            PromptSessionConfigRefreshTarget::NextNewSession => {
+                Some(PromptAssemblyUpdateNotice::NextNewSessionUpdated)
+            }
         }
-
-        self.provider_conversation
-            .set_prompt_prelude(Some(manager.prelude.clone()));
-        self.provider_conversation
-            .set_dynamic_environment_session_config(Some(
-                dynamic_environment_session_config.clone(),
-            ));
-        Some(PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated)
     }
 
     pub(super) fn tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -45,17 +69,30 @@ impl AppRuntimeCoordinator {
     }
 
     pub(super) fn reload_prompt_assembly(&mut self) -> Result<RuntimeCommandReceipt, String> {
-        let store = self.session_store()?;
-        let header = self.session_header()?;
+        self.reload_prompt_assembly_result()
+            .map_err(|error| error.to_string())
+    }
+
+    fn reload_prompt_assembly_result(
+        &mut self,
+    ) -> Result<RuntimeCommandReceipt, PromptAssemblyCommandError> {
+        let store = self
+            .session_store()
+            .map_err(PromptAssemblyCommandError::RuntimeState)?;
+        let header = self
+            .session_header()
+            .map_err(PromptAssemblyCommandError::RuntimeState)?;
         let tool_defs = self.tool_definitions();
         let manager = load_prompt_assembly_manager_snapshot(store, &header.work_dir, &tool_defs)
-            .map_err(|error| error.to_string())?;
+            .map_err(|source| PromptAssemblyCommandError::LoadManager { source })?;
         self.options.initial_prompt_prelude = Some(manager.prelude.clone());
         let dynamic_environment_session_config =
             dynamic_environment_session_config_from_manager(&manager);
         self.options.initial_dynamic_environment_session_config =
             Some(dynamic_environment_session_config.clone());
-        if self.current_session_accepts_prompt_session_config_refresh() {
+        if self.prompt_session_config_refresh_target()
+            == PromptSessionConfigRefreshTarget::CurrentEmptySession
+        {
             self.provider_conversation
                 .set_prompt_prelude(Some(manager.prelude.clone()));
             self.provider_conversation
@@ -73,11 +110,23 @@ impl AppRuntimeCoordinator {
         &mut self,
         mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
     ) -> Result<RuntimeCommandReceipt, String> {
-        let store = self.session_store()?;
-        let header = self.session_header()?;
+        self.mutate_prompt_assembly_result(mutation)
+            .map_err(|error| error.to_string())
+    }
+
+    fn mutate_prompt_assembly_result(
+        &mut self,
+        mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
+    ) -> Result<RuntimeCommandReceipt, PromptAssemblyCommandError> {
+        let store = self
+            .session_store()
+            .map_err(PromptAssemblyCommandError::RuntimeState)?;
+        let header = self
+            .session_header()
+            .map_err(PromptAssemblyCommandError::RuntimeState)?;
         let tool_defs = self.tool_definitions();
         let manager = apply_prompt_assembly_mutation(store, &header.work_dir, mutation, &tool_defs)
-            .map_err(|error| error.to_string())?;
+            .map_err(|source| PromptAssemblyCommandError::ApplyMutation { source })?;
         let dynamic_environment_session_config =
             dynamic_environment_session_config_from_manager(&manager);
         let prelude_changed =

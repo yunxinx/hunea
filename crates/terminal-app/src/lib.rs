@@ -10,12 +10,12 @@ use runtime_domain::{envinfo, phrases};
 use session_store::{LocalSessionStore, SessionHeader, SessionId, SessionStore};
 use terminal_ui::{self, StartupBannerOptions};
 
-mod blocking_runtime;
 mod dynamic_environment;
 mod options_mapping;
 mod prompt_assembly;
 mod replay;
 mod runtime;
+mod session_store_bridge;
 
 use options_mapping::{
     model_options_from_app_config_and_models, model_options_from_config_and_models,
@@ -144,30 +144,19 @@ fn attach_default_session_persistence(
         .map(|selection| selection.model_id.clone())
         .unwrap_or_default();
 
-    options.session_store = Some(store);
-    options.session_header_template = Some(SessionHeader {
+    let session_header = SessionHeader {
         session_id: SessionId::new(),
-        work_dir,
+        work_dir: work_dir.clone(),
         session_name: None,
         initial_model,
         git_head,
         cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-    });
+    };
+    options.session_store = Some(Arc::clone(&store));
+    options.session_header_template = Some(session_header);
     let tool_definitions = tool_definitions_for_managed_search(&options.managed_search_tools);
-    let loaded_prompt_assembly = load_initial_prompt_assembly(
-        options
-            .session_store
-            .as_ref()
-            .cloned()
-            .expect("session store was just initialized"),
-        options
-            .session_header_template
-            .as_ref()
-            .expect("session header was just initialized")
-            .work_dir
-            .as_path(),
-        &tool_definitions,
-    )?;
+    let loaded_prompt_assembly =
+        load_initial_prompt_assembly(store, work_dir.as_path(), &tool_definitions)?;
     model_options.prompt_assembly = Some(loaded_prompt_assembly.clone());
     options.initial_prompt_prelude = Some(loaded_prompt_assembly.prelude.clone());
     options.initial_dynamic_environment_session_config = Some(
@@ -177,8 +166,8 @@ fn attach_default_session_persistence(
 }
 
 fn open_local_session_store() -> Result<Arc<dyn SessionStore>> {
-    let store = blocking_runtime::block_on_session_store(
-        LocalSessionStore::open(),
+    let store = session_store_bridge::run_session_store_future(
+        LocalSessionStore::open,
         "start session store runtime",
     )?
     .wrap_err("open local session store")?;

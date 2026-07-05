@@ -8,6 +8,15 @@ use crate::dynamic_environment::{DynamicEnvironmentSnapshotKind, DynamicEnvironm
 pub mod persistence;
 use persistence::PromptAssemblyScope;
 
+/// 受管 skill-discovery 内容的 generated 区块起始标记。
+pub const SKILL_DISCOVERY_GENERATED_START: &str = "<!-- hunea:skill-discovery generated:start -->";
+/// 受管 skill-discovery 内容的 generated 区块结束标记。
+pub const SKILL_DISCOVERY_GENERATED_END: &str = "<!-- hunea:skill-discovery generated:end -->";
+/// 受管 tool-guidelines 内容的 generated 区块起始标记。
+pub const TOOL_GUIDELINES_GENERATED_START: &str = "<!-- hunea:tool-guidelines generated:start -->";
+/// 受管 tool-guidelines 内容的 generated 区块结束标记。
+pub const TOOL_GUIDELINES_GENERATED_END: &str = "<!-- hunea:tool-guidelines generated:end -->";
+
 /// `PromptAssemblyLifecycle` 表示 prompt assembly 生效的生命周期边界。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -404,44 +413,49 @@ pub fn resolve_prompt_assembly(input: &PromptAssemblyInput) -> PromptAssemblySna
         status: PromptSourceStatus::Active { order: 0 },
     }];
     let mut inactive_sources = Vec::new();
-    let mut grouped_candidates: BTreeMap<String, Vec<PromptSourceCandidate>> = BTreeMap::new();
+    let mut grouped_candidates: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     let mut passthrough_candidates = Vec::new();
 
-    for candidate in &input.candidates {
+    for (candidate_index, candidate) in input.candidates.iter().enumerate() {
         if let Some(collision_key) = candidate.collision_key.as_ref() {
             grouped_candidates
-                .entry(collision_key.clone())
+                .entry(collision_key.as_str())
                 .or_default()
-                .push(candidate.clone());
+                .push(candidate_index);
         } else {
-            passthrough_candidates.push(candidate.clone());
+            passthrough_candidates.push(candidate_index);
         }
     }
 
     let mut active_candidates = Vec::new();
-    for candidates in grouped_candidates.into_values() {
-        let winner_index = collision_winner_index(&candidates);
-        for (index, candidate) in candidates.into_iter().enumerate() {
-            match inactive_reason_for_candidate(&candidate, winner_index == Some(index)) {
+    for candidate_indices in grouped_candidates.into_values() {
+        let winner_index = collision_winner_index(&input.candidates, &candidate_indices);
+        for candidate_index in candidate_indices {
+            let candidate = &input.candidates[candidate_index];
+            match inactive_reason_for_candidate(candidate, winner_index == Some(candidate_index)) {
                 Some(reason) => inactive_sources.push(resolved_inactive(candidate, reason)),
-                None => active_candidates.push(candidate),
+                None => active_candidates.push(candidate_index),
             }
         }
     }
 
-    for candidate in passthrough_candidates {
-        match inactive_reason_for_candidate(&candidate, true) {
+    for candidate_index in passthrough_candidates {
+        let candidate = &input.candidates[candidate_index];
+        match inactive_reason_for_candidate(candidate, true) {
             Some(reason) => inactive_sources.push(resolved_inactive(candidate, reason)),
-            None => active_candidates.push(candidate),
+            None => active_candidates.push(candidate_index),
         }
     }
 
-    active_candidates.sort_by(active_candidate_order);
-    for (index, candidate) in active_candidates.into_iter().enumerate() {
+    active_candidates.sort_by(|left, right| {
+        active_candidate_order(&input.candidates[*left], &input.candidates[*right])
+    });
+    for (index, candidate_index) in active_candidates.into_iter().enumerate() {
+        let candidate = &input.candidates[candidate_index];
         active_sources.push(ResolvedPromptSource {
-            reference_id: candidate.reference_id,
+            reference_id: candidate.reference_id.clone(),
             kind: candidate.kind,
-            title: candidate.title,
+            title: candidate.title.clone(),
             origin: candidate.origin,
             status: PromptSourceStatus::Active { order: index + 1 },
         });
@@ -466,13 +480,17 @@ fn resolve_core_system_origin(input: &CoreSystemPromptInput) -> PromptSourceOrig
     }
 }
 
-fn collision_winner_index(candidates: &[PromptSourceCandidate]) -> Option<usize> {
-    candidates
+fn collision_winner_index(
+    candidates: &[PromptSourceCandidate],
+    indices: &[usize],
+) -> Option<usize> {
+    indices
         .iter()
-        .enumerate()
-        .filter(|(_, candidate)| candidate.enabled)
-        .min_by(|(_, left), (_, right)| collision_priority(left).cmp(&collision_priority(right)))
-        .map(|(index, _)| index)
+        .copied()
+        .filter(|index| candidates[*index].enabled)
+        .min_by(|left, right| {
+            collision_priority(&candidates[*left]).cmp(&collision_priority(&candidates[*right]))
+        })
 }
 
 fn collision_priority(candidate: &PromptSourceCandidate) -> (u8, &str) {
@@ -501,13 +519,13 @@ fn inactive_reason_for_candidate(
 }
 
 fn resolved_inactive(
-    candidate: PromptSourceCandidate,
+    candidate: &PromptSourceCandidate,
     reason: PromptSourceInactiveReason,
 ) -> ResolvedPromptSource {
     ResolvedPromptSource {
-        reference_id: candidate.reference_id,
+        reference_id: candidate.reference_id.clone(),
         kind: candidate.kind,
-        title: candidate.title,
+        title: candidate.title.clone(),
         origin: candidate.origin,
         status: PromptSourceStatus::Inactive { reason },
     }

@@ -102,6 +102,8 @@ impl ContextBudgetWorker {
         let (worker_tx, worker_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
         let worker_generation = Arc::clone(&current_generation);
+        // `/context` 投影偏 CPU 密集且会合并快速请求；专用线程避免占用 Tokio
+        // shared blocking pool，generation 检查负责在投影阶段之间协作式取消。
         let worker_thread = thread::Builder::new()
             .name("context-budget-worker".to_string())
             .spawn(move || worker_loop(worker_rx, result_tx, worker_generation))

@@ -10,6 +10,7 @@ use runtime_domain::{envinfo, phrases};
 use session_store::{LocalSessionStore, SessionHeader, SessionId, SessionStore};
 use terminal_ui::{self, StartupBannerOptions};
 
+mod blocking_runtime;
 mod dynamic_environment;
 mod options_mapping;
 mod prompt_assembly;
@@ -176,13 +177,11 @@ fn attach_default_session_persistence(
 }
 
 fn open_local_session_store() -> Result<Arc<dyn SessionStore>> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .wrap_err("start session store runtime")?;
-    let store = runtime
-        .block_on(LocalSessionStore::open())
-        .wrap_err("open local session store")?;
+    let store = blocking_runtime::block_on_session_store(
+        LocalSessionStore::open(),
+        "start session store runtime",
+    )?
+    .wrap_err("open local session store")?;
     Ok(Arc::new(store))
 }
 

@@ -44,7 +44,7 @@ pub(crate) fn context_usage_percent(usage: ContextWindowUsage) -> f32 {
 
 /// `context_usage_summary` 返回右侧图示首行使用的模型与上下文摘要。
 pub(crate) fn context_usage_summary(model_id: &str, usage: ContextWindowUsage) -> String {
-    let used = format_compact_tokens(usage.used as usize);
+    let used = format_compact_tokens(usage.used);
     let percent = format_percent(context_usage_percent(usage));
 
     format!(
@@ -90,14 +90,8 @@ pub(crate) fn context_budget_category_from_segment_kind(
 }
 
 pub(crate) fn free_space_tokens(snapshot: &ContextBudgetSnapshot) -> usize {
-    usize::try_from(
-        snapshot
-            .usage
-            .limit
-            .get()
-            .saturating_sub(snapshot.usage.used),
-    )
-    .unwrap_or(usize::MAX)
+    let limit = snapshot.usage.limit.get() as usize;
+    limit.saturating_sub(snapshot.usage.used)
 }
 
 pub(crate) fn legend_share_total(snapshot: &ContextBudgetSnapshot) -> usize {
@@ -292,12 +286,12 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_summary_clamps_displayed_used_tokens_at_u32_max() {
+    fn context_usage_summary_displays_used_tokens_above_u32_max() {
         let text = context_usage_summary(
             "local/qwen3",
             ContextWindowUsage {
                 limit: limit(256_000),
-                used: u32::MAX,
+                used: usize::try_from(u32::MAX).expect("u32::MAX should fit in usize") + 1,
             },
         );
 

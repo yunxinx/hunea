@@ -85,8 +85,8 @@ impl std::error::Error for ContextTokenLimitError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextWindowUsage {
     pub limit: ContextTokenLimit,
-    /// `used` 是 UI 展示用绝对 token 数。
-    pub used: u32,
+    /// `used` 保留完整估算值，避免大上下文在 UI 边界静默饱和。
+    pub used: usize,
 }
 
 /// Estimated token breakdown for one prepared turn.
@@ -114,7 +114,7 @@ pub fn context_window_usage(
 ) -> ContextWindowUsage {
     ContextWindowUsage {
         limit: context_limit,
-        used: u32::try_from(total_estimated_tokens).unwrap_or(u32::MAX),
+        used: total_estimated_tokens,
     }
 }
 
@@ -153,13 +153,14 @@ mod tests {
     }
 
     #[test]
-    fn context_window_usage_clamps_display_value_when_total_exceeds_u32_max() {
+    fn context_window_usage_preserves_large_display_values() {
+        let estimated_tokens = usize::try_from(u32::MAX).expect("u32::MAX should fit in usize") + 1;
         let usage = context_window_usage(
-            usize::try_from(u32::MAX).expect("u32::MAX should fit in usize") + 1,
+            estimated_tokens,
             ContextTokenLimit::try_from(256_000).expect("fixture limit should be valid"),
         );
 
-        assert_eq!(usage.used, u32::MAX);
+        assert_eq!(usage.used, estimated_tokens);
     }
 
     #[test]

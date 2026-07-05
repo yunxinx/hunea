@@ -383,10 +383,9 @@ fn trim_outer_blank_lines(content: &str) -> String {
     let Some(start) = lines.iter().position(|line| !line.trim().is_empty()) else {
         return String::new();
     };
-    let end = lines
-        .iter()
-        .rposition(|line| !line.trim().is_empty())
-        .expect("start exists when at least one non-blank line exists");
+    let Some(end) = lines.iter().rposition(|line| !line.trim().is_empty()) else {
+        return String::new();
+    };
 
     lines[start..=end].join("\n")
 }

@@ -1,4 +1,5 @@
 mod preview;
+mod state;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
 use ratatui::{
@@ -14,8 +15,9 @@ use runtime_domain::prompt_assembly::{
     PromptAssemblyEditorTarget, PromptAssemblyExtraPromptCandidate, PromptAssemblyManagedSource,
     PromptAssemblyManagerSource, PromptAssemblyMoveDirection, PromptAssemblyMutation,
     PromptAssemblyToolCandidate, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
-    ResolvedPromptSource, default_extra_prompt_body, natural_sort_text_cmp,
-    next_default_extra_prompt_title,
+    ResolvedPromptSource, SKILL_DISCOVERY_GENERATED_END, SKILL_DISCOVERY_GENERATED_START,
+    TOOL_GUIDELINES_GENERATED_END, TOOL_GUIDELINES_GENERATED_START, default_extra_prompt_body,
+    natural_sort_text_cmp, next_default_extra_prompt_title,
 };
 
 use crate::{
@@ -35,15 +37,15 @@ use crate::{
         tertiary_text_style,
     },
 };
+use state::{PromptOverlayDialog, PromptOverlayExpandedRow};
+pub(crate) use state::{
+    PromptOverlayFocus, PromptOverlayInactiveTab, PromptOverlayPendingEditor, PromptOverlayState,
+};
 
 #[cfg(test)]
 mod tests;
 
 const PROMPT_OVERLAY_HEADER_INSET: usize = 2;
-const SKILL_DISCOVERY_GENERATED_START: &str = "<!-- hunea:skill-discovery generated:start -->";
-const SKILL_DISCOVERY_GENERATED_END: &str = "<!-- hunea:skill-discovery generated:end -->";
-const TOOL_GUIDELINES_GENERATED_START: &str = "<!-- hunea:tool-guidelines generated:start -->";
-const TOOL_GUIDELINES_GENERATED_END: &str = "<!-- hunea:tool-guidelines generated:end -->";
 const PROMPT_OVERLAY_HEADER_TRAILING_PADDING: usize = 2;
 const PROMPT_OVERLAY_ROW_PREFIX_WIDTH: usize = 1;
 const PROMPT_OVERLAY_COLUMN_GAP: usize = 2;
@@ -60,46 +62,6 @@ const PROMPT_OVERLAY_LEFT_PANE_RATIO_NUMERATOR: u32 = 9;
 const PROMPT_OVERLAY_RIGHT_PANE_RATIO_NUMERATOR: u32 = 11;
 const PROMPT_OVERLAY_PANE_RATIO_DENOMINATOR: u32 = 20;
 const PROMPT_OVERLAY_FOOTER_MORE_LABEL: &str = "? more";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PromptOverlayFocus {
-    Active,
-    Inactive,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PromptOverlayInactiveTab {
-    LongLivedSkills,
-    ExtraPrompts,
-    Tools,
-    Dynamic,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PromptOverlayDialog {
-    CreateExtraPromptScope {
-        selected_scope: PromptAssemblyScope,
-    },
-    ConfirmDeleteExtraPrompt {
-        scope: PromptAssemblyScope,
-        reference_id: String,
-        title: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PromptOverlayExpandedRow {
-    ActiveSource {
-        reference_id: String,
-        kind: PromptSourceKind,
-    },
-    InactiveExtraPrompt {
-        reference_id: String,
-    },
-    InactiveDiscoveredSkill {
-        skill_name: String,
-    },
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptOverlayManagedStatus {
@@ -143,90 +105,6 @@ enum PromptOverlayInactiveRow {
     DynamicEnvironmentCandidate {
         source: PromptAssemblyDynamicEnvironmentCandidate,
     },
-}
-
-impl PromptOverlayInactiveTab {
-    const ALL: [Self; 4] = [
-        Self::LongLivedSkills,
-        Self::ExtraPrompts,
-        Self::Tools,
-        Self::Dynamic,
-    ];
-
-    fn next(self) -> Self {
-        match self {
-            Self::LongLivedSkills => Self::ExtraPrompts,
-            Self::ExtraPrompts => Self::Tools,
-            Self::Tools => Self::Dynamic,
-            Self::Dynamic => Self::LongLivedSkills,
-        }
-    }
-
-    fn previous(self) -> Self {
-        match self {
-            Self::LongLivedSkills => Self::Dynamic,
-            Self::ExtraPrompts => Self::LongLivedSkills,
-            Self::Tools => Self::ExtraPrompts,
-            Self::Dynamic => Self::Tools,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::LongLivedSkills => "Skill",
-            Self::ExtraPrompts => "Custom Prompts",
-            Self::Tools => "Tools",
-            Self::Dynamic => "Dynamic",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PromptOverlayState {
-    pub(crate) focus: PromptOverlayFocus,
-    pub(crate) active_selected: usize,
-    pub(crate) active_scroll: usize,
-    pub(crate) active_selected_row_id: Option<String>,
-    pub(crate) inactive_tab: PromptOverlayInactiveTab,
-    pub(crate) inactive_selected: usize,
-    pub(crate) inactive_scroll: usize,
-    pub(crate) inactive_selected_row_id: Option<String>,
-    dynamic_selected_snapshot_kind: DynamicEnvironmentSnapshotKind,
-    expanded_row: Option<PromptOverlayExpandedRow>,
-    dialog: Option<PromptOverlayDialog>,
-    pub(crate) preview: Option<preview::PromptOverlayPreviewState>,
-    shortcut_help_open: bool,
-    pub(crate) draft_scope: PromptAssemblyScope,
-    pub(crate) pending_editor: Option<PromptOverlayPendingEditor>,
-}
-
-impl Default for PromptOverlayState {
-    fn default() -> Self {
-        Self {
-            focus: PromptOverlayFocus::Active,
-            active_selected: 0,
-            active_scroll: 0,
-            active_selected_row_id: None,
-            inactive_tab: PromptOverlayInactiveTab::LongLivedSkills,
-            inactive_selected: 0,
-            inactive_scroll: 0,
-            inactive_selected_row_id: None,
-            dynamic_selected_snapshot_kind: DynamicEnvironmentSnapshotKind::Baseline,
-            expanded_row: None,
-            dialog: None,
-            preview: None,
-            shortcut_help_open: false,
-            draft_scope: PromptAssemblyScope::Project,
-            pending_editor: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PromptOverlayPendingEditor {
-    pub(crate) target: PromptAssemblyEditorTarget,
-    pub(crate) original_draft: String,
-    pub(crate) cleanup_path_after_finish: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

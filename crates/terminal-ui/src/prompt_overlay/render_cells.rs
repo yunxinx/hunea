@@ -462,19 +462,8 @@ pub(super) fn clamp_scroll(
     total: usize,
     visible_rows: usize,
 ) -> usize {
-    if total == 0 {
-        return 0;
-    }
-    let visible_rows = visible_rows.max(1);
-    let max_scroll = total.saturating_sub(visible_rows);
-    let mut scroll = current_scroll.min(max_scroll);
-    if selected < scroll {
-        scroll = selected;
-    }
-    if selected >= scroll.saturating_add(visible_rows) {
-        scroll = selected + 1 - visible_rows;
-    }
-    scroll.min(max_scroll)
+    VisibleWindowSelection::new(selected, total)
+        .scroll_start_for_selection(current_scroll, visible_rows)
 }
 
 pub(super) fn prompt_overlay_active_visible_rows(height: u16) -> usize {

@@ -31,7 +31,7 @@ use crate::{
     AppEffect, Model,
     display_width::display_width,
     fullscreen_list_chrome::fullscreen_list_chrome_rects,
-    list_selection::ListNavigationDirection,
+    list_selection::{ListNavigationDirection, VisibleWindowSelection},
     overlay_input_result::OverlayInputResult,
     relative_age::left_pad_display_width,
     render_frame::RenderFrame,

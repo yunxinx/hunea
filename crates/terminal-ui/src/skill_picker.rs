@@ -12,11 +12,11 @@ use super::{
     composer_inline_picker::{
         ComposerInlinePickerKey, ComposerInlinePickerState, classify_composer_inline_picker_key,
         move_composer_inline_picker_selection, reconcile_composer_inline_picker_state,
+        render_composer_inline_picker_rows,
     },
-    display_width::display_width,
     inline_panel::InlinePanelRenderResult,
     overlay_input_result::OverlayInputResult,
-    selection::{SelectableLineRange, selectable_range_for_plain_line},
+    selection::SelectableLineRange,
     theme::tertiary_text_style,
 };
 
@@ -133,50 +133,23 @@ impl Model {
         width: usize,
         visible_rows: usize,
     ) -> (Vec<Line<'static>>, Vec<String>, Vec<SelectableLineRange>) {
-        let width = width.max(1);
-        let visible_rows = visible_rows.max(1);
-        let mut lines = Vec::with_capacity(visible_rows);
-        let mut plain_lines = Vec::with_capacity(visible_rows);
-        let mut selectable = Vec::with_capacity(visible_rows);
         let name_column_width = attached_prompt_picker_name_column_width(
             state.items.iter().map(skill_picker_display_name),
             width.saturating_sub(ATTACHED_PROMPT_PICKER_INSET_WIDTH),
         );
 
-        if state.items.is_empty() {
-            let plain_line = pad_display_width_right("  No skills", width);
-            lines.push(Line::styled(
-                plain_line.clone(),
-                tertiary_text_style(self.palette),
-            ));
-            plain_lines.push(plain_line.clone());
-            selectable.push(selectable_range_for_plain_line(&plain_line));
-            return (lines, plain_lines, selectable);
-        }
-
-        for row in 0..visible_rows {
-            let index = state.scroll + row;
-            let Some(item) = state.items.get(index) else {
-                lines.push(Line::raw(""));
-                plain_lines.push(String::new());
-                selectable.push(SelectableLineRange::default());
-                continue;
-            };
-
-            let selected = index == state.selected;
-            let (line, plain_line) = self.render_skill_picker_line(
-                item,
-                &state.query,
-                selected,
-                width,
-                name_column_width,
-            );
-            selectable.push(skill_picker_selectable_range(&plain_line, width));
-            lines.push(line);
-            plain_lines.push(plain_line);
-        }
-
-        (lines, plain_lines, selectable)
+        let rows = render_composer_inline_picker_rows(
+            state,
+            width,
+            visible_rows,
+            "  No skills",
+            tertiary_text_style(self.palette),
+            |item, query, selected, width| {
+                self.render_skill_picker_line(item, query, selected, width, name_column_width)
+            },
+            skill_picker_selectable_range,
+        );
+        (rows.lines, rows.plain_lines, rows.selectable)
     }
 
     fn render_skill_picker_line(
@@ -342,13 +315,4 @@ fn skill_picker_display_name(item: &PromptAssemblyDiscoveredSkill) -> &str {
     } else {
         trimmed_title
     }
-}
-
-fn pad_display_width_right(text: &str, width: usize) -> String {
-    let mut padded = text.to_string();
-    let current_width = display_width(text);
-    if current_width < width {
-        padded.push_str(&" ".repeat(width - current_width));
-    }
-    padded
 }

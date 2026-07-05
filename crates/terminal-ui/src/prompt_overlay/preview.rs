@@ -5,7 +5,11 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, Paragraph},
 };
-use runtime_domain::prompt_assembly::PromptAssemblyManagerSource;
+use runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind;
+use runtime_domain::prompt_assembly::{
+    PromptAssemblyDiscoveredSkill, PromptAssemblyDynamicEnvironmentCandidate,
+    PromptAssemblyManagerSource, PromptSourceStatus, ResolvedPromptSource,
+};
 
 use crate::{
     Model,
@@ -18,6 +22,8 @@ use crate::{
     },
     transcript::wrap_plain_text,
 };
+
+use super::PromptOverlaySelection;
 
 const FOOTER_HINT: &str = "  Esc/Space/p back · ↑/←/h previous page · ↓/→/l next page";
 const PROMPT_OVERLAY_PREVIEW_HORIZONTAL_PADDING: usize = 2;
@@ -44,6 +50,84 @@ impl Model {
     ) {
         let title = source.title.clone();
         let content = source.body.unwrap_or_default();
+        self.open_prompt_overlay_plain_text_preview(title, &content, None);
+    }
+
+    pub(super) fn open_selected_prompt_overlay_preview(&mut self) {
+        let Some(selection) = self.selected_prompt_overlay_selection() else {
+            return;
+        };
+        match selection {
+            PromptOverlaySelection::ManagedSource(source) => {
+                let source = ResolvedPromptSource {
+                    reference_id: source.reference_id,
+                    kind: source.kind,
+                    title: source.title,
+                    origin: source.origin,
+                    status: PromptSourceStatus::Active {
+                        order: source.order,
+                    },
+                };
+                let Some(manager_source) = self.manager_source_for_resolved_source(&source) else {
+                    return;
+                };
+                self.open_prompt_overlay_source_preview(manager_source);
+            }
+            PromptOverlaySelection::ResolvedSource(source) => {
+                let Some(manager_source) = self.manager_source_for_resolved_source(&source) else {
+                    return;
+                };
+                self.open_prompt_overlay_source_preview(manager_source);
+            }
+            PromptOverlaySelection::ExtraPromptCandidate(candidate) => {
+                self.open_prompt_overlay_plain_text_preview(candidate.title, &candidate.body, None);
+            }
+            PromptOverlaySelection::DiscoveredSkill(skill) => {
+                self.open_prompt_overlay_skill_preview(skill);
+            }
+            PromptOverlaySelection::ToolCandidate(tool) => {
+                let body = tool.prompt_guidelines.unwrap_or_default();
+                self.open_prompt_overlay_plain_text_preview(
+                    tool.label.unwrap_or(tool.name),
+                    &body,
+                    None,
+                );
+            }
+            PromptOverlaySelection::DynamicEnvironmentCandidate(source) => {
+                self.open_prompt_overlay_dynamic_environment_preview(source);
+            }
+        }
+    }
+
+    fn open_prompt_overlay_skill_preview(&mut self, skill: PromptAssemblyDiscoveredSkill) {
+        let preview_notice = (!skill.can_select_for_discovery).then(|| {
+            "Manual-only skill: `disable-model-invocation: true` keeps this skill out of skill discovery."
+                .to_string()
+        });
+        self.open_prompt_overlay_plain_text_preview(
+            skill.title.clone(),
+            &skill.body,
+            preview_notice,
+        );
+    }
+
+    fn open_prompt_overlay_dynamic_environment_preview(
+        &mut self,
+        source: PromptAssemblyDynamicEnvironmentCandidate,
+    ) {
+        let snapshot_kind = self.prompt_overlay_dynamic_selected_snapshot_kind();
+        let title = match snapshot_kind {
+            DynamicEnvironmentSnapshotKind::Baseline => {
+                format!("{} · Baseline", source.label)
+            }
+            DynamicEnvironmentSnapshotKind::Changes => {
+                format!("{} · Changes", source.label)
+            }
+        };
+        let content = match snapshot_kind {
+            DynamicEnvironmentSnapshotKind::Baseline => source.baseline_preview_body,
+            DynamicEnvironmentSnapshotKind::Changes => source.changes_preview_body,
+        };
         self.open_prompt_overlay_plain_text_preview(title, &content, None);
     }
 

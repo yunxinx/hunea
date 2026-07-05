@@ -133,12 +133,81 @@ enum PromptOverlaySelection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PromptOverlayActionAvailability {
-    can_edit: bool,
-    can_add_custom: bool,
-    can_remove: bool,
-    can_toggle_selection: bool,
-    can_reorder_active: bool,
+enum PromptOverlayActionAvailability {
+    Empty {
+        can_add_custom: bool,
+    },
+    PromptSource {
+        can_edit: bool,
+        can_remove: bool,
+        can_toggle_selection: bool,
+        can_reorder_active: bool,
+    },
+    ExtraPromptCandidate {
+        can_add_custom: bool,
+    },
+    SelectableCandidate {
+        can_reorder_active: bool,
+    },
+    DynamicEnvironmentCandidate,
+}
+
+impl PromptOverlayActionAvailability {
+    const fn can_edit(self) -> bool {
+        match self {
+            Self::PromptSource { can_edit, .. } => can_edit,
+            Self::ExtraPromptCandidate { .. } => true,
+            Self::Empty { .. }
+            | Self::SelectableCandidate { .. }
+            | Self::DynamicEnvironmentCandidate => false,
+        }
+    }
+
+    const fn can_add_custom(self) -> bool {
+        match self {
+            Self::Empty { can_add_custom } | Self::ExtraPromptCandidate { can_add_custom } => {
+                can_add_custom
+            }
+            Self::PromptSource { .. }
+            | Self::SelectableCandidate { .. }
+            | Self::DynamicEnvironmentCandidate => false,
+        }
+    }
+
+    const fn can_remove(self) -> bool {
+        match self {
+            Self::PromptSource { can_remove, .. } => can_remove,
+            Self::ExtraPromptCandidate { .. } => true,
+            Self::Empty { .. }
+            | Self::SelectableCandidate { .. }
+            | Self::DynamicEnvironmentCandidate => false,
+        }
+    }
+
+    const fn can_toggle_selection(self) -> bool {
+        match self {
+            Self::PromptSource {
+                can_toggle_selection,
+                ..
+            } => can_toggle_selection,
+            Self::ExtraPromptCandidate { .. }
+            | Self::SelectableCandidate { .. }
+            | Self::DynamicEnvironmentCandidate => true,
+            Self::Empty { .. } => false,
+        }
+    }
+
+    const fn can_reorder_active(self) -> bool {
+        match self {
+            Self::PromptSource {
+                can_reorder_active, ..
+            }
+            | Self::SelectableCandidate { can_reorder_active } => can_reorder_active,
+            Self::Empty { .. }
+            | Self::ExtraPromptCandidate { .. }
+            | Self::DynamicEnvironmentCandidate => false,
+        }
+    }
 }
 
 fn prompt_overlay_source_kind_can_remove(kind: PromptSourceKind) -> bool {

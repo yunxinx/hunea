@@ -27,7 +27,7 @@ pub(super) fn assemble_attached_prompt_message(
     manager: Option<&PromptAssemblyManagerSnapshot>,
     work_dir: &Path,
     user_message: &TranscriptUserMessage,
-) -> Result<AttachedPromptMessageAssembly> {
+) -> AttachedPromptMessageAssembly {
     let discovered_skills = discover_skills(work_dir, None);
     let skills_by_locator = discovered_skills
         .iter()
@@ -56,10 +56,11 @@ pub(super) fn assemble_attached_prompt_message(
 
     let mut attachments = Vec::new();
     for binding in &user_message.skill_bindings {
-        let skill_path = Path::new(binding.skill_path.as_str());
-        let Some(skill) =
-            skills_by_locator.get(&(binding.skill_name.as_str(), binding.origin, skill_path))
-        else {
+        let Some(skill) = skills_by_locator.get(&(
+            binding.skill_name.as_str(),
+            binding.origin,
+            Path::new(binding.skill_path.as_str()),
+        )) else {
             continue;
         };
         attachments.push(PromptAttachment::ManualSkill {
@@ -139,9 +140,9 @@ pub(super) fn assemble_attached_prompt_message(
         sections.join("\n\n")
     };
 
-    Ok(AttachedPromptMessageAssembly {
+    AttachedPromptMessageAssembly {
         provider_visible_user_text,
         manual_skill_uses,
         custom_prompt_uses,
-    })
+    }
 }

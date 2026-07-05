@@ -630,7 +630,7 @@ fn validated_transcript_user_source_message(
                 && manual_skills.iter().any(|skill| {
                     skill.skill_name == binding.skill_name
                         && skill.origin == binding.origin
-                        && skill.skill_path == binding.skill_path
+                        && skill.skill_path == std::path::Path::new(binding.skill_path.as_str())
                 })
         })
         .collect();

@@ -204,20 +204,16 @@ pub(crate) fn with_connection<T>(
         fs::create_dir_all(parent_dir).map_err(io_error)?;
     }
 
-    let mut conn = Connection::open(index_path).map_err(sqlite_error)?;
-    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
-        .map_err(sqlite_error)?;
+    let mut conn = Connection::open(index_path)?;
+    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
     enable_wal_mode(&conn)?;
 
     operation(&mut conn)
 }
 
 fn enable_wal_mode(conn: &Connection) -> Result<(), SessionStoreError> {
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(sqlite_error)?;
-    let journal_mode: String = conn
-        .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
-        .map_err(sqlite_error)?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    let journal_mode: String = conn.query_row("PRAGMA journal_mode;", [], |row| row.get(0))?;
     if !journal_mode.eq_ignore_ascii_case("wal") {
         return Err(SessionStoreError::CorruptIndex {
             message: format!("sqlite journal_mode is `{journal_mode}`, expected `wal`"),
@@ -326,7 +322,7 @@ fn initialize_database_schema(conn: &Connection) -> Result<(), SessionStoreError
         );
         ",
     )
-    .map_err(sqlite_error)
+    .map_err(SessionStoreError::from)
 }
 
 fn upsert_session_row(conn: &Connection, meta: &SessionMeta) -> Result<(), SessionStoreError> {
@@ -379,8 +375,7 @@ fn upsert_session_row(conn: &Connection, meta: &SessionMeta) -> Result<(), Sessi
             meta.project_dir.as_path().to_string_lossy(),
             meta.jsonl_path.to_string_lossy(),
         ],
-    )
-    .map_err(sqlite_error)?;
+    )?;
 
     Ok(())
 }
@@ -420,8 +415,7 @@ fn get_session_meta_row(
             params![session_id],
             row_to_session_meta,
         )
-        .optional()
-        .map_err(sqlite_error)?;
+        .optional()?;
 
     meta.ok_or(SessionStoreError::SessionNotFound {
         session_id: requested_session_id,
@@ -432,9 +426,8 @@ fn list_session_rows(
     conn: &Connection,
     project_dir: &str,
 ) -> Result<Vec<SessionMeta>, SessionStoreError> {
-    let mut statement = conn
-        .prepare(
-            "
+    let mut statement = conn.prepare(
+        "
             SELECT
                 sessions.session_id,
                 sessions.project_dir,
@@ -456,15 +449,12 @@ fn list_session_rows(
             WHERE sessions.project_dir = ?1
             ORDER BY updated_at DESC, created_at DESC, sessions.session_id DESC
             ",
-        )
-        .map_err(sqlite_error)?;
-    let rows = statement
-        .query_map(params![project_dir], row_to_session_meta)
-        .map_err(sqlite_error)?;
+    )?;
+    let rows = statement.query_map(params![project_dir], row_to_session_meta)?;
 
     let mut sessions = Vec::new();
     for row in rows {
-        sessions.push(row.map_err(sqlite_error)?);
+        sessions.push(row?);
     }
 
     Ok(sessions)
@@ -522,10 +512,6 @@ fn row_to_session_meta(row: &rusqlite::Row<'_>) -> Result<SessionMeta, rusqlite:
 
 fn io_error(source: std::io::Error) -> SessionStoreError {
     SessionStoreError::IoError { source }
-}
-
-fn sqlite_error(source: rusqlite::Error) -> SessionStoreError {
-    SessionStoreError::SqliteError { source }
 }
 
 fn is_sqlite_busy_error(error: &SessionStoreError) -> bool {

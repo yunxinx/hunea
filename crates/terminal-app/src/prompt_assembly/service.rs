@@ -37,7 +37,7 @@ impl<'a> PromptAssemblyWorkspace<'a> {
         &self,
         manager: Option<&PromptAssemblyManagerSnapshot>,
         user_message: &TranscriptUserMessage,
-    ) -> Result<AttachedPromptMessageAssembly> {
+    ) -> AttachedPromptMessageAssembly {
         super::assemble_attached_prompt_message(manager, self.work_dir, user_message)
     }
 }

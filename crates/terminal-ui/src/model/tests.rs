@@ -21,7 +21,7 @@ use runtime_domain::prompt_assembly::PromptSourceOrigin;
 use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
 use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate,
-    PromptAssemblyManagerSnapshot,
+    PromptAssemblyManagerSnapshot, PromptAssemblySelectionState,
 };
 use runtime_domain::provider::ProviderKind;
 use std::path::{Path, PathBuf};
@@ -3170,11 +3170,9 @@ fn skill_picker_model() -> Model {
                 description: "Review code and inspect regressions".to_string(),
                 origin: PromptSourceOrigin::Project,
                 selection_scope: PromptAssemblyScope::Project,
-                skill_path: "/tmp/code-review/SKILL.md".to_string(),
+                skill_path: "/tmp/code-review/SKILL.md".into(),
                 body: "# Code Review".to_string(),
-                can_select_for_discovery: true,
-                selected: false,
-                selected_order: None,
+                selection: PromptAssemblySelectionState::from_parts(true, false, None),
             },
             PromptAssemblyDiscoveredSkill {
                 skill_name: "brainstorming".to_string(),
@@ -3183,11 +3181,9 @@ fn skill_picker_model() -> Model {
                     .to_string(),
                 origin: PromptSourceOrigin::Builtin,
                 selection_scope: PromptAssemblyScope::Project,
-                skill_path: "/tmp/brainstorming/SKILL.md".to_string(),
+                skill_path: "/tmp/brainstorming/SKILL.md".into(),
                 body: "# Brainstorming".to_string(),
-                can_select_for_discovery: true,
-                selected: false,
-                selected_order: None,
+                selection: PromptAssemblySelectionState::from_parts(true, false, None),
             },
         ],
         8,
@@ -3202,11 +3198,9 @@ fn overflowing_skill_picker_model() -> Model {
             description: format!("Skill description {index:02}"),
             origin: PromptSourceOrigin::Project,
             selection_scope: PromptAssemblyScope::Project,
-            skill_path: format!("/tmp/skill-{index:02}/SKILL.md"),
+            skill_path: format!("/tmp/skill-{index:02}/SKILL.md").into(),
             body: format!("# Skill {index:02}"),
-            can_select_for_discovery: true,
-            selected: false,
-            selected_order: None,
+            selection: PromptAssemblySelectionState::from_parts(true, false, None),
         })
         .collect();
     skill_picker_model_with_manual_skills(skills, 5)

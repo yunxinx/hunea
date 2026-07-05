@@ -21,6 +21,7 @@ pub enum PromptAssemblyCommandFailureKind {
     RuntimeState,
     LoadManager,
     ApplyMutation,
+    CheckMissingSources,
 }
 
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。

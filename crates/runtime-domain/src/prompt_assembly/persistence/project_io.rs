@@ -55,8 +55,11 @@ pub enum ProjectPromptAssemblyError {
     },
     #[error("project prompt assembly file {path} uses unsupported version {version}")]
     InvalidVersion { path: PathBuf, version: u32 },
-    #[error("project prompt reference id must be a single safe file component: {reference_id}")]
-    InvalidProjectReferenceId { reference_id: String },
+    #[error("{source}")]
+    InvalidProjectReferenceId {
+        #[from]
+        source: InvalidProjectReferenceId,
+    },
     #[error("project prompt assembly persistence only accepts project scope, got {}", scope.as_stored_value())]
     UnexpectedScope { scope: PromptAssemblyScope },
 }
@@ -165,8 +168,7 @@ pub fn save_project_prompt_assembly_state(
 
     let mut desired_custom_prompt_files = BTreeSet::new();
     for prompt in state.extra_prompts() {
-        let file_name = project_extra_prompt_file_name(&prompt.reference_id)
-            .map_err(project_reference_id_error)?;
+        let file_name = project_extra_prompt_file_name(&prompt.reference_id)?;
         let path = custom_prompts_dir.join(&file_name);
         write_text_file(&path, &prompt.body)?;
         desired_custom_prompt_files.insert(file_name);
@@ -407,12 +409,6 @@ fn prune_stale_prompt_files(
     Ok(())
 }
 
-fn project_reference_id_error(error: InvalidProjectReferenceId) -> ProjectPromptAssemblyError {
-    ProjectPromptAssemblyError::InvalidProjectReferenceId {
-        reference_id: error.reference_id,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,8 +585,8 @@ mod tests {
             assert!(matches!(
                 error,
                 ProjectPromptAssemblyError::InvalidProjectReferenceId {
-                    reference_id: rejected
-                } if rejected == reference_id
+                    source
+                } if source.reference_id() == reference_id
             ));
         }
     }

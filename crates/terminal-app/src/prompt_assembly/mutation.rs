@@ -1140,8 +1140,12 @@ pub(super) fn ordered_non_core_entry_addresses(
     addresses.extend(state_entry_addresses(global_state));
     addresses.extend(state_entry_addresses(project_state));
     addresses.sort_by(|left, right| {
-        let left_entry = entry_ref(global_state, project_state, *left);
-        let right_entry = entry_ref(global_state, project_state, *right);
+        let Some(left_entry) = entry_ref(global_state, project_state, *left) else {
+            return std::cmp::Ordering::Equal;
+        };
+        let Some(right_entry) = entry_ref(global_state, project_state, *right) else {
+            return std::cmp::Ordering::Equal;
+        };
         requested_order_sort_key(left_entry.requested_order)
             .cmp(&requested_order_sort_key(right_entry.requested_order))
             .then_with(|| natural_sort_text_cmp(&left_entry.title, &right_entry.title))
@@ -1171,14 +1175,10 @@ pub(super) fn entry_ref<'a>(
     global_state: &'a PromptAssemblyScopeState,
     project_state: &'a PromptAssemblyScopeState,
     address: PromptEntryAddress,
-) -> &'a PersistedPromptAssemblyEntry {
+) -> Option<&'a PersistedPromptAssemblyEntry> {
     match address.scope {
-        PromptAssemblyScope::Global => global_state
-            .entry_at(address.index)
-            .expect("prompt entry address should refer to an existing global entry"),
-        PromptAssemblyScope::Project => project_state
-            .entry_at(address.index)
-            .expect("prompt entry address should refer to an existing project entry"),
+        PromptAssemblyScope::Global => global_state.entry_at(address.index),
+        PromptAssemblyScope::Project => project_state.entry_at(address.index),
     }
 }
 
@@ -1186,14 +1186,10 @@ pub(super) fn entry_mut<'a>(
     global_state: &'a mut PromptAssemblyScopeState,
     project_state: &'a mut PromptAssemblyScopeState,
     address: PromptEntryAddress,
-) -> &'a mut PersistedPromptAssemblyEntry {
+) -> Option<&'a mut PersistedPromptAssemblyEntry> {
     match address.scope {
-        PromptAssemblyScope::Global => global_state
-            .entry_at_mut(address.index)
-            .expect("prompt entry address should refer to an existing global entry"),
-        PromptAssemblyScope::Project => project_state
-            .entry_at_mut(address.index)
-            .expect("prompt entry address should refer to an existing project entry"),
+        PromptAssemblyScope::Global => global_state.entry_at_mut(address.index),
+        PromptAssemblyScope::Project => project_state.entry_at_mut(address.index),
     }
 }
 
@@ -1202,7 +1198,7 @@ pub(super) fn entry_requested_order(
     project_state: &PromptAssemblyScopeState,
     address: PromptEntryAddress,
 ) -> Option<u16> {
-    entry_ref(global_state, project_state, address).requested_order
+    entry_ref(global_state, project_state, address).and_then(|entry| entry.requested_order)
 }
 
 pub(super) fn set_entry_requested_order(
@@ -1211,7 +1207,9 @@ pub(super) fn set_entry_requested_order(
     address: PromptEntryAddress,
     requested_order: Option<u16>,
 ) {
-    entry_mut(global_state, project_state, address).requested_order = requested_order;
+    if let Some(entry) = entry_mut(global_state, project_state, address) {
+        entry.requested_order = requested_order;
+    }
 }
 
 pub(super) fn normalize_requested_orders(

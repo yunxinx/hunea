@@ -759,13 +759,16 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
         SessionStoreCommand::CheckPromptAssemblyMissingSources { store, work_dir } => {
             let global_state = match store.load_global_prompt_assembly_state().await {
                 Ok(state) => state,
-                Err(_) => {
+                Err(error) => {
                     return SessionStoreWorkerEvent::runtime(
-                        RuntimeEvent::PromptAssemblyMissingSourcesChecked { missing_count: 0 },
+                        RuntimeEvent::PromptAssemblyUpdateFailed {
+                            kind: PromptAssemblyCommandFailureKind::CheckMissingSources,
+                            message: format!("load global prompt assembly state: {error}"),
+                        },
                     );
                 }
             };
-            let missing_count = tokio::task::spawn_blocking(move || {
+            let missing_count = match tokio::task::spawn_blocking(move || {
                 let project_state =
                     runtime_domain::prompt_assembly::persistence::load_project_prompt_assembly_state(
                         &work_dir,
@@ -781,9 +784,25 @@ async fn handle_session_command(command: SessionStoreCommand) -> SessionStoreWor
                 )
             })
             .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or(0);
+            {
+                Ok(Ok(missing_count)) => missing_count,
+                Ok(Err(error)) => {
+                    return SessionStoreWorkerEvent::runtime(
+                        RuntimeEvent::PromptAssemblyUpdateFailed {
+                            kind: PromptAssemblyCommandFailureKind::CheckMissingSources,
+                            message: format!("load project prompt assembly state: {error}"),
+                        },
+                    );
+                }
+                Err(error) => {
+                    return SessionStoreWorkerEvent::runtime(
+                        RuntimeEvent::PromptAssemblyUpdateFailed {
+                            kind: PromptAssemblyCommandFailureKind::CheckMissingSources,
+                            message: format!("check prompt assembly missing sources task panicked: {error}"),
+                        },
+                    );
+                }
+            };
             SessionStoreWorkerEvent::runtime(RuntimeEvent::PromptAssemblyMissingSourcesChecked {
                 missing_count,
             })

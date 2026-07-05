@@ -100,7 +100,7 @@ impl Model {
     }
 
     fn open_prompt_overlay_skill_preview(&mut self, skill: PromptAssemblyDiscoveredSkill) {
-        let preview_notice = (!skill.can_select_for_discovery).then(|| {
+        let preview_notice = (!skill.selection.can_select()).then(|| {
             "Manual-only skill: `disable-model-invocation: true` keeps this skill out of skill discovery."
                 .to_string()
         });

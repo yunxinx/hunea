@@ -32,66 +32,47 @@ pub(crate) fn save_global_prompt_assembly_state(
     }
 
     crate::metadata::with_connection(index_path, |conn| {
-        let transaction = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite_err)?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let scope = PromptAssemblyScope::Global.as_stored_value();
 
-        transaction
-            .execute(
-                "DELETE FROM prompt_assembly_entries WHERE scope = ?1",
-                params![scope],
-            )
-            .map_err(sqlite_err)?;
-        transaction
-            .execute(
-                "DELETE FROM prompt_assembly_extra_prompts WHERE scope = ?1",
-                params![scope],
-            )
-            .map_err(sqlite_err)?;
-        transaction
-            .execute(
-                "DELETE FROM prompt_assembly_core_overrides WHERE scope = ?1",
-                params![scope],
-            )
-            .map_err(sqlite_err)?;
-        transaction
-            .execute(
-                "DELETE FROM prompt_assembly_skill_discovery_overrides WHERE scope = ?1",
-                params![scope],
-            )
-            .map_err(sqlite_err)?;
-        transaction
-            .execute(
-                "DELETE FROM prompt_assembly_skill_discovery_skills WHERE scope = ?1",
-                params![scope],
-            )
-            .map_err(sqlite_err)?;
-        transaction
-            .execute(
-                "DELETE FROM prompt_assembly_tool_guideline_overrides WHERE scope = ?1",
-                params![scope],
-            )
-            .map_err(sqlite_err)?;
-        transaction
-            .execute(
-                "DELETE FROM prompt_assembly_tool_selections WHERE scope = ?1",
-                params![scope],
-            )
-            .map_err(sqlite_err)?;
-        transaction
-            .execute(
-                "DELETE FROM prompt_assembly_dynamic_environment_sources WHERE scope = ?1",
-                params![scope],
-            )
-            .map_err(sqlite_err)?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_entries WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_extra_prompts WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_core_overrides WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_skill_discovery_overrides WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_skill_discovery_skills WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_tool_guideline_overrides WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_tool_selections WHERE scope = ?1",
+            params![scope],
+        )?;
+        transaction.execute(
+            "DELETE FROM prompt_assembly_dynamic_environment_sources WHERE scope = ?1",
+            params![scope],
+        )?;
 
         let mut entries = state.entries().to_vec();
         sort_prompt_assembly_entries(&mut entries);
         for entry in entries {
-            transaction
-                .execute(
-                    "INSERT INTO prompt_assembly_entries (
+            transaction.execute(
+                "INSERT INTO prompt_assembly_entries (
                         scope,
                         reference_id,
                         kind,
@@ -99,39 +80,34 @@ pub(crate) fn save_global_prompt_assembly_state(
                         enabled,
                         requested_order
                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        scope,
-                        entry.reference_id,
-                        prompt_source_kind_value(entry.kind),
-                        entry.title,
-                        entry.enabled,
-                        entry.requested_order.map(i64::from),
-                    ],
-                )
-                .map_err(sqlite_err)?;
+                params![
+                    scope,
+                    entry.reference_id,
+                    prompt_source_kind_value(entry.kind),
+                    entry.title,
+                    entry.enabled,
+                    entry.requested_order.map(i64::from),
+                ],
+            )?;
         }
 
         for prompt in state.extra_prompts() {
-            transaction
-                .execute(
-                    "INSERT INTO prompt_assembly_extra_prompts (
+            transaction.execute(
+                "INSERT INTO prompt_assembly_extra_prompts (
                         scope,
                         reference_id,
                         title,
                         body
                     ) VALUES (?1, ?2, ?3, ?4)",
-                    params![scope, prompt.reference_id, prompt.title, prompt.body],
-                )
-                .map_err(sqlite_err)?;
+                params![scope, prompt.reference_id, prompt.title, prompt.body],
+            )?;
         }
 
         if let Some(body) = state.core_system_override() {
-            transaction
-                .execute(
-                    "INSERT INTO prompt_assembly_core_overrides (scope, body) VALUES (?1, ?2)",
-                    params![scope, body],
-                )
-                .map_err(sqlite_err)?;
+            transaction.execute(
+                "INSERT INTO prompt_assembly_core_overrides (scope, body) VALUES (?1, ?2)",
+                params![scope, body],
+            )?;
         }
 
         if let Some(body) = state.skill_discovery_override() {
@@ -140,28 +116,26 @@ pub(crate) fn save_global_prompt_assembly_state(
                     "INSERT INTO prompt_assembly_skill_discovery_overrides (scope, body) VALUES (?1, ?2)",
                     params![scope, body],
                 )
-                .map_err(sqlite_err)?;
+                ?;
         }
 
         let mut skill_discovery_skills = state.skill_discovery_skills().to_vec();
         sort_skill_discovery_skill_entries(&mut skill_discovery_skills);
         for skill in skill_discovery_skills {
-            transaction
-                .execute(
-                    "INSERT INTO prompt_assembly_skill_discovery_skills (
+            transaction.execute(
+                "INSERT INTO prompt_assembly_skill_discovery_skills (
                         scope,
                         skill_name,
                         enabled,
                         requested_order
                     ) VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        scope,
-                        skill.skill_name,
-                        skill.enabled,
-                        skill.requested_order.map(i64::from),
-                    ],
-                )
-                .map_err(sqlite_err)?;
+                params![
+                    scope,
+                    skill.skill_name,
+                    skill.enabled,
+                    skill.requested_order.map(i64::from),
+                ],
+            )?;
         }
 
         if let Some(body) = state.tool_guidelines_override() {
@@ -170,50 +144,46 @@ pub(crate) fn save_global_prompt_assembly_state(
                     "INSERT INTO prompt_assembly_tool_guideline_overrides (scope, body) VALUES (?1, ?2)",
                     params![scope, body],
                 )
-                .map_err(sqlite_err)?;
+                ?;
         }
 
         let mut tool_selections = state.tool_selections().to_vec();
         sort_tool_selection_entries(&mut tool_selections);
         for tool in tool_selections {
-            transaction
-                .execute(
-                    "INSERT INTO prompt_assembly_tool_selections (
+            transaction.execute(
+                "INSERT INTO prompt_assembly_tool_selections (
                         scope,
                         tool_name,
                         enabled,
                         requested_order
                     ) VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        scope,
-                        tool.tool_name,
-                        tool.enabled,
-                        tool.requested_order.map(i64::from),
-                    ],
-                )
-                .map_err(sqlite_err)?;
+                params![
+                    scope,
+                    tool.tool_name,
+                    tool.enabled,
+                    tool.requested_order.map(i64::from),
+                ],
+            )?;
         }
 
         for source in state.dynamic_environment_sources() {
-            transaction
-                .execute(
-                    "INSERT INTO prompt_assembly_dynamic_environment_sources (
+            transaction.execute(
+                "INSERT INTO prompt_assembly_dynamic_environment_sources (
                         scope,
                         snapshot_kind,
                         source_kind,
                         enabled
                     ) VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        scope,
-                        dynamic_environment_snapshot_kind_value(source.snapshot_kind),
-                        dynamic_environment_source_kind_value(source.source_kind),
-                        source.enabled,
-                    ],
-                )
-                .map_err(sqlite_err)?;
+                params![
+                    scope,
+                    dynamic_environment_snapshot_kind_value(source.snapshot_kind),
+                    dynamic_environment_source_kind_value(source.source_kind),
+                    source.enabled,
+                ],
+            )?;
         }
 
-        transaction.commit().map_err(sqlite_err)?;
+        transaction.commit()?;
         Ok(())
     })
 }
@@ -223,17 +193,15 @@ pub(crate) fn load_global_prompt_assembly_state(
 ) -> Result<PromptAssemblyScopeState, SessionStoreError> {
     crate::metadata::with_connection(index_path, |conn| {
         let scope = PromptAssemblyScope::Global.as_stored_value();
-        let mut entries_statement = conn
-            .prepare(
-                "SELECT reference_id, kind, title, enabled, requested_order
+        let mut entries_statement = conn.prepare(
+            "SELECT reference_id, kind, title, enabled, requested_order
                  FROM prompt_assembly_entries
                  WHERE scope = ?1
                  ORDER BY
                     CASE WHEN requested_order IS NULL THEN 1 ELSE 0 END,
                     requested_order ASC,
                     reference_id ASC",
-            )
-            .map_err(sqlite_err)?;
+        )?;
         let mut entries = entries_statement
             .query_map(params![scope], |row| {
                 let kind = parse_prompt_source_kind(&row.get::<_, String>(1)?)?;
@@ -251,20 +219,16 @@ pub(crate) fn load_global_prompt_assembly_state(
                     enabled: row.get(3)?,
                     requested_order,
                 })
-            })
-            .map_err(sqlite_err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(sqlite_err)?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         sort_prompt_assembly_entries(&mut entries);
 
-        let mut prompts_statement = conn
-            .prepare(
-                "SELECT reference_id, title, body
+        let mut prompts_statement = conn.prepare(
+            "SELECT reference_id, title, body
                  FROM prompt_assembly_extra_prompts
                  WHERE scope = ?1
                  ORDER BY reference_id ASC",
-            )
-            .map_err(sqlite_err)?;
+        )?;
         let extra_prompts = prompts_statement
             .query_map(params![scope], |row| {
                 Ok(StoredPromptBody {
@@ -272,10 +236,8 @@ pub(crate) fn load_global_prompt_assembly_state(
                     title: row.get(1)?,
                     body: row.get(2)?,
                 })
-            })
-            .map_err(sqlite_err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(sqlite_err)?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
 
         let core_system_override = conn
             .query_row(
@@ -283,8 +245,7 @@ pub(crate) fn load_global_prompt_assembly_state(
                 params![scope],
                 |row| row.get(0),
             )
-            .optional()
-            .map_err(sqlite_err)?;
+            .optional()?;
 
         let skill_discovery_override = conn
             .query_row(
@@ -292,20 +253,17 @@ pub(crate) fn load_global_prompt_assembly_state(
                 params![scope],
                 |row| row.get(0),
             )
-            .optional()
-            .map_err(sqlite_err)?;
+            .optional()?;
 
-        let mut discovery_skills_statement = conn
-            .prepare(
-                "SELECT skill_name, enabled, requested_order
+        let mut discovery_skills_statement = conn.prepare(
+            "SELECT skill_name, enabled, requested_order
                  FROM prompt_assembly_skill_discovery_skills
                  WHERE scope = ?1
                  ORDER BY
                     CASE WHEN requested_order IS NULL THEN 1 ELSE 0 END,
                     requested_order ASC,
                     skill_name ASC",
-            )
-            .map_err(sqlite_err)?;
+        )?;
         let mut skill_discovery_skills = discovery_skills_statement
             .query_map(params![scope], |row| {
                 let requested_order = row
@@ -320,10 +278,8 @@ pub(crate) fn load_global_prompt_assembly_state(
                     enabled: row.get(1)?,
                     requested_order,
                 })
-            })
-            .map_err(sqlite_err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(sqlite_err)?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         sort_skill_discovery_skill_entries(&mut skill_discovery_skills);
 
         let tool_guidelines_override = conn
@@ -332,20 +288,17 @@ pub(crate) fn load_global_prompt_assembly_state(
                 params![scope],
                 |row| row.get(0),
             )
-            .optional()
-            .map_err(sqlite_err)?;
+            .optional()?;
 
-        let mut tool_selections_statement = conn
-            .prepare(
-                "SELECT tool_name, enabled, requested_order
+        let mut tool_selections_statement = conn.prepare(
+            "SELECT tool_name, enabled, requested_order
                  FROM prompt_assembly_tool_selections
                  WHERE scope = ?1
                  ORDER BY
                     CASE WHEN requested_order IS NULL THEN 1 ELSE 0 END,
                     requested_order ASC,
                     tool_name ASC",
-            )
-            .map_err(sqlite_err)?;
+        )?;
         let mut tool_selections = tool_selections_statement
             .query_map(params![scope], |row| {
                 let requested_order = row
@@ -360,20 +313,16 @@ pub(crate) fn load_global_prompt_assembly_state(
                     enabled: row.get(1)?,
                     requested_order,
                 })
-            })
-            .map_err(sqlite_err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(sqlite_err)?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         sort_tool_selection_entries(&mut tool_selections);
 
-        let mut dynamic_environment_statement = conn
-            .prepare(
-                "SELECT snapshot_kind, source_kind, enabled
+        let mut dynamic_environment_statement = conn.prepare(
+            "SELECT snapshot_kind, source_kind, enabled
                  FROM prompt_assembly_dynamic_environment_sources
                  WHERE scope = ?1
                  ORDER BY snapshot_kind ASC, source_kind ASC",
-            )
-            .map_err(sqlite_err)?;
+        )?;
         let dynamic_environment_sources = dynamic_environment_statement
             .query_map(params![scope], |row| {
                 Ok(
@@ -387,10 +336,8 @@ pub(crate) fn load_global_prompt_assembly_state(
                         enabled: row.get(2)?,
                     },
                 )
-            })
-            .map_err(sqlite_err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(sqlite_err)?;
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut state = PromptAssemblyScopeState::new(PromptAssemblyScope::Global);
         state.set_core_system_override(core_system_override);
@@ -504,10 +451,6 @@ fn stored_requested_order_out_of_range(index: usize, value: i64) -> rusqlite::Er
             value,
         }),
     )
-}
-
-fn sqlite_err(source: rusqlite::Error) -> SessionStoreError {
-    SessionStoreError::SqliteError { source }
 }
 
 #[cfg(test)]

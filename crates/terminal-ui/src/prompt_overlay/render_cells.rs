@@ -3,9 +3,9 @@ use super::*;
 pub(super) fn prompt_overlay_tool_sel_label(row: &PromptOverlayInactiveRow) -> String {
     match row {
         PromptOverlayInactiveRow::ToolCandidate { tool } => {
-            if !tool.can_select {
+            if !tool.selection.can_select() {
                 "-".to_string()
-            } else if tool.selected {
+            } else if tool.selection.is_selected() {
                 "●".to_string()
             } else {
                 "○".to_string()
@@ -31,7 +31,8 @@ pub(super) fn prompt_overlay_tool_name_cell(
 pub(super) fn prompt_overlay_tool_order_label(row: &PromptOverlayInactiveRow) -> String {
     match row {
         PromptOverlayInactiveRow::ToolCandidate { tool } => tool
-            .selected_order
+            .selection
+            .selected_order()
             .map(|order| order.to_string())
             .unwrap_or_else(|| "-".to_string()),
         _ => "-".to_string(),

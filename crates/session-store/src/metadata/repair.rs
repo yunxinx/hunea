@@ -11,7 +11,7 @@ use crate::{
     ProjectDir, SessionMeta, SessionStoreError, jsonl::JsonlLoader, meta_derive::SessionMetaDeriver,
 };
 
-use super::{checked_i64, io_error, sqlite_error, upsert_session_row};
+use super::{checked_i64, io_error, upsert_session_row};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SessionFileFingerprint {
@@ -72,8 +72,7 @@ fn upsert_repair_state(
             )?,
             fingerprint.modified_at_ms,
         ],
-    )
-    .map_err(sqlite_error)?;
+    )?;
 
     Ok(())
 }
@@ -82,10 +81,8 @@ pub(super) fn rebuild_index_from_jsonl(
     conn: &Connection,
     sessions_dir: &Path,
 ) -> Result<usize, SessionStoreError> {
-    conn.execute("DELETE FROM session_repair_state", [])
-        .map_err(sqlite_error)?;
-    conn.execute("DELETE FROM sessions", [])
-        .map_err(sqlite_error)?;
+    conn.execute("DELETE FROM session_repair_state", [])?;
+    conn.execute("DELETE FROM sessions", [])?;
 
     let mut processed = 0;
     for discovered_file in collect_jsonl_files(sessions_dir)? {
@@ -145,13 +142,11 @@ fn delete_session_rows(conn: &Connection, session_id: &str) -> Result<(), Sessio
     conn.execute(
         "DELETE FROM session_repair_state WHERE session_id = ?1",
         params![session_id],
-    )
-    .map_err(sqlite_error)?;
+    )?;
     conn.execute(
         "DELETE FROM sessions WHERE session_id = ?1",
         params![session_id],
-    )
-    .map_err(sqlite_error)?;
+    )?;
     Ok(())
 }
 
@@ -159,9 +154,8 @@ fn load_indexed_project_files(
     conn: &Connection,
     project_dir: &str,
 ) -> Result<Vec<IndexedProjectFile>, SessionStoreError> {
-    let mut statement = conn
-        .prepare(
-            "
+    let mut statement = conn.prepare(
+        "
             SELECT
                 s.session_id,
                 s.jsonl_path,
@@ -171,35 +165,32 @@ fn load_indexed_project_files(
             LEFT JOIN session_repair_state r ON r.session_id = s.session_id
             WHERE s.project_dir = ?1
             ",
-        )
-        .map_err(sqlite_error)?;
-    let rows = statement
-        .query_map(params![project_dir], |row| {
-            let file_size = row.get::<_, Option<i64>>(2)?;
-            let modified_at_ms = row.get::<_, Option<i64>>(3)?;
-            Ok(IndexedProjectFile {
-                session_id: row.get(0)?,
-                jsonl_path: PathBuf::from(row.get::<_, String>(1)?),
-                fingerprint: match (file_size, modified_at_ms) {
-                    (Some(file_size), Some(modified_at_ms)) => Some(SessionFileFingerprint {
-                        file_size: u64::try_from(file_size).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                2,
-                                rusqlite::types::Type::Integer,
-                                Box::new(error),
-                            )
-                        })?,
-                        modified_at_ms,
-                    }),
-                    _ => None,
-                },
-            })
+    )?;
+    let rows = statement.query_map(params![project_dir], |row| {
+        let file_size = row.get::<_, Option<i64>>(2)?;
+        let modified_at_ms = row.get::<_, Option<i64>>(3)?;
+        Ok(IndexedProjectFile {
+            session_id: row.get(0)?,
+            jsonl_path: PathBuf::from(row.get::<_, String>(1)?),
+            fingerprint: match (file_size, modified_at_ms) {
+                (Some(file_size), Some(modified_at_ms)) => Some(SessionFileFingerprint {
+                    file_size: u64::try_from(file_size).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Integer,
+                            Box::new(error),
+                        )
+                    })?,
+                    modified_at_ms,
+                }),
+                _ => None,
+            },
         })
-        .map_err(sqlite_error)?;
+    })?;
 
     let mut indexed_files = Vec::new();
     for row in rows {
-        indexed_files.push(row.map_err(sqlite_error)?);
+        indexed_files.push(row?);
     }
 
     Ok(indexed_files)

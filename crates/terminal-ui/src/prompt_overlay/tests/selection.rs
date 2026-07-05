@@ -118,11 +118,9 @@ fn ctrl_e_expands_shadowed_skill_under_winner() {
             description: "Project bootstrap".to_string(),
             origin: PromptSourceOrigin::Project,
             selection_scope: PromptAssemblyScope::Project,
-            skill_path: "/tmp/project-repo-bootstrap/SKILL.md".to_string(),
+            skill_path: "/tmp/project-repo-bootstrap/SKILL.md".into(),
             body: "# Project Repo Bootstrap\n".to_string(),
-            can_select_for_discovery: true,
-            selected: true,
-            selected_order: Some(1),
+            selection: PromptAssemblySelectionState::from_parts(true, true, Some(1)),
         },
         PromptAssemblyDiscoveredSkill {
             skill_name: "repo-bootstrap".to_string(),
@@ -130,11 +128,9 @@ fn ctrl_e_expands_shadowed_skill_under_winner() {
             description: "Global bootstrap".to_string(),
             origin: PromptSourceOrigin::Global,
             selection_scope: PromptAssemblyScope::Project,
-            skill_path: "/tmp/global-repo-bootstrap/SKILL.md".to_string(),
+            skill_path: "/tmp/global-repo-bootstrap/SKILL.md".into(),
             body: "# Global Repo Bootstrap\n".to_string(),
-            can_select_for_discovery: true,
-            selected: false,
-            selected_order: Some(1),
+            selection: PromptAssemblySelectionState::from_parts(true, false, Some(1)),
         },
     ];
     model.open_prompt_overlay();
@@ -197,11 +193,9 @@ fn manual_only_skill_does_not_emit_selection_mutation() {
         description: "Ask which skill fits".to_string(),
         origin: PromptSourceOrigin::Project,
         selection_scope: PromptAssemblyScope::Project,
-        skill_path: "/tmp/ask-matt/SKILL.md".to_string(),
+        skill_path: "/tmp/ask-matt/SKILL.md".into(),
         body: "# Ask Matt".to_string(),
-        can_select_for_discovery: false,
-        selected: false,
-        selected_order: None,
+        selection: PromptAssemblySelectionState::from_parts(false, false, None),
     }];
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
@@ -222,11 +216,9 @@ fn manual_only_skills_sort_after_discovery_eligible_skills() {
             description: "discovery".to_string(),
             origin: PromptSourceOrigin::Project,
             selection_scope: PromptAssemblyScope::Project,
-            skill_path: "/tmp/aaa-discovery/SKILL.md".to_string(),
+            skill_path: "/tmp/aaa-discovery/SKILL.md".into(),
             body: "# aaa-discovery".to_string(),
-            can_select_for_discovery: true,
-            selected: true,
-            selected_order: Some(1),
+            selection: PromptAssemblySelectionState::from_parts(true, true, Some(1)),
         },
         PromptAssemblyDiscoveredSkill {
             skill_name: "zzz-manual".to_string(),
@@ -234,11 +226,9 @@ fn manual_only_skills_sort_after_discovery_eligible_skills() {
             description: "manual".to_string(),
             origin: PromptSourceOrigin::Project,
             selection_scope: PromptAssemblyScope::Project,
-            skill_path: "/tmp/zzz-manual/SKILL.md".to_string(),
+            skill_path: "/tmp/zzz-manual/SKILL.md".into(),
             body: "# zzz-manual".to_string(),
-            can_select_for_discovery: false,
-            selected: false,
-            selected_order: None,
+            selection: PromptAssemblySelectionState::from_parts(false, false, None),
         },
     ];
 
@@ -893,11 +883,9 @@ fn global_discovered_skill_reorder_uses_selection_scope_not_item_origin() {
         description: "Review code".to_string(),
         origin: PromptSourceOrigin::Global,
         selection_scope: PromptAssemblyScope::Project,
-        skill_path: "/tmp/code-review/SKILL.md".to_string(),
+        skill_path: "/tmp/code-review/SKILL.md".into(),
         body: "# Code Review".to_string(),
-        can_select_for_discovery: true,
-        selected: true,
-        selected_order: Some(1),
+        selection: PromptAssemblySelectionState::from_parts(true, true, Some(1)),
     }];
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
@@ -928,11 +916,9 @@ fn global_discovered_skill_reset_uses_selection_scope_not_item_origin() {
         description: "Review code".to_string(),
         origin: PromptSourceOrigin::Global,
         selection_scope: PromptAssemblyScope::Project,
-        skill_path: "/tmp/code-review/SKILL.md".to_string(),
+        skill_path: "/tmp/code-review/SKILL.md".into(),
         body: "# Code Review".to_string(),
-        can_select_for_discovery: true,
-        selected: true,
-        selected_order: Some(1),
+        selection: PromptAssemblySelectionState::from_parts(true, true, Some(1)),
     }];
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);

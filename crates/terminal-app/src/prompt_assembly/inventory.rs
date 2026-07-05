@@ -35,28 +35,31 @@ pub(super) fn discovered_skill_inventory(
             description: skill.description.clone(),
             origin: skill.origin,
             selection_scope,
-            skill_path: skill.skill_path.display().to_string(),
+            skill_path: skill.skill_path.clone(),
             body: format_long_lived_skill_body(skill),
-            can_select_for_discovery: skill.can_select_for_discovery(),
-            selected: prompt_overlay_skill_state_for_origin(
-                skill.origin,
-                skill.name.as_str(),
-                &global_state_by_name,
-                &project_state_by_name,
-            )
-            .or_else(|| merged_state_by_name.get(skill.name.as_str()).copied())
-            .map(|entry| entry.enabled)
-            .unwrap_or(skill.can_select_for_discovery()),
-            selected_order: selected_order_by_name.get(skill.name.as_str()).copied(),
+            selection: PromptAssemblySelectionState::from_parts(
+                skill.can_select_for_discovery(),
+                prompt_overlay_skill_state_for_origin(
+                    skill.origin,
+                    skill.name.as_str(),
+                    &global_state_by_name,
+                    &project_state_by_name,
+                )
+                .or_else(|| merged_state_by_name.get(skill.name.as_str()).copied())
+                .map(|entry| entry.enabled)
+                .unwrap_or(skill.can_select_for_discovery()),
+                selected_order_by_name.get(skill.name.as_str()).copied(),
+            ),
         })
         .collect::<Vec<_>>();
     let (mut discovery_eligible, mut manual_only): (Vec<_>, Vec<_>) = inventory
         .into_iter()
-        .partition(|skill| skill.can_select_for_discovery);
+        .partition(|skill| skill.selection.can_select());
     discovery_eligible.sort_by(|left, right| {
-        left.selected_order
+        left.selection
+            .selected_order()
             .unwrap_or(usize::MAX)
-            .cmp(&right.selected_order.unwrap_or(usize::MAX))
+            .cmp(&right.selection.selected_order().unwrap_or(usize::MAX))
             .then_with(|| natural_sort_text_cmp(&left.title, &right.title))
             .then_with(|| natural_sort_text_cmp(&left.skill_name, &right.skill_name))
             .then_with(|| {
@@ -108,11 +111,13 @@ pub(super) fn manual_skill_inventory(
             description: skill.description.clone(),
             origin: skill.origin,
             selection_scope: PromptAssemblyScope::Project,
-            skill_path: skill.skill_path.display().to_string(),
+            skill_path: skill.skill_path.clone(),
             body: format_long_lived_skill_body(skill),
-            can_select_for_discovery: skill.can_select_for_discovery(),
-            selected: false,
-            selected_order: None,
+            selection: PromptAssemblySelectionState::from_parts(
+                skill.can_select_for_discovery(),
+                false,
+                None,
+            ),
         })
         .collect()
 }
@@ -478,7 +483,7 @@ pub(super) fn parse_skill_file(
     })?;
     let (frontmatter, body) =
         split_frontmatter(&content).ok_or(SkillParseError::MissingFrontmatter)?;
-    let frontmatter: SkillFrontmatter = serde_yaml::from_str(frontmatter.as_str())
+    let frontmatter: SkillFrontmatter = yaml_serde::from_str(frontmatter.as_str())
         .map_err(|source| SkillParseError::DecodeFrontmatter { source })?;
     let name = frontmatter
         .name
@@ -517,7 +522,7 @@ pub(super) enum SkillParseError {
     #[error("decode skill frontmatter: {source}")]
     DecodeFrontmatter {
         #[source]
-        source: serde_yaml::Error,
+        source: yaml_serde::Error,
     },
     #[error("missing required name")]
     MissingName,
@@ -820,18 +825,21 @@ pub(super) fn tool_candidate_inventory(
                 project_state,
                 PromptAssemblyScope::Global,
             ),
-            can_select: true,
-            selected: merged_state_by_name
-                .get(def.name.as_str())
-                .map(|entry| entry.enabled)
-                .unwrap_or(true),
-            selected_order: selected_order_by_name.get(def.name.as_str()).copied(),
+            selection: PromptAssemblySelectionState::from_parts(
+                true,
+                merged_state_by_name
+                    .get(def.name.as_str())
+                    .map(|entry| entry.enabled)
+                    .unwrap_or(true),
+                selected_order_by_name.get(def.name.as_str()).copied(),
+            ),
         })
         .collect::<Vec<_>>();
     inventory.sort_by(|left, right| {
-        left.selected_order
+        left.selection
+            .selected_order()
             .unwrap_or(usize::MAX)
-            .cmp(&right.selected_order.unwrap_or(usize::MAX))
+            .cmp(&right.selection.selected_order().unwrap_or(usize::MAX))
             .then_with(|| natural_sort_text_cmp(&left.name, &right.name))
     });
     inventory

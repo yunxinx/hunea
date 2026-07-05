@@ -254,7 +254,12 @@ impl AppRuntimeCoordinator {
         let dynamic_environment_session_config =
             self.resolve_dynamic_environment_session_config(work_dir.as_path())?;
         let is_first_turn = self.provider_conversation.is_history_empty();
-        build_dynamic_environment_injection(
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        runtime.block_on(build_dynamic_environment_injection(
             self.options.dynamic_environment_observer.clone(),
             DynamicEnvironmentRequest {
                 work_dir,
@@ -265,7 +270,8 @@ impl AppRuntimeCoordinator {
                     .dynamic_environment_observations()
                     .to_vec(),
             },
-        )
+            &cancellation,
+        ))
     }
 
     fn resolve_dynamic_environment_session_config(
@@ -363,12 +369,13 @@ impl AppRuntimeCoordinator {
                 custom_prompt_uses: Vec::new(),
             });
         };
-        PromptAssemblyWorkspace::new(work_dir, self.prompt_assembly_tool_definitions())
-            .assemble_attached_prompt_message(
-                self.options.prompt_assembly_manager.as_ref(),
-                user_message,
-            )
-            .map_err(|error| error.to_string())
+        Ok(
+            PromptAssemblyWorkspace::new(work_dir, self.prompt_assembly_tool_definitions())
+                .assemble_attached_prompt_message(
+                    self.options.prompt_assembly_manager.as_ref(),
+                    user_message,
+                ),
+        )
     }
 
     fn manual_skill_activities(

@@ -213,6 +213,43 @@ pub struct PromptAssemblyExtraPromptCandidate {
     pub selected: bool,
 }
 
+/// `PromptAssemblySelectionState` 用单一状态表示候选项是否可选、是否已选以及排序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptAssemblySelectionState {
+    Unselectable,
+    Available,
+    Selected { order: Option<usize> },
+}
+
+impl PromptAssemblySelectionState {
+    #[must_use]
+    pub const fn from_parts(can_select: bool, selected: bool, order: Option<usize>) -> Self {
+        match (can_select, selected) {
+            (false, _) => Self::Unselectable,
+            (true, false) => Self::Available,
+            (true, true) => Self::Selected { order },
+        }
+    }
+
+    #[must_use]
+    pub const fn can_select(self) -> bool {
+        !matches!(self, Self::Unselectable)
+    }
+
+    #[must_use]
+    pub const fn is_selected(self) -> bool {
+        matches!(self, Self::Selected { .. })
+    }
+
+    #[must_use]
+    pub const fn selected_order(self) -> Option<usize> {
+        match self {
+            Self::Selected { order } => order,
+            Self::Unselectable | Self::Available => None,
+        }
+    }
+}
+
 /// `PromptAssemblyDiscoveredSkill` 表示 `/prompt` 右侧 Skills tab 可展示的已发现 skill。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptAssemblyDiscoveredSkill {
@@ -221,11 +258,9 @@ pub struct PromptAssemblyDiscoveredSkill {
     pub description: String,
     pub origin: PromptSourceOrigin,
     pub selection_scope: PromptAssemblyScope,
-    pub skill_path: String,
+    pub skill_path: PathBuf,
     pub body: String,
-    pub can_select_for_discovery: bool,
-    pub selected: bool,
-    pub selected_order: Option<usize>,
+    pub selection: PromptAssemblySelectionState,
 }
 
 /// `PromptAssemblyToolCandidate` 表示 `/prompt` Tools Tab 中的一个工具候选项。
@@ -237,9 +272,7 @@ pub struct PromptAssemblyToolCandidate {
     pub prompt_guidelines: Option<String>,
     pub origin: PromptSourceOrigin,
     pub selection_scope: PromptAssemblyScope,
-    pub can_select: bool,
-    pub selected: bool,
-    pub selected_order: Option<usize>,
+    pub selection: PromptAssemblySelectionState,
 }
 
 /// `PromptAssemblyDynamicEnvironmentCandidate` 表示 Dynamic Tab 中的一个环境来源开关。

@@ -255,13 +255,19 @@ impl Model {
                 prompt_overlay_discovered_skill_winner(left),
                 prompt_overlay_discovered_skill_winner(right),
             ) {
-                (Some(left_winner), Some(right_winner)) => (!left_winner.can_select_for_discovery)
-                    .cmp(&!right_winner.can_select_for_discovery)
+                (Some(left_winner), Some(right_winner)) => (!left_winner.selection.can_select())
+                    .cmp(&!right_winner.selection.can_select())
                     .then_with(|| {
                         left_winner
-                            .selected_order
+                            .selection
+                            .selected_order()
                             .unwrap_or(usize::MAX)
-                            .cmp(&right_winner.selected_order.unwrap_or(usize::MAX))
+                            .cmp(
+                                &right_winner
+                                    .selection
+                                    .selected_order()
+                                    .unwrap_or(usize::MAX),
+                            )
                     })
                     .then_with(|| natural_sort_text_cmp(&left_winner.title, &right_winner.title))
                     .then_with(|| {
@@ -490,7 +496,7 @@ impl Model {
                 })
             }
             PromptOverlaySelection::DiscoveredSkill(skill) => {
-                if !skill.can_select_for_discovery {
+                if !skill.selection.can_select() {
                     return None;
                 }
                 Some(AppEffect::MutatePromptAssembly {
@@ -498,13 +504,13 @@ impl Model {
                         skill.selection_scope,
                         PromptAssemblyScopedMutationKind::SetDiscoveredSkillSelected {
                             skill_name: skill.skill_name,
-                            selected: !skill.selected,
+                            selected: !skill.selection.is_selected(),
                         },
                     ),
                 })
             }
             PromptOverlaySelection::ToolCandidate(tool) => {
-                if !tool.can_select {
+                if !tool.selection.can_select() {
                     return None;
                 }
                 Some(AppEffect::MutatePromptAssembly {
@@ -512,7 +518,7 @@ impl Model {
                         tool.selection_scope,
                         PromptAssemblyScopedMutationKind::SetToolSelected {
                             tool_name: tool.name,
-                            selected: !tool.selected,
+                            selected: !tool.selection.is_selected(),
                         },
                     ),
                 })
@@ -610,66 +616,46 @@ impl Model {
     pub(super) fn prompt_overlay_action_availability(&self) -> PromptOverlayActionAvailability {
         match self.selected_prompt_overlay_selection() {
             Some(PromptOverlaySelection::ManagedSource(source)) => {
-                PromptOverlayActionAvailability {
+                PromptOverlayActionAvailability::PromptSource {
                     can_edit: !matches!(
                         source.kind,
                         PromptSourceKind::LongLivedSkill
                             | PromptSourceKind::DynamicEnvironmentBaseline
                             | PromptSourceKind::DynamicEnvironmentChanges
                     ),
-                    can_add_custom: false,
                     can_remove: prompt_overlay_source_kind_can_remove(source.kind),
                     can_toggle_selection: source.kind != PromptSourceKind::CoreSystemPrompt,
                     can_reorder_active: source.kind != PromptSourceKind::CoreSystemPrompt,
                 }
             }
             Some(PromptOverlaySelection::ResolvedSource(source)) => {
-                PromptOverlayActionAvailability {
+                PromptOverlayActionAvailability::PromptSource {
                     can_edit: source.kind == PromptSourceKind::ExtraPrompt,
-                    can_add_custom: false,
                     can_remove: prompt_overlay_source_kind_can_remove(source.kind),
                     can_toggle_selection: source.kind != PromptSourceKind::CoreSystemPrompt,
                     can_reorder_active: false,
                 }
             }
             Some(PromptOverlaySelection::ExtraPromptCandidate(_)) => {
-                PromptOverlayActionAvailability {
-                    can_edit: true,
+                PromptOverlayActionAvailability::ExtraPromptCandidate {
                     can_add_custom: self.prompt_overlay_can_add_custom(),
-                    can_remove: true,
-                    can_toggle_selection: true,
-                    can_reorder_active: false,
                 }
             }
-            Some(PromptOverlaySelection::DiscoveredSkill(_)) => PromptOverlayActionAvailability {
-                can_edit: false,
-                can_add_custom: false,
-                can_remove: false,
-                can_toggle_selection: true,
-                can_reorder_active: true,
-            },
-            Some(PromptOverlaySelection::ToolCandidate(_)) => PromptOverlayActionAvailability {
-                can_edit: false,
-                can_add_custom: false,
-                can_remove: false,
-                can_toggle_selection: true,
-                can_reorder_active: true,
-            },
+            Some(PromptOverlaySelection::DiscoveredSkill(_)) => {
+                PromptOverlayActionAvailability::SelectableCandidate {
+                    can_reorder_active: true,
+                }
+            }
+            Some(PromptOverlaySelection::ToolCandidate(_)) => {
+                PromptOverlayActionAvailability::SelectableCandidate {
+                    can_reorder_active: true,
+                }
+            }
             Some(PromptOverlaySelection::DynamicEnvironmentCandidate(_)) => {
-                PromptOverlayActionAvailability {
-                    can_edit: false,
-                    can_add_custom: false,
-                    can_remove: false,
-                    can_toggle_selection: true,
-                    can_reorder_active: false,
-                }
+                PromptOverlayActionAvailability::DynamicEnvironmentCandidate
             }
-            None => PromptOverlayActionAvailability {
-                can_edit: false,
+            None => PromptOverlayActionAvailability::Empty {
                 can_add_custom: self.prompt_overlay_can_add_custom(),
-                can_remove: false,
-                can_toggle_selection: false,
-                can_reorder_active: false,
             },
         }
     }

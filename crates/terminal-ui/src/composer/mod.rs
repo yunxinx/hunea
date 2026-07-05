@@ -467,7 +467,7 @@ impl Composer {
     pub(crate) fn replace_current_skill_token(
         &mut self,
         skill_name: &str,
-        skill_path: &str,
+        skill_path: &std::path::Path,
         origin: runtime_domain::prompt_assembly::PromptSourceOrigin,
     ) -> bool {
         let Some(token) = self.current_prefixed_token('$') else {
@@ -485,7 +485,7 @@ impl Composer {
         self.skill_bindings.push(TranscriptSkillBinding {
             skill_name: skill_name.to_string(),
             origin,
-            skill_path: skill_path.to_string(),
+            skill_path: skill_path.display().to_string(),
             start_char: token.start_char,
             end_char: token.start_char + total_chars(&visible_token),
         });

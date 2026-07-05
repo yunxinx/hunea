@@ -335,11 +335,9 @@ fn skills_tab_orders_rows_by_selected_order_before_manual_only_suffix() {
             description: "Be brief".to_string(),
             origin: PromptSourceOrigin::Project,
             selection_scope: PromptAssemblyScope::Project,
-            skill_path: "/tmp/caveman/SKILL.md".to_string(),
+            skill_path: "/tmp/caveman/SKILL.md".into(),
             body: "# caveman".to_string(),
-            can_select_for_discovery: true,
-            selected: true,
-            selected_order: Some(21),
+            selection: PromptAssemblySelectionState::from_parts(true, true, Some(21)),
         },
         PromptAssemblyDiscoveredSkill {
             skill_name: "codebase-design".to_string(),
@@ -347,11 +345,9 @@ fn skills_tab_orders_rows_by_selected_order_before_manual_only_suffix() {
             description: "Design modules".to_string(),
             origin: PromptSourceOrigin::Project,
             selection_scope: PromptAssemblyScope::Project,
-            skill_path: "/tmp/codebase-design/SKILL.md".to_string(),
+            skill_path: "/tmp/codebase-design/SKILL.md".into(),
             body: "# codebase-design".to_string(),
-            can_select_for_discovery: true,
-            selected: false,
-            selected_order: Some(8),
+            selection: PromptAssemblySelectionState::from_parts(true, true, Some(8)),
         },
         PromptAssemblyDiscoveredSkill {
             skill_name: "ask-matt".to_string(),
@@ -359,11 +355,9 @@ fn skills_tab_orders_rows_by_selected_order_before_manual_only_suffix() {
             description: "Ask which skill fits".to_string(),
             origin: PromptSourceOrigin::Project,
             selection_scope: PromptAssemblyScope::Project,
-            skill_path: "/tmp/ask-matt/SKILL.md".to_string(),
+            skill_path: "/tmp/ask-matt/SKILL.md".into(),
             body: "# ask-matt".to_string(),
-            can_select_for_discovery: false,
-            selected: false,
-            selected_order: None,
+            selection: PromptAssemblySelectionState::from_parts(false, false, None),
         },
     ];
     model.open_prompt_overlay();
@@ -402,11 +396,9 @@ fn manual_only_skill_stays_visible_with_manual_marker() {
             description: "Ask which skill fits".to_string(),
             origin: PromptSourceOrigin::Project,
             selection_scope: PromptAssemblyScope::Project,
-            skill_path: "/tmp/ask-matt/SKILL.md".to_string(),
+            skill_path: "/tmp/ask-matt/SKILL.md".into(),
             body: "# Ask Matt".to_string(),
-            can_select_for_discovery: false,
-            selected: false,
-            selected_order: None,
+            selection: PromptAssemblySelectionState::from_parts(false, false, None),
         });
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
@@ -432,11 +424,9 @@ fn manual_only_skill_preview_shows_notice_above_body() {
         description: "Ask which skill fits".to_string(),
         origin: PromptSourceOrigin::Project,
         selection_scope: PromptAssemblyScope::Project,
-        skill_path: "/tmp/ask-matt/SKILL.md".to_string(),
+        skill_path: "/tmp/ask-matt/SKILL.md".into(),
         body: "# Ask Matt".to_string(),
-        can_select_for_discovery: false,
-        selected: false,
-        selected_order: None,
+        selection: PromptAssemblySelectionState::from_parts(false, false, None),
     }];
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
@@ -1322,9 +1312,7 @@ fn tools_tab_shows_ord_column_and_supports_reorder() {
             prompt_guidelines: Some("Prefer rg over grep.".to_string()),
             origin: PromptSourceOrigin::Builtin,
             selection_scope: PromptAssemblyScope::Global,
-            can_select: true,
-            selected: true,
-            selected_order: Some(1),
+            selection: PromptAssemblySelectionState::from_parts(true, true, Some(1)),
         },
         PromptAssemblyToolCandidate {
             name: "read_file".to_string(),
@@ -1333,9 +1321,7 @@ fn tools_tab_shows_ord_column_and_supports_reorder() {
             prompt_guidelines: Some("Use for direct file reads.".to_string()),
             origin: PromptSourceOrigin::Builtin,
             selection_scope: PromptAssemblyScope::Global,
-            can_select: true,
-            selected: true,
-            selected_order: Some(2),
+            selection: PromptAssemblySelectionState::from_parts(true, true, Some(2)),
         },
     ];
     model.set_window(140, 16);

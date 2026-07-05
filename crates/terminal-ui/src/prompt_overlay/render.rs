@@ -132,16 +132,16 @@ impl Model {
             Some(PromptOverlaySelection::DiscoveredSkill(_))
         );
         let selected_previewable = self.selected_prompt_overlay_selection().is_some();
-        if actions.can_edit {
+        if actions.can_edit() {
             parts.push("e/ctrl+g edit");
         }
-        if actions.can_add_custom {
+        if actions.can_add_custom() {
             parts.push("a create prompt");
         }
-        if actions.can_remove {
+        if actions.can_remove() {
             parts.push("d remove");
         }
-        if actions.can_toggle_selection {
+        if actions.can_toggle_selection() {
             parts.push("x disable");
         }
         if selected_core {
@@ -150,7 +150,7 @@ impl Model {
         if selected_discovered_skill {
             parts.push("r reset order");
         }
-        if actions.can_reorder_active && width >= 120 {
+        if actions.can_reorder_active() && width >= 120 {
             parts.push("J/K reorder");
         }
         if selected_previewable {

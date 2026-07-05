@@ -3,7 +3,8 @@ use runtime_domain::{
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
     prompt_assembly::persistence::PromptAssemblyScope,
     prompt_assembly::{
-        PromptAssemblyDiscoveredSkill, PromptAssemblyManagerSnapshot, PromptSourceOrigin,
+        PromptAssemblyDiscoveredSkill, PromptAssemblyManagerSnapshot, PromptAssemblySelectionState,
+        PromptSourceOrigin,
     },
     provider::ProviderKind,
     session::{
@@ -344,11 +345,9 @@ fn model_with_manual_skill(skill_name: &str) -> Model {
         description: "Manual skill".to_string(),
         origin: PromptSourceOrigin::Project,
         selection_scope: PromptAssemblyScope::Project,
-        skill_path: format!("/tmp/{skill_name}/SKILL.md"),
+        skill_path: format!("/tmp/{skill_name}/SKILL.md").into(),
         body: "# Manual Skill".to_string(),
-        can_select_for_discovery: false,
-        selected: false,
-        selected_order: None,
+        selection: PromptAssemblySelectionState::from_parts(false, false, None),
     }];
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),

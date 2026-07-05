@@ -427,7 +427,7 @@ fn skill_binding_survives_edit_outside_bound_token() {
     let mut composer = test_composer(80, 3, "$code");
     assert!(composer.replace_current_skill_token(
         "code-review",
-        "/tmp/code-review/SKILL.md",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
         PromptSourceOrigin::Project,
     ));
 
@@ -443,7 +443,7 @@ fn skill_binding_drops_immediately_after_manual_token_edit() {
     let mut composer = test_composer(80, 3, "$code");
     assert!(composer.replace_current_skill_token(
         "code-review",
-        "/tmp/code-review/SKILL.md",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
         PromptSourceOrigin::Project,
     ));
 
@@ -460,7 +460,7 @@ fn bound_skill_token_renders_with_command_accent_before_submit() {
     let mut composer = test_composer(80, 3, "$code");
     assert!(composer.replace_current_skill_token(
         "code-review",
-        "/tmp/code-review/SKILL.md",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
         PromptSourceOrigin::Project,
     ));
 
@@ -485,7 +485,7 @@ fn bound_skill_token_keeps_same_background_as_live_cx_input() {
     composer.set_text_for_test("$code");
     assert!(composer.replace_current_skill_token(
         "code-review",
-        "/tmp/code-review/SKILL.md",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
         PromptSourceOrigin::Project,
     ));
 
@@ -527,7 +527,7 @@ fn bound_skill_token_renders_from_sigil_after_blank_lines() {
     let mut composer = test_composer(80, 4, "\n\n$code");
     assert!(composer.replace_current_skill_token(
         "code-review",
-        "/tmp/code-review/SKILL.md",
+        std::path::Path::new("/tmp/code-review/SKILL.md"),
         PromptSourceOrigin::Project,
     ));
 

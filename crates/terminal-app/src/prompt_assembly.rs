@@ -25,11 +25,11 @@ use runtime_domain::prompt_assembly::{
     PromptAssemblyExtraPromptCandidate, PromptAssemblyInput, PromptAssemblyManagedSource,
     PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
     PromptAssemblyMutation, PromptAssemblyResolvedSnapshot, PromptAssemblyScopedMutation,
-    PromptAssemblyScopedMutationKind, PromptAssemblySourceInventorySnapshot,
-    PromptAssemblyToolCandidate, PromptPreludeSection, PromptPreludeSnapshot,
-    PromptSourceCandidate, PromptSourceCandidateState, PromptSourceInactiveReason,
-    PromptSourceKind, PromptSourceOrigin, PromptSourceStatus, SKILL_DISCOVERY_GENERATED_END,
-    SKILL_DISCOVERY_GENERATED_START, TOOL_GUIDELINES_GENERATED_END,
+    PromptAssemblyScopedMutationKind, PromptAssemblySelectionState,
+    PromptAssemblySourceInventorySnapshot, PromptAssemblyToolCandidate, PromptPreludeSection,
+    PromptPreludeSnapshot, PromptSourceCandidate, PromptSourceCandidateState,
+    PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin, PromptSourceStatus,
+    SKILL_DISCOVERY_GENERATED_END, SKILL_DISCOVERY_GENERATED_START, TOOL_GUIDELINES_GENERATED_END,
     TOOL_GUIDELINES_GENERATED_START, derive_extra_prompt_title, requested_order_sort_key,
     resolve_prompt_assembly,
 };
@@ -298,7 +298,7 @@ pub(crate) async fn apply_prompt_assembly_mutation_for_worker(
     let tool_definitions = tool_definitions.to_vec();
     let blocking_work_dir = work_dir.clone();
     let blocking_tool_definitions = tool_definitions.clone();
-    let (global_state, project_state) = tokio::task::spawn_blocking(move || {
+    let (global_state, manager) = tokio::task::spawn_blocking(move || {
         let mut project_state = load_project_prompt_assembly_state(&blocking_work_dir)
             .wrap_err("load project prompt assembly state")?;
         apply_mutation_to_scope_states(
@@ -310,7 +310,13 @@ pub(crate) async fn apply_prompt_assembly_mutation_for_worker(
         )?;
         save_project_prompt_assembly_state(&blocking_work_dir, &project_state)
             .wrap_err("save project prompt assembly state")?;
-        Ok::<_, color_eyre::eyre::Report>((global_state, project_state))
+        let manager = resolve_prompt_assembly_manager_snapshot(
+            &blocking_work_dir,
+            &global_state,
+            &project_state,
+            &blocking_tool_definitions,
+        );
+        Ok::<_, color_eyre::eyre::Report>((global_state, manager))
     })
     .await
     .wrap_err("apply prompt assembly worker task panicked")??;
@@ -318,12 +324,7 @@ pub(crate) async fn apply_prompt_assembly_mutation_for_worker(
         .save_global_prompt_assembly_state(&global_state)
         .await
         .wrap_err("save global prompt assembly state")?;
-    Ok(resolve_prompt_assembly_manager_snapshot(
-        &work_dir,
-        &global_state,
-        &project_state,
-        &tool_definitions,
-    ))
+    Ok(manager)
 }
 
 pub(crate) fn check_prompt_assembly_missing_sources_from_states(

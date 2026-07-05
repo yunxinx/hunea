@@ -187,7 +187,7 @@ impl Model {
         let old_column = self.composer.column();
         if !self.composer.replace_current_skill_token(
             &skill.skill_name,
-            &skill.skill_path,
+            skill.skill_path.as_path(),
             skill.origin,
         ) {
             return false;

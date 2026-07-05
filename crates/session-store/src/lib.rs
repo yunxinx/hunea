@@ -318,7 +318,7 @@ pub enum SessionStoreError {
     MissingHeader { message: String },
     #[error("failed to access session metadata sqlite index: {source}")]
     SqliteError {
-        #[source]
+        #[from]
         source: rusqlite::Error,
     },
     #[error("session metadata index task panicked")]

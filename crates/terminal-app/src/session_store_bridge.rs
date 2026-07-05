@@ -1,13 +1,19 @@
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    sync::{OnceLock, mpsc},
+    time::Duration,
+};
 
-use color_eyre::eyre::{Result, WrapErr, eyre};
+use color_eyre::eyre::{Result, eyre};
 
 const SESSION_STORE_BRIDGE_WAIT: Duration = Duration::from_secs(5);
+type SessionStoreRuntimeJob = Box<dyn FnOnce(&tokio::runtime::Runtime) + Send + 'static>;
+static SESSION_STORE_RUNTIME: OnceLock<mpsc::Sender<SessionStoreRuntimeJob>> = OnceLock::new();
 
 /// `run_session_store_future` 在专用 Tokio worker 上执行同步入口需要的 async store 操作。
 ///
-/// app 启动和 prompt assembly 命令仍处在同步调用栈；每次调用使用独立 runtime 和
-/// timeout，让超时 future 被直接丢弃，避免单个慢任务阻塞后续同步入口。
+/// app 启动和 prompt assembly 命令仍处在同步调用栈；共享 runtime 避免为每次同步
+/// 入口重复创建 Tokio driver，timeout 让超时 future 被直接丢弃。
 pub(crate) fn run_session_store_future<T, Fut>(
     future_factory: impl FnOnce() -> Fut + Send + 'static,
     runtime_context: &'static str,
@@ -32,13 +38,42 @@ where
     T: Send + 'static,
     Fut: Future<Output = T> + Send + 'static,
 {
+    let (response, receiver) = mpsc::channel();
+    session_store_runtime_sender()
+        .send(Box::new(move |runtime| {
+            let result = runtime
+                .block_on(async move { tokio::time::timeout(timeout, future_factory()).await });
+            let _ = response.send(result);
+        }))
+        .map_err(|_| eyre!("{runtime_context} runtime worker stopped"))?;
+
+    match receiver
+        .recv()
+        .map_err(|_| eyre!("{runtime_context} runtime worker dropped response"))?
+    {
+        Ok(result) => Ok(result),
+        Err(_) => Err(eyre!("{runtime_context} timed out after {timeout:?}")),
+    }
+}
+
+fn session_store_runtime_sender() -> &'static mpsc::Sender<SessionStoreRuntimeJob> {
+    SESSION_STORE_RUNTIME.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<SessionStoreRuntimeJob>();
+        std::thread::Builder::new()
+            .name("session-store-bridge-runtime".to_string())
+            .spawn(move || run_session_store_runtime(receiver))
+            .expect("session store runtime thread should start");
+        sender
+    })
+}
+
+fn run_session_store_runtime(receiver: mpsc::Receiver<SessionStoreRuntimeJob>) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .wrap_err(runtime_context)?;
-    match runtime.block_on(async move { tokio::time::timeout(timeout, future_factory()).await }) {
-        Ok(result) => Ok(result),
-        Err(_) => Err(eyre!("{runtime_context} timed out after {timeout:?}")),
+        .expect("session store runtime should initialize");
+    while let Ok(job) = receiver.recv() {
+        job(&runtime);
     }
 }
 
@@ -82,6 +117,18 @@ mod tests {
             "next session store operation",
         )
         .expect("later calls should not wait for the timed-out future");
+    }
+
+    #[tokio::test]
+    async fn run_session_store_future_can_be_called_inside_tokio_runtime() {
+        let value = super::run_session_store_future_with_timeout(
+            || async { "loaded" },
+            Duration::from_millis(50),
+            "nested runtime test",
+        )
+        .expect("sync bridge should use its worker runtime instead of nesting block_on");
+
+        assert_eq!(value, "loaded");
     }
 
     struct DropFlag(Arc<AtomicBool>);

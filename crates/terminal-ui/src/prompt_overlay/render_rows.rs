@@ -435,9 +435,9 @@ pub(super) fn prompt_overlay_skill_sel_label(row: &PromptOverlayInactiveRow) -> 
     match row {
         PromptOverlayInactiveRow::DiscoveredSkill { skill, .. }
         | PromptOverlayInactiveRow::DiscoveredSkillShadowedDetail { skill } => {
-            if !skill.can_select_for_discovery {
+            if !skill.selection.can_select() {
                 "-".to_string()
-            } else if skill.selected {
+            } else if skill.selection.is_selected() {
                 "●".to_string()
             } else {
                 "○".to_string()
@@ -458,7 +458,7 @@ pub(super) fn prompt_overlay_skill_name_cell(
         } => {
             let trailing = if *shadowed_count > 0 {
                 prompt_overlay_shadowed_count_marker(*shadowed_count)
-            } else if !skill.can_select_for_discovery {
+            } else if !skill.selection.can_select() {
                 Some("(manual)".to_string())
             } else {
                 None
@@ -489,7 +489,8 @@ pub(super) fn prompt_overlay_inactive_skill_origin(
 pub(super) fn prompt_overlay_skill_order_label(row: &PromptOverlayInactiveRow) -> String {
     match row {
         PromptOverlayInactiveRow::DiscoveredSkill { skill, .. } => skill
-            .selected_order
+            .selection
+            .selected_order()
             .map(|order| order.to_string())
             .unwrap_or_else(|| "-".to_string()),
         PromptOverlayInactiveRow::DiscoveredSkillShadowedDetail { .. } => String::new(),

@@ -893,9 +893,9 @@ fn discovered_skill_inventory_keeps_manual_only_skills_visible() {
         .iter()
         .find(|skill| skill.skill_name == "zzz-manual")
         .expect("manual-only skill should remain visible in discovered inventory");
-    assert!(!skill.can_select_for_discovery);
-    assert!(!skill.selected);
-    assert_eq!(skill.selected_order, None);
+    assert!(!skill.selection.can_select());
+    assert!(!skill.selection.is_selected());
+    assert_eq!(skill.selection.selected_order(), None);
     let manual_index = snapshot
         .candidates
         .discovered_skills
@@ -911,7 +911,7 @@ fn discovered_skill_inventory_keeps_manual_only_skills_visible() {
     assert!(
         snapshot.candidates.discovered_skills[..manual_index]
             .iter()
-            .all(|skill| skill.can_select_for_discovery),
+            .all(|skill| skill.selection.can_select()),
         "manual-only skills should sort after discovery-eligible skills"
     );
 
@@ -1073,7 +1073,7 @@ fn manager_snapshot_skill_inventory_uses_dense_selected_order() {
         .candidates
         .discovered_skills
         .iter()
-        .map(|skill| (skill.skill_name.clone(), skill.selected_order))
+        .map(|skill| (skill.skill_name.clone(), skill.selection.selected_order()))
         .collect::<Vec<_>>();
     selected_orders.sort_by(|left, right| left.0.cmp(&right.0));
 
@@ -1128,7 +1128,7 @@ fn manager_snapshot_tool_inventory_filters_unguided_tools_and_uses_dense_selecte
             .candidates
             .tools
             .iter()
-            .map(|tool| (tool.name.as_str(), tool.selected_order))
+            .map(|tool| (tool.name.as_str(), tool.selection.selected_order()))
             .collect::<Vec<_>>(),
         vec![("bash", Some(1)), ("read_file", Some(2))]
     );
@@ -1690,7 +1690,7 @@ fn activate_long_lived_skill_persists_reference_and_expands_in_prelude() {
             .candidates
             .discovered_skills
             .iter()
-            .any(|skill| skill.skill_name == "repo-bootstrap" && skill.selected)
+            .any(|skill| skill.skill_name == "repo-bootstrap" && skill.selection.is_selected())
     );
     assert!(
         snapshot
@@ -1874,6 +1874,32 @@ fn move_active_source_reorders_non_core_entries() {
 }
 
 #[test]
+fn stale_prompt_entry_address_is_ignored() {
+    let mut global_state = PromptAssemblyScopeState::new(PromptAssemblyScope::Global);
+    let mut project_state = PromptAssemblyScopeState::new(PromptAssemblyScope::Project);
+    let stale_address = PromptEntryAddress {
+        scope: PromptAssemblyScope::Global,
+        index: 0,
+    };
+
+    assert!(entry_ref(&global_state, &project_state, stale_address).is_none());
+    assert_eq!(
+        entry_requested_order(&global_state, &project_state, stale_address),
+        None
+    );
+
+    set_entry_requested_order(
+        &mut global_state,
+        &mut project_state,
+        stale_address,
+        Some(10),
+    );
+
+    assert!(global_state.entries().is_empty());
+    assert!(project_state.entries().is_empty());
+}
+
+#[test]
 fn missing_source_check_counts_missing_entries_without_blocking_snapshot_resolution() {
     let manager = resolve_prompt_assembly_manager_snapshot(
         &temp_dir("missing-check"),
@@ -1985,8 +2011,7 @@ fn assemble_attached_prompt_message_expands_unique_skill_mentions_in_first_use_o
             ],
             custom_prompt_bindings: Vec::new(),
         },
-    )
-    .expect("skill-only attachment assembly should succeed");
+    );
 
     assert_eq!(
         assembled
@@ -2040,8 +2065,7 @@ fn assemble_attached_prompt_message_ignores_plain_text_tokens_without_bindings()
             skill_bindings: Vec::new(),
             custom_prompt_bindings: Vec::new(),
         },
-    )
-    .expect("plain text without bindings should assemble");
+    );
 
     assert!(assembled.manual_skill_uses.is_empty());
     assert!(assembled.custom_prompt_uses.is_empty());
@@ -2110,8 +2134,7 @@ fn assemble_attached_prompt_message_includes_custom_prompt_bodies_in_first_use_o
                 end_char: 20,
             }],
         },
-    )
-    .expect("custom prompt attachment assembly should succeed");
+    );
 
     assert!(assembled.manual_skill_uses.is_empty());
     assert_eq!(

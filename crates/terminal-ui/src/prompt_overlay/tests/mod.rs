@@ -15,9 +15,9 @@ use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyDynamicEnvironmentCandidate,
     PromptAssemblyExtraPromptCandidate, PromptAssemblyLifecycle, PromptAssemblyManagedSource,
     PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
-    PromptAssemblyMutation, PromptAssemblyScopedMutationKind, PromptAssemblySnapshot,
-    PromptAssemblyToolCandidate, PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin,
-    PromptSourceStatus, ResolvedPromptSource,
+    PromptAssemblyMutation, PromptAssemblyScopedMutationKind, PromptAssemblySelectionState,
+    PromptAssemblySnapshot, PromptAssemblyToolCandidate, PromptSourceInactiveReason,
+    PromptSourceKind, PromptSourceOrigin, PromptSourceStatus, ResolvedPromptSource,
 };
 use runtime_domain::session::PromptAssemblyUpdateNotice;
 
@@ -161,11 +161,9 @@ fn ready_model() -> Model {
             description: "Bootstrap repo".to_string(),
             origin: PromptSourceOrigin::Project,
             selection_scope: PromptAssemblyScope::Project,
-            skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
+            skill_path: "/tmp/repo-bootstrap/SKILL.md".into(),
             body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
-            can_select_for_discovery: true,
-            selected: true,
-            selected_order: Some(1),
+            selection: PromptAssemblySelectionState::from_parts(true, true, Some(1)),
         },
         PromptAssemblyDiscoveredSkill {
             skill_name: "code-review".to_string(),
@@ -173,11 +171,9 @@ fn ready_model() -> Model {
             description: "Review code".to_string(),
             origin: PromptSourceOrigin::Global,
             selection_scope: PromptAssemblyScope::Project,
-            skill_path: "/tmp/code-review/SKILL.md".to_string(),
+            skill_path: "/tmp/code-review/SKILL.md".into(),
             body: "# Code Review\n\nUse this skill.".to_string(),
-            can_select_for_discovery: true,
-            selected: true,
-            selected_order: Some(2),
+            selection: PromptAssemblySelectionState::from_parts(true, true, Some(2)),
         },
     ];
     prompt_assembly.candidates.manual_skills = vec![PromptAssemblyDiscoveredSkill {
@@ -186,11 +182,9 @@ fn ready_model() -> Model {
         description: "Bootstrap repo".to_string(),
         origin: PromptSourceOrigin::Project,
         selection_scope: PromptAssemblyScope::Project,
-        skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
+        skill_path: "/tmp/repo-bootstrap/SKILL.md".into(),
         body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
-        can_select_for_discovery: true,
-        selected: false,
-        selected_order: None,
+        selection: PromptAssemblySelectionState::from_parts(true, false, None),
     }];
     prompt_assembly.core_system.builtin_body = "builtin core".to_string();
 

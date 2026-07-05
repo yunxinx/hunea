@@ -32,9 +32,19 @@ struct ProjectReservedPrompt {
     file_name: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InvalidProjectReferenceId {
-    pub reference_id: String,
+/// `InvalidProjectReferenceId` 描述不能安全映射到项目 prompt 文件名的 reference id。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("project prompt reference id must be a single safe file component: {reference_id}")]
+pub struct InvalidProjectReferenceId {
+    reference_id: String,
+}
+
+impl InvalidProjectReferenceId {
+    /// 返回被拒绝的 reference id。
+    #[must_use]
+    pub fn reference_id(&self) -> &str {
+        &self.reference_id
+    }
 }
 
 pub(super) fn project_extra_prompt_file_name(

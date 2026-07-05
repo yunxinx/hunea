@@ -245,6 +245,52 @@ fn startup_prompt_missing_source_check_emits_aggregated_runtime_event() {
 }
 
 #[test]
+fn startup_prompt_missing_source_check_reports_load_failure() {
+    let root = temp_test_dir("prompt-missing-check-failure");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let store: Arc<dyn SessionStore> = Arc::new(FailingSessionStore::new(
+        Arc::new(InMemorySessionStore::new()),
+        FailingSessionStoreLoad::PromptAssemblyLoad,
+    ));
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::CheckPromptAssemblyMissingSources)
+        .expect("startup prompt check should be accepted");
+
+    let (kind, message) = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdateFailed { kind, message } => Some((kind, message)),
+            _ => None,
+        },
+        "prompt missing check failure",
+    );
+
+    assert_eq!(
+        kind,
+        runtime_domain::session::PromptAssemblyCommandFailureKind::CheckMissingSources
+    );
+    assert!(
+        message.contains("load global prompt assembly state"),
+        "failure should explain the failed check stage: {message}"
+    );
+    cleanup(&root);
+}
+
+#[test]
 fn dynamic_environment_does_not_advance_observations_without_injected_snapshot() {
     let root = temp_test_dir("dynamic-environment-empty-snapshot");
     let work_dir = root.join("repo");
@@ -307,10 +353,11 @@ fn conversation_submit_dispatches_without_waiting_for_dynamic_environment_observ
     let work_dir = root.join("repo");
     fs::create_dir_all(&work_dir).expect("work dir should exist");
     let (started_tx, started_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let observer = Arc::new(BlockingDynamicEnvironmentObserver {
         started: std::sync::Mutex::new(Some(started_tx)),
         release: std::sync::Mutex::new(Some(release_rx)),
+        cancellation_observed: std::sync::Mutex::new(None),
     });
     let mut coordinator = runtime_coordinator(AppRuntimeOptions {
         runtime_request_policy: runtime_domain::request_policy::RuntimeRequestPolicy::new(
@@ -387,6 +434,81 @@ fn conversation_submit_dispatches_without_waiting_for_dynamic_environment_observ
         failure.contains("requires API key"),
         "conversation should continue through the normal provider path: {failure}"
     );
+    cleanup(&root);
+}
+
+#[test]
+fn interrupting_pending_dynamic_environment_cancels_observation() {
+    let root = temp_test_dir("dynamic-environment-cancel");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (_release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (cancelled_tx, cancelled_rx) = mpsc::channel();
+    let observer = Arc::new(BlockingDynamicEnvironmentObserver {
+        started: std::sync::Mutex::new(Some(started_tx)),
+        release: std::sync::Mutex::new(Some(release_rx)),
+        cancellation_observed: std::sync::Mutex::new(Some(cancelled_tx)),
+    });
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        dynamic_environment_observer: observer,
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir: work_dir.clone(),
+            session_name: None,
+            initial_model: "gpt-4o-mini".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        initial_dynamic_environment_session_config: Some(
+            runtime_domain::dynamic_environment::DynamicEnvironmentSessionConfig {
+                baseline_enabled: true,
+                changes_enabled: false,
+                source_selections: vec![
+                    runtime_domain::dynamic_environment::DynamicEnvironmentSourceSelection {
+                        snapshot_kind:
+                            runtime_domain::dynamic_environment::DynamicEnvironmentSnapshotKind::Baseline,
+                        source_kind:
+                            runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind::Date,
+                        enabled: true,
+                    },
+                ],
+            },
+        ),
+        ..AppRuntimeOptions::default()
+    });
+    let request = ConversationTurnRequest::new(
+        "openai",
+        ProviderKind::OpenAi,
+        "gpt-4o-mini",
+        None,
+        None,
+        None,
+        ConversationItem::text(Role::User, "hello"),
+    );
+    let target = request.target();
+
+    coordinator
+        .handle_runtime_command(RuntimeCommand::SubmitConversationTurn {
+            target,
+            request: Box::new(request),
+        })
+        .expect("conversation request should dispatch");
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("dynamic environment observation should start");
+
+    let receipt = coordinator
+        .handle_runtime_command(RuntimeCommand::interrupt_current())
+        .expect("interrupt should be accepted");
+
+    assert!(matches!(
+        receipt,
+        RuntimeCommandReceipt::Interrupted { target: Some(_) }
+    ));
+    cancelled_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("dynamic environment observer should receive cancellation");
     cleanup(&root);
 }
 
@@ -586,37 +708,62 @@ fn custom_prompt_attachment_uses_cached_prompt_assembly_without_waiting_for_stor
 
 struct BlockingDynamicEnvironmentObserver {
     started: std::sync::Mutex<Option<mpsc::Sender<()>>>,
-    release: std::sync::Mutex<Option<mpsc::Receiver<()>>>,
+    release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    cancellation_observed: std::sync::Mutex<Option<mpsc::Sender<()>>>,
 }
 
 impl crate::dynamic_environment::DynamicEnvironmentObserver for BlockingDynamicEnvironmentObserver {
-    fn observe(
-        &self,
-        _work_dir: &Path,
-        sources: &[runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind],
-    ) -> Result<
-        Vec<runtime_domain::dynamic_environment::DynamicEnvironmentObservation>,
-        crate::dynamic_environment::DynamicEnvironmentObservationError,
+    fn observe<'a>(
+        &'a self,
+        _work_dir: &'a Path,
+        sources: &'a [runtime_domain::dynamic_environment::DynamicEnvironmentSourceKind],
+        cancellation: &'a tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Vec<runtime_domain::dynamic_environment::DynamicEnvironmentObservation>,
+                        crate::dynamic_environment::DynamicEnvironmentObservationError,
+                    >,
+                > + Send
+                + 'a,
+        >,
     > {
-        if let Some(started) = self.started.lock().expect("started lock").take() {
-            let _ = started.send(());
-        }
-        if let Some(release) = self.release.lock().expect("release lock").take() {
-            release
-                .recv()
-                .expect("test should release dynamic environment observer");
-        }
-        Ok(sources
-            .iter()
-            .copied()
-            .map(
-                |source_kind| runtime_domain::dynamic_environment::DynamicEnvironmentObservation {
-                    source_kind,
-                    fingerprint: "observed".to_string(),
-                    summary: "observed".to_string(),
-                    details: None,
-                },
-            )
-            .collect())
+        Box::pin(async move {
+            if let Some(started) = self.started.lock().expect("started lock").take() {
+                let _ = started.send(());
+            }
+            let release = self.release.lock().expect("release lock").take();
+            if let Some(release) = release {
+                tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        if let Some(cancelled) = self
+                            .cancellation_observed
+                            .lock()
+                            .expect("cancellation lock")
+                            .take()
+                        {
+                            let _ = cancelled.send(());
+                        }
+                        return Err(crate::dynamic_environment::DynamicEnvironmentObservationError);
+                    }
+                    result = release => {
+                        result.expect("test should release dynamic environment observer");
+                    }
+                }
+            }
+            Ok(sources
+                .iter()
+                .copied()
+                .map(|source_kind| {
+                    runtime_domain::dynamic_environment::DynamicEnvironmentObservation {
+                        source_kind,
+                        fingerprint: "observed".to_string(),
+                        summary: "observed".to_string(),
+                        details: None,
+                    }
+                })
+                .collect())
+        })
     }
 }

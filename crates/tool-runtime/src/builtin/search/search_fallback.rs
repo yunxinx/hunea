@@ -8,6 +8,8 @@ use globset::{Glob, GlobMatcher};
 use ignore::WalkBuilder;
 use tokio::{io::AsyncReadExt, task::JoinHandle};
 
+use super::error::SearchToolError;
+
 pub(crate) const TOOL_CALL_INTERRUPTED: &str = "Tool call interrupted";
 pub(crate) const SEARCH_MAX_OUTPUT_BYTES: usize = 50 * 1024;
 pub(crate) const GREP_MAX_LINE_CHARS: usize = 500;
@@ -114,10 +116,13 @@ pub(crate) fn path_text_has_vcs_component(path: &str) -> bool {
         .any(|component| VCS_DIRECTORIES_TO_EXCLUDE.contains(&component))
 }
 
-pub(crate) fn compile_glob(pattern: &str) -> Result<GlobMatcher, String> {
+pub(crate) fn compile_glob(pattern: &str) -> Result<GlobMatcher, SearchToolError> {
     Glob::new(pattern)
         .map(|glob| glob.compile_matcher())
-        .map_err(|error| format!("invalid glob pattern {pattern:?}: {error}"))
+        .map_err(|source| SearchToolError::InvalidGlob {
+            pattern: pattern.to_string(),
+            source,
+        })
 }
 
 pub(crate) fn path_matches_glob(root: &Path, path: &Path, matcher: &GlobMatcher) -> bool {

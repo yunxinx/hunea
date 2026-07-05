@@ -1,6 +1,6 @@
 mod edit;
 mod edit_apply;
-mod error;
+pub(super) mod error;
 mod file_state;
 mod list_dir;
 mod mutation;

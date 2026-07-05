@@ -1,5 +1,7 @@
 use std::{io, path::PathBuf};
 
+use super::edit_apply::EditApplicationError;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WorkspaceFileError {
     #[error("{tool} arguments are invalid: {source}")]
@@ -23,6 +25,11 @@ pub(crate) enum WorkspaceFileError {
         path: String,
         replacement: &'static str,
     },
+    #[error("'{path}' is a directory, cannot {operation} a directory")]
+    DirectoryMutation {
+        path: String,
+        operation: &'static str,
+    },
     #[error("'{path}' is not a regular file")]
     NotRegularFile { path: String },
     #[error("'{path}' is not a directory, use {replacement} instead")]
@@ -36,6 +43,23 @@ pub(crate) enum WorkspaceFileError {
     ReadRejected { path: PathBuf, detail: String },
     #[error("read failed for '{path}': {source}")]
     Read { path: PathBuf, source: io::Error },
+    #[error("create parent directory failed for '{path}': {source}")]
+    CreateParentDirectory { path: PathBuf, source: io::Error },
+    #[error("write failed for '{path}': {source}")]
+    Write { path: PathBuf, source: io::Error },
+    #[error("File has not been read yet. Read it first before writing to it.")]
+    FileNotRead,
+    #[error(
+        "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it."
+    )]
+    FileChanged,
+    #[error("File does not exist. Use write to create a new file before applying edits: {path}")]
+    MissingEditTarget { path: String },
+    #[error("{source}")]
+    EditRejected {
+        #[source]
+        source: EditApplicationError,
+    },
     #[error("read directory failed for '{path}': {source}")]
     ReadDirectory { path: PathBuf, source: io::Error },
     #[error("workspace root '{path}' is unavailable: {source}")]

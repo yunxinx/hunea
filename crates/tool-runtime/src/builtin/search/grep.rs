@@ -24,6 +24,7 @@ use super::super::workspace_file::{
     workspace::resolve_workspace_path, workspace_access::local_workspace_access,
 };
 use super::{
+    error::SearchToolError,
     external_tool::{
         ExternalCommand, ManagedSearchToolConfig, ManagedToolKind, resolve_external_command,
     },
@@ -188,7 +189,7 @@ async fn execute_grep(
     }
     let arguments = match parse_arguments(call.arguments) {
         Ok(arguments) => arguments,
-        Err(message) => return ToolResult::error(call.call_id, message),
+        Err(error) => return ToolResult::error(call.call_id, error.to_string()),
     };
     let access = local_workspace_access();
     let root = match access.as_ref().canonicalize(&root) {
@@ -196,14 +197,23 @@ async fn execute_grep(
         Err(error) => {
             return ToolResult::error(
                 call.call_id,
-                format!("workspace root is unavailable: {error}"),
+                SearchToolError::WorkspaceRoot {
+                    path: root,
+                    source: error,
+                }
+                .to_string(),
             );
         }
     };
     let search_path =
         match resolve_workspace_path(access.as_ref(), &root, &arguments.requested_path) {
             Ok(path) => path,
-            Err(error) => return ToolResult::error(call.call_id, error.to_string()),
+            Err(source) => {
+                return ToolResult::error(
+                    call.call_id,
+                    SearchToolError::WorkspacePath { source }.to_string(),
+                );
+            }
         };
 
     if let Some(command) =
@@ -220,17 +230,21 @@ async fn execute_grep(
         .await
     {
         Ok(Ok(outcome)) => grep_result(call.call_id, outcome),
-        Ok(Err(message)) => ToolResult::error(call.call_id, message),
+        Ok(Err(error)) => ToolResult::error(call.call_id, error.to_string()),
         Err(error) => join_error_result(call_id, error),
     }
 }
 
-fn parse_arguments(value: serde_json::Value) -> Result<NormalizedGrepArguments, String> {
-    let arguments = serde_json::from_value::<GrepArguments>(value)
-        .map_err(|error| format!("grep arguments are invalid: {error}"))?;
+fn parse_arguments(value: serde_json::Value) -> Result<NormalizedGrepArguments, SearchToolError> {
+    let arguments = serde_json::from_value::<GrepArguments>(value).map_err(|source| {
+        SearchToolError::InvalidArguments {
+            tool: GREP_TOOL_NAME,
+            source,
+        }
+    })?;
     let pattern = arguments.pattern.trim();
     if pattern.is_empty() {
-        return Err("'pattern' is required".to_string());
+        return Err(SearchToolError::MissingPattern);
     }
     Ok(NormalizedGrepArguments {
         pattern: pattern.to_string(),
@@ -255,7 +269,7 @@ async fn run_external_grep(
     search_path: &Path,
     arguments: &NormalizedGrepArguments,
     context: &ToolExecutionContext<'_>,
-) -> Result<GrepOutcome, String> {
+) -> Result<GrepOutcome, SearchToolError> {
     let mut args = vec![
         "--json".to_string(),
         "--line-number".to_string(),
@@ -296,11 +310,11 @@ async fn run_external_grep(
 
     let mut child = process
         .spawn()
-        .map_err(|error| format!("spawn external search tool failed: {error}"))?;
+        .map_err(|source| SearchToolError::ExternalSpawn { source })?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "external grep stdout is unavailable".to_string())?;
+        .ok_or(SearchToolError::ExternalStdoutUnavailable { tool: "grep" })?;
     let stderr_task = child
         .stderr
         .take()
@@ -315,10 +329,13 @@ async fn run_external_grep(
         let line = tokio::select! {
             _ = context.cancellation().cancelled() => {
                 let _ = child.start_kill();
-                return Err(TOOL_CALL_INTERRUPTED.to_string());
+                return Err(SearchToolError::Interrupted);
             }
             line = lines.next_line() => {
-                line.map_err(|error| format!("read external grep output failed: {error}"))?
+                line.map_err(|source| SearchToolError::ExternalOutputRead {
+                    tool: "grep",
+                    source,
+                })?
             }
         };
         let Some(line) = line else {
@@ -344,10 +361,16 @@ async fn run_external_grep(
     let status = child
         .wait()
         .await
-        .map_err(|error| format!("wait for external grep failed: {error}"))?;
+        .map_err(|source| SearchToolError::ExternalWait {
+            tool: "grep",
+            source,
+        })?;
     let stderr = stderr_task_output(stderr_task).await;
     if !killed_due_to_limit && !matches!(status.code(), Some(0) | Some(1)) {
-        return Err(format!("external grep failed: {}", stderr.trim()));
+        return Err(SearchToolError::ExternalFailed {
+            tool: "grep",
+            stderr: stderr.trim().to_string(),
+        });
     }
 
     let (lines, lines_truncated) = format_external_grep_matches(root, arguments, &matches).await;
@@ -471,9 +494,9 @@ fn rust_grep(
     search_path: &Path,
     arguments: &NormalizedGrepArguments,
     cancellation: &CancellationToken,
-) -> Result<GrepOutcome, String> {
+) -> Result<GrepOutcome, SearchToolError> {
     if cancellation.is_cancelled() {
-        return Err(TOOL_CALL_INTERRUPTED.to_string());
+        return Err(SearchToolError::Interrupted);
     }
     let pattern = if arguments.literal {
         regex::escape(&arguments.pattern)
@@ -483,7 +506,7 @@ fn rust_grep(
     let regex = RegexBuilder::new(&pattern)
         .case_insensitive(arguments.ignore_case)
         .build()
-        .map_err(|error| format!("invalid grep pattern: {error}"))?;
+        .map_err(|source| SearchToolError::InvalidRegex { source })?;
     let glob = arguments.glob.as_deref().map(compile_glob).transpose()?;
     let mut matches = Vec::new();
     let mut observed_matches = 0usize;
@@ -492,16 +515,18 @@ fn rust_grep(
 
     'walk: for entry in build_workspace_walker(root, search_path, true) {
         if cancellation.is_cancelled() {
-            return Err(TOOL_CALL_INTERRUPTED.to_string());
+            return Err(SearchToolError::Interrupted);
         }
-        let entry = entry.map_err(|error| format!("walk workspace failed: {error}"))?;
+        let entry = entry.map_err(|source| SearchToolError::WalkWorkspace { source })?;
         let path = entry.path();
         if path_has_vcs_component(path) {
             continue;
         }
         let file_type = entry
             .file_type()
-            .ok_or_else(|| format!("read file type failed for '{}'", path.display()))?;
+            .ok_or_else(|| SearchToolError::FileTypeUnavailable {
+                path: path.to_path_buf(),
+            })?;
         if !file_type.is_file() {
             continue;
         }
@@ -638,7 +663,14 @@ fn grep_result(call_id: String, outcome: GrepOutcome) -> ToolResult {
 }
 
 fn join_error_result(call_id: String, error: JoinError) -> ToolResult {
-    ToolResult::error(call_id, format!("grep task failed: {error}"))
+    ToolResult::error(
+        call_id,
+        SearchToolError::JoinTask {
+            operation: "grep",
+            source: error,
+        }
+        .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -656,6 +688,37 @@ mod tests {
 
     use super::super::external_tool::ExternalToolBackend;
     use super::*;
+
+    #[test]
+    fn parse_arguments_preserves_grep_deserialization_error() {
+        let result = parse_arguments(json!({
+            "pattern": 12,
+        }));
+
+        assert!(matches!(
+            result,
+            Err(SearchToolError::InvalidArguments { tool: "grep", .. })
+        ));
+    }
+
+    #[test]
+    fn rust_grep_preserves_invalid_regex_error() {
+        let root = temp_root("rust-grep-invalid-regex");
+        let arguments = NormalizedGrepArguments {
+            pattern: "[".to_string(),
+            requested_path: ".".to_string(),
+            glob: None,
+            ignore_case: false,
+            literal: false,
+            context: 0,
+            limit: 10,
+        };
+
+        let result = rust_grep(&root, &root, &arguments, &CancellationToken::new());
+
+        assert!(matches!(result, Err(SearchToolError::InvalidRegex { .. })));
+        cleanup(&root);
+    }
 
     #[cfg(unix)]
     #[tokio::test]

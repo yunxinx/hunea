@@ -12,11 +12,12 @@ use crate::{
 
 use super::{
     edit_apply::{EditApplication, EditRequest, TextEdit, apply_edit},
+    error::WorkspaceFileError,
     file_state::WorkspaceReadState,
     mutation::{
-        TOOL_CALL_INTERRUPTED, WorkspaceMutationQueue, bounded_permission_preview,
-        bounded_tool_result_details, ensure_existing_file_was_read, existing_file_metadata,
-        permission_file_snapshot, read_existing_text_file, record_written_text_snapshot,
+        WorkspaceMutationQueue, bounded_permission_preview, bounded_tool_result_details,
+        ensure_existing_file_was_read, existing_file_metadata, permission_file_snapshot,
+        read_existing_text_file, record_written_text_snapshot,
     },
     workspace::resolve_workspace_write_path,
     workspace_access::{SharedWorkspaceAccess, WorkspaceAccess, local_workspace_access},
@@ -201,10 +202,18 @@ struct EditItemArgument {
     new_string: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+enum EditRequestError {
+    #[error("edits must contain at least one replacement")]
+    EmptyEdits,
+    #[error("edits[{index}].old_string must not be empty")]
+    EmptyOldString { index: usize },
+}
+
 impl EditArguments {
-    fn into_request(self) -> Result<(String, EditRequest), String> {
+    fn into_request(self) -> Result<(String, EditRequest), EditRequestError> {
         if self.edits.is_empty() {
-            return Err("edits must contain at least one replacement".to_string());
+            return Err(EditRequestError::EmptyEdits);
         }
         let edits = self
             .edits
@@ -212,7 +221,7 @@ impl EditArguments {
             .enumerate()
             .map(|(index, edit)| {
                 if edit.old_string.is_empty() {
-                    return Err(format!("edits[{index}].old_string must not be empty"));
+                    return Err(EditRequestError::EmptyOldString { index });
                 }
                 Ok(TextEdit {
                     old_string: edit.old_string,
@@ -222,6 +231,31 @@ impl EditArguments {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok((self.path, EditRequest { edits }))
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::{EditArguments, EditItemArgument, EditRequestError};
+
+    #[test]
+    fn edit_arguments_reject_empty_old_string_with_indexed_error() {
+        let arguments = EditArguments {
+            path: "notes.txt".to_string(),
+            edits: vec![EditItemArgument {
+                old_string: String::new(),
+                new_string: "replacement".to_string(),
+            }],
+        };
+
+        let error = arguments
+            .into_request()
+            .expect_err("empty old_string should be rejected");
+
+        assert!(matches!(
+            error,
+            EditRequestError::EmptyOldString { index: 0 }
+        ));
     }
 }
 
@@ -278,7 +312,7 @@ fn execute_edit(
             new_text,
             replacements,
         }),
-        Err(message) => ToolResult::error(call.call_id, message),
+        Err(error) => ToolResult::error(call.call_id, error.to_string()),
     }
 }
 
@@ -358,7 +392,7 @@ struct EditTextFileOptions<'a> {
     mutation_queue: &'a WorkspaceMutationQueue,
 }
 
-fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, String> {
+fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, WorkspaceFileError> {
     let EditTextFileOptions {
         access,
         read_state,
@@ -371,15 +405,15 @@ fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, Strin
     } = options;
 
     if cancellation.is_cancelled() {
-        return Err(TOOL_CALL_INTERRUPTED.to_string());
+        return Err(WorkspaceFileError::Interrupted);
     }
 
     let _mutation_guard = mutation_queue.lock_path(path);
     let metadata = existing_file_metadata(access, path, requested_path, "edit")?;
     let Some(metadata) = metadata else {
-        return Err(format!(
-            "File does not exist. Use write to create a new file before applying edits: {requested_path}"
-        ));
+        return Err(WorkspaceFileError::MissingEditTarget {
+            path: requested_path.to_string(),
+        });
     };
 
     ensure_existing_file_was_read(
@@ -394,14 +428,18 @@ fn edit_text_file(options: EditTextFileOptions<'_>) -> Result<EditOutcome, Strin
     let EditApplication {
         final_content,
         replacements,
-    } = apply_edit(&original, request, requested_path)?;
+    } = apply_edit(&original, request, requested_path)
+        .map_err(|source| WorkspaceFileError::EditRejected { source })?;
 
     if cancellation.is_cancelled() {
-        return Err(TOOL_CALL_INTERRUPTED.to_string());
+        return Err(WorkspaceFileError::Interrupted);
     }
     access
         .write_text_file(path, &final_content)
-        .map_err(|error| format!("edit failed for '{}': {error}", path.display()))?;
+        .map_err(|source| WorkspaceFileError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
     record_written_text_snapshot(access, read_state, path, &final_content);
 
     Ok(EditOutcome::Updated {

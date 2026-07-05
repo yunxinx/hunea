@@ -149,6 +149,49 @@ struct OutputSnapshot {
     full_output_path: Option<PathBuf>,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum BashToolError {
+    #[error("bash arguments are invalid: {source}")]
+    InvalidArguments { source: serde_json::Error },
+    #[error("'command' is required")]
+    MissingCommand,
+    #[error("workspace root is unavailable: {source}")]
+    WorkspaceRoot { source: std::io::Error },
+    #[error("workdir not found: {path}: {source}")]
+    WorkdirNotFound {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("workdir is outside workspace: {path}")]
+    WorkdirOutsideWorkspace { path: PathBuf },
+    #[error("stat failed for workdir '{path}': {source}")]
+    WorkdirMetadata {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("workdir is not a directory: {path}")]
+    WorkdirNotDirectory { path: PathBuf },
+    #[error("'timeout' must be a positive number of seconds")]
+    InvalidTimeout,
+    #[cfg(windows)]
+    #[error("No bash shell found. Install Git Bash or add bash.exe to PATH.")]
+    ShellUnavailable,
+    #[error("spawn shell command failed: {source}")]
+    SpawnShell { source: std::io::Error },
+    #[error("{stream} pipe was unexpectedly unavailable")]
+    PipeUnavailable { stream: &'static str },
+    #[error("wait for shell command failed: {source}")]
+    WaitShell { source: std::io::Error },
+    #[error("write full bash output failed: {source}")]
+    WriteFullOutput { source: std::io::Error },
+    #[error("flush full bash output failed: {source}")]
+    FlushFullOutput { source: std::io::Error },
+    #[error("create full bash output failed: {source}")]
+    CreateFullOutput { source: std::io::Error },
+    #[error("create full bash output failed: temp file name collision")]
+    TempOutputNameCollision,
+}
+
 async fn execute_bash(
     root: PathBuf,
     call: ToolCall,
@@ -160,27 +203,30 @@ async fn execute_bash(
 
     let arguments = match serde_json::from_value::<BashArguments>(call.arguments) {
         Ok(arguments) => arguments,
-        Err(error) => {
-            return ToolResult::error(call.call_id, format!("bash arguments are invalid: {error}"));
+        Err(source) => {
+            return ToolResult::error(
+                call.call_id,
+                BashToolError::InvalidArguments { source }.to_string(),
+            );
         }
     };
     let command = arguments.command.trim();
     if command.is_empty() {
-        return ToolResult::error(call.call_id, "'command' is required");
+        return ToolResult::error(call.call_id, BashToolError::MissingCommand.to_string());
     }
     let command = command.to_string();
 
     let cwd = match resolve_workdir(&root, arguments.workdir.as_deref()).await {
         Ok(cwd) => cwd,
-        Err(message) => return ToolResult::error(call.call_id, message),
+        Err(error) => return ToolResult::error(call.call_id, error.to_string()),
     };
     let timeout = match timeout_duration(arguments.timeout) {
         Ok(timeout) => timeout,
-        Err(message) => return ToolResult::error(call.call_id, message),
+        Err(error) => return ToolResult::error(call.call_id, error.to_string()),
     };
     let shell = match resolve_shell() {
         Ok(shell) => shell,
-        Err(message) => return ToolResult::error(call.call_id, message),
+        Err(error) => return ToolResult::error(call.call_id, error.to_string()),
     };
 
     let terminal_id = call.call_id.clone();
@@ -201,7 +247,7 @@ async fn execute_bash(
     let outcome =
         match run_shell_command(&shell, &cwd, &command, timeout, &terminal_id, &context).await {
             Ok(outcome) => outcome,
-            Err(message) => return ToolResult::error(call.call_id, message),
+            Err(error) => return ToolResult::error(call.call_id, error.to_string()),
         };
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -269,10 +315,10 @@ async fn execute_bash(
         .with_details(details)
 }
 
-async fn resolve_workdir(root: &Path, requested: Option<&str>) -> Result<PathBuf, String> {
+async fn resolve_workdir(root: &Path, requested: Option<&str>) -> Result<PathBuf, BashToolError> {
     let root = tokio::fs::canonicalize(root)
         .await
-        .map_err(|error| format!("workspace root is unavailable: {error}"))?;
+        .map_err(|source| BashToolError::WorkspaceRoot { source })?;
     let candidate = match requested.map(str::trim).filter(|value| !value.is_empty()) {
         Some(requested) => {
             let requested_path = Path::new(requested);
@@ -286,36 +332,37 @@ async fn resolve_workdir(root: &Path, requested: Option<&str>) -> Result<PathBuf
     };
     let candidate = tokio::fs::canonicalize(&candidate)
         .await
-        .map_err(|error| format!("workdir not found: {}: {error}", candidate.display()))?;
+        .map_err(|source| BashToolError::WorkdirNotFound {
+            path: candidate.clone(),
+            source,
+        })?;
     if !candidate.starts_with(&root) {
-        return Err(format!(
-            "workdir is outside workspace: {}",
-            candidate.display()
-        ));
+        return Err(BashToolError::WorkdirOutsideWorkspace { path: candidate });
     }
-    let metadata = tokio::fs::metadata(&candidate)
-        .await
-        .map_err(|error| format!("stat failed for workdir '{}': {error}", candidate.display()))?;
+    let metadata =
+        tokio::fs::metadata(&candidate)
+            .await
+            .map_err(|source| BashToolError::WorkdirMetadata {
+                path: candidate.clone(),
+                source,
+            })?;
     if !metadata.is_dir() {
-        return Err(format!(
-            "workdir is not a directory: {}",
-            candidate.display()
-        ));
+        return Err(BashToolError::WorkdirNotDirectory { path: candidate });
     }
     Ok(candidate)
 }
 
-fn timeout_duration(timeout: Option<f64>) -> Result<Option<Duration>, String> {
+fn timeout_duration(timeout: Option<f64>) -> Result<Option<Duration>, BashToolError> {
     let Some(timeout) = timeout else {
         return Ok(None);
     };
     if !timeout.is_finite() || timeout <= 0.0 {
-        return Err("'timeout' must be a positive number of seconds".to_string());
+        return Err(BashToolError::InvalidTimeout);
     }
     Ok(Some(Duration::from_secs_f64(timeout)))
 }
 
-fn resolve_shell() -> Result<ShellConfig, String> {
+fn resolve_shell() -> Result<ShellConfig, BashToolError> {
     #[cfg(windows)]
     {
         resolve_windows_shell()
@@ -327,7 +374,7 @@ fn resolve_shell() -> Result<ShellConfig, String> {
 }
 
 #[cfg(not(windows))]
-fn resolve_unix_shell() -> Result<ShellConfig, String> {
+fn resolve_unix_shell() -> Result<ShellConfig, BashToolError> {
     if Path::new("/bin/bash").is_file() {
         return Ok(ShellConfig {
             program: PathBuf::from("/bin/bash"),
@@ -347,7 +394,7 @@ fn resolve_unix_shell() -> Result<ShellConfig, String> {
 }
 
 #[cfg(windows)]
-fn resolve_windows_shell() -> Result<ShellConfig, String> {
+fn resolve_windows_shell() -> Result<ShellConfig, BashToolError> {
     let mut candidates = Vec::new();
     if let Some(program_files) = env::var_os("ProgramFiles") {
         candidates.push(PathBuf::from(program_files).join("Git\\bin\\bash.exe"));
@@ -369,7 +416,7 @@ fn resolve_windows_shell() -> Result<ShellConfig, String> {
             args: vec![OsString::from("-c")],
         });
     }
-    Err("No bash shell found. Install Git Bash or add bash.exe to PATH.".to_string())
+    Err(BashToolError::ShellUnavailable)
 }
 
 fn find_on_path(binary_name: &str) -> Option<PathBuf> {
@@ -386,7 +433,7 @@ async fn run_shell_command(
     timeout: Option<Duration>,
     terminal_id: &str,
     context: &ToolExecutionContext<'_>,
-) -> Result<CommandExecutionOutcome, String> {
+) -> Result<CommandExecutionOutcome, BashToolError> {
     let mut process = Command::new(&shell.program);
     process.args(&shell.args);
     process.arg(command);
@@ -400,16 +447,16 @@ async fn run_shell_command(
 
     let mut child = process
         .spawn()
-        .map_err(|error| format!("spawn shell command failed: {error}"))?;
+        .map_err(|source| BashToolError::SpawnShell { source })?;
 
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "stdout pipe was unexpectedly unavailable".to_string())?;
+        .ok_or(BashToolError::PipeUnavailable { stream: "stdout" })?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "stderr pipe was unexpectedly unavailable".to_string())?;
+        .ok_or(BashToolError::PipeUnavailable { stream: "stderr" })?;
     let (chunk_sender, mut chunk_receiver) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(read_pipe(stdout, chunk_sender.clone()));
     tokio::spawn(read_pipe(stderr, chunk_sender));
@@ -454,7 +501,7 @@ async fn run_shell_command(
                 }
             }
             status = child.wait(), if exit_status.is_none() => {
-                exit_status = Some(status.map_err(|error| format!("wait for shell command failed: {error}"))?);
+                exit_status = Some(status.map_err(|source| BashToolError::WaitShell { source })?);
                 drain_sleep = Some(Box::pin(tokio::time::sleep(IO_DRAIN_TIMEOUT)));
             }
             _ = context.cancellation().cancelled(), if exit_status.is_none() && end_reason == CommandEndReason::Exited => {
@@ -570,7 +617,7 @@ impl OutputAccumulator {
         }
     }
 
-    async fn append(&mut self, bytes: &[u8]) -> Result<(), String> {
+    async fn append(&mut self, bytes: &[u8]) -> Result<(), BashToolError> {
         if bytes.is_empty() {
             return Ok(());
         }
@@ -578,7 +625,7 @@ impl OutputAccumulator {
         self.append_text(&text).await
     }
 
-    async fn append_text(&mut self, text: &str) -> Result<(), String> {
+    async fn append_text(&mut self, text: &str) -> Result<(), BashToolError> {
         if text.is_empty() {
             return Ok(());
         }
@@ -589,7 +636,7 @@ impl OutputAccumulator {
             if let Some(file) = &mut self.temp_file {
                 file.write_all(text.as_bytes())
                     .await
-                    .map_err(|error| format!("write full bash output failed: {error}"))?;
+                    .map_err(|source| BashToolError::WriteFullOutput { source })?;
             }
         } else {
             self.prefix_text.push_str(text);
@@ -601,7 +648,7 @@ impl OutputAccumulator {
         Ok(())
     }
 
-    async fn finish(&mut self) -> Result<(), String> {
+    async fn finish(&mut self) -> Result<(), BashToolError> {
         let remaining_text = self.decode_pending_utf8();
         self.append_text(&remaining_text).await?;
         if self.should_use_temp_file() {
@@ -610,7 +657,7 @@ impl OutputAccumulator {
         if let Some(file) = &mut self.temp_file {
             file.flush()
                 .await
-                .map_err(|error| format!("flush full bash output failed: {error}"))?;
+                .map_err(|source| BashToolError::FlushFullOutput { source })?;
         }
         Ok(())
     }
@@ -689,7 +736,7 @@ impl OutputAccumulator {
         }
     }
 
-    async fn ensure_temp_file(&mut self) -> Result<(), String> {
+    async fn ensure_temp_file(&mut self) -> Result<(), BashToolError> {
         if self.temp_file.is_some() {
             return Ok(());
         }
@@ -697,7 +744,7 @@ impl OutputAccumulator {
         if !self.prefix_text.is_empty() {
             file.write_all(self.prefix_text.as_bytes())
                 .await
-                .map_err(|error| format!("write full bash output failed: {error}"))?;
+                .map_err(|source| BashToolError::WriteFullOutput { source })?;
             self.prefix_text.clear();
         }
         self.temp_file_path = Some(path);
@@ -791,17 +838,19 @@ fn byte_tail_start(text: &str, max_bytes: usize) -> usize {
     start
 }
 
-async fn create_temp_output_file(prefix: &str) -> Result<(PathBuf, tokio::fs::File), String> {
+async fn create_temp_output_file(
+    prefix: &str,
+) -> Result<(PathBuf, tokio::fs::File), BashToolError> {
     for attempt in 0..16 {
         let path = temp_output_path(prefix, attempt);
         match open_new_private_file(&path).await {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(format!("create full bash output failed: {error}")),
+            Err(source) => return Err(BashToolError::CreateFullOutput { source }),
         }
     }
 
-    Err("create full bash output failed: temp file name collision".to_string())
+    Err(BashToolError::TempOutputNameCollision)
 }
 
 async fn open_new_private_file(path: &Path) -> std::io::Result<tokio::fs::File> {
@@ -958,7 +1007,35 @@ fn format_seconds(seconds: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::OutputAccumulator;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{BashToolError, OutputAccumulator, resolve_workdir, timeout_duration};
+
+    #[test]
+    fn timeout_duration_rejects_non_positive_timeout_with_structured_error() {
+        let result = timeout_duration(Some(0.0));
+
+        assert!(matches!(result, Err(BashToolError::InvalidTimeout)));
+    }
+
+    #[tokio::test]
+    async fn resolve_workdir_rejects_outside_workspace_with_structured_error() {
+        let root = temp_root("bash-workdir-root");
+        let outside = temp_root("bash-workdir-outside");
+
+        let result = resolve_workdir(&root, Some(outside.to_str().expect("utf-8 path"))).await;
+
+        assert!(matches!(
+            result,
+            Err(BashToolError::WorkdirOutsideWorkspace { .. })
+        ));
+        cleanup(&root);
+        cleanup(&outside);
+    }
 
     #[tokio::test]
     async fn output_accumulator_preserves_utf8_split_across_chunks() {
@@ -977,5 +1054,20 @@ mod tests {
         output.finish().await.expect("finish output");
 
         assert_eq!(output.snapshot(true).content, text);
+    }
+
+    fn temp_root(prefix: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("hunea-{prefix}-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&root).expect("create temp root");
+        root
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = fs::remove_dir_all(path);
     }
 }

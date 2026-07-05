@@ -322,7 +322,15 @@ pub(super) fn discover_skills(
     work_dir: &Path,
     global_skill_root_override: Option<&Path>,
 ) -> Vec<DiscoveredSkill> {
+    discover_skills_with_diagnostics(work_dir, global_skill_root_override).0
+}
+
+pub(super) fn discover_skills_with_diagnostics(
+    work_dir: &Path,
+    global_skill_root_override: Option<&Path>,
+) -> (Vec<DiscoveredSkill>, Vec<PromptAssemblyDiagnostic>) {
     let mut discovered = Vec::new();
+    let mut diagnostics = Vec::new();
     let mut seen_names = HashMap::<(String, PromptSourceOrigin), usize>::new();
 
     for path in project_skill_search_dirs(work_dir) {
@@ -331,6 +339,7 @@ pub(super) fn discover_skills(
             PromptSourceOrigin::Project,
             &mut discovered,
             &mut seen_names,
+            &mut diagnostics,
         );
     }
 
@@ -343,10 +352,11 @@ pub(super) fn discover_skills(
             PromptSourceOrigin::Global,
             &mut discovered,
             &mut seen_names,
+            &mut diagnostics,
         );
     }
 
-    discovered
+    (discovered, diagnostics)
 }
 
 pub(super) fn discover_skills_from_root(
@@ -354,20 +364,40 @@ pub(super) fn discover_skills_from_root(
     origin: PromptSourceOrigin,
     discovered: &mut Vec<DiscoveredSkill>,
     seen_names: &mut HashMap<(String, PromptSourceOrigin), usize>,
+    diagnostics: &mut Vec<PromptAssemblyDiagnostic>,
 ) {
     if !root.is_dir() {
         return;
     }
 
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            diagnostics.push(PromptAssemblyDiagnostic {
+                origin: Some(origin),
+                path: Some(root.to_path_buf()),
+                message: format!("read skill directory: {error}"),
+            });
+            return;
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                diagnostics.push(PromptAssemblyDiagnostic {
+                    origin: Some(origin),
+                    path: Some(root.to_path_buf()),
+                    message: format!("read skill directory entry: {error}"),
+                });
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_dir() {
             continue;
         }
-        discover_skill_dir(&path, origin, discovered, seen_names);
+        discover_skill_dir(&path, origin, discovered, seen_names, diagnostics);
     }
 }
 
@@ -376,28 +406,55 @@ pub(super) fn discover_skill_dir(
     origin: PromptSourceOrigin,
     discovered: &mut Vec<DiscoveredSkill>,
     seen_names: &mut HashMap<(String, PromptSourceOrigin), usize>,
+    diagnostics: &mut Vec<PromptAssemblyDiagnostic>,
 ) {
     let skill_path = dir.join(SKILL_FILE_NAME);
     if skill_path.is_file() {
-        if let Some(skill) = parse_skill_file(&skill_path, origin) {
-            let seen_key = (skill.name.clone(), origin);
-            if seen_names.contains_key(&seen_key) {
-                return;
+        match parse_skill_file(&skill_path, origin) {
+            Ok(skill) => {
+                let seen_key = (skill.name.clone(), origin);
+                if seen_names.contains_key(&seen_key) {
+                    return;
+                }
+                let next_index = discovered.len();
+                seen_names.insert(seen_key, next_index);
+                discovered.push(skill);
             }
-            let next_index = discovered.len();
-            seen_names.insert(seen_key, next_index);
-            discovered.push(skill);
+            Err(message) => diagnostics.push(PromptAssemblyDiagnostic {
+                origin: Some(origin),
+                path: Some(skill_path),
+                message,
+            }),
         }
         return;
     }
 
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            diagnostics.push(PromptAssemblyDiagnostic {
+                origin: Some(origin),
+                path: Some(dir.to_path_buf()),
+                message: format!("read nested skill directory: {error}"),
+            });
+            return;
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                diagnostics.push(PromptAssemblyDiagnostic {
+                    origin: Some(origin),
+                    path: Some(dir.to_path_buf()),
+                    message: format!("read nested skill directory entry: {error}"),
+                });
+                continue;
+            }
+        };
         let path = entry.path();
         if path.is_dir() {
-            discover_skill_dir(&path, origin, discovered, seen_names);
+            discover_skill_dir(&path, origin, discovered, seen_names, diagnostics);
         }
     }
 }
@@ -405,17 +462,28 @@ pub(super) fn discover_skill_dir(
 pub(super) fn parse_skill_file(
     skill_path: &Path,
     origin: PromptSourceOrigin,
-) -> Option<DiscoveredSkill> {
-    let content = fs::read_to_string(skill_path).ok()?;
-    let (frontmatter, body) = split_frontmatter(&content)?;
-    let frontmatter: SkillFrontmatter = serde_yaml::from_str(frontmatter.as_str()).ok()?;
-    let name = frontmatter.name?.trim().to_string();
-    let description = frontmatter.description?.trim().to_string();
-    if name.is_empty() || description.is_empty() {
-        return None;
-    }
-
-    Some(DiscoveredSkill {
+) -> Result<DiscoveredSkill, String> {
+    let content =
+        fs::read_to_string(skill_path).map_err(|error| format!("read skill file: {error}"))?;
+    let (frontmatter, body) =
+        split_frontmatter(&content).ok_or_else(|| "missing YAML frontmatter".to_string())?;
+    let frontmatter: SkillFrontmatter = serde_yaml::from_str(frontmatter.as_str())
+        .map_err(|error| format!("decode skill frontmatter: {error}"))?;
+    let name = frontmatter
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "missing required name".to_string())?
+        .to_string();
+    let description = frontmatter
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+        .ok_or_else(|| "missing required description".to_string())?
+        .to_string();
+    Ok(DiscoveredSkill {
         name,
         description,
         skill_path: skill_path.to_path_buf(),

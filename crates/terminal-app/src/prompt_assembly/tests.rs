@@ -49,6 +49,35 @@ fn tool_definitions_with_unguided_tool() -> Vec<ToolDefinition> {
 }
 
 #[test]
+fn manager_snapshot_reports_invalid_skill_files_as_diagnostics() {
+    let work_dir = temp_dir("invalid-skill-diagnostic");
+    let skill_dir = work_dir.join(".agents/skills/broken-skill");
+    fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+    let skill_path = skill_dir.join(SKILL_FILE_NAME);
+    fs::write(
+        &skill_path,
+        "---\nname: broken-skill\n---\n# Missing description\n",
+    )
+    .expect("invalid skill fixture should write");
+
+    let snapshot = resolve_prompt_assembly_manager_snapshot(
+        &work_dir,
+        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Global),
+        &PromptAssemblyScopeState::empty(PromptAssemblyScope::Project),
+        &[],
+    );
+
+    assert!(
+        snapshot.diagnostics.iter().any(|diagnostic| {
+            diagnostic.path.as_deref() == Some(skill_path.as_path())
+                && diagnostic.message.contains("missing required description")
+        }),
+        "invalid skill file should be surfaced as a prompt assembly diagnostic: {:?}",
+        snapshot.diagnostics
+    );
+}
+
+#[test]
 fn manager_snapshot_includes_default_dynamic_environment_sources() {
     let work_dir = temp_dir("dynamic-defaults");
     let snapshot = resolve_prompt_assembly_manager_snapshot(

@@ -1,6 +1,9 @@
 mod input;
 mod preview;
 mod render;
+mod render_cells;
+mod render_rows;
+mod render_support;
 mod selection;
 mod state;
 
@@ -40,7 +43,9 @@ use crate::{
         tertiary_text_style,
     },
 };
-use render::*;
+use render_cells::*;
+use render_rows::*;
+use render_support::*;
 use state::{PromptOverlayDialog, PromptOverlayExpandedRow};
 pub(crate) use state::{
     PromptOverlayFocus, PromptOverlayInactiveTab, PromptOverlayPendingEditor, PromptOverlayState,

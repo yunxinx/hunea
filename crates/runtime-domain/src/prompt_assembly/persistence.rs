@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, fs, io,
+    fs, io,
     path::{Component, Path, PathBuf},
 };
 
@@ -113,104 +113,40 @@ impl PromptAssemblyScopeState {
 }
 
 /// `ProjectPromptAssemblyError` 描述项目级 prompt assembly TOML / prompt 文件的读写失败。
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ProjectPromptAssemblyError {
+    #[error("read project prompt assembly file {path}: {source}")]
     Read {
         path: PathBuf,
+        #[source]
         source: io::Error,
     },
+    #[error("write project prompt assembly file {path}: {source}")]
     Write {
         path: PathBuf,
+        #[source]
         source: io::Error,
     },
+    #[error("decode project prompt assembly file {path}: {source}")]
     Decode {
         path: PathBuf,
+        #[source]
         source: toml::de::Error,
     },
+    #[error("encode project prompt assembly file {path}: {source}")]
     Encode {
         path: PathBuf,
+        #[source]
         source: toml::ser::Error,
     },
-    InvalidVersion {
-        path: PathBuf,
-        version: u32,
-    },
-    InvalidProjectReferenceId {
-        reference_id: String,
-    },
-    UnexpectedScope {
-        scope: PromptAssemblyScope,
-    },
-    OrphanExtraPromptBody {
-        reference_id: String,
-    },
-}
-
-impl fmt::Display for ProjectPromptAssemblyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Read { path, source } => {
-                write!(
-                    f,
-                    "read project prompt assembly file {}: {source}",
-                    path.display()
-                )
-            }
-            Self::Write { path, source } => {
-                write!(
-                    f,
-                    "write project prompt assembly file {}: {source}",
-                    path.display()
-                )
-            }
-            Self::Decode { path, source } => {
-                write!(
-                    f,
-                    "decode project prompt assembly file {}: {source}",
-                    path.display()
-                )
-            }
-            Self::Encode { path, source } => {
-                write!(
-                    f,
-                    "encode project prompt assembly file {}: {source}",
-                    path.display()
-                )
-            }
-            Self::InvalidVersion { path, version } => write!(
-                f,
-                "project prompt assembly file {} uses unsupported version {version}",
-                path.display()
-            ),
-            Self::InvalidProjectReferenceId { reference_id } => write!(
-                f,
-                "project prompt reference id must be a single safe file component: {reference_id}"
-            ),
-            Self::UnexpectedScope { scope } => write!(
-                f,
-                "project prompt assembly persistence only accepts project scope, got {}",
-                scope.as_stored_value()
-            ),
-            Self::OrphanExtraPromptBody { reference_id } => write!(
-                f,
-                "extra prompt body `{reference_id}` has no matching extra prompt entry"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ProjectPromptAssemblyError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Read { source, .. } | Self::Write { source, .. } => Some(source),
-            Self::Decode { source, .. } => Some(source),
-            Self::Encode { source, .. } => Some(source),
-            Self::InvalidVersion { .. }
-            | Self::InvalidProjectReferenceId { .. }
-            | Self::UnexpectedScope { .. }
-            | Self::OrphanExtraPromptBody { .. } => None,
-        }
-    }
+    #[error("project prompt assembly file {path} uses unsupported version {version}")]
+    InvalidVersion { path: PathBuf, version: u32 },
+    #[error("project prompt reference id must be a single safe file component: {reference_id}")]
+    InvalidProjectReferenceId { reference_id: String },
+    #[error("project prompt assembly persistence only accepts project scope, got {}", scope.as_stored_value())]
+    UnexpectedScope { scope: PromptAssemblyScope },
+    #[error("extra prompt body `{reference_id}` has no matching extra prompt entry")]
+    OrphanExtraPromptBody { reference_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

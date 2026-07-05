@@ -19,7 +19,7 @@ use runtime_domain::prompt_assembly::persistence::{
     load_project_prompt_assembly_state, save_project_prompt_assembly_state,
 };
 use runtime_domain::prompt_assembly::{
-    CoreSystemPromptInput, PromptAssemblyDiscoveredSkill,
+    CoreSystemPromptInput, PromptAssemblyDiagnostic, PromptAssemblyDiscoveredSkill,
     PromptAssemblyDynamicEnvironmentCandidate, PromptAssemblyEditorTarget,
     PromptAssemblyExtraPromptCandidate, PromptAssemblyInput, PromptAssemblyManagedSource,
     PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
@@ -549,7 +549,8 @@ fn resolve_prompt_assembly_manager_snapshot_with_overrides(
         &mut effective_global_state,
         &mut effective_project_state,
     );
-    let discovered_skills = discover_skills(work_dir, global_skill_root_override);
+    let (discovered_skills, diagnostics) =
+        discover_skills_with_diagnostics(work_dir, global_skill_root_override);
     let discovered_instruction_files =
         discover_instruction_files(work_dir, global_instructions_path_override);
     ensure_discovered_instruction_entries(
@@ -700,6 +701,7 @@ fn resolve_prompt_assembly_manager_snapshot_with_overrides(
             global_state,
             project_state,
         ),
+        diagnostics,
         builtin_core_system_body: BUILTIN_CORE_SYSTEM_PROMPT.to_string(),
         global_core_system_override: global_state.core_system_override.clone(),
         project_core_system_override: project_state.core_system_override.clone(),

@@ -217,6 +217,14 @@ pub struct PromptAssemblyDynamicEnvironmentCandidate {
     pub changes_preview_body: String,
 }
 
+/// `PromptAssemblyDiagnostic` 表示 prompt assembly 装配过程中保留的非致命诊断。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAssemblyDiagnostic {
+    pub origin: Option<PromptSourceOrigin>,
+    pub path: Option<PathBuf>,
+    pub message: String,
+}
+
 /// `PromptAssemblyManagerSnapshot` 表示 `/prompt` 所需的完整只读快照。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptAssemblyManagerSnapshot {
@@ -229,6 +237,7 @@ pub struct PromptAssemblyManagerSnapshot {
     pub manual_skills: Vec<PromptAssemblyDiscoveredSkill>,
     pub tool_candidates: Vec<PromptAssemblyToolCandidate>,
     pub dynamic_environment_candidates: Vec<PromptAssemblyDynamicEnvironmentCandidate>,
+    pub diagnostics: Vec<PromptAssemblyDiagnostic>,
     pub builtin_core_system_body: String,
     pub global_core_system_override: Option<String>,
     pub project_core_system_override: Option<String>,

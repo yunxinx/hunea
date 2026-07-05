@@ -65,6 +65,17 @@ fn app_layer_persists_managed_search_tool_authorization() {
         coordinator.options.managed_search_tools.allow_managed_fd,
         Some(true)
     );
+    let registry_definitions = coordinator
+        .workspace_tools
+        .definitions()
+        .definitions()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        coordinator.prompt_assembly_tool_definitions(),
+        registry_definitions.as_slice(),
+        "prompt assembly should use the refreshed workspace tool definitions"
+    );
     let content = fs::read_to_string(&config_path).expect("config should be readable");
     assert!(content.contains("allow_managed_fd = true"));
     cleanup(&root);

@@ -1,10 +1,11 @@
-use runtime_domain::session::{PromptAssemblyUpdateNotice, RuntimeCommandReceipt, RuntimeEvent};
-use tool_runtime::ToolDefinition;
+use runtime_domain::session::{
+    PromptAssemblyCommandFailureKind, PromptAssemblyUpdateNotice, RuntimeCommandReceipt,
+    RuntimeEvent,
+};
 
 use super::AppRuntimeCoordinator;
 use crate::prompt_assembly::{
-    apply_prompt_assembly_mutation, dynamic_environment_session_config_from_manager,
-    load_prompt_assembly_manager_snapshot,
+    PromptAssemblyWorkspace, dynamic_environment_session_config_from_manager,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -15,6 +16,30 @@ enum PromptAssemblyCommandError {
     LoadManager { source: color_eyre::Report },
     #[error("apply prompt assembly mutation: {source}")]
     ApplyMutation { source: color_eyre::Report },
+}
+
+impl PromptAssemblyCommandError {
+    fn failure_kind(&self) -> PromptAssemblyCommandFailureKind {
+        match self {
+            Self::RuntimeState(_) => PromptAssemblyCommandFailureKind::RuntimeState,
+            Self::LoadManager { .. } => PromptAssemblyCommandFailureKind::LoadManager,
+            Self::ApplyMutation { .. } => PromptAssemblyCommandFailureKind::ApplyMutation,
+        }
+    }
+
+    fn display_message(&self) -> String {
+        let mut message = self.to_string();
+        let mut source = std::error::Error::source(self);
+        while let Some(error) = source {
+            let source_message = error.to_string();
+            if !source_message.is_empty() && !message.contains(&source_message) {
+                message.push_str(": ");
+                message.push_str(&source_message);
+            }
+            source = error.source();
+        }
+        message
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,17 +85,18 @@ impl AppRuntimeCoordinator {
         }
     }
 
-    pub(super) fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.workspace_tools
-            .definitions()
-            .definitions()
-            .cloned()
-            .collect()
-    }
-
     pub(super) fn reload_prompt_assembly(&mut self) -> Result<RuntimeCommandReceipt, String> {
-        self.reload_prompt_assembly_result()
-            .map_err(|error| error.to_string())
+        match self.reload_prompt_assembly_result() {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                self.pending_runtime_events
+                    .push(RuntimeEvent::PromptAssemblyUpdateFailed {
+                        kind: error.failure_kind(),
+                        message: error.display_message(),
+                    });
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
+        }
     }
 
     fn reload_prompt_assembly_result(
@@ -82,9 +108,10 @@ impl AppRuntimeCoordinator {
         let header = self
             .session_header()
             .map_err(PromptAssemblyCommandError::RuntimeState)?;
-        let tool_defs = self.tool_definitions();
-        let manager = load_prompt_assembly_manager_snapshot(store, &header.work_dir, &tool_defs)
-            .map_err(|source| PromptAssemblyCommandError::LoadManager { source })?;
+        let manager =
+            PromptAssemblyWorkspace::new(&header.work_dir, self.prompt_assembly_tool_definitions())
+                .load_manager(store)
+                .map_err(|source| PromptAssemblyCommandError::LoadManager { source })?;
         self.options.initial_prompt_prelude = Some(manager.prelude.clone());
         let dynamic_environment_session_config =
             dynamic_environment_session_config_from_manager(&manager);
@@ -110,8 +137,17 @@ impl AppRuntimeCoordinator {
         &mut self,
         mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation,
     ) -> Result<RuntimeCommandReceipt, String> {
-        self.mutate_prompt_assembly_result(mutation)
-            .map_err(|error| error.to_string())
+        match self.mutate_prompt_assembly_result(mutation) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                self.pending_runtime_events
+                    .push(RuntimeEvent::PromptAssemblyUpdateFailed {
+                        kind: error.failure_kind(),
+                        message: error.display_message(),
+                    });
+                Ok(RuntimeCommandReceipt::Accepted)
+            }
+        }
     }
 
     fn mutate_prompt_assembly_result(
@@ -124,9 +160,10 @@ impl AppRuntimeCoordinator {
         let header = self
             .session_header()
             .map_err(PromptAssemblyCommandError::RuntimeState)?;
-        let tool_defs = self.tool_definitions();
-        let manager = apply_prompt_assembly_mutation(store, &header.work_dir, mutation, &tool_defs)
-            .map_err(|source| PromptAssemblyCommandError::ApplyMutation { source })?;
+        let manager =
+            PromptAssemblyWorkspace::new(&header.work_dir, self.prompt_assembly_tool_definitions())
+                .apply_mutation(store, mutation)
+                .map_err(|source| PromptAssemblyCommandError::ApplyMutation { source })?;
         let dynamic_environment_session_config =
             dynamic_environment_session_config_from_manager(&manager);
         let prelude_changed =

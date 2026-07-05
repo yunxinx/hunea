@@ -248,6 +248,12 @@ impl RuntimeEventApply for Model {
                     self.present_pending_prompt_assembly_notice_if_ready();
                 }
             }
+            RuntimeEvent::PromptAssemblyUpdateFailed { message, .. } => {
+                self.show_toast(
+                    ToastSeverity::Error,
+                    format!("Prompt assembly not updated: {message}"),
+                );
+            }
             RuntimeEvent::SessionResumed { payload } => {
                 self.apply_session_resume_payload(payload);
             }

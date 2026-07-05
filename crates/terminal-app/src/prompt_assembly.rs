@@ -80,6 +80,9 @@ const DEFAULT_DYNAMIC_CHANGES_REQUESTED_ORDER: u16 = 16;
 const DEFAULT_INSTRUCTIONS_REQUESTED_ORDER_START: u16 = 20;
 const DEFAULT_SKILL_DISCOVERY_REQUESTED_ORDER: u16 = 30;
 
+mod service;
+pub(crate) use service::PromptAssemblyWorkspace;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DiscoveredSkill {
     name: String,
@@ -215,15 +218,7 @@ impl PromptAssemblyMissingSourcesCheck {
     }
 }
 
-pub(crate) fn load_initial_prompt_assembly(
-    store: Arc<dyn SessionStore>,
-    work_dir: &Path,
-    tool_definitions: &[ToolDefinition],
-) -> Result<PromptAssemblyManagerSnapshot> {
-    load_prompt_assembly_manager_snapshot(store, work_dir, tool_definitions)
-}
-
-pub(crate) fn load_prompt_assembly_manager_snapshot(
+fn load_prompt_assembly_manager_snapshot(
     store: Arc<dyn SessionStore>,
     work_dir: &Path,
     tool_definitions: &[ToolDefinition],
@@ -243,7 +238,7 @@ pub(crate) fn load_prompt_assembly_manager_snapshot(
     ))
 }
 
-pub(crate) fn apply_prompt_assembly_mutation(
+fn apply_prompt_assembly_mutation(
     store: Arc<dyn SessionStore>,
     work_dir: &Path,
     mutation: PromptAssemblyMutation,
@@ -299,7 +294,7 @@ pub(crate) fn check_prompt_assembly_missing_sources_from_states(
 }
 
 /// `assemble_attached_prompt_message` 解析当前用户消息里的 `$skill` / `#prompt` 提及并拼装 provider-visible 文本。
-pub(crate) fn assemble_attached_prompt_message(
+fn assemble_attached_prompt_message(
     store: Option<Arc<dyn SessionStore>>,
     work_dir: &Path,
     user_message: &TranscriptUserMessage,
@@ -433,7 +428,9 @@ pub(crate) fn load_initial_prompt_prelude(
     store: Arc<dyn SessionStore>,
     work_dir: &Path,
 ) -> Result<PromptPreludeSnapshot> {
-    Ok(load_initial_prompt_assembly(store, work_dir, &[])?.prelude)
+    Ok(PromptAssemblyWorkspace::new(work_dir, &[])
+        .load_manager(store)?
+        .prelude)
 }
 
 pub(crate) fn dynamic_environment_session_config_from_manager(

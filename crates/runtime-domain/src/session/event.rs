@@ -15,6 +15,14 @@ pub enum PromptAssemblyUpdateNotice {
     NextNewSessionUpdated,
 }
 
+/// `PromptAssemblyCommandFailureKind` 表示 `/prompt` 命令失败的机器可识别阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptAssemblyCommandFailureKind {
+    RuntimeState,
+    LoadManager,
+    ApplyMutation,
+}
+
 /// `RuntimeEvent` 描述交互式 runtime 返回给 TUI 的统一事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
@@ -159,6 +167,10 @@ pub enum RuntimeEvent {
         manager: PromptAssemblyManagerSnapshot,
         notice: Option<PromptAssemblyUpdateNotice>,
     },
+    PromptAssemblyUpdateFailed {
+        kind: PromptAssemblyCommandFailureKind,
+        message: String,
+    },
     MessageFinished {
         target: Option<RuntimeTarget>,
         response: ConversationResponse,
@@ -221,6 +233,7 @@ impl RuntimeEvent {
             | Self::MessageHistoryRecorded { .. }
             | Self::MessageHistoryRecordFailed { .. }
             | Self::PromptAssemblyUpdated { .. }
+            | Self::PromptAssemblyUpdateFailed { .. }
             | Self::ContextBudgetSnapshotLoaded { .. }
             | Self::ContextBudgetSnapshotLoadFailed { .. } => None,
         }

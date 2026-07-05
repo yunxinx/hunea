@@ -183,15 +183,25 @@ impl Model {
             .into_values()
             .collect::<Vec<_>>();
         groups.sort_by(|left, right| {
-            let left_winner = prompt_overlay_extra_candidate_winner(left);
-            let right_winner = prompt_overlay_extra_candidate_winner(right);
-            natural_sort_text_cmp(&left_winner.title, &right_winner.title)
-                .then_with(|| left_winner.reference_id.cmp(&right_winner.reference_id))
+            match (
+                prompt_overlay_extra_candidate_winner(left),
+                prompt_overlay_extra_candidate_winner(right),
+            ) {
+                (Some(left_winner), Some(right_winner)) => {
+                    natural_sort_text_cmp(&left_winner.title, &right_winner.title)
+                        .then_with(|| left_winner.reference_id.cmp(&right_winner.reference_id))
+                }
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
         });
 
         let mut rows = Vec::new();
         for group in groups {
-            let (winner, shadowed) = prompt_overlay_partition_extra_candidates(group);
+            let Some((winner, shadowed)) = prompt_overlay_partition_extra_candidates(group) else {
+                continue;
+            };
             let shadowed_count = shadowed.len();
             rows.push(PromptOverlayInactiveRow::ExtraPromptCandidate {
                 source: winner.clone(),
@@ -238,25 +248,33 @@ impl Model {
             .into_values()
             .collect::<Vec<_>>();
         groups.sort_by(|left, right| {
-            let left_winner = prompt_overlay_discovered_skill_winner(left);
-            let right_winner = prompt_overlay_discovered_skill_winner(right);
-            (!left_winner.can_select_for_discovery)
-                .cmp(&!right_winner.can_select_for_discovery)
-                .then_with(|| {
-                    left_winner
-                        .selected_order
-                        .unwrap_or(usize::MAX)
-                        .cmp(&right_winner.selected_order.unwrap_or(usize::MAX))
-                })
-                .then_with(|| natural_sort_text_cmp(&left_winner.title, &right_winner.title))
-                .then_with(|| {
-                    natural_sort_text_cmp(&left_winner.skill_name, &right_winner.skill_name)
-                })
+            match (
+                prompt_overlay_discovered_skill_winner(left),
+                prompt_overlay_discovered_skill_winner(right),
+            ) {
+                (Some(left_winner), Some(right_winner)) => (!left_winner.can_select_for_discovery)
+                    .cmp(&!right_winner.can_select_for_discovery)
+                    .then_with(|| {
+                        left_winner
+                            .selected_order
+                            .unwrap_or(usize::MAX)
+                            .cmp(&right_winner.selected_order.unwrap_or(usize::MAX))
+                    })
+                    .then_with(|| natural_sort_text_cmp(&left_winner.title, &right_winner.title))
+                    .then_with(|| {
+                        natural_sort_text_cmp(&left_winner.skill_name, &right_winner.skill_name)
+                    }),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
         });
 
         let mut rows = Vec::new();
         for group in groups {
-            let (winner, shadowed) = prompt_overlay_partition_discovered_skills(group);
+            let Some((winner, shadowed)) = prompt_overlay_partition_discovered_skills(group) else {
+                continue;
+            };
             let shadowed_count = shadowed.len();
             rows.push(PromptOverlayInactiveRow::DiscoveredSkill {
                 skill: winner.clone(),

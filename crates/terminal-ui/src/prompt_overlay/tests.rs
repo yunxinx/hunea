@@ -32,6 +32,14 @@ use crate::{
 
 use super::PromptOverlayInactiveTab;
 
+#[test]
+fn prompt_overlay_candidate_group_helpers_tolerate_empty_groups() {
+    assert!(super::prompt_overlay_partition_extra_candidates(Vec::new()).is_none());
+    assert!(super::prompt_overlay_extra_candidate_winner(&[]).is_none());
+    assert!(super::prompt_overlay_partition_discovered_skills(Vec::new()).is_none());
+    assert!(super::prompt_overlay_discovered_skill_winner(&[]).is_none());
+}
+
 fn prompt_source(
     reference_id: &str,
     title: &str,

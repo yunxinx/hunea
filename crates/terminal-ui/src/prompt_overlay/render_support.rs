@@ -84,42 +84,46 @@ pub(super) fn prompt_overlay_left_row_id(row: &PromptOverlayLeftRow) -> String {
 
 pub(super) fn prompt_overlay_partition_extra_candidates(
     mut candidates: Vec<PromptAssemblyExtraPromptCandidate>,
-) -> (
+) -> Option<(
     PromptAssemblyExtraPromptCandidate,
     Vec<PromptAssemblyExtraPromptCandidate>,
-) {
+)> {
+    if candidates.is_empty() {
+        return None;
+    }
     candidates.sort_by_key(|candidate| prompt_overlay_origin_sort_key(candidate.origin));
     let winner = candidates.remove(0);
-    (winner, candidates)
+    Some((winner, candidates))
 }
 
 pub(super) fn prompt_overlay_extra_candidate_winner(
     candidates: &[PromptAssemblyExtraPromptCandidate],
-) -> &PromptAssemblyExtraPromptCandidate {
+) -> Option<&PromptAssemblyExtraPromptCandidate> {
     candidates
         .iter()
         .min_by_key(|candidate| prompt_overlay_origin_sort_key(candidate.origin))
-        .expect("extra prompt group should not be empty")
 }
 
 pub(super) fn prompt_overlay_partition_discovered_skills(
     mut skills: Vec<PromptAssemblyDiscoveredSkill>,
-) -> (
+) -> Option<(
     PromptAssemblyDiscoveredSkill,
     Vec<PromptAssemblyDiscoveredSkill>,
-) {
+)> {
+    if skills.is_empty() {
+        return None;
+    }
     skills.sort_by_key(|skill| prompt_overlay_origin_sort_key(skill.origin));
     let winner = skills.remove(0);
-    (winner, skills)
+    Some((winner, skills))
 }
 
 pub(super) fn prompt_overlay_discovered_skill_winner(
     skills: &[PromptAssemblyDiscoveredSkill],
-) -> &PromptAssemblyDiscoveredSkill {
+) -> Option<&PromptAssemblyDiscoveredSkill> {
     skills
         .iter()
         .min_by_key(|skill| prompt_overlay_origin_sort_key(skill.origin))
-        .expect("discovered skill group should not be empty")
 }
 
 pub(super) fn prompt_overlay_origin_sort_key(origin: PromptSourceOrigin) -> u8 {

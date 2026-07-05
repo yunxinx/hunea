@@ -21,9 +21,7 @@ use options_mapping::{
     model_options_from_app_config_and_models, model_options_from_config_and_models,
     runtime_options_from_app_config_and_models,
 };
-use prompt_assembly::{
-    dynamic_environment_session_config_from_manager, load_initial_prompt_assembly,
-};
+use prompt_assembly::{PromptAssemblyWorkspace, dynamic_environment_session_config_from_manager};
 use replay::write_terminal_replay_on_exit;
 pub use replay::{
     write_terminal_replay, write_terminal_replay_preserving_ansi,
@@ -156,7 +154,7 @@ fn attach_default_session_persistence(
     options.session_header_template = Some(session_header);
     let tool_definitions = tool_definitions_for_managed_search(&options.managed_search_tools);
     let loaded_prompt_assembly =
-        load_initial_prompt_assembly(store, work_dir.as_path(), &tool_definitions)?;
+        PromptAssemblyWorkspace::new(work_dir.as_path(), &tool_definitions).load_manager(store)?;
     model_options.prompt_assembly = Some(loaded_prompt_assembly.clone());
     options.initial_prompt_prelude = Some(loaded_prompt_assembly.prelude.clone());
     options.initial_dynamic_environment_session_config = Some(

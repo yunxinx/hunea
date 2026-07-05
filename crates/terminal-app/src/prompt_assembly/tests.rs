@@ -853,7 +853,9 @@ fn save_skill_discovery_override_rebuilds_generated_block_and_preserves_appended
     )
     .expect("save should succeed");
 
-    let loaded = load_initial_prompt_assembly(store, &work_dir, &[]).expect("snapshot should load");
+    let loaded = PromptAssemblyWorkspace::new(&work_dir, &[])
+        .load_manager(store)
+        .expect("snapshot should load");
     let skill_discovery = loaded
         .sources
         .iter()
@@ -1469,7 +1471,7 @@ fn load_initial_prompt_prelude_reads_global_and_project_state() {
 }
 
 #[test]
-fn load_initial_prompt_assembly_reads_snapshot_and_prelude() {
+fn prompt_assembly_workspace_reads_snapshot_and_prelude() {
     let work_dir = temp_dir("load-snapshot");
     let global_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1498,8 +1500,9 @@ fn load_initial_prompt_assembly_reads_snapshot_and_prelude() {
         )
         .expect("global state should save");
 
-    let loaded =
-        load_initial_prompt_assembly(global_store, &work_dir, &[]).expect("snapshot should load");
+    let loaded = PromptAssemblyWorkspace::new(&work_dir, &[])
+        .load_manager(global_store)
+        .expect("snapshot should load");
 
     let effective = loaded
         .prelude

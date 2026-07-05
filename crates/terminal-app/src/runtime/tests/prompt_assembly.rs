@@ -5,7 +5,7 @@ use runtime_domain::prompt_assembly::{
         StoredPromptBody, project_custom_prompts_dir, save_project_prompt_assembly_state,
     },
 };
-use runtime_domain::session::PromptAssemblyUpdateNotice;
+use runtime_domain::session::{PromptAssemblyCommandFailureKind, PromptAssemblyUpdateNotice};
 
 use super::support::*;
 
@@ -131,6 +131,97 @@ fn reload_prompt_assembly_reads_latest_filesystem_state() {
             .all(|skill| !(skill.origin
                 == runtime_domain::prompt_assembly::PromptSourceOrigin::Project
                 && skill.skill_name == "repo-bootstrap"))
+    );
+    cleanup(&root);
+}
+
+#[test]
+fn reload_prompt_assembly_reports_structured_load_failure_event() {
+    let root = temp_test_dir("reload-prompt-assembly-load-failure");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let store: Arc<dyn SessionStore> = Arc::new(FailingSessionStore::new(
+        Arc::new(InMemorySessionStore::new()),
+        FailingSessionStoreLoad::PromptAssemblyLoad,
+    ));
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir,
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+
+    let receipt = coordinator
+        .handle_runtime_command(RuntimeCommand::ReloadPromptAssembly)
+        .expect("reload command should be accepted and report failures via events");
+
+    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
+    let (kind, message) = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdateFailed { kind, message } => Some((kind, message)),
+            _ => None,
+        },
+        "structured prompt assembly load failure",
+    );
+    assert_eq!(kind, PromptAssemblyCommandFailureKind::LoadManager);
+    assert!(
+        message.contains("injected prompt assembly load failure"),
+        "failure message should retain store context: {message}"
+    );
+    cleanup(&root);
+}
+
+#[test]
+fn mutate_prompt_assembly_reports_structured_apply_failure_event() {
+    let root = temp_test_dir("mutate-prompt-assembly-save-failure");
+    let work_dir = root.join("repo");
+    fs::create_dir_all(&work_dir).expect("work dir should exist");
+    let store: Arc<dyn SessionStore> = Arc::new(FailingSessionStore::new(
+        Arc::new(InMemorySessionStore::new()),
+        FailingSessionStoreLoad::PromptAssemblySave,
+    ));
+    let mut coordinator = runtime_coordinator(AppRuntimeOptions {
+        session_store: Some(store),
+        session_header_template: Some(SessionHeader {
+            session_id: SessionId::new(),
+            work_dir,
+            session_name: None,
+            initial_model: "qwen3".to_string(),
+            git_head: None,
+            cli_version: None,
+        }),
+        ..AppRuntimeOptions::default()
+    });
+
+    let receipt = coordinator
+        .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
+            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::CreateExtraPrompt {
+                scope: PromptAssemblyScope::Global,
+                content: "# Saved search\nUse ripgrep first.\n".to_string(),
+            },
+        })
+        .expect("mutation command should be accepted and report failures via events");
+
+    assert_eq!(receipt, RuntimeCommandReceipt::Accepted);
+    let (kind, message) = wait_for_runtime_event(
+        &mut coordinator,
+        |event| match event {
+            RuntimeEvent::PromptAssemblyUpdateFailed { kind, message } => Some((kind, message)),
+            _ => None,
+        },
+        "structured prompt assembly mutation failure",
+    );
+    assert_eq!(kind, PromptAssemblyCommandFailureKind::ApplyMutation);
+    assert!(
+        message.contains("injected prompt assembly save failure"),
+        "failure message should retain store context: {message}"
     );
     cleanup(&root);
 }

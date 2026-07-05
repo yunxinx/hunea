@@ -47,7 +47,11 @@ use self::{
 pub(crate) fn tool_definitions_for_managed_search(
     managed_search_tools: &ManagedSearchToolConfig,
 ) -> Vec<ToolDefinition> {
-    conversation_workspace_tools(managed_search_tools)
+    tool_definitions_from_registry(&conversation_workspace_tools(managed_search_tools))
+}
+
+fn tool_definitions_from_registry(workspace_tools: &ToolExecutorRegistry) -> Vec<ToolDefinition> {
+    workspace_tools
         .definitions()
         .definitions()
         .cloned()
@@ -74,6 +78,7 @@ pub(crate) struct AppRuntimeCoordinator {
     provider_conversation: ProviderConversation,
     model_refresh: ModelRefreshWorker,
     workspace_tools: ToolExecutorRegistry,
+    prompt_assembly_tool_definitions: Vec<ToolDefinition>,
     session_store_worker: SessionStoreWorker,
     context_budget_worker: ContextBudgetWorker,
     pending_runtime_events: Vec<RuntimeEvent>,
@@ -83,6 +88,7 @@ pub(crate) struct AppRuntimeCoordinator {
 impl AppRuntimeCoordinator {
     pub(crate) fn new(options: AppRuntimeOptions) -> Result<Self, String> {
         let workspace_tools = conversation_workspace_tools(&options.managed_search_tools);
+        let prompt_assembly_tool_definitions = tool_definitions_from_registry(&workspace_tools);
         let provider_conversation = fresh_provider_conversation(&options)?;
         Ok(Self {
             options,
@@ -90,6 +96,7 @@ impl AppRuntimeCoordinator {
             provider_conversation,
             model_refresh: ModelRefreshWorker::default(),
             workspace_tools,
+            prompt_assembly_tool_definitions,
             session_store_worker: SessionStoreWorker::new(),
             context_budget_worker: ContextBudgetWorker::new().map_err(|error| error.to_string())?,
             pending_runtime_events: Vec::new(),
@@ -169,6 +176,7 @@ impl AppRuntimeCoordinator {
                 self.context_budget_worker.cancel_pending();
                 self.workspace_tools =
                     conversation_workspace_tools(&self.options.managed_search_tools);
+                self.refresh_prompt_assembly_tool_definitions();
                 self.pending_runtime_events.clear();
                 self.manual_skill_activity_sequence = 0;
                 Ok(RuntimeCommandReceipt::Accepted)
@@ -199,6 +207,15 @@ impl AppRuntimeCoordinator {
             ));
         }
         Ok(())
+    }
+
+    fn prompt_assembly_tool_definitions(&self) -> &[ToolDefinition] {
+        &self.prompt_assembly_tool_definitions
+    }
+
+    fn refresh_prompt_assembly_tool_definitions(&mut self) {
+        self.prompt_assembly_tool_definitions =
+            tool_definitions_from_registry(&self.workspace_tools);
     }
 
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
@@ -356,6 +373,8 @@ impl RuntimeCoordinator for AppRuntimeCoordinator {
                     target.clone(),
                 ) {
                     events.push(event);
+                } else {
+                    self.refresh_prompt_assembly_tool_definitions();
                 }
                 continue;
             }
@@ -481,12 +500,16 @@ impl AppRuntimeCoordinator {
         tool: runtime_domain::session::ManagedSearchTool,
         target: Option<RuntimeTarget>,
     ) -> Option<RuntimeEvent> {
-        persist_managed_search_tool_authorization(
+        let event = persist_managed_search_tool_authorization(
             &mut self.options,
             &mut self.workspace_tools,
             tool,
             target,
-        )
+        );
+        if event.is_none() {
+            self.refresh_prompt_assembly_tool_definitions();
+        }
+        event
     }
 }
 

@@ -14,8 +14,8 @@ use runtime_domain::{
 
 use super::{AppRuntimeCoordinator, ensure_conversation_target};
 use crate::prompt_assembly::{
-    AttachedPromptMessageAssembly, ManualSkillPromptUse,
-    dynamic_environment_session_config_from_manager, load_prompt_assembly_manager_snapshot,
+    AttachedPromptMessageAssembly, ManualSkillPromptUse, PromptAssemblyWorkspace,
+    dynamic_environment_session_config_from_manager,
 };
 
 impl AppRuntimeCoordinator {
@@ -229,7 +229,8 @@ impl AppRuntimeCoordinator {
             return Ok(DynamicEnvironmentSessionConfig::default());
         };
         let manager =
-            load_prompt_assembly_manager_snapshot(store, work_dir, &self.tool_definitions())
+            PromptAssemblyWorkspace::new(work_dir, self.prompt_assembly_tool_definitions())
+                .load_manager(store)
                 .map_err(|error| error.to_string())?;
         let config = dynamic_environment_session_config_from_manager(&manager);
         self.provider_conversation
@@ -285,13 +286,9 @@ impl AppRuntimeCoordinator {
                 custom_prompt_uses: Vec::new(),
             });
         };
-        crate::prompt_assembly::assemble_attached_prompt_message(
-            self.options.session_store.clone(),
-            work_dir,
-            user_message,
-            &self.tool_definitions(),
-        )
-        .map_err(|error| error.to_string())
+        PromptAssemblyWorkspace::new(work_dir, self.prompt_assembly_tool_definitions())
+            .assemble_attached_prompt_message(self.options.session_store.clone(), user_message)
+            .map_err(|error| error.to_string())
     }
 
     fn manual_skill_activities(

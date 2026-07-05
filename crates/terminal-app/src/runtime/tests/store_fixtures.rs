@@ -40,6 +40,8 @@ pub(super) enum FailingSessionStoreLoad {
     SessionTree,
     BranchTree,
     BranchPreview,
+    PromptAssemblyLoad,
+    PromptAssemblySave,
 }
 
 impl FailingSessionStore {
@@ -249,6 +251,13 @@ impl SessionStore for FailingSessionStore {
         &'a self,
         state: &'a PromptAssemblyScopeState,
     ) -> Pin<Box<dyn Future<Output = Result<(), SessionStoreError>> + Send + 'a>> {
+        if self.failed_load == FailingSessionStoreLoad::PromptAssemblySave {
+            return Box::pin(async {
+                Err(SessionStoreError::CorruptIndex {
+                    message: "injected prompt assembly save failure".to_string(),
+                })
+            });
+        }
         self.inner.save_global_prompt_assembly_state(state)
     }
 
@@ -257,6 +266,13 @@ impl SessionStore for FailingSessionStore {
     ) -> Pin<
         Box<dyn Future<Output = Result<PromptAssemblyScopeState, SessionStoreError>> + Send + 'a>,
     > {
+        if self.failed_load == FailingSessionStoreLoad::PromptAssemblyLoad {
+            return Box::pin(async {
+                Err(SessionStoreError::CorruptIndex {
+                    message: "injected prompt assembly load failure".to_string(),
+                })
+            });
+        }
         self.inner.load_global_prompt_assembly_state()
     }
 }

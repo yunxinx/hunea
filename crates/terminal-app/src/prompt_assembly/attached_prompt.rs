@@ -46,7 +46,8 @@ pub(super) fn assemble_attached_prompt_message(
         .filter(|_| !user_message.custom_prompt_bindings.is_empty())
         .map(|manager| {
             manager
-                .extra_prompt_candidates
+                .candidates
+                .extra_prompts
                 .iter()
                 .map(|prompt| ((prompt.reference_id.clone(), prompt.origin), prompt.clone()))
                 .collect::<HashMap<_, _>>()

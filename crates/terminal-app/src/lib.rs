@@ -157,7 +157,7 @@ fn attach_default_session_persistence(
         PromptAssemblyWorkspace::new(work_dir.as_path(), &tool_definitions).load_manager(store)?;
     model_options.prompt_assembly = Some(loaded_prompt_assembly.clone());
     options.prompt_assembly_manager = Some(loaded_prompt_assembly.clone());
-    options.initial_prompt_prelude = Some(loaded_prompt_assembly.prelude.clone());
+    options.initial_prompt_prelude = Some(loaded_prompt_assembly.resolution.prelude.clone());
     options.initial_dynamic_environment_session_config = Some(
         dynamic_environment_session_config_from_manager(&loaded_prompt_assembly),
     );

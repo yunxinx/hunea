@@ -68,7 +68,8 @@ fn default_active_list_keeps_disabled_and_missing_sources_visible() {
     let mut model = ready_model();
     model
         .prompt_assembly
-        .managed_sources
+        .sources
+        .managed
         .push(PromptAssemblyManagedSource {
             reference_id: "missing-skill".to_string(),
             kind: PromptSourceKind::LongLivedSkill,
@@ -80,7 +81,8 @@ fn default_active_list_keeps_disabled_and_missing_sources_visible() {
         });
     model
         .prompt_assembly
-        .snapshot
+        .resolution
+        .assembly
         .inactive_sources
         .push(prompt_source(
             "missing-skill",
@@ -118,7 +120,7 @@ fn disabled_source_row_does_not_repeat_disabled_label_in_effective_view() {
 
 #[test]
 fn source_status_marker_renders_at_right_edge_of_source_column() {
-    let source = ready_model().prompt_assembly.managed_sources[2].clone();
+    let source = ready_model().prompt_assembly.sources.managed[2].clone();
     let width = 60;
     let row = super::prompt_overlay_active_row_text(
         &source,
@@ -139,7 +141,7 @@ fn source_status_marker_renders_at_right_edge_of_source_column() {
 
 #[test]
 fn source_shadowed_count_marker_renders_at_right_edge_of_source_column() {
-    let source = ready_model().prompt_assembly.managed_sources[2].clone();
+    let source = ready_model().prompt_assembly.sources.managed[2].clone();
     let width = 60;
     let row = super::prompt_overlay_active_row_text(
         &source,
@@ -163,7 +165,8 @@ fn shadowed_detail_row_delete_targets_shadowed_source() {
     let mut model = ready_model();
     model
         .prompt_assembly
-        .snapshot
+        .resolution
+        .assembly
         .inactive_sources
         .push(prompt_source(
             "repo-rules",
@@ -186,11 +189,13 @@ fn shadowed_detail_row_delete_targets_shadowed_source() {
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::RemovePromptSource {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
-                kind: PromptSourceKind::ExtraPrompt,
-                reference_id: "repo-rules".to_string(),
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::RemovePromptSource {
+                    kind: PromptSourceKind::ExtraPrompt,
+                    reference_id: "repo-rules".to_string(),
+                },
+            ),
         })
     );
 }
@@ -323,7 +328,7 @@ fn render_uses_fixed_width_table_columns_with_right_heavier_split() {
 fn skills_tab_orders_rows_by_selected_order_before_manual_only_suffix() {
     let mut model = ready_model();
     model.set_window(120, 20);
-    model.prompt_assembly.discovered_skills = vec![
+    model.prompt_assembly.candidates.discovered_skills = vec![
         PromptAssemblyDiscoveredSkill {
             skill_name: "caveman".to_string(),
             title: "caveman".to_string(),
@@ -389,6 +394,7 @@ fn manual_only_skill_stays_visible_with_manual_marker() {
     let mut model = ready_model();
     model
         .prompt_assembly
+        .candidates
         .discovered_skills
         .push(PromptAssemblyDiscoveredSkill {
             skill_name: "ask-matt".to_string(),
@@ -420,7 +426,7 @@ fn manual_only_skill_stays_visible_with_manual_marker() {
 #[test]
 fn manual_only_skill_preview_shows_notice_above_body() {
     let mut model = ready_model();
-    model.prompt_assembly.discovered_skills = vec![PromptAssemblyDiscoveredSkill {
+    model.prompt_assembly.candidates.discovered_skills = vec![PromptAssemblyDiscoveredSkill {
         skill_name: "ask-matt".to_string(),
         title: "ask-matt".to_string(),
         description: "Ask which skill fits".to_string(),
@@ -473,7 +479,7 @@ fn skills_tab_shows_ord_column() {
 fn empty_extra_candidates_state_aligns_with_sel_column() {
     let mut model = ready_model();
     model.set_window(120, 16);
-    model.prompt_assembly.extra_prompt_candidates.clear();
+    model.prompt_assembly.candidates.extra_prompts.clear();
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
     let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
@@ -507,7 +513,7 @@ fn empty_extra_candidates_state_aligns_with_sel_column() {
 fn empty_skills_state_aligns_with_sel_column() {
     let mut model = ready_model();
     model.set_window(120, 16);
-    model.prompt_assembly.discovered_skills.clear();
+    model.prompt_assembly.candidates.discovered_skills.clear();
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
 
@@ -809,7 +815,7 @@ fn custom_prompt_scope_dialog_is_centered_within_right_pane() {
 #[test]
 fn space_opens_prompt_source_preview() {
     let mut model = ready_model();
-    model.prompt_assembly.sources = vec![
+    model.prompt_assembly.sources.preview = vec![
         runtime_domain::prompt_assembly::PromptAssemblyManagerSource {
             reference_id: "core-system".to_string(),
             kind: PromptSourceKind::CoreSystemPrompt,
@@ -849,7 +855,7 @@ fn p_toggles_assembled_preview_open_and_closed() {
 #[test]
 fn prompt_preview_renders_markdown_source_as_plain_text() {
     let mut model = ready_model();
-    model.prompt_assembly.sources = vec![
+    model.prompt_assembly.sources.preview = vec![
         runtime_domain::prompt_assembly::PromptAssemblyManagerSource {
             reference_id: "core-system".to_string(),
             kind: PromptSourceKind::CoreSystemPrompt,
@@ -882,7 +888,7 @@ fn prompt_preview_renders_markdown_source_as_plain_text() {
 #[test]
 fn prompt_preview_rewraps_after_resize() {
     let mut model = ready_model();
-    model.prompt_assembly.sources = vec![
+    model.prompt_assembly.sources.preview = vec![
         runtime_domain::prompt_assembly::PromptAssemblyManagerSource {
             reference_id: "core-system".to_string(),
             kind: PromptSourceKind::CoreSystemPrompt,
@@ -944,7 +950,7 @@ fn prompt_preview_word_wraps_indented_skill_lines() {
 #[test]
 fn custom_prompt_rows_sort_titles_naturally() {
     let mut model = ready_model();
-    model.prompt_assembly.extra_prompt_candidates = vec![
+    model.prompt_assembly.candidates.extra_prompts = vec![
         PromptAssemblyExtraPromptCandidate {
             reference_id: "new-prompt-10".to_string(),
             title: "New prompt 10".to_string(),
@@ -1028,17 +1034,22 @@ fn footer_hides_remove_for_active_skill_discovery() {
 #[test]
 fn footer_hides_remove_for_active_instruction_file() {
     let mut model = ready_model();
-    model.prompt_assembly.snapshot.active_sources.insert(
-        1,
-        prompt_source(
-            "instructions:project:.",
-            "AGENTS.md",
-            PromptSourceKind::InstructionsFile,
-            Some(PromptSourceOrigin::Project),
-            PromptSourceStatus::Active { order: 1 },
-        ),
-    );
-    model.prompt_assembly.managed_sources.insert(
+    model
+        .prompt_assembly
+        .resolution
+        .assembly
+        .active_sources
+        .insert(
+            1,
+            prompt_source(
+                "instructions:project:.",
+                "AGENTS.md",
+                PromptSourceKind::InstructionsFile,
+                Some(PromptSourceOrigin::Project),
+                PromptSourceStatus::Active { order: 1 },
+            ),
+        );
+    model.prompt_assembly.sources.managed.insert(
         1,
         PromptAssemblyManagedSource {
             reference_id: "instructions:project:.".to_string(),
@@ -1053,6 +1064,7 @@ fn footer_hides_remove_for_active_instruction_file() {
     model
         .prompt_assembly
         .sources
+        .preview
         .push(PromptAssemblyManagerSource {
             reference_id: "instructions:project:.".to_string(),
             kind: PromptSourceKind::InstructionsFile,
@@ -1100,7 +1112,7 @@ fn footer_shows_custom_actions_only_on_custom_tab() {
 #[test]
 fn footer_shows_create_prompt_on_empty_custom_tab() {
     let mut model = ready_model();
-    model.prompt_assembly.extra_prompt_candidates.clear();
+    model.prompt_assembly.candidates.extra_prompts.clear();
     model.set_window(140, 16);
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
@@ -1146,7 +1158,8 @@ fn footer_shows_preview_disable_and_reorder_for_dynamic_environment_source() {
     let mut model = ready_model();
     model
         .prompt_assembly
-        .managed_sources
+        .sources
+        .managed
         .insert(1, dynamic_environment_baseline_managed_source());
     model.set_window(140, 16);
     model.open_prompt_overlay();
@@ -1162,7 +1175,7 @@ fn footer_shows_preview_disable_and_reorder_for_dynamic_environment_source() {
 #[test]
 fn space_opens_dynamic_environment_candidate_preview_for_selected_snapshot_column() {
     let mut model = ready_model();
-    model.prompt_assembly.dynamic_environment_candidates =
+    model.prompt_assembly.candidates.dynamic_environment =
         vec![PromptAssemblyDynamicEnvironmentCandidate {
             source_kind: DynamicEnvironmentSourceKind::GitReference,
             label: "Git reference".to_string(),
@@ -1224,21 +1237,31 @@ fn footer_hides_disable_for_core_system_prompt() {
 #[test]
 fn footer_hides_remove_for_active_tool_guidelines() {
     let mut model = ready_model();
-    model.prompt_assembly.snapshot.active_sources.insert(
-        1,
-        prompt_source(
-            "tool-guidelines",
-            "Tool guidelines",
-            PromptSourceKind::ToolGuidelines,
-            Some(PromptSourceOrigin::Builtin),
-            PromptSourceStatus::Active { order: 1 },
-        ),
-    );
     model
         .prompt_assembly
-        .managed_sources
+        .resolution
+        .assembly
+        .active_sources
+        .insert(
+            1,
+            prompt_source(
+                "tool-guidelines",
+                "Tool guidelines",
+                PromptSourceKind::ToolGuidelines,
+                Some(PromptSourceOrigin::Builtin),
+                PromptSourceStatus::Active { order: 1 },
+            ),
+        );
+    model
+        .prompt_assembly
+        .sources
+        .managed
         .insert(1, tool_guidelines_managed_source());
-    model.prompt_assembly.sources.push(tool_guidelines_source());
+    model
+        .prompt_assembly
+        .sources
+        .preview
+        .push(tool_guidelines_source());
     model.set_window(140, 16);
     model.open_prompt_overlay();
     let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
@@ -1291,7 +1314,7 @@ fn shortcut_help_uses_aligned_two_column_layout() {
 #[test]
 fn tools_tab_shows_ord_column_and_supports_reorder() {
     let mut model = ready_model();
-    model.prompt_assembly.tool_candidates = vec![
+    model.prompt_assembly.candidates.tools = vec![
         PromptAssemblyToolCandidate {
             name: "bash".to_string(),
             label: Some("Bash".to_string()),
@@ -1331,11 +1354,13 @@ fn tools_tab_shows_ord_column_and_supports_reorder() {
             crossterm::event::KeyModifiers::SHIFT,
         )),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveTool {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
-                tool_name: "bash".to_string(),
-                direction: PromptAssemblyMoveDirection::Down,
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::MoveTool {
+                    tool_name: "bash".to_string(),
+                    direction: PromptAssemblyMoveDirection::Down,
+                },
+            ),
         })
     );
 }
@@ -1343,7 +1368,7 @@ fn tools_tab_shows_ord_column_and_supports_reorder() {
 #[test]
 fn dynamic_tab_groups_baseline_and_changes_columns_for_builtin_sources() {
     let mut model = ready_model();
-    model.prompt_assembly.dynamic_environment_candidates =
+    model.prompt_assembly.candidates.dynamic_environment =
         vec![PromptAssemblyDynamicEnvironmentCandidate {
             source_kind: DynamicEnvironmentSourceKind::GitReference,
             label: "Git reference".to_string(),
@@ -1410,7 +1435,7 @@ fn dynamic_tab_groups_baseline_and_changes_columns_for_builtin_sources() {
 #[test]
 fn mouse_click_on_dynamic_checkbox_selects_snapshot_column_for_x_toggle() {
     let mut model = ready_model();
-    model.prompt_assembly.dynamic_environment_candidates =
+    model.prompt_assembly.candidates.dynamic_environment =
         vec![PromptAssemblyDynamicEnvironmentCandidate {
             source_kind: DynamicEnvironmentSourceKind::GitReference,
             label: "Git reference".to_string(),
@@ -1484,11 +1509,10 @@ fn r_still_restores_core_system_override_on_left_selection() {
             crossterm::event::KeyModifiers::NONE,
         )),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::RestoreCoreSystemOverride {
-                    scope:
-                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
-                },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::RestoreCoreSystemOverride,
+            ),
         })
     );
 }

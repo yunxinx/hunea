@@ -20,8 +20,8 @@ use runtime_domain::phrases::StatusPhraseOrder;
 use runtime_domain::prompt_assembly::PromptSourceOrigin;
 use runtime_domain::prompt_assembly::persistence::PromptAssemblyScope;
 use runtime_domain::prompt_assembly::{
-    PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate, PromptAssemblyInput,
-    PromptAssemblyManagerSnapshot, PromptPreludeSnapshot, resolve_prompt_assembly,
+    PromptAssemblyDiscoveredSkill, PromptAssemblyExtraPromptCandidate,
+    PromptAssemblyManagerSnapshot,
 };
 use runtime_domain::provider::ProviderKind;
 use std::path::{Path, PathBuf};
@@ -662,9 +662,9 @@ fn custom_prompt_picker_renders_body_summary_with_scope_suffix() {
 #[test]
 fn custom_prompt_picker_does_not_render_reference_id_when_prompt_has_only_title() {
     let mut model = custom_prompt_picker_model();
-    model.prompt_assembly.extra_prompt_candidates[0].reference_id = "new-prompt-1".to_string();
-    model.prompt_assembly.extra_prompt_candidates[0].title = "测试用的".to_string();
-    model.prompt_assembly.extra_prompt_candidates[0].body = "# 测试用的\n".to_string();
+    model.prompt_assembly.candidates.extra_prompts[0].reference_id = "new-prompt-1".to_string();
+    model.prompt_assembly.candidates.extra_prompts[0].title = "测试用的".to_string();
+    model.prompt_assembly.candidates.extra_prompts[0].body = "# 测试用的\n".to_string();
     model.set_window(80, 8);
 
     type_text(&mut model, "#new");
@@ -690,7 +690,7 @@ fn custom_prompt_picker_does_not_render_reference_id_when_prompt_has_only_title(
 #[test]
 fn custom_prompt_picker_keeps_scope_suffix_visible_at_row_end_when_content_is_long() {
     let mut model = custom_prompt_picker_model();
-    model.prompt_assembly.extra_prompt_candidates[0].body =
+    model.prompt_assembly.candidates.extra_prompts[0].body =
         "This is a deliberately long custom prompt body that should be clipped before the scope suffix disappears.\n".to_string();
     model.set_window(36, 8);
 
@@ -3216,25 +3216,13 @@ fn skill_picker_model_with_manual_skills(
     manual_skills: Vec<PromptAssemblyDiscoveredSkill>,
     file_picker_popup_height: u16,
 ) -> Model {
+    let mut prompt_assembly = PromptAssemblyManagerSnapshot::default();
+    prompt_assembly.candidates.manual_skills = manual_skills;
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
         ModelOptions {
             file_picker_popup_height,
-            prompt_assembly: Some(PromptAssemblyManagerSnapshot {
-                snapshot: resolve_prompt_assembly(&PromptAssemblyInput::default()),
-                prelude: PromptPreludeSnapshot::default(),
-                managed_sources: Vec::new(),
-                sources: Vec::new(),
-                extra_prompt_candidates: Vec::new(),
-                discovered_skills: Vec::new(),
-                manual_skills,
-                tool_candidates: Vec::new(),
-                dynamic_environment_candidates: Vec::new(),
-                diagnostics: Vec::new(),
-                builtin_core_system_body: String::new(),
-                global_core_system_override: None,
-                project_core_system_override: None,
-            }),
+            prompt_assembly: Some(prompt_assembly),
             ..ModelOptions::default()
         },
     );
@@ -3245,40 +3233,28 @@ fn skill_picker_model_with_manual_skills(
 }
 
 fn custom_prompt_picker_model() -> Model {
+    let mut prompt_assembly = PromptAssemblyManagerSnapshot::default();
+    prompt_assembly.candidates.extra_prompts = vec![
+        PromptAssemblyExtraPromptCandidate {
+            reference_id: "review-rules".to_string(),
+            title: "Review Rules".to_string(),
+            origin: PromptSourceOrigin::Project,
+            body: "Review every diff for regressions and missing tests.".to_string(),
+            selected: false,
+        },
+        PromptAssemblyExtraPromptCandidate {
+            reference_id: "release-checklist".to_string(),
+            title: "Release Checklist".to_string(),
+            origin: PromptSourceOrigin::Global,
+            body: "Verify changelog, version, and rollout notes.".to_string(),
+            selected: false,
+        },
+    ];
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
         ModelOptions {
             file_picker_popup_height: 8,
-            prompt_assembly: Some(PromptAssemblyManagerSnapshot {
-                snapshot: resolve_prompt_assembly(&PromptAssemblyInput::default()),
-                prelude: PromptPreludeSnapshot::default(),
-                managed_sources: Vec::new(),
-                sources: Vec::new(),
-                extra_prompt_candidates: vec![
-                    PromptAssemblyExtraPromptCandidate {
-                        reference_id: "review-rules".to_string(),
-                        title: "Review Rules".to_string(),
-                        origin: PromptSourceOrigin::Project,
-                        body: "Review every diff for regressions and missing tests.".to_string(),
-                        selected: false,
-                    },
-                    PromptAssemblyExtraPromptCandidate {
-                        reference_id: "release-checklist".to_string(),
-                        title: "Release Checklist".to_string(),
-                        origin: PromptSourceOrigin::Global,
-                        body: "Verify changelog, version, and rollout notes.".to_string(),
-                        selected: false,
-                    },
-                ],
-                discovered_skills: Vec::new(),
-                manual_skills: Vec::new(),
-                tool_candidates: Vec::new(),
-                dynamic_environment_candidates: Vec::new(),
-                diagnostics: Vec::new(),
-                builtin_core_system_body: String::new(),
-                global_core_system_override: None,
-                project_core_system_override: None,
-            }),
+            prompt_assembly: Some(prompt_assembly),
             ..ModelOptions::default()
         },
     );

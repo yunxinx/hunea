@@ -51,7 +51,8 @@ impl Model {
             return;
         }
 
-        let items = filter_manual_skill_items(&self.prompt_assembly.manual_skills, &query);
+        let items =
+            filter_manual_skill_items(&self.prompt_assembly.candidates.manual_skills, &query);
         let visible_rows = self.file_picker_list_visible_rows();
         let previous = self.skill_picker.as_ref();
         let bound_skill_name = self

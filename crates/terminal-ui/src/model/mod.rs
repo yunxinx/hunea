@@ -13,8 +13,9 @@ use runtime_domain::{
     envinfo,
     model_catalog::{ModelCatalog, ModelSelection},
     prompt_assembly::{
-        PromptAssemblyInput, PromptAssemblyManagerSnapshot, PromptPreludeSnapshot,
-        resolve_prompt_assembly,
+        PromptAssemblyCandidateInventorySnapshot, PromptAssemblyCoreSystemSnapshot,
+        PromptAssemblyInput, PromptAssemblyManagerSnapshot, PromptAssemblyResolvedSnapshot,
+        PromptAssemblySourceInventorySnapshot, PromptPreludeSnapshot, resolve_prompt_assembly,
     },
     session::{PromptAssemblyUpdateNotice, RuntimeTerminalSnapshot, SessionLoadRequestId},
 };
@@ -193,19 +194,27 @@ impl Model {
             options
                 .prompt_assembly
                 .unwrap_or_else(|| PromptAssemblyManagerSnapshot {
-                    snapshot: resolve_prompt_assembly(&PromptAssemblyInput::default()),
-                    prelude: PromptPreludeSnapshot::default(),
-                    managed_sources: Vec::new(),
-                    sources: Vec::new(),
-                    extra_prompt_candidates: Vec::new(),
-                    discovered_skills: Vec::new(),
-                    manual_skills: Vec::new(),
-                    tool_candidates: Vec::new(),
-                    dynamic_environment_candidates: Vec::new(),
+                    resolution: PromptAssemblyResolvedSnapshot {
+                        assembly: resolve_prompt_assembly(&PromptAssemblyInput::default()),
+                        prelude: PromptPreludeSnapshot::default(),
+                    },
+                    sources: PromptAssemblySourceInventorySnapshot {
+                        managed: Vec::new(),
+                        preview: Vec::new(),
+                    },
+                    candidates: PromptAssemblyCandidateInventorySnapshot {
+                        extra_prompts: Vec::new(),
+                        discovered_skills: Vec::new(),
+                        manual_skills: Vec::new(),
+                        tools: Vec::new(),
+                        dynamic_environment: Vec::new(),
+                    },
+                    core_system: PromptAssemblyCoreSystemSnapshot {
+                        builtin_body: String::new(),
+                        global_override: None,
+                        project_override: None,
+                    },
                     diagnostics: Vec::new(),
-                    builtin_core_system_body: String::new(),
-                    global_core_system_override: None,
-                    project_core_system_override: None,
                 });
 
         Self {

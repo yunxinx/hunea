@@ -11,16 +11,51 @@ pub(super) fn apply_mutation_to_scope_states(
         PromptAssemblyMutation::SaveEditorTarget { target, content } => {
             apply_save_editor_target(work_dir, global_state, project_state, target, content)
         }
-        PromptAssemblyMutation::SetExtraPromptSelected {
-            scope,
+        PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
+            snapshot_kind,
+            source_kind,
+            selected,
+        } => {
+            ensure_dynamic_environment_selection_state_materialized(
+                global_state,
+                project_state,
+                PromptAssemblyScope::Global,
+            );
+            set_dynamic_environment_source_selected(
+                scope_state_mut(global_state, project_state, PromptAssemblyScope::Global),
+                snapshot_kind,
+                source_kind,
+                selected,
+            );
+            Ok(())
+        }
+        PromptAssemblyMutation::Scoped(scoped) => apply_scoped_mutation_to_scope_states(
+            work_dir,
+            global_state,
+            project_state,
+            scoped,
+            tool_definitions,
+        ),
+    }
+}
+
+fn apply_scoped_mutation_to_scope_states(
+    work_dir: &Path,
+    global_state: &mut PromptAssemblyScopeState,
+    project_state: &mut PromptAssemblyScopeState,
+    mutation: PromptAssemblyScopedMutation,
+    tool_definitions: &[ToolDefinition],
+) -> Result<()> {
+    let PromptAssemblyScopedMutation { scope, kind } = mutation;
+    match kind {
+        PromptAssemblyScopedMutationKind::SetExtraPromptSelected {
             reference_id,
             selected,
         } => {
             set_extra_prompt_selected(global_state, project_state, scope, &reference_id, selected);
             Ok(())
         }
-        PromptAssemblyMutation::SetPromptSourceEnabled {
-            scope,
+        PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
             kind,
             reference_id,
             enabled,
@@ -37,8 +72,7 @@ pub(super) fn apply_mutation_to_scope_states(
             set_prompt_source_enabled(state, kind, &reference_id, enabled);
             Ok(())
         }
-        PromptAssemblyMutation::SetDiscoveredSkillSelected {
-            scope,
+        PromptAssemblyScopedMutationKind::SetDiscoveredSkillSelected {
             skill_name,
             selected,
         } => {
@@ -55,8 +89,7 @@ pub(super) fn apply_mutation_to_scope_states(
             );
             Ok(())
         }
-        PromptAssemblyMutation::MoveDiscoveredSkill {
-            scope,
+        PromptAssemblyScopedMutationKind::MoveDiscoveredSkill {
             skill_name,
             direction,
         } => {
@@ -72,7 +105,7 @@ pub(super) fn apply_mutation_to_scope_states(
                 direction,
             )
         }
-        PromptAssemblyMutation::ResetDiscoveredSkillOrder { scope } => {
+        PromptAssemblyScopedMutationKind::ResetDiscoveredSkillOrder => {
             ensure_skill_discovery_selection_state_materialized(
                 work_dir,
                 global_state,
@@ -86,8 +119,7 @@ pub(super) fn apply_mutation_to_scope_states(
             );
             Ok(())
         }
-        PromptAssemblyMutation::SetToolSelected {
-            scope,
+        PromptAssemblyScopedMutationKind::SetToolSelected {
             tool_name,
             selected,
         } => {
@@ -108,26 +140,7 @@ pub(super) fn apply_mutation_to_scope_states(
             );
             Ok(())
         }
-        PromptAssemblyMutation::SetDynamicEnvironmentSourceSelected {
-            snapshot_kind,
-            source_kind,
-            selected,
-        } => {
-            ensure_dynamic_environment_selection_state_materialized(
-                global_state,
-                project_state,
-                PromptAssemblyScope::Global,
-            );
-            set_dynamic_environment_source_selected(
-                scope_state_mut(global_state, project_state, PromptAssemblyScope::Global),
-                snapshot_kind,
-                source_kind,
-                selected,
-            );
-            Ok(())
-        }
-        PromptAssemblyMutation::MoveTool {
-            scope,
+        PromptAssemblyScopedMutationKind::MoveTool {
             tool_name,
             direction,
         } => {
@@ -147,11 +160,11 @@ pub(super) fn apply_mutation_to_scope_states(
                 direction,
             )
         }
-        PromptAssemblyMutation::ActivateLongLivedSkill { scope, skill_name } => {
+        PromptAssemblyScopedMutationKind::ActivateLongLivedSkill { skill_name } => {
             activate_long_lived_skill(global_state, project_state, scope, &skill_name);
             Ok(())
         }
-        PromptAssemblyMutation::CreateExtraPrompt { scope, content } => {
+        PromptAssemblyScopedMutationKind::CreateExtraPrompt { content } => {
             let state = scope_state_mut(global_state, project_state, scope);
             let title = derive_extra_prompt_title(&content, "New prompt");
             let reference_id = generate_unique_extra_prompt_reference_id(state, &title);
@@ -173,10 +186,7 @@ pub(super) fn apply_mutation_to_scope_states(
             });
             Ok(())
         }
-        PromptAssemblyMutation::DeleteExtraPrompt {
-            scope,
-            reference_id,
-        } => {
+        PromptAssemblyScopedMutationKind::DeleteExtraPrompt { reference_id } => {
             let state = scope_state_mut(global_state, project_state, scope);
             state.entries_mut().retain(|entry| {
                 !(entry.kind == PromptSourceKind::ExtraPrompt && entry.reference_id == reference_id)
@@ -186,11 +196,7 @@ pub(super) fn apply_mutation_to_scope_states(
                 .retain(|prompt| prompt.reference_id != reference_id);
             Ok(())
         }
-        PromptAssemblyMutation::RemovePromptSource {
-            scope,
-            kind,
-            reference_id,
-        } => {
+        PromptAssemblyScopedMutationKind::RemovePromptSource { kind, reference_id } => {
             ensure_prompt_source_entry_materialized(
                 work_dir,
                 global_state,
@@ -206,8 +212,7 @@ pub(super) fn apply_mutation_to_scope_states(
             );
             Ok(())
         }
-        PromptAssemblyMutation::MoveActiveSource {
-            scope,
+        PromptAssemblyScopedMutationKind::MoveActiveSource {
             kind,
             reference_id,
             direction,
@@ -229,7 +234,7 @@ pub(super) fn apply_mutation_to_scope_states(
                 direction,
             )
         }
-        PromptAssemblyMutation::RestoreCoreSystemOverride { scope } => {
+        PromptAssemblyScopedMutationKind::RestoreCoreSystemOverride => {
             scope_state_mut(global_state, project_state, scope).set_core_system_override(None);
             Ok(())
         }
@@ -387,20 +392,20 @@ pub(super) fn extend_candidates(
     for entry in state.entries() {
         let reference_id = entry.reference_id.clone();
         let origin = Some(entry_origin(state.scope(), entry.kind));
+        let resolvable = resolvable_for_entry(
+            entry,
+            state.scope(),
+            context.extra_prompt_bodies,
+            context.skills_by_name,
+            context.instructions_by_reference_id,
+        );
         let candidate = PromptSourceCandidate {
             reference_id: reference_id.clone(),
             kind: entry.kind,
             title: entry.title.clone(),
             origin,
             collision_key: collision_key_for_entry(entry),
-            enabled: entry.enabled,
-            resolvable: resolvable_for_entry(
-                entry,
-                state.scope(),
-                context.extra_prompt_bodies,
-                context.skills_by_name,
-                context.instructions_by_reference_id,
-            ),
+            state: PromptSourceCandidateState::from_materialized_source(entry.enabled, resolvable),
             requested_order: entry.requested_order,
         };
         if let Some(body) = body_for_entry(entry, state.scope(), context) {

@@ -15,8 +15,8 @@ use runtime_domain::prompt_assembly::{
     PromptAssemblyDiscoveredSkill, PromptAssemblyDynamicEnvironmentCandidate,
     PromptAssemblyExtraPromptCandidate, PromptAssemblyLifecycle, PromptAssemblyManagedSource,
     PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
-    PromptAssemblyMutation, PromptAssemblySnapshot, PromptAssemblyToolCandidate,
-    PromptPreludeSnapshot, PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin,
+    PromptAssemblyMutation, PromptAssemblyScopedMutationKind, PromptAssemblySnapshot,
+    PromptAssemblyToolCandidate, PromptSourceInactiveReason, PromptSourceKind, PromptSourceOrigin,
     PromptSourceStatus, ResolvedPromptSource,
 };
 use runtime_domain::session::PromptAssemblyUpdateNotice;
@@ -107,103 +107,97 @@ fn prompt_snapshot() -> PromptAssemblySnapshot {
 }
 
 fn ready_model() -> Model {
+    let mut prompt_assembly = PromptAssemblyManagerSnapshot::default();
+    prompt_assembly.resolution.assembly = prompt_snapshot();
+    prompt_assembly.sources.managed = vec![
+        PromptAssemblyManagedSource {
+            reference_id: "core-system".to_string(),
+            kind: PromptSourceKind::CoreSystemPrompt,
+            title: "Core system prompt".to_string(),
+            origin: Some(PromptSourceOrigin::Builtin),
+            scope: None,
+            enabled: true,
+            order: 1,
+        },
+        PromptAssemblyManagedSource {
+            reference_id: "skill-discovery".to_string(),
+            kind: PromptSourceKind::SkillDiscovery,
+            title: "Skill discovery".to_string(),
+            origin: Some(PromptSourceOrigin::Project),
+            scope: Some(PromptAssemblyScope::Project),
+            enabled: true,
+            order: 2,
+        },
+        PromptAssemblyManagedSource {
+            reference_id: "repo-rules".to_string(),
+            kind: PromptSourceKind::ExtraPrompt,
+            title: "repo-rules".to_string(),
+            origin: Some(PromptSourceOrigin::Project),
+            scope: Some(PromptAssemblyScope::Project),
+            enabled: true,
+            order: 3,
+        },
+        PromptAssemblyManagedSource {
+            reference_id: "safety-policy".to_string(),
+            kind: PromptSourceKind::ExtraPrompt,
+            title: "safety-policy".to_string(),
+            origin: Some(PromptSourceOrigin::Global),
+            scope: Some(PromptAssemblyScope::Global),
+            enabled: false,
+            order: 4,
+        },
+    ];
+    prompt_assembly.candidates.extra_prompts = vec![PromptAssemblyExtraPromptCandidate {
+        reference_id: "global-extra".to_string(),
+        title: "global-extra".to_string(),
+        origin: PromptSourceOrigin::Global,
+        body: "# Global Extra\n".to_string(),
+        selected: false,
+    }];
+    prompt_assembly.candidates.discovered_skills = vec![
+        PromptAssemblyDiscoveredSkill {
+            skill_name: "repo-bootstrap".to_string(),
+            title: "repo-bootstrap".to_string(),
+            description: "Bootstrap repo".to_string(),
+            origin: PromptSourceOrigin::Project,
+            selection_scope: PromptAssemblyScope::Project,
+            skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
+            body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
+            can_select_for_discovery: true,
+            selected: true,
+            selected_order: Some(1),
+        },
+        PromptAssemblyDiscoveredSkill {
+            skill_name: "code-review".to_string(),
+            title: "code-review".to_string(),
+            description: "Review code".to_string(),
+            origin: PromptSourceOrigin::Global,
+            selection_scope: PromptAssemblyScope::Project,
+            skill_path: "/tmp/code-review/SKILL.md".to_string(),
+            body: "# Code Review\n\nUse this skill.".to_string(),
+            can_select_for_discovery: true,
+            selected: true,
+            selected_order: Some(2),
+        },
+    ];
+    prompt_assembly.candidates.manual_skills = vec![PromptAssemblyDiscoveredSkill {
+        skill_name: "repo-bootstrap".to_string(),
+        title: "repo-bootstrap".to_string(),
+        description: "Bootstrap repo".to_string(),
+        origin: PromptSourceOrigin::Project,
+        selection_scope: PromptAssemblyScope::Project,
+        skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
+        body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
+        can_select_for_discovery: true,
+        selected: false,
+        selected_order: None,
+    }];
+    prompt_assembly.core_system.builtin_body = "builtin core".to_string();
+
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
         ModelOptions {
-            prompt_assembly: Some(PromptAssemblyManagerSnapshot {
-                snapshot: prompt_snapshot(),
-                prelude: PromptPreludeSnapshot::default(),
-                managed_sources: vec![
-                    PromptAssemblyManagedSource {
-                        reference_id: "core-system".to_string(),
-                        kind: PromptSourceKind::CoreSystemPrompt,
-                        title: "Core system prompt".to_string(),
-                        origin: Some(PromptSourceOrigin::Builtin),
-                        scope: None,
-                        enabled: true,
-                        order: 1,
-                    },
-                    PromptAssemblyManagedSource {
-                        reference_id: "skill-discovery".to_string(),
-                        kind: PromptSourceKind::SkillDiscovery,
-                        title: "Skill discovery".to_string(),
-                        origin: Some(PromptSourceOrigin::Project),
-                        scope: Some(PromptAssemblyScope::Project),
-                        enabled: true,
-                        order: 2,
-                    },
-                    PromptAssemblyManagedSource {
-                        reference_id: "repo-rules".to_string(),
-                        kind: PromptSourceKind::ExtraPrompt,
-                        title: "repo-rules".to_string(),
-                        origin: Some(PromptSourceOrigin::Project),
-                        scope: Some(PromptAssemblyScope::Project),
-                        enabled: true,
-                        order: 3,
-                    },
-                    PromptAssemblyManagedSource {
-                        reference_id: "safety-policy".to_string(),
-                        kind: PromptSourceKind::ExtraPrompt,
-                        title: "safety-policy".to_string(),
-                        origin: Some(PromptSourceOrigin::Global),
-                        scope: Some(PromptAssemblyScope::Global),
-                        enabled: false,
-                        order: 4,
-                    },
-                ],
-                sources: Vec::new(),
-                extra_prompt_candidates: vec![PromptAssemblyExtraPromptCandidate {
-                    reference_id: "global-extra".to_string(),
-                    title: "global-extra".to_string(),
-                    origin: PromptSourceOrigin::Global,
-                    body: "# Global Extra\n".to_string(),
-                    selected: false,
-                }],
-                discovered_skills: vec![
-                    PromptAssemblyDiscoveredSkill {
-                        skill_name: "repo-bootstrap".to_string(),
-                        title: "repo-bootstrap".to_string(),
-                        description: "Bootstrap repo".to_string(),
-                        origin: PromptSourceOrigin::Project,
-                        selection_scope: PromptAssemblyScope::Project,
-                        skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
-                        body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
-                        can_select_for_discovery: true,
-                        selected: true,
-                        selected_order: Some(1),
-                    },
-                    PromptAssemblyDiscoveredSkill {
-                        skill_name: "code-review".to_string(),
-                        title: "code-review".to_string(),
-                        description: "Review code".to_string(),
-                        origin: PromptSourceOrigin::Global,
-                        selection_scope: PromptAssemblyScope::Project,
-                        skill_path: "/tmp/code-review/SKILL.md".to_string(),
-                        body: "# Code Review\n\nUse this skill.".to_string(),
-                        can_select_for_discovery: true,
-                        selected: true,
-                        selected_order: Some(2),
-                    },
-                ],
-                manual_skills: vec![PromptAssemblyDiscoveredSkill {
-                    skill_name: "repo-bootstrap".to_string(),
-                    title: "repo-bootstrap".to_string(),
-                    description: "Bootstrap repo".to_string(),
-                    origin: PromptSourceOrigin::Project,
-                    selection_scope: PromptAssemblyScope::Project,
-                    skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
-                    body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
-                    can_select_for_discovery: true,
-                    selected: false,
-                    selected_order: None,
-                }],
-                tool_candidates: Vec::new(),
-                dynamic_environment_candidates: Vec::new(),
-                diagnostics: Vec::new(),
-                builtin_core_system_body: "builtin core".to_string(),
-                global_core_system_override: None,
-                project_core_system_override: None,
-            }),
+            prompt_assembly: Some(prompt_assembly),
             ..ModelOptions::default()
         },
     );

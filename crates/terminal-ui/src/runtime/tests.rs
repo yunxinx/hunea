@@ -3,8 +3,7 @@ use runtime_domain::{
     model_catalog::{ModelCatalog, ModelEntry, ModelProvider, ModelSelection, ModelSource},
     prompt_assembly::persistence::PromptAssemblyScope,
     prompt_assembly::{
-        PromptAssemblyDiscoveredSkill, PromptAssemblyInput, PromptAssemblyManagerSnapshot,
-        PromptPreludeSnapshot, PromptSourceOrigin, resolve_prompt_assembly,
+        PromptAssemblyDiscoveredSkill, PromptAssemblyManagerSnapshot, PromptSourceOrigin,
     },
     provider::ProviderKind,
     session::{
@@ -338,35 +337,23 @@ fn model_catalog() -> ModelCatalog {
 }
 
 fn model_with_manual_skill(skill_name: &str) -> Model {
+    let mut prompt_assembly = PromptAssemblyManagerSnapshot::default();
+    prompt_assembly.candidates.manual_skills = vec![PromptAssemblyDiscoveredSkill {
+        skill_name: skill_name.to_string(),
+        title: skill_name.to_string(),
+        description: "Manual skill".to_string(),
+        origin: PromptSourceOrigin::Project,
+        selection_scope: PromptAssemblyScope::Project,
+        skill_path: format!("/tmp/{skill_name}/SKILL.md"),
+        body: "# Manual Skill".to_string(),
+        can_select_for_discovery: false,
+        selected: false,
+        selected_order: None,
+    }];
     let mut model = Model::new_with_options(
         StartupBannerOptions::default(),
         ModelOptions {
-            prompt_assembly: Some(PromptAssemblyManagerSnapshot {
-                snapshot: resolve_prompt_assembly(&PromptAssemblyInput::default()),
-                prelude: PromptPreludeSnapshot::default(),
-                managed_sources: Vec::new(),
-                sources: Vec::new(),
-                extra_prompt_candidates: Vec::new(),
-                discovered_skills: Vec::new(),
-                manual_skills: vec![PromptAssemblyDiscoveredSkill {
-                    skill_name: skill_name.to_string(),
-                    title: skill_name.to_string(),
-                    description: "Manual skill".to_string(),
-                    origin: PromptSourceOrigin::Project,
-                    selection_scope: PromptAssemblyScope::Project,
-                    skill_path: format!("/tmp/{skill_name}/SKILL.md"),
-                    body: "# Manual Skill".to_string(),
-                    can_select_for_discovery: false,
-                    selected: false,
-                    selected_order: None,
-                }],
-                tool_candidates: Vec::new(),
-                dynamic_environment_candidates: Vec::new(),
-                diagnostics: Vec::new(),
-                builtin_core_system_body: String::new(),
-                global_core_system_override: None,
-                project_core_system_override: None,
-            }),
+            prompt_assembly: Some(prompt_assembly),
             ..ModelOptions::default()
         },
     );

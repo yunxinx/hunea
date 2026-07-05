@@ -19,13 +19,16 @@ use runtime_domain::prompt_assembly::persistence::{
     load_project_prompt_assembly_state, save_project_prompt_assembly_state,
 };
 use runtime_domain::prompt_assembly::{
-    CoreSystemPromptInput, PromptAssemblyDiagnostic, PromptAssemblyDiscoveredSkill,
+    CoreSystemPromptInput, PromptAssemblyCandidateInventorySnapshot,
+    PromptAssemblyCoreSystemSnapshot, PromptAssemblyDiagnostic, PromptAssemblyDiscoveredSkill,
     PromptAssemblyDynamicEnvironmentCandidate, PromptAssemblyEditorTarget,
     PromptAssemblyExtraPromptCandidate, PromptAssemblyInput, PromptAssemblyManagedSource,
     PromptAssemblyManagerSnapshot, PromptAssemblyManagerSource, PromptAssemblyMoveDirection,
-    PromptAssemblyMutation, PromptAssemblyToolCandidate, PromptPreludeSection,
-    PromptPreludeSnapshot, PromptSourceCandidate, PromptSourceInactiveReason, PromptSourceKind,
-    PromptSourceOrigin, PromptSourceStatus, SKILL_DISCOVERY_GENERATED_END,
+    PromptAssemblyMutation, PromptAssemblyResolvedSnapshot, PromptAssemblyScopedMutation,
+    PromptAssemblyScopedMutationKind, PromptAssemblySourceInventorySnapshot,
+    PromptAssemblyToolCandidate, PromptPreludeSection, PromptPreludeSnapshot,
+    PromptSourceCandidate, PromptSourceCandidateState, PromptSourceInactiveReason,
+    PromptSourceKind, PromptSourceOrigin, PromptSourceStatus, SKILL_DISCOVERY_GENERATED_END,
     SKILL_DISCOVERY_GENERATED_START, TOOL_GUIDELINES_GENERATED_END,
     TOOL_GUIDELINES_GENERATED_START, derive_extra_prompt_title, resolve_prompt_assembly,
 };
@@ -182,7 +185,8 @@ impl PromptAssemblyMissingSourcesCheck {
     fn from_manager(manager: &PromptAssemblyManagerSnapshot) -> Self {
         Self {
             missing_count: manager
-                .snapshot
+                .resolution
+                .assembly
                 .inactive_sources
                 .iter()
                 .filter(|source| {

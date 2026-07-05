@@ -101,6 +101,7 @@ impl Model {
     ) -> Option<PromptAssemblyManagerSource> {
         self.prompt_assembly
             .sources
+            .preview
             .iter()
             .find(|source| {
                 source.reference_id == selected.reference_id
@@ -117,7 +118,7 @@ impl Model {
             .and_then(|state| state.expanded_row.clone());
 
         let mut rows = Vec::new();
-        for source in &self.prompt_assembly.managed_sources {
+        for source in &self.prompt_assembly.sources.managed {
             let status = self.prompt_overlay_managed_status_for(source);
             if matches!(status, PromptOverlayManagedStatus::Shadowed) {
                 continue;
@@ -167,7 +168,8 @@ impl Model {
             .and_then(|state| state.expanded_row.clone());
         let mut groups = self
             .prompt_assembly
-            .extra_prompt_candidates
+            .candidates
+            .extra_prompts
             .iter()
             .cloned()
             .fold(
@@ -232,6 +234,7 @@ impl Model {
             .and_then(|state| state.expanded_row.clone());
         let mut groups = self
             .prompt_assembly
+            .candidates
             .discovered_skills
             .iter()
             .cloned()
@@ -298,7 +301,8 @@ impl Model {
 
     pub(super) fn prompt_overlay_tool_rows(&self) -> Vec<PromptOverlayInactiveRow> {
         self.prompt_assembly
-            .tool_candidates
+            .candidates
+            .tools
             .iter()
             .cloned()
             .map(|tool| PromptOverlayInactiveRow::ToolCandidate { tool })
@@ -307,7 +311,8 @@ impl Model {
 
     pub(super) fn prompt_overlay_dynamic_rows(&self) -> Vec<PromptOverlayInactiveRow> {
         self.prompt_assembly
-            .dynamic_environment_candidates
+            .candidates
+            .dynamic_environment
             .iter()
             .cloned()
             .map(|source| PromptOverlayInactiveRow::DynamicEnvironmentCandidate { source })
@@ -320,7 +325,8 @@ impl Model {
     ) -> PromptOverlayManagedStatus {
         if self
             .prompt_assembly
-            .snapshot
+            .resolution
+            .assembly
             .active_sources
             .iter()
             .any(|resolved| {
@@ -336,7 +342,8 @@ impl Model {
         }
 
         self.prompt_assembly
-            .snapshot
+            .resolution
+            .assembly
             .inactive_sources
             .iter()
             .find(|resolved| {
@@ -372,7 +379,8 @@ impl Model {
         reference_id: &str,
     ) -> Vec<ResolvedPromptSource> {
         self.prompt_assembly
-            .snapshot
+            .resolution
+            .assembly
             .inactive_sources
             .iter()
             .filter(|source| {
@@ -398,22 +406,26 @@ impl Model {
             self.selected_prompt_overlay_selection()
         {
             return Some(AppEffect::MutatePromptAssembly {
-                mutation: PromptAssemblyMutation::MoveDiscoveredSkill {
-                    scope: skill.selection_scope,
-                    skill_name: skill.skill_name,
-                    direction,
-                },
+                mutation: PromptAssemblyMutation::scoped(
+                    skill.selection_scope,
+                    PromptAssemblyScopedMutationKind::MoveDiscoveredSkill {
+                        skill_name: skill.skill_name,
+                        direction,
+                    },
+                ),
             });
         }
         if let Some(PromptOverlaySelection::ToolCandidate(tool)) =
             self.selected_prompt_overlay_selection()
         {
             return Some(AppEffect::MutatePromptAssembly {
-                mutation: PromptAssemblyMutation::MoveTool {
-                    scope: tool.selection_scope,
-                    tool_name: tool.name,
-                    direction,
-                },
+                mutation: PromptAssemblyMutation::scoped(
+                    tool.selection_scope,
+                    PromptAssemblyScopedMutationKind::MoveTool {
+                        tool_name: tool.name,
+                        direction,
+                    },
+                ),
             });
         }
         let selected = self.selected_prompt_overlay_managed_source()?;
@@ -421,12 +433,14 @@ impl Model {
             return None;
         }
         Some(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::MoveActiveSource {
-                scope: selected.scope?,
-                kind: selected.kind,
-                reference_id: selected.reference_id,
-                direction,
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                selected.scope?,
+                PromptAssemblyScopedMutationKind::MoveActiveSource {
+                    kind: selected.kind,
+                    reference_id: selected.reference_id,
+                    direction,
+                },
+            ),
         })
     }
 
@@ -436,12 +450,14 @@ impl Model {
                 return None;
             }
             return Some(AppEffect::MutatePromptAssembly {
-                mutation: PromptAssemblyMutation::SetPromptSourceEnabled {
-                    scope: selected.scope?,
-                    kind: selected.kind,
-                    reference_id: selected.reference_id,
-                    enabled: !selected.enabled,
-                },
+                mutation: PromptAssemblyMutation::scoped(
+                    selected.scope?,
+                    PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                        kind: selected.kind,
+                        reference_id: selected.reference_id,
+                        enabled: !selected.enabled,
+                    },
+                ),
             });
         }
 
@@ -452,21 +468,25 @@ impl Model {
                     return None;
                 }
                 Some(AppEffect::MutatePromptAssembly {
-                    mutation: PromptAssemblyMutation::SetPromptSourceEnabled {
-                        scope: prompt_scope_from_origin(selected.origin?)?,
-                        kind: selected.kind,
-                        reference_id: selected.reference_id,
-                        enabled: false,
-                    },
+                    mutation: PromptAssemblyMutation::scoped(
+                        prompt_scope_from_origin(selected.origin?)?,
+                        PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                            kind: selected.kind,
+                            reference_id: selected.reference_id,
+                            enabled: false,
+                        },
+                    ),
                 })
             }
             PromptOverlaySelection::ExtraPromptCandidate(candidate) => {
                 Some(AppEffect::MutatePromptAssembly {
-                    mutation: PromptAssemblyMutation::SetExtraPromptSelected {
-                        scope: prompt_scope_from_origin(candidate.origin)?,
-                        reference_id: candidate.reference_id,
-                        selected: !candidate.selected,
-                    },
+                    mutation: PromptAssemblyMutation::scoped(
+                        prompt_scope_from_origin(candidate.origin)?,
+                        PromptAssemblyScopedMutationKind::SetExtraPromptSelected {
+                            reference_id: candidate.reference_id,
+                            selected: !candidate.selected,
+                        },
+                    ),
                 })
             }
             PromptOverlaySelection::DiscoveredSkill(skill) => {
@@ -474,11 +494,13 @@ impl Model {
                     return None;
                 }
                 Some(AppEffect::MutatePromptAssembly {
-                    mutation: PromptAssemblyMutation::SetDiscoveredSkillSelected {
-                        scope: skill.selection_scope,
-                        skill_name: skill.skill_name,
-                        selected: !skill.selected,
-                    },
+                    mutation: PromptAssemblyMutation::scoped(
+                        skill.selection_scope,
+                        PromptAssemblyScopedMutationKind::SetDiscoveredSkillSelected {
+                            skill_name: skill.skill_name,
+                            selected: !skill.selected,
+                        },
+                    ),
                 })
             }
             PromptOverlaySelection::ToolCandidate(tool) => {
@@ -486,11 +508,13 @@ impl Model {
                     return None;
                 }
                 Some(AppEffect::MutatePromptAssembly {
-                    mutation: PromptAssemblyMutation::SetToolSelected {
-                        scope: tool.selection_scope,
-                        tool_name: tool.name,
-                        selected: !tool.selected,
-                    },
+                    mutation: PromptAssemblyMutation::scoped(
+                        tool.selection_scope,
+                        PromptAssemblyScopedMutationKind::SetToolSelected {
+                            tool_name: tool.name,
+                            selected: !tool.selected,
+                        },
+                    ),
                 })
             }
             PromptOverlaySelection::DynamicEnvironmentCandidate(source) => {
@@ -518,14 +542,18 @@ impl Model {
         }
         let content = self.default_extra_prompt_body_for_scope(scope);
         Some(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::CreateExtraPrompt { scope, content },
+            mutation: PromptAssemblyMutation::scoped(
+                scope,
+                PromptAssemblyScopedMutationKind::CreateExtraPrompt { content },
+            ),
         })
     }
 
     pub(super) fn default_extra_prompt_body_for_scope(&self, scope: PromptAssemblyScope) -> String {
         let title = next_default_extra_prompt_title(
             self.prompt_assembly
-                .managed_sources
+                .sources
+                .managed
                 .iter()
                 .filter(|source| {
                     source.kind == PromptSourceKind::ExtraPrompt
@@ -537,7 +565,8 @@ impl Model {
                 .map(|source| source.title.as_str())
                 .chain(
                     self.prompt_assembly
-                        .extra_prompt_candidates
+                        .candidates
+                        .extra_prompts
                         .iter()
                         .filter(|candidate| {
                             prompt_scope_from_origin(candidate.origin)
@@ -571,10 +600,10 @@ impl Model {
         reference_id: String,
     ) -> AppEffect {
         AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::DeleteExtraPrompt {
+            mutation: PromptAssemblyMutation::scoped(
                 scope,
-                reference_id,
-            },
+                PromptAssemblyScopedMutationKind::DeleteExtraPrompt { reference_id },
+            ),
         }
     }
 
@@ -672,15 +701,17 @@ impl Model {
         match scope {
             PromptAssemblyScope::Global => self
                 .prompt_assembly
-                .global_core_system_override
+                .core_system
+                .global_override
                 .clone()
-                .unwrap_or_else(|| self.prompt_assembly.builtin_core_system_body.clone()),
+                .unwrap_or_else(|| self.prompt_assembly.core_system.builtin_body.clone()),
             PromptAssemblyScope::Project => self
                 .prompt_assembly
-                .project_core_system_override
+                .core_system
+                .project_override
                 .clone()
-                .or_else(|| self.prompt_assembly.global_core_system_override.clone())
-                .unwrap_or_else(|| self.prompt_assembly.builtin_core_system_body.clone()),
+                .or_else(|| self.prompt_assembly.core_system.global_override.clone())
+                .unwrap_or_else(|| self.prompt_assembly.core_system.builtin_body.clone()),
         }
     }
 
@@ -695,6 +726,7 @@ impl Model {
         let body = self
             .prompt_assembly
             .sources
+            .preview
             .iter()
             .find(|source| {
                 source.reference_id == "skill-discovery"
@@ -718,6 +750,7 @@ impl Model {
         let body = self
             .prompt_assembly
             .sources
+            .preview
             .iter()
             .find(|source| {
                 source.reference_id == "tool-guidelines"

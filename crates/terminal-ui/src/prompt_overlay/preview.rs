@@ -134,6 +134,7 @@ impl Model {
     pub(crate) fn open_prompt_overlay_assembled_preview(&mut self) {
         let content = self
             .prompt_assembly
+            .resolution
             .prelude
             .effective_system_prompt()
             .unwrap_or_default();

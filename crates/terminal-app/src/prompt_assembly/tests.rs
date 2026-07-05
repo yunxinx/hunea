@@ -160,20 +160,21 @@ fn manager_snapshot_includes_default_dynamic_environment_sources() {
         &[],
     );
 
-    assert!(snapshot.managed_sources.iter().any(|source| {
+    assert!(snapshot.sources.managed.iter().any(|source| {
         source.kind == PromptSourceKind::DynamicEnvironmentBaseline
             && source.title == "Env baseline"
             && source.enabled
     }));
-    assert!(snapshot.managed_sources.iter().any(|source| {
+    assert!(snapshot.sources.managed.iter().any(|source| {
         source.kind == PromptSourceKind::DynamicEnvironmentChanges
             && source.title == "Env changes"
             && source.enabled
     }));
-    assert_eq!(snapshot.dynamic_environment_candidates.len(), 4);
+    assert_eq!(snapshot.candidates.dynamic_environment.len(), 4);
     assert!(
         snapshot
-            .dynamic_environment_candidates
+            .candidates
+            .dynamic_environment
             .iter()
             .any(|candidate| {
                 candidate.source_kind == DynamicEnvironmentSourceKind::GitWorkingTree
@@ -190,7 +191,8 @@ fn manager_snapshot_includes_default_dynamic_environment_sources() {
     );
     assert!(
         snapshot
-            .dynamic_environment_candidates
+            .candidates
+            .dynamic_environment
             .iter()
             .any(|candidate| {
                 candidate.source_kind == DynamicEnvironmentSourceKind::Workdir
@@ -201,7 +203,8 @@ fn manager_snapshot_includes_default_dynamic_environment_sources() {
     );
     assert_eq!(
         snapshot
-            .snapshot
+            .resolution
+            .assembly
             .active_sources
             .iter()
             .map(|source| source.reference_id.as_str())
@@ -436,10 +439,11 @@ fn resolve_initial_prompt_assembly_keeps_inactive_sources_for_manager_view() {
         &[],
     );
 
-    assert_eq!(resolved.snapshot.active_sources.len(), 5);
+    assert_eq!(resolved.resolution.assembly.active_sources.len(), 5);
     assert_eq!(
         resolved
-            .snapshot
+            .resolution
+            .assembly
             .active_sources
             .iter()
             .map(|source| source.reference_id.as_str())
@@ -454,7 +458,8 @@ fn resolve_initial_prompt_assembly_keeps_inactive_sources_for_manager_view() {
     );
     assert_eq!(
         resolved
-            .snapshot
+            .resolution
+            .assembly
             .inactive_sources
             .iter()
             .map(|source| source.reference_id.as_str())
@@ -482,7 +487,8 @@ fn resolve_manager_snapshot_injects_default_skill_discovery_source_with_generate
     );
 
     let managed_skill_discovery = resolved
-        .managed_sources
+        .sources
+        .managed
         .iter()
         .find(|source| source.kind == PromptSourceKind::SkillDiscovery)
         .expect("default skill discovery source should exist");
@@ -490,6 +496,7 @@ fn resolve_manager_snapshot_injects_default_skill_discovery_source_with_generate
 
     let materialized_skill_discovery = resolved
         .sources
+        .preview
         .iter()
         .find(|source| {
             source.kind == PromptSourceKind::SkillDiscovery
@@ -525,7 +532,8 @@ fn resolve_manager_snapshot_places_tool_guidelines_after_core_and_marks_it_built
 
     assert_eq!(
         resolved
-            .snapshot
+            .resolution
+            .assembly
             .active_sources
             .iter()
             .map(|source| (source.reference_id.as_str(), source.origin))
@@ -539,7 +547,8 @@ fn resolve_manager_snapshot_places_tool_guidelines_after_core_and_marks_it_built
         ]
     );
     let managed_tool_guidelines = resolved
-        .managed_sources
+        .sources
+        .managed
         .iter()
         .find(|source| source.reference_id == "tool-guidelines")
         .expect("tool guidelines should be visible in manager list");
@@ -562,12 +571,14 @@ fn disabling_default_tool_guidelines_materializes_builtin_entry_in_global_state(
     apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
-        PromptAssemblyMutation::SetPromptSourceEnabled {
-            scope: PromptAssemblyScope::Global,
-            kind: PromptSourceKind::ToolGuidelines,
-            reference_id: "tool-guidelines".to_string(),
-            enabled: false,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                kind: PromptSourceKind::ToolGuidelines,
+                reference_id: "tool-guidelines".to_string(),
+                enabled: false,
+            },
+        ),
         &builtin_tool_definitions(),
     )
     .expect("disable should succeed");
@@ -596,25 +607,28 @@ fn disabling_default_dynamic_environment_changes_keeps_baseline_visible() {
     let disabled_snapshot = apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
-        PromptAssemblyMutation::SetPromptSourceEnabled {
-            scope: PromptAssemblyScope::Global,
-            kind: PromptSourceKind::DynamicEnvironmentChanges,
-            reference_id: "env-changes".to_string(),
-            enabled: false,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                kind: PromptSourceKind::DynamicEnvironmentChanges,
+                reference_id: "env-changes".to_string(),
+                enabled: false,
+            },
+        ),
         &[],
     )
     .expect("disable should succeed");
 
-    assert!(disabled_snapshot.managed_sources.iter().any(|source| {
+    assert!(disabled_snapshot.sources.managed.iter().any(|source| {
         source.kind == PromptSourceKind::DynamicEnvironmentBaseline && source.enabled
     }));
-    assert!(disabled_snapshot.managed_sources.iter().any(|source| {
+    assert!(disabled_snapshot.sources.managed.iter().any(|source| {
         source.kind == PromptSourceKind::DynamicEnvironmentChanges && !source.enabled
     }));
     assert!(
         disabled_snapshot
-            .snapshot
+            .resolution
+            .assembly
             .active_sources
             .iter()
             .any(|source| {
@@ -624,7 +638,8 @@ fn disabling_default_dynamic_environment_changes_keeps_baseline_visible() {
     );
     assert!(
         disabled_snapshot
-            .snapshot
+            .resolution
+            .assembly
             .inactive_sources
             .iter()
             .any(|source| {
@@ -648,37 +663,41 @@ fn dynamic_environment_prompt_source_stays_visible_after_disable_and_can_be_rest
     let disabled_snapshot = apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
-        PromptAssemblyMutation::SetPromptSourceEnabled {
-            scope: PromptAssemblyScope::Global,
-            kind: PromptSourceKind::DynamicEnvironmentBaseline,
-            reference_id: "env-baseline".to_string(),
-            enabled: false,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                kind: PromptSourceKind::DynamicEnvironmentBaseline,
+                reference_id: "env-baseline".to_string(),
+                enabled: false,
+            },
+        ),
         &[],
     )
     .expect("disable should succeed");
 
-    assert!(disabled_snapshot.managed_sources.iter().any(|source| {
+    assert!(disabled_snapshot.sources.managed.iter().any(|source| {
         source.kind == PromptSourceKind::DynamicEnvironmentBaseline && !source.enabled
     }));
-    assert!(disabled_snapshot.managed_sources.iter().any(|source| {
+    assert!(disabled_snapshot.sources.managed.iter().any(|source| {
         source.kind == PromptSourceKind::DynamicEnvironmentChanges && source.enabled
     }));
 
     let restored_snapshot = apply_prompt_assembly_mutation(
         store,
         &work_dir,
-        PromptAssemblyMutation::SetPromptSourceEnabled {
-            scope: PromptAssemblyScope::Global,
-            kind: PromptSourceKind::DynamicEnvironmentBaseline,
-            reference_id: "env-baseline".to_string(),
-            enabled: true,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                kind: PromptSourceKind::DynamicEnvironmentBaseline,
+                reference_id: "env-baseline".to_string(),
+                enabled: true,
+            },
+        ),
         &[],
     )
     .expect("re-enable should succeed");
 
-    assert!(restored_snapshot.managed_sources.iter().any(|source| {
+    assert!(restored_snapshot.sources.managed.iter().any(|source| {
         source.kind == PromptSourceKind::DynamicEnvironmentBaseline && source.enabled
     }));
 }
@@ -691,19 +710,22 @@ fn moving_default_dynamic_environment_source_reorders_managed_list() {
     let snapshot = apply_prompt_assembly_mutation(
         store,
         &work_dir,
-        PromptAssemblyMutation::MoveActiveSource {
-            scope: PromptAssemblyScope::Global,
-            kind: PromptSourceKind::DynamicEnvironmentBaseline,
-            reference_id: "env-baseline".to_string(),
-            direction: PromptAssemblyMoveDirection::Down,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::MoveActiveSource {
+                kind: PromptSourceKind::DynamicEnvironmentBaseline,
+                reference_id: "env-baseline".to_string(),
+                direction: PromptAssemblyMoveDirection::Down,
+            },
+        ),
         &[],
     )
     .expect("move should succeed");
 
     assert_eq!(
         snapshot
-            .managed_sources
+            .sources
+            .managed
             .iter()
             .map(|source| source.reference_id.as_str())
             .collect::<Vec<_>>(),
@@ -727,19 +749,22 @@ fn moving_default_instruction_file_materializes_and_reorders_project_entry() {
     let snapshot = apply_prompt_assembly_mutation(
         store,
         &work_dir,
-        PromptAssemblyMutation::MoveActiveSource {
-            scope: PromptAssemblyScope::Project,
-            kind: PromptSourceKind::InstructionsFile,
-            reference_id: "instructions:project:.".to_string(),
-            direction: PromptAssemblyMoveDirection::Down,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::MoveActiveSource {
+                kind: PromptSourceKind::InstructionsFile,
+                reference_id: "instructions:project:.".to_string(),
+                direction: PromptAssemblyMoveDirection::Down,
+            },
+        ),
         &builtin_tool_definitions(),
     )
     .expect("move should succeed");
 
     assert_eq!(
         snapshot
-            .snapshot
+            .resolution
+            .assembly
             .active_sources
             .iter()
             .map(|source| source.reference_id.as_str())
@@ -816,12 +841,14 @@ fn manager_snapshot_keeps_project_and_global_skill_duplicates_for_overlay() {
     );
 
     let visible_origins = snapshot
+        .candidates
         .discovered_skills
         .iter()
         .filter(|skill| skill.skill_name == "repo-bootstrap")
         .map(|skill| skill.origin)
         .collect::<Vec<_>>();
     let manual_origins = snapshot
+        .candidates
         .manual_skills
         .iter()
         .filter(|skill| skill.skill_name == "repo-bootstrap")
@@ -861,6 +888,7 @@ fn discovered_skill_inventory_keeps_manual_only_skills_visible() {
     );
 
     let skill = snapshot
+        .candidates
         .discovered_skills
         .iter()
         .find(|skill| skill.skill_name == "zzz-manual")
@@ -869,18 +897,19 @@ fn discovered_skill_inventory_keeps_manual_only_skills_visible() {
     assert!(!skill.selected);
     assert_eq!(skill.selected_order, None);
     let manual_index = snapshot
+        .candidates
         .discovered_skills
         .iter()
         .position(|skill| skill.skill_name == "zzz-manual")
         .expect("manual-only skill should stay in inventory");
     assert!(
-        snapshot.discovered_skills[..manual_index]
+        snapshot.candidates.discovered_skills[..manual_index]
             .windows(2)
             .all(|pair| pair[0].title <= pair[1].title),
         "discovery-eligible ordering should stay intact before manual-only suffix"
     );
     assert!(
-        snapshot.discovered_skills[..manual_index]
+        snapshot.candidates.discovered_skills[..manual_index]
             .iter()
             .all(|skill| skill.can_select_for_discovery),
         "manual-only skills should sort after discovery-eligible skills"
@@ -888,6 +917,7 @@ fn discovered_skill_inventory_keeps_manual_only_skills_visible() {
 
     let generated = snapshot
         .sources
+        .preview
         .iter()
         .find(|source| source.kind == PromptSourceKind::SkillDiscovery)
         .and_then(|source| source.body.as_deref())
@@ -931,6 +961,7 @@ fn save_skill_discovery_override_rebuilds_generated_block_and_preserves_appended
         .expect("snapshot should load");
     let skill_discovery = loaded
         .sources
+        .preview
         .iter()
         .find(|source| source.kind == PromptSourceKind::SkillDiscovery)
         .and_then(|source| source.body.as_deref())
@@ -1039,6 +1070,7 @@ fn manager_snapshot_skill_inventory_uses_dense_selected_order() {
     );
 
     let mut selected_orders = snapshot
+        .candidates
         .discovered_skills
         .iter()
         .map(|skill| (skill.skill_name.clone(), skill.selected_order))
@@ -1093,7 +1125,8 @@ fn manager_snapshot_tool_inventory_filters_unguided_tools_and_uses_dense_selecte
 
     assert_eq!(
         snapshot
-            .tool_candidates
+            .candidates
+            .tools
             .iter()
             .map(|tool| (tool.name.as_str(), tool.selected_order))
             .collect::<Vec<_>>(),
@@ -1101,7 +1134,8 @@ fn manager_snapshot_tool_inventory_filters_unguided_tools_and_uses_dense_selecte
     );
     assert!(
         snapshot
-            .tool_candidates
+            .candidates
+            .tools
             .iter()
             .all(|tool| tool.selection_scope == PromptAssemblyScope::Global)
     );
@@ -1128,6 +1162,7 @@ fn manager_snapshot_discovered_skills_carry_effective_selection_scope() {
     );
 
     let skill = snapshot
+        .candidates
         .discovered_skills
         .iter()
         .find(|skill| skill.skill_name == "code-review")
@@ -1189,11 +1224,13 @@ fn selecting_discovered_skill_persists_requested_order_from_one() {
     apply_prompt_assembly_mutation(
         store,
         &work_dir,
-        PromptAssemblyMutation::SetDiscoveredSkillSelected {
-            scope: PromptAssemblyScope::Project,
-            skill_name: "repo-bootstrap".to_string(),
-            selected: true,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::SetDiscoveredSkillSelected {
+                skill_name: "repo-bootstrap".to_string(),
+                selected: true,
+            },
+        ),
         &[],
     )
     .expect("selection should succeed");
@@ -1232,11 +1269,13 @@ fn moving_default_discovered_skill_materializes_dense_project_order() {
     apply_prompt_assembly_mutation(
         store,
         &work_dir,
-        PromptAssemblyMutation::MoveDiscoveredSkill {
-            scope: PromptAssemblyScope::Project,
-            skill_name: "code-review".to_string(),
-            direction: PromptAssemblyMoveDirection::Up,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::MoveDiscoveredSkill {
+                skill_name: "code-review".to_string(),
+                direction: PromptAssemblyMoveDirection::Up,
+            },
+        ),
         &[],
     )
     .expect("move should succeed");
@@ -1290,6 +1329,7 @@ fn resetting_discovered_skill_order_restores_default_discovery_order() {
         &[],
     );
     let default_order = default_snapshot
+        .candidates
         .discovered_skills
         .iter()
         .map(|skill| skill.skill_name.clone())
@@ -1328,9 +1368,10 @@ fn resetting_discovered_skill_order_restores_default_discovery_order() {
     apply_prompt_assembly_mutation(
         store,
         &work_dir,
-        PromptAssemblyMutation::ResetDiscoveredSkillOrder {
-            scope: PromptAssemblyScope::Project,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::ResetDiscoveredSkillOrder,
+        ),
         &[],
     )
     .expect("reset should succeed");
@@ -1383,11 +1424,13 @@ fn moving_default_tool_materializes_dense_global_order() {
     apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
-        PromptAssemblyMutation::MoveTool {
-            scope: PromptAssemblyScope::Global,
-            tool_name: "read_file".to_string(),
-            direction: PromptAssemblyMoveDirection::Up,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::MoveTool {
+                tool_name: "read_file".to_string(),
+                direction: PromptAssemblyMoveDirection::Up,
+            },
+        ),
         &builtin_tool_definitions(),
     )
     .expect("move should succeed");
@@ -1423,11 +1466,13 @@ fn moving_tool_ignores_unguided_registry_entries_when_materializing_order() {
     apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
-        PromptAssemblyMutation::MoveTool {
-            scope: PromptAssemblyScope::Global,
-            tool_name: "read_file".to_string(),
-            direction: PromptAssemblyMoveDirection::Up,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Global,
+            PromptAssemblyScopedMutationKind::MoveTool {
+                tool_name: "read_file".to_string(),
+                direction: PromptAssemblyMoveDirection::Up,
+            },
+        ),
         &tool_definitions_with_unguided_tool(),
     )
     .expect("move should succeed");
@@ -1463,12 +1508,14 @@ fn disabling_skill_discovery_materializes_disabled_entry_in_selected_scope() {
     apply_prompt_assembly_mutation(
         store,
         &work_dir,
-        PromptAssemblyMutation::SetPromptSourceEnabled {
-            scope: PromptAssemblyScope::Project,
-            kind: PromptSourceKind::SkillDiscovery,
-            reference_id: "skill-discovery".to_string(),
-            enabled: false,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                kind: PromptSourceKind::SkillDiscovery,
+                reference_id: "skill-discovery".to_string(),
+                enabled: false,
+            },
+        ),
         &[],
     )
     .expect("disable should succeed");
@@ -1578,6 +1625,7 @@ fn prompt_assembly_workspace_reads_snapshot_and_prelude() {
         .expect("snapshot should load");
 
     let effective = loaded
+        .resolution
         .prelude
         .effective_system_prompt()
         .expect("effective prompt should exist");
@@ -1585,7 +1633,8 @@ fn prompt_assembly_workspace_reads_snapshot_and_prelude() {
     assert!(effective.contains("<available_skills>"));
     assert_eq!(
         loaded
-            .snapshot
+            .resolution
+            .assembly
             .inactive_sources
             .iter()
             .map(|source| source.reference_id.as_str())
@@ -1609,17 +1658,20 @@ fn activate_long_lived_skill_persists_reference_and_expands_in_prelude() {
     let snapshot = apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
-        PromptAssemblyMutation::ActivateLongLivedSkill {
-            scope: PromptAssemblyScope::Project,
-            skill_name: "repo-bootstrap".to_string(),
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::ActivateLongLivedSkill {
+                skill_name: "repo-bootstrap".to_string(),
+            },
+        ),
         &[],
     )
     .expect("mutation should succeed");
 
     assert_eq!(
         snapshot
-            .snapshot
+            .resolution
+            .assembly
             .active_sources
             .iter()
             .map(|source| source.reference_id.as_str())
@@ -1635,12 +1687,14 @@ fn activate_long_lived_skill_persists_reference_and_expands_in_prelude() {
     );
     assert!(
         snapshot
+            .candidates
             .discovered_skills
             .iter()
             .any(|skill| skill.skill_name == "repo-bootstrap" && skill.selected)
     );
     assert!(
         snapshot
+            .resolution
             .prelude
             .effective_system_prompt()
             .expect("effective prompt should exist")
@@ -1706,6 +1760,7 @@ fn active_long_lived_skill_prefers_project_skill_when_names_collide() {
 
     let skill_source = snapshot
         .sources
+        .preview
         .iter()
         .find(|source| {
             source.kind == PromptSourceKind::LongLivedSkill
@@ -1786,19 +1841,22 @@ fn move_active_source_reorders_non_core_entries() {
     let snapshot = apply_prompt_assembly_mutation(
         store.clone(),
         &work_dir,
-        PromptAssemblyMutation::MoveActiveSource {
-            scope: PromptAssemblyScope::Project,
-            kind: PromptSourceKind::ExtraPrompt,
-            reference_id: "repo-rules".to_string(),
-            direction: PromptAssemblyMoveDirection::Up,
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::MoveActiveSource {
+                kind: PromptSourceKind::ExtraPrompt,
+                reference_id: "repo-rules".to_string(),
+                direction: PromptAssemblyMoveDirection::Up,
+            },
+        ),
         &[],
     )
     .expect("move should succeed");
 
     assert_eq!(
         snapshot
-            .snapshot
+            .resolution
+            .assembly
             .active_sources
             .iter()
             .map(|source| source.reference_id.as_str())
@@ -1852,15 +1910,23 @@ fn missing_source_check_counts_missing_entries_without_blocking_snapshot_resolut
     let check = PromptAssemblyMissingSourcesCheck::from_manager(&manager);
 
     assert_eq!(check.missing_count, 1);
-    assert!(manager.snapshot.inactive_sources.iter().any(|source| {
-        source.reference_id == "missing-skill"
-            && matches!(
-                source.status,
-                PromptSourceStatus::Inactive {
-                    reason: runtime_domain::prompt_assembly::PromptSourceInactiveReason::Missing
-                }
-            )
-    }));
+    assert!(
+        manager
+            .resolution
+            .assembly
+            .inactive_sources
+            .iter()
+            .any(|source| {
+                source.reference_id == "missing-skill"
+                    && matches!(
+                        source.status,
+                        PromptSourceStatus::Inactive {
+                            reason:
+                                runtime_domain::prompt_assembly::PromptSourceInactiveReason::Missing
+                        }
+                    )
+            })
+    );
 }
 
 #[test]
@@ -2095,24 +2161,27 @@ fn removing_project_active_extra_prompt_preserves_it_as_inactive_candidate() {
     let snapshot = apply_prompt_assembly_mutation(
         store,
         &work_dir,
-        PromptAssemblyMutation::RemovePromptSource {
-            scope: PromptAssemblyScope::Project,
-            kind: PromptSourceKind::ExtraPrompt,
-            reference_id: "review-rules".to_string(),
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::RemovePromptSource {
+                kind: PromptSourceKind::ExtraPrompt,
+                reference_id: "review-rules".to_string(),
+            },
+        ),
         &[],
     )
     .expect("removing project extra prompt should succeed");
 
     assert!(
         snapshot
-            .managed_sources
+            .sources
+            .managed
             .iter()
             .all(|source| source.reference_id != "review-rules"),
         "removed prompt should leave the active list"
     );
     assert_eq!(
-        snapshot.extra_prompt_candidates,
+        snapshot.candidates.extra_prompts,
         vec![PromptAssemblyExtraPromptCandidate {
             reference_id: "review-rules".to_string(),
             title: "Review rules".to_string(),
@@ -2131,16 +2200,19 @@ fn create_extra_prompt_keeps_supplied_legacy_default_body_verbatim() {
     let snapshot = apply_prompt_assembly_mutation(
         store,
         &work_dir,
-        PromptAssemblyMutation::CreateExtraPrompt {
-            scope: PromptAssemblyScope::Project,
-            content: "# New prompt\n".to_string(),
-        },
+        PromptAssemblyMutation::scoped(
+            PromptAssemblyScope::Project,
+            PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                content: "# New prompt\n".to_string(),
+            },
+        ),
         &[],
     )
     .expect("create extra prompt should succeed");
 
     let created = snapshot
-        .extra_prompt_candidates
+        .candidates
+        .extra_prompts
         .iter()
         .find(|prompt| prompt.reference_id == "new-prompt")
         .expect("legacy default body should stay verbatim");

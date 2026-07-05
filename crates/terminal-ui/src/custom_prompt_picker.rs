@@ -47,7 +47,7 @@ impl Model {
         }
 
         let items =
-            filter_custom_prompt_items(&self.prompt_assembly.extra_prompt_candidates, &query);
+            filter_custom_prompt_items(&self.prompt_assembly.candidates.extra_prompts, &query);
         let visible_rows = self.file_picker_list_visible_rows();
         let previous = self.custom_prompt_picker.as_ref();
         let bound_prompt = self.composer.current_custom_prompt_binding();

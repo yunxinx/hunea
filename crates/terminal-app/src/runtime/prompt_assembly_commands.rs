@@ -55,7 +55,7 @@ impl AppRuntimeCoordinator {
         match self.prompt_session_config_refresh_target() {
             PromptSessionConfigRefreshTarget::CurrentEmptySession => {
                 self.provider_conversation
-                    .set_prompt_prelude(Some(manager.prelude.clone()));
+                    .set_prompt_prelude(Some(manager.resolution.prelude.clone()));
                 self.provider_conversation
                     .set_dynamic_environment_session_config(Some(
                         dynamic_environment_session_config.clone(),
@@ -106,7 +106,7 @@ impl AppRuntimeCoordinator {
         manager: runtime_domain::prompt_assembly::PromptAssemblyManagerSnapshot,
     ) -> RuntimeEvent {
         self.options.prompt_assembly_manager = Some(manager.clone());
-        self.options.initial_prompt_prelude = Some(manager.prelude.clone());
+        self.options.initial_prompt_prelude = Some(manager.resolution.prelude.clone());
         let dynamic_environment_session_config =
             dynamic_environment_session_config_from_manager(&manager);
         self.options.initial_dynamic_environment_session_config =
@@ -115,7 +115,7 @@ impl AppRuntimeCoordinator {
             == PromptSessionConfigRefreshTarget::CurrentEmptySession
         {
             self.provider_conversation
-                .set_prompt_prelude(Some(manager.prelude.clone()));
+                .set_prompt_prelude(Some(manager.resolution.prelude.clone()));
             self.provider_conversation
                 .set_dynamic_environment_session_config(Some(dynamic_environment_session_config));
         }
@@ -172,7 +172,7 @@ impl AppRuntimeCoordinator {
         let dynamic_environment_session_config =
             dynamic_environment_session_config_from_manager(&manager);
         let prelude_changed =
-            self.options.initial_prompt_prelude.as_ref() != Some(&manager.prelude);
+            self.options.initial_prompt_prelude.as_ref() != Some(&manager.resolution.prelude);
         let dynamic_environment_config_changed = self
             .options
             .initial_dynamic_environment_session_config
@@ -184,7 +184,7 @@ impl AppRuntimeCoordinator {
             &dynamic_environment_session_config,
         );
         self.options.prompt_assembly_manager = Some(manager.clone());
-        self.options.initial_prompt_prelude = Some(manager.prelude.clone());
+        self.options.initial_prompt_prelude = Some(manager.resolution.prelude.clone());
         self.options.initial_dynamic_environment_session_config =
             Some(dynamic_environment_session_config);
         RuntimeEvent::PromptAssemblyUpdated { manager, notice }

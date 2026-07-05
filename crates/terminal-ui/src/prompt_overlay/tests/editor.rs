@@ -82,17 +82,22 @@ fn e_on_instruction_file_opens_real_file_in_external_editor() {
     let mut model = ready_model_with_external_editor();
     let instruction_path = temp_test_file("overlay-instructions-real-file");
     fs::write(&instruction_path, "project instructions\n").expect("instruction file should exist");
-    model.prompt_assembly.snapshot.active_sources.insert(
-        1,
-        prompt_source(
-            "instructions:project:.",
-            "AGENTS.md",
-            PromptSourceKind::InstructionsFile,
-            Some(PromptSourceOrigin::Project),
-            PromptSourceStatus::Active { order: 1 },
-        ),
-    );
-    model.prompt_assembly.managed_sources.insert(
+    model
+        .prompt_assembly
+        .resolution
+        .assembly
+        .active_sources
+        .insert(
+            1,
+            prompt_source(
+                "instructions:project:.",
+                "AGENTS.md",
+                PromptSourceKind::InstructionsFile,
+                Some(PromptSourceOrigin::Project),
+                PromptSourceStatus::Active { order: 1 },
+            ),
+        );
+    model.prompt_assembly.sources.managed.insert(
         1,
         PromptAssemblyManagedSource {
             reference_id: "instructions:project:.".to_string(),
@@ -107,6 +112,7 @@ fn e_on_instruction_file_opens_real_file_in_external_editor() {
     model
         .prompt_assembly
         .sources
+        .preview
         .push(PromptAssemblyManagerSource {
             reference_id: "instructions:project:.".to_string(),
             kind: PromptSourceKind::InstructionsFile,

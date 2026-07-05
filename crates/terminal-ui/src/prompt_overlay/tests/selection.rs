@@ -26,7 +26,7 @@ fn skills_tab_uses_discovered_skill_inventory() {
         2
     );
     assert_eq!(
-        model.prompt_assembly.discovered_skills[0].skill_name,
+        model.prompt_assembly.candidates.discovered_skills[0].skill_name,
         "repo-bootstrap"
     );
 }
@@ -36,7 +36,8 @@ fn extra_tab_filters_to_extra_candidates_only() {
     let model = ready_model();
     let source_ids = model
         .prompt_assembly
-        .extra_prompt_candidates
+        .candidates
+        .extra_prompts
         .iter()
         .map(|source| source.reference_id.clone())
         .collect::<Vec<_>>();
@@ -49,7 +50,8 @@ fn ctrl_e_expands_shadowed_detail_under_selected_winner() {
     let mut model = ready_model();
     model
         .prompt_assembly
-        .snapshot
+        .resolution
+        .assembly
         .inactive_sources
         .push(prompt_source(
             "repo-rules",
@@ -81,7 +83,8 @@ fn ctrl_e_expands_shadowed_extra_candidate_under_winner() {
     let mut model = ready_model();
     model
         .prompt_assembly
-        .extra_prompt_candidates
+        .candidates
+        .extra_prompts
         .push(PromptAssemblyExtraPromptCandidate {
             reference_id: "global-extra".to_string(),
             title: "global-extra".to_string(),
@@ -108,7 +111,7 @@ fn ctrl_e_expands_shadowed_extra_candidate_under_winner() {
 #[test]
 fn ctrl_e_expands_shadowed_skill_under_winner() {
     let mut model = ready_model();
-    model.prompt_assembly.discovered_skills = vec![
+    model.prompt_assembly.candidates.discovered_skills = vec![
         PromptAssemblyDiscoveredSkill {
             skill_name: "repo-bootstrap".to_string(),
             title: "repo-bootstrap".to_string(),
@@ -154,7 +157,8 @@ fn create_extra_prompt_uses_next_numbered_default_title() {
     let mut model = ready_model();
     model
         .prompt_assembly
-        .extra_prompt_candidates
+        .candidates
+        .extra_prompts
         .push(PromptAssemblyExtraPromptCandidate {
             reference_id: "new-prompt-1".to_string(),
             title: "New prompt 1".to_string(),
@@ -174,10 +178,12 @@ fn create_extra_prompt_uses_next_numbered_default_title() {
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Enter)),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::CreateExtraPrompt {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
-                content: "# New prompt 2\n".to_string(),
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                    content: "# New prompt 2\n".to_string(),
+                },
+            ),
         })
     );
 }
@@ -185,7 +191,7 @@ fn create_extra_prompt_uses_next_numbered_default_title() {
 #[test]
 fn manual_only_skill_does_not_emit_selection_mutation() {
     let mut model = ready_model();
-    model.prompt_assembly.discovered_skills = vec![PromptAssemblyDiscoveredSkill {
+    model.prompt_assembly.candidates.discovered_skills = vec![PromptAssemblyDiscoveredSkill {
         skill_name: "ask-matt".to_string(),
         title: "ask-matt".to_string(),
         description: "Ask which skill fits".to_string(),
@@ -209,7 +215,7 @@ fn manual_only_skill_does_not_emit_selection_mutation() {
 #[test]
 fn manual_only_skills_sort_after_discovery_eligible_skills() {
     let mut model = ready_model();
-    model.prompt_assembly.discovered_skills = vec![
+    model.prompt_assembly.candidates.discovered_skills = vec![
         PromptAssemblyDiscoveredSkill {
             skill_name: "aaa-discovery".to_string(),
             title: "aaa-discovery".to_string(),
@@ -237,11 +243,11 @@ fn manual_only_skills_sort_after_discovery_eligible_skills() {
     ];
 
     assert_eq!(
-        model.prompt_assembly.discovered_skills[0].skill_name,
+        model.prompt_assembly.candidates.discovered_skills[0].skill_name,
         "aaa-discovery"
     );
     assert_eq!(
-        model.prompt_assembly.discovered_skills[1].skill_name,
+        model.prompt_assembly.candidates.discovered_skills[1].skill_name,
         "zzz-manual"
     );
 }
@@ -260,30 +266,20 @@ fn prompt_runtime_update_replaces_manager_snapshot() {
         )],
         inactive_sources: Vec::new(),
     };
+    let mut manager = PromptAssemblyManagerSnapshot::default();
+    manager.resolution.assembly = next_snapshot;
+    manager.core_system.builtin_body = "builtin core".to_string();
+    manager.core_system.project_override = Some("project core".to_string());
 
     model.apply_runtime_event(
         runtime_domain::session::RuntimeEvent::PromptAssemblyUpdated {
-            manager: PromptAssemblyManagerSnapshot {
-                snapshot: next_snapshot,
-                prelude: PromptPreludeSnapshot::default(),
-                managed_sources: Vec::new(),
-                sources: Vec::new(),
-                extra_prompt_candidates: Vec::new(),
-                discovered_skills: Vec::new(),
-                manual_skills: Vec::new(),
-                tool_candidates: Vec::new(),
-                dynamic_environment_candidates: Vec::new(),
-                diagnostics: Vec::new(),
-                builtin_core_system_body: "builtin core".to_string(),
-                global_core_system_override: None,
-                project_core_system_override: Some("project core".to_string()),
-            },
+            manager,
             notice: None,
         },
     );
 
     assert_eq!(
-        model.prompt_assembly.snapshot.active_sources[0].origin,
+        model.prompt_assembly.resolution.assembly.active_sources[0].origin,
         Some(PromptSourceOrigin::Project)
     );
 }
@@ -301,103 +297,49 @@ fn active_selection_follows_reordered_source_after_runtime_update() {
             .map(|source| source.reference_id.as_str()),
         Some("repo-rules")
     );
+    let mut manager = model.prompt_assembly.clone();
+    manager.sources.managed = vec![
+        PromptAssemblyManagedSource {
+            reference_id: "core-system".to_string(),
+            kind: PromptSourceKind::CoreSystemPrompt,
+            title: "Core system prompt".to_string(),
+            origin: Some(PromptSourceOrigin::Builtin),
+            scope: None,
+            enabled: true,
+            order: 1,
+        },
+        PromptAssemblyManagedSource {
+            reference_id: "skill-discovery".to_string(),
+            kind: PromptSourceKind::SkillDiscovery,
+            title: "Skill discovery".to_string(),
+            origin: Some(PromptSourceOrigin::Project),
+            scope: Some(PromptAssemblyScope::Project),
+            enabled: true,
+            order: 2,
+        },
+        PromptAssemblyManagedSource {
+            reference_id: "safety-policy".to_string(),
+            kind: PromptSourceKind::ExtraPrompt,
+            title: "safety-policy".to_string(),
+            origin: Some(PromptSourceOrigin::Global),
+            scope: Some(PromptAssemblyScope::Global),
+            enabled: false,
+            order: 3,
+        },
+        PromptAssemblyManagedSource {
+            reference_id: "repo-rules".to_string(),
+            kind: PromptSourceKind::ExtraPrompt,
+            title: "repo-rules".to_string(),
+            origin: Some(PromptSourceOrigin::Project),
+            scope: Some(PromptAssemblyScope::Project),
+            enabled: true,
+            order: 4,
+        },
+    ];
 
     model.apply_runtime_event(
         runtime_domain::session::RuntimeEvent::PromptAssemblyUpdated {
-            manager: PromptAssemblyManagerSnapshot {
-                snapshot: prompt_snapshot(),
-                prelude: PromptPreludeSnapshot::default(),
-                managed_sources: vec![
-                    PromptAssemblyManagedSource {
-                        reference_id: "core-system".to_string(),
-                        kind: PromptSourceKind::CoreSystemPrompt,
-                        title: "Core system prompt".to_string(),
-                        origin: Some(PromptSourceOrigin::Builtin),
-                        scope: None,
-                        enabled: true,
-                        order: 1,
-                    },
-                    PromptAssemblyManagedSource {
-                        reference_id: "skill-discovery".to_string(),
-                        kind: PromptSourceKind::SkillDiscovery,
-                        title: "Skill discovery".to_string(),
-                        origin: Some(PromptSourceOrigin::Project),
-                        scope: Some(PromptAssemblyScope::Project),
-                        enabled: true,
-                        order: 2,
-                    },
-                    PromptAssemblyManagedSource {
-                        reference_id: "safety-policy".to_string(),
-                        kind: PromptSourceKind::ExtraPrompt,
-                        title: "safety-policy".to_string(),
-                        origin: Some(PromptSourceOrigin::Global),
-                        scope: Some(PromptAssemblyScope::Global),
-                        enabled: false,
-                        order: 3,
-                    },
-                    PromptAssemblyManagedSource {
-                        reference_id: "repo-rules".to_string(),
-                        kind: PromptSourceKind::ExtraPrompt,
-                        title: "repo-rules".to_string(),
-                        origin: Some(PromptSourceOrigin::Project),
-                        scope: Some(PromptAssemblyScope::Project),
-                        enabled: true,
-                        order: 4,
-                    },
-                ],
-                sources: Vec::new(),
-                extra_prompt_candidates: vec![PromptAssemblyExtraPromptCandidate {
-                    reference_id: "global-extra".to_string(),
-                    title: "global-extra".to_string(),
-                    origin: PromptSourceOrigin::Global,
-                    body: "# Global Extra\n".to_string(),
-                    selected: false,
-                }],
-                discovered_skills: vec![
-                    PromptAssemblyDiscoveredSkill {
-                        skill_name: "repo-bootstrap".to_string(),
-                        title: "repo-bootstrap".to_string(),
-                        description: "Bootstrap repo".to_string(),
-                        origin: PromptSourceOrigin::Project,
-                        selection_scope: PromptAssemblyScope::Project,
-                        skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
-                        body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
-                        can_select_for_discovery: true,
-                        selected: true,
-                        selected_order: Some(1),
-                    },
-                    PromptAssemblyDiscoveredSkill {
-                        skill_name: "code-review".to_string(),
-                        title: "code-review".to_string(),
-                        description: "Review code".to_string(),
-                        origin: PromptSourceOrigin::Global,
-                        selection_scope: PromptAssemblyScope::Project,
-                        skill_path: "/tmp/code-review/SKILL.md".to_string(),
-                        body: "# Code Review\n\nUse this skill.".to_string(),
-                        can_select_for_discovery: true,
-                        selected: true,
-                        selected_order: Some(2),
-                    },
-                ],
-                manual_skills: vec![PromptAssemblyDiscoveredSkill {
-                    skill_name: "repo-bootstrap".to_string(),
-                    title: "repo-bootstrap".to_string(),
-                    description: "Bootstrap repo".to_string(),
-                    origin: PromptSourceOrigin::Project,
-                    selection_scope: PromptAssemblyScope::Project,
-                    skill_path: "/tmp/repo-bootstrap/SKILL.md".to_string(),
-                    body: "# Repo Bootstrap\n\nUse this skill.".to_string(),
-                    can_select_for_discovery: true,
-                    selected: false,
-                    selected_order: None,
-                }],
-                tool_candidates: Vec::new(),
-                dynamic_environment_candidates: Vec::new(),
-                diagnostics: Vec::new(),
-                builtin_core_system_body: "builtin core".to_string(),
-                global_core_system_override: None,
-                project_core_system_override: None,
-            },
+            manager,
             notice: None,
         },
     );
@@ -477,10 +419,12 @@ fn deleting_modified_extra_prompt_confirms_on_enter() {
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Enter)),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::DeleteExtraPrompt {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
-                reference_id: "global-extra".to_string(),
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::DeleteExtraPrompt {
+                    reference_id: "global-extra".to_string(),
+                },
+            ),
         })
     );
 }
@@ -509,8 +453,8 @@ fn deleting_modified_extra_prompt_can_cancel_confirmation() {
 #[test]
 fn deleting_default_template_extra_prompt_also_opens_confirmation_dialog() {
     let mut model = ready_model();
-    model.prompt_assembly.extra_prompt_candidates[0].title = "new-prompt-1".to_string();
-    model.prompt_assembly.extra_prompt_candidates[0].body = "# New prompt 1\n".to_string();
+    model.prompt_assembly.candidates.extra_prompts[0].title = "new-prompt-1".to_string();
+    model.prompt_assembly.candidates.extra_prompts[0].body = "# New prompt 1\n".to_string();
     model.open_prompt_overlay();
     model.set_prompt_overlay_focus(super::PromptOverlayFocus::Inactive);
     let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Tab));
@@ -548,11 +492,13 @@ fn removing_active_disabled_extra_prompt_emits_generic_remove_mutation() {
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('d'))),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::RemovePromptSource {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
-                kind: PromptSourceKind::ExtraPrompt,
-                reference_id: "safety-policy".to_string(),
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::RemovePromptSource {
+                    kind: PromptSourceKind::ExtraPrompt,
+                    reference_id: "safety-policy".to_string(),
+                },
+            ),
         })
     );
 }
@@ -567,12 +513,14 @@ fn moving_active_source_emits_reorder_mutation() {
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('J'))),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveActiveSource {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
-                kind: PromptSourceKind::ExtraPrompt,
-                reference_id: "repo-rules".to_string(),
-                direction: PromptAssemblyMoveDirection::Down,
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::MoveActiveSource {
+                    kind: PromptSourceKind::ExtraPrompt,
+                    reference_id: "repo-rules".to_string(),
+                    direction: PromptAssemblyMoveDirection::Down,
+                },
+            ),
         })
     );
 }
@@ -590,12 +538,14 @@ fn shifted_j_and_k_reorder_active_source() {
             crossterm::event::KeyModifiers::SHIFT,
         )),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveActiveSource {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
-                kind: PromptSourceKind::ExtraPrompt,
-                reference_id: "repo-rules".to_string(),
-                direction: PromptAssemblyMoveDirection::Up,
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::MoveActiveSource {
+                    kind: PromptSourceKind::ExtraPrompt,
+                    reference_id: "repo-rules".to_string(),
+                    direction: PromptAssemblyMoveDirection::Up,
+                },
+            ),
         })
     );
 
@@ -605,12 +555,14 @@ fn shifted_j_and_k_reorder_active_source() {
             crossterm::event::KeyModifiers::SHIFT,
         )),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveActiveSource {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
-                kind: PromptSourceKind::ExtraPrompt,
-                reference_id: "repo-rules".to_string(),
-                direction: PromptAssemblyMoveDirection::Down,
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::MoveActiveSource {
+                    kind: PromptSourceKind::ExtraPrompt,
+                    reference_id: "repo-rules".to_string(),
+                    direction: PromptAssemblyMoveDirection::Down,
+                },
+            ),
         })
     );
 }
@@ -620,9 +572,14 @@ fn moving_tool_guidelines_emits_reorder_mutation_with_managed_scope() {
     let mut model = ready_model();
     model
         .prompt_assembly
-        .managed_sources
+        .sources
+        .managed
         .insert(1, tool_guidelines_managed_source());
-    model.prompt_assembly.sources.push(tool_guidelines_source());
+    model
+        .prompt_assembly
+        .sources
+        .preview
+        .push(tool_guidelines_source());
     model.open_prompt_overlay();
     let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
 
@@ -632,12 +589,14 @@ fn moving_tool_guidelines_emits_reorder_mutation_with_managed_scope() {
             crossterm::event::KeyModifiers::SHIFT,
         )),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveActiveSource {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
-                kind: PromptSourceKind::ToolGuidelines,
-                reference_id: "tool-guidelines".to_string(),
-                direction: PromptAssemblyMoveDirection::Down,
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::MoveActiveSource {
+                    kind: PromptSourceKind::ToolGuidelines,
+                    reference_id: "tool-guidelines".to_string(),
+                    direction: PromptAssemblyMoveDirection::Down,
+                },
+            ),
         })
     );
 }
@@ -647,23 +606,28 @@ fn toggling_tool_guidelines_emits_scope_aware_disable_mutation() {
     let mut model = ready_model();
     model
         .prompt_assembly
-        .managed_sources
+        .sources
+        .managed
         .insert(1, tool_guidelines_managed_source());
-    model.prompt_assembly.sources.push(tool_guidelines_source());
+    model
+        .prompt_assembly
+        .sources
+        .preview
+        .push(tool_guidelines_source());
     model.open_prompt_overlay();
     let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
 
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::SetPromptSourceEnabled {
-                    scope:
-                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
                     kind: PromptSourceKind::ToolGuidelines,
                     reference_id: "tool-guidelines".to_string(),
                     enabled: false,
                 },
+            ),
         })
     );
 }
@@ -691,12 +655,14 @@ fn x_on_active_non_core_source_emits_disable_mutation() {
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::SetPromptSourceEnabled {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
-                kind: PromptSourceKind::ExtraPrompt,
-                reference_id: "repo-rules".to_string(),
-                enabled: false,
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                    kind: PromptSourceKind::ExtraPrompt,
+                    reference_id: "repo-rules".to_string(),
+                    enabled: false,
+                },
+            ),
         })
     );
 }
@@ -710,12 +676,14 @@ fn x_on_active_skill_discovery_emits_disable_mutation() {
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::SetPromptSourceEnabled {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
-                kind: PromptSourceKind::SkillDiscovery,
-                reference_id: "skill-discovery".to_string(),
-                enabled: false,
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                    kind: PromptSourceKind::SkillDiscovery,
+                    reference_id: "skill-discovery".to_string(),
+                    enabled: false,
+                },
+            ),
         })
     );
 }
@@ -736,7 +704,8 @@ fn x_on_active_dynamic_environment_baseline_emits_disable_mutation() {
     let mut model = ready_model();
     model
         .prompt_assembly
-        .managed_sources
+        .sources
+        .managed
         .insert(1, dynamic_environment_baseline_managed_source());
     model.open_prompt_overlay();
     let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
@@ -744,12 +713,14 @@ fn x_on_active_dynamic_environment_baseline_emits_disable_mutation() {
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::SetPromptSourceEnabled {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
-                kind: PromptSourceKind::DynamicEnvironmentBaseline,
-                reference_id: "env-baseline".to_string(),
-                enabled: false,
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
+                    kind: PromptSourceKind::DynamicEnvironmentBaseline,
+                    reference_id: "env-baseline".to_string(),
+                    enabled: false,
+                },
+            ),
         })
     );
 }
@@ -759,7 +730,8 @@ fn moving_dynamic_environment_baseline_emits_reorder_mutation() {
     let mut model = ready_model();
     model
         .prompt_assembly
-        .managed_sources
+        .sources
+        .managed
         .insert(1, dynamic_environment_baseline_managed_source());
     model.open_prompt_overlay();
     let _ = model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Down));
@@ -770,12 +742,14 @@ fn moving_dynamic_environment_baseline_emits_reorder_mutation() {
             crossterm::event::KeyModifiers::SHIFT,
         )),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveActiveSource {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
-                kind: PromptSourceKind::DynamicEnvironmentBaseline,
-                reference_id: "env-baseline".to_string(),
-                direction: PromptAssemblyMoveDirection::Down,
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::MoveActiveSource {
+                    kind: PromptSourceKind::DynamicEnvironmentBaseline,
+                    reference_id: "env-baseline".to_string(),
+                    direction: PromptAssemblyMoveDirection::Down,
+                },
+            ),
         })
     );
 }
@@ -789,13 +763,13 @@ fn x_on_discovered_skill_emits_selection_toggle_mutation() {
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Char('x'))),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::SetDiscoveredSkillSelected {
-                    scope:
-                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::SetDiscoveredSkillSelected {
                     skill_name: "repo-bootstrap".to_string(),
                     selected: false,
                 },
+            ),
         })
     );
 }
@@ -803,17 +777,22 @@ fn x_on_discovered_skill_emits_selection_toggle_mutation() {
 #[test]
 fn d_does_not_remove_active_instruction_file() {
     let mut model = ready_model();
-    model.prompt_assembly.snapshot.active_sources.insert(
-        1,
-        prompt_source(
-            "instructions:project:.",
-            "AGENTS.md",
-            PromptSourceKind::InstructionsFile,
-            Some(PromptSourceOrigin::Project),
-            PromptSourceStatus::Active { order: 1 },
-        ),
-    );
-    model.prompt_assembly.managed_sources.insert(
+    model
+        .prompt_assembly
+        .resolution
+        .assembly
+        .active_sources
+        .insert(
+            1,
+            prompt_source(
+                "instructions:project:.",
+                "AGENTS.md",
+                PromptSourceKind::InstructionsFile,
+                Some(PromptSourceOrigin::Project),
+                PromptSourceStatus::Active { order: 1 },
+            ),
+        );
+    model.prompt_assembly.sources.managed.insert(
         1,
         PromptAssemblyManagedSource {
             reference_id: "instructions:project:.".to_string(),
@@ -846,13 +825,13 @@ fn shifted_j_and_k_reorder_discovered_skill() {
             crossterm::event::KeyModifiers::SHIFT,
         )),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveDiscoveredSkill {
-                    scope:
-                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::MoveDiscoveredSkill {
                     skill_name: "repo-bootstrap".to_string(),
                     direction: PromptAssemblyMoveDirection::Up,
                 },
+            ),
         })
     );
 
@@ -862,13 +841,13 @@ fn shifted_j_and_k_reorder_discovered_skill() {
             crossterm::event::KeyModifiers::SHIFT,
         )),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveDiscoveredSkill {
-                    scope:
-                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::MoveDiscoveredSkill {
                     skill_name: "repo-bootstrap".to_string(),
                     direction: PromptAssemblyMoveDirection::Down,
                 },
+            ),
         })
     );
 }
@@ -885,11 +864,10 @@ fn r_resets_discovered_skill_order() {
             crossterm::event::KeyModifiers::NONE,
         )),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::ResetDiscoveredSkillOrder {
-                    scope:
-                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
-                },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::ResetDiscoveredSkillOrder,
+            ),
         })
     );
 }
@@ -897,7 +875,7 @@ fn r_resets_discovered_skill_order() {
 #[test]
 fn global_discovered_skill_reorder_uses_selection_scope_not_item_origin() {
     let mut model = ready_model();
-    model.prompt_assembly.discovered_skills = vec![PromptAssemblyDiscoveredSkill {
+    model.prompt_assembly.candidates.discovered_skills = vec![PromptAssemblyDiscoveredSkill {
         skill_name: "code-review".to_string(),
         title: "code-review".to_string(),
         description: "Review code".to_string(),
@@ -918,13 +896,13 @@ fn global_discovered_skill_reorder_uses_selection_scope_not_item_origin() {
             crossterm::event::KeyModifiers::SHIFT,
         )),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::MoveDiscoveredSkill {
-                    scope:
-                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::MoveDiscoveredSkill {
                     skill_name: "code-review".to_string(),
                     direction: PromptAssemblyMoveDirection::Down,
                 },
+            ),
         })
     );
 }
@@ -932,7 +910,7 @@ fn global_discovered_skill_reorder_uses_selection_scope_not_item_origin() {
 #[test]
 fn global_discovered_skill_reset_uses_selection_scope_not_item_origin() {
     let mut model = ready_model();
-    model.prompt_assembly.discovered_skills = vec![PromptAssemblyDiscoveredSkill {
+    model.prompt_assembly.candidates.discovered_skills = vec![PromptAssemblyDiscoveredSkill {
         skill_name: "code-review".to_string(),
         title: "code-review".to_string(),
         description: "Review code".to_string(),
@@ -953,11 +931,10 @@ fn global_discovered_skill_reset_uses_selection_scope_not_item_origin() {
             crossterm::event::KeyModifiers::NONE,
         )),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::ResetDiscoveredSkillOrder {
-                    scope:
-                        runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Project,
-                },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::ResetDiscoveredSkillOrder,
+            ),
         })
     );
 }

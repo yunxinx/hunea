@@ -445,8 +445,8 @@ impl Model {
                 &mut transcript,
                 self.style_mode,
                 self.reasoning_display_mode,
-                &self.prompt_assembly.manual_skills,
-                &self.prompt_assembly.extra_prompt_candidates,
+                &self.prompt_assembly.candidates.manual_skills,
+                &self.prompt_assembly.candidates.extra_prompts,
             );
         }
         for snapshot in terminal_snapshots.iter().cloned() {

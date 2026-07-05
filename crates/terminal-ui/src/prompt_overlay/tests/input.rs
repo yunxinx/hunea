@@ -91,10 +91,12 @@ fn scope_picker_confirms_selected_scope_for_custom_creation() {
     assert_eq!(
         model.handle_prompt_overlay_key(KeyEvent::from(KeyCode::Enter)),
         super::OverlayInputResult::Effect(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::CreateExtraPrompt {
-                scope: runtime_domain::prompt_assembly::persistence::PromptAssemblyScope::Global,
-                content: "# New prompt 1\n".to_string(),
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                    content: "# New prompt 1\n".to_string(),
+                },
+            ),
         })
     );
 }

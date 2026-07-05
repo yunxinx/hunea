@@ -1,5 +1,6 @@
 use runtime_domain::prompt_assembly::{
-    PromptPreludeSection, PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
+    PromptAssemblyMutation, PromptAssemblyScopedMutationKind, PromptPreludeSection,
+    PromptPreludeSnapshot, PromptSourceKind, PromptSourceOrigin,
     persistence::{
         PersistedPromptAssemblyEntry, PromptAssemblyScope, StoredPromptBody,
         project_custom_prompts_dir, save_project_prompt_assembly_state,
@@ -112,18 +113,21 @@ fn reload_prompt_assembly_reads_latest_filesystem_state() {
 
     assert!(
         initial_manager
-            .extra_prompt_candidates
+            .candidates
+            .extra_prompts
             .iter()
             .any(|prompt| prompt.reference_id == "review-rules")
     );
     assert!(
         initial_manager
+            .candidates
             .discovered_skills
             .iter()
             .any(|skill| skill.skill_name == "repo-bootstrap")
     );
     assert!(
         initial_manager
+            .candidates
             .manual_skills
             .iter()
             .any(|skill| skill.skill_name == "repo-bootstrap")
@@ -148,12 +152,14 @@ fn reload_prompt_assembly_reads_latest_filesystem_state() {
 
     assert!(
         reloaded_manager
-            .extra_prompt_candidates
+            .candidates
+            .extra_prompts
             .iter()
             .all(|prompt| prompt.reference_id != "review-rules")
     );
     assert!(
         reloaded_manager
+            .candidates
             .discovered_skills
             .iter()
             .all(|skill| !(skill.origin
@@ -162,6 +168,7 @@ fn reload_prompt_assembly_reads_latest_filesystem_state() {
     );
     assert!(
         reloaded_manager
+            .candidates
             .manual_skills
             .iter()
             .all(|skill| !(skill.origin
@@ -298,10 +305,12 @@ fn mutate_prompt_assembly_reports_structured_apply_failure_event() {
 
     let receipt = coordinator
         .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::CreateExtraPrompt {
-                scope: PromptAssemblyScope::Global,
-                content: "# Saved search\nUse ripgrep first.\n".to_string(),
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                    content: "# Saved search\nUse ripgrep first.\n".to_string(),
+                },
+            ),
         })
         .expect("mutation command should be accepted and report failures via events");
 
@@ -360,10 +369,12 @@ fn mutate_prompt_assembly_dispatches_without_waiting_for_store_or_project_io() {
     let started = std::time::Instant::now();
     let receipt = coordinator
         .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation: runtime_domain::prompt_assembly::PromptAssemblyMutation::CreateExtraPrompt {
-                scope: PromptAssemblyScope::Global,
-                content: "# Async prompt\nDo not block the UI.\n".to_string(),
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::CreateExtraPrompt {
+                    content: "# Async prompt\nDo not block the UI.\n".to_string(),
+                },
+            ),
         })
         .expect("prompt assembly mutation command should dispatch");
 
@@ -383,7 +394,8 @@ fn mutate_prompt_assembly_dispatches_without_waiting_for_store_or_project_io() {
     );
     assert!(
         manager
-            .extra_prompt_candidates
+            .candidates
+            .extra_prompts
             .iter()
             .any(|prompt| prompt.title == "Async prompt")
     );
@@ -455,13 +467,14 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
 
     coordinator
         .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::SetPromptSourceEnabled {
-                    scope: PromptAssemblyScope::Project,
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
                     kind: PromptSourceKind::ExtraPrompt,
                     reference_id: "review-rules".to_string(),
                     enabled: true,
                 },
+            ),
         })
         .expect("prompt assembly mutation should be accepted");
     let (updated_manager, notice) = wait_for_runtime_event(
@@ -475,17 +488,20 @@ fn prompt_assembly_changes_sync_current_empty_session_prelude_immediately() {
 
     assert_eq!(
         coordinator.provider_conversation.prompt_prelude(),
-        Some(&updated_manager.prelude)
+        Some(&updated_manager.resolution.prelude)
     );
     assert_eq!(
         coordinator.options.initial_prompt_prelude.as_ref(),
-        Some(&updated_manager.prelude)
+        Some(&updated_manager.resolution.prelude)
     );
     assert_eq!(
         notice,
         Some(PromptAssemblyUpdateNotice::CurrentEmptySessionUpdated)
     );
-    assert_ne!(Some(&updated_manager.prelude), Some(&initial_prelude));
+    assert_ne!(
+        Some(&updated_manager.resolution.prelude),
+        Some(&initial_prelude)
+    );
     cleanup(&root);
 }
 
@@ -550,13 +566,14 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
 
     coordinator
         .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::SetPromptSourceEnabled {
-                    scope: PromptAssemblyScope::Project,
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Project,
+                PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
                     kind: PromptSourceKind::ExtraPrompt,
                     reference_id: "review-rules".to_string(),
                     enabled: true,
                 },
+            ),
         })
         .expect("prompt assembly mutation should be accepted");
     let (updated_manager, notice) = wait_for_runtime_event(
@@ -574,7 +591,7 @@ fn prompt_assembly_changes_on_started_session_apply_only_after_next_new_session_
     );
     assert_eq!(
         coordinator.options.initial_prompt_prelude.as_ref(),
-        Some(&updated_manager.prelude)
+        Some(&updated_manager.resolution.prelude)
     );
     assert_eq!(
         notice,
@@ -729,13 +746,14 @@ fn disabling_dynamic_environment_changes_waits_for_next_new_session() {
 
     coordinator
         .handle_runtime_command(RuntimeCommand::MutatePromptAssembly {
-            mutation:
-                runtime_domain::prompt_assembly::PromptAssemblyMutation::SetPromptSourceEnabled {
-                    scope: PromptAssemblyScope::Global,
+            mutation: PromptAssemblyMutation::scoped(
+                PromptAssemblyScope::Global,
+                PromptAssemblyScopedMutationKind::SetPromptSourceEnabled {
                     kind: PromptSourceKind::DynamicEnvironmentChanges,
                     reference_id: "env-changes".to_string(),
                     enabled: false,
                 },
+            ),
         })
         .expect("dynamic environment source mutation should be accepted");
     let notice = wait_for_runtime_event(

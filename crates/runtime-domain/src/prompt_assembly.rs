@@ -83,9 +83,30 @@ pub struct PromptSourceCandidate {
     pub title: String,
     pub origin: Option<PromptSourceOrigin>,
     pub collision_key: Option<String>,
-    pub enabled: bool,
-    pub resolvable: bool,
+    pub state: PromptSourceCandidateState,
     pub requested_order: Option<u16>,
+}
+
+/// `PromptSourceCandidateState` 表示 candidate 自身是否可进入 resolution。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptSourceCandidateState {
+    Enabled,
+    Disabled,
+    Missing,
+}
+
+impl PromptSourceCandidateState {
+    /// `from_materialized_source` 把持久化启停与实体可解析性收敛为合法状态。
+    #[must_use]
+    pub const fn from_materialized_source(enabled: bool, resolvable: bool) -> Self {
+        if !enabled {
+            Self::Disabled
+        } else if !resolvable {
+            Self::Missing
+        } else {
+            Self::Enabled
+        }
+    }
 }
 
 /// `PromptAssemblyInput` 描述一次 next-new-session prompt assembly resolution 的输入。
@@ -227,21 +248,54 @@ pub struct PromptAssemblyDiagnostic {
 }
 
 /// `PromptAssemblyManagerSnapshot` 表示 `/prompt` 所需的完整只读快照。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PromptAssemblyManagerSnapshot {
-    pub snapshot: PromptAssemblySnapshot,
+    pub resolution: PromptAssemblyResolvedSnapshot,
+    pub sources: PromptAssemblySourceInventorySnapshot,
+    pub candidates: PromptAssemblyCandidateInventorySnapshot,
+    pub core_system: PromptAssemblyCoreSystemSnapshot,
+    pub diagnostics: Vec<PromptAssemblyDiagnostic>,
+}
+
+/// `PromptAssemblyResolvedSnapshot` 表示最终解析结果和会进入新 session 的 prelude。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAssemblyResolvedSnapshot {
+    pub assembly: PromptAssemblySnapshot,
     pub prelude: PromptPreludeSnapshot,
-    pub managed_sources: Vec<PromptAssemblyManagedSource>,
-    pub sources: Vec<PromptAssemblyManagerSource>,
-    pub extra_prompt_candidates: Vec<PromptAssemblyExtraPromptCandidate>,
+}
+
+impl Default for PromptAssemblyResolvedSnapshot {
+    fn default() -> Self {
+        Self {
+            assembly: resolve_prompt_assembly(&PromptAssemblyInput::default()),
+            prelude: PromptPreludeSnapshot::default(),
+        }
+    }
+}
+
+/// `PromptAssemblySourceInventorySnapshot` 表示 `/prompt` 左侧管理列表和预览源集合。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PromptAssemblySourceInventorySnapshot {
+    pub managed: Vec<PromptAssemblyManagedSource>,
+    pub preview: Vec<PromptAssemblyManagerSource>,
+}
+
+/// `PromptAssemblyCandidateInventorySnapshot` 表示 `/prompt` 右侧各候选列表。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PromptAssemblyCandidateInventorySnapshot {
+    pub extra_prompts: Vec<PromptAssemblyExtraPromptCandidate>,
     pub discovered_skills: Vec<PromptAssemblyDiscoveredSkill>,
     pub manual_skills: Vec<PromptAssemblyDiscoveredSkill>,
-    pub tool_candidates: Vec<PromptAssemblyToolCandidate>,
-    pub dynamic_environment_candidates: Vec<PromptAssemblyDynamicEnvironmentCandidate>,
-    pub diagnostics: Vec<PromptAssemblyDiagnostic>,
-    pub builtin_core_system_body: String,
-    pub global_core_system_override: Option<String>,
-    pub project_core_system_override: Option<String>,
+    pub tools: Vec<PromptAssemblyToolCandidate>,
+    pub dynamic_environment: Vec<PromptAssemblyDynamicEnvironmentCandidate>,
+}
+
+/// `PromptAssemblyCoreSystemSnapshot` 表示 core system prompt 的默认体和覆盖层。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PromptAssemblyCoreSystemSnapshot {
+    pub builtin_body: String,
+    pub global_override: Option<String>,
+    pub project_override: Option<String>,
 }
 
 /// `PromptAssemblyEditorTarget` 标识一次外部编辑器保存要落到哪里。
@@ -276,71 +330,77 @@ pub enum PromptAssemblyMutation {
         target: PromptAssemblyEditorTarget,
         content: String,
     },
-    SetExtraPromptSelected {
-        scope: PromptAssemblyScope,
-        reference_id: String,
-        selected: bool,
-    },
-    SetPromptSourceEnabled {
-        scope: PromptAssemblyScope,
-        kind: PromptSourceKind,
-        reference_id: String,
-        enabled: bool,
-    },
-    SetDiscoveredSkillSelected {
-        scope: PromptAssemblyScope,
-        skill_name: String,
-        selected: bool,
-    },
-    MoveDiscoveredSkill {
-        scope: PromptAssemblyScope,
-        skill_name: String,
-        direction: PromptAssemblyMoveDirection,
-    },
-    ResetDiscoveredSkillOrder {
-        scope: PromptAssemblyScope,
-    },
-    SetToolSelected {
-        scope: PromptAssemblyScope,
-        tool_name: String,
-        selected: bool,
-    },
+    Scoped(PromptAssemblyScopedMutation),
     SetDynamicEnvironmentSourceSelected {
         snapshot_kind: DynamicEnvironmentSnapshotKind,
         source_kind: DynamicEnvironmentSourceKind,
         selected: bool,
     },
+}
+
+impl PromptAssemblyMutation {
+    /// `scoped` 构造带明确 scope 的 prompt assembly mutation。
+    #[must_use]
+    pub fn scoped(scope: PromptAssemblyScope, kind: PromptAssemblyScopedMutationKind) -> Self {
+        Self::Scoped(PromptAssemblyScopedMutation { scope, kind })
+    }
+}
+
+/// `PromptAssemblyScopedMutation` 表示作用于单个 prompt assembly scope 的变更。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAssemblyScopedMutation {
+    pub scope: PromptAssemblyScope,
+    pub kind: PromptAssemblyScopedMutationKind,
+}
+
+/// `PromptAssemblyScopedMutationKind` 描述 scope 内部的具体变更。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptAssemblyScopedMutationKind {
+    SetExtraPromptSelected {
+        reference_id: String,
+        selected: bool,
+    },
+    SetPromptSourceEnabled {
+        kind: PromptSourceKind,
+        reference_id: String,
+        enabled: bool,
+    },
+    SetDiscoveredSkillSelected {
+        skill_name: String,
+        selected: bool,
+    },
+    MoveDiscoveredSkill {
+        skill_name: String,
+        direction: PromptAssemblyMoveDirection,
+    },
+    ResetDiscoveredSkillOrder,
+    SetToolSelected {
+        tool_name: String,
+        selected: bool,
+    },
     MoveTool {
-        scope: PromptAssemblyScope,
         tool_name: String,
         direction: PromptAssemblyMoveDirection,
     },
     ActivateLongLivedSkill {
-        scope: PromptAssemblyScope,
         skill_name: String,
     },
     CreateExtraPrompt {
-        scope: PromptAssemblyScope,
         content: String,
     },
     RemovePromptSource {
-        scope: PromptAssemblyScope,
         kind: PromptSourceKind,
         reference_id: String,
     },
     MoveActiveSource {
-        scope: PromptAssemblyScope,
         kind: PromptSourceKind,
         reference_id: String,
         direction: PromptAssemblyMoveDirection,
     },
     DeleteExtraPrompt {
-        scope: PromptAssemblyScope,
         reference_id: String,
     },
-    RestoreCoreSystemOverride {
-        scope: PromptAssemblyScope,
-    },
+    RestoreCoreSystemOverride,
 }
 
 /// `PromptAssemblyMoveDirection` 描述 active source 的排序方向。
@@ -497,7 +557,7 @@ fn collision_winner_index(
     indices
         .iter()
         .copied()
-        .filter(|index| candidates[*index].enabled)
+        .filter(|index| candidates[*index].state != PromptSourceCandidateState::Disabled)
         .min_by(|left, right| {
             collision_priority(&candidates[*left]).cmp(&collision_priority(&candidates[*right]))
         })
@@ -516,13 +576,13 @@ fn inactive_reason_for_candidate(
     candidate: &PromptSourceCandidate,
     is_collision_winner: bool,
 ) -> Option<PromptSourceInactiveReason> {
-    if !candidate.enabled {
+    if candidate.state == PromptSourceCandidateState::Disabled {
         return Some(PromptSourceInactiveReason::Disabled);
     }
     if !is_collision_winner {
         return Some(PromptSourceInactiveReason::Shadowed);
     }
-    if !candidate.resolvable {
+    if candidate.state == PromptSourceCandidateState::Missing {
         return Some(PromptSourceInactiveReason::Missing);
     }
     None
@@ -589,8 +649,7 @@ mod tests {
             title: title.to_string(),
             origin: Some(origin),
             collision_key: Some(reference_id.to_string()),
-            enabled: true,
-            resolvable: true,
+            state: PromptSourceCandidateState::Enabled,
             requested_order,
         }
     }
@@ -608,8 +667,7 @@ mod tests {
             title: title.to_string(),
             origin: Some(origin),
             collision_key: Some(collision_key.to_string()),
-            enabled: true,
-            resolvable: true,
+            state: PromptSourceCandidateState::Enabled,
             requested_order,
         }
     }
@@ -621,8 +679,7 @@ mod tests {
             title: "Skill discovery source".to_string(),
             origin: None,
             collision_key: None,
-            enabled: true,
-            resolvable: true,
+            state: PromptSourceCandidateState::Enabled,
             requested_order,
         }
     }
@@ -712,7 +769,7 @@ mod tests {
             "code-review",
             Some(1),
         );
-        disabled_project.enabled = false;
+        disabled_project.state = PromptSourceCandidateState::Disabled;
 
         let snapshot = resolve_prompt_assembly(&PromptAssemblyInput {
             core_system: CoreSystemPromptInput::default(),
@@ -754,7 +811,7 @@ mod tests {
             "repo-bootstrap",
             Some(1),
         );
-        missing_project.resolvable = false;
+        missing_project.state = PromptSourceCandidateState::Missing;
 
         let snapshot = resolve_prompt_assembly(&PromptAssemblyInput {
             core_system: CoreSystemPromptInput::default(),
@@ -838,7 +895,7 @@ mod tests {
             PromptSourceOrigin::Project,
             Some(1),
         );
-        disabled_beta.enabled = false;
+        disabled_beta.state = PromptSourceCandidateState::Disabled;
 
         let mut disabled_alpha = extra_prompt(
             "a-disabled",
@@ -846,7 +903,7 @@ mod tests {
             PromptSourceOrigin::Project,
             Some(2),
         );
-        disabled_alpha.enabled = false;
+        disabled_alpha.state = PromptSourceCandidateState::Disabled;
 
         let mut missing_skill = long_lived_skill(
             "missing-project",
@@ -855,7 +912,7 @@ mod tests {
             "missing-skill",
             Some(3),
         );
-        missing_skill.resolvable = false;
+        missing_skill.state = PromptSourceCandidateState::Missing;
 
         let snapshot = resolve_prompt_assembly(&PromptAssemblyInput {
             core_system: CoreSystemPromptInput::default(),
@@ -906,8 +963,7 @@ mod tests {
                     title: "alpha 10".to_string(),
                     origin: Some(PromptSourceOrigin::Project),
                     collision_key: None,
-                    enabled: false,
-                    resolvable: true,
+                    state: PromptSourceCandidateState::Disabled,
                     requested_order: None,
                 },
                 PromptSourceCandidate {
@@ -916,8 +972,7 @@ mod tests {
                     title: "alpha 2".to_string(),
                     origin: Some(PromptSourceOrigin::Project),
                     collision_key: None,
-                    enabled: false,
-                    resolvable: true,
+                    state: PromptSourceCandidateState::Disabled,
                     requested_order: None,
                 },
                 PromptSourceCandidate {
@@ -926,8 +981,7 @@ mod tests {
                     title: "missing".to_string(),
                     origin: Some(PromptSourceOrigin::Global),
                     collision_key: None,
-                    enabled: true,
-                    resolvable: false,
+                    state: PromptSourceCandidateState::Missing,
                     requested_order: None,
                 },
                 PromptSourceCandidate {
@@ -936,8 +990,7 @@ mod tests {
                     title: "shadowed".to_string(),
                     origin: Some(PromptSourceOrigin::Global),
                     collision_key: Some("shared".to_string()),
-                    enabled: true,
-                    resolvable: true,
+                    state: PromptSourceCandidateState::Enabled,
                     requested_order: None,
                 },
                 PromptSourceCandidate {
@@ -946,8 +999,7 @@ mod tests {
                     title: "shadowed".to_string(),
                     origin: Some(PromptSourceOrigin::Project),
                     collision_key: Some("shared".to_string()),
-                    enabled: true,
-                    resolvable: true,
+                    state: PromptSourceCandidateState::Enabled,
                     requested_order: None,
                 },
             ],

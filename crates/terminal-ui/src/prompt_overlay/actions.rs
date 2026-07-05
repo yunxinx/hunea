@@ -77,11 +77,13 @@ impl Model {
                     return None;
                 }
                 Some(AppEffect::MutatePromptAssembly {
-                    mutation: PromptAssemblyMutation::RemovePromptSource {
-                        scope: selected.scope?,
-                        kind: selected.kind,
-                        reference_id: selected.reference_id,
-                    },
+                    mutation: PromptAssemblyMutation::scoped(
+                        selected.scope?,
+                        PromptAssemblyScopedMutationKind::RemovePromptSource {
+                            kind: selected.kind,
+                            reference_id: selected.reference_id,
+                        },
+                    ),
                 })
             }
             PromptOverlaySelection::ExtraPromptCandidate(candidate) => {
@@ -98,11 +100,13 @@ impl Model {
                     return None;
                 }
                 Some(AppEffect::MutatePromptAssembly {
-                    mutation: PromptAssemblyMutation::RemovePromptSource {
-                        scope: prompt_scope_from_origin(selected.origin?)?,
-                        kind: selected.kind,
-                        reference_id: selected.reference_id,
-                    },
+                    mutation: PromptAssemblyMutation::scoped(
+                        prompt_scope_from_origin(selected.origin?)?,
+                        PromptAssemblyScopedMutationKind::RemovePromptSource {
+                            kind: selected.kind,
+                            reference_id: selected.reference_id,
+                        },
+                    ),
                 })
             }
             PromptOverlaySelection::DiscoveredSkill(_)
@@ -122,7 +126,10 @@ impl Model {
             .map(|state| state.draft_scope)
             .unwrap_or(PromptAssemblyScope::Project);
         Some(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::RestoreCoreSystemOverride { scope },
+            mutation: PromptAssemblyMutation::scoped(
+                scope,
+                PromptAssemblyScopedMutationKind::RestoreCoreSystemOverride,
+            ),
         })
     }
 
@@ -133,9 +140,10 @@ impl Model {
             return None;
         };
         Some(AppEffect::MutatePromptAssembly {
-            mutation: PromptAssemblyMutation::ResetDiscoveredSkillOrder {
-                scope: skill.selection_scope,
-            },
+            mutation: PromptAssemblyMutation::scoped(
+                skill.selection_scope,
+                PromptAssemblyScopedMutationKind::ResetDiscoveredSkillOrder,
+            ),
         })
     }
 }

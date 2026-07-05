@@ -7,6 +7,7 @@ pub(crate) fn load_initial_prompt_prelude(
 ) -> Result<PromptPreludeSnapshot> {
     Ok(PromptAssemblyWorkspace::new(work_dir, &[])
         .load_manager(store)?
+        .resolution
         .prelude)
 }
 
@@ -14,7 +15,8 @@ pub(crate) fn dynamic_environment_session_config_from_manager(
     manager: &PromptAssemblyManagerSnapshot,
 ) -> DynamicEnvironmentSessionConfig {
     let mut source_selections = manager
-        .dynamic_environment_candidates
+        .candidates
+        .dynamic_environment
         .iter()
         .flat_map(|candidate| {
             [
@@ -35,12 +37,14 @@ pub(crate) fn dynamic_environment_session_config_from_manager(
 
     DynamicEnvironmentSessionConfig {
         baseline_enabled: manager
-            .snapshot
+            .resolution
+            .assembly
             .active_sources
             .iter()
             .any(|source| source.kind == PromptSourceKind::DynamicEnvironmentBaseline),
         changes_enabled: manager
-            .snapshot
+            .resolution
+            .assembly
             .active_sources
             .iter()
             .any(|source| source.kind == PromptSourceKind::DynamicEnvironmentChanges),
@@ -64,6 +68,7 @@ pub(super) fn resolve_initial_prompt_prelude_with_overrides(
         global_instructions_path_override,
         &[],
     )
+    .resolution
     .prelude
 }
 
@@ -248,38 +253,46 @@ pub(super) fn resolve_prompt_assembly_manager_snapshot_with_overrides(
     }
 
     PromptAssemblyManagerSnapshot {
-        snapshot,
-        prelude: PromptPreludeSnapshot { sections },
-        managed_sources: managed_sources(global_state, project_state),
-        sources,
-        extra_prompt_candidates: extra_prompt_candidates(
-            global_state,
-            project_state,
-            &extra_prompt_bodies,
-        ),
-        discovered_skills: discovered_skill_inventory(
-            &discovered_skills,
-            global_state,
-            project_state,
-            &skill_discovery_skill_state,
-        ),
-        manual_skills: manual_skill_inventory(&effective_discovered_skills),
-        tool_candidates: tool_candidate_inventory(
-            tool_definitions,
-            &tool_selection_state,
-            global_state,
-            project_state,
-        ),
-        dynamic_environment_candidates: dynamic_environment_candidate_inventory(
-            &dynamic_environment_observations,
-            &dynamic_environment_selection_state,
-            global_state,
-            project_state,
-        ),
+        resolution: PromptAssemblyResolvedSnapshot {
+            assembly: snapshot,
+            prelude: PromptPreludeSnapshot { sections },
+        },
+        sources: PromptAssemblySourceInventorySnapshot {
+            managed: managed_sources(global_state, project_state),
+            preview: sources,
+        },
+        candidates: PromptAssemblyCandidateInventorySnapshot {
+            extra_prompts: extra_prompt_candidates(
+                global_state,
+                project_state,
+                &extra_prompt_bodies,
+            ),
+            discovered_skills: discovered_skill_inventory(
+                &discovered_skills,
+                global_state,
+                project_state,
+                &skill_discovery_skill_state,
+            ),
+            manual_skills: manual_skill_inventory(&effective_discovered_skills),
+            tools: tool_candidate_inventory(
+                tool_definitions,
+                &tool_selection_state,
+                global_state,
+                project_state,
+            ),
+            dynamic_environment: dynamic_environment_candidate_inventory(
+                &dynamic_environment_observations,
+                &dynamic_environment_selection_state,
+                global_state,
+                project_state,
+            ),
+        },
         diagnostics,
-        builtin_core_system_body: BUILTIN_CORE_SYSTEM_PROMPT.to_string(),
-        global_core_system_override: global_state.core_system_override().map(str::to_string),
-        project_core_system_override: project_state.core_system_override().map(str::to_string),
+        core_system: PromptAssemblyCoreSystemSnapshot {
+            builtin_body: BUILTIN_CORE_SYSTEM_PROMPT.to_string(),
+            global_override: global_state.core_system_override().map(str::to_string),
+            project_override: project_state.core_system_override().map(str::to_string),
+        },
     }
 }
 

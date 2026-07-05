@@ -10,13 +10,17 @@ use super::{
         render_attached_prompt_picker_row,
     },
     composer_inline_picker::{
-        ComposerInlinePickerKey, ComposerInlinePickerState, classify_composer_inline_picker_key,
-        move_composer_inline_picker_selection, reconcile_composer_inline_picker_state,
+        ComposerInlinePickerCommand, ComposerInlinePickerInputResult,
+        ComposerInlinePickerRenderedRows, ComposerInlinePickerSearchText,
+        ComposerInlinePickerState, common_composer_inline_picker_completion_prefix,
+        filter_composer_inline_picker_items, handle_composer_inline_picker_input,
+        reconcile_composer_inline_picker_state, render_composer_inline_picker_panel,
         render_composer_inline_picker_rows,
     },
     inline_panel::InlinePanelRenderResult,
     overlay_input_result::OverlayInputResult,
     selection::SelectableLineRange,
+    text_search::CaseInsensitiveQuery,
     theme::tertiary_text_style,
 };
 
@@ -70,54 +74,39 @@ impl Model {
     }
 
     pub(crate) fn handle_custom_prompt_picker_key(&mut self, key: KeyEvent) -> OverlayInputResult {
-        if !self.custom_prompt_picker_active() {
+        let visible_rows = self.file_picker_list_visible_rows();
+        let Some(state) = self.custom_prompt_picker.as_mut() else {
             return OverlayInputResult::Ignored;
-        }
+        };
 
-        match classify_composer_inline_picker_key(key) {
-            Some(ComposerInlinePickerKey::MovePrevious) => {
-                self.move_custom_prompt_picker_selection(-1);
-                OverlayInputResult::Handled
-            }
-            Some(ComposerInlinePickerKey::MoveNext) => {
-                self.move_custom_prompt_picker_selection(1);
-                OverlayInputResult::Handled
-            }
-            Some(ComposerInlinePickerKey::Dismiss) => {
+        match handle_composer_inline_picker_input(state, key, visible_rows) {
+            ComposerInlinePickerInputResult::Handled => OverlayInputResult::Handled,
+            ComposerInlinePickerInputResult::Command(ComposerInlinePickerCommand::Dismiss) => {
                 self.dismiss_current_custom_prompt_picker_token();
                 self.close_custom_prompt_picker();
                 OverlayInputResult::Handled
             }
-            Some(ComposerInlinePickerKey::Complete) => {
+            ComposerInlinePickerInputResult::Command(ComposerInlinePickerCommand::Complete) => {
                 self.complete_custom_prompt_picker_common_prefix();
                 OverlayInputResult::Handled
             }
-            Some(ComposerInlinePickerKey::Accept) => {
+            ComposerInlinePickerInputResult::Command(ComposerInlinePickerCommand::Accept) => {
                 let _ = self.insert_selected_custom_prompt_picker_item();
                 OverlayInputResult::Handled
             }
-            None => OverlayInputResult::Ignored,
+            ComposerInlinePickerInputResult::Ignored => OverlayInputResult::Ignored,
         }
     }
 
     pub(crate) fn current_custom_prompt_picker_render_result(&self) -> InlinePanelRenderResult {
-        let Some(state) = self.custom_prompt_picker.as_ref() else {
-            return InlinePanelRenderResult::default();
-        };
-
-        let visible_rows = self.file_picker_list_visible_rows();
-        let width = usize::from(self.width.max(1));
-        let has_scrollbar = state.items.len() > visible_rows;
-        let content_width = width.saturating_sub(usize::from(has_scrollbar && width > 1));
-        let (lines, plain_lines, selectable) =
-            self.render_custom_prompt_picker_lines(state, content_width, visible_rows);
-
-        InlinePanelRenderResult {
-            lines,
-            plain_lines,
-            selectable,
-            has_content: true,
-        }
+        render_composer_inline_picker_panel(
+            self.custom_prompt_picker.as_ref(),
+            self.width,
+            self.file_picker_list_visible_rows(),
+            |state, width, visible_rows| {
+                self.render_custom_prompt_picker_lines(state, width, visible_rows)
+            },
+        )
     }
 
     fn render_custom_prompt_picker_lines(
@@ -125,13 +114,13 @@ impl Model {
         state: &CustomPromptPickerState,
         width: usize,
         visible_rows: usize,
-    ) -> (Vec<Line<'static>>, Vec<String>, Vec<SelectableLineRange>) {
+    ) -> ComposerInlinePickerRenderedRows {
         let name_column_width = attached_prompt_picker_name_column_width(
             state.items.iter().map(custom_prompt_picker_display_name),
             width.saturating_sub(ATTACHED_PROMPT_PICKER_INSET_WIDTH),
         );
 
-        let rows = render_composer_inline_picker_rows(
+        render_composer_inline_picker_rows(
             state,
             width,
             visible_rows,
@@ -147,8 +136,7 @@ impl Model {
                 )
             },
             custom_prompt_picker_selectable_range,
-        );
-        (rows.lines, rows.plain_lines, rows.selectable)
+        )
     }
 
     fn render_custom_prompt_picker_line(
@@ -173,14 +161,6 @@ impl Model {
             name_column_width,
             self.palette,
         )
-    }
-
-    fn move_custom_prompt_picker_selection(&mut self, delta: isize) {
-        let visible_rows = self.file_picker_list_visible_rows();
-        let Some(state) = self.custom_prompt_picker.as_mut() else {
-            return;
-        };
-        move_composer_inline_picker_selection(state, delta, visible_rows);
     }
 
     fn complete_custom_prompt_picker_common_prefix(&mut self) {
@@ -255,61 +235,29 @@ fn filter_custom_prompt_items(
     prompts: &[PromptAssemblyExtraPromptCandidate],
     query: &str,
 ) -> Vec<PromptAssemblyExtraPromptCandidate> {
-    let trimmed_query = query.trim().to_ascii_lowercase();
-    if trimmed_query.is_empty() {
-        return prompts.to_vec();
-    }
-
-    let mut prefix_matches = Vec::new();
-    let mut fuzzy_matches = Vec::new();
-    for prompt in prompts {
-        let reference_id = prompt.reference_id.to_ascii_lowercase();
-        let title = custom_prompt_picker_display_name(prompt).to_ascii_lowercase();
-        let description = custom_prompt_picker_description(prompt).to_ascii_lowercase();
-        let body = prompt.body.to_ascii_lowercase();
-        if reference_id.starts_with(&trimmed_query) || title.starts_with(&trimmed_query) {
-            prefix_matches.push(prompt.clone());
-        } else if reference_id.contains(&trimmed_query)
-            || title.contains(&trimmed_query)
-            || description.contains(&trimmed_query)
-            || body.contains(&trimmed_query)
-        {
-            fuzzy_matches.push(prompt.clone());
-        }
-    }
-    prefix_matches.extend(fuzzy_matches);
-    prefix_matches
+    filter_composer_inline_picker_items(prompts, query, |prompt| ComposerInlinePickerSearchText {
+        prefix_terms: vec![
+            prompt.reference_id.as_str().into(),
+            custom_prompt_picker_display_name(prompt).into(),
+        ],
+        fuzzy_terms: vec![
+            custom_prompt_picker_description(prompt).into(),
+            prompt.body.as_str().into(),
+        ],
+    })
 }
 
 fn common_custom_prompt_completion_prefix(
     prompts: &[PromptAssemblyExtraPromptCandidate],
     query: &str,
 ) -> String {
-    let mut matches = prompts
-        .iter()
-        .filter(|prompt| {
-            prompt
-                .reference_id
-                .to_ascii_lowercase()
-                .starts_with(&query.to_ascii_lowercase())
-        })
-        .map(|prompt| prompt.reference_id.as_str());
-    let Some(first) = matches.next() else {
-        return String::new();
-    };
-    let mut prefix = first.to_string();
-    for reference_id in matches {
-        let common_len = prefix
-            .chars()
-            .zip(reference_id.chars())
-            .take_while(|(left, right)| left.eq_ignore_ascii_case(right))
-            .count();
-        prefix = prefix.chars().take(common_len).collect();
-        if prefix.is_empty() {
-            break;
-        }
-    }
-    prefix
+    let query = CaseInsensitiveQuery::new(query);
+    common_composer_inline_picker_completion_prefix(
+        prompts
+            .iter()
+            .map(|prompt| prompt.reference_id.as_str())
+            .filter(|reference_id| query.starts_with(reference_id)),
+    )
 }
 
 fn custom_prompt_picker_selectable_range(plain_line: &str, width: usize) -> SelectableLineRange {

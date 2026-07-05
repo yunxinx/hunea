@@ -47,6 +47,28 @@ impl<'a> CaseInsensitiveQuery<'a> {
             .windows(needle_bytes.len())
             .any(|window| window.eq_ignore_ascii_case(needle_bytes))
     }
+
+    /// 判断 haystack 是否以当前查询为前缀。
+    pub(crate) fn starts_with(&self, haystack: &str) -> bool {
+        if self.needle.is_empty() {
+            return true;
+        }
+
+        if let Some(folded_needle) = &self.folded_unicode {
+            let mut haystack_chars = haystack.chars().flat_map(char::to_lowercase);
+            return folded_needle.chars.iter().all(|needle| {
+                haystack_chars
+                    .next()
+                    .is_some_and(|haystack| haystack == *needle)
+            });
+        }
+
+        let needle_bytes = self.needle.as_bytes();
+        haystack
+            .as_bytes()
+            .get(..needle_bytes.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(needle_bytes))
+    }
 }
 
 fn contains_folded_unicode(haystack: &str, needle: &FoldedUnicodeNeedle) -> bool {
@@ -110,6 +132,8 @@ mod tests {
         assert!(world.matches("Hello World"));
         assert!(hello.matches("Hello World"));
         assert!(!xyz.matches("Hello World"));
+        assert!(hello.starts_with("hello world"));
+        assert!(!world.starts_with("Hello World"));
     }
 
     #[test]
@@ -124,5 +148,7 @@ mod tests {
 
         assert!(query.matches("die äffin ruft"));
         assert!(!query.matches("die affe ruft"));
+        assert!(query.starts_with("äffin"));
+        assert!(!query.starts_with("affe"));
     }
 }

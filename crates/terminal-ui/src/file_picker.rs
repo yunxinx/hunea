@@ -6,9 +6,10 @@ use ratatui::text::{Line, Span};
 use super::{
     Model,
     composer_inline_picker::{
-        ComposerInlinePickerKey, ComposerInlinePickerState, classify_composer_inline_picker_key,
-        move_composer_inline_picker_selection, reconcile_composer_inline_picker_state,
-        render_composer_inline_picker_rows,
+        ComposerInlinePickerCommand, ComposerInlinePickerInputResult,
+        ComposerInlinePickerRenderedRows, ComposerInlinePickerState,
+        handle_composer_inline_picker_input, reconcile_composer_inline_picker_state,
+        render_composer_inline_picker_panel, render_composer_inline_picker_rows,
     },
     display_width::display_width,
     file_search::{FileSearchMatch, common_path_completion_prefix},
@@ -66,29 +67,23 @@ impl Model {
     }
 
     pub(crate) fn handle_file_picker_key(&mut self, key: KeyEvent) -> OverlayInputResult {
-        if !self.file_picker_active() {
+        let visible_rows = self.file_picker_list_visible_rows();
+        let Some(state) = self.file_picker.as_mut() else {
             return OverlayInputResult::Ignored;
-        }
+        };
 
-        match classify_composer_inline_picker_key(key) {
-            Some(ComposerInlinePickerKey::MovePrevious) => {
-                self.move_file_picker_selection(-1);
-                OverlayInputResult::Handled
-            }
-            Some(ComposerInlinePickerKey::MoveNext) => {
-                self.move_file_picker_selection(1);
-                OverlayInputResult::Handled
-            }
-            Some(ComposerInlinePickerKey::Dismiss) => {
+        match handle_composer_inline_picker_input(state, key, visible_rows) {
+            ComposerInlinePickerInputResult::Handled => OverlayInputResult::Handled,
+            ComposerInlinePickerInputResult::Command(ComposerInlinePickerCommand::Dismiss) => {
                 self.dismiss_current_file_picker_token();
                 self.close_file_picker();
                 OverlayInputResult::Handled
             }
-            Some(ComposerInlinePickerKey::Complete) => {
+            ComposerInlinePickerInputResult::Command(ComposerInlinePickerCommand::Complete) => {
                 self.complete_file_picker_common_prefix();
                 OverlayInputResult::Handled
             }
-            Some(ComposerInlinePickerKey::Accept) => {
+            ComposerInlinePickerInputResult::Command(ComposerInlinePickerCommand::Accept) => {
                 if self.current_file_picker_query_resolves_to_file() {
                     if self.insert_exact_file_picker_image_attachment() {
                         return OverlayInputResult::Handled;
@@ -102,28 +97,17 @@ impl Model {
                 }
                 OverlayInputResult::Handled
             }
-            None => OverlayInputResult::Ignored,
+            ComposerInlinePickerInputResult::Ignored => OverlayInputResult::Ignored,
         }
     }
 
     pub(crate) fn current_file_picker_render_result(&self) -> InlinePanelRenderResult {
-        let Some(state) = self.file_picker.as_ref() else {
-            return InlinePanelRenderResult::default();
-        };
-
-        let visible_rows = self.file_picker_list_visible_rows();
-        let width = usize::from(self.width.max(1));
-        let has_scrollbar = state.items.len() > visible_rows;
-        let content_width = width.saturating_sub(usize::from(has_scrollbar && width > 1));
-        let (lines, plain_lines, selectable) =
-            self.render_file_picker_lines(state, content_width, visible_rows);
-
-        InlinePanelRenderResult {
-            lines,
-            plain_lines,
-            selectable,
-            has_content: true,
-        }
+        render_composer_inline_picker_panel(
+            self.file_picker.as_ref(),
+            self.width,
+            self.file_picker_list_visible_rows(),
+            |state, width, visible_rows| self.render_file_picker_lines(state, width, visible_rows),
+        )
     }
 
     pub(crate) fn file_picker_list_visible_rows(&self) -> usize {
@@ -135,8 +119,8 @@ impl Model {
         state: &FilePickerState,
         width: usize,
         visible_rows: usize,
-    ) -> (Vec<Line<'static>>, Vec<String>, Vec<SelectableLineRange>) {
-        let rows = render_composer_inline_picker_rows(
+    ) -> ComposerInlinePickerRenderedRows {
+        render_composer_inline_picker_rows(
             state,
             width,
             visible_rows,
@@ -146,8 +130,7 @@ impl Model {
                 self.render_file_picker_line(item, selected, width, query)
             },
             file_picker_selectable_range,
-        );
-        (rows.lines, rows.plain_lines, rows.selectable)
+        )
     }
 
     fn render_file_picker_line(
@@ -182,14 +165,6 @@ impl Model {
         )));
 
         (Line::from(spans), plain_line)
-    }
-
-    fn move_file_picker_selection(&mut self, delta: isize) {
-        let visible_rows = self.file_picker_list_visible_rows();
-        let Some(state) = self.file_picker.as_mut() else {
-            return;
-        };
-        move_composer_inline_picker_selection(state, delta, visible_rows);
     }
 
     fn complete_file_picker_common_prefix(&mut self) {

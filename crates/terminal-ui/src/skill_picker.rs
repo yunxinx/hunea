@@ -10,8 +10,11 @@ use super::{
         render_attached_prompt_picker_row,
     },
     composer_inline_picker::{
-        ComposerInlinePickerKey, ComposerInlinePickerState, classify_composer_inline_picker_key,
-        move_composer_inline_picker_selection, reconcile_composer_inline_picker_state,
+        ComposerInlinePickerCommand, ComposerInlinePickerInputResult,
+        ComposerInlinePickerRenderedRows, ComposerInlinePickerSearchText,
+        ComposerInlinePickerState, common_composer_inline_picker_completion_prefix,
+        filter_composer_inline_picker_items, handle_composer_inline_picker_input,
+        reconcile_composer_inline_picker_state, render_composer_inline_picker_panel,
         render_composer_inline_picker_rows,
     },
     inline_panel::InlinePanelRenderResult,
@@ -78,54 +81,37 @@ impl Model {
     }
 
     pub(crate) fn handle_skill_picker_key(&mut self, key: KeyEvent) -> OverlayInputResult {
-        if !self.skill_picker_active() {
+        let visible_rows = self.file_picker_list_visible_rows();
+        let Some(state) = self.skill_picker.as_mut() else {
             return OverlayInputResult::Ignored;
-        }
+        };
 
-        match classify_composer_inline_picker_key(key) {
-            Some(ComposerInlinePickerKey::MovePrevious) => {
-                self.move_skill_picker_selection(-1);
-                OverlayInputResult::Handled
-            }
-            Some(ComposerInlinePickerKey::MoveNext) => {
-                self.move_skill_picker_selection(1);
-                OverlayInputResult::Handled
-            }
-            Some(ComposerInlinePickerKey::Dismiss) => {
+        match handle_composer_inline_picker_input(state, key, visible_rows) {
+            ComposerInlinePickerInputResult::Handled => OverlayInputResult::Handled,
+            ComposerInlinePickerInputResult::Command(ComposerInlinePickerCommand::Dismiss) => {
                 self.dismiss_current_skill_picker_token();
                 self.close_skill_picker();
                 OverlayInputResult::Handled
             }
-            Some(ComposerInlinePickerKey::Complete) => {
+            ComposerInlinePickerInputResult::Command(ComposerInlinePickerCommand::Complete) => {
                 self.complete_skill_picker_common_prefix();
                 OverlayInputResult::Handled
             }
-            Some(ComposerInlinePickerKey::Accept) => {
+            ComposerInlinePickerInputResult::Command(ComposerInlinePickerCommand::Accept) => {
                 let _ = self.insert_selected_skill_picker_skill();
                 OverlayInputResult::Handled
             }
-            None => OverlayInputResult::Ignored,
+            ComposerInlinePickerInputResult::Ignored => OverlayInputResult::Ignored,
         }
     }
 
     pub(crate) fn current_skill_picker_render_result(&self) -> InlinePanelRenderResult {
-        let Some(state) = self.skill_picker.as_ref() else {
-            return InlinePanelRenderResult::default();
-        };
-
-        let visible_rows = self.file_picker_list_visible_rows();
-        let width = usize::from(self.width.max(1));
-        let has_scrollbar = state.items.len() > visible_rows;
-        let content_width = width.saturating_sub(usize::from(has_scrollbar && width > 1));
-        let (lines, plain_lines, selectable) =
-            self.render_skill_picker_lines(state, content_width, visible_rows);
-
-        InlinePanelRenderResult {
-            lines,
-            plain_lines,
-            selectable,
-            has_content: true,
-        }
+        render_composer_inline_picker_panel(
+            self.skill_picker.as_ref(),
+            self.width,
+            self.file_picker_list_visible_rows(),
+            |state, width, visible_rows| self.render_skill_picker_lines(state, width, visible_rows),
+        )
     }
 
     fn render_skill_picker_lines(
@@ -133,13 +119,13 @@ impl Model {
         state: &SkillPickerState,
         width: usize,
         visible_rows: usize,
-    ) -> (Vec<Line<'static>>, Vec<String>, Vec<SelectableLineRange>) {
+    ) -> ComposerInlinePickerRenderedRows {
         let name_column_width = attached_prompt_picker_name_column_width(
             state.items.iter().map(skill_picker_display_name),
             width.saturating_sub(ATTACHED_PROMPT_PICKER_INSET_WIDTH),
         );
 
-        let rows = render_composer_inline_picker_rows(
+        render_composer_inline_picker_rows(
             state,
             width,
             visible_rows,
@@ -149,8 +135,7 @@ impl Model {
                 self.render_skill_picker_line(item, query, selected, width, name_column_width)
             },
             skill_picker_selectable_range,
-        );
-        (rows.lines, rows.plain_lines, rows.selectable)
+        )
     }
 
     fn render_skill_picker_line(
@@ -173,14 +158,6 @@ impl Model {
             name_column_width,
             self.palette,
         )
-    }
-
-    fn move_skill_picker_selection(&mut self, delta: isize) {
-        let visible_rows = self.file_picker_list_visible_rows();
-        let Some(state) = self.skill_picker.as_mut() else {
-            return;
-        };
-        move_composer_inline_picker_selection(state, delta, visible_rows);
     }
 
     fn complete_skill_picker_common_prefix(&mut self) {
@@ -256,47 +233,19 @@ fn filter_manual_skill_items(
     skills: &[PromptAssemblyDiscoveredSkill],
     query: &str,
 ) -> Vec<PromptAssemblyDiscoveredSkill> {
-    let trimmed_query = query.trim().to_ascii_lowercase();
-    if trimmed_query.is_empty() {
-        return skills.to_vec();
-    }
-
-    let mut prefix_matches = Vec::new();
-    let mut fuzzy_matches = Vec::new();
-    for skill in skills {
-        let skill_name = skill.skill_name.to_ascii_lowercase();
-        let title = skill_picker_display_name(skill).to_ascii_lowercase();
-        let description = skill.description.to_ascii_lowercase();
-        if skill_name.starts_with(&trimmed_query) || title.starts_with(&trimmed_query) {
-            prefix_matches.push(skill.clone());
-        } else if skill_name.contains(&trimmed_query)
-            || title.contains(&trimmed_query)
-            || description.contains(&trimmed_query)
-        {
-            fuzzy_matches.push(skill.clone());
-        }
-    }
-    prefix_matches.extend(fuzzy_matches);
-    prefix_matches
+    filter_composer_inline_picker_items(skills, query, |skill| ComposerInlinePickerSearchText {
+        prefix_terms: vec![
+            skill.skill_name.as_str().into(),
+            skill_picker_display_name(skill).into(),
+        ],
+        fuzzy_terms: vec![skill.description.as_str().into()],
+    })
 }
 
 fn common_skill_completion_prefix(skills: &[PromptAssemblyDiscoveredSkill], query: &str) -> String {
-    let mut iter = skills.iter().map(|skill| skill.skill_name.as_str());
-    let Some(first) = iter.next() else {
-        return String::new();
-    };
-    let mut prefix = first.to_string();
-    for name in iter {
-        let next_len = prefix
-            .chars()
-            .zip(name.chars())
-            .take_while(|(left, right)| left == right)
-            .count();
-        prefix = prefix.chars().take(next_len).collect();
-        if prefix.is_empty() {
-            break;
-        }
-    }
+    let prefix = common_composer_inline_picker_completion_prefix(
+        skills.iter().map(|skill| skill.skill_name.as_str()),
+    );
 
     if prefix.len() <= query.len() {
         String::new()

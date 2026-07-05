@@ -103,7 +103,7 @@ fn runtime_tool_activity_content_for_result(
     }
 
     let content = result
-        .content
+        .content()
         .iter()
         .map(|content| match content {
             tool_runtime::ToolResultContent::Text(text) => {

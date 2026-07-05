@@ -98,11 +98,10 @@ impl Tool for ConditionalTerminatingTool {
                 .get("terminate")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
-            let result = ToolResult::success(call.call_id.clone(), call.call_id);
             if should_terminate {
-                result.with_terminate()
+                ToolResult::terminate(call.call_id.clone(), call.call_id)
             } else {
-                result
+                ToolResult::success(call.call_id.clone(), call.call_id)
             }
         })
     }
@@ -123,9 +122,7 @@ impl Tool for TerminatingTool {
         call: RuntimeToolCall,
         _cancellation: &'a CancellationToken,
     ) -> ToolExecutionFuture<'a> {
-        Box::pin(async move {
-            ToolResult::success(call.call_id, "terminate here").with_terminate()
-        })
+        Box::pin(async move { ToolResult::terminate(call.call_id, "terminate here") })
     }
 }
 

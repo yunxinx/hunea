@@ -129,7 +129,7 @@ pub(super) async fn execute_tool_call(
 
 fn provider_content_from_tool_result(result: &ToolResult) -> Vec<ContentBlock> {
     result
-        .content
+        .content()
         .iter()
         .map(|content| match content {
             tool_runtime::ToolResultContent::Text(text) => ContentBlock::Text(text.clone()),

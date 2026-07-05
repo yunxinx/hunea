@@ -213,8 +213,8 @@ async fn builtin_bash_rejects_legacy_reason_argument() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("arguments do not match schema"));
-    assert!(result.content.contains("reason"));
+    assert!(result.content().contains("arguments do not match schema"));
+    assert!(result.content().contains("reason"));
     cleanup(&root);
 }
 
@@ -241,8 +241,8 @@ async fn builtin_bash_returns_merged_stdout_and_stderr() {
         !result.is_error(),
         "bash command should succeed: {result:?}"
     );
-    assert!(result.content.contains("stdout"));
-    assert!(result.content.contains("stderr"));
+    assert!(result.content().contains("stdout"));
+    assert!(result.content().contains("stderr"));
     cleanup(&root);
 }
 
@@ -301,8 +301,8 @@ async fn builtin_bash_non_zero_exit_returns_error_with_output() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("before failure"));
-    assert!(result.content.contains("Command exited with code 7"));
+    assert!(result.content().contains("before failure"));
+    assert!(result.content().contains("Command exited with code 7"));
     assert_eq!(
         result
             .details()
@@ -334,11 +334,11 @@ async fn builtin_bash_timeout_kills_command_and_keeps_output() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("started"));
-    assert!(!result.content.contains("after sleep"));
+    assert!(result.content().contains("started"));
+    assert!(!result.content().contains("after sleep"));
     assert!(
         result
-            .content
+            .content()
             .contains("Command timed out after 0.1 seconds")
     );
     assert_eq!(
@@ -377,9 +377,9 @@ async fn builtin_bash_cancellation_kills_command_and_keeps_output() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("started"));
-    assert!(!result.content.contains("after sleep"));
-    assert!(result.content.contains("Command aborted"));
+    assert!(result.content().contains("started"));
+    assert!(!result.content().contains("after sleep"));
+    assert!(result.content().contains("Command aborted"));
     cleanup(&root);
 }
 
@@ -409,8 +409,8 @@ async fn builtin_bash_runs_inside_workspace_workdir() {
         !result.is_error(),
         "bash workdir should succeed: {result:?}"
     );
-    assert!(result.content.contains("nested"));
-    assert!(result.content.contains("marker.txt"));
+    assert!(result.content().contains("nested"));
+    assert!(result.content().contains("marker.txt"));
     cleanup(&root);
 }
 
@@ -436,7 +436,7 @@ async fn builtin_bash_rejects_workdir_outside_workspace() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("outside workspace"));
+    assert!(result.content().contains("outside workspace"));
     cleanup(&outside);
     cleanup(&root);
 }
@@ -464,7 +464,7 @@ async fn builtin_bash_truncates_large_output_and_persists_full_output_path() {
         !result.is_error(),
         "large output should succeed: {result:?}"
     );
-    assert!(result.content.contains("2105"));
+    assert!(result.content().contains("2105"));
     let expected_display_content = (106..=2105)
         .map(|line| line.to_string())
         .collect::<Vec<_>>()
@@ -474,7 +474,7 @@ async fn builtin_bash_truncates_large_output_and_persists_full_output_path() {
         Some(expected_display_content.as_str()),
         "TUI display output should not include the model-visible full-output footer"
     );
-    assert!(!result.content.contains("\n1\n"));
+    assert!(!result.content().contains("\n1\n"));
     let details = result.details().expect("details should exist");
     assert_eq!(
         details
@@ -527,14 +527,14 @@ async fn builtin_bash_byte_truncation_uses_accurate_model_footer() {
         "large one-line output should succeed: {result:?}"
     );
     assert!(
-        result.content.contains("[Showing last "),
+        result.content().contains("[Showing last "),
         "byte truncation should describe a byte tail, not a complete line range: {}",
-        result.content
+        result.content()
     );
     assert!(
-        !result.content.contains("[Showing lines "),
+        !result.content().contains("[Showing lines "),
         "byte truncation should not claim complete line ranges: {}",
-        result.content
+        result.content()
     );
     assert!(
         result
@@ -659,7 +659,7 @@ async fn builtin_view_image_tool_can_be_registered_independently() {
 
     assert!(!result.is_error());
     assert!(matches!(
-        result.content.as_slice(),
+        result.content().as_slice(),
         [ToolResultContent::Image { data_base64, mime_type, uri, detail }]
             if !data_base64.is_empty()
                 && mime_type == "image/png"
@@ -699,9 +699,9 @@ async fn builtin_list_dir_tool_can_be_registered_independently() {
         .await;
 
     assert!(!result.is_error());
-    assert!(result.content.contains("Cargo.toml"));
-    assert!(result.content.contains("src/"));
-    assert!(result.content.contains(".hidden"));
+    assert!(result.content().contains("Cargo.toml"));
+    assert!(result.content().contains("src/"));
+    assert!(result.content().contains(".hidden"));
     cleanup(&root);
 }
 
@@ -741,8 +741,8 @@ async fn builtin_grep_tool_can_be_registered_independently() {
         .await;
 
     assert!(!result.is_error(), "grep should succeed: {result:?}");
-    assert!(result.content.contains("src/lib.rs:2:"));
-    assert!(result.content.contains("needle();"));
+    assert!(result.content().contains("src/lib.rs:2:"));
+    assert!(result.content().contains("needle();"));
     cleanup(&root);
 }
 
@@ -769,12 +769,12 @@ async fn builtin_grep_searches_hidden_files_and_truncates_long_lines_by_default(
         .await;
 
     assert!(!result.is_error(), "grep should succeed: {result:?}");
-    assert!(result.content.contains(".hidden.rs:1:"));
-    assert!(result.content.contains("needle "));
+    assert!(result.content().contains(".hidden.rs:1:"));
+    assert!(result.content().contains("needle "));
     assert!(
-        result.content.contains("..."),
+        result.content().contains("..."),
         "long matching line should be visibly truncated: {}",
-        result.content
+        result.content()
     );
     assert_eq!(
         result
@@ -820,7 +820,7 @@ async fn builtin_grep_applies_byte_truncation_after_match_limit() {
         .await;
 
     assert!(!result.is_error(), "grep should succeed: {result:?}");
-    assert!(result.content.contains("50.0KB limit reached"));
+    assert!(result.content().contains("50.0KB limit reached"));
     assert_eq!(
         result
             .details()
@@ -927,8 +927,8 @@ async fn builtin_find_uses_required_glob_pattern_and_searches_hidden_paths_by_de
         .await;
 
     assert!(!result.is_error(), "find should succeed: {result:?}");
-    assert!(result.content.contains(".hidden.rs"));
-    assert!(result.content.contains("src/lib.rs"));
+    assert!(result.content().contains(".hidden.rs"));
+    assert!(result.content().contains("src/lib.rs"));
     cleanup(&root);
 }
 
@@ -960,9 +960,9 @@ async fn builtin_find_treats_path_containing_pattern_as_full_path_glob() {
         .await;
 
     assert!(!result.is_error(), "find should succeed: {result:?}");
-    assert!(result.content.contains("src/bin/main.rs"));
-    assert!(result.content.contains("src/lib.rs"));
-    assert!(!result.content.contains("\nmain.rs"));
+    assert!(result.content().contains("src/bin/main.rs"));
+    assert!(result.content().contains("src/lib.rs"));
+    assert!(!result.content().contains("\nmain.rs"));
     cleanup(&root);
 }
 
@@ -992,8 +992,8 @@ async fn builtin_search_tools_exclude_vcs_directories_but_keep_hidden_files() {
         !grep_result.is_error(),
         "grep should succeed: {grep_result:?}"
     );
-    assert!(grep_result.content.contains(".hidden.rs"));
-    assert!(!grep_result.content.contains(".git/config"));
+    assert!(grep_result.content().contains(".hidden.rs"));
+    assert!(!grep_result.content().contains(".git/config"));
 
     let find_result = registry
         .execute_tool(
@@ -1012,8 +1012,8 @@ async fn builtin_search_tools_exclude_vcs_directories_but_keep_hidden_files() {
         !find_result.is_error(),
         "find should succeed: {find_result:?}"
     );
-    assert!(find_result.content.contains(".hidden.rs"));
-    assert!(!find_result.content.contains(".git"));
+    assert!(find_result.content().contains(".hidden.rs"));
+    assert!(!find_result.content().contains(".git"));
     cleanup(&root);
 }
 
@@ -1039,10 +1039,10 @@ async fn builtin_grep_and_find_reject_arguments_outside_schema_before_execution(
     assert!(grep_result.is_error());
     assert!(
         grep_result
-            .content
+            .content()
             .contains("arguments do not match schema")
     );
-    assert!(grep_result.content.contains("recursive"));
+    assert!(grep_result.content().contains("recursive"));
 
     let find_result = registry
         .execute_tool(
@@ -1060,10 +1060,10 @@ async fn builtin_grep_and_find_reject_arguments_outside_schema_before_execution(
     assert!(find_result.is_error());
     assert!(
         find_result
-            .content
+            .content()
             .contains("arguments do not match schema")
     );
-    assert!(find_result.content.contains("entry_type"));
+    assert!(find_result.content().contains("entry_type"));
     cleanup(&root);
 }
 
@@ -1136,7 +1136,7 @@ async fn builtin_write_rejects_missing_paths_outside_workspace() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("outside workspace"));
+    assert!(result.content().contains("outside workspace"));
     assert!(!outside.join("created.txt").exists());
     cleanup(&outside);
     cleanup(&root);
@@ -1163,7 +1163,7 @@ async fn builtin_write_existing_file_requires_complete_prior_read() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("has not been read"));
+    assert!(result.content().contains("has not been read"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
         "old\n"
@@ -1208,7 +1208,7 @@ async fn builtin_write_rejects_partial_read_snapshot() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("has not been read"));
+    assert!(result.content().contains("has not been read"));
     cleanup(&root);
 }
 
@@ -1227,9 +1227,9 @@ async fn builtin_write_rejects_read_snapshot_with_truncated_line() {
         .await;
     assert!(!read_result.is_error());
     assert!(
-        read_result.content.ends_with("..."),
+        read_result.content().ends_with("..."),
         "long line should be visibly truncated: {}",
-        read_result.content
+        read_result.content()
     );
 
     let result = registry
@@ -1247,7 +1247,7 @@ async fn builtin_write_rejects_read_snapshot_with_truncated_line() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("has not been read"));
+    assert!(result.content().contains("has not been read"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
         original
@@ -1338,7 +1338,7 @@ async fn builtin_write_rejects_file_changed_after_read() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("modified since read"));
+    assert!(result.content().contains("modified since read"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read stale fixture"),
         "external\n"
@@ -1364,10 +1364,10 @@ async fn builtin_list_dir_omits_gitignored_entries_by_default() {
         .await;
 
     assert!(!result.is_error());
-    assert!(result.content.contains(".hidden"));
-    assert!(result.content.contains("src/"));
-    assert!(!result.content.contains("target/"));
-    assert!(!result.content.contains("scratch.tmp"));
+    assert!(result.content().contains(".hidden"));
+    assert!(result.content().contains("src/"));
+    assert!(!result.content().contains("target/"));
+    assert!(!result.content().contains("scratch.tmp"));
     cleanup(&root);
 }
 
@@ -1392,8 +1392,8 @@ async fn builtin_list_dir_rejects_arguments_outside_schema_before_execution() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("arguments do not match schema"));
-    assert!(result.content.contains("recursive"));
+    assert!(result.content().contains("arguments do not match schema"));
+    assert!(result.content().contains("recursive"));
     cleanup(&root);
 }
 
@@ -1418,9 +1418,9 @@ async fn builtin_read_rejects_offset_below_schema_minimum() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("arguments do not match schema"));
-    assert!(result.content.contains("offset"));
-    assert!(result.content.contains("minimum"));
+    assert!(result.content().contains("arguments do not match schema"));
+    assert!(result.content().contains("offset"));
+    assert!(result.content().contains("minimum"));
     cleanup(&root);
 }
 
@@ -1447,10 +1447,10 @@ async fn builtin_list_dir_limits_output_entries() {
         .await;
 
     assert!(!result.is_error());
-    assert!(result.content.contains("a.txt"));
-    assert!(result.content.contains("b.txt"));
-    assert!(!result.content.contains("c.txt"));
-    assert!(result.content.contains("Truncated"));
+    assert!(result.content().contains("a.txt"));
+    assert!(result.content().contains("b.txt"));
+    assert!(!result.content().contains("c.txt"));
+    assert!(result.content().contains("Truncated"));
     cleanup(&root);
 }
 
@@ -1473,7 +1473,7 @@ async fn builtin_read_rejects_paths_outside_workspace_root() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("outside workspace"));
+    assert!(result.content().contains("outside workspace"));
     cleanup(&outside);
     cleanup(&root);
 }
@@ -1604,7 +1604,7 @@ async fn builtin_view_image_preserves_original_detail_hint() {
 
     assert!(!result.is_error());
     assert!(matches!(
-        result.content.as_slice(),
+        result.content().as_slice(),
         [ToolResultContent::Image { detail, .. }]
             if detail == &Some(tool_runtime::ToolImageDetail::Original)
     ));
@@ -1706,7 +1706,7 @@ async fn builtin_read_rejects_binary_text_fallback() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("not valid UTF-8 text"));
+    assert!(result.content().contains("not valid UTF-8 text"));
     cleanup(&root);
 }
 
@@ -1728,7 +1728,7 @@ async fn builtin_read_rejects_control_character_binary_payload() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("not valid UTF-8 text"));
+    assert!(result.content().contains("not valid UTF-8 text"));
     cleanup(&root);
 }
 

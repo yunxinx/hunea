@@ -48,7 +48,7 @@ async fn builtin_edit_rejects_partial_read_snapshot() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("has not been read"));
+    assert!(result.content().contains("has not been read"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
         "one\ntwo\nthree\n"
@@ -78,7 +78,7 @@ async fn builtin_edit_rejects_missing_files() {
         .await;
 
     assert!(result.is_error());
-    assert!(result.content.contains("File does not exist"));
+    assert!(result.content().contains("File does not exist"));
     assert!(!root.join("missing.txt").exists());
     cleanup(&root);
 }
@@ -103,7 +103,7 @@ async fn builtin_write_and_edit_reject_directory_paths() {
         )
         .await;
     assert!(write_result.is_error());
-    assert!(write_result.content.contains("is a directory"));
+    assert!(write_result.content().contains("is a directory"));
 
     let edit_result = registry
         .execute_tool(
@@ -121,7 +121,7 @@ async fn builtin_write_and_edit_reject_directory_paths() {
         )
         .await;
     assert!(edit_result.is_error());
-    assert!(edit_result.content.contains("is a directory"));
+    assert!(edit_result.content().contains("is a directory"));
 
     assert!(root.join("src").is_dir());
     cleanup(&root);
@@ -157,7 +157,7 @@ async fn builtin_edit_reports_noop_and_missing_match_without_modifying_file() {
         )
         .await;
     assert!(noop_result.is_error());
-    assert!(noop_result.content.contains("No changes"));
+    assert!(noop_result.content().contains("No changes"));
 
     let missing_match_result = registry
         .execute_tool(
@@ -175,7 +175,7 @@ async fn builtin_edit_reports_noop_and_missing_match_without_modifying_file() {
         )
         .await;
     assert!(missing_match_result.is_error());
-    assert!(missing_match_result.content.contains("not found"));
+    assert!(missing_match_result.content().contains("not found"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read fixture"),
         "alpha\nbeta\n"
@@ -268,7 +268,7 @@ async fn builtin_write_can_use_permission_preview_snapshot_for_approved_update()
     assert!(rejected_without_approval_snapshot.is_error());
     assert!(
         rejected_without_approval_snapshot
-            .content
+            .content()
             .contains("has not been read")
     );
     assert_eq!(
@@ -323,7 +323,7 @@ async fn builtin_edit_can_use_permission_preview_snapshot_for_approved_update() 
     assert!(rejected_without_approval_snapshot.is_error());
     assert!(
         rejected_without_approval_snapshot
-            .content
+            .content()
             .contains("has not been read")
     );
     assert_eq!(
@@ -397,7 +397,7 @@ async fn builtin_write_after_edit_still_rejects_external_changes() {
         .await;
 
     assert!(write_result.is_error());
-    assert!(write_result.content.contains("modified since read"));
+    assert!(write_result.content().contains("modified since read"));
     assert_eq!(
         fs::read_to_string(root.join("notes.txt")).expect("read stale fixture"),
         "external\n"

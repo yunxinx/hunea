@@ -12,6 +12,7 @@ mod tool_error;
 pub use definition::ToolDefinition;
 pub use execution::{
     ToolCall, ToolImageDetail, ToolResult, ToolResultContent, ToolResultContentBlocks,
+    ToolResultOutcome,
 };
 pub use executor::{
     Tool, ToolExecutionContext, ToolExecutionFuture, ToolExecutor, ToolExecutorRegistry,

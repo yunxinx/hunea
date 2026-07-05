@@ -25,8 +25,8 @@ impl ToolCall {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
 pub struct ToolResult {
-    pub call_id: String,
-    pub content: ToolResultContentBlocks,
+    call_id: String,
+    content: ToolResultContentBlocks,
     display_content: Option<String>,
     outcome: ToolResultOutcome,
     details: Option<Value>,
@@ -148,6 +148,17 @@ impl ToolResult {
         }
     }
 
+    /// `terminate` 创建终止当前工具循环的工具结果。
+    pub fn terminate(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            call_id: call_id.into(),
+            content: vec![ToolResultContent::Text(content.into())].into(),
+            display_content: None,
+            outcome: ToolResultOutcome::Terminate,
+            details: None,
+        }
+    }
+
     /// `with_display_content` 设置仅供 runtime/TUI 展示的内容。
     pub fn with_display_content(mut self, display_content: impl Into<String>) -> Self {
         self.display_content = Some(display_content.into());
@@ -160,15 +171,19 @@ impl ToolResult {
         self
     }
 
-    /// `with_terminate` 标记工具结果为终止当前工具循环。
-    pub fn with_terminate(mut self) -> Self {
-        self.outcome = ToolResultOutcome::Terminate;
-        self
-    }
-
     /// `outcome` 返回工具结果对 runtime 的控制含义。
     pub fn outcome(&self) -> ToolResultOutcome {
         self.outcome
+    }
+
+    /// `call_id` 返回该结果对应的工具调用 ID。
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    /// `content` 返回模型可见的结构化工具结果内容。
+    pub fn content(&self) -> &ToolResultContentBlocks {
+        &self.content
     }
 
     /// `is_error` 返回工具是否失败。
@@ -201,5 +216,39 @@ impl ToolResult {
         self.display_content
             .clone()
             .unwrap_or_else(|| self.text_content())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_result_outcome_has_single_control_state() {
+        let success = ToolResult::success("success-call", "ok");
+        assert_eq!(success.outcome(), ToolResultOutcome::Success);
+        assert!(!success.is_error());
+        assert!(!success.terminates());
+
+        let error = ToolResult::error("error-call", "failed");
+        assert_eq!(error.outcome(), ToolResultOutcome::Error);
+        assert!(error.is_error());
+        assert!(!error.terminates());
+
+        let terminate = ToolResult::terminate("terminate-call", "stop");
+        assert_eq!(terminate.outcome(), ToolResultOutcome::Terminate);
+        assert!(!terminate.is_error());
+        assert!(terminate.terminates());
+    }
+
+    #[test]
+    fn tool_result_exposes_read_only_identity_and_content() {
+        let result =
+            ToolResult::success("call-1", "visible output").with_display_content("display output");
+
+        assert_eq!(result.call_id(), "call-1");
+        assert!(result.content().contains("visible output"));
+        assert_eq!(result.text_content(), "visible output");
+        assert_eq!(result.display_text(), "display output");
     }
 }
